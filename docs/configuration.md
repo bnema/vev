@@ -74,6 +74,14 @@ code.detach = DET
 
 Invalid values log a warning and resolve that setting to its default on both initial load and reload.
 
+## Logs and durable state
+
+Set `VEV_LOG=debug`, `VEV_LOG=warn`, or `VEV_LOG=error` to change verbosity; the default is `info`. JSON-line logs such as `vev-daemon.log` live in `$XDG_STATE_HOME/vev`, or `~/.local/state/vev` when unset. The same state directory contains the strict session catalogue, migration journal, notices, and `snapshots/`. The lifecycle lock and socket live in `$XDG_RUNTIME_DIR/vev` (with platform runtime fallbacks).
+
+Recovery events include `lifecycle_owner_wait`, `lifecycle_owner_acquired`, `lifecycle_owner_released`, `catalogue_validated`, `catalogue_compaction_recovery_complete`, `session_restore_complete`, `fallback_checkpoint_promoted`, `snapshot_head_repair_complete`, `session_degraded`, `snapshot_maintenance_progress`, `interrupted_transaction_recovery_complete`, and `daemon_startup_complete`.
+
+Catalogue failure is fail-closed: vev does not publish an empty replacement daemon. Preserve the state directory, inspect `catalogue_validation_failed`, correct storage or ownership problems, and retry without editing catalogue files. See [Durable session recovery](durable-session-recovery.md) for explicit recovery commands, migration, diagnostics, and the committed checkpoint plus up to two direct fallbacks retention policy.
+
 ## Theme
 
 With `theme = auto`, vev follows the terminal's reported foreground, background, light/dark scheme, and ANSI palette. `theme.palette = on` is the default. `theme.accent = auto` derives one accent from the terminal's chromatic ANSI colors; repeated terminal colors are preferred, otherwise vev uses an eligible blue slot when available. `theme.accent = 0` through `theme.accent = 15` selects exactly that ANSI slot. Arbitrary RGB values and `off` are not accepted for `theme.accent`.

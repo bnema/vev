@@ -47,6 +47,7 @@ func Registry() []Command {
 		listCommand("list-sessions", "List sessions", "List sessions with active markers", TargetNone, func(ctx ControlContext, json bool) (string, error) { return ctx.ListSessions(json) }),
 		listCommand("list-tabs", "List tabs", "List tabs in the target session", TargetSession, func(ctx ControlContext, json bool) (string, error) { return ctx.ListTabs(json) }),
 		listCommand("list-panes", "List panes", "List panes in the target tab", TargetTab, func(ctx ControlContext, json bool) (string, error) { return ctx.ListPanes(json) }),
+		sessionRecoveryCommand(),
 	}
 	return commands
 }
@@ -87,6 +88,21 @@ func toastCommand() Command {
 		}
 		return ControlResult{}, ctx.Toast(severity, args[0])
 	}}
+}
+
+func sessionRecoveryCommand() Command {
+	return Command{
+		Slug: "session-recovery", Name: "Session recovery", Desc: "Discard a broken durable session's persisted state",
+		Usage:      "session-recovery discard",
+		Scriptable: true, Target: TargetNone,
+		Control: func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
+			if len(args) != 1 || args[0] != "discard" {
+				return ControlResult{}, ErrInvalidArguments
+			}
+			output, err := ctx.SessionRecovery("discard")
+			return ControlResult{Output: output}, err
+		},
+	}
 }
 
 func listCommand(slug, name, desc string, target TargetKind, list func(ControlContext, bool) (string, error)) Command {

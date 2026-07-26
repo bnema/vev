@@ -8,19 +8,21 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-func (r *Repository) ensureSession(key string) error {
+func (r *Repository) ensureSession(id domain.IncarnationID) error {
+	sessionPath := r.sessionPath(id)
 	for _, directory := range []struct {
 		path  string
 		phase string
 	}{
 		{r.dir, "repository"},
 		{filepath.Join(r.dir, repositorySessionsDir), "sessions"},
-		{r.sessionPath(key), "session"},
-		{filepath.Join(r.sessionPath(key), repositoryObjectsDir), "objects"},
-		{filepath.Join(r.sessionPath(key), repositoryGenerations), "generations"},
+		{sessionPath, "session"},
+		{filepath.Join(sessionPath, repositoryObjectsDir), "objects"},
+		{filepath.Join(sessionPath, repositoryGenerations), "generations"},
 	} {
 		if err := r.ensurePrivateDirectoryPhase(directory.path, directory.phase); err != nil {
 			return fmt.Errorf("create snapshot repository directory: %w", err)
@@ -47,11 +49,6 @@ func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) (err error) 
 			return err
 		}
 		if created {
-			if hook := r.hooks.syncDirectory; hook != nil {
-				if err := hook(filepath.Dir(dir)); err != nil {
-					return fmt.Errorf("%s parent directory sync: %w", phase, err)
-				}
-			}
 			if err := syncDirectory(filepath.Dir(dir)); err != nil {
 				return fmt.Errorf("%s parent directory sync: %w", phase, err)
 			}
@@ -191,36 +188,17 @@ func (r *Repository) withAtomicTemp(dir string, data []byte, publish func(string
 }
 
 func (r *Repository) createTemp(dir string) (*os.File, error) {
-	if r.hooks.createTemp != nil {
-		if err := r.hooks.createTemp(dir); err != nil {
-			return nil, err
-		}
-	}
 	return r.createTempAt(dir)
 }
 func (r *Repository) writeFile(f *os.File, data []byte) error {
-	if r.hooks.writeTemp != nil {
-		if err := r.hooks.writeTemp(f.Name()); err != nil {
-			return err
-		}
-	}
 	_, err := f.Write(data)
 	return err
 }
 func (r *Repository) syncFile(f *os.File) error {
-	if r.hooks.syncFile != nil {
-		if err := r.hooks.syncFile(f.Name()); err != nil {
-			return err
-		}
-	}
 	return f.Sync()
 }
 func (r *Repository) closeFile(f *os.File) error {
-	var injected error
-	if r.hooks.closeFile != nil {
-		injected = r.hooks.closeFile(f.Name())
-	}
-	return errors.Join(injected, f.Close())
+	return f.Close()
 }
 
 // joinCloseError retains a primary operation failure and appends contextual
@@ -232,11 +210,6 @@ func joinCloseError(primary *error, operation string, closeErr error) {
 }
 
 func (r *Repository) installImmutable(oldPath, newPath string) (err error) {
-	if r.hooks.installImmutable != nil {
-		if err := r.hooks.installImmutable(newPath); err != nil {
-			return err
-		}
-	}
 	oldRel, ok := r.repositoryRelative(oldPath)
 	if !ok {
 		return fmt.Errorf("snapshot path outside repository")
@@ -253,11 +226,6 @@ func (r *Repository) installImmutable(oldPath, newPath string) (err error) {
 	return root.Link(oldRel, newRel)
 }
 func (r *Repository) rename(oldPath, newPath string) (err error) {
-	if r.hooks.rename != nil {
-		if err := r.hooks.rename(newPath); err != nil {
-			return err
-		}
-	}
 	oldRel, ok := r.repositoryRelative(oldPath)
 	if !ok {
 		return fmt.Errorf("snapshot path outside repository")
@@ -274,11 +242,6 @@ func (r *Repository) rename(oldPath, newPath string) (err error) {
 	return root.Rename(oldRel, newRel)
 }
 func (r *Repository) remove(path string) (err error) {
-	if r.hooks.remove != nil {
-		if err := r.hooks.remove(path); err != nil {
-			return err
-		}
-	}
 	rel, ok := r.repositoryRelative(path)
 	if !ok {
 		return fmt.Errorf("snapshot path outside repository")
@@ -291,11 +254,6 @@ func (r *Repository) remove(path string) (err error) {
 	return root.Remove(rel)
 }
 func (r *Repository) syncDirectory(dir string) error {
-	if r.hooks.syncDirectory != nil {
-		if err := r.hooks.syncDirectory(dir); err != nil {
-			return err
-		}
-	}
 	return syncDirectory(dir)
 }
 func syncDirectory(dir string) error {

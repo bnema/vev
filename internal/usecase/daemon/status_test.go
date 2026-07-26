@@ -1066,9 +1066,9 @@ func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
 	cur := &session{id: "cur", name: "current", tabs: []*tab{{}}}
 	d.sessions[cur.id] = cur
 
-	_, err := d.createSessionLocked("zeta", false, "/tmp/zeta", sz, terminalEnv{}, d.baseEnv)
+	_, err := createSessionForTest(d, "zeta", false, "/tmp/zeta", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
-	_, err = d.createSessionLocked("alpha", false, "/tmp/alpha", sz, terminalEnv{}, d.baseEnv)
+	_, err = createSessionForTest(d, "alpha", false, "/tmp/alpha", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 
 	state := d.barStateFor(cur, "")

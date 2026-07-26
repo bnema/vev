@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -46,26 +46,29 @@ type session struct {
 	// tab, or pane locks. The owner performs teardown without holding teardownMu;
 	// duplicate daemon-shutdown callers can therefore bound their ownership wait
 	// with Serve's shared snapshot deadline.
-	teardownMu             sync.Mutex
-	teardownActive         bool
-	teardownDone           chan struct{}
-	teardownWaiters        uint
-	teardownChanged        chan struct{}
-	lifecycleStopOnce      sync.Once
-	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
+	teardownMu        sync.Mutex
+	teardownActive    bool
+	teardownDone      chan struct{}
+	teardownWaiters   uint
+	teardownChanged   chan struct{}
+	lifecycleStopOnce sync.Once
+	mu                sync.Mutex // guards tabs, active, client, restoreDone, clipFiles, and clipboard queue state
+	// restoreDone remains attached to a restored session after it is published in
+	// the live registry, so racing attaches cannot bypass restoration completion.
+	restoreDone            chan struct{}
 	themeMu                sync.Mutex
 	tabs                   []*tab
 	active                 int
 	client                 *attachedClient
 	clipboardQueue         []clipboardForward
 	clipboardWorkerRunning bool
-	renameInProgress       bool
 	cwd                    string
 	terminal               terminalEnv
 	// env is the authoritative immutable environment snapshot for future PTY children.
 	// It is guarded by mu and is always copied on ingress and egress.
 	env          []string
 	createdAt    int64
+	incarnation  domain.IncarnationID
 	mruAt        atomic.Uint64
 	snapDirty    atomic.Bool
 	snapEligible atomic.Bool
@@ -75,6 +78,7 @@ type session struct {
 	snapshotMu                        sync.Mutex
 	snapshotGeneration                uint64 // newest mutation revision
 	snapshotPublishedGeneration       uint64 // newest repository generation
+	snapshotPublishedCheckpoint       *domain.CheckpointRef
 	snapshotPublishedMutationRevision uint64
 	snapshotNextEligibleAt            time.Time
 	// The coordinator state below is guarded by snapshotMu. A capture can be
@@ -93,7 +97,6 @@ type session struct {
 	snapshotPublicationContext context.Context
 	snapshotPublicationCancel  context.CancelFunc
 	snapshotQuarantined        bool
-	snapshotQuarantineEpoch    uint64
 	// snapshotChunkCache retains encoded sealed history only for this named
 	// session. snapshotMu owns it so cache touches never contend with pane
 	// state or mutate bytes retained by queued/in-flight publications.
@@ -164,40 +167,57 @@ func (d *Daemon) touchMRU(sess *session) {
 		return
 	}
 	seq := d.mruSeq.Add(1)
-	updated := false
 	for {
 		old := sess.mruAt.Load()
 		if old >= seq {
 			return
 		}
 		if sess.mruAt.CompareAndSwap(old, seq) {
-			updated = true
 			break
 		}
 	}
-	if !updated {
-		return
-	}
 	sess.mu.Lock()
-	name := sess.name
-	ephemeral := sess.ephemeral
-	sess.mu.Unlock()
-	if !ephemeral && d.persist != nil {
-		if err := d.persist.TouchMRU(name, seq); err != nil {
-			d.log.Warn("touching persisted session recency failed", "err", err, "session", name)
-		}
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
+	sess.mu.Unlock()
 }
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
+	if _, reserved := d.creating[name]; reserved {
+		return nil, errSessionNameInUse
+	}
+	d.creating[name] = struct{}{}
+	defer delete(d.creating, name)
 	stopped, resuming := d.stopped[name]
+	var authoritative domain.CatalogueRecord
+	var authoritativeExists bool
+	if !ephemeral && resuming && d.persistEnabled {
+		d.mu.Unlock()
+		var err error
+		authoritative, authoritativeExists, err = d.catalogueRecord(name)
+		d.mu.Lock()
+		if err != nil {
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't read session catalogue", err)
+		}
+		if d.closing {
+			return nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		}
+		stopped, resuming = d.stopped[name]
+	}
 	var createdAt int64
+	var incarnation domain.IncarnationID
 	if !ephemeral {
 		if resuming {
 			// A stopped session is the same lifecycle when resumed; it must retain
 			// the persisted identity rather than receive a fresh timestamp.
 			createdAt = stopped.createdAt
+			incarnation = stopped.incarnation
+			if authoritativeExists {
+				createdAt = authoritative.CreatedAt
+				incarnation = authoritative.IncarnationID
+			}
 			if createdAt > d.lastAllocatedCreatedAt {
 				d.lastAllocatedCreatedAt = createdAt
 			}
@@ -206,6 +226,13 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			createdAt, err = d.allocateLifecycleCreatedAtLocked()
 			if err != nil {
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
+			}
+		}
+		if incarnation == (domain.IncarnationID{}) {
+			var err error
+			incarnation, err = domain.NewIncarnationID(rand.Reader)
+			if err != nil {
+				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", fmt.Errorf("generate durable identity: %w", err))
 			}
 		}
 	}
@@ -247,6 +274,9 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	if !ephemeral && resuming {
 		lastUsedSeq = stopped.lastUsedSeq
 	}
+	if lastUsedSeq == 0 {
+		lastUsedSeq = d.mruSeq.Add(1)
+	}
 	sess := &session{
 		id:           id,
 		name:         name,
@@ -258,27 +288,41 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		terminal:     term,
 		env:          env,
 		createdAt:    createdAt,
+		incarnation:  incarnation,
 		snapshotWake: d.snapshotWake,
 	}
 	if !ephemeral && name != "" {
 		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
 	}
-	if lastUsedSeq > 0 {
-		sess.mruAt.Store(lastUsedSeq)
-	}
+	sess.mruAt.Store(lastUsedSeq)
 	sess.snapEligible.Store(!ephemeral && name != "")
 	if !ephemeral {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}); err != nil {
-			closeTabs(tabs)
-			cancel()
-			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
+		if d.persistEnabled {
+			record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}
+			if d.recovery == nil {
+				closeTabs(tabs)
+				cancel()
+				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("durable session authority is not configured"))
+			}
+			var err error
+			if resuming && authoritativeExists {
+				err = d.catalogue.UpdateMetadata(record.MetadataUpdate())
+				if err == nil {
+					err = d.catalogue.Sync()
+				}
+			} else {
+				record, err = d.recovery.Create(d.serveCtx, record)
+			}
+			if err != nil {
+				closeTabs(tabs)
+				cancel()
+				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
+			}
+			sess.incarnation = record.IncarnationID
 		}
 		delete(d.stopped, name)
 	}
 	d.sessions[id] = sess
-	if lastUsedSeq == 0 {
-		d.touchMRU(sess)
-	}
 	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
 	for i, tb := range tabs {
 		d.log.Info("tab created", "session", name, "tab", i)
@@ -406,29 +450,16 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 		p.ctx, p.cancel = context.WithCancel(tb.ctx)
 	}
 	sess.mu.Lock()
-	oldActive := sess.active
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
 	tabIndex := sess.active
-	record := sess.persistRecordLocked(time.Now().UnixNano())
-	ephemeral := sess.ephemeral
-	if !ephemeral {
-		if err := d.persist.Save(record); err != nil {
-			sess.tabs = sess.tabs[:len(sess.tabs)-1]
-			sess.active = oldActive
-			if tb.cancel != nil {
-				tb.cancel()
-			}
-			sess.mu.Unlock()
-			d.mu.Unlock()
-			_ = pty.Close()
-			return err
-		}
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
 	sess.mu.Unlock()
+	d.mu.Unlock()
 	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
-	d.mu.Unlock()
 	d.activateTab(sess, tb)
 	markSnapshotDirty(sess)
 	return nil
@@ -612,21 +643,14 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		return err
 	}
 
-	// Reserve the rename while state is inspected, then perform persistence and
-	// repository I/O without daemon/session locks. The old identity is first
-	// quarantined and durably purged; committing the new record before that
-	// transaction completes could leave a restorable old legacy source.
+	// Hold daemon then session state across the durable identity write. The
+	// incarnation-keyed snapshot namespace is never relocated.
 	d.mu.Lock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
 		d.mu.Unlock()
 		return errSessionNameInUse
 	}
 	sess.mu.Lock()
-	if sess.renameInProgress {
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		return errors.New("session rename already in progress")
-	}
 	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
 		sess.mu.Unlock()
 		d.mu.Unlock()
@@ -635,6 +659,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	oldName := sess.name
 	wasEphemeral := sess.ephemeral
 	createdAt := sess.createdAt
+	priorIncarnation := sess.incarnation
 	if wasEphemeral {
 		var err error
 		createdAt, err = d.allocateLifecycleCreatedAtLocked()
@@ -643,71 +668,54 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 			d.mu.Unlock()
 			return err
 		}
+		sess.incarnation, err = domain.NewIncarnationID(rand.Reader)
+		if err != nil {
+			sess.mu.Unlock()
+			d.mu.Unlock()
+			return fmt.Errorf("generate durable identity: %w", err)
+		}
 	}
 	lastUsedSeq := sess.mruAt.Load()
-	record := sess.persistRecordLocked(d.nowUnixNano())
+	record := sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
 	record.Name = name
 	record.CreatedAt = createdAt
 	record.LastUsedSeq = lastUsedSeq
-	sess.renameInProgress = true
-	sess.mu.Unlock()
-	d.mu.Unlock()
-
 	rollback := func(err error) error {
-		sess.mu.Lock()
-		sess.renameInProgress = false
+		sess.incarnation = priorIncarnation
 		sess.mu.Unlock()
+		d.mu.Unlock()
 		return err
 	}
-	var quarantine snapshotCoordinatorQuarantine
-	if !wasEphemeral && oldName != name {
-		quarantine = quarantineSnapshotCoordinatorWithEpoch(sess)
-		<-quarantine.done
-		if err := d.beginSnapshotPurge(oldName); err != nil {
-			return rollback(err)
+	// Durable named renames are one atomic catalogue batch. The incarnation-keyed
+	// snapshot namespace is intentionally untouched.
+	if (wasEphemeral || oldName != name) && d.persistEnabled {
+		if d.recovery == nil {
+			return rollback(errors.New("durable session authority is not configured"))
 		}
-		// finishSnapshotPurge preserves the tombstone through both source
-		// deletions and the old metadata delete, including a retained legacy
-		// import whose verified source delete is still pending.
-		if err := d.finishSnapshotPurge(oldName); err != nil {
-			return rollback(err)
-		}
-	}
-	// For a named rename this is the durable commit point, deliberately after
-	// the old tombstone transaction. Ephemeral promotion has no old durable
-	// identity and can create its first record directly.
-	if wasEphemeral || oldName != name {
-		if err := d.persist.Save(record); err != nil {
-			return rollback(err)
+		{
+			var committed domain.CatalogueRecord
+			var err error
+			if wasEphemeral {
+				committed, err = d.recovery.Create(d.serveCtx, record)
+			} else {
+				committed, err = d.recovery.Rename(d.serveCtx, oldName, name)
+			}
+			if err != nil {
+				return rollback(err)
+			}
+			record = committed
 		}
 	}
 
-	d.mu.Lock()
-	sess.mu.Lock()
-	// The reservation prevents another rename. A closing session is allowed to
-	// finish this short commit; killSession subsequently owns its teardown.
 	delete(d.stopped, oldName)
 	delete(d.stopped, name)
 	sess.name = name
 	sess.createdAt = createdAt
+	sess.incarnation = record.IncarnationID
 	sess.ephemeral = false
-	sess.renameInProgress = false
-	// Keep the coordinator in quarantine until the new in-memory identity is
-	// fully committed. The fresh coordinator below makes the new repository
-	// start at generation one.
-	if !wasEphemeral && oldName != name {
-		sess.snapEligible.Store(false)
-	} else {
-		sess.snapEligible.Store(name != "")
-	}
+	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()
 	d.mu.Unlock()
-	if !wasEphemeral && oldName != name {
-		// A concurrent teardown may have quarantined after this rename did. In
-		// that case its newer epoch owns the stopped coordinator.
-		resumeSnapshotCoordinatorForNewIdentity(sess, quarantine)
-		return nil
-	}
 	if wasEphemeral {
 		sess.snapshotMu.Lock()
 		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
@@ -732,24 +740,16 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 		d.mu.Unlock()
 		return errors.New("tab not found")
 	}
-	oldName := tb.name
 	tb.name = name
-	record := sess.persistRecordLocked(time.Now().UnixNano())
-	ephemeral := sess.ephemeral
-	if !ephemeral {
-		if err := d.persist.Save(record); err != nil {
-			tb.name = oldName
-			sess.mu.Unlock()
-			d.mu.Unlock()
-			return err
-		}
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
 	return nil
 }
 
-func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
+func (s *session) persistRecordLocked(updatedAt int64) domain.CatalogueRecord {
 	createdAt := s.createdAt
 	tabNames := make([]string, len(s.tabs))
 	lastCustom := -1
@@ -764,7 +764,7 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 	} else {
 		tabNames = tabNames[:lastCustom+1]
 	}
-	return persist.Record{Name: s.name, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
+	return domain.CatalogueRecord{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
@@ -813,12 +813,8 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 	destination := sess.tabs[sess.active]
 	ac := sess.client
 	name := sess.name
-	record := sess.persistRecordLocked(time.Now().UnixNano())
-	ephemeral := sess.ephemeral
-	if !ephemeral {
-		if err := d.persist.Save(record); err != nil {
-			d.log.Warn("persisting closed tab failed", "err", err, "session", name)
-		}
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
@@ -860,68 +856,58 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 // beginSnapshotPurge commits a logical named-session kill before its live
 // identity or persisted metadata is removed. It never runs under daemon or
 // session locks.
-func (d *Daemon) beginSnapshotPurge(name string) error {
-	if d.snapshotRepository == nil || name == "" {
-		return nil
+func (d *Daemon) beginSnapshotPurge(_ string, _ domain.IncarnationID) error {
+	if d.persistEnabled && d.recovery == nil {
+		return errors.New("durable session authority is not configured")
 	}
-	return d.snapshotRepository.Tombstone(context.Background(), name)
+	// The lifecycle coordinator performs the complete ordered protocol after
+	// snapshot writers have joined.
+	return nil
 }
 
-// finishSnapshotPurge deletes both independently durable snapshot sources,
-// then metadata, and only then clears the tombstone. Any failure deliberately
-// leaves the marker in place so startup cannot restore or import the name and
-// a later live/offline kill can retry the idempotent source deletes.
-func (d *Daemon) finishSnapshotPurge(name string) error {
-	if d.snapshotRepository == nil {
-		return d.persist.Delete(name)
+// finishSnapshotPurge removes catalogue metadata first, then deletes the
+// incarnation directory. Startup garbage collection removes the directory if
+// the second step is interrupted.
+func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, _ domain.IncarnationID) error {
+	if !d.persistEnabled {
+		return nil
 	}
-	incrementalErr := d.snapshotRepository.Delete(context.Background(), name)
-	var legacyErr error
-	if d.legacySnapshots != nil {
-		legacyErr = d.legacySnapshots.DeleteLegacy(context.Background(), name)
+	if d.recovery == nil {
+		return errors.New("durable session authority is not configured")
 	}
-	if incrementalErr != nil || legacyErr != nil {
-		return errors.Join(incrementalErr, legacyErr)
+	if ctx == nil {
+		ctx = d.serveCtx
 	}
-	if err := d.persist.Delete(name); err != nil {
-		return err
-	}
-	return d.snapshotRepository.DeleteTombstone(context.Background(), name)
+	purgeCtx, cancel := context.WithTimeout(ctx, snapshotFinalFlushTimeout)
+	defer cancel()
+	return d.recovery.Delete(purgeCtx, name)
 }
 
 // retryStoppedPurge completes a previously closed session's durable purge.
 // It keeps the stopped record hidden until all sources and metadata cross their
 // deletion boundaries.
 func (d *Daemon) retryStoppedPurge(name string) error {
+	return d.retryStoppedPurgeContext(d.serveCtx, name)
+}
+
+func (d *Daemon) retryStoppedPurgeContext(ctx context.Context, name string) error {
 	d.mu.Lock()
 	stopped, ok := d.stopped[name]
 	if !ok {
 		d.mu.Unlock()
 		return nil
 	}
-	// Without a repository there is no restore/import source to fence, so the
-	// stopped record retains the metadata-only deletion behavior.
-	if d.snapshotRepository == nil {
-		d.mu.Unlock()
-		if err := d.persist.Delete(name); err != nil {
-			return err
-		}
-		d.mu.Lock()
-		delete(d.stopped, name)
-		d.mu.Unlock()
-		return nil
-	}
 	stopped.purging = true
 	d.stopped[name] = stopped
-	d.mu.Unlock()
 
-	if err := d.beginSnapshotPurge(name); err != nil {
+	if err := d.beginSnapshotPurge(name, stopped.incarnation); err != nil {
+		d.mu.Unlock()
 		return err
 	}
-	if err := d.finishSnapshotPurge(name); err != nil {
+	if err := d.finishSnapshotPurge(ctx, name, stopped.incarnation); err != nil {
+		d.mu.Unlock()
 		return err
 	}
-	d.mu.Lock()
 	if current, ok := d.stopped[name]; ok && current.purging {
 		delete(d.stopped, name)
 	}
@@ -1063,13 +1049,12 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	sess.mu.Lock()
 	isEphemeral := sess.ephemeral
 	name := sess.name
+	incarnation := sess.incarnation
 	sess.mu.Unlock()
-	// Commit the tombstone before changing live identity or metadata. A
-	// repository delete must never race an older publication that could recreate
-	// the just-quarantined name. Do not hold daemon or session locks while
-	// tombstoning or joining: a repository implementation may block on I/O.
+	// Join snapshot publication before changing live identity or deleting the
+	// incarnation directory, so an older publication cannot recreate it.
 	if purge && !isEphemeral {
-		if err := d.beginSnapshotPurge(name); err != nil {
+		if err := d.beginSnapshotPurge(name, incarnation); err != nil {
 			return err
 		}
 		if d.snapshotRepository != nil {
@@ -1145,7 +1130,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, incarnation: incarnation, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
 		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0
@@ -1201,20 +1186,20 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		}
 	}
 	// The coordinator and all panes are now stopped, so no producer can publish
-	// another generation after this destructive source deletion. Keep the
-	// tombstone and hidden stopped record when any source or metadata operation
-	// fails; retryStoppedPurge (including a repeated live kill) resumes safely.
+	// another generation after this destructive source deletion. Keep the hidden
+	// stopped record when deletion fails so a repeated live kill can retry.
 	if !ephemeral && purge {
-		if err := d.finishSnapshotPurge(stoppedName); err != nil {
+		d.mu.Lock()
+		sess.mu.Lock()
+		err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation)
+		sess.mu.Unlock()
+		if err != nil {
 			purgeErr = errors.Join(purgeErr, err)
 			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
-		} else {
-			d.mu.Lock()
-			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
-				delete(d.stopped, stoppedName)
-			}
-			d.mu.Unlock()
+		} else if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
+			delete(d.stopped, stoppedName)
 		}
+		d.mu.Unlock()
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
@@ -1259,8 +1244,11 @@ func (d *Daemon) nameLiveOrStoppedLocked(name string) bool {
 	if d.findByNameLocked(name) != nil {
 		return true
 	}
-	_, ok := d.stopped[name]
-	return ok
+	if _, ok := d.stopped[name]; ok {
+		return true
+	}
+	_, reserved := d.creating[name]
+	return reserved
 }
 
 func (d *Daemon) cwdSampler(ctx context.Context) {
@@ -1272,7 +1260,12 @@ func (d *Daemon) cwdSampler(ctx context.Context) {
 			return
 		case <-t.C():
 		}
-		d.refreshNamedSessionCwds()
+		if d.procCwd != nil {
+			d.refreshNamedSessionCwds()
+		}
+		if err := d.flushCatalogue(); err != nil {
+			d.log.Warn("flushing session catalogue failed", "err", err)
+		}
 		t.Reset(5 * time.Second)
 	}
 }
@@ -1321,16 +1314,12 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 		return
 	}
 	sess.cwd = cwd
-	name := sess.name
-	ephemeral := sess.ephemeral
-	sess.mu.Unlock()
-	if !ephemeral {
-		if err := d.persist.Touch(name, cwd, time.Now().UnixNano()); err != nil {
-			d.log.Warn("touching persisted session cwd failed", "err", err, "session", name)
-		}
-		markSnapshotDirty(sess)
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
+	sess.mu.Unlock()
 	d.mu.Unlock()
+	markSnapshotDirty(sess)
 }
 
 // childEnv retains the daemon-environment helper for daemon-local legacy callers.
@@ -1344,11 +1333,8 @@ func copyEnvironment(env []string) []string {
 }
 
 func environmentEntry(entry string) (name, value string, ok bool) {
-	i := strings.IndexByte(entry, '=')
-	if i < 0 {
-		return "", "", false
-	}
-	return entry[:i], entry[i+1:], true
+	name, value, ok = strings.Cut(entry, "=")
+	return name, value, ok
 }
 
 func (d *Daemon) ptyCommand(env []string) (string, []string) {

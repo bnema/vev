@@ -1,55 +1,254 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"net"
+	"sync"
+	"syscall"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
-// restoreIncrementalSnapshots imports v3 only before listing repository
-// sessions, then restores each independently. A corrupt session therefore
-// cannot prevent an unrelated saved session from starting.
+const catalogueRestoreConcurrency = 8
+
+var errRetryableRestoreLoad = errors.New("snapshot: retryable checkpoint load")
+
+func initialSessionState(record domain.CatalogueRecord) (ports.SessionState, chan struct{}) {
+	done := make(chan struct{})
+	state := ports.SessionStopped
+	if record.DegradedReason != "" {
+		state = ports.SessionBroken
+		close(done)
+	} else if record.Committed == nil {
+		close(done)
+	}
+	return state, done
+}
+
+// restoreIncrementalSnapshots restores only records named by the authoritative
+// catalogue. Snapshot repository discovery is deliberately not part of this
+// path, so stale or oversized namespaces cannot affect unrelated sessions.
 func (d *Daemon) restoreIncrementalSnapshots(ctx context.Context) {
-	d.importLegacySnapshots(ctx)
-	names, err := d.snapshotRepository.List(ctx)
-	if err != nil {
-		d.log.Warn("listing session snapshots failed", "err", err)
-		d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore, "couldn't load saved sessions after restart", err)
+	if d.catalogue == nil {
 		return
 	}
-	for _, name := range names {
-		if err := ctx.Err(); err != nil {
-			return
-		}
-		generation, err := d.snapshotRepository.Load(ctx, name)
-		if err != nil {
-			d.snapshotRestoreFailure(name, err)
-			continue
-		}
-		if generation.Fallback {
-			d.NotifyGlobal(domain.NoticeWarn, domain.NoticeSnapshotRestore, "restored an older saved checkpoint for session "+name, nil)
-		}
-		snapshot, err := sessionFromGeneration(generation)
-		if err != nil {
-			d.snapshotRestoreFailure(name, err)
-			continue
-		}
-		if err := d.restoreSession(ctx, snapshot, generation.Generation); err != nil {
-			if ctx.Err() == nil {
-				d.snapshotRestoreFailure(name, err)
+	records, err := d.catalogue.Records()
+	if err != nil {
+		d.log.Error("loading catalogue for snapshot restoration failed", "err", err)
+		return
+	}
+	d.restoreCatalogue(ctx, records)
+}
+
+// restoreCatalogue gives every expected record an independent bounded job.
+// A failed record is degraded without cancelling any sibling restoration.
+func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.CatalogueRecord) {
+	jobs := make(chan domain.CatalogueRecord)
+	workers := min(catalogueRestoreConcurrency, len(records))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for record := range jobs {
+				done := d.ensureCatalogueRegistryEntry(record)
+				err := d.restoreRecord(ctx, record)
+				d.finishRecordRestore(record, err, done)
 			}
-		}
+		})
+	}
+	for _, record := range records {
+		jobs <- record
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func stoppedSessionFromRecord(record domain.CatalogueRecord, state ports.SessionState, done chan struct{}) stoppedSession {
+	return stoppedSession{
+		name:        record.Name,
+		cwd:         record.Cwd,
+		createdAt:   record.CreatedAt,
+		incarnation: record.IncarnationID,
+		lastUsedSeq: record.LastUsedSeq,
+		tabNames:    append([]string(nil), record.TabNames...),
+		record:      record,
+		state:       state,
+		restoreDone: done,
 	}
 }
 
-func (d *Daemon) snapshotRestoreFailure(name string, err error) {
-	d.log.Warn("restoring session snapshot failed", "err", err, "session", name)
-	d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore, "couldn't restore session "+name+" after restart", err)
+func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if entry, ok := d.stopped[record.Name]; ok {
+		return entry.restoreDone
+	}
+	state, done := initialSessionState(record)
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, state, done)
+	return done
+}
+
+// closeRuntimeRestoreDoneLocked closes a per-record restoration barrier.
+// Caller must hold d.mu so state transition and waiter release are atomic.
+func closeRuntimeRestoreDoneLocked(done chan struct{}) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	default:
+		close(done)
+	}
+}
+
+func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state ports.SessionState) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.stopped[record.Name]
+	if !ok {
+		return
+	}
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, state, entry.restoreDone)
+}
+
+func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
+	retryable := errors.Is(restoreErr, errRetryableRestoreLoad)
+	degraded := false
+	if restoreErr != nil {
+		reason := "checkpoint validation failed"
+		switch {
+		case retryable:
+			reason = "checkpoint load failed"
+		case errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded):
+			reason = "restore interrupted"
+		}
+		if d.recovery == nil {
+			d.log.Error("marking session degraded failed", "session", record.Name, "err", errors.New("recovery coordinator unavailable"))
+		} else if current, marked, err := d.recovery.MarkBroken(context.Background(), record.Name, record.IncarnationID, reason); err != nil {
+			d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
+		} else if marked {
+			record = current
+			degraded = true
+		}
+	}
+
+	d.mu.Lock()
+	if entry, ok := d.stopped[record.Name]; ok && degraded {
+		d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionBroken, entry.restoreDone)
+	}
+	closeRuntimeRestoreDoneLocked(done)
+	d.mu.Unlock()
+	if degraded {
+		reasonCode := "checkpoint-invalid"
+		switch {
+		case retryable:
+			reasonCode = "checkpoint-load-failed"
+		case errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded):
+			reasonCode = "restore-interrupted"
+		}
+		d.logSessionDegraded(record, reasonCode)
+	}
+}
+
+func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecord) error {
+	if record.DegradedReason != "" {
+		d.setStoppedRecovery(record, ports.SessionBroken)
+		d.logSessionDegraded(record, "persisted-broken")
+		return nil
+	}
+	if record.Committed == nil {
+		d.setStoppedRecovery(record, ports.SessionStopped)
+		d.logSessionRestoreComplete(record, 0, false)
+		return nil
+	}
+	if d.snapshotRepository == nil {
+		return errors.New("snapshot: repository unavailable")
+	}
+
+	if record.Committed == nil {
+		return errors.New("snapshot: healthy record has no checkpoint")
+	}
+	selected := *record.Committed
+	selectedGeneration, err := d.snapshotRepository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, selected)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if isRetryableRestoreLoadError(err) {
+			return fmt.Errorf("%w: %w", errRetryableRestoreLoad, err)
+		}
+		d.logRejectedRestoreCandidate(record, selected, false, "load-failed", err)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	selectedSnapshot, err := sessionFromGeneration(selectedGeneration)
+	if err != nil {
+		d.logRejectedRestoreCandidate(record, selected, false, "decode-failed", err)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	if selectedGeneration.IncarnationID != record.IncarnationID {
+		d.logRejectedRestoreCandidate(record, selected, false, "incarnation-mismatch", nil)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	if selectedGeneration.Name != record.Name {
+		d.logRejectedRestoreCandidate(record, selected, false, "name-mismatch", nil)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	if selectedGeneration.Generation != selected.Generation {
+		d.logRejectedRestoreCandidate(record, selected, false, "generation-mismatch", nil)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	if err := d.snapshotRepository.ReconcileCheckpoint(ctx, record.IncarnationID, selected); err != nil {
+		d.log.Warn("snapshot_checkpoint_reconciliation_pending", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation, "reason_code", "reconcile-failed")
+	} else {
+		d.log.Info("snapshot_checkpoint_reconciliation_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
+	}
+
+	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {
+		return err
+	}
+	d.setStoppedRecovery(record, ports.SessionStopped)
+	d.logSessionRestoreComplete(record, selected.Generation, false)
+	return nil
+}
+
+func isRetryableRestoreLoadError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, syscall.ENOSPC) ||
+		errors.Is(err, syscall.ENOMEM) ||
+		errors.Is(err, syscall.EMFILE) ||
+		errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.EDQUOT) {
+		return true
+	}
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+		return true
+	}
+	temporary, ok := errors.AsType[interface {
+		error
+		Temporary() bool
+	}](err)
+	return ok && temporary.Temporary()
+}
+
+func (d *Daemon) logRejectedRestoreCandidate(record domain.CatalogueRecord, candidate domain.CheckpointRef, fallback bool, reason string, err error) {
+	kind := "committed"
+	if fallback {
+		kind = "fallback"
+	}
+	d.log.Warn("snapshot_restore_candidate_rejected",
+		"session", record.Name,
+		"incarnation", record.IncarnationID.String(),
+		"generation", candidate.Generation,
+		"candidate", kind,
+		"reason_code", reason,
+		"err", err,
+	)
 }
 
 func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Session, error) {
@@ -57,7 +256,7 @@ func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Sessi
 	if err != nil {
 		return snapcodec.Session{}, err
 	}
-	if manifest.Name != generation.Name || manifest.Generation != generation.Generation {
+	if manifest.IncarnationID != generation.IncarnationID || manifest.Name != generation.Name || manifest.Generation != generation.Generation {
 		return snapcodec.Session{}, fmt.Errorf("snapshot: generation identity mismatch")
 	}
 	result := snapcodec.Session{Name: manifest.Name, CreatedAt: manifest.CreatedAt, Active: manifest.Active, Tabs: make([]snapcodec.Tab, 0, len(manifest.Tabs))}
@@ -98,118 +297,4 @@ func generationObject(generation ports.SnapshotGeneration, ref snapcodec.ObjectR
 		return nil, fmt.Errorf("snapshot: invalid object")
 	}
 	return append([]byte(nil), payload...), nil
-}
-
-// importLegacySnapshots is intentionally best effort per session. It deletes
-// a legacy blob only after publication and a full repository reload verify the
-// exact converted session, leaving failures retryable on the next startup.
-func (d *Daemon) importLegacySnapshots(ctx context.Context) {
-	if d.legacySnapshots == nil || d.snapshotRepository == nil || ctx.Err() != nil {
-		return
-	}
-	existing, err := d.snapshotRepository.List(ctx)
-	if err != nil {
-		d.log.Warn("listing incremental snapshots before import failed", "err", err)
-		return
-	}
-	present := make(map[string]struct{}, len(existing))
-	for _, name := range existing {
-		present[name] = struct{}{}
-	}
-	legacy, err := d.legacySnapshots.LoadLegacy(ctx)
-	if err != nil {
-		d.log.Warn("loading legacy snapshots failed", "err", err)
-		return
-	}
-	for _, blob := range legacy {
-		if ctx.Err() != nil {
-			return
-		}
-		if _, ok := present[blob.Name]; ok {
-			d.retryLegacyDelete(ctx, blob)
-			continue
-		}
-		snapshot, err := snapcodec.Unmarshal(blob.Data)
-		if err != nil || snapshot.Name != blob.Name {
-			d.log.Warn("importing legacy snapshot failed", "session", blob.Name, "err", err)
-			continue
-		}
-		publication, err := legacyPublication(snapshot)
-		if err == nil {
-			err = d.snapshotRepository.Publish(ctx, publication)
-		}
-		if err == nil {
-			var generation ports.SnapshotGeneration
-			generation, err = d.snapshotRepository.Load(ctx, snapshot.Name)
-			if err == nil {
-				err = verifyLegacyImportGeneration(generation, publication)
-			}
-		}
-		if err != nil {
-			d.log.Warn("importing legacy snapshot failed", "session", blob.Name, "err", err)
-			continue
-		}
-		d.rememberLegacyDelete(blob)
-		if err := d.legacySnapshots.DeleteVerifiedLegacy(ctx, blob); err != nil {
-			d.log.Warn("deleting imported legacy snapshot failed", "session", blob.Name, "err", err)
-			continue
-		}
-		d.forgetLegacyDelete(blob.Name)
-		present[blob.Name] = struct{}{}
-	}
-}
-
-func verifyLegacyImportGeneration(generation ports.SnapshotGeneration, publication ports.SnapshotPublication) error {
-	if generation.Name != publication.Name || generation.Generation != publication.Generation || !bytes.Equal(generation.Manifest, publication.Manifest) {
-		return fmt.Errorf("snapshot: legacy import verification mismatch")
-	}
-	expected := make(map[ports.SnapshotDigest][]byte, len(publication.Objects))
-	for _, object := range publication.Objects {
-		if sha256.Sum256(object.Data) != object.Digest {
-			return fmt.Errorf("snapshot: legacy import publication digest mismatch")
-		}
-		expected[object.Digest] = object.Data
-	}
-	if len(generation.Objects) != len(expected) {
-		return fmt.Errorf("snapshot: legacy import verification mismatch")
-	}
-	for digest, expectedData := range expected {
-		actual, ok := generation.Objects[digest]
-		if !ok || !bytes.Equal(actual, expectedData) || sha256.Sum256(actual) != digest {
-			return fmt.Errorf("snapshot: legacy import verification mismatch")
-		}
-	}
-	return nil
-}
-
-func (d *Daemon) rememberLegacyDelete(blob ports.LegacySnapshot) {
-	d.legacyImportMu.Lock()
-	if d.legacyImportPending == nil {
-		d.legacyImportPending = make(map[string][]byte)
-	}
-	d.legacyImportPending[blob.Name] = append([]byte(nil), blob.Data...)
-	d.legacyImportMu.Unlock()
-}
-
-func (d *Daemon) forgetLegacyDelete(name string) {
-	d.legacyImportMu.Lock()
-	delete(d.legacyImportPending, name)
-	d.legacyImportMu.Unlock()
-}
-
-// retryLegacyDelete only acts on a blob which this daemon has already
-// published and exactly reloaded. An unrelated pre-existing generation must
-// continue to leave its legacy counterpart untouched.
-func (d *Daemon) retryLegacyDelete(ctx context.Context, blob ports.LegacySnapshot) {
-	d.legacyImportMu.Lock()
-	pending, ok := d.legacyImportPending[blob.Name]
-	d.legacyImportMu.Unlock()
-	if !ok || !bytes.Equal(pending, blob.Data) {
-		return
-	}
-	if err := d.legacySnapshots.DeleteVerifiedLegacy(ctx, blob); err != nil {
-		d.log.Warn("deleting imported legacy snapshot failed", "session", blob.Name, "err", err)
-		return
-	}
-	d.forgetLegacyDelete(blob.Name)
 }

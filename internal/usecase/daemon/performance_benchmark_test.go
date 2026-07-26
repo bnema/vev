@@ -627,12 +627,18 @@ func publishBenchmarkSnapshot(b testing.TB, fixture *performanceFixture, generat
 	if err := fixture.snapshots.Publish(context.Background(), publication); err != nil {
 		b.Fatal(err)
 	}
+	checkpoint := domain.CheckpointRef{Generation: generation, ManifestDigest: snapcodec.ManifestDigest(publication.Manifest)}
+	capture.checkpoint = checkpoint
+	fixture.sess.snapshotMu.Lock()
+	fixture.sess.snapshotPublishedGeneration = generation
+	fixture.sess.snapshotPublishedCheckpoint = &checkpoint
+	fixture.sess.snapshotMu.Unlock()
 	markSnapshotCaptureObjectsPublished(capture)
 }
 
 func mutateBenchmarkVisible(fixture *performanceFixture, operation int) {
 	fixture.activePane.mu.Lock()
-	fixture.activePane.screen.Write([]byte(fmt.Sprintf("\x1b[1;1Hvisible-%08d", operation)))
+	fixture.activePane.screen.Write(fmt.Appendf(nil, "\x1b[1;1Hvisible-%08d", operation))
 	fixture.activePane.mu.Unlock()
 }
 
@@ -647,7 +653,7 @@ func mutateBenchmarkTail(fixture *performanceFixture, operation int) {
 }
 
 func mutateBenchmarkSealedChunk(fixture *performanceFixture, operation int) {
-	for row := 0; row < 256; row++ {
+	for row := range 256 {
 		mutateBenchmarkTail(fixture, operation*256+row)
 	}
 }
@@ -719,7 +725,14 @@ func snapshotGeneration(publication ports.SnapshotPublication) ports.SnapshotGen
 	for _, object := range publication.Objects {
 		objects[object.Digest] = object.Data
 	}
-	return ports.SnapshotGeneration{Name: publication.Name, Generation: publication.Generation, Manifest: publication.Manifest, Objects: objects}
+	return ports.SnapshotGeneration{
+		IncarnationID:    publication.IncarnationID,
+		Name:             publication.Name,
+		Generation:       publication.Generation,
+		ParentCheckpoint: publication.ParentCheckpoint,
+		Manifest:         publication.Manifest,
+		Objects:          objects,
+	}
 }
 
 func snapshotObjectBytes(publication ports.SnapshotPublication) uint64 {
@@ -1036,6 +1049,7 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 	ac.size = config.size
 	sess.name = "performance"
 	sess.ephemeral = false
+	sess.incarnation = domain.IncarnationID{1}
 	sess.snapEligible.Store(true)
 
 	fixture := &performanceFixture{
@@ -1051,7 +1065,7 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
-	WithSnapshotRepository(fixture.snapshots, nil)(d)
+	WithSnapshotRepository(fixture.snapshots)(d)
 	d.startSnapshotEncodeWorker()
 	if registerCleanup {
 		t.Cleanup(d.stopSnapshotEncodeWorker)
@@ -1376,6 +1390,7 @@ type countingSnapshotMetrics struct {
 	writes, objectBytes, historyBlobBytes, suppliedObjectBytes, suppliedHistoryBytes, manifestBytes, headBytes uint64
 }
 type countingSnapshotRepository struct {
+	noOpSnapshotRepository
 	mu sync.Mutex
 	countingSnapshotMetrics
 	objects map[string]map[ports.SnapshotDigest]struct{}
@@ -1418,14 +1433,6 @@ func (s *countingSnapshotRepository) Publish(_ context.Context, publication port
 	s.last = publication.Manifest
 	return nil
 }
-func (*countingSnapshotRepository) List(context.Context) ([]string, error) { return nil, nil }
-func (*countingSnapshotRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
-	return ports.SnapshotGeneration{}, nil
-}
-func (*countingSnapshotRepository) Delete(context.Context, string) error          { return nil }
-func (*countingSnapshotRepository) Tombstone(context.Context, string) error       { return nil }
-func (*countingSnapshotRepository) DeleteTombstone(context.Context, string) error { return nil }
-func (*countingSnapshotRepository) Maintain(context.Context) error                { return nil }
 func (s *countingSnapshotRepository) reset() {
 	s.mu.Lock()
 	s.countingSnapshotMetrics = countingSnapshotMetrics{}

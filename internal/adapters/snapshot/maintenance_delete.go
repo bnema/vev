@@ -4,195 +4,51 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/bnema/vev/internal/domain"
 )
 
-// Delete makes a session unavailable by durably moving it out of the canonical
-// namespace. Maintain reaps the private quarantine later; Delete never restores
-// a quarantined directory.
-func (r *Repository) Delete(ctx context.Context, name string) error {
+// DeleteIncarnation removes one incarnation-keyed snapshot namespace. It is
+// retry-idempotent: an incarnation already absent is a successful deletion.
+func (r *Repository) DeleteIncarnation(ctx context.Context, id domain.IncarnationID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := sessionKey(name)
+	key, err := incarnationKey(id)
+	if err != nil {
+		return err
+	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
+
+	path := r.sessionPath(id)
+	if err := r.removeIncarnationLocked(id); err != nil {
+		return fmt.Errorf("remove snapshot incarnation %s: %w", id.String(), safeFilesystemError(err))
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	canonical := r.sessionPath(key)
-	sessions := filepath.Dir(canonical)
-	// A prior rename may have succeeded while its parent sync failed. Complete
-	// that durability boundary before considering a canonical directory: this
-	// also leaves a newly recreated session untouched.
-	pending, err := r.pendingQuarantine(sessions, key)
-	if err != nil {
-		return fmt.Errorf("stat deleting snapshot session %q: %w", key, safeFilesystemError(err))
-	}
-	if pending {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := r.syncDirectory(sessions); err != nil {
-			return fmt.Errorf("sync deleted snapshot session directory %q: %w", key, safeFilesystemError(err))
-		}
-		return nil
-	}
-	if dir, err := r.openDirectory(canonical); errors.Is(err, os.ErrNotExist) {
+	parent := filepath.Dir(path)
+	if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("stat snapshot session %q: %w", key, safeFilesystemError(err))
-	} else if err := dir.Close(); err != nil {
-		return fmt.Errorf("close snapshot session %q: %w", key, safeFilesystemError(err))
-	}
-	quarantine := filepath.Join(sessions, deletingSessionName(key))
-	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// A renamed session can be replaced by a later publication. Invalidate any
-	// mark made for the old namespace before that replacement becomes possible.
-	r.invalidateStorageEpoch(key)
-	if err := r.rename(canonical, quarantine); err != nil {
-		return fmt.Errorf("quarantine snapshot session %q: %w", key, safeFilesystemError(err))
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := r.syncDirectory(sessions); err != nil {
-		return fmt.Errorf("sync deleted snapshot session directory %q: %w", key, safeFilesystemError(err))
-	}
-	return nil
+	return r.syncDirectory(parent)
 }
 
-// deletingSessionName is a deterministic pending-delete record. Its presence
-// is checked directly rather than scanning an attacker-controlled sessions
-// directory, and it prevents a retry from deleting a session republished after
-// the initial rename reached disk but its directory sync failed.
-func deletingSessionName(key string) string { return ".deleting-" + key }
-
-func (r *Repository) pendingQuarantine(dir, key string) (bool, error) {
-	path := filepath.Join(dir, deletingSessionName(key))
-	if hook := r.hooks.beforePendingQuarantineCheck; hook != nil {
-		hook(path)
-	}
-	file, err := r.openDirectory(path)
+// removeIncarnationLocked removes an incarnation through a root-pinned path.
+// The caller must hold the incarnation's session lock.
+func (r *Repository) removeIncarnationLocked(id domain.IncarnationID) (err error) {
+	root, err := r.openRoot()
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return nil
 	}
 	if err != nil {
-		return false, err
+		return err
 	}
-	return true, file.Close()
-}
-
-// Maintain reaps a bounded amount of stale state. Continuation handles are
-// repository-owned, so a stable prefix cannot starve entries later in a large
-// directory. Cancellation and errors discard those handles: a restarted
-// repository (and the next fresh cycle) always begins at a safe boundary.
-func isQuarantine(name string) bool { return strings.HasPrefix(name, ".deleting-") }
-
-// quarantineMaintenance retains one root-to-current path, never an unbounded
-// stack of directory handles or names. Parent paths are recovered after a
-// removal, while descent resumes from current on the next budgeted step.
-type quarantineMaintenance struct {
-	root    string
-	current string
-}
-
-// consumeQuarantineWork charges every filesystem operation that can be driven
-// by quarantine contents. This makes deep and wide trees subject to exactly
-// the same maintenanceBatch ceiling as removal work.
-func (r *Repository) consumeQuarantineWork(budget *int, operation string) bool {
-	if *budget == 0 {
-		return false
-	}
-	*budget--
-	if hook := r.hooks.beforeMaintenanceWork; hook != nil {
-		hook(operation)
-	}
-	return true
-}
-
-// maintainQuarantine makes one bounded depth-first traversal step at a time.
-// It deliberately reopens a directory to select its first child: every
-// successful child removal changes that prefix, so no directory cursor is
-// retained at each hostile nesting level.
-func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (changed, done bool, err error) {
-	state := r.maintenanceQuarantine
-	if state == nil {
-		return false, true, nil
-	}
-	for *budget > 0 {
-		if err := ctx.Err(); err != nil {
-			return changed, false, err
-		}
-		if !r.consumeQuarantineWork(budget, "stat") {
-			return changed, false, nil
-		}
-		stat, err := r.stat(state.current)
-		if errors.Is(err, os.ErrNotExist) {
-			if state.current == state.root {
-				return changed, true, nil
-			}
-			state.current = filepath.Dir(state.current)
-			continue
-		}
-		if err != nil {
-			return changed, false, err
-		}
-		if !stat.IsDir() {
-			if !r.consumeQuarantineWork(budget, "remove") {
-				return changed, false, nil
-			}
-			if err := r.remove(state.current); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return changed, false, err
-			}
-			changed = true
-			state.current = filepath.Dir(state.current)
-			continue
-		}
-
-		if !r.consumeQuarantineWork(budget, "open") {
-			return changed, false, nil
-		}
-		dir, err := r.openDirectory(state.current)
-		if err != nil {
-			return changed, false, err
-		}
-		if !r.consumeQuarantineWork(budget, "read") {
-			_ = dir.Close()
-			return changed, false, nil
-		}
-		entries, readErr := dir.ReadDir(1)
-		closeErr := dir.Close()
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return changed, false, readErr
-		}
-		if closeErr != nil {
-			return changed, false, closeErr
-		}
-		if len(entries) == 0 {
-			if !r.consumeQuarantineWork(budget, "remove") {
-				return changed, false, nil
-			}
-			if err := r.remove(state.current); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return changed, false, err
-			}
-			changed = true
-			if state.current == state.root {
-				return changed, true, nil
-			}
-			state.current = filepath.Dir(state.current)
-			continue
-		}
-		if !r.consumeQuarantineWork(budget, "descend") {
-			return changed, false, nil
-		}
-		state.current = filepath.Join(state.current, entries[0].Name())
-	}
-	return changed, false, nil
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
+	return root.RemoveAll(filepath.Join(repositorySessionsDir, id.String()))
 }

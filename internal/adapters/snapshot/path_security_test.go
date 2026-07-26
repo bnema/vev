@@ -3,12 +3,14 @@ package snapshot
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/bnema/vev/internal/domain"
+	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
@@ -39,13 +41,14 @@ func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := repo.Load(context.Background(), publication.Name); err == nil {
-		t.Fatal("Load succeeded through replaced configured-root symlink")
+	if _, err := loadPublication(context.Background(), repo, publication); err == nil {
+		t.Fatal("LoadCheckpoint succeeded through replaced configured-root symlink")
 	}
-	if err := repo.Maintain(context.Background()); err == nil {
-		t.Fatal("Maintain succeeded through replaced configured-root symlink")
+	keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {Generation: publication.Generation, ManifestDigest: codec.ManifestDigest(publication.Manifest)}}
+	if err := repo.CollectGarbage(context.Background(), keep); err == nil {
+		t.Fatal("CollectGarbage succeeded through replaced configured-root symlink")
 	}
-	loaded, err := external.Load(context.Background(), publication.Name)
+	loaded, err := loadPublication(context.Background(), external, externalPublication)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,84 +70,6 @@ func TestOpenRootRejectsUnsafePinnedRoot(t *testing.T) {
 	}
 }
 
-func TestOpenRootDetectsReplacementAfterOpen(t *testing.T) {
-	dir := privateDir(t)
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	old := dir + "-old"
-	replacementMarker := filepath.Join(dir, "replacement-marker")
-	repo := NewRepository(dir)
-	repo.hooks.afterOpenRoot = func() {
-		repo.hooks.afterOpenRoot = nil
-		if err := os.Rename(dir, old); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(replacementMarker, []byte("unchanged"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := repo.openRoot(); !errors.Is(err, syscall.ESTALE) {
-		t.Fatalf("openRoot error = %v, want ESTALE", err)
-	}
-	if got, err := os.ReadFile(replacementMarker); err != nil || string(got) != "unchanged" {
-		t.Fatalf("replacement marker = %q, %v", got, err)
-	}
-	if _, err := os.Stat(filepath.Join(old, "replacement-marker")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("pinned tree was operated on: %v", err)
-	}
-}
-
-func TestOpenDirectoryClosesChildWhenRootCloseFails(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	if err := os.Mkdir(repo.dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	child := filepath.Join(repo.dir, "child")
-	if err := os.Mkdir(child, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	closeErr := errors.New("injected root close")
-	repo.hooks.closeRoot = func() error { return closeErr }
-	before := openDescriptorCount(t)
-	for range 20 {
-		file, err := repo.openDirectory(child)
-		if file != nil || !errors.Is(err, closeErr) {
-			t.Fatalf("openDirectory = (%v, %v), want nil and close error", file, err)
-		}
-	}
-	if got := openDescriptorCount(t); got > before+4 {
-		t.Fatalf("open descriptors after failed openDirectory = %d, before = %d", got, before)
-	}
-}
-
-func TestRootCloseErrorsJoinAndCloseRealRoot(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	if err := os.Mkdir(repo.dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	closeErr := errors.New("injected root close")
-	repo.hooks.closeRoot = func() error { return closeErr }
-	root, err := repo.openRoot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.closeRoot(root); !errors.Is(err, closeErr) {
-		t.Fatalf("closeRoot error = %v, want injected error", err)
-	}
-	if _, err := root.Stat("."); err == nil {
-		t.Fatal("real root remained open after injected close error")
-	}
-
-	_, err = repo.stat(filepath.Join(repo.dir, "missing"))
-	if !errors.Is(err, closeErr) || !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stat error = %v, want primary and close errors", err)
-	}
-}
-
 func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	for _, target := range []string{repositoryGenerations, repositoryObjectsDir} {
 		t.Run(target, func(t *testing.T) {
@@ -153,8 +78,7 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 			if err := repo.Publish(context.Background(), publication); err != nil {
 				t.Fatal(err)
 			}
-			key := sessionKey(publication.Name)
-			inside := filepath.Join(repo.sessionPath(key), target)
+			inside := filepath.Join(repo.sessionPath(publication.IncarnationID), target)
 			outside := t.TempDir()
 			guard := filepath.Join(outside, "must-not-change")
 			if err := os.WriteFile(guard, []byte("guard"), 0o600); err != nil {
@@ -166,11 +90,12 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 			if err := os.Symlink(outside, inside); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := repo.Load(context.Background(), publication.Name); err == nil {
-				t.Fatal("Load succeeded through symlinked repository component")
+			if _, err := loadPublication(context.Background(), repo, publication); err == nil {
+				t.Fatal("LoadCheckpoint succeeded through symlinked repository component")
 			}
-			if err := repo.Maintain(context.Background()); err == nil {
-				t.Fatal("Maintain succeeded through symlinked repository component")
+			keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {Generation: publication.Generation, ManifestDigest: codec.ManifestDigest(publication.Manifest)}}
+			if err := repo.CollectGarbage(context.Background(), keep); err == nil {
+				t.Fatal("CollectGarbage succeeded through symlinked repository component")
 			}
 			got, err := os.ReadFile(guard)
 			if err != nil || string(got) != "guard" {
@@ -198,20 +123,5 @@ func TestFinalSymlinksRejectedByRootOperations(t *testing.T) {
 	}
 	if _, err := repo.readBounded(link); !errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), repo.dir) {
 		t.Fatalf("readBounded error = %v, want sanitized ELOOP", err)
-	}
-}
-
-func TestRepositoryLoadLegacyChargesUnrelatedRootEntries(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	if err := os.MkdirAll(repo.dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i <= maxDirectoryTraversalEntries; i++ {
-		if err := os.WriteFile(filepath.Join(repo.dir, fmt.Sprintf("unrelated-%05d", i)), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := repo.LoadLegacy(context.Background()); !errors.Is(err, ErrDirectoryTraversalBudget) {
-		t.Fatalf("LoadLegacy error = %v, want traversal budget error", err)
 	}
 }

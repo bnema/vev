@@ -1,10 +1,7 @@
 package kv
 
 import (
-	"encoding/binary"
 	"errors"
-	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,369 +12,201 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-// Store is an append-only WAL-backed key/value store.
+// Store is an in-memory key/value map persisted by whole-file atomic rewrite.
+// Set and Delete mutate memory only; Sync is the durability barrier.
 type Store struct {
-	mu        sync.Mutex
-	path      string
-	file      *os.File
-	lockFile  *os.File
-	data      map[string][]byte
-	entrySize map[string]int64
-	total     int64
-	live      int64
-	closed    bool
+	mu       sync.Mutex
+	path     string
+	lockFile *os.File
+	data     map[string][]byte
+	dirty    bool
+	closed   bool
 }
 
-// Open opens or creates a store at path, replays valid records, truncates any
-// corrupt or torn tail, and compacts if the file contains enough obsolete data.
+// Open reads path, or starts empty when it does not exist. Stray .tmp files
+// are ignored. Any invalid existing main file fails closed and is untouched.
 func Open(path string) (*Store, error) {
 	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-
 	lockFile, err := acquireLock(path)
 	if err != nil {
 		return nil, err
 	}
-
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		_ = releaseLock(lockFile)
-		return nil, err
+	fail := func(err error) (*Store, error) {
+		return nil, errors.Join(err, releaseLock(lockFile))
 	}
 
-	data, sizes, total, live, lastGood, err := replayFile(f)
-	if err != nil {
-		_ = f.Close()
-		_ = releaseLock(lockFile)
-		return nil, err
-	}
-	if err := f.Truncate(lastGood); err != nil {
-		_ = f.Close()
-		_ = releaseLock(lockFile)
-		return nil, err
-	}
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		_ = f.Close()
-		_ = releaseLock(lockFile)
-		return nil, err
-	}
-
-	s := &Store{path: path, file: f, lockFile: lockFile, data: data, entrySize: sizes, total: total, live: live}
-	if s.shouldCompact() {
-		if err := s.compactLocked(); err != nil {
-			_ = f.Close()
-			_ = releaseLock(lockFile)
-			return nil, err
-		}
-	}
-	return s, nil
-}
-
-// Replay reads path without mutating it and returns the state from valid records.
-func Replay(path string) (map[string][]byte, error) {
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string][]byte{}, nil
+		store := &Store{path: path, lockFile: lockFile, data: make(map[string][]byte), dirty: true}
+		if err := store.syncLocked(); err != nil {
+			return fail(err)
+		}
+		return store, nil
 	}
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	defer func() { _ = f.Close() }()
-
-	data, _, _, _, _, err := replayFile(f)
+	data, err := decodeFile(raw)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	return data, nil
+	return &Store{path: path, lockFile: lockFile, data: data}, nil
 }
 
-// Get returns a copy of the value for key.
 func (s *Store) Get(key []byte) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	value, ok := s.data[string(key)]
+	return append([]byte(nil), value...), ok
+}
 
-	v, ok := s.data[string(key)]
-	if !ok {
-		return nil, false
+func (s *Store) Set(key, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return os.ErrClosed
 	}
-	return append([]byte(nil), v...), true
+	s.data[string(key)] = append([]byte(nil), value...)
+	s.dirty = true
+	return nil
 }
 
-// Set appends a SET record. It does not fsync.
-func (s *Store) Set(key, val []byte) error {
-	return s.appendRecord(opSet, key, val)
-}
-
-// Delete appends a DEL tombstone. It does not fsync.
 func (s *Store) Delete(key []byte) error {
-	return s.appendRecord(opDel, key, nil)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return os.ErrClosed
+	}
+	if _, exists := s.data[string(key)]; exists {
+		delete(s.data, string(key))
+		s.dirty = true
+	}
+	return nil
 }
 
-// Range calls fn for each key/value pair, using copies. Iteration stops when fn returns false.
 func (s *Store) Range(fn func(k, v []byte) bool) {
 	s.mu.Lock()
 	keys := make([]string, 0, len(s.data))
-	for k := range s.data {
-		keys = append(keys, k)
+	for key := range s.data {
+		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	pairs := make([]struct{ k, v []byte }, 0, len(keys))
-	for _, k := range keys {
-		pairs = append(pairs, struct{ k, v []byte }{[]byte(k), append([]byte(nil), s.data[k]...)})
+	values := make([][]byte, len(keys))
+	for i, key := range keys {
+		values[i] = append([]byte(nil), s.data[key]...)
 	}
 	s.mu.Unlock()
-
-	for _, p := range pairs {
-		if !fn(p.k, p.v) {
+	for i, key := range keys {
+		if !fn([]byte(key), values[i]) {
 			return
 		}
 	}
 }
 
-// Sync fsyncs the WAL file.
+// Sync writes path.tmp, fsyncs it, renames it over path, then fsyncs the
+// directory. The main pathname therefore contains either the previous whole
+// map or the next whole map, never a subset of mutations.
 func (s *Store) Sync() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return os.ErrClosed
 	}
-	return s.file.Sync()
+	return s.syncLocked()
 }
 
-// Close fsyncs and closes the store.
+func (s *Store) syncLocked() error {
+	if !s.dirty {
+		return nil
+	}
+	data := encodeFile(s.data)
+	tmp := s.path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := writeAll(file, data); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	if err := file.Sync(); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(s.path)); err != nil {
+		return err
+	}
+	s.dirty = false
+	return nil
+}
+
+// Close syncs buffered mutations before releasing the process lock.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil
 	}
-	errSync := s.file.Sync()
-	errClose := s.file.Close()
-	errUnlock := releaseLock(s.lockFile)
+	err := s.syncLocked()
 	s.closed = true
-	if errSync != nil {
-		return errSync
-	}
-	if errClose != nil {
-		return errClose
-	}
-	return errUnlock
+	return errors.Join(err, releaseLock(s.lockFile))
 }
 
-func acquireLock(path string) (*os.File, error) {
-	lf, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = lf.Close()
-		return nil, err
-	}
-	return lf, nil
-}
-
-func releaseLock(f *os.File) error {
-	if f == nil {
-		return nil
-	}
-	errUnlock := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	errClose := f.Close()
-	if errUnlock != nil {
-		return errUnlock
-	}
-	return errClose
-}
-
-func (s *Store) appendRecord(op byte, key, val []byte) error {
-	buf, err := encodeRecord(op, key, val)
-	if err != nil {
-		return err
-	}
-
+// CloseWithoutSync releases the process lock without making buffered mutations
+// durable. It is used when a higher-level transaction rejected those mutations.
+func (s *Store) CloseWithoutSync() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return os.ErrClosed
+		return nil
 	}
-	pos, err := s.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return err
-	}
-	n, err := s.file.Write(buf)
-	if err != nil || n != len(buf) {
-		writeErr := err
-		if writeErr == nil {
-			writeErr = io.ErrShortWrite
-		}
-		if tErr := s.file.Truncate(pos); tErr != nil {
-			s.closed = true
-			return fmt.Errorf("write failed (%w) and recovery truncate failed: %w", writeErr, tErr)
-		}
-		if _, sErr := s.file.Seek(pos, io.SeekStart); sErr != nil {
-			s.closed = true
-			return fmt.Errorf("write failed (%w) and recovery seek failed: %w", writeErr, sErr)
-		}
-		return writeErr
-	}
+	s.closed = true
+	return releaseLock(s.lockFile)
+}
 
-	k := string(key)
-	if old, ok := s.entrySize[k]; ok {
-		s.live -= old
-	}
-	s.total += int64(len(buf))
-	if op == opSet {
-		s.data[k] = append([]byte(nil), val...)
-		s.entrySize[k] = int64(len(buf))
-		s.live += int64(len(buf))
-	} else {
-		delete(s.data, k)
-		delete(s.entrySize, k)
-	}
-	if s.shouldCompact() {
-		return s.compactLocked()
+func writeAll(file *os.File, data []byte) error {
+	for len(data) > 0 {
+		n, err := file.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
 	}
 	return nil
 }
 
-func (s *Store) shouldCompact() bool {
-	return s.total > compactThreshold && float64(s.total-s.live)/float64(s.total) > compactWasteRatio
+func acquireLock(path string) (*os.File, error) {
+	file, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
-func (s *Store) compactLocked() error {
-	tmp := s.path + ".compact"
-	tf, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
+func releaseLock(file *os.File) error {
+	if file == nil {
+		return nil
 	}
-
-	keys := make([]string, 0, len(s.data))
-	for k := range s.data {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	newSizes := make(map[string]int64, len(keys))
-	var newTotal, newLive int64
-	for _, k := range keys {
-		buf, err := encodeRecord(opSet, []byte(k), s.data[k])
-		if err != nil {
-			_ = tf.Close()
-			_ = os.Remove(tmp)
-			return err
-		}
-		if _, err := tf.Write(buf); err != nil {
-			_ = tf.Close()
-			_ = os.Remove(tmp)
-			return err
-		}
-		sz := int64(len(buf))
-		newSizes[k] = sz
-		newTotal += sz
-		newLive += sz
-	}
-	if err := tf.Sync(); err != nil {
-		_ = tf.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := tf.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	bak := s.path + ".bak"
-	_ = os.Remove(bak)
-	if err := os.Rename(s.path, bak); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		_ = os.Rename(bak, s.path)
-		_ = os.Remove(tmp)
-		return err
-	}
-	f, err := os.OpenFile(s.path, os.O_RDWR, 0o600)
-	if err != nil {
-		_ = os.Remove(s.path)
-		_ = os.Rename(bak, s.path)
-		return err
-	}
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		_ = f.Close()
-		_ = os.Remove(s.path)
-		_ = os.Rename(bak, s.path)
-		return err
-	}
-	old := s.file
-	s.file = f
-	s.entrySize = newSizes
-	s.total = newTotal
-	s.live = newLive
-	_ = old.Close()
-	_ = os.Remove(bak)
-	return nil
+	return errors.Join(syscall.Flock(int(file.Fd()), syscall.LOCK_UN), file.Close())
 }
 
-func replayFile(f *os.File) (map[string][]byte, map[string]int64, int64, int64, int64, error) {
-	info, err := f.Stat()
+func syncDir(dir string) error {
+	file, err := os.Open(dir)
 	if err != nil {
-		return nil, nil, 0, 0, 0, err
+		return err
 	}
-	fileSize := info.Size()
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	data := make(map[string][]byte)
-	sizes := make(map[string]int64)
-	var total, live, off int64
-	header := make([]byte, headerLen)
-	for {
-		n, err := io.ReadFull(f, header)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			_ = n
-			break
-		}
-		if err != nil {
-			return nil, nil, 0, 0, 0, err
-		}
-
-		payloadLen := binary.BigEndian.Uint32(header[0:4])
-		if int64(payloadLen) > fileSize-off-headerLen {
-			break
-		}
-		wantCRC := binary.BigEndian.Uint32(header[4:8])
-		payload := make([]byte, int(payloadLen))
-		if _, err := io.ReadFull(f, payload); errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			return nil, nil, 0, 0, 0, err
-		}
-		if crc32.ChecksumIEEE(payload) != wantCRC {
-			break
-		}
-		rec, err := decodePayload(payload)
-		if err != nil {
-			break
-		}
-
-		sz := int64(headerLen + len(payload))
-		k := string(rec.key)
-		if old, ok := sizes[k]; ok {
-			live -= old
-		}
-		total += sz
-		if rec.op == opSet {
-			data[k] = rec.value
-			sizes[k] = sz
-			live += sz
-		} else {
-			delete(data, k)
-			delete(sizes, k)
-		}
-		off += sz
-	}
-	return data, sizes, total, live, off, nil
+	return errors.Join(file.Sync(), file.Close())
 }

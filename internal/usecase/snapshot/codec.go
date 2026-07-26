@@ -185,6 +185,15 @@ func writeProcess(w *payloadWriter, p *Process) error {
 
 type payloadReader struct{ b []byte }
 
+func (r *payloadReader) getBytes(n int) ([]byte, error) {
+	if n < 0 || len(r.b) < n {
+		return nil, ErrShortPayload
+	}
+	b := r.b[:n]
+	r.b = r.b[n:]
+	return b, nil
+}
+
 func (r *payloadReader) getUint8() (uint8, error) {
 	if len(r.b) < 1 {
 		return 0, ErrShortPayload

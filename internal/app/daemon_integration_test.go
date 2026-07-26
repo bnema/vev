@@ -4,12 +4,16 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,10 +21,14 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/pkg/vt"
 )
 
@@ -421,6 +429,780 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
 }
+
+func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runtime")
+	owner, err := lifecycle.TryAcquire(dir)
+	require.NoError(t, err)
+
+	ready := make(chan struct{})
+	transport := &integrationTransport{}
+	dial := func(context.Context, string) (ports.Transport, error) {
+		select {
+		case <-ready:
+			return transport, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+	var spawns atomic.Int32
+	cfg := backoffConfig{initial: time.Millisecond, max: 2 * time.Millisecond, total: time.Second}
+
+	const clients = 4
+	errs := make(chan error, clients)
+	var wg sync.WaitGroup
+	for range clients {
+		wg.Go(func() {
+			_, err := ensureDaemonWithLifecycle(context.Background(), dir, dial, func() error {
+				spawns.Add(1)
+				return nil
+			}, cfg)
+			errs <- err
+		})
+	}
+	require.Never(t, func() bool { return spawns.Load() != 0 }, 50*time.Millisecond, time.Millisecond)
+	close(ready)
+	require.NoError(t, owner.Release())
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Zero(t, spawns.Load())
+}
+
+func TestListWaitsForLifecycleOwner(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
+	require.NoError(t, p.Close())
+	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- runList(context.Background()) }()
+	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
+	require.NoError(t, owner.Release())
+	require.NoError(t, <-done)
+}
+
+func TestOfflineKillWaitsForLifecycleOwner(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
+	now := time.Now().UnixNano()
+	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, CreatedAt: now, UpdatedAt: now}))
+	require.NoError(t, p.Close())
+	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- runKill(context.Background(), "named", false, false) }()
+	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
+	require.NoError(t, owner.Release())
+	require.NoError(t, <-done)
+}
+
+func TestKillDaemonWaitsForOwnershipTransfer(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
+	require.NoError(t, err)
+	_, served := startDaemonInDir(t, ipc.SocketDir())
+
+	done := make(chan error, 1)
+	go func() { done <- requestDaemonStop(context.Background()) }()
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not stop")
+	}
+	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
+	require.NoError(t, owner.Release())
+	require.NoError(t, <-done)
+}
+
+func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	catalogue := &lifecycleObservedCatalogue{
+		Catalogue: newTestPersister(t, stateDir),
+		closed:    make(chan struct{}),
+	}
+	require.NoError(t, catalogue.Create(domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}}))
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+	shutdownClock := newLifecycleShutdownClock(t)
+	maintenanceRepository := &lifecycleBlockingMaintenanceRepository{
+		SnapshotRepository: repository,
+		entered:            make(chan struct{}),
+		release:            make(chan struct{}),
+		returned:           make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var releaseOnce sync.Once
+	releaseMaintenance := func() { releaseOnce.Do(func() { close(maintenanceRepository.release) }) }
+	t.Cleanup(releaseMaintenance)
+
+	callbackReturned := make(chan struct{})
+	wrapperReturned := make(chan error, 1)
+	go func() {
+		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
+			defer close(callbackReturned)
+			d := daemon.New(
+				pty.NewFactory(),
+				shutdownClock,
+				discardLog(),
+				daemon.WithSnapshotRepository(repository),
+				daemon.WithDurableMaintenance(catalogue, maintenanceRepository),
+				daemon.WithCatalogue(catalogue, nil),
+			)
+			if err := d.CollectStartupGarbage(ctx); err != nil {
+				return err
+			}
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return err
+			}
+			return d.Serve(ctx, listener)
+		})
+	}()
+
+	awaitLifecycleStage(t, maintenanceRepository.entered, "pre-publication maintenance repository call")
+	cancel()
+	select {
+	case <-callbackReturned:
+		t.Fatal("Serve callback returned after shutdown deadline while maintenance was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertLifecycleStagePending(t, catalogue.closed, "catalogue close while maintenance is blocked")
+	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return while maintenance is blocked")
+	_, err := lifecycle.TryAcquire(runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	releaseMaintenance()
+	awaitLifecycleStage(t, maintenanceRepository.returned, "maintenance repository return")
+	awaitLifecycleStage(t, catalogue.closed, "catalogue close after maintenance")
+	awaitLifecycleStage(t, callbackReturned, "Serve callback return after catalogue close")
+	require.NoError(t, awaitLifecycleResult(t, wrapperReturned, "lifecycle wrapper return"))
+	owner, err := lifecycle.TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	require.NoError(t, owner.Release())
+}
+
+type lifecycleBlockingMaintenanceRepository struct {
+	ports.SnapshotRepository
+	entered    chan struct{}
+	release    chan struct{}
+	returned   chan struct{}
+	enterOnce  sync.Once
+	returnOnce sync.Once
+}
+
+func (r *lifecycleBlockingMaintenanceRepository) CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error {
+	r.enterOnce.Do(func() { close(r.entered) })
+	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
+	r.returnOnce.Do(func() { close(r.returned) })
+	return nil
+}
+
+type lifecycleObservedCatalogue struct {
+	ports.Catalogue
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *lifecycleObservedCatalogue) Close() error {
+	err := c.Catalogue.Close()
+	c.closeOnce.Do(func() { close(c.closed) })
+	return err
+}
+
+func TestLifecycleOwnershipOutlivesSnapshotWriter(t *testing.T) {
+	result := runBlockedSnapshotWriterShutdown(t)
+	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
+	assertLifecycleResultPending(t, result.wrapperReturned, "lifecycle wrapper return while snapshot writer is blocked")
+	_, err := lifecycle.TryAcquire(result.runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	result.releaseWriter()
+	awaitLifecycleStage(t, result.publishReturned, "snapshot writer return")
+	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
+	owner, err := lifecycle.TryAcquire(result.runtimeDir)
+	require.NoError(t, err)
+	require.NoError(t, owner.Release())
+}
+
+func TestLifecycleCallbackWaitsForEveryWriter(t *testing.T) {
+	result := runBlockedSnapshotWriterShutdown(t)
+	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
+
+	result.releaseWriter()
+	awaitLifecycleStage(t, result.publishReturned, "snapshot writer return")
+	awaitLifecycleStage(t, result.callbackReturned, "Serve callback return after snapshot writer")
+	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
+}
+
+func TestFinalCheckpointTimeoutKeepsOwner(t *testing.T) {
+	result := runBlockedSnapshotWriterShutdown(t)
+	assertLifecycleResultPending(t, result.wrapperReturned, "ownership release after checkpoint timeout with writer alive")
+	_, err := lifecycle.TryAcquire(result.runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	result.releaseWriter()
+	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
+}
+
+// Startup restoration repairs HEADs, promotes fallbacks, and replaces catalogue
+// records. Lifecycle ownership must therefore outlive it: releasing the flock
+// while a restoration repository call is still running would let a second
+// daemon mutate the same durable state.
+func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+	checkpointed := publishRestorableCheckpoint(t, stateDir, repository)
+
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	blocking := &lifecycleBlockingRestore{
+		SnapshotRepository: repository,
+		entered:            make(chan struct{}),
+		release:            make(chan struct{}),
+		returned:           make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseRestore := func() { releaseOnce.Do(func() { close(blocking.release) }) }
+	t.Cleanup(releaseRestore)
+
+	shutdownClock := newLifecycleShutdownClock(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	listenerReady := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	wrapperReturned := make(chan error, 1)
+	go func() {
+		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
+			defer close(callbackReturned)
+			opened, err := persist.OpenOrCreate(stateDir)
+			if err != nil {
+				return err
+			}
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return errors.Join(err, opened.Catalogue.Close())
+			}
+			close(listenerReady)
+			d := daemon.New(
+				pty.NewFactory(),
+				shutdownClock,
+				discardLog(),
+				daemon.WithShell("/bin/cat", nil),
+				daemon.WithCatalogue(opened.Catalogue, opened.Records),
+				daemon.WithSnapshotRepository(blocking),
+			)
+			return d.Serve(ctx, listener)
+		})
+	}()
+
+	awaitLifecycleStage(t, listenerReady, "daemon listener")
+	awaitLifecycleStage(t, blocking.entered, "restoration repository call")
+	require.Equal(t, checkpointed, blocking.repairedName(), "restoration must target the checkpointed session")
+
+	cancel()
+	shutdownClock.nextTimer(t).fire()
+	select {
+	case <-callbackReturned:
+		t.Fatal("Serve callback returned after shutdown deadline while restoration was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertLifecycleStagePending(t, callbackReturned, "Serve callback return while restoration is blocked")
+	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return while restoration is blocked")
+	_, err := lifecycle.TryAcquire(runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	releaseRestore()
+	awaitLifecycleStage(t, blocking.returned, "restoration repository return")
+	awaitLifecycleStage(t, callbackReturned, "Serve callback return after restoration")
+	require.NoError(t, awaitLifecycleResult(t, wrapperReturned, "lifecycle wrapper return"))
+	owner, err := lifecycle.TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	require.NoError(t, owner.Release())
+}
+
+// publishRestorableCheckpoint runs a complete daemon over the real catalogue and
+// repository until one named session owns a committed checkpoint, then shuts it
+// down. The returned name is restorable by any later daemon on the same state.
+func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snapshot.Repository) string {
+	t.Helper()
+	const name = "restorable"
+	runtimeDir := filepath.Join(t.TempDir(), "seed-runtime")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opened, err := persist.OpenOrCreate(stateDir)
+	require.NoError(t, err)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
+	listener, err := ipc.Listen(runtimeDir)
+	require.NoError(t, err)
+	d := daemon.New(
+		pty.NewFactory(),
+		clock.New(),
+		discardLog(),
+		daemon.WithShell("/bin/cat", nil),
+		daemon.WithCatalogue(opened.Catalogue, opened.Records),
+		daemon.WithSnapshotRepository(repository),
+		daemon.WithRecoveryCoordinator(coordinator),
+	)
+	served := make(chan error, 1)
+	go func() { served <- d.Serve(ctx, listener) }()
+
+	tr, _ := attach(t, runtimeDir, ports.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("checkpoint me\n")})}))
+	require.Eventually(t, func() bool {
+		record, ok, _ := opened.Catalogue.Record(name)
+		return ok && record.Committed != nil && record.DegradedReason == ""
+	}, 5*time.Second, 10*time.Millisecond, "session never committed a checkpoint")
+	require.NoError(t, tr.Close())
+
+	cancel()
+	require.NoError(t, awaitLifecycleResult(t, served, "seed daemon shutdown"))
+	return name
+}
+
+type lifecycleBlockingRestore struct {
+	ports.SnapshotRepository
+	entered    chan struct{}
+	release    chan struct{}
+	returned   chan struct{}
+	enterOnce  sync.Once
+	returnOnce sync.Once
+	mu         sync.Mutex
+	repaired   string
+}
+
+func (r *lifecycleBlockingRestore) LoadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref domain.CheckpointRef) (ports.SnapshotGeneration, error) {
+	r.mu.Lock()
+	r.repaired = name
+	r.mu.Unlock()
+	return r.SnapshotRepository.LoadCheckpoint(ctx, id, name, ref)
+}
+
+func (r *lifecycleBlockingRestore) ReconcileCheckpoint(ctx context.Context, id domain.IncarnationID, ref domain.CheckpointRef) error {
+	r.enterOnce.Do(func() { close(r.entered) })
+	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
+	r.returnOnce.Do(func() { close(r.returned) })
+	return r.SnapshotRepository.ReconcileCheckpoint(ctx, id, ref)
+}
+
+func (r *lifecycleBlockingRestore) repairedName() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repaired
+}
+
+type blockedSnapshotWriterShutdown struct {
+	runtimeDir       string
+	callbackReturned <-chan struct{}
+	wrapperReturned  <-chan error
+	publishReturned  <-chan struct{}
+	releaseWriter    func()
+}
+
+func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdown {
+	t.Helper()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	shutdownClock := newLifecycleShutdownClock(t)
+	repository := newLifecycleBlockingRepository()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	listenerReady := make(chan struct{})
+	listenerClosed := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	wrapperReturned := make(chan error, 1)
+	go func() {
+		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
+			defer close(callbackReturned)
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return err
+			}
+			observed := &lifecycleObservedListener{Listener: listener, closed: listenerClosed}
+			close(listenerReady)
+			d := daemon.New(
+				pty.NewFactory(),
+				shutdownClock,
+				discardLog(),
+				daemon.WithShell("/bin/cat", nil),
+				daemon.WithSnapshotRepository(repository),
+			)
+			return d.Serve(ctx, observed)
+		})
+	}()
+
+	awaitLifecycleStage(t, listenerReady, "daemon listener")
+	tr, _ := attach(t, runtimeDir, ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("dirty state\n")})}))
+	awaitLifecycleStage(t, repository.entered, "snapshot publication")
+	require.NoError(t, tr.Close())
+	require.Eventually(t, func() bool {
+		sessions := listRemoteSessions(t, runtimeDir)
+		return len(sessions.Sessions) == 1 && !sessions.Sessions[0].Attached
+	}, time.Second, 10*time.Millisecond)
+	cancel()
+	awaitLifecycleStage(t, listenerClosed, "listener close")
+
+	shutdownClock.nextTimer(t).fire()
+	select {
+	case <-callbackReturned:
+		t.Fatal("Serve callback returned after checkpoint timeout while snapshot writer was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertLifecycleStagePending(t, callbackReturned, "Serve callback return after checkpoint timeout")
+	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return after checkpoint timeout")
+
+	var releaseOnce sync.Once
+	releaseWriter := func() { releaseOnce.Do(func() { close(repository.release) }) }
+	t.Cleanup(releaseWriter)
+	return blockedSnapshotWriterShutdown{
+		runtimeDir:       runtimeDir,
+		callbackReturned: callbackReturned,
+		wrapperReturned:  wrapperReturned,
+		publishReturned:  repository.returned,
+		releaseWriter:    releaseWriter,
+	}
+}
+
+type lifecycleBlockingRepository struct {
+	ports.SnapshotRepository
+	entered    chan struct{}
+	release    chan struct{}
+	returned   chan struct{}
+	enterOnce  sync.Once
+	returnOnce sync.Once
+}
+
+func newLifecycleBlockingRepository() *lifecycleBlockingRepository {
+	return &lifecycleBlockingRepository{
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+}
+
+func (r *lifecycleBlockingRepository) Publish(context.Context, ports.SnapshotPublication) error {
+	r.enterOnce.Do(func() { close(r.entered) })
+	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
+	r.returnOnce.Do(func() { close(r.returned) })
+	return nil
+}
+
+type lifecycleShutdownClock struct {
+	t      *testing.T
+	base   ports.Clock
+	timers chan *lifecycleManualTimer
+}
+
+func newLifecycleShutdownClock(t *testing.T) *lifecycleShutdownClock {
+	t.Helper()
+	return &lifecycleShutdownClock{t: t, base: clock.New(), timers: make(chan *lifecycleManualTimer, 4)}
+}
+
+func (c *lifecycleShutdownClock) Now() time.Time { return c.base.Now() }
+func (c *lifecycleShutdownClock) NewTimer(delay time.Duration) ports.Timer {
+	if delay != daemon.SnapshotShutdownTimeout() {
+		return c.base.NewTimer(delay)
+	}
+	timer := &lifecycleManualTimer{t: c.t, ch: make(chan time.Time, 1)}
+	select {
+	case c.timers <- timer:
+	default:
+		c.t.Errorf("unexpected additional snapshot shutdown timer with delay %s", delay)
+		timer.fire()
+	}
+	return timer
+}
+
+func (c *lifecycleShutdownClock) nextTimer(t *testing.T) *lifecycleManualTimer {
+	t.Helper()
+	select {
+	case timer := <-c.timers:
+		return timer
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for shutdown deadline timer")
+		return nil
+	}
+}
+
+type lifecycleManualTimer struct {
+	t       *testing.T
+	ch      chan time.Time
+	stopped atomic.Bool
+}
+
+func (t *lifecycleManualTimer) C() <-chan time.Time { return t.ch }
+func (t *lifecycleManualTimer) Reset(delay time.Duration) bool {
+	if delay != daemon.SnapshotShutdownTimeout() {
+		t.t.Errorf("snapshot shutdown timer reset with delay %s, want %s", delay, daemon.SnapshotShutdownTimeout())
+	}
+	t.stopped.Store(false)
+	return false
+}
+func (t *lifecycleManualTimer) Stop() bool { return !t.stopped.Swap(true) }
+func (t *lifecycleManualTimer) fire() {
+	if t.stopped.Load() {
+		return
+	}
+	select {
+	case t.ch <- time.Now():
+	default:
+	}
+}
+
+func TestLifecycleManualTimerRepeatedFireIsNonBlocking(t *testing.T) {
+	timer := &lifecycleManualTimer{t: t, ch: make(chan time.Time, 1)}
+	timer.fire()
+
+	returned := make(chan struct{})
+	go func() {
+		timer.fire()
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("repeated manual timer fire blocked on a pending tick")
+	}
+}
+
+type lifecycleObservedListener struct {
+	ports.Listener
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *lifecycleObservedListener) Close() error {
+	err := l.Listener.Close()
+	l.once.Do(func() { close(l.closed) })
+	return err
+}
+
+func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	oldOwner, err := lifecycle.TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	oldOpened, err := persist.OpenOrCreate(stateDir)
+	require.NoError(t, err)
+	oldListener, err := ipc.Listen(runtimeDir)
+	require.NoError(t, err)
+
+	socketCloseEntered := make(chan struct{})
+	allowSocketClose := make(chan struct{})
+	socketClosed := make(chan struct{})
+	catalogueCloseEntered := make(chan struct{})
+	allowCatalogueClose := make(chan struct{})
+	catalogueClosed := make(chan struct{})
+	ownerReleaseEntered := make(chan struct{})
+	allowOwnerRelease := make(chan struct{})
+	ownerReleased := make(chan struct{})
+	teardownEvents := make(chan string, 3)
+
+	controlledListener := &lifecycleControlledListener{
+		Listener: oldListener,
+		entered:  socketCloseEntered,
+		proceed:  allowSocketClose,
+		closed:   socketClosed,
+		events:   teardownEvents,
+	}
+	controlledCatalogue := &lifecycleControlledCatalogue{
+		Catalogue: oldOpened.Catalogue,
+		entered:   catalogueCloseEntered,
+		proceed:   allowCatalogueClose,
+		closed:    catalogueClosed,
+		events:    teardownEvents,
+	}
+	oldDaemon := daemon.New(pty.NewFactory(), clock.New(), discardLog(), daemon.WithCatalogue(controlledCatalogue, oldOpened.Records))
+	oldCtx, stopOld := context.WithCancel(context.Background())
+	oldDone := make(chan error, 1)
+	go func() {
+		serveErr := oldDaemon.Serve(oldCtx, controlledListener)
+		teardownEvents <- "owner-release"
+		close(ownerReleaseEntered)
+		<-allowOwnerRelease
+		releaseErr := oldOwner.Release()
+		close(ownerReleased)
+		oldDone <- errors.Join(serveErr, releaseErr)
+	}()
+
+	newAcquireAttempted := make(chan struct{})
+	newDurableOpen := make(chan struct{})
+	newListen := make(chan struct{})
+	startupEvents := make(chan string, 3)
+	newDone := make(chan error, 1)
+	go func() {
+		newDone <- runWithLifecycleOwnerDeps(context.Background(), runtimeDir, stateDir, func(ctx context.Context) error {
+			close(newDurableOpen)
+			opened, err := persist.OpenOrCreate(stateDir)
+			if err != nil {
+				return err
+			}
+			startupEvents <- "durable-open"
+
+			close(newListen)
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return errors.Join(err, opened.Catalogue.Close())
+			}
+			startupEvents <- "listen"
+			return errors.Join(listener.Close(), opened.Catalogue.Close())
+		}, lifecycleStartupDeps{
+			ensurePrivate: func(string) error { return nil },
+			acquire: func(ctx context.Context, dir string, retry time.Duration) (lifecycleOwnership, error) {
+				close(newAcquireAttempted)
+				owner, err := lifecycle.Acquire(ctx, dir, retry)
+				if err != nil {
+					return nil, err
+				}
+				<-ownerReleased
+				startupEvents <- "owner-acquired"
+				return owner, nil
+			},
+		})
+	}()
+
+	awaitLifecycleStage(t, newAcquireAttempted, "new lifecycle acquisition attempt")
+	assertLifecycleStagePending(t, newDurableOpen, "new durable open before old teardown")
+	assertLifecycleStagePending(t, newListen, "new listen before old teardown")
+
+	stopOld()
+	awaitLifecycleStage(t, socketCloseEntered, "old socket close")
+	assertNewDaemonStartupPending(t, newDurableOpen, newListen, "socket close")
+	close(allowSocketClose)
+	awaitLifecycleStage(t, socketClosed, "old socket closed")
+
+	awaitLifecycleStage(t, catalogueCloseEntered, "old catalogue close")
+	assertNewDaemonStartupPending(t, newDurableOpen, newListen, "catalogue close")
+	close(allowCatalogueClose)
+	awaitLifecycleStage(t, catalogueClosed, "old catalogue closed")
+
+	awaitLifecycleStage(t, ownerReleaseEntered, "old lifecycle owner release")
+	assertNewDaemonStartupPending(t, newDurableOpen, newListen, "owner release")
+	close(allowOwnerRelease)
+	awaitLifecycleStage(t, ownerReleased, "old lifecycle owner released")
+
+	require.NoError(t, awaitLifecycleResult(t, oldDone, "old daemon teardown"))
+	require.NoError(t, awaitLifecycleResult(t, newDone, "new daemon startup"))
+	require.Equal(t, []string{"socket-close", "catalogue-close", "owner-release"}, []string{
+		<-teardownEvents,
+		<-teardownEvents,
+		<-teardownEvents,
+	})
+	require.Equal(t, []string{"owner-acquired", "durable-open", "listen"}, []string{
+		<-startupEvents,
+		<-startupEvents,
+		<-startupEvents,
+	})
+}
+
+func awaitLifecycleStage(t *testing.T, stage <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-stage:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func awaitLifecycleResult(t *testing.T, result <-chan error, name string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+		return nil
+	}
+}
+
+func assertLifecycleStagePending(t *testing.T, stage <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-stage:
+		t.Fatalf("unexpected %s", name)
+	default:
+	}
+}
+
+func assertLifecycleResultPending(t *testing.T, result <-chan error, name string) {
+	t.Helper()
+	select {
+	case err := <-result:
+		t.Fatalf("unexpected %s: %v", name, err)
+	default:
+	}
+}
+
+func assertNewDaemonStartupPending(t *testing.T, durableOpen, listen <-chan struct{}, heldAt string) {
+	t.Helper()
+	assertLifecycleStagePending(t, durableOpen, "new durable open while old daemon held at "+heldAt)
+	assertLifecycleStagePending(t, listen, "new listen while old daemon held at "+heldAt)
+}
+
+type lifecycleControlledListener struct {
+	ports.Listener
+	entered chan struct{}
+	proceed chan struct{}
+	closed  chan struct{}
+	events  chan<- string
+	once    sync.Once
+	err     error
+}
+
+func (l *lifecycleControlledListener) Close() error {
+	l.once.Do(func() {
+		l.events <- "socket-close"
+		close(l.entered)
+		<-l.proceed
+		l.err = l.Listener.Close()
+		close(l.closed)
+	})
+	return l.err
+}
+
+type lifecycleControlledCatalogue struct {
+	ports.Catalogue
+	entered chan struct{}
+	proceed chan struct{}
+	closed  chan struct{}
+	events  chan<- string
+	once    sync.Once
+	err     error
+}
+
+func (c *lifecycleControlledCatalogue) Close() error {
+	c.once.Do(func() {
+		c.events <- "catalogue-close"
+		close(c.entered)
+		<-c.proceed
+		c.err = c.Catalogue.Close()
+		close(c.closed)
+	})
+	return c.err
+}
+
+type integrationTransport struct{}
+
+func (*integrationTransport) Send(ports.Frame) error     { return nil }
+func (*integrationTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*integrationTransport) Close() error               { return nil }
+func (*integrationTransport) LocalAddr() net.Addr        { return nil }
+func (*integrationTransport) RemoteAddr() net.Addr       { return nil }
 
 func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}

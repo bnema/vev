@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,14 +29,14 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) {
 		_ = tr.Send(frameCommandResult(ports.CommandResult{Code: ports.ErrInternal, Text: "malformed command request"}))
 		return
 	}
-	_ = tr.Send(frameCommandResult(d.dispatchCommand(request)))
+	_ = tr.Send(frameCommandResult(d.dispatchCommand(d.serveCtx, request)))
 }
 
 func frameCommandResult(result ports.CommandResult) ports.Frame {
 	return ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(result)}
 }
 
-func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResult {
+func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandRequest) ports.CommandResult {
 	cmd, ok := command.BySlug(request.Slug)
 	if !ok {
 		return commandFailure(ports.ErrUnknownCommand, "unknown command: "+request.Slug)
@@ -43,7 +45,7 @@ func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResu
 		return commandFailure(ports.ErrNotScriptable, request.Slug+" requires an attached client")
 	}
 	if cmd.Target == command.TargetNone && !request.Self {
-		return d.runControl(cmd, controlExec{d: d}, request)
+		return d.runControl(cmd, controlExec{ctx: ctx, d: d, recoveryName: request.TargetSession}, request)
 	}
 
 	sess, code, text := d.resolveTargetSession(request)
@@ -57,7 +59,7 @@ func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResu
 	if code != 0 {
 		return commandFailure(code, text)
 	}
-	return d.runControl(cmd, controlExec{d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
+	return d.runControl(cmd, controlExec{ctx: ctx, d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
 }
 
 func (d *Daemon) runControl(cmd command.Command, exec controlExec, request ports.CommandRequest) ports.CommandResult {
@@ -306,14 +308,7 @@ func (d *Daemon) hasDaemonActionPaneTarget(target daemonActionTarget) bool {
 	}
 	target.session.mu.Lock()
 	defer target.session.mu.Unlock()
-	foundTab := false
-	for _, tb := range target.session.tabs {
-		if tb == target.tab {
-			foundTab = true
-			break
-		}
-	}
-	if !foundTab {
+	if !slices.Contains(target.session.tabs, target.tab) {
 		return false
 	}
 	target.tab.mu.Lock()
@@ -332,11 +327,13 @@ func (a daemonActions) switchRelative(sess *session, delta int) error {
 // controlExec implements command.ControlContext against resolved daemon-owned
 // targets. It deliberately contains no attached-client state.
 type controlExec struct {
-	d       *Daemon
-	sess    *session
-	tab     *tab
-	target  daemonActionTarget
-	actions daemonActionRunner
+	ctx          context.Context
+	d            *Daemon
+	sess         *session
+	tab          *tab
+	recoveryName string
+	target       daemonActionTarget
+	actions      daemonActionRunner
 }
 
 func (e controlExec) runAction(request daemonActionRequest) error {
@@ -455,6 +452,30 @@ func (e controlExec) Toast(severity, message string) error {
 	}
 	e.d.notify(e.sess, level, domain.NoticeUser, message, nil)
 	return nil
+}
+
+func (e controlExec) SessionRecovery(action string) (string, error) {
+	if e.d == nil || e.d.recovery == nil || e.recoveryName == "" || action != "discard" {
+		return "", command.ErrInvalidArguments
+	}
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = e.d.serveCtx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := e.d.recovery.Discard(ctx, e.recoveryName); err != nil {
+		return "", err
+	}
+	record, ok, err := e.d.catalogue.Record(e.recoveryName)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		e.d.setStoppedRecovery(record, ports.SessionStopped)
+	}
+	return "", nil
 }
 
 func (e controlExec) ListSessions(asJSON bool) (string, error) {

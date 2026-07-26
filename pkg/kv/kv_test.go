@@ -1,259 +1,221 @@
 package kv
 
 import (
-	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-func privatePath(t *testing.T) string {
-	t.Helper()
-	return filepath.Join(t.TempDir(), "vev", "store.kv")
+func TestSyncCrashBoundaries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		leaveTmp  bool
+		corrupt   bool
+		wantOpen  bool
+		wantValue string
+	}{
+		{name: "clean file opens", wantOpen: true, wantValue: "v1"},
+		{name: "stray tmp is ignored", leaveTmp: true, wantOpen: true, wantValue: "v1"},
+		{name: "corrupt file fails closed", corrupt: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := privateStorePath(t)
+			store, err := Open(path)
+			require.NoError(t, err)
+			require.NoError(t, store.Set([]byte("k"), []byte("v1")))
+			require.NoError(t, store.Sync())
+			require.NoError(t, store.Close())
+
+			if tt.leaveTmp {
+				require.NoError(t, os.WriteFile(path+".tmp", []byte("half written"), 0o600))
+			}
+			if tt.corrupt {
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				data[len(data)-1] ^= 0xff
+				require.NoError(t, os.WriteFile(path, data, 0o600))
+			}
+
+			reopened, err := Open(path)
+			if !tt.wantOpen {
+				require.ErrorIs(t, err, ErrCorrupt)
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = reopened.Close() })
+			got, ok := reopened.Get([]byte("k"))
+			require.True(t, ok)
+			require.Equal(t, tt.wantValue, string(got))
+		})
+	}
 }
 
-func closeStore(t *testing.T, s *Store) {
-	t.Helper()
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
+func TestSyncIsAtomicAcrossKeys(t *testing.T) {
+	t.Parallel()
+	path := privateStorePath(t)
+	store, err := Open(path)
+	require.NoError(t, err)
+	require.NoError(t, store.Set([]byte("old"), []byte("x")))
+	require.NoError(t, store.Sync())
+	require.NoError(t, store.Delete([]byte("old")))
+	require.NoError(t, store.Set([]byte("new"), []byte("x")))
+	require.NoError(t, store.Sync())
+	require.NoError(t, store.Close())
+
+	reopened, err := Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	_, hadOld := reopened.Get([]byte("old"))
+	_, hasNew := reopened.Get([]byte("new"))
+	require.False(t, hadOld)
+	require.True(t, hasNew)
+}
+
+func TestOpenFailsClosedWithoutMutation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "empty", raw: []byte{}},
+		{name: "short magic", raw: []byte("VE")},
+		{name: "unknown magic", raw: func() []byte {
+			payload := append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+			copy(payload[:4], "NOPE")
+			return appendCRC(payload)
+		}()},
+		{name: "unknown version", raw: func() []byte {
+			payload := append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+			binary.BigEndian.PutUint16(payload[4:6], 99)
+			return appendCRC(payload)
+		}()},
+		{name: "truncated entry", raw: func() []byte {
+			payload := append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+			binary.BigEndian.PutUint32(payload[6:10], 1)
+			payload = append(payload, 0, 0, 0, 1)
+			return appendCRC(payload)
+		}()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := privateStorePath(t)
+			require.NoError(t, os.WriteFile(path, tt.raw, 0o600))
+			_, err := Open(path)
+			require.ErrorIs(t, err, ErrCorrupt)
+			after, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			require.Equal(t, tt.raw, after)
+		})
 	}
 }
 
-func TestSetGetDeleteRange(t *testing.T) {
-	path := privatePath(t)
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeStore(t, s)
+func TestCloseSyncsDirtyStore(t *testing.T) {
+	t.Parallel()
+	path := privateStorePath(t)
+	store, err := Open(path)
+	require.NoError(t, err)
+	require.NoError(t, store.Set([]byte("k"), []byte("v")))
+	require.NoError(t, store.Close())
 
-	if err := s.Set([]byte("b"), []byte("two")); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Set([]byte("a"), []byte("one")); err != nil {
-		t.Fatal(err)
-	}
-	got, ok := s.Get([]byte("a"))
-	if !ok || string(got) != "one" {
-		t.Fatalf("Get(a) = %q, %v", got, ok)
-	}
-	got[0] = 'X'
-	got, _ = s.Get([]byte("a"))
-	if string(got) != "one" {
-		t.Fatalf("Get returned mutable value: %q", got)
-	}
-	if err := s.Delete([]byte("b")); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := s.Get([]byte("b")); ok {
-		t.Fatal("deleted key still present")
-	}
+	reopened, err := Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	got, ok := reopened.Get([]byte("k"))
+	require.True(t, ok)
+	require.Equal(t, []byte("v"), got)
+}
 
-	seen := map[string]string{}
-	s.Range(func(k, v []byte) bool {
-		seen[string(k)] = string(v)
+func TestStoreCopiesValuesAndRangesInKeyOrder(t *testing.T) {
+	t.Parallel()
+	store, err := Open(privateStorePath(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	value := []byte("two")
+	require.NoError(t, store.Set([]byte("b"), value))
+	value[0] = 'x'
+	require.NoError(t, store.Set([]byte("a"), []byte("one")))
+	got, ok := store.Get([]byte("b"))
+	require.True(t, ok)
+	require.Equal(t, []byte("two"), got)
+	got[0] = 'x'
+	gotAgain, _ := store.Get([]byte("b"))
+	require.Equal(t, []byte("two"), gotAgain)
+
+	var keys []string
+	store.Range(func(k, v []byte) bool {
+		keys = append(keys, string(k))
 		return true
 	})
-	if len(seen) != 1 || seen["a"] != "one" {
-		t.Fatalf("Range saw %#v", seen)
-	}
+	require.Equal(t, []string{"a", "b"}, keys)
 }
 
-func TestReopenDurability(t *testing.T) {
-	path := privatePath(t)
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Set([]byte("k"), []byte("v")); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	s, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeStore(t, s)
-	got, ok := s.Get([]byte("k"))
-	if !ok || string(got) != "v" {
-		t.Fatalf("after reopen Get(k) = %q, %v", got, ok)
-	}
+func TestStoreLockAndClosedErrors(t *testing.T) {
+	t.Parallel()
+	path := privateStorePath(t)
+	store, err := Open(path)
+	require.NoError(t, err)
+	_, err = Open(path)
+	require.Error(t, err)
+	require.NoError(t, store.Close())
+	require.NoError(t, store.Close())
+	require.ErrorIs(t, store.Set([]byte("k"), []byte("v")), os.ErrClosed)
+	require.ErrorIs(t, store.Delete([]byte("k")), os.ErrClosed)
+	require.ErrorIs(t, store.Sync(), os.ErrClosed)
 }
 
-func TestCompactionShrinksWithDataIntact(t *testing.T) {
-	path := privatePath(t)
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Set([]byte("keep"), bytes.Repeat([]byte("x"), 128)); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := info.Size()
-	if err := s.Set([]byte("keep"), []byte("y")); err != nil {
-		t.Fatal(err)
-	}
-	info, err = os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after := info.Size()
-	if after >= before {
-		t.Fatalf("expected compaction to shrink file: before=%d after=%d", before, after)
-	}
-	got, ok := s.Get([]byte("keep"))
-	if !ok || string(got) != "y" {
-		t.Fatalf("compacted value = %q, %v", got, ok)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+func privateStorePath(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "vev")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	return filepath.Join(dir, "sessions.kv")
 }
 
-func TestOpenTruncatesMidRecordTail(t *testing.T) {
-	path := privatePath(t)
-	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
-	second, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, append(first, second[:len(second)/2]...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeStore(t, s)
-	if got, ok := s.Get([]byte("a")); !ok || string(got) != "one" {
-		t.Fatalf("good record missing: %q %v", got, ok)
-	}
-	if _, ok := s.Get([]byte("b")); ok {
-		t.Fatal("torn record was replayed")
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() != int64(len(first)) {
-		t.Fatalf("tail not truncated: size=%d want=%d", info.Size(), len(first))
-	}
+func validEmptyFile() []byte {
+	return encodeFile(map[string][]byte{})
 }
 
-func TestCRCcorruptionOfLastRecordDropsIt(t *testing.T) {
-	path := privatePath(t)
-	first, _ := encodeRecord(opSet, []byte("k"), []byte("old"))
-	second, _ := encodeRecord(opSet, []byte("k"), []byte("new"))
-	buf := append(append([]byte{}, first...), second...)
-	buf[len(first)+headerLen+payloadPrefixLen+1] ^= 0xff
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
+func TestDecodeRejectsDuplicateKeysAndTrailingData(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 0)
+	payload = append(payload, fileMagic[:]...)
+	payload = binary.BigEndian.AppendUint16(payload, fileVersion)
+	payload = binary.BigEndian.AppendUint32(payload, 2)
+	for range 2 {
+		payload = binary.BigEndian.AppendUint32(payload, 1)
+		payload = append(payload, 'k')
+		payload = binary.BigEndian.AppendUint32(payload, 1)
+		payload = append(payload, 'v')
 	}
-	if err := os.WriteFile(path, buf, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	raw := appendCRC(payload)
+	_, err := decodeFile(raw)
+	require.ErrorIs(t, err, ErrCorrupt)
 
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeStore(t, s)
-	got, ok := s.Get([]byte("k"))
-	if !ok || string(got) != "old" {
-		t.Fatalf("corrupt last record not dropped: %q %v", got, ok)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() != int64(len(first)) {
-		t.Fatalf("corrupt tail not truncated: size=%d want=%d", info.Size(), len(first))
-	}
+	payload = append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+	payload = append(payload, 0)
+	_, err = decodeFile(appendCRC(payload))
+	require.True(t, errors.Is(err, ErrCorrupt))
 }
 
-func TestAbsentAndEmptyFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "missing", "store.kv")
-	m, err := Replay(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(m) != 0 {
-		t.Fatalf("Replay(absent) = %#v", m)
-	}
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	m, err = Replay(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(m) != 0 {
-		t.Fatalf("Replay(empty) = %#v", m)
-	}
-}
+func TestCloseWithoutSyncPreventsLaterCloseFromSyncing(t *testing.T) {
+	t.Parallel()
+	path := privateStorePath(t)
+	store, err := Open(path)
+	require.NoError(t, err)
+	require.NoError(t, store.Set([]byte("rejected"), []byte("value")))
+	require.NoError(t, store.CloseWithoutSync())
+	require.NoError(t, store.Close(), "a later normal Close must remain a no-op")
 
-func TestTombstoneSurvivesCompaction(t *testing.T) {
-	path := privatePath(t)
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Set([]byte("dead"), bytes.Repeat([]byte("d"), 128)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Set([]byte("keep"), bytes.Repeat([]byte("k"), 128)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Delete([]byte("dead")); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	s, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeStore(t, s)
-	if _, ok := s.Get([]byte("dead")); ok {
-		t.Fatal("deleted key resurrected after compaction/reopen")
-	}
-	if got, ok := s.Get([]byte("keep")); !ok || len(got) != 128 || got[0] != 'k' {
-		t.Fatalf("live key missing after compaction/reopen: len=%d ok=%v", len(got), ok)
-	}
-}
-
-func TestReplayStopsAtBadPayloadLengthWithoutAllocatingHugeBuffer(t *testing.T) {
-	path := privatePath(t)
-	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
-	header := make([]byte, headerLen)
-	binary.BigEndian.PutUint32(header[0:4], 1<<31)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, append(first, header...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeStore(t, s)
-	if got, ok := s.Get([]byte("a")); !ok || string(got) != "one" {
-		t.Fatalf("good record missing before bad length: %q %v", got, ok)
-	}
+	reopened, err := Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	_, ok := reopened.Get([]byte("rejected"))
+	require.False(t, ok)
 }

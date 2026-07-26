@@ -18,9 +18,6 @@ func (r *Repository) openRoot() (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	if hook := r.hooks.afterOpenRoot; hook != nil {
-		hook()
-	}
 	current, err := os.Lstat(r.dir)
 	if err != nil {
 		return nil, r.closeRootOnError(root, err)
@@ -47,11 +44,7 @@ func privateDirectory(fi os.FileInfo) bool {
 }
 
 func (r *Repository) closeRoot(root *os.Root) error {
-	var injected error
-	if hook := r.hooks.closeRoot; hook != nil {
-		injected = hook()
-	}
-	return errors.Join(injected, root.Close())
+	return root.Close()
 }
 
 func (r *Repository) closeRootOnError(root *os.Root, err error) error {
@@ -108,19 +101,6 @@ func (r *Repository) repositoryRelative(path string) (string, bool) {
 		return "", false
 	}
 	return rel, true
-}
-
-func (r *Repository) stat(path string) (fi os.FileInfo, err error) {
-	rel, ok := r.repositoryRelative(path)
-	if !ok {
-		return nil, fmt.Errorf("snapshot path outside repository")
-	}
-	root, err := r.openRoot()
-	if err != nil {
-		return nil, err
-	}
-	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
-	return root.Lstat(rel)
 }
 
 // createTempAt creates an exclusively owned temporary file in an already

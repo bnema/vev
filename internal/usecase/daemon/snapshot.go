@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/vt"
@@ -35,14 +36,20 @@ type snapshotCapture struct {
 	session              *session
 	attemptKind          snapshotAttemptKind
 	generation           uint64 // repository publication generation
+	parentCheckpoint     *domain.CheckpointRef
+	checkpoint           domain.CheckpointRef // set by the encoder before publication
 	mutationRevision     uint64
 	name                 string
+	incarnation          domain.IncarnationID
 	createdAt            uint64
 	active               uint16
 	tabs                 []snapshotCaptureTab
 	publicationContext   context.Context
 	sealedRefs           map[*vt.HistoryChunk]snapcodec.ObjectRef // set by the single encoder worker
 	coordinatorDiscarded bool                                     // guarded by session.snapshotMu
+	// normalWorkerAdmitted is set before snapshotJobs admission and immutable
+	// until completion; final-queue captures leave it false.
+	normalWorkerAdmitted bool
 	finishOnce           sync.Once
 }
 
@@ -94,3 +101,6 @@ const (
 	snapshotInterval          = 2 * time.Minute
 	snapshotFinalFlushTimeout = time.Second
 )
+
+// SnapshotShutdownTimeout reports the shared final-checkpoint shutdown budget.
+func SnapshotShutdownTimeout() time.Duration { return snapshotFinalFlushTimeout }

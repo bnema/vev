@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -20,7 +19,7 @@ import (
 func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	started := make(chan struct{})
@@ -49,7 +48,7 @@ func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.
 func TestSnapshotCoordinatorQuarantineJoinsInFlightPublication(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	started := make(chan struct{})
@@ -82,166 +81,10 @@ func TestSnapshotCoordinatorQuarantineJoinsInFlightPublication(t *testing.T) {
 	}
 }
 
-func TestRenameKeepsSnapshotCoordinatorQuarantinedUntilNewIdentityCommits(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	store, state := newMockStore(t)
-	WithStore(store)(d)
-	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
-	startSnapshotEncodeWorker(t, d)
-
-	deleteEntered := make(chan struct{})
-	allowDelete := make(chan struct{})
-	deleteCompleted := make(chan struct{})
-	state.deleteDone = deleteCompleted
-	published := make(chan ports.SnapshotPublication, 2)
-	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
-	repository.EXPECT().Delete(mock.Anything, "work").RunAndReturn(func(context.Context, string) error {
-		close(deleteEntered)
-		<-allowDelete
-		return nil
-	}).Once()
-	repository.EXPECT().DeleteTombstone(mock.Anything, "work").Return(nil).Once()
-	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
-		published <- publication
-		return nil
-	}).Once()
-
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d.ptys = newFactory(t, pty)
-	sess, err := d.createSessionLocked("work", false, "/work", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	markSnapshotDirty(sess)
-
-	renameDone := make(chan error, 1)
-	go func() { renameDone <- d.renameSession(sess, "renamed") }()
-	select {
-	case <-deleteEntered:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("rename did not begin deleting the old snapshot identity")
-	}
-
-	// Hold the daemon identity commit after Delete has returned. Scheduler work
-	// during this window must not capture or publish the old name.
-	d.mu.Lock()
-	close(allowDelete)
-	select {
-	case <-deleteCompleted:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("old snapshot identity was not deleted")
-	}
-	require.False(t, state.has("work"))
-	sess.snapshotMu.Lock()
-	quarantined := sess.snapshotQuarantined
-	sess.snapshotMu.Unlock()
-	require.True(t, quarantined, "old Delete returned before the coordinator resumed")
-
-	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
-	defer cancelScheduler()
-	go d.snapshotRepositorySaver(schedulerCtx)
-	select {
-	case d.snapshotWake <- struct{}{}:
-	default:
-	}
-	require.True(t, d.scheduleSnapshot(sess), "old work may be coalesced while the coordinator is quarantined")
-	d.mu.Unlock()
-
-	require.NoError(t, <-renameDone)
-	select {
-	case publication := <-published:
-		require.Equal(t, "renamed", publication.Name)
-		require.Equal(t, uint64(1), publication.Generation)
-	case <-time.After(testWaitTimeout):
-		t.Fatal("new identity was not published")
-	}
-}
-
-func TestRenameRollbackAfterOldDeleteLeavesOldCoordinatorStopped(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	store, state := newMockStore(t)
-	WithStore(store)(d)
-	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
-	startSnapshotEncodeWorker(t, d)
-
-	deleteOldRecordErr := errors.New("old record delete failed")
-	state.mu.Lock()
-	state.deleteErr = func(key string) error {
-		if key == "work" {
-			return deleteOldRecordErr
-		}
-		return nil
-	}
-	state.mu.Unlock()
-	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
-	repository.EXPECT().Delete(mock.Anything, "work").Return(nil).Once()
-	// No Publish expectation is installed: any publication is an unexpected mock
-	// call. The saver handshake below joins the scheduler before this test ends.
-
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d.ptys = newFactory(t, pty)
-	sess, err := d.createSessionLocked("work", false, "/work", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	markSnapshotDirty(sess)
-
-	require.ErrorIs(t, d.renameSession(sess, "renamed"), deleteOldRecordErr)
-	sess.mu.Lock()
-	require.Equal(t, "work", sess.name)
-	require.False(t, sess.ephemeral)
-	require.False(t, sess.renameInProgress)
-	sess.mu.Unlock()
-	require.True(t, state.has("work"))
-	require.False(t, state.has("renamed"))
-	sess.snapshotMu.Lock()
-	quarantined := sess.snapshotQuarantined
-	sess.snapshotMu.Unlock()
-	require.True(t, quarantined)
-
-	// Drain stale producer notifications, then use the timer-reset handshake to
-	// prove the saver consumed this wake and completed its scheduling pass. Stop
-	// and join it before asserting: no publisher can start after this point.
-	for {
-		select {
-		case <-d.snapshotWake:
-		default:
-			goto wakeDrained
-		}
-	}
-
-wakeDrained:
-	clock := newDeterministicSnapshotClock(time.Unix(100, 0))
-	d.clock = clock
-	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
-	schedulerDone := make(chan struct{})
-	go func() {
-		d.snapshotRepositorySaver(schedulerCtx)
-		close(schedulerDone)
-	}()
-	timer := clock.timer()
-	require.Equal(t, 24*time.Hour, <-timer.resets)
-	select {
-	case d.snapshotWake <- struct{}{}:
-	default:
-		t.Fatal("snapshot wake unexpectedly remained full")
-	}
-	require.Equal(t, 24*time.Hour, <-timer.resets, "scheduler did not process the rollback wake")
-	cancelScheduler()
-	select {
-	case <-schedulerDone:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("snapshot scheduler did not stop")
-	}
-	// The deterministic scheduler clock has no independently firing deadline;
-	// restore the daemon's normal test clock before its session cleanup runs.
-	d.clock = stubClock{}
-}
-
 func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	started := make(chan struct{})
@@ -280,7 +123,7 @@ func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {
 func TestForcedSnapshotSchedulesSuccessorForRoutineCaptureQueuedBehindWorker(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	blockerStarted := make(chan struct{})
@@ -321,7 +164,7 @@ func TestForcedSnapshotSchedulesSuccessorForRoutineCaptureQueuedBehindWorker(t *
 func TestMultipleForcedSnapshotsCoalesceToOneSuccessor(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	started := make(chan struct{})
@@ -364,7 +207,7 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	clock := newSnapshotDeadlineClock()
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	notices := portsmocks.NewMockNoticeStore(t)
 	WithNoticeStore(notices)(d)
 	startSnapshotEncodeWorker(t, d)
@@ -442,13 +285,12 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	}
 }
 
-func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
+func TestServeShutdownDeadlineStillJoinsPaneExitWriter(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	clock := newServeShutdownClock()
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
-	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
+	WithSnapshotRepository(repository)(d)
 
 	publicationStarted := make(chan struct{})
 	releasePublication := make(chan struct{})
@@ -463,7 +305,7 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 
 	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	listener := serveSnapshotListener(t, tr)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, listener) }()
@@ -486,9 +328,9 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 	// deadline.
 	ownerDeadlineTimer := clock.nextFinalTimer(t)
 
-	// Cleanup is the only place that releases the competing owner. It also fires
-	// that owner's independent budget and joins the real pane reader, proving no
-	// teardown goroutine is leaked without making Serve depend on repository I/O.
+	// Cleanup fires the pane-exit owner's independent budget and joins the real
+	// pane reader. Serve itself must remain owned until the repository writer is
+	// released below, even after its checkpoint deadline expires.
 	t.Cleanup(func() {
 		releaseSnapshot()
 		ownerDeadlineTimer.fire()
@@ -501,9 +343,15 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 
 	select {
 	case err := <-served:
+		t.Fatalf("Serve returned with a durable writer alive: %v", err)
+	default:
+	}
+	releaseSnapshot()
+	select {
+	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(testWaitTimeout):
-		t.Fatal("Serve did not return after its shared deadline while the pane-exit owner remained blocked")
+		t.Fatal("Serve did not return after the durable writer exited")
 	}
 
 	sess.snapshotMu.Lock()
@@ -534,7 +382,7 @@ func awaitTeardownWaiters(t *testing.T, sess *session, want uint) {
 func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	publicationStarted := make(chan struct{})
@@ -608,8 +456,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 	defer releasePTY()
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
-	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
+	WithSnapshotRepository(repository)(d)
 
 	published := make(chan ports.SnapshotPublication, 2)
 	allowTerminalPublication := make(chan struct{})
@@ -623,7 +470,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 
 	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	l := serveSnapshotListener(t, tr)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
@@ -647,21 +494,21 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 	}
 }
 
-func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository(t *testing.T) {
+func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	clock := newServeShutdownClock()
 	d := newTestDaemon(t, newFactory(t, p), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
-	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
+	WithSnapshotRepository(repository)(d)
 	noticeStore := portsmocks.NewMockNoticeStore(t)
 	WithNoticeStore(noticeStore)(d)
 	noticeStore.EXPECT().Claim().Return(nil, nil).Maybe()
 	noticeStore.EXPECT().Ack().Return(nil).Maybe()
+	noticePersisted := make(chan struct{})
 	noticeStore.EXPECT().Append(mock.MatchedBy(func(n domain.Notification) bool {
 		return n.Code == domain.NoticeSnapshotWrite && n.Severity == domain.NoticeError
-	})).Return(nil).Once()
+	})).Run(func(domain.Notification) { close(noticePersisted) }).Return(nil).Once()
 
 	firstPublicationCompleted := make(chan struct{})
 	terminalPublicationStarted := make(chan struct{})
@@ -680,7 +527,7 @@ func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository
 
 	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	l := serveSnapshotListener(t, tr)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
@@ -704,21 +551,29 @@ func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository
 	workerDone := d.snapshotWorkerDone
 	d.snapshotWorkerMu.Unlock()
 	require.NotNil(t, workerDone)
-	defer func() {
-		close(releaseTerminalPublication)
-		select {
-		case <-workerDone:
-		case <-time.After(testWaitTimeout):
-			t.Error("snapshot worker leaked after its repository call was released")
-		}
-	}()
 	clock.nextFinalTimer(t).fire()
+	select {
+	case <-noticePersisted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("shutdown timeout notice was not persisted before the writer join")
+	}
 
+	select {
+	case err := <-served:
+		t.Fatalf("Serve returned with an uncooperative durable writer alive: %v", err)
+	default:
+	}
+	close(releaseTerminalPublication)
+	select {
+	case <-workerDone:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshot worker leaked after its repository call was released")
+	}
 	select {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(testWaitTimeout):
-		t.Fatal("Serve waited beyond the terminal checkpoint deadline")
+		t.Fatal("Serve did not return after the uncooperative writer exited")
 	}
 	require.LessOrEqual(t, clock.finalBudget.Load(), int64(snapshotFinalFlushTimeout), "shutdown must consume at most one snapshot deadline")
 	require.Equal(t, uint64(1), lastValid.Load(), "the last valid checkpoint remains available after the terminal attempt times out")
@@ -783,7 +638,7 @@ func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *t
 	clock := &snapshotSchedulerClock{now: time.Unix(100, 0)}
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	var publishes atomic.Int32
@@ -931,7 +786,7 @@ func TestSnapshotCompletionSchedulesRoutineRetriesFromCompletion(t *testing.T) {
 	clock := newDeterministicSnapshotClock(now)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 
 	for _, tt := range []struct {
 		name             string
@@ -964,12 +819,11 @@ func TestSnapshotSchedulerImmediateEligibilityAndStaleCapturesRemainDirty(t *tes
 	now := time.Unix(100, 0)
 	clock := newDeterministicSnapshotClock(now)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	WithSnapshotRepository(portsmocks.NewMockSnapshotRepository(t), nil)(d)
 
 	t.Run("no prior attempt is immediately eligible", func(t *testing.T) {
 		published := make(chan ports.SnapshotPublication, 1)
 		repository := portsmocks.NewMockSnapshotRepository(t)
-		WithSnapshotRepository(repository, nil)(d)
+		WithSnapshotRepository(repository)(d)
 		startSnapshotEncodeWorker(t, d)
 		repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
 			published <- publication
@@ -1024,7 +878,7 @@ func TestSnapshotWorkerQueueIsBoundedAndForcedCapturesCoalesce(t *testing.T) {
 	clock := newDeterministicSnapshotClock(now)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	started := make(chan struct{})
@@ -1082,7 +936,7 @@ func TestSnapshotRepositorySaverUsesEarliestDeadlineAndRecomputes(t *testing.T) 
 	clock := newDeterministicSnapshotClock(now)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	published := make(chan ports.SnapshotPublication, 1)
@@ -1097,7 +951,7 @@ func TestSnapshotRepositorySaverUsesEarliestDeadlineAndRecomputes(t *testing.T) 
 	later.snapshotNextEligibleAt = now.Add(10 * time.Minute)
 	d.sessions[later.id] = later
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
 		d.snapshotRepositorySaver(ctx)

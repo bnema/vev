@@ -12,15 +12,59 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/pkg/renderer"
 )
+
+// TestWithSnapshotRepositoryRejectsTypedNil verifies typed nil repositories are disabled.
+func TestWithSnapshotRepositoryRejectsTypedNil(t *testing.T) {
+	var repository *snapshotAcceptanceRepository
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+
+	WithSnapshotRepository(repository)(d)
+
+	require.Nil(t, d.snapshotRepository)
+	require.False(t, d.snapsEnabled)
+}
+
+func TestDurableWriterFailureNamesIncludesBufferedCapture(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	capture := &snapshotCapture{name: "work", session: newSnapshotTestSession(t, "work", false, "/work")}
+	d.snapshotWorkerMu.Lock()
+	d.snapshotAdmitted[capture] = struct{}{}
+	d.snapshotJobs <- capture
+	d.snapshotWorkerMu.Unlock()
+
+	require.Equal(t, []string{"work"}, d.durableWriterFailureNames())
+}
+
+func TestCheckpointCatalogueFailureKeepsCaptureRetryable(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	catalogue := portsmocks.NewMockCatalogue(t)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	record := domain.CatalogueRecord{
+		Name:          "work",
+		IncarnationID: domain.IncarnationID{1},
+	}
+	catalogue.EXPECT().Record("work").Return(record, true, nil).Once()
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).Return(nil).Once()
+	catalogue.EXPECT().Replace("work", mock.Anything).Return(errors.New("catalogue unavailable")).Once()
+	WithSnapshotRepository(repository)(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
+	startSnapshotEncodeWorker(t, d)
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	require.True(t, d.captureSession(sess))
+	awaitSnapshotIdle(t, sess)
+	require.True(t, sess.snapDirty.Load(), "failed catalogue commit must remain retryable")
+}
 
 // TestSnapshotWorkerPublishesContentAddressedCapture verifies that all new
 // checkpoints use the repository publication contract.
 func TestSnapshotWorkerPublishesContentAddressedCapture(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	repository.EXPECT().Publish(mock.Anything, mock.MatchedBy(func(p ports.SnapshotPublication) bool {
@@ -46,8 +90,31 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	p.screen.Write([]byte("hello"))
 	appendHistoryRow(t, p.history, []renderer.Cell{{Rune: 'h'}, {Rune: 'i'}})
 	sess := &session{id: domain.SessionID("sess-" + name), name: name, ephemeral: ephemeral, ctx: context.Background(), cancel: func() {}, tabs: []*tab{tb}, active: 0, cwd: cwd, createdAt: 42}
+	if !ephemeral {
+		sess.incarnation = domain.IncarnationID{1}
+	}
 	sess.snapEligible.Store(!ephemeral && name != "")
 	return sess
+}
+
+// noOpSnapshotRepository supplies the current durable repository contract to
+// focused test sinks that only need to observe publication or deletion calls.
+type noOpSnapshotRepository struct{}
+
+var _ ports.SnapshotRepository = noOpSnapshotRepository{}
+
+func (noOpSnapshotRepository) Publish(context.Context, ports.SnapshotPublication) error { return nil }
+func (noOpSnapshotRepository) LoadCheckpoint(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+	return ports.SnapshotGeneration{}, errors.New("unused")
+}
+func (noOpSnapshotRepository) ReconcileCheckpoint(context.Context, domain.IncarnationID, ports.CheckpointRef) error {
+	return nil
+}
+func (noOpSnapshotRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
+	return nil
+}
+func (noOpSnapshotRepository) CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error {
+	return nil
 }
 
 func awaitSnapshotIdle(t testing.TB, sess *session) {

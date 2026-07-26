@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/vt"
@@ -113,7 +114,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	if err := prepareSnapshotChunkCache(capture); err != nil {
 		return ports.SnapshotPublication{}, err
 	}
-	manifest := snapcodec.Manifest{Generation: capture.generation, Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.ManifestTab, 0, len(capture.tabs))}
+	manifest := snapcodec.Manifest{Generation: capture.generation, IncarnationID: capture.incarnation, ParentCheckpoint: capture.parentCheckpoint, Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.ManifestTab, 0, len(capture.tabs))}
 	objects := make([]ports.SnapshotObject, 0)
 	capture.sealedRefs = make(map[*vt.HistoryChunk]snapcodec.ObjectRef)
 	for _, tab := range capture.tabs {
@@ -160,7 +161,8 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	if err != nil {
 		return ports.SnapshotPublication{}, err
 	}
-	return ports.SnapshotPublication{Name: capture.name, Generation: capture.generation, Manifest: encoded, Objects: objects}, nil
+	capture.checkpoint = domain.CheckpointRef{Generation: capture.generation, ManifestDigest: snapcodec.ManifestDigest(encoded)}
+	return ports.SnapshotPublication{IncarnationID: capture.incarnation, Name: capture.name, Generation: capture.generation, ParentCheckpoint: capture.parentCheckpoint, Manifest: encoded, Objects: objects}, nil
 }
 
 // marshalSnapshotTail selects the canonical empty-tail encoding before any

@@ -3,6 +3,7 @@ package snapshot
 import (
 	"fmt"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -11,8 +12,42 @@ import (
 func preflightManifest(body []byte) error {
 	r := payloadReader{b: body}
 	budget := manifestPreflightBudget{}
-	if _, err := r.getUint64(); err != nil {
+	generation, err := r.getUint64()
+	if err != nil {
 		return err
+	}
+	if generation == 0 {
+		return fmt.Errorf("%w: manifest generation", ErrInvalidData)
+	}
+	incarnationBytes, err := r.getBytes(len(domain.IncarnationID{}))
+	if err != nil {
+		return err
+	}
+	var incarnationID domain.IncarnationID
+	copy(incarnationID[:], incarnationBytes)
+	if incarnationID == (domain.IncarnationID{}) {
+		return fmt.Errorf("%w: manifest incarnation", ErrInvalidData)
+	}
+	parentPresent, err := r.getUint8()
+	if err != nil {
+		return err
+	}
+	switch parentPresent {
+	case 0:
+	case 1:
+		parentGeneration, err := r.getUint64()
+		if err != nil {
+			return err
+		}
+		digest, err := r.getBytes(len(SnapshotDigest{}))
+		if err != nil {
+			return err
+		}
+		if parentGeneration == 0 || parentGeneration >= generation || isZeroDigestBytes(digest) {
+			return fmt.Errorf("%w: parent checkpoint", ErrInvalidData)
+		}
+	default:
+		return fmt.Errorf("%w: parent checkpoint presence", ErrInvalidData)
 	}
 	name, err := preflightManifestStringBytes(&r, &budget)
 	if err != nil {

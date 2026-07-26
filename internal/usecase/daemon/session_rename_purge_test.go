@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -10,36 +9,22 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
-func TestRenamePurgesOldIncrementalAndLegacyBeforeCommittingNewIdentity(t *testing.T) {
+func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := &retryablePurgeRepository{}
-	WithSnapshotRepository(repository, repository)(d)
+	WithSnapshotRepository(repository)(d)
 	store, state := newMockStore(t)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	sess := newSnapshotTestSession(t, "old", false, "/work")
 	d.sessions = map[domain.SessionID]*session{sess.id: sess}
-	require.NoError(t, d.persist.Save(sess.persistRecordLocked(1)))
+	sess.mu.Lock()
+	record := sess.persistRecordLocked(1)
+	sess.mu.Unlock()
+	require.NoError(t, testPersister(t, d).Save(record))
 
 	require.NoError(t, d.renameSession(sess, "new"))
-	require.Equal(t, []string{"tombstone", "incremental", "legacy", "clear tombstone"}, repository.calls)
+	require.Empty(t, repository.calls, "rename must not delete incarnation-keyed snapshots")
 	require.False(t, state.has("old"))
 	require.True(t, state.has("new"))
-	require.False(t, repository.tombstoned["old"])
-}
-
-func TestRenameLegacyFailureLeavesOldIdentityFenced(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	repository := &retryablePurgeRepository{legacyErr: errors.New("legacy delete failed")}
-	WithSnapshotRepository(repository, repository)(d)
-	store, state := newMockStore(t)
-	WithStore(store)(d)
-	sess := newSnapshotTestSession(t, "old", false, "/work")
-	d.sessions = map[domain.SessionID]*session{sess.id: sess}
-	require.NoError(t, d.persist.Save(sess.persistRecordLocked(1)))
-
-	require.Error(t, d.renameSession(sess, "new"))
-	require.Equal(t, []string{"tombstone", "incremental", "legacy"}, repository.calls)
-	require.True(t, repository.tombstoned["old"])
-	require.True(t, state.has("old"))
-	require.False(t, state.has("new"))
+	require.Equal(t, sess.incarnation, state.record(t, "new").IncarnationID)
 }

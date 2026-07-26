@@ -105,6 +105,35 @@ func TestPaletteRegistryHidesAPIOnly(t *testing.T) {
 	}
 }
 
+func TestSessionRecoveryCommand(t *testing.T) {
+	cmd, ok := BySlug("session-recovery")
+	if !ok || !cmd.Scriptable || cmd.Target != TargetNone {
+		t.Fatalf("session-recovery command = %#v, ok=%v", cmd, ok)
+	}
+	tests := []struct {
+		args     []string
+		wantCall string
+		wantErr  error
+	}{
+		{args: []string{"discard"}, wantCall: "session-recovery:discard"},
+		{args: []string{"retry"}, wantErr: ErrInvalidArguments},
+		{args: []string{"restore", "7"}, wantErr: ErrInvalidArguments},
+		{args: []string{"export", "/tmp/export"}, wantErr: ErrInvalidArguments},
+		{args: nil, wantErr: ErrInvalidArguments},
+	}
+	for _, test := range tests {
+		ctx := &controlSpy{recoveryOutput: "recovery output"}
+		got, err := cmd.Control(ctx, test.args, ControlOptions{})
+		wantOutput := ""
+		if test.wantCall != "" {
+			wantOutput = ctx.recoveryOutput
+		}
+		if !errors.Is(err, test.wantErr) || ctx.call != test.wantCall || got.Output != wantOutput {
+			t.Errorf("args %v: call/output/error = %q/%q/%v, want %q/%q/%v", test.args, ctx.call, got.Output, err, test.wantCall, wantOutput, test.wantErr)
+		}
+	}
+}
+
 func TestControlHandlersValidateAndDelegate(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -149,7 +178,10 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 	}
 }
 
-type controlSpy struct{ call string }
+type controlSpy struct {
+	call           string
+	recoveryOutput string
+}
 
 func (s *controlSpy) record(call string) error          { s.call = call; return nil }
 func (s *controlSpy) CreateTab() error                  { return s.record("new-tab") }
@@ -177,6 +209,9 @@ func (s *controlSpy) RenameSessionTo(v string) error    { return s.record("renam
 func (s *controlSpy) RenameTabTo(v string) error        { return s.record("rename-tab:" + v) }
 func (s *controlSpy) Toast(level, message string) error {
 	return s.record("toast:" + level + ":" + message)
+}
+func (s *controlSpy) SessionRecovery(action string) (string, error) {
+	return s.recoveryOutput, s.record("session-recovery:" + action)
 }
 func (s *controlSpy) ListSessions(json bool) (string, error) {
 	_ = s.record("list-sessions:" + strconv.FormatBool(json))

@@ -198,6 +198,16 @@ func (d *Daemon) persistShutdownSnapshotFailure(name string, cause error) {
 	if d.noticeStore == nil {
 		return
 	}
+	d.shutdownNoticeMu.Lock()
+	if d.shutdownNoticedSessions == nil {
+		d.shutdownNoticedSessions = make(map[string]struct{})
+	}
+	if _, exists := d.shutdownNoticedSessions[name]; exists {
+		d.shutdownNoticeMu.Unlock()
+		return
+	}
+	d.shutdownNoticedSessions[name] = struct{}{}
+	d.shutdownNoticeMu.Unlock()
 	if err := d.noticeStore.Append(domain.Notification{
 		Code:     domain.NoticeSnapshotWrite,
 		Severity: domain.NoticeError,
@@ -205,7 +215,10 @@ func (d *Daemon) persistShutdownSnapshotFailure(name string, cause error) {
 		Details:  noticeDetails(cause),
 		Time:     d.clock.Now(),
 	}); err != nil {
-		d.log.Warn("persisting shutdown notice failed", "err", err, "session", name)
+		d.shutdownNoticeMu.Lock()
+		delete(d.shutdownNoticedSessions, name)
+		d.shutdownNoticeMu.Unlock()
+		d.log.Warn("persisting shutdown notice failed", "err", err, "session", name, "action", "final-checkpoint-timeout")
 	}
 }
 

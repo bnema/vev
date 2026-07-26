@@ -8,9 +8,9 @@ import (
 // ErrInvalidArguments reports arguments that do not have the exact command format.
 var ErrInvalidArguments = errors.New("invalid command arguments")
 
-// ParsePositiveDecimal accepts exactly one base-10 positive decimal value.
+// ParsePositiveUint64 accepts exactly one base-10 positive decimal value.
 // It deliberately rejects signs, whitespace, zero, and non-canonical forms.
-func ParsePositiveDecimal(args []string) (int, error) {
+func ParsePositiveUint64(args []string) (uint64, error) {
 	if len(args) != 1 || args[0] == "" || (len(args[0]) > 1 && args[0][0] == '0') {
 		return 0, ErrInvalidArguments
 	}
@@ -19,11 +19,20 @@ func ParsePositiveDecimal(args []string) (int, error) {
 			return 0, ErrInvalidArguments
 		}
 	}
-	n, err := strconv.Atoi(args[0])
+	n, err := strconv.ParseUint(args[0], 10, 64)
 	if err != nil || n < 1 {
 		return 0, ErrInvalidArguments
 	}
 	return n, nil
+}
+
+// ParsePositiveDecimal parses a positive decimal that must fit the platform int.
+func ParsePositiveDecimal(args []string) (int, error) {
+	n, err := ParsePositiveUint64(args)
+	if err != nil || n > uint64(^uint(0)>>1) {
+		return 0, ErrInvalidArguments
+	}
+	return int(n), nil
 }
 
 // Context is the set of application actions available to commands.
@@ -124,6 +133,7 @@ type ControlContext interface {
 	RenameSessionTo(name string) error
 	RenameTabTo(name string) error
 	Toast(severity, message string) error
+	SessionRecovery(action string) (string, error)
 	ListSessions(json bool) (string, error)
 	ListTabs(json bool) (string, error)
 	ListPanes(json bool) (string, error)

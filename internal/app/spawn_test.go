@@ -258,6 +258,36 @@ func TestAcquireSpawnLockTakesOverStaleLock(t *testing.T) {
 	release()
 }
 
+func TestRetryAttemptsChecksOperationErrorBeforeDeadline(t *testing.T) {
+	attemptErr := errors.New("attempt failed")
+	calls := 0
+	_, err := retryAttempts(context.Background(), backoffConfig{}, func() (struct{}, bool, error) {
+		calls++
+		return struct{}{}, false, attemptErr
+	})
+	if !errors.Is(err, attemptErr) {
+		t.Fatalf("retryAttempts error = %v, want %v", err, attemptErr)
+	}
+	if calls != 1 {
+		t.Fatalf("attempt called %d times, want 1", calls)
+	}
+}
+
+func TestRetryAttemptsClampsNonPositiveInitialDelay(t *testing.T) {
+	started := time.Now()
+	calls := 0
+	_, err := retryAttempts(context.Background(), backoffConfig{total: time.Second, max: time.Second}, func() (struct{}, bool, error) {
+		calls++
+		return struct{}{}, calls == 2, nil
+	})
+	if err != nil {
+		t.Fatalf("retryAttempts: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 500*time.Microsecond {
+		t.Fatalf("retryAttempts retried after %s, want a positive initial delay", elapsed)
+	}
+}
+
 func TestRetryDialSucceedsAfterTransientFailures(t *testing.T) {
 	want := portsmocks.NewMockTransport(t)
 	var calls atomic.Int32

@@ -1,10 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -13,16 +16,394 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/snapshot"
+	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
+	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/pkg/kv"
+	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+func decodeJSONLogs(t *testing.T, data []byte) []map[string]any {
+	t.Helper()
+	var entries []map[string]any
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &entry))
+		entries = append(entries, entry)
+	}
+	require.NoError(t, scanner.Err())
+	return entries
+}
+
+func eventNames(entries []map[string]any) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if name, ok := entry["msg"].(string); ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func requireEvent(t *testing.T, entries []map[string]any, name string) map[string]any {
+	t.Helper()
+	for _, entry := range entries {
+		if entry["msg"] == name {
+			return entry
+		}
+	}
+	t.Fatalf("event %q not found in %v", name, eventNames(entries))
+	return nil
+}
+
+func TestRecoveryObservability(t *testing.T) {
+	var logBuffer bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+	owner := fakeLifecycleOwnership{release: func() error { return nil }}
+	deps := lifecycleStartupDeps{
+		ensurePrivate: func(string) error { return nil },
+		acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
+			return owner, nil
+		},
+		log: log,
+	}
+	ref := &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+	records := []domain.CatalogueRecord{
+		{Committed: ref},
+		{Committed: ref},
+		{},
+		{Committed: ref, DegradedReason: "checkpoint validation failed"},
+	}
+	require.NoError(t, runWithLifecycleOwnerDeps(context.Background(), "/runtime/vev", "/state/vev", func(context.Context) error {
+		logCatalogueRecovery(log, records, "current")
+		logStartupRecoveryCounts(log, records, 0)
+		return nil
+	}, deps))
+
+	entries := decodeJSONLogs(t, logBuffer.Bytes())
+	for _, name := range []string{"lifecycle_owner_wait", "lifecycle_owner_acquired", "catalogue_validated", "daemon_startup_complete", "lifecycle_owner_released"} {
+		require.Contains(t, eventNames(entries), name)
+	}
+	startup := requireEvent(t, entries, "daemon_startup_complete")
+	require.EqualValues(t, 2, startup["healthy"])
+	require.EqualValues(t, 1, startup["fresh"])
+	require.EqualValues(t, 0, startup["restoring"])
+	require.EqualValues(t, 1, startup["broken"])
+	require.NotContains(t, eventNames(entries), "interrupted_transaction_recovery_complete")
+}
+
+// A session-scoped conflict no longer aborts startup, so the daemon comes up
+// looking healthy. Startup must therefore name the fenced session in the log,
+// persist a notice for it, and never report the recovery as clean.
+type fakeLifecycleOwnership struct {
+	release func() error
+}
+
+func (o fakeLifecycleOwnership) Release() error { return o.release() }
+
+type fakeLifecycleProbe struct {
+	owner lifecycleOwnership
+	err   error
+}
+
+func (p fakeLifecycleProbe) TryAcquire(string) (lifecycleOwnership, error) {
+	return p.owner, p.err
+}
+
+func TestJoinLifecycleReleaseError(t *testing.T) {
+	operationErr := errors.New("operation failed")
+	releaseErr := errors.New("release failed")
+
+	tests := []struct {
+		name         string
+		operationErr error
+		releaseErr   error
+		wantErrors   []error
+	}{
+		{
+			name:       "successful operation preserves release failure",
+			releaseErr: releaseErr,
+			wantErrors: []error{releaseErr},
+		},
+		{
+			name:         "operation and release failures are joined",
+			operationErr: operationErr,
+			releaseErr:   releaseErr,
+			wantErrors:   []error{operationErr, releaseErr},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.operationErr
+			joinLifecycleReleaseError(&got, fakeLifecycleOwnership{release: func() error {
+				return tt.releaseErr
+			}})
+
+			for _, wantErr := range tt.wantErrors {
+				require.ErrorIs(t, got, wantErr)
+			}
+		})
+	}
+}
+
+func TestOfflineCommandsPropagateLifecycleReleaseErrors(t *testing.T) {
+	releaseErr := errors.New("release failed")
+
+	tests := []struct {
+		name             string
+		run              func(context.Context) error
+		wantOperationErr string
+	}{
+		{
+			name: "list joins release failure to success",
+			run:  runList,
+		},
+		{
+			name: "kill joins release failure to operation failure",
+			run: func(ctx context.Context) error {
+				return runKill(ctx, "", false, false)
+			},
+			wantOperationErr: "vev: no daemon running",
+		},
+	}
+
+	originalProbe := daemonLifecycleProbe
+	t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			daemonLifecycleProbe = fakeLifecycleProbe{
+				owner: fakeLifecycleOwnership{release: func() error { return releaseErr }},
+			}
+
+			err := tt.run(context.Background())
+			require.ErrorIs(t, err, releaseErr)
+			if tt.wantOperationErr != "" {
+				require.ErrorContains(t, err, tt.wantOperationErr)
+			}
+		})
+	}
+}
+
+func TestCatalogueFailureDoesNotListen(t *testing.T) {
+	originalOpenCatalogue, originalListenDaemon := openCatalogue, listenDaemon
+	t.Cleanup(func() {
+		openCatalogue = originalOpenCatalogue
+		listenDaemon = originalListenDaemon
+	})
+
+	for _, catalogueErr := range []error{errors.New("catalogue corrupt"), errors.New("catalogue unavailable")} {
+		t.Run(catalogueErr.Error(), func(t *testing.T) {
+			runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
+			runtimeDir := filepath.Join(runtimeRoot, "vev")
+			stateDir := filepath.Join(stateRoot, "vev")
+			t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+			t.Setenv("XDG_STATE_HOME", stateRoot)
+
+			listenCalls := 0
+			openCatalogue = func(gotStateDir string) (persist.OpenResult, error) {
+				require.Equal(t, stateDir, gotStateDir)
+				return persist.OpenResult{}, catalogueErr
+			}
+			listenDaemon = func(string, ports.SerializedRuntimeObserver) (ports.Listener, error) {
+				listenCalls++
+				return nil, errors.New("IPC listen must not run after catalogue failure")
+			}
+
+			err := runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, func(ctx context.Context) error {
+				return runDaemonOwnedWithLogger(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			})
+			require.ErrorIs(t, err, catalogueErr)
+			require.Zero(t, listenCalls)
+			require.NoFileExists(t, filepath.Join(runtimeDir, "daemon.sock"))
+
+			owner, acquireErr := lifecycle.TryAcquire(runtimeDir)
+			require.NoError(t, acquireErr, "catalogue failure must release lifecycle ownership")
+			require.NoError(t, owner.Release())
+		})
+	}
+}
+
+func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
+	var events []string
+	_, _, err := constructDaemonBeforeSocketPublication(
+		func() *daemon.Daemon {
+			events = append(events, "catalogue-registry")
+			return nil
+		},
+		func(*daemon.Daemon) error {
+			require.Equal(t, []string{"catalogue-registry"}, events)
+			events = append(events, "startup-garbage-collection")
+			return nil
+		},
+		func() (ports.Listener, error) {
+			require.Equal(t, []string{"catalogue-registry", "startup-garbage-collection"}, events)
+			events = append(events, "socket-publication")
+			return nil, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"catalogue-registry", "startup-garbage-collection", "socket-publication"}, events)
+}
+
+func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
+	t.Run("ownership prefix is exact", func(t *testing.T) {
+		var events []string
+		owner := fakeLifecycleOwnership{release: func() error {
+			events = append(events, "unlock")
+			return nil
+		}}
+		deps := lifecycleStartupDeps{
+			ensurePrivate: func(path string) error {
+				if path == "runtime" {
+					events = append(events, "ensure-runtime")
+				} else {
+					events = append(events, "ensure-state")
+				}
+				return nil
+			},
+			acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
+				events = append(events, "lock")
+				return owner, nil
+			},
+		}
+
+		err := runWithLifecycleOwnerDeps(context.Background(), "runtime", "state", func(context.Context) error {
+			events = append(events, "durable-open", "listen", "serve")
+			return nil
+		}, deps)
+		require.NoError(t, err)
+		require.Equal(t, []string{"ensure-runtime", "ensure-state", "lock"}, events[:3])
+		require.Equal(t, []string{"ensure-runtime", "ensure-state", "lock", "durable-open", "listen", "serve", "unlock"}, events)
+	})
+
+	t.Run("callback observes held lock and failure releases it", func(t *testing.T) {
+		runtimeDir := filepath.Join(t.TempDir(), "runtime")
+		stateDir := filepath.Join(t.TempDir(), "state")
+		startErr := errors.New("catalogue corrupt")
+
+		err := runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, func(context.Context) error {
+			_, lockErr := lifecycle.TryAcquire(runtimeDir)
+			require.ErrorIs(t, lockErr, lifecycle.ErrBusy)
+			return startErr
+		})
+		require.ErrorIs(t, err, startErr)
+
+		owner, err := lifecycle.TryAcquire(runtimeDir)
+		require.NoError(t, err, "callback failure must release lifecycle ownership")
+		require.NoError(t, owner.Release())
+	})
+
+	t.Run("busy and unavailable ownership fail before startup", func(t *testing.T) {
+		runtimeDir := filepath.Join(t.TempDir(), "runtime")
+		stateDir := filepath.Join(t.TempDir(), "state")
+		owner, err := lifecycle.TryAcquire(runtimeDir)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, owner.Release()) }()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		started := false
+		err = runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(context.Context) error {
+			started = true
+			return nil
+		})
+		require.ErrorIs(t, err, context.Canceled)
+		require.False(t, started)
+
+		badState := filepath.Join(t.TempDir(), "state-file")
+		require.NoError(t, os.WriteFile(badState, []byte("unavailable"), 0o600))
+		err = runWithLifecycleOwner(context.Background(), filepath.Join(t.TempDir(), "other-runtime"), badState, func(context.Context) error {
+			started = true
+			return nil
+		})
+		require.Error(t, err)
+		require.False(t, started)
+	})
+
+	t.Run("corrupt catalogue fails before socket publication", func(t *testing.T) {
+		runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
+		runtimeDir := filepath.Join(runtimeRoot, "vev")
+		stateDir := filepath.Join(stateRoot, "vev")
+		require.NoError(t, safedir.EnsurePrivate(stateDir))
+		store, err := kv.Open(persist.StorePath(stateDir))
+		require.NoError(t, err)
+		require.NoError(t, store.Set([]byte("work"), []byte("malformed catalogue value")))
+		require.NoError(t, store.Close())
+
+		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+		t.Setenv("XDG_STATE_HOME", stateRoot)
+		before, err := os.ReadFile(persist.StorePath(stateDir))
+		require.NoError(t, err)
+		err = runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, runDaemonOwned)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), stateDir)
+		require.Contains(t, err.Error(), "rm -rf "+stateDir)
+		after, readErr := os.ReadFile(persist.StorePath(stateDir))
+		require.NoError(t, readErr)
+		require.Equal(t, before, after, "failed startup must leave the catalogue untouched")
+		_, statErr := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+
+	t.Run("proven absence creates the catalogue before socket publication", func(t *testing.T) {
+		runtimeRoot, err := os.MkdirTemp("/tmp", "vev-")
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeRoot)) })
+		stateRoot := t.TempDir()
+		runtimeDir := filepath.Join(runtimeRoot, "vev")
+		stateDir := filepath.Join(stateRoot, "vev")
+		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+		t.Setenv("XDG_STATE_HOME", stateRoot)
+		ctx, cancel := context.WithCancel(t.Context())
+		result := make(chan error, 1)
+		go func() {
+			result <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, runDaemonOwned)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case err := <-result:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Error("daemon lifecycle did not stop after cancellation")
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
+			return err == nil
+		}, 5*time.Second, time.Millisecond, "daemon socket was not published")
+		require.FileExists(t, persist.StorePath(stateDir))
+	})
+
+	t.Run("callback and release errors are joined", func(t *testing.T) {
+		startErr := errors.New("catalogue unavailable")
+		releaseErr := errors.New("unlock failed")
+		deps := lifecycleStartupDeps{
+			ensurePrivate: func(string) error { return nil },
+			acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
+				return fakeLifecycleOwnership{release: func() error { return releaseErr }}, nil
+			},
+		}
+
+		err := runWithLifecycleOwnerDeps(context.Background(), "runtime", "state", func(context.Context) error {
+			return startErr
+		}, deps)
+		require.ErrorIs(t, err, startErr)
+		require.ErrorIs(t, err, releaseErr)
+	})
+}
 
 // scriptRecv makes a transport yield frames in order, then wait for done
 // before returning EOF. The shared done channel coordinates proxy readers
@@ -266,11 +647,26 @@ func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
 	}
 }
 
+func TestListShowsBroken(t *testing.T) {
+	var out bytes.Buffer
+	printSessions(&out, []ports.SessionInfo{
+		{Name: "fresh", State: ports.SessionStopped},
+		{Name: "loading", State: ports.SessionStopped},
+		{Name: "broken", State: ports.SessionBroken},
+	})
+	require.Contains(t, out.String(), "fresh")
+	require.Contains(t, out.String(), "stopped")
+	require.Contains(t, out.String(), "loading")
+	require.Contains(t, out.String(), "broken")
+	require.NotContains(t, out.String(), "restoring")
+	require.NotContains(t, out.String(), "degraded")
+}
+
 func TestPrintSessionsShowsStoppedState(t *testing.T) {
 	var out bytes.Buffer
 	printSessions(&out, []ports.SessionInfo{
-		{Name: "main", Tabs: 2, Attached: true},
-		{Name: "old", Stopped: true},
+		{Name: "main", State: ports.SessionRunning, Tabs: 2, Attached: true},
+		{Name: "old", State: ports.SessionStopped},
 	})
 	got := out.String()
 	for _, want := range []string{"NAME", "STATE", "main", "running", "2", "yes", "old", "stopped", "-"} {
@@ -283,9 +679,9 @@ func TestPrintSessionsShowsStoppedState(t *testing.T) {
 func TestPrintSessionsMarksEphemeral(t *testing.T) {
 	var buf bytes.Buffer
 	printSessions(&buf, []ports.SessionInfo{
-		{Name: "0", Ephemeral: true, Tabs: 1, Attached: false},
-		{Name: "work", Tabs: 2, Attached: true},
-		{Name: "old", Stopped: true},
+		{Name: "0", State: ports.SessionRunning, Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", State: ports.SessionRunning, Tabs: 2, Attached: true},
+		{Name: "old", State: ports.SessionStopped},
 	})
 	out := buf.String()
 	for _, want := range []string{"0", "temporary", "work", "running", "old", "stopped"} {
@@ -293,17 +689,21 @@ func TestPrintSessionsMarksEphemeral(t *testing.T) {
 	}
 }
 
+func newTestPersister(t *testing.T, stateDir string) *persist.Persister {
+	t.Helper()
+	store, err := persist.OpenStore(persist.StorePath(stateDir))
+	require.NoError(t, err)
+	return persist.New(store)
+}
+
 func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 
-	p, err := persist.Open(filepath.Join(stateRoot, "vev"))
-	if err != nil {
-		t.Fatalf("persist.Open error = %v", err)
-	}
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
+	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatalf("Save error = %v", err)
 	}
 	if err := p.Close(); err != nil {
@@ -320,6 +720,30 @@ func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 			t.Fatalf("runList output %q missing %q", got, want)
 		}
 	}
+}
+
+func TestRunListUnreadableCatalogueProvidesResetGuidance(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	stateDir := filepath.Join(stateRoot, "vev")
+	runtimeDir := filepath.Join(runtimeRoot, "vev")
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	require.NoError(t, safedir.EnsurePrivate(stateDir))
+
+	catalogue := persist.StorePath(stateDir)
+	before := []byte("corrupt catalogue")
+	require.NoError(t, os.WriteFile(catalogue, before, 0o600))
+
+	var runErr error
+	stdout := captureStdout(t, func() { runErr = Run([]string{"ls"}) })
+	require.Empty(t, stdout)
+	require.Error(t, runErr)
+	require.ErrorContains(t, runErr, stateDir)
+	require.ErrorContains(t, runErr, "rm -rf "+stateDir)
+	require.NoFileExists(t, filepath.Join(runtimeDir, "daemon.sock"))
+	after, err := os.ReadFile(catalogue)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 func TestRunKillMissingStoppedSessionDoesNotCreateStore(t *testing.T) {
@@ -341,19 +765,14 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 
-	p, err := persist.Open(filepath.Join(stateRoot, "vev"))
-	if err != nil {
-		t.Fatalf("persist.Open error = %v", err)
-	}
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
+	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatalf("Save error = %v", err)
 	}
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close error = %v", err)
 	}
-	snapshots := snapshot.NewRepository(filepath.Join(stateRoot, "vev", "snapshots"))
-
 	got := captureStdout(t, func() {
 		if err := runKill(context.Background(), "stored", false, false); err != nil {
 			t.Fatalf("runKill error = %v", err)
@@ -368,13 +787,6 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	}
 	if len(records) != 0 {
 		t.Fatalf("records after kill = %#v, want none", records)
-	}
-	names, err := snapshots.List(context.Background())
-	if err != nil {
-		t.Fatalf("snapshot List error = %v", err)
-	}
-	if len(names) != 0 {
-		t.Fatalf("snapshots after kill = %#v, want none", names)
 	}
 }
 

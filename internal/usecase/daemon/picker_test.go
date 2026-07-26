@@ -11,11 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -23,33 +25,17 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
-// failingDeleteStore is a ports.Store whose Delete always fails, used to
-// exercise the picker's kill-target error path without disturbing the
-// generated mock's default Delete expectation.
-type failingDeleteStore struct{ err error }
-
-func (failingDeleteStore) Get([]byte) ([]byte, bool)    { return nil, false }
-func (failingDeleteStore) Set([]byte, []byte) error     { return nil }
-func (s failingDeleteStore) Delete([]byte) error        { return s.err }
-func (failingDeleteStore) Range(func(k, v []byte) bool) {}
-func (failingDeleteStore) Sync() error                  { return nil }
-func (failingDeleteStore) Close() error                 { return nil }
-
-type refusingSnapshotDeleteRepository struct{ err error }
+type refusingSnapshotDeleteRepository struct {
+	noOpSnapshotRepository
+	err error
+}
 
 func (refusingSnapshotDeleteRepository) Publish(context.Context, ports.SnapshotPublication) error {
 	return nil
 }
-func (refusingSnapshotDeleteRepository) List(context.Context) ([]string, error) { return nil, nil }
-func (refusingSnapshotDeleteRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
-	return ports.SnapshotGeneration{}, nil
+func (s refusingSnapshotDeleteRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
+	return s.err
 }
-func (s refusingSnapshotDeleteRepository) Delete(context.Context, string) error  { return s.err }
-func (refusingSnapshotDeleteRepository) Tombstone(context.Context, string) error { return nil }
-func (refusingSnapshotDeleteRepository) DeleteTombstone(context.Context, string) error {
-	return nil
-}
-func (refusingSnapshotDeleteRepository) Maintain(context.Context) error { return nil }
 
 func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
@@ -234,6 +220,148 @@ func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
 	require.Equal(t, []picker.TabEntry{{Name: "1", Detail: " (vim)"}, {Name: "logs", Detail: " (sh)"}}, views[0].Tabs)
 }
 
+func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, from, ac, _ := newManualSessionWithPTYs(t, p)
+	record := durableRecoveryRecord(0)
+	record.Name = "restoring"
+	state, done := initialSessionState(record)
+	d.stopped[record.Name] = stoppedSession{
+		name:        record.Name,
+		createdAt:   record.CreatedAt,
+		incarnation: record.IncarnationID,
+		record:      record,
+		state:       state,
+		restoreDone: done,
+	}
+	factory := &recoveryCountingPTYFactory{}
+	d.ptys = factory
+
+	result := make(chan error, 1)
+	go func() {
+		result <- d.switchToTarget(from, ac, picker.Target{Name: record.Name, Stopped: true})
+	}()
+
+	select {
+	case err := <-result:
+		t.Fatalf("picker switch returned before target restoration completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	require.Zero(t, factory.calls.Load())
+	require.Same(t, from, ac.currentSession())
+
+	ctx, cancel := context.WithCancel(d.serveCtx)
+	defer cancel()
+	target := &session{id: "restored", name: record.Name, createdAt: record.CreatedAt, ctx: ctx, cancel: cancel, tabs: []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})}}
+	d.mu.Lock()
+	delete(d.stopped, record.Name)
+	d.sessions[target.id] = target
+	closeRuntimeRestoreDoneLocked(done)
+	d.mu.Unlock()
+
+	require.NoError(t, <-result)
+	require.Same(t, target, ac.currentSession())
+}
+
+func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, from, ac, _ := newManualSessionWithPTYs(t, p)
+	record := durableRecoveryRecord(0)
+	record.Name = "restoring"
+	repository := &cancellationRecoveryRepository{started: make(chan struct{})}
+	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
+	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
+	WithSnapshotRepository(repository)(d)
+	WithRecoveryCoordinator(coordinator)(d)
+	restoreCtx, cancelRestore := context.WithCancel(context.Background())
+	restored := make(chan struct{})
+	go func() {
+		d.restoreCatalogue(restoreCtx, mustDurableRecords(t, catalogue))
+		close(restored)
+	}()
+	<-repository.started
+
+	result := make(chan error, 1)
+	go func() {
+		result <- d.switchToTarget(from, ac, picker.Target{Name: record.Name, Stopped: true})
+	}()
+	cancelRestore()
+
+	require.Error(t, <-result)
+	<-restored
+	require.Same(t, from, ac.currentSession())
+	d.mu.Lock()
+	entry := d.stopped[record.Name]
+	d.mu.Unlock()
+	require.Equal(t, ports.SessionBroken, entry.state)
+	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
+	select {
+	case <-entry.restoreDone:
+	default:
+		t.Fatal("restore completion was not signaled")
+	}
+}
+
+func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
+	tests := []struct {
+		name         string
+		broken       bool
+		runtimeState ports.SessionState
+	}{
+		{name: "broken", broken: true, runtimeState: ports.SessionBroken},
+		{name: "healthy without restored runtime", runtimeState: ports.SessionStopped},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, from, ac, _ := newManualSessionWithPTYs(t, p)
+			store, storeState := newMockStore(t)
+			record := durableRecoveryRecord(0)
+			record.Name = "unsafe"
+			if tt.broken {
+				record.DegradedReason = "checkpoint validation failed"
+			}
+			catalogue := persist.New(store)
+			WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
+			d.stopped[record.Name] = stoppedSession{
+				name:        record.Name,
+				createdAt:   record.CreatedAt,
+				incarnation: record.IncarnationID,
+				record:      record,
+				state:       tt.runtimeState,
+			}
+			factory := &recoveryCountingPTYFactory{}
+			d.ptys = factory
+
+			err := d.switchToTarget(from, ac, picker.Target{Name: record.Name, Stopped: true})
+
+			var userError *domain.UserError
+			require.ErrorAs(t, err, &userError)
+			require.Equal(t, domain.NoticeSessionUnavailable, userError.Code)
+			var protocolError *protoErr
+			require.ErrorAs(t, err, &protocolError)
+			require.Equal(t, ports.ErrInternal, protocolError.code)
+			require.Zero(t, factory.calls.Load(), "unsafe target must not open a PTY")
+			require.Same(t, from, ac.currentSession())
+
+			storeState.mu.Lock()
+			sets := storeState.sets
+			storeState.mu.Unlock()
+			require.Zero(t, sets, "unsafe target must not mutate the catalogue")
+			d.mu.Lock()
+			entry := d.stopped[record.Name]
+			d.mu.Unlock()
+			require.Equal(t, record, entry.record)
+			require.Equal(t, tt.runtimeState, entry.state)
+		})
+	}
+}
+
 func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
@@ -243,7 +371,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	defer release3()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactorySeq(t, p2, p3)
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: ports.SessionStopped}
 
 	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1007,8 +1135,17 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	d, from, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	cause := errors.New("snapshot delete refused")
-	WithSnapshotRepository(refusingSnapshotDeleteRepository{err: cause}, nil)(d)
+	WithSnapshotRepository(refusingSnapshotDeleteRepository{err: cause})(d)
 	target := d.sessions[domain.SessionID("recent")]
+	store, _ := newMockStore(t)
+	WithStore(t, store)(d)
+	target.mu.Lock()
+	if target.incarnation == (domain.IncarnationID{}) {
+		target.incarnation = domain.IncarnationID{1}
+	}
+	record := target.persistRecordLocked(1)
+	target.mu.Unlock()
+	require.NoError(t, d.catalogue.Create(record))
 
 	d.enterPicker(from, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1041,8 +1178,14 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	defer release()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p)
 	cause := errors.New("delete failed")
-	WithStore(failingDeleteStore{err: cause})(d)
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7}
+	store, state := newMockStore(t)
+	WithStore(t, store)(d)
+	record := domain.CatalogueRecord{Name: "stopped", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/stopped", CreatedAt: 7}
+	require.NoError(t, d.catalogue.Create(record))
+	state.mu.Lock()
+	state.deleteErr = func(string) error { return cause }
+	state.mu.Unlock()
+	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, incarnation: record.IncarnationID, record: record}
 
 	d.enterPicker(from, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1059,12 +1202,9 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	toasts := awaitToastCount(t, ac, 1)
 	require.Equal(t, domain.NoticePersistDelete, toasts[0].Code)
 
-	views, _ := d.pickerViews(from)
-	var stillListed bool
-	for _, v := range views {
-		if v.Stopped && v.Name == "stopped" {
-			stillListed = true
-		}
-	}
-	require.True(t, stillListed, "entry must remain listed after refreshPicker when the delete failed")
+	d.mu.Lock()
+	stopped, retained := d.stopped["stopped"]
+	d.mu.Unlock()
+	require.True(t, retained, "failed deletion must retain the reserved name")
+	require.True(t, stopped.purging, "an uncertain deletion stays fenced from restore")
 }

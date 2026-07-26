@@ -3,86 +3,79 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/persist"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 )
 
-type offlineSnapshotFake struct {
-	calls              []string
-	deleteErr          error
-	deleteLegacyErr    error
-	tombstoneErr       error
-	deleteTombstoneErr error
+func TestRunOfflineNamedKillUsesOpenCatalogueSeam(t *testing.T) {
+	stateRoot := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	stateDir := filepath.Join(stateRoot, "vev")
+
+	p := newTestPersister(t, stateDir)
+	now := time.Now().UnixNano()
+	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}))
+	require.NoError(t, p.Close())
+
+	original := openCatalogue
+	t.Cleanup(func() { openCatalogue = original })
+	wantErr := errors.New("open seam called")
+	called := false
+	openCatalogue = func(gotStateDir string) (persist.OpenResult, error) {
+		called = true
+		require.Equal(t, stateDir, gotStateDir)
+		return persist.OpenResult{}, wantErr
+	}
+
+	err := runOfflineNamedKill(context.Background(), "named")
+	require.ErrorIs(t, err, wantErr)
+	require.True(t, called)
 }
 
-func (f *offlineSnapshotFake) Tombstone(context.Context, string) error {
-	f.calls = append(f.calls, "tombstone")
-	return f.tombstoneErr
-}
-
-func (f *offlineSnapshotFake) Delete(context.Context, string) error {
-	f.calls = append(f.calls, "incremental")
-	return f.deleteErr
-}
-
-func (f *offlineSnapshotFake) DeleteLegacy(context.Context, string) error {
-	f.calls = append(f.calls, "legacy")
-	return f.deleteLegacyErr
-}
-
-func (f *offlineSnapshotFake) DeleteTombstone(context.Context, string) error {
-	f.calls = append(f.calls, "delete tombstone")
-	return f.deleteTombstoneErr
-}
-
-func TestRunKillOfflineRetriesSnapshotDeletion(t *testing.T) {
-	for _, tt := range []struct {
-		name           string
-		incrementalErr error
-		legacyErr      error
+func TestRunKillOfflineUsesIncarnationDeletionProtocol(t *testing.T) {
+	tests := []struct {
+		name      string
+		crashHook func(*testing.T, string)
 	}{
-		{name: "legacy failure", legacyErr: errors.New("legacy unlink failed")},
-		{name: "incremental failure", incrementalErr: errors.New("incremental quarantine failed")},
-		{name: "both failures", incrementalErr: errors.New("incremental quarantine failed"), legacyErr: errors.New("legacy unlink failed")},
-	} {
+		{name: "normal"},
+		{
+			name: "stray tmp is ignored",
+			crashHook: func(t *testing.T, stateDir string) {
+				t.Helper()
+				storePath := persist.StorePath(stateDir)
+				require.NoError(t, os.WriteFile(storePath+".tmp", []byte("partial rewrite"), 0o600))
+			},
+		},
+	}
+
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
 			t.Setenv("XDG_STATE_HOME", stateRoot)
 			t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+			stateDir := filepath.Join(stateRoot, "vev")
 
-			p, err := persist.Open(filepath.Join(stateRoot, "vev"))
-			require.NoError(t, err)
+			id := domain.IncarnationID{1}
+			p := newTestPersister(t, stateDir)
 			now := time.Now().UnixNano()
-			require.NoError(t, p.Save(persist.Record{Name: "named", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}))
+			require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: id, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}))
 			require.NoError(t, p.Close())
-
-			fake := &offlineSnapshotFake{deleteErr: tt.incrementalErr, deleteLegacyErr: tt.legacyErr}
-			originalFactory := newOfflineSnapshotRepository
-			newOfflineSnapshotRepository = func(string) offlineSnapshotSource { return fake }
-			t.Cleanup(func() { newOfflineSnapshotRepository = originalFactory })
-
-			err = runKill(context.Background(), "named", false, false)
-			if tt.incrementalErr != nil {
-				require.ErrorIs(t, err, tt.incrementalErr)
+			source := filepath.Join(stateDir, "snapshots", "sessions", id.String())
+			require.NoError(t, os.MkdirAll(source, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(source, "sentinel"), []byte("durable"), 0o600))
+			if tt.crashHook != nil {
+				tt.crashHook(t, stateDir)
 			}
-			if tt.legacyErr != nil {
-				require.ErrorIs(t, err, tt.legacyErr)
-			}
-			require.Equal(t, []string{"tombstone", "incremental", "legacy"}, fake.calls)
-			records, err := persist.LoadReadOnly(filepath.Join(stateRoot, "vev"))
-			require.NoError(t, err)
-			require.Len(t, records, 1, "a failed source delete must retain retry identity")
 
-			fake.deleteErr, fake.deleteLegacyErr = nil, nil
 			require.NoError(t, runKill(context.Background(), "named", false, false))
-			require.Equal(t, []string{"tombstone", "incremental", "legacy", "tombstone", "incremental", "legacy", "delete tombstone"}, fake.calls)
-			records, err = persist.LoadReadOnly(filepath.Join(stateRoot, "vev"))
-			require.NoError(t, err)
-			require.Empty(t, records)
+			require.NoDirExists(t, source)
 		})
 	}
 }

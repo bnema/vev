@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"os"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -14,7 +17,10 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := sessionKey(publication.Name)
+	key, err := incarnationKey(publication.IncarnationID)
+	if err != nil {
+		return err
+	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
@@ -28,20 +34,16 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// A failed publication can still leave immutable blobs or a manifest behind.
-	// Invalidate an in-progress GC mark before creating any publication storage.
-	r.invalidateStorageEpoch(key)
-	if err := r.ensureSession(key); err != nil {
+	// A replay may find a forward orphan left after publication but before its
+	// catalogue commit. Accept it only after the canonical checkpoint loader has
+	// revalidated the pointer digest, manifest, and every referenced object.
+	if unchanged, err := r.unchangedPublication(ctx, publication); err != nil {
 		return err
-	}
-	// The common replay path needs neither a manifest decode nor a reference
-	// map. Checking the immutable bytes directly also keeps its descriptor
-	// reads beneath the pinned repository root.
-	if unchanged, err := r.unchangedPublication(key, publication); err == nil && unchanged {
+	} else if unchanged {
 		return nil
 	}
 
-	current, currentManifest, currentRefs, err := r.currentPublication(ctx, publication.Name, key)
+	current, currentManifest, currentRefs, err := r.currentIncarnationPublication(ctx, publication)
 	if err != nil {
 		return err
 	}
@@ -53,6 +55,13 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return fmt.Errorf("snapshot generation %d: immutable conflict", publication.Generation)
 		}
 		return nil
+	}
+
+	// Parent validation and all other publication checks above happen before
+	// creating repository state. A rejected child must leave the authoritative
+	// checkpoint and its storage byte-for-byte unchanged.
+	if err := r.ensureSession(publication.IncarnationID); err != nil {
+		return err
 	}
 
 	// Retained refs from the authoritative generation were verified when their
@@ -70,7 +79,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		path := r.objectPath(key, digest)
+		path := r.objectPath(publication.IncarnationID, digest)
 		exists, err := r.verifyObjectFile(path, digest, ref)
 		if err != nil {
 			return fmt.Errorf("verify object %x: %w", digest, err)
@@ -86,11 +95,6 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		if err != nil {
 			return err
 		}
-		if r.hooks.beforeBlobWrite != nil {
-			if err := r.hooks.beforeBlobWrite(path); err != nil {
-				return err
-			}
-		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -104,7 +108,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		}
 	}
 
-	manifestPath := r.manifestPath(key, publication.Generation)
+	manifestPath := r.manifestPath(publication.IncarnationID, publication.Generation)
 	existing, exists, err := r.readOptionalBounded(manifestPath)
 	if err != nil {
 		return err
@@ -114,11 +118,6 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return fmt.Errorf("manifest generation %d: immutable conflict", publication.Generation)
 		}
 	} else {
-		if r.hooks.beforeManifestWrite != nil {
-			if err := r.hooks.beforeManifestWrite(manifestPath); err != nil {
-				return err
-			}
-		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -131,63 +130,78 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return fmt.Errorf("write manifest: %w", err)
 		}
 	}
-	if r.hooks.beforeHeadWrite != nil {
-		if err := r.hooks.beforeHeadWrite(r.headPath(key)); err != nil {
-			return err
-		}
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := r.writeMutable(r.headPath(key), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest))); err != nil {
+	if err := r.writeMutable(r.headPath(publication.IncarnationID), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest))); err != nil {
 		return fmt.Errorf("write HEAD: %w", err)
 	}
 	return nil
 }
 
-// unchangedPublication uses one root for the two reads in the replay fast
-// path. The root is confined to this operation and is closed before return;
-// all other repository operations retain their open-per-operation roots.
-func (r *Repository) unchangedPublication(key string, publication ports.SnapshotPublication) (unchanged bool, err error) {
-	root, err := r.openRoot()
-	if err != nil {
-		return false, err
-	}
-	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
-
-	generation, _, err := r.readHeadWithRoot(root, key)
+// unchangedPublication validates an existing forward orphan through the same
+// loader used for recovery. A corrupt replay must not be accepted merely
+// because its manifest bytes happen to match the requested publication.
+func (r *Repository) unchangedPublication(ctx context.Context, publication ports.SnapshotPublication) (bool, error) {
+	generation, digest, err := r.readHead(publication.IncarnationID)
+	_ = err // A missing or unreadable HEAD is not treated as a replay.
 	if err != nil || generation != publication.Generation {
 		return false, nil
 	}
-	current, err := r.readBoundedRoot(root, r.manifestPath(key, generation))
-	return err == nil && bytes.Equal(current, publication.Manifest), nil
+	current, _, err := r.loadCheckpointLocked(ctx, publication.IncarnationID, publication.Name, ports.CheckpointRef{
+		Generation:     generation,
+		ManifestDigest: digest,
+	})
+	if err != nil {
+		return false, fmt.Errorf("validate replayed checkpoint: %w", err)
+	}
+	return bytes.Equal(current.Manifest, publication.Manifest), nil
 }
 
-// currentPublication takes the normal HEAD path without loading every object
-// in the current generation. A damaged HEAD or manifest still uses the full
-// fallback scan, because only Load's object validation can establish a safe
-// replacement authoritative generation in that recovery case.
-func (r *Repository) currentPublication(ctx context.Context, name, key string) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
-	generation, digest, err := r.readHead(key)
-	if err == nil {
-		data, readErr := r.readBounded(r.manifestPath(key, generation))
-		if readErr == nil && sha256.Sum256(data) == digest {
-			refs, validateErr := validateManifest(data, name, generation)
-			if validateErr == nil {
-				return generation, data, refs, nil
-			}
+func (r *Repository) currentIncarnationPublication(ctx context.Context, publication ports.SnapshotPublication) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
+	generation, digest, err := r.readHead(publication.IncarnationID)
+	if errors.Is(err, os.ErrNotExist) {
+		if publication.Generation != 1 || publication.ParentCheckpoint != nil {
+			return 0, nil, nil, fmt.Errorf("first snapshot generation must be 1 with no parent")
+		}
+		return 0, nil, nil, nil
+	}
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("read snapshot HEAD: %w", err)
+	}
+	data, err := r.readBounded(r.manifestPath(publication.IncarnationID, generation))
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("validate current checkpoint: %w", err)
+	}
+	if sha256.Sum256(data) != digest {
+		return 0, nil, nil, fmt.Errorf("validate current checkpoint: manifest digest mismatch")
+	}
+	manifest, err := codec.UnmarshalManifest(data)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("validate current manifest: %w", err)
+	}
+	if manifest.IncarnationID != publication.IncarnationID || manifest.Generation != generation {
+		return 0, nil, nil, fmt.Errorf("current manifest identity mismatch")
+	}
+	// Every child checkpoint is bound to the exact authoritative HEAD.
+	if publication.Generation == generation+1 {
+		wantParent := &domain.CheckpointRef{Generation: generation, ManifestDigest: digest}
+		if !checkpointRefEqual(publication.ParentCheckpoint, wantParent) {
+			return 0, nil, nil, fmt.Errorf("publication parent does not match current checkpoint")
 		}
 	}
+	refs := manifestRefs(manifest)
+	if refs == nil || !withinGenerationBudget(len(data), refs) {
+		return 0, nil, nil, fmt.Errorf("invalid current generation")
+	}
+	return generation, data, refs, ctx.Err()
+}
 
-	generation, data, err := r.currentGeneration(ctx, name, key)
-	if err != nil || generation == 0 {
-		return generation, data, nil, err
+func checkpointRefEqual(left, right *domain.CheckpointRef) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
 	}
-	refs, err := validateManifest(data, name, generation)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	return generation, data, refs, nil
+	return *left == *right
 }
 
 func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, map[ports.SnapshotDigest]ports.SnapshotObject, error) {
@@ -201,7 +215,7 @@ func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]
 	}
 	objects := make(map[ports.SnapshotDigest]ports.SnapshotObject, len(supplied))
 	for digest, entries := range supplied {
-		object, err := validateSuppliedObject(entries, digest, refs[digest], nil)
+		object, err := validateSuppliedObject(entries, digest, refs[digest])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -211,16 +225,16 @@ func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]
 }
 
 func validatePublicationManifest(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
-	return validateManifest(p.Manifest, p.Name, p.Generation)
+	return validateManifest(p.Manifest, p.IncarnationID, p.Name, p.Generation, p.ParentCheckpoint)
 }
 
-func validateManifest(data []byte, name string, generation uint64) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
+func validateManifest(data []byte, incarnationID domain.IncarnationID, name string, generation uint64, parent *domain.CheckpointRef) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
 	manifest, err := codec.UnmarshalManifest(data)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
-	if manifest.Name != name || manifest.Generation != generation || generation == 0 {
-		return nil, fmt.Errorf("manifest name or generation does not match publication")
+	if manifest.IncarnationID != incarnationID || manifest.Name != name || manifest.Generation != generation || generation == 0 || !checkpointRefEqual(manifest.ParentCheckpoint, parent) {
+		return nil, fmt.Errorf("manifest identity, name, generation, or parent does not match publication")
 	}
 	refs := manifestRefs(manifest)
 	if refs == nil {
@@ -255,16 +269,13 @@ func retainedObject(currentRefs map[ports.SnapshotDigest]codec.ObjectRef, digest
 }
 
 func (r *Repository) validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef) (ports.SnapshotObject, error) {
-	return validateSuppliedObject(objects, digest, ref, r)
+	return validateSuppliedObject(objects, digest, ref)
 }
 
-func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef, repository *Repository) (ports.SnapshotObject, error) {
+func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef) (ports.SnapshotObject, error) {
 	object := objects[0]
 	for _, candidate := range objects {
 		actual := sha256.Sum256(candidate.Data)
-		if repository != nil {
-			actual = repository.objectDigest(candidate.Data)
-		}
 		if actual != candidate.Digest || candidate.Digest != digest {
 			return ports.SnapshotObject{}, fmt.Errorf("object digest mismatch")
 		}
@@ -275,9 +286,6 @@ func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.Snapsho
 	kind, payload, err := codec.PreflightObject(object.Data)
 	if err != nil || kind != ref.Kind || len(object.Data) != int(ref.Size) || len(payload) == 0 {
 		return ports.SnapshotObject{}, fmt.Errorf("invalid object envelope")
-	}
-	if repository != nil && repository.hooks.beforeObjectCopy != nil {
-		repository.hooks.beforeObjectCopy(object.Data)
 	}
 	return ports.SnapshotObject{Digest: digest, Data: append([]byte(nil), object.Data...)}, nil
 }
@@ -326,16 +334,10 @@ func validObject(data []byte, ref codec.ObjectRef) bool {
 }
 
 func (r *Repository) objectDigest(data []byte) ports.SnapshotDigest {
-	if r.hooks.beforeObjectHash != nil {
-		r.hooks.beforeObjectHash(data)
-	}
 	return sha256.Sum256(data)
 }
 
 func (r *Repository) verifyObjectFile(path string, digest ports.SnapshotDigest, ref codec.ObjectRef) (bool, error) {
-	if r.hooks.beforeObjectRead != nil {
-		r.hooks.beforeObjectRead(path)
-	}
 	data, exists, err := r.readOptionalBounded(path)
 	if err != nil || !exists {
 		return exists, err

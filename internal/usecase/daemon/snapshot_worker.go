@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"sort"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -130,7 +132,19 @@ func (d *Daemon) publishSnapshotCapture(workerCtx context.Context, workerID uint
 	}
 	if err == nil && workerCtx.Err() == nil {
 		if err = publicationContext.Err(); err == nil {
-			err = d.snapshotRepository.Publish(publicationContext, publication)
+			if d.recovery != nil {
+				var record domain.CatalogueRecord
+				record, err = d.recovery.PublishCheckpoint(publicationContext, capture.name, publication)
+				if err == nil {
+					if record.Committed == nil {
+						err = errors.New("snapshot: checkpoint publication returned no committed checkpoint")
+					} else {
+						capture.checkpoint = *record.Committed
+					}
+				}
+			} else {
+				err = d.snapshotRepository.Publish(publicationContext, publication)
+			}
 		}
 	}
 	d.clearSnapshotWorkerInFlight(workerID, capture)
@@ -185,45 +199,108 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 	if d == nil {
 		return
 	}
-	deadline := newSnapshotShutdownDeadline(d.clock)
-	defer deadline.stop()
-	d.stopSnapshotEncodeWorkerWithDeadline(deadline)
+	_ = d.StopDurableWriters(context.Background())
+	d.WaitDurableWriters()
 }
 
-// stopSnapshotEncodeWorkerWithDeadline performs the one deadline-aware join
-// for a Serve shutdown. Queues are never closed, and detached writers only
-// retain immutable captures plus contexts/channels that remain live, so an
-// uncooperative repository call cannot race teardown or block process exit.
-func (d *Daemon) stopSnapshotEncodeWorkerWithDeadline(deadline *snapshotShutdownDeadline) {
+// StopDurableWriters stops maintenance scheduling, cancels cooperative
+// maintenance calls, stops snapshot admission, and requests the snapshot
+// worker's final drain. The context bounds checkpoint success only:
+// cancellation never detaches a writer from its owner.
+func (d *Daemon) StopDurableWriters(ctx context.Context) []string {
+	if d == nil {
+		return nil
+	}
+	cancel, done := d.requestDurableWriterStop()
+	if done == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		// Snapshot identity before cancellation can let a cooperative worker clear
+		// its in-flight capture. The caller persists timeout notices before the
+		// unconditional ownership join.
+		names := d.durableWriterFailureNames()
+		cancel()
+		return names
+	}
+}
+
+// WaitDurableWriters is the unconditional ownership barrier. It has no timeout
+// or status branch: every writer goroutine must exit before Serve may return.
+// Restoration is joined with the others because it mutates durable state too;
+// it observes serveCtx cancellation, so waiting for it cannot outlive an
+// uncooperative repository call any longer than the snapshot worker does.
+func (d *Daemon) WaitDurableWriters() {
 	if d == nil {
 		return
 	}
 	d.snapshotWorkerMu.Lock()
-	cancel := d.snapshotWorkerCancel
-	if cancel == nil || d.snapshotWorkerClosing {
-		d.snapshotWorkerMu.Unlock()
-		return
-	}
-	// Stop accepting producers, then let the single worker drain its bounded
-	// queue. A non-context-aware store may still block indefinitely, so the
-	// shared shutdown deadline bounds the one and only join.
-	d.snapshotWorkerClosing = true
-	flush := d.snapshotWorkerFlush
-	done := d.snapshotWorkerDone
-	close(flush)
+	snapshotDone := d.snapshotWorkerDone
+	maintenanceDone := d.maintenanceWorkerDone
+	restoreDone := d.restoreWorkerDone
 	d.snapshotWorkerMu.Unlock()
-
-	if deadline == nil {
-		deadline = newSnapshotShutdownDeadline(d.clock)
-		defer deadline.stop()
-	}
-	select {
-	case <-done:
+	if snapshotDone != nil {
+		<-snapshotDone
 		d.finishStoppedSnapshotWorker(false)
-	case <-deadline.Done():
-		cancel()
-		d.finishStoppedSnapshotWorker(true)
 	}
+	if maintenanceDone != nil {
+		<-maintenanceDone
+	}
+	// Restoration never blocks on the workers above (snapshot admission is
+	// non-blocking), so joining it last cannot deadlock.
+	if restoreDone != nil {
+		<-restoreDone
+	}
+}
+
+func (d *Daemon) requestDurableWriterStop() (context.CancelFunc, <-chan struct{}) {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if d.maintenanceWorkerCancel != nil {
+		d.maintenanceWorkerCancel()
+	}
+	cancel := d.snapshotWorkerCancel
+	if cancel == nil {
+		return nil, nil
+	}
+	if !d.snapshotWorkerClosing {
+		d.snapshotWorkerClosing = true
+		close(d.snapshotWorkerFlush)
+	}
+	return cancel, d.snapshotWorkerDone
+}
+
+// durableWriterFailureNames includes admitted buffered captures as well as the
+// active and final queues. snapshotAdmitted tracks normal captures from queue
+// admission through completion, so worker dequeue cannot make one disappear.
+func (d *Daemon) durableWriterFailureNames() []string {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	seen := make(map[string]struct{})
+	add := func(capture *snapshotCapture) {
+		if capture != nil && capture.name != "" {
+			seen[capture.name] = struct{}{}
+		}
+	}
+	add(d.snapshotWorkerInFlight)
+	for _, capture := range d.snapshotFinalJobs {
+		add(capture)
+	}
+	for capture := range d.snapshotAdmitted {
+		add(capture)
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (d *Daemon) finishStoppedSnapshotWorker(abandoned bool) {

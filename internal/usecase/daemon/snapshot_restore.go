@@ -2,23 +2,68 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/vt"
 )
 
 func (d *Daemon) closeRestoreDone() {
+	d.mu.Lock()
+	for name, entry := range d.stopped {
+		if entry.restoreDone == nil {
+			continue
+		}
+		select {
+		case <-entry.restoreDone:
+			continue
+		default:
+		}
+		entry.state = ports.SessionBroken
+		if entry.record.DegradedReason == "" {
+			entry.record.DegradedReason = "restore unavailable"
+		}
+		d.stopped[name] = entry
+		closeRuntimeRestoreDoneLocked(entry.restoreDone)
+	}
+	d.mu.Unlock()
 	d.restoreOnce.Do(func() { close(d.restoreDone) })
+}
+
+// startSnapshotRestoration launches catalogue-driven restoration as a durable
+// writer. Restoration reconciles committed checkpoints, so lifecycle ownership
+// must outlive it exactly as it outlives the snapshot and maintenance workers. The completion
+// channel is registered before the goroutine starts, so shutdown can never
+// begin waiting while this writer is still unregistered.
+func (d *Daemon) startSnapshotRestoration() {
+	if d == nil {
+		return
+	}
+	d.snapshotWorkerMu.Lock()
+	if d.restoreWorkerDone != nil {
+		d.snapshotWorkerMu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	d.restoreWorkerDone = done
+	d.snapshotWorkerMu.Unlock()
+	d.sessWg.Go(func() {
+		defer close(done)
+		d.restoreSnapshots(d.serveCtx)
+	})
 }
 
 func (d *Daemon) restoreSnapshots(ctx context.Context) {
 	if d == nil {
 		return
 	}
+	defer d.logStartupRecoveryCounts(0)
 	defer d.closeRestoreDone()
 	if ns := d.noticeStore; ns != nil {
 		claimed, err := ns.Claim()
@@ -64,7 +109,7 @@ func validateRestoreSessionSnapshot(snap snapcodec.Session) error {
 
 // restoreSession owns the restored tabs until registration succeeds. Every
 // unsuccessful path closes their PTYs and cancels their shared session context.
-func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, repositoryGeneration uint64) error {
+func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, repositoryGeneration uint64, checkpoint domain.CheckpointRef) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -101,6 +146,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, rep
 	// The loaded manifest is the repository head for this name. Future dirty
 	// checkpoints must continue from it rather than reuse generation one.
 	sess.snapshotPublishedGeneration = repositoryGeneration
+	sess.snapshotPublishedCheckpoint = &checkpoint
 	registered, err := d.persistAndRegisterRestoredSession(ctx, sess)
 	if err != nil || !registered {
 		return err
@@ -253,8 +299,32 @@ func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context
 // persistAndRegisterRestoredSession atomically transfers a successfully
 // persisted session to the daemon. The caller retains cleanup on false/error.
 func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *session) (bool, error) {
-	if err := d.persist.Save(sess.persistRecordLocked(sess.createdAt)); err != nil {
-		return false, err
+	if sess.incarnation == (domain.IncarnationID{}) {
+		d.mu.Lock()
+		stopped := d.stopped[sess.name]
+		d.mu.Unlock()
+		sess.incarnation = stopped.incarnation
+		if sess.incarnation == (domain.IncarnationID{}) {
+			var err error
+			sess.incarnation, err = domain.NewIncarnationID(rand.Reader)
+			if err != nil {
+				return false, fmt.Errorf("snapshot: generate durable identity: %w", err)
+			}
+		}
+	}
+	// Restoration is catalogue-authorized. Missing or unreadable authority is a
+	// hard failure.
+	if d.persistEnabled {
+		record, ok, err := d.catalogueRecord(sess.name)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, errors.New("snapshot: restored session is absent from catalogue")
+		}
+		if record.IncarnationID != sess.incarnation {
+			return false, errors.New("snapshot: restored session incarnation differs from catalogue")
+		}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -263,6 +333,10 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	}
 	sess.id = domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
+	stopped := d.stopped[sess.name]
+	sess.mu.Lock()
+	sess.restoreDone = stopped.restoreDone
+	sess.mu.Unlock()
 	delete(d.stopped, sess.name)
 	d.sessions[sess.id] = sess
 	sess.snapDirty.Store(false)

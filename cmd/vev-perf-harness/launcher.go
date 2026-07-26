@@ -117,21 +117,22 @@ type terminalOutput interface {
 }
 
 type cliProcess struct {
-	cmd            *exec.Cmd
-	pty            io.ReadWriteCloser
-	output         terminalOutput
-	chunks         chan []byte
-	done           chan struct{}
-	closed         sync.Once
-	waitErr        chan error
-	waitTimeout    func() <-chan time.Time
-	forceCleanup   func()
-	forceKill      func()
-	shutdown       func() error
-	cleanupRuntime func() error
-	terminalReady  bool
-	readyPath      string
-	closeResult    error
+	cmd              *exec.Cmd
+	pty              io.ReadWriteCloser
+	output           terminalOutput
+	chunks           chan []byte
+	done             chan struct{}
+	closed           sync.Once
+	waitErr          chan error
+	waitTimeout      func() <-chan time.Time
+	gracefulShutdown func()
+	forceCleanup     func()
+	forceKill        func()
+	shutdown         func() error
+	cleanupRuntime   func() error
+	terminalReady    bool
+	readyPath        string
+	closeResult      error
 }
 
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -203,6 +204,12 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		}
 		_ = slave.Close()
 		p.pty, p.output, p.chunks, p.done = master, output, make(chan []byte, 32), make(chan struct{})
+		// Stop workload generation through the attached shell before any signal.
+		// A normal shell exit makes the daemon detach the client; the client then
+		// closes and waits for its ssh transport, allowing a traced _stdio
+		// descendant to flush end marks and exit. Process-group signals are reserved
+		// for timeout escalation because they would kill the descendant concurrently.
+		p.gracefulShutdown = func() { _, _ = master.Write([]byte("exit\n")) }
 		go p.copyTerminal()
 	} else {
 		// Every launched role owns a dedicated process group, so the bounded
@@ -629,11 +636,10 @@ func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
 // Close tears down a launched role along a bounded escalation ladder. Each rung
 // performs one action, then waits a single closeDeadline for the process to be
 // reaped before the next rung escalates. The graceful rungs — the public daemon
-// stop, the client shell exit, the controlling-terminal hangup, and SIGTERM —
-// let a role close its blocked transport operations and serialize their end
-// marks; only a SIGKILL severs a process before it can, so only that rung fails
-// teardown. Every path closes the PTY exactly once and finalizes output and
-// runtime state.
+// stop and a client shell exit — let a role close its blocked transport
+// operations and drain descendants' end marks. Process-group SIGTERM is reserved
+// for timeout escalation; only a SIGKILL rung fails teardown. Every path closes
+// the PTY exactly once and finalizes output and runtime state.
 func (p *cliProcess) Close() error {
 	p.closed.Do(func() {
 		// 1. Drain terminal output for the whole teardown. Without an active
@@ -682,27 +688,19 @@ func (p *cliProcess) Close() error {
 			_ = p.shutdown()
 			waitForExit()
 		}
-		// 3. Client role: a public terminal client owns a shell session. Ask that
-		// shell to exit so the client detaches and its transport finishes its
-		// receive span cleanly.
-		if p.pty != nil && !reaped() {
-			_, _ = p.pty.Write([]byte("exit\n"))
+		// 3. Client role: stop the shell normally. Session teardown detaches the
+		// client, which closes and waits for ssh/_stdio before it exits.
+		if p.gracefulShutdown != nil && !reaped() {
+			p.gracefulShutdown()
 			waitForExit()
 		}
-		// 4. Hang up the controlling terminal. The attach path installs a signal
-		// handler, so this SIGHUP is a graceful detach — not an abrupt kill — and
-		// the client still flushes its in-flight receive end mark.
-		if p.pty != nil && !reaped() {
-			closePTY()
-			waitForExit()
-		}
-		// 5. SIGTERM the role's own process group. The daemon and, through its
-		// attach signal handler, the client both treat this as a graceful stop.
+		// 4. Escalate a role that ignored graceful shutdown to process-group
+		// SIGTERM. This remains bounded and cleans up hung descendants.
 		if !reaped() {
 			p.forceProcessGroupCleanup()
 			waitForExit()
 		}
-		// 6. SIGKILL the role's process group. This severs the process; an
+		// 5. SIGKILL the role's process group. This severs the process; an
 		// in-flight observed operation cannot be closed, so its trace may truncate.
 		killed := false
 		if !reaped() {
@@ -710,12 +708,12 @@ func (p *cliProcess) Close() error {
 			p.forceProcessGroupKill()
 			waitForExit()
 		}
-		// 7. A SIGKILL escalation cannot guarantee a complete trace. Fail teardown
+		// 6. A SIGKILL escalation cannot guarantee a complete trace. Fail teardown
 		// with a clear cause rather than letting the truncation surface later as a
 		// downstream merge mystery. The graceful rungs never error on their own.
 		if killed {
 			if exited {
-				p.closeResult = errors.New("public CLI process did not exit after hangup and SIGTERM; killed")
+				p.closeResult = errors.New("public CLI process did not exit after graceful shutdown and SIGTERM; killed")
 			} else {
 				p.closeResult = errors.New("timed out reaping public CLI process")
 			}

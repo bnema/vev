@@ -122,7 +122,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			Env:     []string{"A=B", "XY=123"},
 		})
 		want := []byte{
-			0x00, 0x12, 0x00, // version, intent
+			0x00, 0x13, 0x00, // version, intent
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -336,7 +336,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(18), ProtocolVersion)
+	require.Equal(t, uint16(19), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -461,7 +461,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "minimal",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
 			want: []byte{
-				0x00, 0x12,
+				0x00, 0x13,
 				0x00,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x00,
@@ -482,7 +482,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 				JSON:          true,
 			},
 			want: []byte{
-				0x00, 0x12,
+				0x00, 0x13,
 				0x01,
 				0x00, 0x05, 't', 'o', 'a', 's', 't',
 				0x00, 0x03,
@@ -741,6 +741,35 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 	assertTrailingGarbageFails(t, append(append([]byte(nil), legacy...), 0x00), UnmarshalKill)
 }
 
+func TestSessionInfoRecoveryState(t *testing.T) {
+	tests := []struct {
+		name  string
+		state SessionState
+		want  []byte
+	}{
+		{name: "running", state: SessionRunning, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{name: "stopped", state: SessionStopped, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
+		{name: "broken", state: SessionBroken, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: tt.state}}})
+			require.Equal(t, tt.want, payload)
+			got, err := UnmarshalSessions(payload)
+			require.NoError(t, err)
+			require.Equal(t, tt.state, got.Sessions[0].State)
+			assertAllPrefixesFail(t, payload, UnmarshalSessions)
+			assertTrailingGarbageFails(t, payload, UnmarshalSessions)
+		})
+	}
+	for _, state := range []byte{3, 255} {
+		payload := append([]byte(nil), tests[0].want...)
+		payload[len(payload)-1] = state
+		_, err := UnmarshalSessions(payload)
+		require.Error(t, err, "state %d", state)
+	}
+}
+
 func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -755,8 +784,8 @@ func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 		{
 			name: "two",
 			msg: Sessions{Sessions: []SessionInfo{
-				{SessionID: "0", Name: "0", Ephemeral: true, Tabs: 1, Attached: false},
-				{SessionID: "work", Name: "proj", Ephemeral: false, Tabs: 5, Attached: true, Stopped: true},
+				{SessionID: "0", Name: "0", State: SessionRunning, Ephemeral: true, Tabs: 1, Attached: false},
+				{SessionID: "work", Name: "proj", State: SessionStopped, Ephemeral: false, Tabs: 5, Attached: true},
 			}},
 			want: []byte{
 				0x00, 0x02,

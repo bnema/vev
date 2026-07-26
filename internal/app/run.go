@@ -32,6 +32,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/config"
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/noticefile"
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
@@ -48,8 +49,9 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/internal/usecase/recovery"
 	pdgram "github.com/bnema/vev/pkg/dgram"
-	"github.com/bnema/vev/pkg/kv"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 // cmdKind identifies which sub-command the CLI parsed.
@@ -114,6 +116,11 @@ var (
 	version = "0.1.0-dev"
 	commit  = "none"
 	date    = "unknown"
+
+	openCatalogue = persist.OpenOrCreate
+	listenDaemon  = func(dir string, observer ports.SerializedRuntimeObserver) (ports.Listener, error) {
+		return ipc.Listen(dir, ipc.WithRuntimeObserver(observer))
+	}
 )
 
 // versionLine renders the --version output.
@@ -410,17 +417,130 @@ func pprofAddrIsLoopback(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+type ownedDaemonStart func(context.Context) error
+
+type lifecycleOwnership interface {
+	Release() error
+}
+
+func joinLifecycleReleaseError(retErr *error, owner lifecycleOwnership) {
+	*retErr = errors.Join(*retErr, owner.Release())
+}
+
+type lifecycleStartupDeps struct {
+	ensurePrivate func(string) error
+	acquire       func(context.Context, string, time.Duration) (lifecycleOwnership, error)
+	log           *slog.Logger
+}
+
+const lifecycleAcquireRetry = 25 * time.Millisecond
+
+func lifecycleStartupDependencies(log *slog.Logger) lifecycleStartupDeps {
+	return lifecycleStartupDeps{
+		ensurePrivate: safedir.EnsurePrivate,
+		acquire: func(ctx context.Context, runtimeDir string, retry time.Duration) (lifecycleOwnership, error) {
+			return lifecycle.Acquire(ctx, runtimeDir, retry)
+		},
+		log: log,
+	}
+}
+
+func runWithLifecycleOwner(ctx context.Context, runtimeDir, stateDir string, start ownedDaemonStart) error {
+	return runWithLifecycleOwnerDeps(ctx, runtimeDir, stateDir, start, lifecycleStartupDependencies(nil))
+}
+
+func runWithLifecycleOwnerDeps(ctx context.Context, runtimeDir, stateDir string, start ownedDaemonStart, deps lifecycleStartupDeps) (retErr error) {
+	log := deps.log
+	if log == nil {
+		log = slog.Default()
+	}
+	if err := deps.ensurePrivate(runtimeDir); err != nil {
+		return fmt.Errorf("vev: secure runtime directory: %w", err)
+	}
+	if err := deps.ensurePrivate(stateDir); err != nil {
+		return fmt.Errorf("vev: secure state directory: %w", err)
+	}
+	lockPath := lifecycle.Path(runtimeDir)
+	log.Info("lifecycle_owner_wait", "path", lockPath)
+	owner, err := deps.acquire(ctx, runtimeDir, lifecycleAcquireRetry)
+	if err != nil {
+		log.Warn("lifecycle_owner_wait_failed", "path", lockPath, "reason_code", "acquire-failed")
+		return fmt.Errorf("vev: acquire lifecycle ownership: %w", err)
+	}
+	log.Info("lifecycle_owner_acquired", "path", lockPath)
+	defer func() {
+		releaseErr := owner.Release()
+		if releaseErr != nil {
+			log.Error("lifecycle_owner_release_failed", "path", lockPath, "reason_code", "release-failed")
+		} else {
+			log.Info("lifecycle_owner_released", "path", lockPath)
+		}
+		retErr = errors.Join(retErr, releaseErr)
+	}()
+	if start == nil {
+		return errors.New("vev: nil owned daemon startup")
+	}
+	return start(ctx)
+}
+
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
-// entered by an auto-spawned child): it sets up logging, binds the socket,
-// constructs the daemon, and serves until the last session exits or a
-// termination signal arrives (graceful shutdown notifies attached clients).
+// entered by an auto-spawned child) while holding exclusive lifecycle
+// ownership through complete teardown.
 func runDaemon() (retErr error) {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	log, logCloser, err := configureLogging(logging.Daemon, true)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = logCloser.Close() }()
+	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
+	return runWithLifecycleOwnerDeps(ctx, ipc.SocketDir(), platform.StateDir(), func(ctx context.Context) error {
+		return runDaemonOwnedWithLogger(ctx, log)
+	}, lifecycleStartupDependencies(log))
+}
 
+func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, recoveryMode string) {
+	log.Info("catalogue_validated", "records", len(records), "recovery", recoveryMode)
+}
+
+func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord, restoring int) {
+	healthy, fresh, broken := 0, 0, 0
+	for _, record := range records {
+		switch {
+		case record.DegradedReason != "":
+			broken++
+		case record.Committed == nil:
+			fresh++
+		default:
+			healthy++
+		}
+	}
+	log.Info("daemon_startup_complete", "healthy", healthy, "fresh", fresh, "restoring", restoring, "broken", broken)
+}
+
+func constructDaemonBeforeSocketPublication(
+	construct func() *daemon.Daemon,
+	prepare func(*daemon.Daemon) error,
+	listen func() (ports.Listener, error),
+) (*daemon.Daemon, ports.Listener, error) {
+	d := construct()
+	if err := prepare(d); err != nil {
+		return d, nil, err
+	}
+	ln, err := listen()
+	return d, ln, err
+}
+
+func runDaemonOwned(ctx context.Context) (retErr error) {
+	log, logCloser, err := configureLogging(logging.Daemon, true)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
+	return runDaemonOwnedWithLogger(ctx, log)
+}
+
+func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr error) {
 	clk := clock.New()
 	observer, observerCloser, err := newPerformanceTrace(clk)
 	if err != nil {
@@ -429,17 +549,6 @@ func runDaemon() (retErr error) {
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	// Every accepted local connection shares this process's serialized sink.
-	ln, err := ipc.Listen(ipc.SocketDir(), ipc.WithRuntimeObserver(observer))
-	if err != nil {
-		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
-		return fmt.Errorf("vev: daemon listen: %w", err)
-	}
-	defer func() { _ = ln.Close() }()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-
 	if addr := os.Getenv("VEV_PPROF_ADDR"); addr != "" {
 		if !pprofAddrIsLoopback(addr) {
 			log.Warn("pprof bound to non-loopback address; /debug/pprof is unauthenticated", "addr", addr)
@@ -452,7 +561,6 @@ func runDaemon() (retErr error) {
 		log.Info("pprof enabled", "addr", addr)
 	}
 
-	log.Info("daemon starting", "socket", ln.Addr())
 	daemonOpts := []daemon.Option(nil)
 	if observer != nil {
 		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
@@ -467,23 +575,54 @@ func runDaemon() (retErr error) {
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
-	snapshotRepository := snapshotadapter.NewRepository(snapshotDir())
-	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository, snapshotRepository))
-	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticefile.New(platform.StateDir())))
-	storePath := persist.StorePath(platform.StateDir())
-	var storeErr error
-	if store, err := kv.Open(storePath); err != nil {
-		log.Warn("opening session store failed; persistence disabled", "path", storePath, "err", err)
-		storeErr = err
-	} else {
-		log.Info("session persistence enabled", "path", storePath)
-		daemonOpts = append(daemonOpts, daemon.WithStore(store))
+	snapshotRepository := snapshotadapter.NewRepositoryWithLogger(snapshotDir(), log)
+	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository))
+	noticeStore := noticefile.New(platform.StateDir())
+	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticeStore))
+	stateDir := platform.StateDir()
+	storePath := persist.StorePath(stateDir)
+	opened, err := openCatalogue(stateDir)
+	if err != nil {
+		log.Error("catalogue_validation_failed", "path", storePath, "reason_code", "open-failed")
+		if errors.Is(err, persist.ErrCatalogueUnreadable) {
+			return unreadableCatalogueError(stateDir)
+		}
+		return fmt.Errorf("vev: open durable session state %s: %w", storePath, err)
 	}
-	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
-	if storeErr != nil {
-		d.NotifyGlobal(domain.NoticeWarn, domain.NoticePersistDisabled,
-			"session persistence is disabled; sessions will not survive daemon restarts", storeErr)
+	recoveryMode := "current"
+	if opened.NewInstall {
+		recoveryMode = "new-install"
 	}
+	logCatalogueRecovery(log, opened.Records, recoveryMode)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, rand.Reader)
+	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))
+	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository))
+	log.Info("session persistence enabled", "path", storePath)
+	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))
+
+	// Construct the catalogue-backed expected-session registry before socket
+	// publication. Phase 3 snapshot restoration remains asynchronous in Serve.
+	d, ln, err := constructDaemonBeforeSocketPublication(
+		func() *daemon.Daemon { return daemon.New(pty.NewFactory(), clk, log, daemonOpts...) },
+		func(d *daemon.Daemon) error {
+			if err := d.CollectStartupGarbage(ctx); err != nil {
+				// GC is best-effort, but it is fully finished before socket
+				// publication. A failed pass leaves durable state untouched and
+				// restoration retains its per-session failure isolation.
+				log.Warn("snapshot_garbage_collection_failed", "err", err)
+			}
+			return nil
+		},
+		func() (ports.Listener, error) { return listenDaemon(ipc.SocketDir(), observer) },
+	)
+	if err != nil {
+		closeErr := opened.Catalogue.Close()
+		log.Error("daemon startup preparation failed", "socket_dir", ipc.SocketDir(), "err", err)
+		return errors.Join(fmt.Errorf("vev: prepare daemon startup: %w", err), closeErr)
+	}
+	defer func() { _ = ln.Close() }()
+	log.Info("daemon starting", "socket", ln.Addr())
+
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go func() {
@@ -695,7 +834,7 @@ func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
 			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
 		}
 	}
-	return ensureDaemon(ctx, d.dir, dial, realSpawn, defaultBackoff)
+	return ensureDaemonWithLifecycle(ctx, d.dir, dial, realSpawn, defaultBackoff)
 }
 
 func detachedLocalHello(name, cwd string) ports.Hello {
@@ -713,7 +852,7 @@ func detachedLocalHello(name, cwd string) ports.Hello {
 }
 
 func createDetachedLocalSession(ctx context.Context, name string) error {
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
@@ -776,40 +915,26 @@ func requestDaemonStop(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
 	defer cancel()
 
-	done := make(chan error, 1)
-	go func() {
-		transport, err := realDial(ctx, ipc.SocketDir())
-		if err != nil {
-			done <- fmt.Errorf("vev: no daemon running")
-			return
-		}
-		defer func() { _ = transport.Close() }()
-		closed := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = transport.Close()
-			case <-closed:
-			}
-		}()
-		defer close(closed)
-		if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
-			done <- fmt.Errorf("vev: requesting daemon stop: %w", err)
-			return
-		}
-		if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
-			done <- fmt.Errorf("vev: reading daemon stop reply: %w", err)
-			return
-		}
-		done <- nil
-	}()
-
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("vev: stopping daemon: %w", ctx.Err())
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
+	if err != nil {
+		return fmt.Errorf("vev: stopping daemon: %w", err)
 	}
+	if owner != nil {
+		return errors.Join(errors.New("vev: no daemon running"), owner.Release())
+	}
+	defer func() { _ = transport.Close() }()
+	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+		return fmt.Errorf("vev: requesting daemon stop: %w", err)
+	}
+	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("vev: reading daemon stop reply: %w", err)
+	}
+
+	owner, err = waitForLifecycleAvailability(ctx, ipc.SocketDir(), defaultBackoff)
+	if err != nil {
+		return fmt.Errorf("vev: waiting for daemon ownership transfer: %w", err)
+	}
+	return owner.Release()
 }
 
 // runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it
@@ -831,7 +956,7 @@ func runStdio(ctx context.Context) (retErr error) {
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
 		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
@@ -946,7 +1071,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+	daemonTr, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
 		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
@@ -1163,16 +1288,27 @@ func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger
 
 // runList prints the daemon's session listing. With no daemon running, it
 // falls back to the persisted stopped-session records.
-func runList(ctx context.Context) error {
-	transport, err := realDial(ctx, ipc.SocketDir())
+func runList(ctx context.Context) (retErr error) {
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
+		return fmt.Errorf("vev: waiting for durable session state: %w", err)
+	}
+	if owner != nil {
+		defer joinLifecycleReleaseError(&retErr, owner)
 		records, loadErr := persist.LoadReadOnly(platform.StateDir())
 		if loadErr != nil {
+			if errors.Is(loadErr, persist.ErrCatalogueUnreadable) {
+				return unreadableCatalogueError(platform.StateDir())
+			}
 			return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
 		}
 		infos := make([]ports.SessionInfo, 0, len(records))
 		for _, r := range records {
-			infos = append(infos, ports.SessionInfo{Name: r.Name, Stopped: true})
+			state := ports.SessionStopped
+			if r.DegradedReason != "" {
+				state = ports.SessionBroken
+			}
+			infos = append(infos, ports.SessionInfo{Name: r.Name, State: state})
 		}
 		printSessions(os.Stdout, infos)
 		return nil
@@ -1213,11 +1349,17 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		state := "running"
 		tabs := fmt.Sprintf("%d", s.Tabs)
 		attached := "no"
-		if s.Stopped {
+		switch s.State {
+		case ports.SessionStopped:
 			state = "stopped"
 			tabs = "-"
-		} else if s.Ephemeral {
-			state = "temporary"
+		case ports.SessionBroken:
+			state = "broken"
+			tabs = "-"
+		default:
+			if s.Ephemeral {
+				state = "temporary"
+			}
 		}
 		if s.Attached {
 			attached = "yes"
@@ -1227,83 +1369,52 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	_ = tw.Flush()
 }
 
-// offlineSnapshotSource owns the durable source and tombstone transitions for
-// a daemon-less kill. It is intentionally local to the composition root: the
-// daemon uses the repository through its narrower ports.
-type offlineSnapshotSource interface {
-	Tombstone(context.Context, string) error
-	Delete(context.Context, string) error
-	DeleteLegacy(context.Context, string) error
-	DeleteTombstone(context.Context, string) error
+func unreadableCatalogueError(stateDir string) error {
+	return fmt.Errorf("%w: vev: durable session state at %s cannot be read and was left untouched.\n"+
+		"vev does not erase it automatically. To start fresh, remove it:\n"+
+		"    rm -rf %s", persist.ErrCatalogueUnreadable, stateDir, stateDir)
 }
 
-var newOfflineSnapshotRepository = func(dir string) offlineSnapshotSource {
-	return snapshotadapter.NewRepository(dir)
-}
-
-func phaseError(phase string, err error) error {
-	if err == nil {
-		return nil
+func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
+	stateDir := platform.StateDir()
+	if _, err := os.Stat(persist.StorePath(stateDir)); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("vev: no such session: %s", name)
+	} else if err != nil {
+		return fmt.Errorf("vev: reading stored sessions: %w", err)
 	}
-	return fmt.Errorf("vev: %s: %w", phase, err)
+	repository := snapshotadapter.NewRepository(snapshotDir())
+	opened, err := openCatalogue(stateDir)
+	if err != nil {
+		if errors.Is(err, persist.ErrCatalogueUnreadable) {
+			return unreadableCatalogueError(stateDir)
+		}
+		return fmt.Errorf("vev: opening stored sessions: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, opened.Catalogue.Close()) }()
+
+	if _, ok, err := opened.Catalogue.Record(name); err != nil {
+		return fmt.Errorf("vev: reading stored session: %w", err)
+	} else if !ok {
+		return fmt.Errorf("vev: no such session: %s", name)
+	}
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
+	if err := coordinator.Delete(ctx, name); err != nil {
+		return fmt.Errorf("vev: deleting stored session: %w", err)
+	}
+	return nil
 }
 
 // runKill asks the daemon to terminate a named session, every session, or the daemon.
-func runKill(ctx context.Context, name string, all, daemon bool) error {
-	transport, err := realDial(ctx, ipc.SocketDir())
+func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) {
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
+		return fmt.Errorf("vev: waiting for durable session state: %w", err)
+	}
+	if owner != nil {
+		defer joinLifecycleReleaseError(&retErr, owner)
 		if name != "" && !all && !daemon {
-			storePath := persist.StorePath(platform.StateDir())
-			if _, statErr := os.Stat(storePath); errors.Is(statErr, os.ErrNotExist) {
-				return fmt.Errorf("vev: no such session: %s", name)
-			} else if statErr != nil {
-				return fmt.Errorf("vev: reading stored sessions: %w", statErr)
-			}
-			records, loadErr := persist.LoadReadOnly(platform.StateDir())
-			if loadErr != nil {
-				return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
-			}
-			found := false
-			for _, record := range records {
-				if record.Name == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("vev: no such session: %s", name)
-			}
-			p, openErr := persist.Open(platform.StateDir())
-			if openErr != nil {
-				return fmt.Errorf("vev: opening stored sessions: %w", openErr)
-			}
-			snapshots := newOfflineSnapshotRepository(snapshotDir())
-			// The durable marker is the commit point for a logical kill. Keep it and
-			// the persisted record until both independently recoverable sources have
-			// crossed their deletion durability boundaries.
-			if tombstoneErr := snapshots.Tombstone(ctx, name); tombstoneErr != nil {
-				_ = p.Close()
-				return fmt.Errorf("vev: marking session killed: %w", tombstoneErr)
-			}
-			incrementalErr := snapshots.Delete(ctx, name)
-			legacyErr := snapshots.DeleteLegacy(ctx, name)
-			if incrementalErr != nil || legacyErr != nil {
-				_ = p.Close()
-				return errors.Join(
-					phaseError("deleting incremental session snapshot", incrementalErr),
-					phaseError("deleting legacy session snapshot", legacyErr),
-				)
-			}
-			if deleteErr := p.Delete(name); deleteErr != nil {
-				_ = p.Close()
-				return fmt.Errorf("vev: deleting stored session: %w", deleteErr)
-			}
-			if tombstoneErr := snapshots.DeleteTombstone(ctx, name); tombstoneErr != nil {
-				_ = p.Close()
-				return fmt.Errorf("vev: clearing killed session marker: %w", tombstoneErr)
-			}
-			if closeErr := p.Close(); closeErr != nil {
-				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
+			if err := runOfflineNamedKill(ctx, name); err != nil {
+				return err
 			}
 			printKillSuccess(name, all, daemon)
 			return nil

@@ -8,51 +8,46 @@ import (
 	"testing"
 )
 
-func TestWriteImmutableUsesOneFinalDirectorySync(t *testing.T) {
+func TestWriteImmutablePublishesAndReusesIdenticalData(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	dir := filepath.Join(repo.dir, "immutable")
 	if err := repo.ensurePrivateDirectory(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	syncs := 0
-	repo.hooks.syncDirectory = func(got string) error {
-		if got == dir {
-			syncs++
-		}
-		return nil
-	}
+	path := filepath.Join(dir, "object")
 	data := []byte("immutable")
-	if err := repo.writeImmutable(filepath.Join(dir, "object"), data, func(existing []byte) error {
+	verify := func(existing []byte) error {
 		if !bytes.Equal(existing, data) {
 			return errors.New("unexpected immutable data")
 		}
 		return nil
-	}); err != nil {
+	}
+	if err := repo.writeImmutable(path, data, verify); err != nil {
 		t.Fatal(err)
 	}
-	if syncs != 1 {
-		t.Fatalf("successful immutable directory syncs = %d, want 1", syncs)
+	if err := repo.writeImmutable(path, data, verify); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("immutable data = %q, want %q", got, data)
 	}
 }
 
-func TestWithAtomicTempPreservesLifecycleOrder(t *testing.T) {
+func TestWithAtomicTempRemovesPublishedTemporaryFile(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	dir := filepath.Join(repo.dir, "temporary")
 	if err := repo.ensurePrivateDirectory(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	var events []string
-	repo.hooks.createTemp = func(string) error { events = append(events, "create"); return nil }
-	repo.hooks.writeTemp = func(string) error { events = append(events, "write"); return nil }
-	repo.hooks.syncFile = func(string) error { events = append(events, "sync file"); return nil }
-	repo.hooks.closeFile = func(string) error { events = append(events, "close"); return nil }
-	repo.hooks.remove = func(string) error { events = append(events, "remove"); return nil }
-	repo.hooks.syncDirectory = func(string) error { events = append(events, "sync directory"); return nil }
-
+	var temporary string
 	if err := repo.withAtomicTemp(dir, []byte("data"), func(path string) (bool, error) {
-		events = append(events, "publish")
+		temporary = path
 		info, err := os.Stat(path)
 		if err != nil {
 			return true, err
@@ -64,21 +59,14 @@ func TestWithAtomicTempPreservesLifecycleOrder(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create", "write", "sync file", "close", "publish", "remove", "sync directory"}
-	if len(events) != len(want) {
-		t.Fatalf("lifecycle = %v, want %v", events, want)
-	}
-	for i := range want {
-		if events[i] != want[i] {
-			t.Fatalf("lifecycle = %v, want %v", events, want)
-		}
+	if _, err := os.Stat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file remains after publication: %v", err)
 	}
 }
 
-func TestWriteMutableDoesNotRemoveConsumedTemporaryFile(t *testing.T) {
+func TestWriteMutableConsumesTemporaryFile(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	path := filepath.Join(repo.dir, "HEAD")
-	repo.hooks.remove = func(string) error { return errors.New("remove must not run") }
 
 	if err := repo.writeMutable(path, []byte("head")); err != nil {
 		t.Fatalf("writeMutable error = %v", err)
@@ -89,5 +77,9 @@ func TestWriteMutableDoesNotRemoveConsumedTemporaryFile(t *testing.T) {
 	}
 	if !bytes.Equal(got, []byte("head")) {
 		t.Fatalf("HEAD = %q, want %q", got, "head")
+	}
+	matches, err := filepath.Glob(filepath.Join(repo.dir, ".tmp-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("temporary files after mutable write = %v, glob error = %v", matches, err)
 	}
 }

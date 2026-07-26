@@ -311,13 +311,8 @@ func appendNoticeFragment(line, fragment []byte) ([]byte, bool) {
 	}
 	required := len(line) + len(fragment)
 	if required > cap(line) {
-		capacity := cap(line) * 2
-		if capacity < noticeReadBufferSize {
-			capacity = noticeReadBufferSize
-		}
-		if capacity > maxNoticeRecordSize {
-			capacity = maxNoticeRecordSize
-		}
+		capacity := max(cap(line)*2, noticeReadBufferSize)
+		capacity = min(capacity, maxNoticeRecordSize)
 		grown := make([]byte, len(line), capacity)
 		copy(grown, line)
 		line = grown

@@ -4,48 +4,33 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
-func TestHandleKillStoppedUsesDurableBothSourcePurge(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	repository := &retryablePurgeRepository{legacyErr: errors.New("legacy delete failed")}
-	WithSnapshotRepository(repository, repository)(d)
-	d.stopped["work"] = stoppedSession{name: "work"}
-
-	transport := portsmocks.NewMockTransport(t)
-	transport.EXPECT().Send(mock.Anything).Return(nil).Once()
-	transport.EXPECT().Close().Return(nil).Once()
-	d.handleKill(transport, ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{Name: "work"})})
-
-	require.Equal(t, []string{"tombstone", "incremental", "legacy"}, repository.calls)
-	require.True(t, repository.tombstoned["work"])
-	require.True(t, d.stopped["work"].purging)
-}
-
-func TestStoppedPurgeMetadataFailureRemainsFencedForRetry(t *testing.T) {
+func TestStoppedPurgeMetadataFailureFencesCatalogue(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := &retryablePurgeRepository{}
-	WithSnapshotRepository(repository, repository)(d)
+	WithSnapshotRepository(repository)(d)
 	store, state := newMockStore(t)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
+	record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}}
+	require.NoError(t, d.catalogue.Create(record))
 	metadataErr := errors.New("metadata delete failed")
 	state.mu.Lock()
 	state.deleteErr = func(string) error { return metadataErr }
 	state.mu.Unlock()
-	d.stopped["work"] = stoppedSession{name: "work"}
+	d.stopped["work"] = stoppedSession{name: "work", incarnation: record.IncarnationID, record: record}
 
 	require.ErrorIs(t, d.retryStoppedPurge("work"), metadataErr)
-	require.True(t, repository.tombstoned["work"])
-	require.Equal(t, []string{"tombstone", "incremental", "legacy"}, repository.calls)
+	require.Empty(t, repository.calls, "snapshot deletion must wait for catalogue removal")
 
 	state.mu.Lock()
 	state.deleteErr = nil
 	state.mu.Unlock()
-	require.NoError(t, d.retryStoppedPurge("work"))
-	require.Equal(t, []string{"tombstone", "incremental", "legacy", "tombstone", "incremental", "legacy", "clear tombstone"}, repository.calls)
+	require.ErrorIs(t, d.retryStoppedPurge("work"), persist.ErrCatalogueDurability)
+	require.Empty(t, repository.calls, "a fenced catalogue must not retry deletion")
 }
