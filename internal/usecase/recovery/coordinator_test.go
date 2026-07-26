@@ -26,7 +26,7 @@ func TestCoordinatorRecoverFailsClosedForPendingWork(t *testing.T) {
 	repo := portsmocks.NewMockSnapshotRepository(t)
 	repo.EXPECT().ListDeletionTombstones(context.Background(), ports.DeletionTombstoneCursor{}, recoveryListingBudget).
 		Return(ports.DeletionTombstonePage{Done: true}, nil)
-	c := NewCoordinator(nil, repo, journalStub{intents: []domain.DiscardIntent{{}}}, nil)
+	c := NewCoordinator(newTransactionCatalogue(), repo, journalStub{intents: []domain.DiscardIntent{{}}}, nil)
 	require.ErrorIs(t, c.Recover(context.Background()), ErrPendingRecoveryUnsupported)
 }
 
@@ -35,6 +35,6 @@ func TestCoordinatorRecoverPagesTombstonesAndPropagatesErrors(t *testing.T) {
 	repo := portsmocks.NewMockSnapshotRepository(t)
 	repo.EXPECT().ListDeletionTombstones(context.Background(), ports.DeletionTombstoneCursor{}, recoveryListingBudget).
 		Return(ports.DeletionTombstonePage{}, cause)
-	c := NewCoordinator(nil, repo, journalStub{}, nil)
+	c := NewCoordinator(newTransactionCatalogue(), repo, journalStub{}, nil)
 	require.ErrorIs(t, c.Recover(context.Background()), cause)
 }

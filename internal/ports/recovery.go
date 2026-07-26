@@ -134,6 +134,16 @@ type CheckpointCoordinator interface {
 	PromoteFallback(context.Context, string, domain.CheckpointRef) (FallbackPromotionOutcome, error)
 }
 
+// SessionLifecycleCoordinator owns durable named-session create, rename, and
+// delete commit protocols. Runtime registries update only after these calls
+// complete successfully.
+type SessionLifecycleCoordinator interface {
+	CheckpointCoordinator
+	Create(context.Context, domain.CatalogueRecord) (domain.CatalogueRecord, error)
+	Rename(context.Context, string, string) (domain.CatalogueRecord, error)
+	Delete(context.Context, string) error
+}
+
 type Catalogue interface {
 	Records() []domain.CatalogueRecord
 	Record(string) (domain.CatalogueRecord, bool)

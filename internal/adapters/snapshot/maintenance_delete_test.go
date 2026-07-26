@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -36,6 +37,22 @@ func TestDeletionTombstoneCodec(t *testing.T) {
 	}
 	if _, err := decodeDeletionTombstone(append(encoded, 0)); err == nil {
 		t.Fatal("trailing byte accepted")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{name: "wrong magic", mutate: func(data []byte) []byte { data[0] ^= 0xff; return data }},
+		{name: "wrong version", mutate: func(data []byte) []byte { data[5]++; return data }},
+		{name: "invalid name", mutate: func(data []byte) []byte { copy(data[8:12], "../x"); return data }},
+		{name: "zero ID", mutate: func(data []byte) []byte { clear(data[len(data)-16:]); return data }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			malformed := test.mutate(append([]byte(nil), encoded...))
+			if _, err := decodeDeletionTombstone(malformed); err == nil {
+				t.Fatal("malformed tombstone accepted")
+			}
+		})
 	}
 
 	for _, boundary := range []string{"file-sync", "install", "directory-sync"} {
@@ -114,6 +131,25 @@ func TestDeletionTombstoneListingResumesAcrossRepositoryRecreation(t *testing.T)
 	}
 	if reads != len(want) {
 		t.Fatalf("tombstone object reads = %d, want %d", reads, len(want))
+	}
+}
+
+func TestMalformedDeletionTombstone(t *testing.T) {
+	dir := privateDir(t)
+	repo := NewRepository(dir)
+	tombstone := domain.DeletionTombstone{Name: "work", IncarnationID: domain.IncarnationID{7}}
+	if err := repo.WriteDeletionTombstone(context.Background(), tombstone); err != nil {
+		t.Fatal(err)
+	}
+	path := repo.deletionTombstonePath(tombstone.IncarnationID)
+	if err := os.WriteFile(path, []byte("malformed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ListDeletionTombstones(context.Background(), ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 64, Bytes: 1024}); err == nil {
+		t.Fatal("malformed tombstone was skipped")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("malformed tombstone was removed: %v", err)
 	}
 }
 

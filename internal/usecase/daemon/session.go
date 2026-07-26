@@ -292,9 +292,13 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			if resuming {
 				if _, ok := d.catalogueRecord(name); ok {
 					err = d.updateCatalogueMetadata(record.MetadataUpdate())
+				} else if d.lifecycleRecovery != nil {
+					record, err = d.lifecycleRecovery.Create(context.Background(), record)
 				} else {
 					err = d.createCatalogueRecord(record)
 				}
+			} else if d.lifecycleRecovery != nil {
+				record, err = d.lifecycleRecovery.Create(context.Background(), record)
 			} else {
 				err = d.createCatalogueRecord(record)
 			}
@@ -303,6 +307,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 				cancel()
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 			}
+			sess.incarnation = record.IncarnationID
 		}
 		delete(d.stopped, name)
 	}
@@ -696,26 +701,37 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		sess.mu.Unlock()
 		return err
 	}
-	var quarantine snapshotCoordinatorQuarantine
-	if !wasEphemeral && oldName != name {
-		quarantine = quarantineSnapshotCoordinatorWithEpoch(sess)
-		<-quarantine.done
-		if err := d.beginSnapshotPurge(oldName, sess.incarnation); err != nil {
-			return rollback(err)
-		}
-		// finishSnapshotPurge preserves the tombstone through both source
-		// deletions and the old metadata delete, including a retained legacy
-		// import whose verified source delete is still pending.
-		if err := d.finishSnapshotPurge(oldName, sess.incarnation); err != nil {
-			return rollback(err)
-		}
-	}
-	// For a named rename this is the durable commit point, deliberately after
-	// the old tombstone transaction. Ephemeral promotion has no old durable
-	// identity and can create its first record directly.
+	// Durable named renames are one atomic catalogue batch. The incarnation-keyed
+	// snapshot namespace is intentionally untouched.
 	if (wasEphemeral || oldName != name) && d.persistEnabled {
-		if err := d.createCatalogueRecord(record); err != nil {
-			return rollback(err)
+		if d.lifecycleRecovery != nil {
+			var committed domain.CatalogueRecord
+			var err error
+			if wasEphemeral {
+				committed, err = d.lifecycleRecovery.Create(context.Background(), record)
+			} else {
+				committed, err = d.lifecycleRecovery.Rename(context.Background(), oldName, name)
+			}
+			if err != nil {
+				return rollback(err)
+			}
+			record = committed
+		} else if wasEphemeral {
+			if err := d.createCatalogueRecord(record); err != nil {
+				return rollback(err)
+			}
+		} else {
+			if current, ok := d.catalogueRecord(oldName); ok {
+				current.Name = name
+				current.Cwd = record.Cwd
+				current.UpdatedAt = record.UpdatedAt
+				current.LastUsedSeq = record.LastUsedSeq
+				current.TabNames = append([]string(nil), record.TabNames...)
+				record = current
+			}
+			if err := d.catalogue.Rename(oldName, record); err != nil {
+				return rollback(err)
+			}
 		}
 	}
 
@@ -727,24 +743,12 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	delete(d.stopped, name)
 	sess.name = name
 	sess.createdAt = createdAt
+	sess.incarnation = record.IncarnationID
 	sess.ephemeral = false
 	sess.renameInProgress = false
-	// Keep the coordinator in quarantine until the new in-memory identity is
-	// fully committed. The fresh coordinator below makes the new repository
-	// start at generation one.
-	if !wasEphemeral && oldName != name {
-		sess.snapEligible.Store(false)
-	} else {
-		sess.snapEligible.Store(name != "")
-	}
+	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()
 	d.mu.Unlock()
-	if !wasEphemeral && oldName != name {
-		// A concurrent teardown may have quarantined after this rename did. In
-		// that case its newer epoch owns the stopped coordinator.
-		resumeSnapshotCoordinatorForNewIdentity(sess, quarantine)
-		return nil
-	}
 	if wasEphemeral {
 		sess.snapshotMu.Lock()
 		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
@@ -898,6 +902,11 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 // identity or persisted metadata is removed. It never runs under daemon or
 // session locks.
 func (d *Daemon) beginSnapshotPurge(name string, incarnation domain.IncarnationID) error {
+	if d.lifecycleRecovery != nil {
+		// The lifecycle coordinator performs the complete ordered protocol after
+		// snapshot writers have joined.
+		return nil
+	}
 	if d.snapshotRepository == nil || name == "" {
 		return nil
 	}
@@ -909,6 +918,9 @@ func (d *Daemon) beginSnapshotPurge(name string, incarnation domain.IncarnationI
 // leaves the marker in place so startup cannot restore or import the name and
 // a later live/offline kill can retry the idempotent source deletes.
 func (d *Daemon) finishSnapshotPurge(name string, incarnation domain.IncarnationID) error {
+	if d.lifecycleRecovery != nil {
+		return d.lifecycleRecovery.Delete(context.Background(), name)
+	}
 	if d.snapshotRepository == nil {
 		return d.deleteCatalogueRecord(name)
 	}

@@ -126,6 +126,7 @@ type Daemon struct {
 	// read-only migration input and is never used for new writes.
 	snapshotRepository ports.SnapshotRepository
 	checkpointRecovery ports.CheckpointCoordinator
+	lifecycleRecovery  ports.SessionLifecycleCoordinator
 	legacySnapshots    ports.LegacySnapshotSource
 	snapsEnabled       bool
 	noticeStore        ports.NoticeStore
@@ -276,6 +277,15 @@ func WithCatalogue(catalogue ports.Catalogue, records []domain.CatalogueRecord) 
 func WithCheckpointCoordinator(coordinator ports.CheckpointCoordinator) Option {
 	return func(d *Daemon) {
 		d.checkpointRecovery = coordinator
+	}
+}
+
+// WithRecoveryCoordinator installs all durable checkpoint and named-session
+// lifecycle transaction seams.
+func WithRecoveryCoordinator(coordinator ports.SessionLifecycleCoordinator) Option {
+	return func(d *Daemon) {
+		d.checkpointRecovery = coordinator
+		d.lifecycleRecovery = coordinator
 	}
 }
 

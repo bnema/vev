@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -10,7 +9,7 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
-func TestRenamePurgesOldIncrementalAndLegacyBeforeCommittingNewIdentity(t *testing.T) {
+func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := &retryablePurgeRepository{}
 	WithSnapshotRepository(repository, repository)(d)
@@ -21,15 +20,15 @@ func TestRenamePurgesOldIncrementalAndLegacyBeforeCommittingNewIdentity(t *testi
 	require.NoError(t, d.persist.Save(sess.persistRecordLocked(1)))
 
 	require.NoError(t, d.renameSession(sess, "new"))
-	require.Equal(t, []string{"tombstone", "incremental", "legacy", "clear tombstone"}, repository.calls)
+	require.Empty(t, repository.calls, "rename must not touch incarnation-keyed snapshot storage")
 	require.False(t, state.has("old"))
 	require.True(t, state.has("new"))
-	require.False(t, repository.tombstoned["old"])
+	require.Equal(t, sess.incarnation, state.record(t, "new").IncarnationID)
 }
 
-func TestRenameLegacyFailureLeavesOldIdentityFenced(t *testing.T) {
+func TestRenameIgnoresUnrelatedLegacySourceFailure(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	repository := &retryablePurgeRepository{legacyErr: errors.New("legacy delete failed")}
+	repository := &retryablePurgeRepository{}
 	WithSnapshotRepository(repository, repository)(d)
 	store, state := newMockStore(t)
 	WithStore(store)(d)
@@ -37,9 +36,8 @@ func TestRenameLegacyFailureLeavesOldIdentityFenced(t *testing.T) {
 	d.sessions = map[domain.SessionID]*session{sess.id: sess}
 	require.NoError(t, d.persist.Save(sess.persistRecordLocked(1)))
 
-	require.Error(t, d.renameSession(sess, "new"))
-	require.Equal(t, []string{"tombstone", "incremental", "legacy"}, repository.calls)
-	require.True(t, repository.tombstoned["old"])
-	require.True(t, state.has("old"))
-	require.False(t, state.has("new"))
+	require.NoError(t, d.renameSession(sess, "new"))
+	require.Empty(t, repository.calls)
+	require.False(t, state.has("old"))
+	require.True(t, state.has("new"))
 }
