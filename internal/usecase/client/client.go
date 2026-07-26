@@ -269,13 +269,23 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		transport, err := r.dialer.Dial(ctx)
 		if err != nil {
 			if resumeToken == 0 || ctx.Err() != nil {
-				reconnect.clear()
+				if clearErr := reconnect.clear(); clearErr != nil {
+					return errors.Join(err, clearErr)
+				}
 				return err
 			}
 			r.logger.Warn("reconnect dial failed", "err", err, "backoff", backoff)
-			reconnect.draw()
-			if !reconnect.sleep(ctx, r.clock, backoff) {
-				reconnect.clear()
+			if drawErr := reconnect.draw(); drawErr != nil {
+				return errors.Join(err, drawErr)
+			}
+			slept, sleepErr := reconnect.sleep(ctx, r.clock, backoff)
+			if sleepErr != nil {
+				return errors.Join(err, sleepErr)
+			}
+			if !slept {
+				if clearErr := reconnect.clear(); clearErr != nil {
+					return errors.Join(ctx.Err(), clearErr)
+				}
 				return ctx.Err()
 			}
 			backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
@@ -316,17 +326,29 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.SessionName = result.sessionName
 		}
 		if result.err == nil {
-			reconnect.clear()
+			if clearErr := reconnect.clear(); clearErr != nil {
+				return clearErr
+			}
 			return nil
 		}
 		if !shouldReconnect(result.err) || resumeToken == 0 || ctx.Err() != nil {
-			reconnect.clear()
+			if clearErr := reconnect.clear(); clearErr != nil {
+				return errors.Join(result.err, clearErr)
+			}
 			return result.err
 		}
 		r.logger.Warn("reconnecting after attach error", "err", result.err, "backoff", backoff)
-		reconnect.drawStage(reconnectStageSSH)
-		if !reconnect.sleep(ctx, r.clock, backoff) {
-			reconnect.clear()
+		if drawErr := reconnect.drawStage(reconnectStageSSH); drawErr != nil {
+			return errors.Join(result.err, drawErr)
+		}
+		slept, sleepErr := reconnect.sleep(ctx, r.clock, backoff)
+		if sleepErr != nil {
+			return errors.Join(result.err, sleepErr)
+		}
+		if !slept {
+			if clearErr := reconnect.clear(); clearErr != nil {
+				return errors.Join(ctx.Err(), clearErr)
+			}
 			return ctx.Err()
 		}
 		backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
@@ -342,70 +364,78 @@ type reconnectUI struct {
 	remote     bool
 	rawEntered *bool
 	showing    bool
-	rect       domain.Rect
 	stage      reconnectStage
 }
 
-func (u *reconnectUI) redraw(size domain.Size) {
+func (u *reconnectUI) redraw(size domain.Size) error {
 	if !*u.rawEntered || !u.remote {
-		return
+		return nil
 	}
-	if u.showing {
-		_ = clearReconnectToast(u.term.Out(), u.rect)
+	_, err := drawReconnectToastStage(u.term.Out(), size, u.stage)
+	if err != nil {
+		return fmt.Errorf("drawing reconnect toast: %w", err)
 	}
-	drawnRect, _ := drawReconnectToastStage(u.term.Out(), size, u.stage)
-	u.rect = drawnRect
-	_ = u.term.Flush()
+	if err := u.term.Flush(); err != nil {
+		return fmt.Errorf("flushing reconnect toast: %w", err)
+	}
 	u.showing = true
+	return nil
 }
 
-func (u *reconnectUI) drawStage(stage reconnectStage) {
+func (u *reconnectUI) drawStage(stage reconnectStage) error {
 	u.stage = stage
 	if u.showing && u.remote {
 		size, err := u.term.Size()
-		if err == nil {
-			u.redraw(size)
+		if err != nil {
+			return fmt.Errorf("reading terminal size for reconnect toast: %w", err)
 		}
-		return
+		return u.redraw(size)
 	}
-	u.draw()
+	return u.draw()
 }
 
-func (u *reconnectUI) draw() {
+func (u *reconnectUI) draw() error {
 	if !*u.rawEntered || u.showing {
-		return
+		return nil
 	}
 	if u.remote {
 		size, err := u.term.Size()
 		if err != nil {
-			return
+			return fmt.Errorf("reading terminal size for reconnect toast: %w", err)
 		}
-		u.redraw(size)
-		return
+		return u.redraw(size)
 	}
-	_, _ = u.term.Out().Write([]byte(statusReconnect))
-	_ = u.term.Flush()
+	if _, err := u.term.Out().Write([]byte(statusReconnect)); err != nil {
+		return fmt.Errorf("writing reconnect status: %w", err)
+	}
+	if err := u.term.Flush(); err != nil {
+		return fmt.Errorf("flushing reconnect status: %w", err)
+	}
 	u.showing = true
+	return nil
 }
 
-func (u *reconnectUI) clear() {
+func (u *reconnectUI) clear() error {
 	if !u.showing {
-		return
+		return nil
 	}
-	if u.remote {
-		_ = clearReconnectToast(u.term.Out(), u.rect)
-	} else {
-		_, _ = u.term.Out().Write([]byte(statusClear))
+	if !u.remote {
+		if _, err := u.term.Out().Write([]byte(statusClear)); err != nil {
+			return fmt.Errorf("clearing reconnect status: %w", err)
+		}
+		if err := u.term.Flush(); err != nil {
+			return fmt.Errorf("flushing reconnect status clear: %w", err)
+		}
 	}
-	_ = u.term.Flush()
 	u.showing = false
+	return nil
 }
 
-func (u *reconnectUI) sleep(ctx context.Context, clk ports.Clock, d time.Duration) bool {
+func (u *reconnectUI) sleep(ctx context.Context, clk ports.Clock, d time.Duration) (bool, error) {
 	if u.remote && u.showing {
 		return reconnectSleepWithResize(ctx, clk, d, u.term.ResizeEvents(), u.redraw)
 	}
-	return reconnectSleep(ctx, clk, d)
+	return reconnectSleep(ctx, clk, d), nil
 }
 
 func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool {
@@ -419,22 +449,24 @@ func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool 
 	}
 }
 
-func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size)) bool {
+func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size) error) (bool, error) {
 	t := clk.NewTimer(d)
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C():
-			return true
+			return true, nil
 		case <-ctx.Done():
-			return false
+			return false, nil
 		case size, ok := <-resizeEvents:
 			if !ok {
 				resizeEvents = nil
 				continue
 			}
 			if onResize != nil {
-				onResize(size)
+				if err := onResize(size); err != nil {
+					return false, err
+				}
 			}
 		}
 	}
@@ -619,7 +651,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	if err := enterRaw(); err != nil {
 		return welcomedResult(err)
 	}
-	reconnect.clear()
 
 	// 4. Derive a cancellable context so the pumps always unwind when the
 	// loop returns. The attach loop is the sole terminal writer and palette
@@ -757,6 +788,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	if remote {
 		clip = clipboard
 	}
+	awaitingReconnectReset := false
+	if reconnect.showing {
+		if reconnect.remote {
+			// Before the asynchronous sender starts, preserve transport ordering by
+			// requesting the reset synchronously after the initial Theme publication.
+			closed, resetErr := boundedPreWelcome(ctx, clk, transport, func() error {
+				return transport.Send(ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: size})})
+			})
+			if resetErr != nil {
+				resetResult := welcomedResult(fmt.Errorf("requesting reconnect reconciliation: %w", resetErr))
+				resetResult.transportClosed = closed
+				return resetResult
+			}
+			awaitingReconnectReset = true
+		}
+		if err := reconnect.clear(); err != nil {
+			return welcomedResult(err)
+		}
+	}
 	senderStarted = true
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
 	stdinDone := make(chan struct{})
@@ -780,24 +830,60 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	recvCh := make(chan recvResult, 1)
 	go runRecv(loopCtx, transport, recvCh, log)
 
+	requestReconnectReset := func() error {
+		if awaitingReconnectReset {
+			return nil
+		}
+		size, serr := term.Size()
+		if serr != nil {
+			return fmt.Errorf("reading terminal size for reconnect reconciliation: %w", serr)
+		}
+		select {
+		case sendCh <- ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: size})}:
+			awaitingReconnectReset = true
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
+	dismissReconnect := func() error {
+		if !reconnect.showing {
+			return nil
+		}
+		if err := reconnect.clear(); err != nil {
+			return err
+		}
+		if !reconnect.remote {
+			return nil
+		}
+		return requestReconnectReset()
+	}
+	loopCanceledResult := func() attachResult {
+		// A pump initiated shutdown (stdin EOF/detach) or the parent context
+		// was cancelled. A queued sender error takes priority.
+		select {
+		case serr := <-sendErrCh:
+			return welcomedResult(fmt.Errorf("vev: sending to daemon: %w", serr))
+		default:
+			return welcomedResult(nil)
+		}
+	}
 	for {
 		select {
 		case <-loopCtx.Done():
-			// A pump initiated shutdown (stdin EOF/detach) or the parent
-			// context was cancelled. A queued sender error takes priority.
-			select {
-			case serr := <-sendErrCh:
-				return welcomedResult(fmt.Errorf("vev: sending to daemon: %w", serr))
-			default:
-				return welcomedResult(nil)
-			}
+			return loopCanceledResult()
 		case ev, ok := <-linkEvents:
 			if !ok {
 				linkEvents = nil
 				continue
 			}
 			if ev.State == ports.LinkStateConnected {
-				reconnect.clear()
+				if err := dismissReconnect(); err != nil {
+					if errors.Is(err, context.Canceled) {
+						return loopCanceledResult()
+					}
+					return welcomedResult(fmt.Errorf("dismissing reconnect toast: %w", err))
+				}
 				select {
 				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(ports.ClientNotice{Action: ports.ClientNoticeLinkConnected})}:
 				case <-loopCtx.Done():
@@ -814,7 +900,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				continue
 			}
-			reconnect.drawStage(stageForLinkState(ev.State))
+			stage := stageForLinkState(ev.State)
+			if reconnect.remote && reconnect.showing && reconnect.stage != stage {
+				reconnect.stage = stage
+				if err := requestReconnectReset(); err != nil {
+					if errors.Is(err, context.Canceled) {
+						return loopCanceledResult()
+					}
+					return welcomedResult(fmt.Errorf("requesting reconnect reconciliation: %w", err))
+				}
+			} else if err := reconnect.drawStage(stage); err != nil {
+				return welcomedResult(err)
+			}
 			if ev.State == ports.LinkStateOffline {
 				// Stop waiting for the transport to reach Dead at 60s: exit with
 				// a retryable error so Run re-dials over ssh with the resume
@@ -850,10 +947,30 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding output: %w", derr))
 				}
+				// Dismissing or changing a local overlay requests a same-size resize,
+				// whose stateful base-zero Output is the daemon's authoritative reset.
+				// ACK intervening increments so the output window keeps moving, but do
+				// not apply diffs based on cells hidden by the client-local overlay.
+				resetFrame := isReconnectResetFrame(o)
+				if awaitingReconnectReset && !resetFrame && o.NewStateNum != 0 {
+					ackQueue.offer(o.NewStateNum)
+					continue
+				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
 					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
-				if ferr := term.Flush(); ferr != nil {
+				if awaitingReconnectReset && resetFrame {
+					awaitingReconnectReset = false
+				}
+				if reconnect.showing && reconnect.remote {
+					size, serr := term.Size()
+					if serr != nil {
+						return welcomedResult(fmt.Errorf("vev: reading terminal size for reconnect redraw: %w", serr))
+					}
+					if rerr := reconnect.redraw(size); rerr != nil {
+						return welcomedResult(fmt.Errorf("vev: redrawing reconnect toast: %w", rerr))
+					}
+				} else if ferr := term.Flush(); ferr != nil {
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
 				}
 				// The terminal boundary is after a successful flush and before ACK.
@@ -887,6 +1004,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			}
 		}
 	}
+}
+
+// isReconnectResetFrame identifies the authoritative stateful reset emitted
+// by the daemon's existing resize path. Stateless side effects can also have a
+// zero base, so they must not dismiss or reconcile a client-local overlay.
+func isReconnectResetFrame(o ports.Output) bool {
+	return o.BaseStateNum == 0 && o.NewStateNum != 0
 }
 
 // recvResult carries one framed message (or a read error) from the receive
