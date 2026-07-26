@@ -7,10 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
-func TestStoppedPurgeMetadataFailureRemainsFencedForRetry(t *testing.T) {
+func TestStoppedPurgeMetadataFailureFencesCatalogue(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := &retryablePurgeRepository{}
 	WithSnapshotRepository(repository)(d)
@@ -30,6 +31,6 @@ func TestStoppedPurgeMetadataFailureRemainsFencedForRetry(t *testing.T) {
 	state.mu.Lock()
 	state.deleteErr = nil
 	state.mu.Unlock()
-	require.NoError(t, d.retryStoppedPurge("work"))
-	require.Equal(t, []string{"delete incarnation"}, repository.calls)
+	require.ErrorIs(t, d.retryStoppedPurge("work"), persist.ErrCatalogueDurability)
+	require.Empty(t, repository.calls, "a fenced catalogue must not retry deletion")
 }

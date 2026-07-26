@@ -158,6 +158,18 @@ func (s *Store) Close() error {
 	return errors.Join(err, releaseLock(s.lockFile))
 }
 
+// CloseWithoutSync releases the process lock without making buffered mutations
+// durable. It is used when a higher-level transaction rejected those mutations.
+func (s *Store) CloseWithoutSync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return releaseLock(s.lockFile)
+}
+
 func writeAll(file *os.File, data []byte) error {
 	for len(data) > 0 {
 		n, err := file.Write(data)

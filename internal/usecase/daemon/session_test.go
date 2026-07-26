@@ -1184,19 +1184,22 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		defer release()
 		store := portsmocks.NewMockStore(t)
 		var attempted map[string][]byte
-		store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {}).Times(3)
-		store.EXPECT().Get([]byte("named")).Return(nil, false).Times(4)
+		store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {}).Times(2)
+		store.EXPECT().Get([]byte("named")).Return(nil, false).Times(3)
 		store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
 			attempted = map[string][]byte{string(key): append([]byte(nil), value...)}
 			return errors.New("disk full")
 		}).Once()
+		store.EXPECT().Delete([]byte("named")).Return(nil).Once()
 		clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
 		d := newTestDaemon(t, newFactory(t, p), clock)
 		WithStore(t, store)(d)
 
 		sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 		require.NoError(t, err)
-		require.EqualError(t, d.renameSession(sess, "named"), "disk full")
+		err = d.renameSession(sess, "named")
+		require.ErrorIs(t, err, persist.ErrCatalogueDurability)
+		require.ErrorContains(t, err, "disk full")
 		require.Equal(t, "0", sess.name)
 		require.True(t, sess.ephemeral)
 		require.Zero(t, sess.createdAt)
@@ -1206,10 +1209,8 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		require.Len(t, records, 1)
 		require.Equal(t, int64(100), records[0].CreatedAt, "a promotion must never attempt to persist a zero lifecycle identity")
 
-		store.EXPECT().Set(mock.Anything, mock.Anything).Return(nil).Once()
-		store.EXPECT().Sync().Return(nil).Once()
-		require.NoError(t, d.renameSession(sess, "named"))
-		require.Equal(t, int64(101), sess.createdAt, "the high-water mark must remain monotonic after a failed promotion")
+		require.ErrorIs(t, d.renameSession(sess, "named"), persist.ErrCatalogueDurability)
+		require.Equal(t, int64(101), d.lastAllocatedCreatedAt, "the lifecycle identity is allocated before the fenced catalogue rejects promotion")
 	})
 }
 

@@ -118,6 +118,10 @@ func TestCatalogueMutationsUseOneSync(t *testing.T) {
 			}
 		}
 	}).Once()
+	store.EXPECT().Get(mock.Anything).RunAndReturn(func(key []byte) ([]byte, bool) {
+		value, ok := state[string(key)]
+		return append([]byte(nil), value...), ok
+	}).Times(3)
 	store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
 		state[string(key)] = append([]byte(nil), value...)
 		return nil
@@ -146,7 +150,9 @@ func TestCatalogueMutationFailureDoesNotSync(t *testing.T) {
 	store := portsmocks.NewMockStore(t)
 	setErr := errors.New("set failed")
 	store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {})
+	store.EXPECT().Get([]byte("one")).Return(nil, false).Once()
 	store.EXPECT().Set(mock.Anything, mock.Anything).Return(setErr)
+	store.EXPECT().Delete([]byte("one")).Return(nil).Once()
 	p := New(store)
 	err := p.Replace("one", validRecord("one", 1))
 	require.ErrorIs(t, err, setErr)
@@ -204,4 +210,224 @@ func TestCatalogueRecordsPropagatesMalformedRecord(t *testing.T) {
 	records, err := New(store).Records()
 	require.Error(t, err)
 	require.Empty(t, records)
+}
+
+type failClosedStore struct {
+	data    map[string][]byte
+	durable map[string][]byte
+
+	setFailures    int
+	deleteFailures int
+	syncFailures   int
+	failure        error
+
+	closeFlushed bool
+	closeAborted bool
+}
+
+func newFailClosedStore(data map[string][]byte) *failClosedStore {
+	return &failClosedStore{data: copyStoreData(data), durable: copyStoreData(data), failure: errors.New("store write failed")}
+}
+
+func (s *failClosedStore) Get(key []byte) ([]byte, bool) {
+	value, ok := s.data[string(key)]
+	return append([]byte(nil), value...), ok
+}
+
+func (s *failClosedStore) Set(key, value []byte) error {
+	s.data[string(key)] = append([]byte(nil), value...)
+	if s.setFailures > 0 {
+		s.setFailures--
+		return s.failure
+	}
+	return nil
+}
+
+func (s *failClosedStore) Delete(key []byte) error {
+	delete(s.data, string(key))
+	if s.deleteFailures > 0 {
+		s.deleteFailures--
+		return s.failure
+	}
+	return nil
+}
+
+func (s *failClosedStore) Range(fn func([]byte, []byte) bool) {
+	for key, value := range s.data {
+		if !fn([]byte(key), append([]byte(nil), value...)) {
+			return
+		}
+	}
+}
+
+func (s *failClosedStore) Sync() error {
+	if s.syncFailures > 0 {
+		s.syncFailures--
+		return s.failure
+	}
+	s.durable = copyStoreData(s.data)
+	return nil
+}
+
+func (s *failClosedStore) Close() error {
+	s.closeFlushed = true
+	s.durable = copyStoreData(s.data)
+	return nil
+}
+
+func (s *failClosedStore) CloseWithoutSync() error {
+	s.closeAborted = true
+	return nil
+}
+
+func copyStoreData(data map[string][]byte) map[string][]byte {
+	copy := make(map[string][]byte, len(data))
+	for key, value := range data {
+		copy[key] = append([]byte(nil), value...)
+	}
+	return copy
+}
+
+func TestRejectedIdentityWriteFencesCatalogue(t *testing.T) {
+	t.Parallel()
+	one, err := encodeRecordValue(validRecord("work", 1))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name           string
+		initial        map[string][]byte
+		setFailures    int
+		deleteFailures int
+		syncFailures   int
+		mutate         func(*Persister) error
+	}{
+		{
+			name:        "create set failure",
+			initial:     map[string][]byte{},
+			setFailures: 1,
+			mutate: func(p *Persister) error {
+				return p.Create(validRecord("new", 2))
+			},
+		},
+		{
+			name:         "create sync failure",
+			initial:      map[string][]byte{},
+			syncFailures: 1,
+			mutate: func(p *Persister) error {
+				return p.Create(validRecord("new", 2))
+			},
+		},
+		{
+			name:        "replace set failure",
+			initial:     map[string][]byte{"work": one},
+			setFailures: 1,
+			mutate: func(p *Persister) error {
+				next := validRecord("work", 1)
+				next.Cwd = "/next"
+				return p.Replace("work", next)
+			},
+		},
+		{
+			name:         "replace sync failure",
+			initial:      map[string][]byte{"work": one},
+			syncFailures: 1,
+			mutate: func(p *Persister) error {
+				next := validRecord("work", 1)
+				next.Cwd = "/next"
+				return p.Replace("work", next)
+			},
+		},
+		{
+			name:        "rename set failure",
+			initial:     map[string][]byte{"work": one},
+			setFailures: 1,
+			mutate: func(p *Persister) error {
+				next := validRecord("renamed", 1)
+				return p.Rename("work", next)
+			},
+		},
+		{
+			name:           "rename delete failure",
+			initial:        map[string][]byte{"work": one},
+			deleteFailures: 1,
+			mutate: func(p *Persister) error {
+				next := validRecord("renamed", 1)
+				return p.Rename("work", next)
+			},
+		},
+		{
+			name:         "rename sync failure",
+			initial:      map[string][]byte{"work": one},
+			syncFailures: 1,
+			mutate: func(p *Persister) error {
+				next := validRecord("renamed", 1)
+				return p.Rename("work", next)
+			},
+		},
+		{
+			name:           "delete delete failure",
+			initial:        map[string][]byte{"work": one},
+			deleteFailures: 1,
+			mutate: func(p *Persister) error {
+				return p.Delete("work")
+			},
+		},
+		{
+			name:         "delete sync failure",
+			initial:      map[string][]byte{"work": one},
+			syncFailures: 1,
+			mutate: func(p *Persister) error {
+				return p.Delete("work")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := newFailClosedStore(tt.initial)
+			store.setFailures = tt.setFailures
+			store.deleteFailures = tt.deleteFailures
+			store.syncFailures = tt.syncFailures
+			p := New(store)
+
+			err := tt.mutate(p)
+			require.ErrorIs(t, err, ErrCatalogueDurability)
+			require.ErrorIs(t, err, store.failure)
+			require.Equal(t, tt.initial, store.data, "rejected identity keys must be restored in memory")
+			require.Equal(t, tt.initial, store.durable, "rejected identity write must not reach disk")
+
+			_, _, recordErr := p.Record("work")
+			require.ErrorIs(t, recordErr, ErrCatalogueDurability)
+			require.ErrorIs(t, p.Sync(), ErrCatalogueDurability)
+			require.ErrorIs(t, p.Create(validRecord("later", 3)), ErrCatalogueDurability)
+			require.Equal(t, tt.initial, store.durable, "later Sync must be fenced")
+
+			require.ErrorIs(t, p.Close(), ErrCatalogueDurability)
+			require.True(t, store.closeAborted, "Close must release without flushing rejected state")
+			require.False(t, store.closeFlushed)
+			require.Equal(t, tt.initial, store.durable, "Close must not make rejected state durable")
+		})
+	}
+}
+
+func TestRejectedIdentityWriteRestoresBufferedMetadata(t *testing.T) {
+	t.Parallel()
+	encoded, err := encodeRecordValue(validRecord("work", 1))
+	require.NoError(t, err)
+	store := newFailClosedStore(map[string][]byte{"work": encoded})
+	p := New(store)
+
+	cwd := "/buffered"
+	require.NoError(t, p.UpdateMetadata(domain.CatalogueMetadataUpdate{
+		Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: &cwd,
+	}))
+	buffered := copyStoreData(store.data)
+	store.syncFailures = 1
+
+	require.ErrorIs(t, p.Rename("work", validRecord("renamed", 1)), ErrCatalogueDurability)
+	require.Equal(t, buffered, store.data, "rollback must preserve already-buffered metadata on the affected key")
+	require.Equal(t, map[string][]byte{"work": encoded}, store.durable)
+	require.ErrorIs(t, p.Close(), ErrCatalogueDurability)
+	require.Equal(t, map[string][]byte{"work": encoded}, store.durable)
 }

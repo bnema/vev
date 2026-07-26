@@ -190,3 +190,18 @@ func TestDecodeRejectsDuplicateKeysAndTrailingData(t *testing.T) {
 	_, err = decodeFile(valid)
 	require.True(t, errors.Is(err, ErrCorrupt))
 }
+
+func TestCloseWithoutSyncDiscardsDirtyStore(t *testing.T) {
+	t.Parallel()
+	path := privateStorePath(t)
+	store, err := Open(path)
+	require.NoError(t, err)
+	require.NoError(t, store.Set([]byte("rejected"), []byte("value")))
+	require.NoError(t, store.CloseWithoutSync())
+
+	reopened, err := Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	_, ok := reopened.Get([]byte("rejected"))
+	require.False(t, ok)
+}

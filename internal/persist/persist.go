@@ -17,6 +17,11 @@ const filename = "sessions.kv"
 
 var errPersistenceUnavailable = errors.New("persist: catalogue unavailable")
 
+// ErrCatalogueDurability reports a failed identity write whose durability is
+// ambiguous. A Persister remains fenced after this error so rejected state
+// cannot be made durable by a later flush.
+var ErrCatalogueDurability = errors.New("persist: catalogue durability rejected")
+
 // ErrCatalogueUnreadable reports durable state that exists but cannot be
 // decoded. vev never repairs or erases it; the operator resets explicitly.
 var ErrCatalogueUnreadable = errors.New("persist: catalogue unreadable")
@@ -37,6 +42,7 @@ type Persister struct {
 	incarnationOwners map[domain.IncarnationID]string
 	nameIncarnations  map[string]domain.IncarnationID
 	incarnationIndex  bool
+	terminalErr       error
 }
 
 // KVStore adapts the reusable whole-file store to the persistence port.
@@ -58,6 +64,8 @@ func (s *KVStore) Range(fn func(key, value []byte) bool) {
 }
 func (s *KVStore) Sync() error  { return s.store.Sync() }
 func (s *KVStore) Close() error { return s.store.Close() }
+
+func (s *KVStore) CloseWithoutSync() error { return s.store.CloseWithoutSync() }
 
 // Open opens an existing strict catalogue and never creates an unproven empty one.
 func Open(dir string) (*Persister, error) {
@@ -140,6 +148,9 @@ func (p *Persister) Create(record domain.CatalogueRecord) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.terminalLocked(); err != nil {
+		return err
+	}
 	if _, exists := p.store.Get([]byte(record.Name)); exists {
 		return errors.New("persist: session already exists")
 	}
@@ -153,6 +164,9 @@ func (p *Persister) Record(name string) (domain.CatalogueRecord, bool, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.terminalLocked(); err != nil {
+		return domain.CatalogueRecord{}, false, err
+	}
 	value, ok := p.store.Get([]byte(name))
 	if !ok {
 		return domain.CatalogueRecord{}, false, nil
@@ -172,6 +186,9 @@ func (p *Persister) Apply(records map[string]*domain.CatalogueRecord) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.terminalLocked(); err != nil {
+		return err
+	}
 	return p.applyLocked(records, true)
 }
 func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord, durable bool) error {
@@ -226,6 +243,11 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord, dura
 			}
 		}
 	}
+	previous := make(map[string]storedValue, len(changes))
+	for _, change := range changes {
+		value, ok := p.store.Get(change.key)
+		previous[string(change.key)] = storedValue{value: value, exists: ok}
+	}
 	for _, change := range changes {
 		var err error
 		if change.delete {
@@ -234,14 +256,14 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord, dura
 			err = p.store.Set(change.key, change.value)
 		}
 		if err != nil {
-			p.incarnationIndex = false
-			return err
+			p.restoreLocked(previous)
+			return p.fenceLocked(err)
 		}
 	}
 	if durable {
 		if err := p.store.Sync(); err != nil {
-			p.incarnationIndex = false
-			return err
+			p.restoreLocked(previous)
+			return p.fenceLocked(err)
 		}
 	}
 	for name := range records {
@@ -259,7 +281,37 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord, dura
 	return nil
 }
 
+type storedValue struct {
+	value  []byte
+	exists bool
+}
+
+// restoreLocked restores only keys affected by the rejected identity mutation.
+// It intentionally does not Sync: the Persister is fenced immediately after.
+func (p *Persister) restoreLocked(previous map[string]storedValue) {
+	for key, old := range previous {
+		if old.exists {
+			_ = p.store.Set([]byte(key), old.value)
+		} else {
+			_ = p.store.Delete([]byte(key))
+		}
+	}
+}
+
+func (p *Persister) fenceLocked(cause error) error {
+	if p.terminalErr == nil {
+		p.terminalErr = fmt.Errorf("%w: %w", ErrCatalogueDurability, cause)
+	}
+	p.incarnationIndex = false
+	return p.terminalErr
+}
+
+func (p *Persister) terminalLocked() error { return p.terminalErr }
+
 func (p *Persister) ensureIncarnationIndexLocked() error {
+	if err := p.terminalLocked(); err != nil {
+		return err
+	}
 	if p.incarnationIndex {
 		return nil
 	}
@@ -318,6 +370,9 @@ func (p *Persister) UpdateMetadata(update domain.CatalogueMetadataUpdate) error 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.terminalLocked(); err != nil {
+		return err
+	}
 	value, ok := p.store.Get([]byte(update.Name))
 	if !ok {
 		return errors.New("persist: session not found")
@@ -354,7 +409,13 @@ func (p *Persister) Sync() error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.store.Sync()
+	if err := p.terminalLocked(); err != nil {
+		return err
+	}
+	if err := p.store.Sync(); err != nil {
+		return p.fenceLocked(err)
+	}
+	return nil
 }
 
 func (p *Persister) Delete(name string) error {
@@ -370,6 +431,9 @@ func (p *Persister) LoadCatalogue() ([]domain.CatalogueRecord, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.terminalLocked(); err != nil {
+		return nil, err
+	}
 	data := make(map[string][]byte)
 	p.store.Range(func(key, value []byte) bool { data[string(key)] = append([]byte(nil), value...); return true })
 	return decodeAll(data)
@@ -380,6 +444,18 @@ func (p *Persister) Close() error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.terminalLocked(); err != nil {
+		if store, ok := p.store.(interface{ CloseWithoutSync() error }); ok {
+			if closeErr := store.CloseWithoutSync(); closeErr != nil {
+				return errors.Join(err, closeErr)
+			}
+			return err
+		}
+		if closeErr := p.store.Close(); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+		return err
+	}
 	return p.store.Close()
 }
 
