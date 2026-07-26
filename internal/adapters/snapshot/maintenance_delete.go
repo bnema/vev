@@ -527,9 +527,19 @@ func (r *Repository) QuarantineDeletionSources(ctx context.Context, tombstone do
 	if err := r.quarantineSource(r.sessionPath(tombstone.IncarnationID), filepath.Join(quarantineDir, "snapshot")); err != nil {
 		return err
 	}
+	if hook := r.hooks.afterDeletionIncarnationQuarantine; hook != nil {
+		if err := hook(); err != nil {
+			return err
+		}
+	}
 	if includeLegacyName {
 		if err := r.quarantineSource(filepath.Join(r.dir, filenameForName(tombstone.Name)), filepath.Join(quarantineDir, "legacy.snap")); err != nil {
 			return err
+		}
+		if hook := r.hooks.afterDeletionLegacyQuarantine; hook != nil {
+			if err := hook(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

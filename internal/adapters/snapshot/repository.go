@@ -78,6 +78,10 @@ type repositoryHooks struct {
 	openMaintenanceDirectory    func(string) (maintenanceDirectory, error)
 	beforeDirectoryRead         func(string)
 	beforeDeletionTombstoneRead func(string)
+	// afterDeletionIncarnationQuarantine and afterDeletionLegacyQuarantine expose
+	// the two completed deletion rename+sync boundaries to package tests.
+	afterDeletionIncarnationQuarantine func() error
+	afterDeletionLegacyQuarantine      func() error
 	// beforeMaintenanceWork observes each budgeted quarantine filesystem step.
 	// It is test-only instrumentation for hostile traversal bounds.
 	beforeMaintenanceWork func(string)
