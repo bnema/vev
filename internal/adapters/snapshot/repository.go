@@ -85,6 +85,7 @@ type repositoryHooks struct {
 	afterOpenRoot               func()
 	closeRoot                   func() error
 	openMaintenanceDirectory    func(string) (maintenanceDirectory, error)
+	maintenanceDirentConfig     *maintenanceDirentConfig
 	beforeDirectoryRead         func(string)
 	beforeDeletionTombstoneRead func(string)
 	// afterDeletionIncarnationQuarantine and afterDeletionLegacyQuarantine expose

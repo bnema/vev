@@ -2,7 +2,9 @@ package snapshot
 
 import (
 	"context"
+	"io"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -11,6 +13,72 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeReconcileDrainDirectory struct {
+	names    []string
+	position int
+}
+
+func (d *fakeReconcileDrainDirectory) Seek(offset int64, whence int) (int64, error) {
+	if whence == io.SeekCurrent {
+		return int64(d.position), nil
+	}
+	d.position = int(offset)
+	return offset, nil
+}
+
+func (d *fakeReconcileDrainDirectory) ReadDirent(buffer []byte) (int, error) {
+	if d.position >= len(d.names) {
+		return 0, nil
+	}
+	batch := maintenanceDirentBatch(d.names[d.position:]...)
+	d.position = len(d.names)
+	return copy(buffer, batch), nil
+}
+
+func (d *fakeReconcileDrainDirectory) Close() error { return nil }
+
+func configureDrainingReconcileScanner(repo *Repository, names []string) {
+	repo.hooks.openMaintenanceDirectory = func(string) (maintenanceDirectory, error) {
+		return &fakeReconcileDrainDirectory{names: names}, nil
+	}
+	repo.hooks.maintenanceDirentConfig = &maintenanceDirentConfig{
+		drainBuffer: true,
+		cookie: func(file maintenanceDirectory, _ *syscall.Dirent, remaining int) (int64, error) {
+			end, err := file.Seek(0, io.SeekCurrent)
+			return end - int64(remaining), err
+		},
+	}
+}
+
+func TestReconciliationDrainedBatchHasNoSkippedOrDuplicateEntries(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	sessions := filepath.Join(repo.dir, repositorySessionsDir)
+	names := make([]string, 3)
+	for i := range names {
+		id := domain.IncarnationID{byte(i + 20)}
+		names[i] = id.String()
+		require.NoError(t, safedir.EnsurePrivate(filepath.Join(sessions, names[i])))
+	}
+	configureDrainingReconcileScanner(repo, names)
+
+	cursor := ports.ReconcileCursor{}
+	var got []string
+	for calls := 0; ; calls++ {
+		next, findings, err := repo.Reconcile(context.Background(), nil, cursor, ports.MaintenanceBudget{Entries: 2, Bytes: 1})
+		require.NoError(t, err)
+		for _, finding := range findings {
+			got = append(got, finding.Candidate.Name)
+		}
+		if next.DirectoryCookie == 0 {
+			break
+		}
+		require.Greater(t, next.DirectoryCookie, cursor.DirectoryCookie)
+		cursor = next
+		require.Less(t, calls, 3)
+	}
+	require.Equal(t, names, got)
+}
 
 func TestReconciliationReadsEachCandidatePayloadOnceWithinBudget(t *testing.T) {
 	repo := NewRepository(privateDir(t))
@@ -94,6 +162,50 @@ func TestReconciliationReadsEachCandidatePayloadOnceWithinBudget(t *testing.T) {
 	}
 }
 
+func TestReconciliationIntrinsicallyOversizedCandidateMakesFixedBudgetProgress(t *testing.T) {
+	tests := []struct {
+		name   string
+		budget ports.MaintenanceBudget
+	}{
+		{name: "entry cost", budget: ports.MaintenanceBudget{Entries: 1, Bytes: 8 << 20}},
+		{name: "byte cost", budget: ports.MaintenanceBudget{Entries: 8, Bytes: 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			publications := publishMaintenanceGenerations(t, repo, "work", 2)
+			committed := checkpointRefForPublication(publications[0])
+			record := domain.CatalogueRecord{Name: "work", IncarnationID: publications[0].IncarnationID, RecoveryState: domain.RecoveryHealthy, Committed: &committed}
+			unknown := domain.IncarnationID{99}
+			require.NoError(t, safedir.EnsurePrivate(filepath.Join(repo.dir, repositorySessionsDir, unknown.String())))
+			configureDrainingReconcileScanner(repo, []string{record.IncarnationID.String(), unknown.String()})
+
+			next, findings, err := repo.Reconcile(context.Background(), []domain.CatalogueRecord{record}, ports.ReconcileCursor{}, tc.budget)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), next.DirectoryCookie)
+			require.Len(t, findings, 1)
+			require.Equal(t, ports.ReconcileBudgetExhausted, findings[0].Status)
+			require.LessOrEqual(t, findings[0].Consumed.Entries, tc.budget.Entries)
+			require.LessOrEqual(t, findings[0].Consumed.Bytes, tc.budget.Bytes)
+
+			later, findings, err := repo.Reconcile(context.Background(), []domain.CatalogueRecord{record}, next, tc.budget)
+			require.NoError(t, err)
+			require.Len(t, findings, 1)
+			require.Equal(t, unknown, findings[0].Candidate.IncarnationID)
+			require.Equal(t, ports.ReconcileQuarantined, findings[0].Status)
+			if later.DirectoryCookie == 0 {
+				return
+			}
+			require.Greater(t, later.DirectoryCookie, next.DirectoryCookie)
+
+			done, findings, err := repo.Reconcile(context.Background(), []domain.CatalogueRecord{record}, later, tc.budget)
+			require.NoError(t, err)
+			require.Zero(t, done)
+			require.Empty(t, findings, "oversized candidate must not be retried")
+		})
+	}
+}
+
 func TestReconciliationCursor(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	publications := publishMaintenanceGenerations(t, repo, "work", 2)
@@ -132,19 +244,25 @@ func TestReconciliationCursor(t *testing.T) {
 	}
 	require.Greater(t, calls, 1, "top-level traversal must resume across bounded calls")
 
-	unknown := 0
+	unknown := make(map[domain.IncarnationID]struct{})
 	adoptable := 0
 	for _, finding := range findings {
 		switch finding.Kind {
 		case ports.ReconcileUnknownIncarnation:
-			unknown++
+			require.Equal(t, ports.ReconcileQuarantined, finding.Status)
+			_, duplicate := unknown[finding.Candidate.IncarnationID]
+			require.False(t, duplicate, "unknown incarnation was returned twice")
+			unknown[finding.Candidate.IncarnationID] = struct{}{}
 		case ports.ReconcileForwardOrphan:
+			if finding.Status == ports.ReconcileBudgetExhausted {
+				continue
+			}
 			require.Equal(t, ports.ReconcileValidated, finding.Status)
 			require.Equal(t, uint64(2), finding.Candidate.Ref.Generation)
 			require.Equal(t, committed, *finding.Candidate.Parent)
 			adoptable++
 		}
 	}
-	require.Equal(t, 6, unknown)
-	require.Equal(t, 1, adoptable)
+	require.Len(t, unknown, 6)
+	require.Equal(t, 1, adoptable, "candidate must reach a terminal result exactly once")
 }

@@ -630,6 +630,9 @@ func (r *Repository) readRetentionDir(state *retentionMaintenance, dir string, n
 		count := min(n, len(cursor.pending))
 		entries := cursor.pending[:count]
 		cursor.pending = cursor.pending[count:]
+		if len(entries) != 0 {
+			cursor.offset = entries[len(entries)-1].cookie
+		}
 		done := cursor.done && len(cursor.pending) == 0
 		if done {
 			delete(state.cursors, id)
@@ -787,6 +790,7 @@ func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRe
 	}
 	findings = make([]ports.ReconcileFinding, 0, findingCapacity)
 	stepConsumed := ports.MaintenanceBudget{}
+	resumeCursor := cursor
 	for scanned := uint64(0); scanned < budget.Entries && stepConsumed.Entries < budget.Entries; scanned++ {
 		entries, done, err := r.readMaintenanceDirent(root, 1, state)
 		if errors.Is(err, os.ErrNotExist) {
@@ -802,34 +806,48 @@ func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRe
 			continue
 		}
 		entry := entries[0]
-		next := ports.ReconcileCursor{DirectoryCookie: uint64(state.offset)}
+		nextCursor = ports.ReconcileCursor{DirectoryCookie: uint64(entry.cookie)}
 		if !entry.isDir || isQuarantine(entry.name) {
+			resumeCursor = nextCursor
 			if done {
 				return ports.ReconcileCursor{}, findings, nil
 			}
 			continue
 		}
 		findingIndex := len(findings)
+		consumedBeforeCandidate := stepConsumed
 		var id domain.IncarnationID
 		if err := id.UnmarshalText([]byte(entry.name)); err != nil {
-			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name}, Cursor: next, Consumed: ports.MaintenanceBudget{Entries: 1}})
+			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name}, Cursor: nextCursor, Consumed: ports.MaintenanceBudget{Entries: 1}})
 		} else if record, ok := byIncarnation[id]; !ok {
-			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name, IncarnationID: id}, Cursor: next, Consumed: ports.MaintenanceBudget{Entries: 1}})
+			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name, IncarnationID: id}, Cursor: nextCursor, Consumed: ports.MaintenanceBudget{Entries: 1}})
 		} else {
 			remaining := ports.MaintenanceBudget{Entries: budget.Entries - stepConsumed.Entries, Bytes: budget.Bytes - stepConsumed.Bytes}
 			finding := r.reconcileIncarnation(ctx, record, remaining)
-			finding.Cursor = next
+			finding.Cursor = nextCursor
 			findings = append(findings, finding)
 		}
 		if len(findings) > findingIndex {
 			stepConsumed.Entries += findings[findingIndex].Consumed.Entries
 			stepConsumed.Bytes += findings[findingIndex].Consumed.Bytes
+			if findings[findingIndex].Status == ports.ReconcileBudgetExhausted {
+				// If a fresh per-call budget cannot admit this candidate, retrying
+				// the same fixed budget can never succeed. Report the bounded
+				// exhaustion once and deliberately advance so later entries remain
+				// reachable. A candidate reached after earlier work is retried on a
+				// fresh call because it may fit that call's full budget.
+				if consumedBeforeCandidate.Entries == 0 && consumedBeforeCandidate.Bytes == 0 {
+					return nextCursor, findings, nil
+				}
+				return resumeCursor, findings, nil
+			}
 		}
+		resumeCursor = nextCursor
 		if done {
 			return ports.ReconcileCursor{}, findings, nil
 		}
 	}
-	return ports.ReconcileCursor{DirectoryCookie: uint64(state.offset)}, findings, nil
+	return nextCursor, findings, nil
 }
 
 func (r *Repository) reconcileIncarnation(ctx context.Context, record domain.CatalogueRecord, budget ports.MaintenanceBudget) ports.ReconcileFinding {

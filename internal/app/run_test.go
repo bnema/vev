@@ -466,7 +466,10 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 	})
 
 	t.Run("proven absence creates the catalogue before socket publication", func(t *testing.T) {
-		runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
+		runtimeRoot, err := os.MkdirTemp("/tmp", "vev-")
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeRoot)) })
+		stateRoot := t.TempDir()
 		runtimeDir := filepath.Join(runtimeRoot, "vev")
 		stateDir := filepath.Join(stateRoot, "vev")
 		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)

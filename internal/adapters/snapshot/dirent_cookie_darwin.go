@@ -14,8 +14,12 @@ import (
 // descriptor-maintained count is saved.
 const maintenanceDirentBufferSize = int(unsafe.Sizeof(syscall.Dirent{}))
 
-func directoryCookie(file maintenanceDirectory, _ *syscall.Dirent) (int64, error) {
-	return file.Seek(0, io.SeekCurrent)
+func directoryCookie(file maintenanceDirectory, _ *syscall.Dirent, remaining int) (int64, error) {
+	end, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	return end - int64(remaining), nil
 }
 
 func drainMaintenanceDirentBatch() bool { return true }

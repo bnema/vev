@@ -9,7 +9,7 @@ import (
 
 func TestDirectoryCookieUsesLinuxOffset(t *testing.T) {
 	dirent := syscall.Dirent{Off: 42}
-	got, err := directoryCookie(fakeMaintenanceDirectory{}, &dirent)
+	got, err := directoryCookie(fakeMaintenanceDirectory{}, &dirent, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

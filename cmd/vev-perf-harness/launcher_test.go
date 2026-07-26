@@ -27,29 +27,22 @@ func (discardTerminalOutput) Close() error                { return nil }
 func TestCLIProcessCloseDrainsQueuedTerminalOutputBeforeClientExit(t *testing.T) {
 	harnessPTY, clientPTY := net.Pipe()
 	t.Cleanup(func() { _ = clientPTY.Close() })
-	waitErr := make(chan error)
+	waitErr := make(chan error, 1)
 	secondRead := make(chan struct{})
 	p := &cliProcess{
-		pty:         harnessPTY,
-		output:      discardTerminalOutput{},
-		chunks:      make(chan []byte, 1),
-		done:        make(chan struct{}),
-		waitErr:     waitErr,
-		waitTimeout: func() <-chan time.Time { return time.After(time.Second) },
+		pty:          harnessPTY,
+		output:       discardTerminalOutput{},
+		chunks:       make(chan []byte, 1),
+		done:         make(chan struct{}),
+		waitErr:      waitErr,
+		waitTimeout:  func() <-chan time.Time { return time.After(time.Second) },
+		forceCleanup: func() { waitErr <- nil },
 	}
 	go p.copyTerminal()
 	go func() {
 		_, _ = clientPTY.Write([]byte("first"))
 		_, _ = clientPTY.Write([]byte("second"))
 		close(secondRead)
-		buf := make([]byte, len("exit\n"))
-		if _, err := clientPTY.Read(buf); err != nil {
-			return
-		}
-		if _, err := clientPTY.Write([]byte("third")); err != nil {
-			return
-		}
-		waitErr <- nil
 	}()
 	select {
 	case <-secondRead:
@@ -131,6 +124,26 @@ func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
 	}
 	if term != 1 || kill != 1 {
 		t.Fatalf("TERM/KILL calls = %d/%d, want 1/1", term, kill)
+	}
+}
+
+func TestCLIProcessCloseEscalatesHungClientAfterGracefulDrainTimeout(t *testing.T) {
+	deadline := make(chan time.Time)
+	close(deadline)
+	var graceful, term, kill int
+	p := &cliProcess{
+		pty:              &orderedPTY{close: func() {}},
+		waitErr:          make(chan error),
+		waitTimeout:      func() <-chan time.Time { return deadline },
+		gracefulShutdown: func() { graceful++ },
+		forceCleanup:     func() { term++ },
+		forceKill:        func() { kill++ },
+	}
+	if err := p.Close(); err == nil {
+		t.Fatal("hung client close succeeded")
+	}
+	if graceful != 1 || term != 1 || kill != 1 {
+		t.Fatalf("graceful/TERM/KILL calls = %d/%d/%d, want 1/1/1", graceful, term, kill)
 	}
 }
 
@@ -252,6 +265,11 @@ func TestCLILauncherIsolatesRoleXDGEnvironmentAcrossRepetitions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run %d %s launch: %v", run, role, err)
 			}
+			// The fixture exits on its own. Synchronize with that exit instead of
+			// letting Close race its SIGTERM against the environment capture.
+			proc := p.(*cliProcess)
+			exitErr := <-proc.waitErr
+			proc.waitErr <- exitErr
 			runtimeDir := launcher.runtimes[runDir]
 			if err := p.Close(); err != nil {
 				t.Fatalf("run %d %s close: %v", run, role, err)
@@ -383,36 +401,29 @@ func TestTraceEnvironmentMatchesProcessMapping(t *testing.T) {
 	}
 }
 
-func TestCLIProcessCloseGracefulDetachCompletesSpanBeforeForcedCleanup(t *testing.T) {
+func TestCLIProcessCloseStopsShellBeforeProcessGroupCleanup(t *testing.T) {
 	var order []string
 	waitErr := make(chan error, 1)
-	timeout := make(chan time.Time)
 	p := &cliProcess{
-		pty: &orderedPTY{
-			write: func(input []byte) {
-				if string(input) != "exit\n" {
-					t.Fatalf("graceful exit input=%q", input)
-				}
-				order = append(order, "exit_written")
-				// The graceful client exit has closed its transport and emitted
-				// its adapter receive-end mark before cmd.Wait completes.
-				order = append(order, "adapter_receive_end")
-				waitErr <- nil
-			},
-			close: func() { order = append(order, "pty_closed") },
+		pty:     &orderedPTY{close: func() { order = append(order, "pty_closed") }},
+		output:  &orderedOutput{close: func() { order = append(order, "output_closed") }},
+		waitErr: waitErr,
+		gracefulShutdown: func() {
+			order = append(order, "shell_exit")
+			// The client closes and waits for its transport descendant before it
+			// reports its own exit to the launcher.
+			order = append(order, "descendant_receive_end")
+			waitErr <- nil
 		},
-		output:      &orderedOutput{close: func() { order = append(order, "output_closed") }},
-		waitErr:     waitErr,
-		waitTimeout: func() <-chan time.Time { return timeout },
 		forceCleanup: func() {
-			order = append(order, "forced_process_group_cleanup")
+			t.Fatal("normal shutdown sent SIGTERM to the traced descendant process group")
 		},
 	}
 
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !equalStrings(order, []string{"exit_written", "adapter_receive_end", "pty_closed", "output_closed"}) {
+	if !equalStrings(order, []string{"shell_exit", "descendant_receive_end", "pty_closed", "output_closed"}) {
 		t.Fatalf("cleanup order=%q", order)
 	}
 }

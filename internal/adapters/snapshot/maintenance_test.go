@@ -287,7 +287,7 @@ func (d *fakeMultiBatchMaintenanceDirectory) ReadDirent(buffer []byte) (int, err
 
 func (d *fakeMultiBatchMaintenanceDirectory) Close() error { return nil }
 
-func maintenanceTestDirectoryCookie(file maintenanceDirectory, _ *syscall.Dirent) (int64, error) {
+func maintenanceTestDirectoryCookie(file maintenanceDirectory, _ *syscall.Dirent, _ int) (int64, error) {
 	return file.Seek(0, io.SeekCurrent)
 }
 

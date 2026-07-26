@@ -26,8 +26,14 @@ type maintenanceCursor struct {
 }
 
 type maintenanceDirEntry struct {
-	name  string
-	isDir bool
+	name   string
+	isDir  bool
+	cookie int64
+}
+
+type maintenanceDirentConfig struct {
+	drainBuffer bool
+	cookie      func(maintenanceDirectory, *syscall.Dirent, int) (int64, error)
 }
 
 func (r *Repository) resetMaintenance() {
@@ -49,16 +55,6 @@ func maintenanceCursorID(dir, purpose string) string { return purpose + "\x00" +
 func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]maintenanceDirEntry, bool, error) {
 	id := maintenanceCursorID(dir, purpose)
 	cursor := r.maintenanceCursors[id]
-	if cursor != nil && len(cursor.pending) != 0 {
-		count := min(n, len(cursor.pending))
-		entries := cursor.pending[:count]
-		cursor.pending = cursor.pending[count:]
-		done := cursor.done && len(cursor.pending) == 0
-		if done {
-			delete(r.maintenanceCursors, id)
-		}
-		return entries, done, nil
-	}
 	if cursor == nil {
 		if len(r.maintenanceCursors) >= maxMaintenanceCursors {
 			return nil, false, errMaintenanceCursorLimit
@@ -121,13 +117,26 @@ func maintenanceDirectoryError(operation string, err error) error {
 // stores an entry count in the descriptor offset, so every returned buffer
 // must be drained before that descriptor-maintained count is saved.
 func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (entries []maintenanceDirEntry, done bool, err error) {
-	return r.readMaintenanceDirentWithDrain(dir, limit, cursor, drainMaintenanceDirentBatch(), directoryCookie)
+	if len(cursor.pending) != 0 {
+		count := min(limit, len(cursor.pending))
+		entries = cursor.pending[:count]
+		cursor.pending = cursor.pending[count:]
+		if len(entries) != 0 {
+			cursor.offset = entries[len(entries)-1].cookie
+		}
+		return entries, cursor.done && len(cursor.pending) == 0, nil
+	}
+	config := maintenanceDirentConfig{drainBuffer: drainMaintenanceDirentBatch(), cookie: directoryCookie}
+	if r.hooks.maintenanceDirentConfig != nil {
+		config = *r.hooks.maintenanceDirentConfig
+	}
+	return r.readMaintenanceDirentWithDrain(dir, limit, cursor, config.drainBuffer, config.cookie)
 }
 
 // readMaintenanceDirentWithDrain contains the shared traversal logic. The
 // explicit parameters permit platform-independent verification of Darwin's
 // buffer-draining semantics with deterministic fake directories.
-func (r *Repository) readMaintenanceDirentWithDrain(dir string, limit int, cursor *maintenanceCursor, drainBuffer bool, cookie func(maintenanceDirectory, *syscall.Dirent) (int64, error)) (entries []maintenanceDirEntry, done bool, err error) {
+func (r *Repository) readMaintenanceDirentWithDrain(dir string, limit int, cursor *maintenanceCursor, drainBuffer bool, cookie func(maintenanceDirectory, *syscall.Dirent, int) (int64, error)) (entries []maintenanceDirEntry, done bool, err error) {
 	file, err := r.openMaintenanceDirectory(dir)
 	if err != nil {
 		return nil, false, maintenanceDirectoryError("open maintenance directory", err)
@@ -163,14 +172,19 @@ func (r *Repository) readMaintenanceDirentWithDrain(dir string, limit int, curso
 		if count == 0 {
 			return entries, true, nil
 		}
+		remainingRecords, err := countMaintenanceDirents(buffer[:count])
+		if err != nil {
+			return nil, false, err
+		}
 		for data := buffer[:count]; len(data) != 0 && (len(entries) < limit || drainBuffer); {
 			record, nameBytes, reclen, decodeErr := decodeMaintenanceDirent(data)
 			if decodeErr != nil {
 				return nil, false, decodeErr
 			}
 			data = data[reclen:]
+			remainingRecords--
 			// Advance past every raw record, including dot and disappeared entries.
-			offset, cookieErr := cookie(file, record)
+			offset, cookieErr := cookie(file, record, remainingRecords)
 			if cookieErr != nil {
 				return nil, false, maintenanceDirectoryError("tell maintenance directory", cookieErr)
 			}
@@ -189,17 +203,31 @@ func (r *Repository) readMaintenanceDirentWithDrain(dir string, limit int, curso
 			if err != nil {
 				return nil, false, maintenanceDirectoryError("stat maintenance directory entry", err)
 			}
-			entries = append(entries, maintenanceDirEntry{name: name, isDir: stat.IsDir()})
+			entries = append(entries, maintenanceDirEntry{name: name, isDir: stat.IsDir(), cookie: offset})
 		}
 		if len(entries) >= limit {
 			if drainBuffer && len(entries) > limit {
-				// Darwin has already advanced the descriptor past this entire
-				// buffer, so retain only this final buffer's excess.
+				// The descriptor is past the whole buffer. Retain the excess and
+				// expose only the last entry actually consumed as the logical cursor.
 				cursor.pending = append(cursor.pending, entries[limit:]...)
+				cursor.offset = entries[limit-1].cookie
 			}
 			return entries[:limit], false, nil
 		}
 	}
+}
+
+func countMaintenanceDirents(data []byte) (int, error) {
+	count := 0
+	for len(data) != 0 {
+		_, _, reclen, err := decodeMaintenanceDirent(data)
+		if err != nil {
+			return 0, err
+		}
+		data = data[reclen:]
+		count++
+	}
+	return count, nil
 }
 
 // decodeMaintenanceDirent copies a bounded raw record into aligned storage
