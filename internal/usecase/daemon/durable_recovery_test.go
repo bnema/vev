@@ -551,6 +551,26 @@ func TestAttachWaitsForRestore(t *testing.T) {
 	require.Zero(t, factory.calls.Load())
 }
 
+func TestAttachBarrierSurvivesLiveRegistryPublication(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
+	done := d.recordRestoreDone(record.Name)
+	sess := &session{name: record.Name, incarnation: record.IncarnationID}
+
+	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)
+	require.NoError(t, err)
+	require.True(t, registered)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, d.waitForTargetRestore(cancelled, record.Name), context.Canceled,
+		"an attach racing after live publication must still observe the restore barrier")
+
+	d.finishRecordRestore(record, nil, done)
+	require.NoError(t, d.waitForTargetRestore(context.Background(), record.Name),
+		"attach must proceed after successful restoration completes")
+}
+
 func TestAttachRestoreWaitHonorsContextCancellation(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})

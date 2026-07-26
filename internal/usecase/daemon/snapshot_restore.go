@@ -334,6 +334,10 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	}
 	sess.id = domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
+	stopped := d.stopped[sess.name]
+	sess.mu.Lock()
+	sess.restoreDone = stopped.restoreDone
+	sess.mu.Unlock()
 	delete(d.stopped, sess.name)
 	d.sessions[sess.id] = sess
 	sess.snapDirty.Store(false)

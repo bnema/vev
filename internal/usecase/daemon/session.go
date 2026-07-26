@@ -52,7 +52,10 @@ type session struct {
 	teardownWaiters   uint
 	teardownChanged   chan struct{}
 	lifecycleStopOnce sync.Once
-	mu                sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
+	mu                sync.Mutex // guards tabs, active, client, restoreDone, clipFiles, and clipboard queue state
+	// restoreDone remains attached to a restored session after it is published in
+	// the live registry, so racing attaches cannot bypass restoration completion.
+	restoreDone chan struct{}
 	// metadataPersistMu serializes authority writes and post-I/O rollback. State
 	// mutation paths must release d.mu and mu before acquiring it. After durable
 	// I/O completes it may acquire d.mu then mu to reconcile failed revisions.

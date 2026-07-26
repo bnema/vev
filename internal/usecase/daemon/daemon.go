@@ -944,16 +944,23 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 
 func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 	d.mu.Lock()
-	if d.findByNameLocked(name) != nil {
-		d.mu.Unlock()
-		return nil
+	var (
+		done    chan struct{}
+		stopped stoppedSession
+		ok      bool
+	)
+	if sess := d.findByNameLocked(name); sess != nil {
+		sess.mu.Lock()
+		done = sess.restoreDone
+		sess.mu.Unlock()
+	} else {
+		stopped, ok = d.stopped[name]
+		if !ok || stopped.purging {
+			d.mu.Unlock()
+			return nil
+		}
+		done = stopped.restoreDone
 	}
-	stopped, ok := d.stopped[name]
-	if !ok || stopped.purging {
-		d.mu.Unlock()
-		return nil
-	}
-	done := stopped.restoreDone
 	d.mu.Unlock()
 
 	if done != nil {
