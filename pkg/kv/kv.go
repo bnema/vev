@@ -36,14 +36,28 @@ const (
 	// formatLegacy is a file written before the record header carried its own
 	// checksum. It is read with the original semantics and upgraded at Open.
 	formatLegacy walFormat = iota
+	// formatCurrentV1 is the released VEVK v1 framing with its six-byte file
+	// header. Its record headers are identical to the current format.
+	formatCurrentV1
 	formatCurrent
 )
 
 func (f walFormat) headerLen() int64 {
-	if f == formatCurrent {
+	if f != formatLegacy {
 		return recordHeaderLen
 	}
 	return legacyHeaderLen
+}
+
+func (f walFormat) fileHeaderLen() int64 {
+	switch f {
+	case formatCurrentV1:
+		return fileHeaderV1Len
+	case formatCurrent:
+		return fileHeaderLen
+	default:
+		return 0
+	}
 }
 
 type headerStatus uint8
@@ -466,10 +480,7 @@ func replayFile(f *os.File) (ReplayResult, error) {
 	if err != nil {
 		return ReplayResult{}, err
 	}
-	result := ReplayResult{Data: make(map[string][]byte), EntrySize: make(map[string]int64), Format: format}
-	if format == formatCurrent {
-		result.LastGood = fileHeaderLen
-	}
+	result := ReplayResult{Data: make(map[string][]byte), EntrySize: make(map[string]int64), Format: format, LastGood: format.fileHeaderLen()}
 	for {
 		header, status, err := readRecordHeader(f, format, fileSize, result.LastGood)
 		if err != nil {
@@ -501,7 +512,7 @@ func replayFile(f *os.File) (ReplayResult, error) {
 			records = []record{rec}
 		}
 		if err != nil {
-			return ReplayResult{}, fmt.Errorf("%w: invalid record at offset %d: %v", ErrCorruptWAL, result.LastGood, err)
+			return ReplayResult{}, fmt.Errorf("%w: invalid record at offset %d: %w", ErrCorruptWAL, result.LastGood, err)
 		}
 		size := format.headerLen() + int64(len(payload))
 		applyRecords(result.Data, result.EntrySize, &result.Live, records, size)
@@ -513,23 +524,60 @@ func replayFile(f *os.File) (ReplayResult, error) {
 // readFileFormat consumes the file header when one is present and leaves the
 // reader positioned at the first record either way.
 func readFileFormat(f io.ReadSeeker, fileSize int64) (walFormat, error) {
-	if fileSize < fileHeaderLen {
+	if fileSize == 0 {
 		return formatLegacy, nil
 	}
-	header := make([]byte, fileHeaderLen)
-	if _, err := io.ReadFull(f, header); err != nil {
+	probeLen := min(fileSize, int64(fileHeaderLen))
+	probe := make([]byte, probeLen)
+	if _, err := io.ReadFull(f, probe); err != nil {
 		return formatLegacy, err
 	}
-	if !bytes.Equal(header[:fileMagicLen], fileMagic[:]) {
+	if fileSize < fileMagicLen {
+		if bytes.Equal(probe, fileMagic[:len(probe)]) {
+			return formatLegacy, fmt.Errorf("%w: incomplete VEVK header", ErrCorruptWAL)
+		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return formatLegacy, err
 		}
 		return formatLegacy, nil
 	}
-	if version := binary.BigEndian.Uint16(header[fileMagicLen:]); version != formatVersion {
+	if !bytes.Equal(probe[:fileMagicLen], fileMagic[:]) {
+		// A complete v2 identity checksum authenticates the intended magic as
+		// well as the version. Detect it before legacy replay so damage to the
+		// first magic byte cannot masquerade as a small legacy length and be
+		// truncated or compacted away.
+		if len(probe) == fileHeaderLen &&
+			binary.BigEndian.Uint16(probe[fileMagicLen:fileHeaderBodyLen]) == formatVersion &&
+			binary.BigEndian.Uint32(probe[fileHeaderBodyLen:]) == binary.BigEndian.Uint32(fileHeader()[fileHeaderBodyLen:]) {
+			return formatLegacy, fmt.Errorf("%w: damaged VEVK v2 magic", ErrCorruptWAL)
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return formatLegacy, err
+		}
+		return formatLegacy, nil
+	}
+	if fileSize < fileHeaderV1Len {
+		return formatLegacy, fmt.Errorf("%w: incomplete VEVK header", ErrCorruptWAL)
+	}
+	prefix := probe[:fileHeaderV1Len]
+	if _, err := f.Seek(fileHeaderV1Len, io.SeekStart); err != nil {
+		return formatLegacy, err
+	}
+	switch version := binary.BigEndian.Uint16(prefix[fileMagicLen:]); version {
+	case formatVersionV1:
+		return formatCurrentV1, nil
+	case formatVersion:
+		checksum := make([]byte, fileHeaderLen-fileHeaderV1Len)
+		if _, err := io.ReadFull(f, checksum); err != nil {
+			return formatLegacy, fmt.Errorf("%w: incomplete VEVK v2 header", ErrCorruptWAL)
+		}
+		if crc32.ChecksumIEEE(prefix) != binary.BigEndian.Uint32(checksum) {
+			return formatLegacy, fmt.Errorf("%w: file header checksum mismatch", ErrCorruptWAL)
+		}
+		return formatCurrent, nil
+	default:
 		return formatLegacy, fmt.Errorf("%w: unsupported format version %d", ErrCorruptWAL, version)
 	}
-	return formatCurrent, nil
 }
 
 type recordHeader struct {
@@ -554,15 +602,18 @@ func readRecordHeader(f io.Reader, format walFormat, fileSize, offset int64) (re
 		payloadLen: binary.BigEndian.Uint32(buf[0:4]),
 		payloadCRC: binary.BigEndian.Uint32(buf[4:8]),
 	}
-	if format == formatCurrent {
+	if format != formatLegacy {
 		if crc32.ChecksumIEEE(buf[0:8]) != binary.BigEndian.Uint32(buf[8:recordHeaderLen]) {
 			return recordHeader{}, headerOK, fmt.Errorf("%w: record header CRC mismatch at offset %d", ErrCorruptWAL, offset)
 		}
 		// The length is now trustworthy, so an implausible one is corruption
 		// rather than a short tail. Checked before any allocation.
-		if header.payloadLen > maxPayloadLen {
-			return recordHeader{}, headerOK, fmt.Errorf("%w: record length %d exceeds maximum at offset %d", ErrCorruptWAL, header.payloadLen, offset)
-		}
+	}
+	// Every framing is allocation-bounded. In legacy framing an oversized
+	// declaration remains corruption rather than driving an attacker-sized
+	// allocation; ordinary short tails retain their released truncation semantics.
+	if header.payloadLen > maxPayloadLen {
+		return recordHeader{}, headerOK, fmt.Errorf("%w: record length %d exceeds maximum at offset %d", ErrCorruptWAL, header.payloadLen, offset)
 	}
 	if int64(header.payloadLen) > fileSize-offset-format.headerLen() {
 		return recordHeader{}, headerTorn, nil
@@ -577,9 +628,9 @@ func applyRecords(data map[string][]byte, sizes map[string]int64, live *int64, r
 			setCount++
 		}
 	}
-	setSize := size
+	setSize, remainder := size, int64(0)
 	if setCount > 1 {
-		setSize = size / setCount
+		setSize, remainder = size/setCount, size%setCount
 	}
 	for _, rec := range records {
 		key := string(rec.key)
@@ -587,9 +638,14 @@ func applyRecords(data map[string][]byte, sizes map[string]int64, live *int64, r
 			*live -= old
 		}
 		if rec.op == opSet {
+			entrySize := setSize
+			if remainder > 0 {
+				entrySize++
+				remainder--
+			}
 			data[key] = append([]byte(nil), rec.value...)
-			sizes[key] = setSize
-			*live += setSize
+			sizes[key] = entrySize
+			*live += entrySize
 		} else {
 			delete(data, key)
 			delete(sizes, key)
@@ -598,7 +654,7 @@ func applyRecords(data map[string][]byte, sizes map[string]int64, live *int64, r
 }
 
 func recoverCompaction(path string, hooks fsHooks) error {
-	_, currentExists, currentErr := candidate(path)
+	currentResult, currentExists, currentErr := candidate(path)
 	nextResult, nextExists, nextErr := candidate(path + ".next")
 	_, prevExists, prevErr := candidate(path + ".prev")
 	if nextErr == nil && nextResult.TornTail {
@@ -606,6 +662,12 @@ func recoverCompaction(path string, hooks fsHooks) error {
 	}
 	dir := filepath.Dir(path)
 	if currentExists && currentErr == nil {
+		if currentResult.TornTail && prevExists {
+			// A predecessor proves compaction was in flight. The torn current is
+			// ambiguous, so preserve both candidates and fail closed rather than
+			// truncating current and deleting the last complete predecessor.
+			return fmt.Errorf("%w: torn current with predecessor", ErrCorruptWAL)
+		}
 		if nextExists {
 			if err := hooks.Remove(path + ".next"); err != nil {
 				return err
@@ -625,33 +687,23 @@ func recoverCompaction(path string, hooks fsHooks) error {
 		return nil
 	}
 	if currentExists && currentErr != nil {
-		if !prevExists || prevErr != nil {
-			return fmt.Errorf("%w: no valid current or predecessor", ErrCorruptWAL)
-		}
-		if err := hooks.Remove(path); err != nil {
-			return err
-		}
-		if err := hooks.Rename(path+".prev", path); err != nil {
-			return err
-		}
-		if err := hooks.SyncDir(dir); err != nil {
-			return err
-		}
-		if nextExists {
-			if err := hooks.Remove(path + ".next"); err != nil {
-				return err
-			}
-			return hooks.SyncDir(dir)
-		}
-		return nil
+		// Corruption does not prove which bytes are disposable. Preserve every
+		// candidate for diagnosis/recovery instead of deleting current or a valid
+		// predecessor and fail closed.
+		return fmt.Errorf("%w: invalid current candidate", ErrCorruptWAL)
 	}
-	if !currentExists && prevExists {
-		if prevErr != nil {
-			return fmt.Errorf("%w: invalid predecessor", ErrCorruptWAL)
-		}
-		source := path + ".prev"
+	if !currentExists && (nextExists || prevExists) {
+		// A complete .next is the newest fully published compaction candidate and
+		// wins even when .prev exists but is corrupt. Otherwise a complete .prev
+		// is the only safe rollback. Invalid candidates are never selected.
+		source := ""
 		if nextExists && nextErr == nil {
 			source = path + ".next"
+		} else if prevExists && prevErr == nil {
+			source = path + ".prev"
+		}
+		if source == "" {
+			return fmt.Errorf("%w: no valid current, successor, or predecessor", ErrCorruptWAL)
 		}
 		if err := hooks.Rename(source, path); err != nil {
 			return err
@@ -668,8 +720,8 @@ func recoverCompaction(path string, hooks fsHooks) error {
 		}
 		return hooks.SyncDir(dir)
 	}
-	if nextExists || (currentExists && currentErr != nil) || (prevExists && prevErr != nil) {
-		return fmt.Errorf("%w: no valid current or predecessor", ErrCorruptWAL)
+	if currentExists && currentErr != nil {
+		return fmt.Errorf("%w: no valid current", ErrCorruptWAL)
 	}
 	return nil
 }

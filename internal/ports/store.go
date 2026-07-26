@@ -21,6 +21,11 @@ type Store interface {
 	Get(key []byte) ([]byte, bool)
 	Set(key, val []byte) error
 	Delete(key []byte) error
+	// Batch applies all changes atomically to in-memory state: an error leaves
+	// every prior value unchanged. Implementations repair or discard any torn
+	// WAL batch during replay so no partial batch becomes visible after restart.
+	// Batch does not retain StoreChange key or value slices; the caller owns and
+	// may mutate them after Batch returns.
 	Batch([]StoreChange) error
 	// Range iterates key/value pairs; fn returning false stops iteration early.
 	// Each key and value is a stable copy owned by the caller, which may retain

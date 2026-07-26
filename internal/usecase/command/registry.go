@@ -1,6 +1,9 @@
 package command
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // Registry returns all palette and control commands in stable display order.
 func Registry() []Command {
@@ -101,11 +104,11 @@ func sessionRecoveryCommand() Command {
 			case len(args) == 1 && (args[0] == "retry" || args[0] == "discard"):
 				action = args[0]
 			case len(args) == 2 && args[0] == "restore":
-				if _, err := ParsePositiveDecimal(args[1:]); err != nil {
+				if _, err := ParsePositiveUint64(args[1:]); err != nil {
 					return ControlResult{}, ErrInvalidArguments
 				}
 				action, argument = args[0], args[1]
-			case len(args) == 2 && args[0] == "export" && args[1] != "":
+			case len(args) == 2 && args[0] == "export" && filepath.IsAbs(args[1]):
 				action, argument = args[0], args[1]
 			default:
 				return ControlResult{}, ErrInvalidArguments

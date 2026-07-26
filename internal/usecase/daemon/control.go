@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,14 +32,14 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) {
 		_ = tr.Send(frameCommandResult(ports.CommandResult{Code: ports.ErrInternal, Text: "malformed command request"}))
 		return
 	}
-	_ = tr.Send(frameCommandResult(d.dispatchCommand(request)))
+	_ = tr.Send(frameCommandResult(d.dispatchCommand(d.serveCtx, request)))
 }
 
 func frameCommandResult(result ports.CommandResult) ports.Frame {
 	return ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(result)}
 }
 
-func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResult {
+func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandRequest) ports.CommandResult {
 	cmd, ok := command.BySlug(request.Slug)
 	if !ok {
 		return commandFailure(ports.ErrUnknownCommand, "unknown command: "+request.Slug)
@@ -46,7 +48,7 @@ func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResu
 		return commandFailure(ports.ErrNotScriptable, request.Slug+" requires an attached client")
 	}
 	if cmd.Target == command.TargetNone && !request.Self {
-		return d.runControl(cmd, controlExec{d: d, recoveryName: request.TargetSession}, request)
+		return d.runControl(cmd, controlExec{ctx: ctx, d: d, recoveryName: request.TargetSession}, request)
 	}
 
 	sess, code, text := d.resolveTargetSession(request)
@@ -60,7 +62,7 @@ func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResu
 	if code != 0 {
 		return commandFailure(code, text)
 	}
-	return d.runControl(cmd, controlExec{d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
+	return d.runControl(cmd, controlExec{ctx: ctx, d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
 }
 
 func (d *Daemon) runControl(cmd command.Command, exec controlExec, request ports.CommandRequest) ports.CommandResult {
@@ -309,14 +311,7 @@ func (d *Daemon) hasDaemonActionPaneTarget(target daemonActionTarget) bool {
 	}
 	target.session.mu.Lock()
 	defer target.session.mu.Unlock()
-	foundTab := false
-	for _, tb := range target.session.tabs {
-		if tb == target.tab {
-			foundTab = true
-			break
-		}
-	}
-	if !foundTab {
+	if !slices.Contains(target.session.tabs, target.tab) {
 		return false
 	}
 	target.tab.mu.Lock()
@@ -335,6 +330,7 @@ func (a daemonActions) switchRelative(sess *session, delta int) error {
 // controlExec implements command.ControlContext against resolved daemon-owned
 // targets. It deliberately contains no attached-client state.
 type controlExec struct {
+	ctx          context.Context
 	d            *Daemon
 	sess         *session
 	tab          *tab
@@ -465,7 +461,10 @@ func (e controlExec) SessionRecovery(action, argument string) (string, error) {
 	if e.d == nil || e.d.degradedRecovery == nil || e.recoveryName == "" {
 		return "", command.ErrInvalidArguments
 	}
-	ctx := context.Background()
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = e.d.serveCtx
+	}
 	switch action {
 	case "retry":
 		if err := e.d.degradedRecovery.Retry(ctx, e.recoveryName); err != nil {
@@ -480,7 +479,10 @@ func (e controlExec) SessionRecovery(action, argument string) (string, error) {
 		if err != nil || generation == 0 {
 			return "", command.ErrInvalidArguments
 		}
-		record, ok := e.d.catalogue.Record(e.recoveryName)
+		record, ok, err := e.d.catalogue.Record(e.recoveryName)
+		if err != nil {
+			return "", err
+		}
 		if !ok {
 			return "", errors.New("session recovery record not found")
 		}
@@ -494,6 +496,9 @@ func (e controlExec) SessionRecovery(action, argument string) (string, error) {
 		}
 		return "", errors.New("requested recovery fallback is not available")
 	case "export":
+		if !filepath.IsAbs(argument) {
+			return "", command.ErrInvalidArguments
+		}
 		file, err := os.OpenFile(argument, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			return "", err
@@ -520,20 +525,30 @@ func (e controlExec) restoreExplicitRecovery(ctx context.Context) error {
 	if e.d.catalogue == nil {
 		return errors.New("durable session catalogue unavailable")
 	}
-	record, ok := e.d.catalogue.Record(e.recoveryName)
+	record, ok, err := e.d.catalogue.Record(e.recoveryName)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return errors.New("session recovery record not found")
 	}
 	done := make(chan struct{})
 	e.d.mu.Lock()
-	if entry, exists := e.d.stopped[record.Name]; exists {
-		entry.record = record
-		entry.state = runtimeRestoring
-		entry.restoreDone = done
-		e.d.stopped[record.Name] = entry
+	entry, exists := e.d.stopped[record.Name]
+	if !exists || entry.incarnation != record.IncarnationID {
+		e.d.mu.Unlock()
+		return errors.New("session recovery runtime record not found")
 	}
+	if entry.purging || entry.state != runtimeDegraded {
+		e.d.mu.Unlock()
+		return errors.New("session recovery is not available in the current state")
+	}
+	entry.record = record
+	entry.state = runtimeRestoring
+	entry.restoreDone = done
+	e.d.stopped[record.Name] = entry
 	e.d.mu.Unlock()
-	err := e.d.restoreRecord(ctx, record)
+	err = e.d.restoreRecord(ctx, record)
 	e.d.finishRecordRestore(record, err, done)
 	return err
 }

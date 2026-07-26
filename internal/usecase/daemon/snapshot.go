@@ -47,6 +47,9 @@ type snapshotCapture struct {
 	publicationContext   context.Context
 	sealedRefs           map[*vt.HistoryChunk]snapcodec.ObjectRef // set by the single encoder worker
 	coordinatorDiscarded bool                                     // guarded by session.snapshotMu
+	// normalWorkerAdmitted is set before snapshotJobs admission and immutable
+	// until completion; final-queue captures leave it false.
+	normalWorkerAdmitted bool
 	finishOnce           sync.Once
 }
 
@@ -98,3 +101,6 @@ const (
 	snapshotInterval          = 2 * time.Minute
 	snapshotFinalFlushTimeout = time.Second
 )
+
+// SnapshotShutdownTimeout reports the shared final-checkpoint shutdown budget.
+func SnapshotShutdownTimeout() time.Duration { return snapshotFinalFlushTimeout }

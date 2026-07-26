@@ -18,12 +18,15 @@ type retryablePurgeRepository struct {
 	legacyErr      error
 	tombstoned     map[string]bool
 	calls          []string
+	deadlineScoped []bool
 }
 
 func (r *retryablePurgeRepository) Publish(context.Context, ports.SnapshotPublication) error {
 	return nil
 }
-func (r *retryablePurgeRepository) WriteDeletionTombstone(_ context.Context, tombstone domain.DeletionTombstone) error {
+func (r *retryablePurgeRepository) WriteDeletionTombstone(ctx context.Context, tombstone domain.DeletionTombstone) error {
+	_, hasDeadline := ctx.Deadline()
+	r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
 	if r.tombstoned == nil {
 		r.tombstoned = make(map[string]bool)
 	}
@@ -31,14 +34,18 @@ func (r *retryablePurgeRepository) WriteDeletionTombstone(_ context.Context, tom
 	r.tombstoned[tombstone.Name] = true
 	return nil
 }
-func (r *retryablePurgeRepository) QuarantineDeletionSources(_ context.Context, tombstone domain.DeletionTombstone, _ bool) error {
+func (r *retryablePurgeRepository) QuarantineDeletionSources(ctx context.Context, tombstone domain.DeletionTombstone, _ bool) error {
+	_, hasDeadline := ctx.Deadline()
+	r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
 	r.calls = append(r.calls, "incremental", "legacy")
 	if r.incrementalErr != nil {
 		return r.incrementalErr
 	}
 	return r.legacyErr
 }
-func (r *retryablePurgeRepository) DeleteDeletionTombstone(_ context.Context, _ domain.IncarnationID) error {
+func (r *retryablePurgeRepository) DeleteDeletionTombstone(ctx context.Context, _ domain.IncarnationID) error {
+	_, hasDeadline := ctx.Deadline()
+	r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
 	r.calls = append(r.calls, "clear tombstone")
 	for name := range r.tombstoned {
 		delete(r.tombstoned, name)
@@ -65,8 +72,13 @@ func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 			repository := &retryablePurgeRepository{incrementalErr: tt.incremental, legacyErr: tt.legacy}
-			WithSnapshotRepository(repository, repository)(d)
+			WithSnapshotRepository(repository)(d)
+			store, _ := newMockStore(t)
+			WithStore(store)(d)
 			sess := newSnapshotTestSession(t, "work", false, "/work")
+			record := sess.persistRecordLocked(1)
+			record.RecoveryState = domain.RecoveryFresh
+			require.NoError(t, d.catalogue.Create(record))
 			pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
 			require.True(t, ok, "snapshot test pane must use MockPTY")
 			pty.EXPECT().Close().Return(nil).Once()
@@ -86,6 +98,10 @@ func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 			require.NoError(t, d.retryStoppedPurge("work"))
 			require.False(t, repository.tombstoned["work"])
 			require.Equal(t, []string{"tombstone", "incremental", "legacy", "tombstone", "incremental", "legacy", "clear tombstone"}, repository.calls)
+			require.NotEmpty(t, repository.deadlineScoped)
+			for _, scoped := range repository.deadlineScoped {
+				require.True(t, scoped, "every purge repository call must receive a deadline-scoped context")
+			}
 			d.mu.Lock()
 			_, ok = d.stopped["work"]
 			d.mu.Unlock()

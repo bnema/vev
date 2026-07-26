@@ -13,6 +13,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/recovery"
+	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,7 +58,7 @@ func TestDeletionRestartsAtInternalQuarantineBoundaries(t *testing.T) {
 			record := domain.CatalogueRecord{Name: "work", IncarnationID: oldID, RecoveryState: domain.RecoveryFresh}
 			require.NoError(t, catalogue.Create(record))
 			sessionPath := repository.sessionPath(oldID)
-			require.NoError(t, os.MkdirAll(sessionPath, 0o700))
+			require.NoError(t, safedir.EnsurePrivate(sessionPath))
 			require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "durable"), []byte("old namespace"), 0o600))
 			require.NoError(t, os.WriteFile(filepath.Join(h.snapshotDir, filenameForName(record.Name)), []byte("old legacy"), 0o600))
 			tc.inject(repository)
@@ -69,7 +70,8 @@ func TestDeletionRestartsAtInternalQuarantineBoundaries(t *testing.T) {
 			// Simulate a new process: none of the adapter or coordinator state survives.
 			catalogue, repository, journal = h.open(t)
 			require.NoError(t, recovery.NewCoordinator(catalogue, repository, journal, nil).Recover(ctx))
-			_, exists := catalogue.Record(record.Name)
+			_, exists, err := catalogue.Record(record.Name)
+			require.NoError(t, err)
 			require.False(t, exists)
 			require.NoDirExists(t, repository.sessionPath(oldID))
 			require.Equal(t, []byte("old namespace"), mustReadCrashFile(t, filepath.Join(h.snapshotDir, "quarantine", oldID.String(), "snapshot", "durable")))
@@ -84,13 +86,14 @@ func TestDeletionRestartsAtInternalQuarantineBoundaries(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, newID, created.IncarnationID)
 			newPath := repository.sessionPath(newID)
-			require.NoError(t, os.MkdirAll(newPath, 0o700))
+			require.NoError(t, safedir.EnsurePrivate(newPath))
 			require.NoError(t, os.WriteFile(filepath.Join(newPath, "durable"), []byte("new namespace"), 0o600))
 			require.NoError(t, catalogue.Close())
 
 			catalogue, repository, journal = h.open(t)
 			require.NoError(t, recovery.NewCoordinator(catalogue, repository, journal, nil).Recover(ctx))
-			got, exists := catalogue.Record(record.Name)
+			got, exists, err := catalogue.Record(record.Name)
+			require.NoError(t, err)
 			require.True(t, exists)
 			require.Equal(t, newID, got.IncarnationID)
 			require.Equal(t, []byte("new namespace"), mustReadCrashFile(t, filepath.Join(repository.sessionPath(newID), "durable")))
@@ -114,20 +117,26 @@ func TestCreatePreCommitRestartLeavesNoAdoptableNamespace(t *testing.T) {
 	interruptedID := domain.IncarnationID{3}
 	_, err := recovery.NewCoordinator(rejectCreateCatalogue{Catalogue: catalogue}, repository, journal, bytes.NewReader(interruptedID[:])).Create(ctx, domain.CatalogueRecord{Name: "work"})
 	require.ErrorIs(t, err, errDeletionBoundaryCrash)
-	require.Empty(t, catalogue.Records())
+	records, err := catalogue.Records()
+	require.NoError(t, err)
+	require.Empty(t, records)
 	require.NoDirExists(t, filepath.Join(h.snapshotDir, repositorySessionsDir))
 	require.NoError(t, catalogue.Close())
 
 	catalogue, repository, journal = h.open(t)
 	require.NoError(t, recovery.NewCoordinator(catalogue, repository, journal, nil).Recover(ctx))
-	require.Empty(t, catalogue.Records())
+	records, err = catalogue.Records()
+	require.NoError(t, err)
+	require.Empty(t, records)
 	require.NoDirExists(t, repository.sessionPath(interruptedID))
 
 	retryID := domain.IncarnationID{4}
 	created, err := recovery.NewCoordinator(catalogue, repository, journal, bytes.NewReader(retryID[:])).Create(ctx, domain.CatalogueRecord{Name: "work"})
 	require.NoError(t, err)
 	require.Equal(t, retryID, created.IncarnationID)
-	require.Len(t, catalogue.Records(), 1)
+	records, err = catalogue.Records()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
 	require.NoDirExists(t, repository.sessionPath(interruptedID))
 	require.NoError(t, catalogue.Close())
 }

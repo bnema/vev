@@ -638,7 +638,7 @@ func publishBenchmarkSnapshot(b testing.TB, fixture *performanceFixture, generat
 
 func mutateBenchmarkVisible(fixture *performanceFixture, operation int) {
 	fixture.activePane.mu.Lock()
-	fixture.activePane.screen.Write([]byte(fmt.Sprintf("\x1b[1;1Hvisible-%08d", operation)))
+	fixture.activePane.screen.Write(fmt.Appendf(nil, "\x1b[1;1Hvisible-%08d", operation))
 	fixture.activePane.mu.Unlock()
 }
 
@@ -653,7 +653,7 @@ func mutateBenchmarkTail(fixture *performanceFixture, operation int) {
 }
 
 func mutateBenchmarkSealedChunk(fixture *performanceFixture, operation int) {
-	for row := 0; row < 256; row++ {
+	for row := range 256 {
 		mutateBenchmarkTail(fixture, operation*256+row)
 	}
 }
@@ -1065,7 +1065,7 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
-	WithSnapshotRepository(fixture.snapshots, nil)(d)
+	WithSnapshotRepository(fixture.snapshots)(d)
 	d.startSnapshotEncodeWorker()
 	if registerCleanup {
 		t.Cleanup(d.stopSnapshotEncodeWorker)

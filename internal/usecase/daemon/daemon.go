@@ -7,13 +7,13 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
@@ -70,6 +70,8 @@ type Daemon struct {
 	mu       sync.Mutex
 	sessions map[domain.SessionID]*session
 	stopped  map[string]stoppedSession
+	// creating reserves names while durable creation I/O runs without mu.
+	creating map[string]struct{}
 	nextID   uint64
 	// lastAllocatedCreatedAt is the named-session lifecycle timestamp high-water
 	// mark. It is guarded by mu and prevents a wall-clock regression from
@@ -117,13 +119,11 @@ type Daemon struct {
 	shell                          string
 	shellArgs                      []string
 	shellOverride                  bool
-	persist                        *persist.Persister
 	persistEnabled                 bool
 	catalogue                      ports.Catalogue
 	catalogueRecords               []domain.CatalogueRecord
 	catalogueRecordsProvided       bool
-	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
-	// read-only migration input and is never used for new writes.
+	// snapshotRepository is the sole checkpoint contract.
 	snapshotRepository      ports.SnapshotRepository
 	checkpointRecovery      ports.CheckpointCoordinator
 	lifecycleRecovery       ports.SessionLifecycleCoordinator
@@ -136,10 +136,12 @@ type Daemon struct {
 	// records, so it is a durable writer and is guarded by snapshotWorkerMu with
 	// the other two.
 	restoreWorkerDone chan struct{}
-	legacySnapshots   ports.LegacySnapshotSource
 	snapsEnabled      bool
 	noticeStore       ports.NoticeStore
 	snapshotJobs      chan *snapshotCapture
+	// snapshotAdmitted contains every capture accepted by either worker queue,
+	// including captures buffered in snapshotJobs. Guarded by snapshotWorkerMu.
+	snapshotAdmitted map[*snapshotCapture]struct{}
 	// snapshotWake wakes the repository scheduler when a session becomes dirty
 	// or an attempt completes. It is never closed and producers only send
 	// non-blockingly.
@@ -263,16 +265,6 @@ func WithShell(cmd string, args []string) Option {
 	}
 }
 
-// WithStore enables persisted named session metadata. A nil store keeps the
-// daemon in no-op persistence mode.
-func WithStore(store ports.Store) Option {
-	return func(d *Daemon) {
-		d.persist = persist.New(store)
-		d.catalogue = d.persist
-		d.persistEnabled = store != nil
-	}
-}
-
 // WithCatalogue installs the singular catalogue and the strictly opened
 // records that define the daemon's expected-session registry at startup.
 func WithCatalogue(catalogue ports.Catalogue, records []domain.CatalogueRecord) Option {
@@ -303,23 +295,27 @@ func WithRecoveryCoordinator(coordinator ports.SessionLifecycleCoordinator) Opti
 	}
 }
 
-// WithSnapshotRepository enables content-addressed incremental snapshots. The
-// legacy source is read-only migration input and is never used for new writes.
-func WithSnapshotRepository(repository any, legacy ports.LegacySnapshotSource) Option {
+// WithSnapshotRepository enables content-addressed incremental snapshots.
+func WithSnapshotRepository(repository ports.SnapshotRepository) Option {
 	return func(d *Daemon) {
-		if repository == nil {
+		if isNilSnapshotRepository(repository) {
 			return
 		}
-		typed, ok := repository.(ports.SnapshotRepository)
-		if !ok {
-			// Pre-incarnation test repositories are intentionally not admitted to
-			// normal runtime paths. They remain accepted by this option only so
-			// package-level legacy tests can exercise their isolated helpers.
-			return
-		}
-		d.snapshotRepository = typed
-		d.legacySnapshots = legacy
+		d.snapshotRepository = repository
 		d.snapsEnabled = true
+	}
+}
+
+func isNilSnapshotRepository(repository ports.SnapshotRepository) bool {
+	if repository == nil {
+		return true
+	}
+	value := reflect.ValueOf(repository)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -420,6 +416,9 @@ func (d *Daemon) allocateLifecycleCreatedAtLocked() (int64, error) {
 }
 
 func (d *Daemon) nowUnixNano() int64 {
+	if d == nil || d.clock == nil {
+		return time.Now().UnixNano()
+	}
 	return d.clock.Now().UnixNano()
 }
 
@@ -434,23 +433,24 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions:        make(map[domain.SessionID]*session),
-		stopped:         make(map[string]stoppedSession),
-		parked:          make(map[uint64]*parkedAttachment),
-		ptys:            ptys,
-		clock:           clock,
-		log:             log,
-		baseEnv:         os.Environ(),
-		shell:           shell,
-		persist:         persist.New(nil),
-		dirOrHome:       dirOrHome,
-		done:            make(chan struct{}),
-		restoreDone:     make(chan struct{}),
-		animWake:        make(chan struct{}, 1),
-		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotWake:    make(chan struct{}, 1),
-		notices:         newNoticeCenter(),
-		resumeParkGrace: defaultResumeParkGrace,
+		sessions:         make(map[domain.SessionID]*session),
+		stopped:          make(map[string]stoppedSession),
+		creating:         make(map[string]struct{}),
+		parked:           make(map[uint64]*parkedAttachment),
+		ptys:             ptys,
+		clock:            clock,
+		log:              log,
+		baseEnv:          os.Environ(),
+		shell:            shell,
+		dirOrHome:        dirOrHome,
+		done:             make(chan struct{}),
+		restoreDone:      make(chan struct{}),
+		animWake:         make(chan struct{}, 1),
+		snapshotJobs:     make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted: make(map[*snapshotCapture]struct{}),
+		snapshotWake:     make(chan struct{}, 1),
+		notices:          newNoticeCenter(),
+		resumeParkGrace:  defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -470,9 +470,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	for _, o := range opts {
 		o(d)
 	}
-	if d.persist == nil {
-		d.persist = persist.New(nil)
-	}
 	if d.dirOrHome == nil {
 		d.dirOrHome = dirOrHome
 	}
@@ -488,20 +485,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		d.restoreProcessAllowlist.Store(&allow)
 	}
 	records := d.catalogueRecords
-	// Only attempt the load when persistence is actually configured
-	// (d.persistEnabled tracks the same store-is-non-nil condition
-	// persist.Persister uses to distinguish "no store" from "load failed").
-	// Without this gate, the default no-persistence Daemon (persist.New(nil))
-	// would log a false-alarm "loading persisted sessions failed" warning on
-	// every construction: nothing failed, persistence simply isn't enabled.
-	if !d.catalogueRecordsProvided && d.persistEnabled {
-		var err error
-		records, err = d.persist.LoadAll()
-		if err != nil {
-			d.log.Warn("loading persisted sessions failed", "err", err)
-			return d
-		}
-	}
 	var maxSeq uint64
 	var maxCreatedAt int64
 	hasCreatedAt := false
@@ -628,8 +611,6 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	var closeErr error
 	if d.catalogue != nil {
 		closeErr = d.catalogue.Close()
-	} else {
-		closeErr = d.persist.Close()
 	}
 	if closeErr != nil {
 		d.log.Warn("closing session persister failed", "err", closeErr)
@@ -662,10 +643,22 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	for _, s := range snapshot {
 		// Cancellation and PTY closure must not wait behind a teardown owner that
 		// is blocked in snapshot publication or purge work.
+		s.mu.Lock()
+		name := s.name
+		ephemeral := s.ephemeral
+		s.mu.Unlock()
 		s.stopInMemoryLifecycle()
 		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline); err != nil {
 			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
+		}
+		if !ephemeral && deadline != nil {
+			select {
+			case <-deadline.Done():
+				checkpointIncomplete = true
+				d.persistShutdownSnapshotFailure(name, context.DeadlineExceeded)
+			default:
+			}
 		}
 	}
 	return checkpointIncomplete
@@ -737,6 +730,12 @@ func snapshotStopContext(deadline *snapshotShutdownDeadline) (context.Context, c
 	ctx, cancel := context.WithCancel(context.Background())
 	if deadline == nil {
 		return ctx, cancel
+	}
+	select {
+	case <-deadline.Done():
+		cancel()
+		return ctx, cancel
+	default:
 	}
 	stop := make(chan struct{})
 	go func() {
@@ -817,13 +816,16 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		}
 		state := ports.SessionStopped
 		if stopped.purging {
+			// Purge is the dominant externally visible state: restoration must
+			// never make a deletion-reserved record appear attachable.
 			state = ports.SessionDegraded
-		}
-		switch stopped.state {
-		case runtimeRestoring:
-			state = ports.SessionRestoring
-		case runtimeDegraded, runtimeDeleting:
-			state = ports.SessionDegraded
+		} else {
+			switch stopped.state {
+			case runtimeRestoring:
+				state = ports.SessionRestoring
+			case runtimeDegraded, runtimeDeleting:
+				state = ports.SessionDegraded
+			}
 		}
 		infos = append(infos, ports.SessionInfo{Name: name, State: state})
 	}

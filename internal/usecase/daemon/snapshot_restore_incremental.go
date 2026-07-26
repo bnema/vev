@@ -43,7 +43,12 @@ func (d *Daemon) restoreIncrementalSnapshots(ctx context.Context) {
 	if d.catalogue == nil {
 		return
 	}
-	d.restoreCatalogue(ctx, d.catalogue.Records())
+	records, err := d.catalogue.Records()
+	if err != nil {
+		d.log.Error("loading catalogue for snapshot restoration failed", "err", err)
+		return
+	}
+	d.restoreCatalogue(ctx, records)
 }
 
 // restoreCatalogue gives every expected record an independent bounded job.
@@ -95,7 +100,9 @@ func (d *Daemon) recordRestoreDone(name string) chan struct{} {
 	return d.stopped[name].restoreDone
 }
 
-func closeRuntimeRestoreDone(done chan struct{}) {
+// closeRuntimeRestoreDoneLocked closes a per-record restoration barrier.
+// Caller must hold d.mu so state transition and waiter release are atomic.
+func closeRuntimeRestoreDoneLocked(done chan struct{}) {
 	if done == nil {
 		return
 	}
@@ -125,8 +132,13 @@ func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state runtime
 
 func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
 	if restoreErr != nil {
+		catalogueReadable := true
 		if d.catalogue != nil {
-			if current, ok := d.catalogue.Record(record.Name); ok && current.IncarnationID == record.IncarnationID {
+			current, ok, readErr := d.catalogue.Record(record.Name)
+			if readErr != nil {
+				catalogueReadable = false
+				d.log.Error("reading catalogue before degradation failed", "session", record.Name, "err", readErr)
+			} else if ok && current.IncarnationID == record.IncarnationID {
 				record = current
 			}
 		}
@@ -135,7 +147,7 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 		if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
 			record.DegradedReason = "restore interrupted"
 		}
-		if d.catalogue != nil {
+		if d.catalogue != nil && catalogueReadable {
 			if err := d.catalogue.Replace(record.Name, record); err != nil {
 				d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
 			}
@@ -155,7 +167,7 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 			entry.tabNames = append([]string(nil), record.TabNames...)
 			d.stopped[record.Name] = entry
 		}
-		closeRuntimeRestoreDone(done)
+		closeRuntimeRestoreDoneLocked(done)
 	}
 	d.mu.Unlock()
 	if restoreErr != nil {
@@ -197,26 +209,42 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	var selectedGeneration ports.SnapshotGeneration
 	var selectedSnapshot snapcodec.Session
 	selectedIndex := -1
+	selectedFallback := false
 	for i, candidate := range candidates {
+		fallback := record.Committed == nil || i > 0
 		generation, err := d.snapshotRepository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, candidate)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
+			d.logRejectedRestoreCandidate(record, candidate, fallback, "load-failed", err)
 			continue
 		}
-		snapshot, err := sessionFromGeneration(generation)
-		if err != nil || generation.IncarnationID != record.IncarnationID || generation.Name != record.Name || generation.Generation != candidate.Generation {
+		snapshot, decodeErr := sessionFromGeneration(generation)
+		if decodeErr != nil {
+			d.logRejectedRestoreCandidate(record, candidate, fallback, "decode-failed", decodeErr)
 			continue
 		}
-		selected, selectedGeneration, selectedSnapshot, selectedIndex = candidate, generation, snapshot, i
+		if generation.IncarnationID != record.IncarnationID {
+			d.logRejectedRestoreCandidate(record, candidate, fallback, "incarnation-mismatch", nil)
+			continue
+		}
+		if generation.Name != record.Name {
+			d.logRejectedRestoreCandidate(record, candidate, fallback, "name-mismatch", nil)
+			continue
+		}
+		if generation.Generation != candidate.Generation {
+			d.logRejectedRestoreCandidate(record, candidate, fallback, "generation-mismatch", nil)
+			continue
+		}
+		selected, selectedGeneration, selectedSnapshot, selectedIndex, selectedFallback = candidate, generation, snapshot, i, fallback
 		break
 	}
 	if selectedIndex < 0 {
 		return errors.New("snapshot: no catalogue checkpoint validated")
 	}
 
-	if selectedIndex > 0 {
+	if selectedFallback {
 		if d.checkpointRecovery == nil {
 			return errors.New("snapshot: checkpoint coordinator unavailable for fallback promotion")
 		}
@@ -244,8 +272,23 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		return err
 	}
 	d.setStoppedRecovery(record, runtimeHealthy)
-	d.logSessionRestoreComplete(record, selected.Generation, selectedIndex > 0)
+	d.logSessionRestoreComplete(record, selected.Generation, selectedFallback)
 	return nil
+}
+
+func (d *Daemon) logRejectedRestoreCandidate(record domain.CatalogueRecord, candidate domain.CheckpointRef, fallback bool, reason string, err error) {
+	kind := "committed"
+	if fallback {
+		kind = "fallback"
+	}
+	d.log.Warn("snapshot_restore_candidate_rejected",
+		"session", record.Name,
+		"incarnation", record.IncarnationID.String(),
+		"generation", candidate.Generation,
+		"candidate", kind,
+		"reason_code", reason,
+		"err", err,
+	)
 }
 
 func checkpointCandidates(record domain.CatalogueRecord) []domain.CheckpointRef {

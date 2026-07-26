@@ -20,13 +20,15 @@ type checkpointCatalogue struct {
 	events     *[]string
 }
 
-func (c *checkpointCatalogue) Records() []domain.CatalogueRecord {
-	return []domain.CatalogueRecord{c.record}
-}
-func (c *checkpointCatalogue) Record(name string) (domain.CatalogueRecord, bool) {
+func (c *checkpointCatalogue) Records() ([]domain.CatalogueRecord, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.record, c.record.Name == name
+	return []domain.CatalogueRecord{c.record}, nil
+}
+func (c *checkpointCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.record, c.record.Name == name, nil
 }
 func (c *checkpointCatalogue) Create(domain.CatalogueRecord) error { return nil }
 func (c *checkpointCatalogue) UpdateMetadata(domain.CatalogueMetadataUpdate) error {
@@ -127,33 +129,33 @@ func runCheckpointCommit(t *testing.T, count int) (domain.CatalogueRecord, *chec
 		catalogue.record, err = coordinator.PublishCheckpoint(context.Background(), "work", checkpointPublication(catalogue.record, generation))
 		require.NoError(t, err)
 	}
-	for i := 0; i < count; i++ {
+	for i := range count {
 		require.Equal(t, []string{"repository", "catalogue"}, events[i*2:i*2+2])
 	}
 	return catalogue.record, catalogue, repository
 }
 
-func TestCheckpointCommitFirst(t *testing.T) {
-	record, catalogue, _ := runCheckpointCommit(t, 1)
-	require.Equal(t, uint64(1), record.Committed.Generation)
-	require.Empty(t, populatedGenerations(record.Fallbacks))
-	require.Equal(t, 1, catalogue.replaces)
-}
-
-func TestCheckpointCommitSecond(t *testing.T) {
-	record, catalogue, _ := runCheckpointCommit(t, 2)
-	require.Equal(t, uint64(2), record.Committed.Generation)
-	require.Equal(t, []uint64{1}, populatedGenerations(record.Fallbacks))
-	require.Equal(t, 2, catalogue.replaces)
-}
-
-func TestCheckpointCommitThird(t *testing.T) {
-	record, catalogue, _ := runCheckpointCommit(t, 4)
-	require.Equal(t, uint64(4), record.Committed.Generation)
-	require.Equal(t, []uint64{3, 2}, populatedGenerations(record.Fallbacks))
-	require.Equal(t, domain.RecoveryHealthy, record.RecoveryState)
-	require.Empty(t, record.DegradedReason)
-	require.Equal(t, 4, catalogue.replaces)
+func TestCheckpointCommits(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		count         int
+		wantCommitted uint64
+		wantFallbacks []uint64
+	}{
+		{name: "first", count: 1, wantCommitted: 1},
+		{name: "second", count: 2, wantCommitted: 2, wantFallbacks: []uint64{1}},
+		{name: "third", count: 3, wantCommitted: 3, wantFallbacks: []uint64{2, 1}},
+		{name: "fourth", count: 4, wantCommitted: 4, wantFallbacks: []uint64{3, 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record, catalogue, _ := runCheckpointCommit(t, tc.count)
+			require.Equal(t, tc.wantCommitted, record.Committed.Generation)
+			require.Equal(t, tc.wantFallbacks, populatedGenerations(record.Fallbacks))
+			require.Equal(t, domain.RecoveryHealthy, record.RecoveryState)
+			require.Empty(t, record.DegradedReason)
+			require.Equal(t, tc.count, catalogue.replaces)
+		})
+	}
 }
 
 func TestCheckpointCommitThirdPromotesOnlyValidatedDirectFallbacks(t *testing.T) {

@@ -40,9 +40,27 @@ func testCatalogueRecordRoundTrip(t *testing.T) {
 			got, err := decodeRecordValue(record.Name, encoded)
 			require.NoError(t, err)
 			require.Equal(t, record, got)
+			for prefix := range len(encoded) {
+				_, err := decodeRecordValue(record.Name, encoded[:prefix])
+				require.Error(t, err, "prefix length %d", prefix)
+			}
 			require.Error(t, func() error { _, err := decodeRecordValue(record.Name, append(encoded, 0)); return err }())
 		})
 	}
+}
+
+func TestDecodeRecordValueWrapsMalformedAndValidationErrors(t *testing.T) {
+	encoded, err := encodeRecordValue(validRecord("work", 1))
+	require.NoError(t, err)
+	const recoveryStateOffset = 4 + 2 + 16 + 4 + 8 + 8 + 8 + 4
+	encoded[recoveryStateOffset] = 99
+
+	_, err = decodeRecordValue("work", encoded)
+	require.ErrorIs(t, err, errMalformedRecord)
+	joined, ok := err.(interface{ Unwrap() []error })
+	require.True(t, ok)
+	require.Len(t, joined.Unwrap(), 2)
+	require.ErrorContains(t, joined.Unwrap()[1], "invalid recovery state")
 }
 
 func testCatalogueDuplicateIncarnations(t *testing.T) {
@@ -110,7 +128,8 @@ func testCatalogueMetadataUpdatePreservesAuthority(t *testing.T) {
 	next := domain.CatalogueRecord{Name: "work", IncarnationID: original.IncarnationID, Cwd: "/new", UpdatedAt: 22, LastUsedSeq: 23, TabNames: []string{"editor", "logs"}}
 	update := next.MetadataUpdate()
 	require.NoError(t, p.UpdateMetadata(update))
-	got, ok := p.Record("work")
+	got, ok, err := p.Record("work")
+	require.NoError(t, err)
 	require.True(t, ok)
 	expected := original
 	expected.Cwd, expected.UpdatedAt, expected.LastUsedSeq, expected.TabNames = next.Cwd, next.UpdatedAt, next.LastUsedSeq, next.TabNames
@@ -121,14 +140,16 @@ func testCatalogueMetadataUpdatePreservesAuthority(t *testing.T) {
 		Name: "work", IncarnationID: original.IncarnationID, LastUsedSeq: &lastUsedSeq,
 	}))
 	expected.LastUsedSeq = lastUsedSeq
-	partiallyUpdated, ok := p.Record("work")
+	partiallyUpdated, ok, err := p.Record("work")
+	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, expected, partiallyUpdated, "a partial metadata update must not clear other mutable or authority-owned fields")
 
 	stale := update
 	stale.IncarnationID = domain.IncarnationID{2}
 	require.Error(t, p.UpdateMetadata(stale))
-	unchanged, ok := p.Record("work")
+	unchanged, ok, err := p.Record("work")
+	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, expected, unchanged)
 }
@@ -198,6 +219,13 @@ func testCatalogueLoadReadOnlyRecoversCrashStates(t *testing.T) {
 				stale := want
 				stale.IncarnationID = domain.IncarnationID{9}
 				writeCandidate(t, StorePath(dir)+".prev", stale)
+				writeCandidate(t, StorePath(dir)+".next", want)
+			},
+		},
+		{
+			// Crash before a new installation publishes .next as current.
+			name: "next-only-recovers-from-next",
+			write: func(t *testing.T, dir string, want domain.CatalogueRecord) {
 				writeCandidate(t, StorePath(dir)+".next", want)
 			},
 		},

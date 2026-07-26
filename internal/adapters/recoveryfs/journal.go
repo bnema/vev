@@ -104,16 +104,33 @@ func (j *Journal) ListDiscards(ctx context.Context) ([]domain.DiscardIntent, err
 	if err != nil {
 		return nil, err
 	}
-	entries, readErr := dir.ReadDir(maxDiscardIntents + 1)
-	closeErr := dir.Close()
-	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return nil, readErr
+	entries := make([]os.DirEntry, 0, maxDiscardIntents)
+	for {
+		batch, readErr := dir.ReadDir(maxDiscardIntents + 1)
+		for _, entry := range batch {
+			if strings.HasPrefix(entry.Name(), ".intent-") && !entry.IsDir() {
+				continue
+			}
+			if entry.IsDir() || !strings.HasPrefix(entry.Name(), "discard-") {
+				_ = dir.Close()
+				return nil, errors.New("recovery journal: invalid transaction entry")
+			}
+			entries = append(entries, entry)
+			if len(entries) > maxDiscardIntents {
+				_ = dir.Close()
+				return nil, errors.New("recovery journal: transaction entry limit exceeded")
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			_ = dir.Close()
+			return nil, readErr
+		}
 	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	if len(entries) > maxDiscardIntents {
-		return nil, errors.New("recovery journal: transaction entry limit exceeded")
+	if err := dir.Close(); err != nil {
+		return nil, err
 	}
 	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })
 	out := make([]domain.DiscardIntent, 0, len(entries))
@@ -121,9 +138,6 @@ func (j *Journal) ListDiscards(ctx context.Context) ([]domain.DiscardIntent, err
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
-		}
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "discard-") {
-			return nil, errors.New("recovery journal: invalid transaction entry")
 		}
 		data, err := readFileBounded(filepath.Join(j.dir, entry.Name()), maxDiscardIntentSize)
 		if err != nil {

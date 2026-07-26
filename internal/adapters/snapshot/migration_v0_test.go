@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -37,10 +38,45 @@ func TestLegacyManifestV1(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "work", got.Name)
 	require.Equal(t, uint64(7), got.Generation)
-	for _, invalid := range [][]byte{encoded[:5], append(append([]byte(nil), encoded...), 0)} {
-		_, err := decodeManifestV1(invalid)
-		require.Error(t, err)
+	for size := range len(encoded) {
+		_, err := decodeManifestV1(encoded[:size])
+		require.Errorf(t, err, "prefix length %d", size)
 	}
+	_, err = decodeManifestV1(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
+}
+
+func TestLegacyManifestV1DeduplicatesObjectsPreservingFirst(t *testing.T) {
+	chunk, err := codec.MarshalObject(codec.HistoryChunk, []byte("chunk"))
+	require.NoError(t, err)
+	tail, err := codec.MarshalObject(codec.HistoryTail, []byte("tail"))
+	require.NoError(t, err)
+	visible, err := codec.MarshalObject(codec.Visible, []byte("visible"))
+	require.NoError(t, err)
+	chunkRef := codec.ObjectRef{Kind: codec.HistoryChunk, Digest: chunk.Digest, Size: uint32(len(chunk.Data))}
+	manifest := codec.Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "work", Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: []codec.ObjectRef{chunkRef, chunkRef}, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}}
+	modern, err := codec.MarshalManifest(manifest)
+	require.NoError(t, err)
+	body := append([]byte(nil), modern[legacyManifestHeaderSize:]...)
+	body = append(body[:8], body[25:]...)
+	legacy := make([]byte, legacyManifestHeaderSize, legacyManifestHeaderSize+len(body))
+	copy(legacy, "VEVM")
+	binary.BigEndian.PutUint16(legacy[4:6], 1)
+	binary.BigEndian.PutUint32(legacy[8:12], uint32(len(body)))
+	binary.BigEndian.PutUint32(legacy[12:16], crc32.ChecksumIEEE(body))
+	legacy = append(legacy, body...)
+
+	decoded, err := decodeManifestV1(legacy)
+	require.NoError(t, err)
+	require.Len(t, decoded.Objects, 3)
+	require.Equal(t, chunk.Digest, decoded.Objects[0].Digest)
+}
+
+func TestUncertainLegacyErrorWrapsSentinelAndCause(t *testing.T) {
+	cause := errors.New("legacy cause")
+	err := uncertainLegacyError("read", cause)
+	require.ErrorIs(t, err, ports.ErrLegacySnapshotUncertain)
+	require.ErrorIs(t, err, cause)
 }
 
 func TestHasLegacyState(t *testing.T) {

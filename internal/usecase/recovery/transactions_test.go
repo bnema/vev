@@ -27,20 +27,20 @@ func newTransactionCatalogue(records ...domain.CatalogueRecord) *transactionCata
 	return catalogue
 }
 
-func (c *transactionCatalogue) Records() []domain.CatalogueRecord {
+func (c *transactionCatalogue) Records() ([]domain.CatalogueRecord, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]domain.CatalogueRecord, 0, len(c.records))
 	for _, record := range c.records {
 		out = append(out, record)
 	}
-	return out
+	return out, nil
 }
-func (c *transactionCatalogue) Record(name string) (domain.CatalogueRecord, bool) {
+func (c *transactionCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	record, ok := c.records[name]
-	return record, ok
+	return record, ok, nil
 }
 func (c *transactionCatalogue) Create(record domain.CatalogueRecord) error {
 	c.mu.Lock()
@@ -233,16 +233,13 @@ func TestFallbackPromotion(t *testing.T) {
 	fallback := *record.Fallbacks[0]
 	catalogue := newTransactionCatalogue(record)
 	repository := newTransactionRepository()
-	repository.generations[fallback] = ports.SnapshotGeneration{
-		IncarnationID: record.IncarnationID, Name: record.Name, Generation: fallback.Generation,
-		Manifest: []byte("fallback"),
-	}
-	fallback.ManifestDigest = checkpointDigest(repository.generations[*record.Fallbacks[0]].Manifest)
+	manifest := []byte("fallback")
+	fallback.ManifestDigest = checkpointDigest(manifest)
 	record.Fallbacks[0] = &fallback
 	catalogue.records[record.Name] = record
 	repository.generations[fallback] = ports.SnapshotGeneration{
 		IncarnationID: record.IncarnationID, Name: record.Name, Generation: fallback.Generation,
-		Manifest: []byte("fallback"),
+		Manifest: manifest,
 	}
 	coordinator := NewCoordinator(catalogue, repository, newTransactionJournal(), nil)
 
@@ -283,6 +280,20 @@ func TestDegradedExportIsReadOnly(t *testing.T) {
 
 // A third incarnation still fails closed for that session: its intent and
 // record are retained untouched, but startup is no longer aborted.
+func TestDiscardRecoveryRemovesIntentWhenCatalogueRecordIsAbsent(t *testing.T) {
+	old := degradedTransactionRecord()
+	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: old.Name, Reason: "discard"}
+	catalogue := newTransactionCatalogue()
+	journal := newTransactionJournal()
+	journal.intents[old.IncarnationID] = intent
+	coordinator := NewCoordinator(catalogue, newTransactionRepository(), journal, nil)
+
+	require.NoError(t, coordinator.Recover(context.Background()))
+	require.NotContains(t, journal.intents, old.IncarnationID)
+	require.Equal(t, []string{"delete-intent"}, journal.events)
+	require.Empty(t, coordinator.Conflicts())
+}
+
 func TestDiscardIncarnationConflict(t *testing.T) {
 	old := degradedTransactionRecord()
 	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: old.Name, Reason: "discard"}

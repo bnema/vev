@@ -644,28 +644,7 @@ func (r *Repository) SaveQuarantineDescriptor(ctx context.Context, descriptor do
 
 func quarantineDescriptorsEqual(a, b domain.QuarantineDescriptor) bool {
 	return a.OldIncarnation == b.OldIncarnation && a.ReplacementIncarnation == b.ReplacementIncarnation &&
-		a.SessionName == b.SessionName && a.Reason == b.Reason && catalogueRecordsEqual(a.OldRecord, b.OldRecord)
-}
-
-func catalogueRecordsEqual(a, b domain.CatalogueRecord) bool {
-	if a.Name != b.Name || a.IncarnationID != b.IncarnationID || a.Cwd != b.Cwd || a.CreatedAt != b.CreatedAt ||
-		a.UpdatedAt != b.UpdatedAt || a.LastUsedSeq != b.LastUsedSeq || a.RecoveryState != b.RecoveryState ||
-		a.DegradedReason != b.DegradedReason || len(a.TabNames) != len(b.TabNames) {
-		return false
-	}
-	for i := range a.TabNames {
-		if a.TabNames[i] != b.TabNames[i] {
-			return false
-		}
-	}
-	return checkpointRefsEqual(a.Committed, b.Committed) && checkpointRefsEqual(a.Fallbacks[0], b.Fallbacks[0]) && checkpointRefsEqual(a.Fallbacks[1], b.Fallbacks[1])
-}
-
-func checkpointRefsEqual(a, b *domain.CheckpointRef) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
+		a.SessionName == b.SessionName && a.Reason == b.Reason && a.OldRecord.Equal(b.OldRecord)
 }
 
 func (r *Repository) QuarantineIncarnation(ctx context.Context, id domain.IncarnationID) error {

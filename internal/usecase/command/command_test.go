@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+func TestParsePositiveUint64(t *testing.T) {
+	const maxUint64 = "18446744073709551615"
+	got, err := ParsePositiveUint64([]string{maxUint64})
+	if err != nil || got != ^uint64(0) {
+		t.Fatalf("ParsePositiveUint64(max) = %d, %v", got, err)
+	}
+	if _, err := ParsePositiveUint64([]string{"18446744073709551616"}); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatalf("ParsePositiveUint64(overflow) error = %v", err)
+	}
+}
+
 func TestParsePositiveDecimal(t *testing.T) {
 	for _, tt := range []struct {
 		name    string

@@ -453,15 +453,13 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 	errs := make(chan error, clients)
 	var wg sync.WaitGroup
 	for range clients {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := ensureDaemonWithLifecycle(context.Background(), dir, dial, func() error {
 				spawns.Add(1)
 				return nil
 			}, cfg)
 			errs <- err
-		}()
+		})
 	}
 	require.Never(t, func() bool { return spawns.Load() != 0 }, 50*time.Millisecond, time.Millisecond)
 	close(ready)
@@ -537,7 +535,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 		closed:    make(chan struct{}),
 	}
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
-	shutdownClock := newLifecycleShutdownClock()
+	shutdownClock := newLifecycleShutdownClock(t)
 	reconciler := &lifecycleBlockingReconciler{
 		entered:  make(chan struct{}),
 		release:  make(chan struct{}),
@@ -564,7 +562,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 				pty.NewFactory(),
 				shutdownClock,
 				discardLog(),
-				daemon.WithSnapshotRepository(repository, nil),
+				daemon.WithSnapshotRepository(repository),
 				daemon.WithDurableMaintenance(catalogue, repository, reconciler, nil),
 				daemon.WithCatalogue(catalogue, nil),
 			)
@@ -679,7 +677,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	releaseRestore := func() { releaseOnce.Do(func() { close(blocking.release) }) }
 	t.Cleanup(releaseRestore)
 
-	shutdownClock := newLifecycleShutdownClock()
+	shutdownClock := newLifecycleShutdownClock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	listenerReady := make(chan struct{})
@@ -707,7 +705,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 				discardLog(),
 				daemon.WithShell("/bin/cat", nil),
 				daemon.WithCatalogue(opened.Catalogue, opened.Records),
-				daemon.WithSnapshotRepository(blocking, nil),
+				daemon.WithSnapshotRepository(blocking),
 			)
 			return d.Serve(ctx, listener)
 		})
@@ -764,7 +762,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 		discardLog(),
 		daemon.WithShell("/bin/cat", nil),
 		daemon.WithCatalogue(opened.Catalogue, opened.Records),
-		daemon.WithSnapshotRepository(repository, nil),
+		daemon.WithSnapshotRepository(repository),
 		daemon.WithRecoveryCoordinator(coordinator),
 	)
 	served := make(chan error, 1)
@@ -773,7 +771,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 	tr, _ := attach(t, runtimeDir, ports.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("checkpoint me\n")})}))
 	require.Eventually(t, func() bool {
-		record, ok := opened.Catalogue.Record(name)
+		record, ok, _ := opened.Catalogue.Record(name)
 		return ok && record.RecoveryState == domain.RecoveryHealthy && record.Committed != nil
 	}, 5*time.Second, 10*time.Millisecond, "session never committed a checkpoint")
 	require.NoError(t, tr.Close())
@@ -826,7 +824,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	t.Helper()
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
-	shutdownClock := newLifecycleShutdownClock()
+	shutdownClock := newLifecycleShutdownClock(t)
 	repository := newLifecycleBlockingRepository()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -849,7 +847,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 				shutdownClock,
 				discardLog(),
 				daemon.WithShell("/bin/cat", nil),
-				daemon.WithSnapshotRepository(repository, nil),
+				daemon.WithSnapshotRepository(repository),
 			)
 			return d.Serve(ctx, observed)
 		})
@@ -913,21 +911,28 @@ func (r *lifecycleBlockingRepository) Publish(context.Context, ports.SnapshotPub
 }
 
 type lifecycleShutdownClock struct {
+	t      *testing.T
 	base   ports.Clock
 	timers chan *lifecycleManualTimer
 }
 
-func newLifecycleShutdownClock() *lifecycleShutdownClock {
-	return &lifecycleShutdownClock{base: clock.New(), timers: make(chan *lifecycleManualTimer, 4)}
+func newLifecycleShutdownClock(t *testing.T) *lifecycleShutdownClock {
+	t.Helper()
+	return &lifecycleShutdownClock{t: t, base: clock.New(), timers: make(chan *lifecycleManualTimer, 4)}
 }
 
 func (c *lifecycleShutdownClock) Now() time.Time { return c.base.Now() }
 func (c *lifecycleShutdownClock) NewTimer(delay time.Duration) ports.Timer {
-	if delay != time.Second {
+	if delay != daemon.SnapshotShutdownTimeout() {
 		return c.base.NewTimer(delay)
 	}
-	timer := &lifecycleManualTimer{ch: make(chan time.Time, 1)}
-	c.timers <- timer
+	timer := &lifecycleManualTimer{t: c.t, ch: make(chan time.Time, 1)}
+	select {
+	case c.timers <- timer:
+	default:
+		c.t.Errorf("unexpected additional snapshot shutdown timer with delay %s", delay)
+		timer.fire()
+	}
 	return timer
 }
 
@@ -943,12 +948,16 @@ func (c *lifecycleShutdownClock) nextTimer(t *testing.T) *lifecycleManualTimer {
 }
 
 type lifecycleManualTimer struct {
+	t       *testing.T
 	ch      chan time.Time
 	stopped atomic.Bool
 }
 
 func (t *lifecycleManualTimer) C() <-chan time.Time { return t.ch }
-func (t *lifecycleManualTimer) Reset(time.Duration) bool {
+func (t *lifecycleManualTimer) Reset(delay time.Duration) bool {
+	if delay != daemon.SnapshotShutdownTimeout() {
+		t.t.Errorf("snapshot shutdown timer reset with delay %s, want %s", delay, daemon.SnapshotShutdownTimeout())
+	}
 	t.stopped.Store(false)
 	return false
 }

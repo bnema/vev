@@ -148,7 +148,9 @@ func (c *Coordinator) Create(ctx context.Context, record domain.CatalogueRecord)
 	}
 	unlock := c.locks.Lock([]string{record.Name})
 	defer unlock()
-	if _, exists := c.catalogue.Record(record.Name); exists {
+	if _, exists, err := c.catalogue.Record(record.Name); err != nil {
+		return domain.CatalogueRecord{}, err
+	} else if exists {
 		return domain.CatalogueRecord{}, fmt.Errorf("recovery: session %q already exists", record.Name)
 	}
 	id, err := domain.NewIncarnationID(c.random)
@@ -180,11 +182,16 @@ func (c *Coordinator) Rename(ctx context.Context, oldName, newName string) (doma
 	}
 	unlock := c.locks.Lock([]string{oldName, newName})
 	defer unlock()
-	record, ok := c.catalogue.Record(oldName)
+	record, ok, err := c.catalogue.Record(oldName)
+	if err != nil {
+		return domain.CatalogueRecord{}, err
+	}
 	if !ok {
 		return domain.CatalogueRecord{}, fmt.Errorf("recovery: session %q not found", oldName)
 	}
-	if existing, exists := c.catalogue.Record(newName); exists && (newName != oldName || existing.IncarnationID != record.IncarnationID) {
+	if existing, exists, err := c.catalogue.Record(newName); err != nil {
+		return domain.CatalogueRecord{}, err
+	} else if exists && (newName != oldName || existing.IncarnationID != record.IncarnationID) {
 		return domain.CatalogueRecord{}, fmt.Errorf("recovery: session %q already exists", newName)
 	}
 	record.Name = newName
@@ -207,7 +214,10 @@ func (c *Coordinator) Delete(ctx context.Context, name string) error {
 	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return nil
 	}
@@ -267,13 +277,21 @@ func (c *Coordinator) Recover(ctx context.Context) error {
 			}
 		}
 	}
-	for _, candidate := range c.catalogue.Records() {
+	records, err := c.catalogue.Records()
+	if err != nil {
+		return err
+	}
+	for _, candidate := range records {
 		if candidate.RecoveryState != domain.RecoveryDeleting {
 			continue
 		}
 		unlock := c.locks.Lock([]string{candidate.Name})
 		var deleteErr error
-		current, ok := c.catalogue.Record(candidate.Name)
+		current, ok, readErr := c.catalogue.Record(candidate.Name)
+		if readErr != nil {
+			unlock()
+			return readErr
+		}
 		if ok && current.IncarnationID == candidate.IncarnationID && current.RecoveryState == domain.RecoveryDeleting {
 			deleteErr = c.deleteLocked(ctx, current)
 		}
@@ -323,7 +341,10 @@ func (c *Coordinator) fenceSession(name, kind, reason string, cause error) error
 
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return err
+	}
 	if !ok || record.RecoveryState != domain.RecoveryHealthy {
 		// Fresh records cannot represent degraded state (it requires a committed
 		// checkpoint), and deleting or already degraded records must keep the
@@ -354,7 +375,10 @@ func (c *Coordinator) recoverDeletionTombstone(ctx context.Context, tombstone do
 	}
 	unlock := c.locks.Lock([]string{tombstone.Name})
 	defer unlock()
-	record, exists := c.catalogue.Record(tombstone.Name)
+	record, exists, err := c.catalogue.Record(tombstone.Name)
+	if err != nil {
+		return err
+	}
 	includeLegacyName := true
 	if exists {
 		switch {

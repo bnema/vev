@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -11,8 +12,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/bnema/vev/internal/domain"
@@ -1043,21 +1046,17 @@ func TestRetentionSlots(t *testing.T) {
 }
 
 func TestUnresolvedDataPinned(t *testing.T) {
-	for _, state := range []string{"degraded", "deleting", "migration", "transaction"} {
-		t.Run(state, func(t *testing.T) {
-			repo := NewRepository(privateDir(t))
-			publications := publishMaintenanceGenerations(t, repo, state, 4)
-			done, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: publications[0].IncarnationID, PinAll: true}, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !done {
-				t.Fatal("pinned maintenance did not complete without traversing")
-			}
-			if got := remainingMaintenanceGenerations(t, repo, publications[0].IncarnationID); !slices.Equal(got, []uint64{4, 3, 2, 1}) {
-				t.Fatalf("pinned generations = %v", got)
-			}
-		})
+	repo := NewRepository(privateDir(t))
+	publications := publishMaintenanceGenerations(t, repo, "unresolved", 4)
+	done, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: publications[0].IncarnationID, PinAll: true}, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("pinned maintenance did not complete without traversing")
+	}
+	if got := remainingMaintenanceGenerations(t, repo, publications[0].IncarnationID); !slices.Equal(got, []uint64{4, 3, 2, 1}) {
+		t.Fatalf("pinned generations = %v", got)
 	}
 }
 
@@ -1091,6 +1090,79 @@ func TestMaintenanceBudgetAdmitsPayloadsBeforeRead(t *testing.T) {
 	}
 	if len(reads) != 1 || reads[0] != manifestPath {
 		t.Fatalf("payload reads = %v, want only admitted manifest %q", reads, manifestPath)
+	}
+}
+
+func TestMaintainSessionDistinguishesInitialOversizeFromResumableExhaustion(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	publications := publishMaintenanceGenerations(t, repo, "budget-semantics", 2)
+	plan := ports.RetentionPlan{IncarnationID: publications[0].IncarnationID}
+	firstInfo, err := os.Stat(repo.manifestPath(plan.IncarnationID, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInfo, err := os.Stat(repo.manifestPath(plan.IncarnationID, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSize, secondSize := uint64(firstInfo.Size()), uint64(secondInfo.Size())
+
+	done, err := repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 2, Bytes: min(firstSize, secondSize) - 1})
+	if done || !errors.Is(err, ErrMaintenanceBudgetTooSmall) {
+		t.Fatalf("initial oversized item: done=%v err=%v", done, err)
+	}
+
+	done, err = repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 2, Bytes: firstSize + secondSize - 1})
+	if err != nil || done {
+		t.Fatalf("mid-pass exhaustion must be resumable: done=%v err=%v", done, err)
+	}
+	done, err = repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
+	if err != nil || !done {
+		t.Fatalf("resumed maintenance: done=%v err=%v", done, err)
+	}
+}
+
+func TestReconcileDoesNotHoldMaintenanceLockDuringPayloadRead(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	publications := publishMaintenanceGenerations(t, repo, "reconcile-lock", 2)
+	committed := checkpointRefForPublication(publications[0])
+	record := domain.CatalogueRecord{Name: "reconcile-lock", IncarnationID: publications[0].IncarnationID, RecoveryState: domain.RecoveryHealthy, Committed: &committed}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	repo.hooks.beforeMaintenancePayloadRead = func(string) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	}
+	reconcileDone := make(chan error, 1)
+	go func() {
+		_, _, err := repo.Reconcile(context.Background(), []domain.CatalogueRecord{record}, ports.ReconcileCursor{}, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
+		reconcileDone <- err
+	}()
+	<-entered
+
+	pinDone := make(chan error, 1)
+	go func() {
+		_, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: record.IncarnationID, PinAll: true}, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
+		pinDone <- err
+	}()
+	select {
+	case err := <-pinDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("maintenance lock remained held during reconciliation payload I/O")
+	}
+	releaseOnce.Do(func() { close(release) })
+	if err := <-reconcileDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1149,6 +1221,6 @@ func remainingMaintenanceGenerations(t *testing.T, repo *Repository, id domain.I
 			generations = append(generations, generation)
 		}
 	}
-	slices.SortFunc(generations, func(a, b uint64) int { return int(b) - int(a) })
+	slices.SortFunc(generations, func(a, b uint64) int { return cmp.Compare(b, a) })
 	return generations
 }

@@ -132,7 +132,7 @@ func TestDurableTransactionCrashMatrix(t *testing.T) {
 		require.NoError(t, catalogue.Close())
 
 		h.recoverTwice(t, func(catalogue *persist.Persister, _ *snapshot.Repository, _ *recoveryfs.Journal) {
-			record, exists := catalogue.Record("work")
+			record, exists, _ := catalogue.Record("work")
 			require.True(t, exists)
 			require.Equal(t, domain.IncarnationID{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, record.IncarnationID)
 			require.Equal(t, domain.RecoveryFresh, record.RecoveryState)
@@ -160,7 +160,7 @@ func TestDurableTransactionCrashMatrix(t *testing.T) {
 
 			ref := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(publication.Manifest)}
 			h.recoverTwice(t, func(catalogue *persist.Persister, repository *snapshot.Repository, _ *recoveryfs.Journal) {
-				stored, exists := catalogue.Record(record.Name)
+				stored, exists, _ := catalogue.Record(record.Name)
 				require.True(t, exists)
 				if boundaryName == "snapshot-publish" {
 					require.Equal(t, domain.RecoveryFresh, stored.RecoveryState)
@@ -189,8 +189,8 @@ func TestDurableTransactionCrashMatrix(t *testing.T) {
 		require.NoError(t, catalogue.Close())
 
 		h.recoverTwice(t, func(catalogue *persist.Persister, _ *snapshot.Repository, _ *recoveryfs.Journal) {
-			_, oldExists := catalogue.Record("old")
-			renamed, newExists := catalogue.Record("new")
+			_, oldExists, _ := catalogue.Record("old")
+			renamed, newExists, _ := catalogue.Record("new")
 			require.False(t, oldExists)
 			require.True(t, newExists)
 			require.Equal(t, record.IncarnationID, renamed.IncarnationID)
@@ -228,7 +228,7 @@ func TestDurableTransactionCrashMatrix(t *testing.T) {
 			require.NoError(t, catalogue.Close())
 
 			h.recoverTwice(t, func(catalogue *persist.Persister, repository *snapshot.Repository, _ *recoveryfs.Journal) {
-				_, exists := catalogue.Record(record.Name)
+				_, exists, _ := catalogue.Record(record.Name)
 				require.False(t, exists)
 				assertNoTombstones(t, repository)
 				require.NoDirExists(t, filepath.Join(h.snapshotDir, "sessions", record.IncarnationID.String()))
@@ -275,7 +275,7 @@ func TestDurableDiscardCrashMatrix(t *testing.T) {
 			require.NoError(t, catalogue.Close())
 
 			h.recoverTwice(t, func(catalogue *persist.Persister, _ *snapshot.Repository, journal *recoveryfs.Journal) {
-				got, exists := catalogue.Record(old.Name)
+				got, exists, _ := catalogue.Record(old.Name)
 				require.True(t, exists)
 				require.Equal(t, newID, got.IncarnationID)
 				require.Equal(t, domain.RecoveryFresh, got.RecoveryState)
@@ -312,7 +312,7 @@ func TestDeletionRecoveryProtectsReusedNameFilesystemBytes(t *testing.T) {
 	require.NoError(t, catalogue.Close())
 
 	h.recoverTwice(t, func(catalogue *persist.Persister, repository *snapshot.Repository, _ *recoveryfs.Journal) {
-		got, exists := catalogue.Record("work")
+		got, exists, _ := catalogue.Record("work")
 		require.True(t, exists)
 		require.Equal(t, replacement, got)
 		require.Equal(t, replacementBytes, readTree(t, replacementPath))

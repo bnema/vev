@@ -22,7 +22,12 @@ func TestIncarnationIDText(t *testing.T) {
 	var decoded IncarnationID
 	require.NoError(t, decoded.UnmarshalText(text))
 	require.Equal(t, id, decoded)
-	require.Error(t, decoded.UnmarshalText([]byte("AB")))
+	require.Error(t, decoded.UnmarshalText([]byte("AB0000000000000000000000000000CD")))
+
+	_, err = (IncarnationID{}).MarshalText()
+	require.Error(t, err)
+	require.Error(t, decoded.UnmarshalText([]byte("00000000000000000000000000000000")))
+	require.Equal(t, id, decoded, "rejected zero text must not mutate the receiver")
 }
 
 func TestCatalogueRecordValidate(t *testing.T) {
@@ -50,12 +55,28 @@ func TestCatalogueRecordValidate(t *testing.T) {
 		{name: "zero checkpoint generation", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{ManifestDigest: [32]byte{1}}}},
 		{name: "zero checkpoint digest", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7}}},
 		{name: "second fallback without first", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: validRef, Fallbacks: [2]*CheckpointRef{nil, {Generation: 6, ManifestDigest: [32]byte{2}}}}},
+		{name: "fallback newer than committed", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 6, ManifestDigest: [32]byte{1}}, Fallbacks: [2]*CheckpointRef{{Generation: 7, ManifestDigest: [32]byte{2}}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Error(t, tt.record.Validate())
 		})
 	}
+}
+
+func TestCatalogueRecordEqualUsesCheckpointValuesAndOrderedTabs(t *testing.T) {
+	committed := CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
+	left := CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, TabNames: []string{"shell", "logs"}, RecoveryState: RecoveryHealthy, Committed: &committed}
+	right := left
+	right.TabNames = append([]string(nil), left.TabNames...)
+	copy := committed
+	right.Committed = &copy
+	require.True(t, left.Equal(right))
+
+	right.TabNames[0], right.TabNames[1] = right.TabNames[1], right.TabNames[0]
+	require.False(t, left.Equal(right))
+	require.True(t, (*CheckpointRef)(nil).Equal(nil))
+	require.False(t, left.Committed.Equal(nil))
 }
 
 func TestDeletionTombstoneValidate(t *testing.T) {

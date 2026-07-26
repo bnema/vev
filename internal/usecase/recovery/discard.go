@@ -39,7 +39,10 @@ func (c *Coordinator) Retry(ctx context.Context, name string) error {
 	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrRecoveryRecordNotFound
 	}
@@ -66,7 +69,10 @@ func (c *Coordinator) RestoreFallback(ctx context.Context, name string, ref doma
 	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrRecoveryRecordNotFound
 	}
@@ -88,7 +94,10 @@ func (c *Coordinator) Export(ctx context.Context, name string, w io.Writer) erro
 	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrRecoveryRecordNotFound
 	}
@@ -167,7 +176,10 @@ func (c *Coordinator) Discard(ctx context.Context, name, reason string) (domain.
 	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return domain.CatalogueRecord{}, err
+	}
 	if !ok {
 		return domain.CatalogueRecord{}, ErrRecoveryRecordNotFound
 	}
@@ -207,9 +219,15 @@ func (c *Coordinator) recoverDiscardLocked(ctx context.Context, intent domain.Di
 	if err := validateDiscardIntent(intent); err != nil {
 		return err
 	}
-	current, ok := c.catalogue.Record(intent.SessionName)
+	current, ok, err := c.catalogue.Record(intent.SessionName)
+	if err != nil {
+		return err
+	}
 	if !ok {
-		return fmt.Errorf("%w: missing session %q", ErrDiscardConflict, intent.SessionName)
+		// Catalogue deletion is terminal for this session identity. There is no
+		// live record to replace or quarantine, so retaining the intent would
+		// manufacture a permanent startup conflict.
+		return c.journal.DeleteDiscard(ctx, intent.OldIncarnation)
 	}
 	next := freshReplacement(intent)
 	if err := next.Validate(); err != nil {
@@ -217,7 +235,7 @@ func (c *Coordinator) recoverDiscardLocked(ctx context.Context, intent domain.Di
 	}
 	switch current.IncarnationID {
 	case intent.OldIncarnation:
-		if !catalogueRecordsEqual(current, intent.OldRecord) {
+		if !current.Equal(intent.OldRecord) {
 			return fmt.Errorf("%w: old record changed", ErrDiscardConflict)
 		}
 	case intent.NewIncarnation:
@@ -274,12 +292,4 @@ func freshReplacement(intent domain.DiscardIntent) domain.CatalogueRecord {
 	next.Fallbacks = [2]*domain.CheckpointRef{}
 	next.DegradedReason = ""
 	return next
-}
-
-func catalogueRecordsEqual(a, b domain.CatalogueRecord) bool {
-	return a.Name == b.Name && a.IncarnationID == b.IncarnationID && a.Cwd == b.Cwd &&
-		a.CreatedAt == b.CreatedAt && a.UpdatedAt == b.UpdatedAt && a.LastUsedSeq == b.LastUsedSeq &&
-		slices.Equal(a.TabNames, b.TabNames) && a.RecoveryState == b.RecoveryState &&
-		equalCheckpointRefs(a.Committed, b.Committed) && equalCheckpointRefs(a.Fallbacks[0], b.Fallbacks[0]) &&
-		equalCheckpointRefs(a.Fallbacks[1], b.Fallbacks[1]) && a.DegradedReason == b.DegradedReason
 }

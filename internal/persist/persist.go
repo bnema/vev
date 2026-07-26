@@ -3,8 +3,6 @@ package persist
 import (
 	"errors"
 	"fmt"
-	"log/slog"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -23,25 +21,6 @@ func StorePath(dir string) string { return filepath.Join(dir, filename) }
 type Persister struct {
 	store ports.Store
 	mu    sync.Mutex
-	log   *slog.Logger
-}
-
-// Option configures a Persister at construction time.
-type Option func(*Persister)
-
-// WithLogger directs diagnostics for failures that ports.Catalogue has no
-// error return for (see Records) to log instead of the default logger.
-func WithLogger(log *slog.Logger) Option {
-	return func(p *Persister) { p.log = log }
-}
-
-// logger returns a nil-safe logger, defaulting to slog.Default() when no
-// logger was configured.
-func (p *Persister) logger() *slog.Logger {
-	if p != nil && p.log != nil {
-		return p.log
-	}
-	return slog.Default()
 }
 
 // KVStore adapts the reusable WAL implementation to the persistence port.
@@ -76,28 +55,15 @@ func Open(dir string) (*Persister, error) {
 	p, _, err := openCurrentCatalogue(dir, false)
 	return p, err
 }
-func New(store ports.Store, opts ...Option) *Persister {
-	p := &Persister{store: store}
-	for _, opt := range opts {
-		opt(p)
-	}
-	return p
-}
+func New(store ports.Store) *Persister { return &Persister{store: store} }
 
 func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []domain.CatalogueRecord, error) {
 	path := StorePath(dir)
-	absent := true
-	for _, candidate := range []string{path, path + ".next", path + ".prev"} {
-		_, err := os.Stat(candidate)
-		if err == nil {
-			absent = false
-			continue
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, nil, err
-		}
+	present, err := catalogueCandidatesPresent(path)
+	if err != nil {
+		return nil, nil, err
 	}
-	if absent && !createProvenEmpty {
+	if !present && !createProvenEmpty {
 		return nil, nil, fmt.Errorf("%w: no catalogue candidates", errPersistenceUnavailable)
 	}
 	store, err := OpenStore(path)
@@ -148,30 +114,22 @@ func (p *Persister) Create(record domain.CatalogueRecord) error {
 	return p.applyLocked(map[string]*domain.CatalogueRecord{record.Name: &record})
 }
 
-// Records satisfies ports.Catalogue, whose signature has no error return. A
-// load failure (unavailable store, or a malformed record surfaced by
-// decodeAll) must not silently look like an empty catalogue, so it is logged
-// here instead of being swallowed.
-func (p *Persister) Records() []domain.CatalogueRecord {
-	records, err := p.LoadCatalogue()
-	if err != nil {
-		p.logger().Error("persist: loading catalogue records failed", "err", err)
-		return []domain.CatalogueRecord{}
-	}
-	return records
-}
-func (p *Persister) Record(name string) (domain.CatalogueRecord, bool) {
+func (p *Persister) Records() ([]domain.CatalogueRecord, error) { return p.LoadCatalogue() }
+func (p *Persister) Record(name string) (domain.CatalogueRecord, bool, error) {
 	if p == nil || p.store == nil {
-		return domain.CatalogueRecord{}, false
+		return domain.CatalogueRecord{}, false, errPersistenceUnavailable
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	value, ok := p.store.Get([]byte(name))
 	if !ok {
-		return domain.CatalogueRecord{}, false
+		return domain.CatalogueRecord{}, false, nil
 	}
 	record, err := decodeRecordValue(name, value)
-	return record, err == nil
+	if err != nil {
+		return domain.CatalogueRecord{}, false, err
+	}
+	return record, true, nil
 }
 func (p *Persister) Apply(records map[string]*domain.CatalogueRecord) error {
 	if p == nil {

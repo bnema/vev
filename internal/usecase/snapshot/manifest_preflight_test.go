@@ -40,6 +40,7 @@ func TestManifestEnvelopePreflightParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	nameOffset, nodeKindOffset := manifestFieldOffsets(t, encoded)
 	mutations := []struct {
 		name string
 		edit func([]byte) []byte
@@ -51,9 +52,21 @@ func TestManifestEnvelopePreflightParity(t *testing.T) {
 		{"body length", func(b []byte) []byte { binary.BigEndian.PutUint32(b[8:12], uint32(len(b))); return b }},
 		{"crc", func(b []byte) []byte { b[12] ^= 1; return b }},
 		{"trailing", func(b []byte) []byte { return append(b, 0) }},
-		{"body name", func(b []byte) []byte { b[26] ^= 1; binary.BigEndian.PutUint32(b[12:16], checksum(b[16:])); return b }},
-		{"body generation", func(b []byte) []byte { b[16] ^= 1; binary.BigEndian.PutUint32(b[12:16], checksum(b[16:])); return b }},
-		{"body node kind", func(b []byte) []byte { b[65] = 99; binary.BigEndian.PutUint32(b[12:16], checksum(b[16:])); return b }},
+		{"body name", func(b []byte) []byte {
+			b[nameOffset] = 0
+			binary.BigEndian.PutUint32(b[12:16], checksum(b[16:]))
+			return b
+		}},
+		{"body generation", func(b []byte) []byte {
+			clear(b[manifestHeaderSize : manifestHeaderSize+8])
+			binary.BigEndian.PutUint32(b[12:16], checksum(b[16:]))
+			return b
+		}},
+		{"body node kind", func(b []byte) []byte {
+			b[nodeKindOffset] = 99
+			binary.BigEndian.PutUint32(b[12:16], checksum(b[16:]))
+			return b
+		}},
 	}
 	for _, tc := range mutations {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,6 +79,45 @@ func TestManifestEnvelopePreflightParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func manifestFieldOffsets(t *testing.T, encoded []byte) (nameOffset, nodeKindOffset int) {
+	t.Helper()
+	r := payloadReader{b: encoded[manifestHeaderSize:]}
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := r.getUint64()
+	must(err)
+	r.b = r.b[len(domain.IncarnationID{}):]
+	_, err = r.getUint8()
+	must(err)
+	nameLengthOffset := len(encoded) - len(r.b)
+	name, err := r.getString()
+	must(err)
+	nameOffset = nameLengthOffset + 2
+	if len(name) == 0 {
+		t.Fatal("test manifest has empty name")
+	}
+	_, err = r.getUint64()
+	must(err)
+	_, err = r.getUint16()
+	must(err)
+	_, err = r.getUint16()
+	must(err)
+	_, err = r.getString()
+	must(err)
+	_, err = r.getUint16()
+	must(err)
+	_, err = r.getUint16()
+	must(err)
+	_, err = r.getUint64()
+	must(err)
+	_, err = r.getString()
+	must(err)
+	return nameOffset, len(encoded) - len(r.b)
 }
 
 func TestManifestObjectRefKinds(t *testing.T) {

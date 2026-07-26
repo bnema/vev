@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -44,6 +45,24 @@ type CatalogueRecord struct {
 
 // CatalogueMetadataUpdate changes mutable runtime metadata for one catalogue
 // incarnation without carrying authority-owned recovery or checkpoint fields.
+// Equal reports canonical value equality between checkpoint references.
+func (r *CheckpointRef) Equal(other *CheckpointRef) bool {
+	if r == nil || other == nil {
+		return r == nil && other == nil
+	}
+	return *r == *other
+}
+
+// Equal reports canonical value equality, including ordered tab names and
+// pointed-to checkpoint values rather than pointer identity.
+func (r CatalogueRecord) Equal(other CatalogueRecord) bool {
+	return r.Name == other.Name && r.IncarnationID == other.IncarnationID && r.Cwd == other.Cwd &&
+		r.CreatedAt == other.CreatedAt && r.UpdatedAt == other.UpdatedAt && r.LastUsedSeq == other.LastUsedSeq &&
+		slices.Equal(r.TabNames, other.TabNames) && r.RecoveryState == other.RecoveryState &&
+		r.Committed.Equal(other.Committed) && r.Fallbacks[0].Equal(other.Fallbacks[0]) &&
+		r.Fallbacks[1].Equal(other.Fallbacks[1]) && r.DegradedReason == other.DegradedReason
+}
+
 type CatalogueMetadataUpdate struct {
 	Name          string
 	IncarnationID IncarnationID

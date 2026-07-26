@@ -38,6 +38,7 @@ func TestDiscardCrashMatrix(t *testing.T) {
 		path := j.path(old)
 		encoded, err := os.ReadFile(path)
 		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, os.WriteFile(path, encoded, 0o600)) })
 		require.NoError(t, os.WriteFile(path, append(encoded, 0), 0o600))
 		_, err = j.ListDiscards(ctx)
 		require.Error(t, err)
@@ -73,6 +74,18 @@ func TestRecoveryJournalRoundTripAndIdempotentDelete(t *testing.T) {
 	require.NoError(t, j.DeleteDiscard(context.Background(), old))
 	require.NoError(t, j.DeleteDiscard(context.Background(), old))
 	got, err = j.ListDiscards(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func TestRecoveryJournalIgnoresAtomicLeftoversWhenCountingDiscards(t *testing.T) {
+	j := New(t.TempDir())
+	require.NoError(t, os.MkdirAll(j.dir, 0o700))
+	for i := 0; i < maxDiscardIntents+1; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(j.dir, ".intent-leftover-"+string(rune(0x1000+i))), nil, 0o600))
+	}
+
+	got, err := j.ListDiscards(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, got)
 }

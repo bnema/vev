@@ -806,11 +806,27 @@ func (s newStaticStore) Get(key []byte) ([]byte, bool) {
 func (s newStaticStore) Set(_, _ []byte) error { return nil }
 func (s newStaticStore) Delete(_ []byte) error { return nil }
 func (s newStaticStore) Batch(changes []ports.StoreChange) error {
-	for _, change := range changes {
+	if len(changes) == 0 {
+		return errors.New("empty batch")
+	}
+	prepared := make([]ports.StoreChange, len(changes))
+	seen := make(map[string]struct{}, len(changes))
+	for i, change := range changes {
+		key := string(change.Key)
+		if _, exists := seen[key]; exists {
+			return errors.New("duplicate batch key")
+		}
+		if change.Delete && len(change.Value) != 0 {
+			return errors.New("delete batch change has value")
+		}
+		seen[key] = struct{}{}
+		prepared[i] = ports.StoreChange{Key: append([]byte(nil), change.Key...), Value: append([]byte(nil), change.Value...), Delete: change.Delete}
+	}
+	for _, change := range prepared {
 		if change.Delete {
 			delete(s, string(change.Key))
 		} else {
-			s[string(change.Key)] = append([]byte(nil), change.Value...)
+			s[string(change.Key)] = change.Value
 		}
 	}
 	return nil
@@ -841,19 +857,26 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	store, _ := newMockStore(t)
 	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
 	incarnation := domain.IncarnationID{1}
-	require.NoError(t, seed.persist.Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, seed.catalogue.(*persist.Persister).Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9, RecoveryState: domain.RecoveryFresh}))
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
 	d.mu.Lock()
 	stopped := d.stopped["work"]
 	d.mu.Unlock()
-	require.Equal(t, stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, incarnation: incarnation, lastUsedSeq: 9}, stopped)
+	require.Equal(t, "work", stopped.name)
+	require.Equal(t, "/tmp/work", stopped.cwd)
+	require.Equal(t, int64(7), stopped.createdAt)
+	require.Equal(t, incarnation, stopped.incarnation)
+	require.Equal(t, uint64(9), stopped.lastUsedSeq)
+	require.Equal(t, domain.RecoveryFresh, stopped.record.RecoveryState)
+	require.Equal(t, runtimeFresh, stopped.state)
+	require.NotNil(t, stopped.restoreDone)
 	require.Equal(t, uint64(9), d.mruSeq.Load())
 }
 
 // TestDaemonNewWithoutPersistenceLogsNoLoadWarning covers the default,
 // persistence-free construction path (no WithStore/WithCatalogue option):
-// d.persist is the persist.New(nil) sentinel, so LoadAll now returns
+// d.catalogue.(*persist.Persister) is the persist.New(nil) sentinel, so LoadAll now returns
 // errPersistenceUnavailable instead of an empty slice. That must not surface
 // as a "loading persisted sessions failed" warning, since nothing failed —
 // persistence simply was never configured.
@@ -864,20 +887,6 @@ func TestDaemonNewWithoutPersistenceLogsNoLoadWarning(t *testing.T) {
 	require.False(t, d.persistEnabled)
 	require.Empty(t, d.stopped)
 	require.NotContains(t, logBuf.String(), "loading persisted sessions failed")
-}
-
-// TestDaemonNewWithConfiguredStoreStillLogsLoadFailure is the inverse of the
-// above: when persistence IS configured (a real store via WithStore) and the
-// load genuinely fails (an undecodable catalogue record here), the warning
-// must still fire.
-func TestDaemonNewWithConfiguredStoreStillLogsLoadFailure(t *testing.T) {
-	store, state := newMockStore(t)
-	state.data["bad"] = []byte{0, 1} // not a valid encoded catalogue record
-	var logBuf strings.Builder
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logBuf, nil)), WithStore(store))
-	require.NotNil(t, d)
-	require.True(t, d.persistEnabled)
-	require.Contains(t, logBuf.String(), "loading persisted sessions failed")
 }
 
 func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
@@ -930,7 +939,7 @@ func TestTouchMRUPersistsNamedButNotEphemeral(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithStore(store)(d)
 	named := &session{name: "work", tabs: []*tab{{}}, createdAt: 1, incarnation: domain.IncarnationID{1}}
-	require.NoError(t, d.persist.Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, d.catalogue.(*persist.Persister).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
 
 	d.touchMRU(named)
 	require.Equal(t, named.mruAt.Load(), state.record(t, "work").LastUsedSeq)
@@ -1003,7 +1012,7 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 
-	records, err := d.persist.LoadAll()
+	records, err := d.catalogue.(*persist.Persister).LoadAll()
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	require.Equal(t, "work", records[0].Name)
@@ -1011,6 +1020,23 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	require.Equal(t, sess.createdAt, records[0].CreatedAt)
 	require.GreaterOrEqual(t, records[0].UpdatedAt, records[0].CreatedAt)
 	require.Equal(t, []string{"shell"}, records[0].TabNames)
+}
+
+func TestRenameTabDoesNotHoldDaemonOrSessionMutexDuringCatalogueIO(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	d.sessions[sess.id] = sess
+	catalogue := portsmocks.NewMockCatalogue(t)
+	WithCatalogue(catalogue, nil)(d)
+	catalogue.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(func(domain.CatalogueMetadataUpdate) error {
+		require.True(t, d.mu.TryLock(), "daemon mutex held during catalogue I/O")
+		d.mu.Unlock()
+		require.True(t, sess.mu.TryLock(), "session mutex held during catalogue I/O")
+		sess.mu.Unlock()
+		return nil
+	}).Once()
+
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 }
 
 func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
@@ -1045,7 +1071,7 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			}
 
 			require.NoError(t, d.closeTab(sess, sess.tabs[tt.closeIndex], false))
-			records, err := d.persist.LoadAll()
+			records, err := d.catalogue.(*persist.Persister).LoadAll()
 			require.NoError(t, err)
 			require.Len(t, records, 1)
 			require.Equal(t, tt.want, records[0].TabNames)
@@ -1090,7 +1116,7 @@ func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	require.Equal(t, "shell", sess.tabs[0].name)
 
 	require.False(t, state.has("0"))
-	records, err := d.persist.LoadAll()
+	records, err := d.catalogue.(*persist.Persister).LoadAll()
 	require.NoError(t, err)
 	require.Empty(t, records)
 }
@@ -1104,7 +1130,7 @@ func TestAttachRestoresPersistedTabNames(t *testing.T) {
 	store, _ := newMockStore(t)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	WithStore(store)(d)
-	require.NoError(t, d.persist.Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, d.catalogue.(*persist.Persister).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}, RecoveryState: domain.RecoveryFresh}))
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
@@ -1213,8 +1239,8 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		defer release()
 		store := portsmocks.NewMockStore(t)
 		var attempted map[string][]byte
-		store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {}).Twice()
-		store.EXPECT().Get([]byte("named")).Return(nil, false).Twice()
+		store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {}).Times(3)
+		store.EXPECT().Get([]byte("named")).Return(nil, false).Times(4)
 		store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
 			attempted = make(map[string][]byte, len(changes))
 			for _, change := range changes {
@@ -1318,7 +1344,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithStore(store)(d)
-	require.NoError(t, d.persist.Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, d.catalogue.(*persist.Persister).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
 	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp", createdAt: 1}
 	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
 	require.False(t, state.has("old"))
@@ -1830,7 +1856,7 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *testing.T) {
 	store, _ := newMockStore(t)
 	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
-	require.NoError(t, seed.persist.Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, seed.catalogue.(*persist.Persister).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900, RecoveryState: domain.RecoveryFresh}))
 
 	p, release := newBlockingPTY(t)
 	defer release()

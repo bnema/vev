@@ -24,6 +24,33 @@ type reconcilePage struct {
 	err      error
 }
 
+type reconcileConflictCatalogue struct {
+	*transactionCatalogue
+	stale domain.CatalogueRecord
+	reads int
+}
+
+func (c *reconcileConflictCatalogue) Records() ([]domain.CatalogueRecord, error) {
+	records, err := c.transactionCatalogue.Records()
+	if err != nil {
+		return nil, err
+	}
+	for i := range records {
+		if records[i].Name == c.stale.Name {
+			records[i] = c.stale
+		}
+	}
+	return records, nil
+}
+
+func (c *reconcileConflictCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
+	if name == c.stale.Name && c.reads == 0 {
+		c.reads++
+		return c.stale, true, nil
+	}
+	return c.transactionCatalogue.Record(name)
+}
+
 func (r *reconcileRepository) Reconcile(_ context.Context, _ []domain.CatalogueRecord, cursor ports.ReconcileCursor, budget ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
 	r.seenCursors = append(r.seenCursors, cursor)
 	r.seenBudgets = append(r.seenBudgets, budget)
@@ -62,6 +89,56 @@ func TestReconciliationCursor(t *testing.T) {
 	require.Equal(t, ports.ReconcileAdopt, decisions[0].Kind)
 	require.Equal(t, []ports.ReconcileCursor{{}, {DirectoryCookie: 12}}, repository.seenCursors)
 	require.Equal(t, []ports.MaintenanceBudget{{Entries: 2, Bytes: 32}, {Entries: 2, Bytes: 32}}, repository.seenBudgets)
+}
+
+func TestReconciliationRejectsCumulativeAndOverflowingBudgets(t *testing.T) {
+	record := healthyReconcileRecord()
+	finding := ports.ReconcileFinding{Status: ports.ReconcileBudgetExhausted, Candidate: ports.ReconcileCandidate{Name: record.Name}}
+	for _, tc := range []struct {
+		name     string
+		budget   ports.MaintenanceBudget
+		consumed []ports.MaintenanceBudget
+	}{
+		{name: "cumulative entries", budget: ports.MaintenanceBudget{Entries: 3, Bytes: 10}, consumed: []ports.MaintenanceBudget{{Entries: 2, Bytes: 1}, {Entries: 2, Bytes: 1}}},
+		{name: "cumulative bytes", budget: ports.MaintenanceBudget{Entries: 10, Bytes: 3}, consumed: []ports.MaintenanceBudget{{Entries: 1, Bytes: 2}, {Entries: 1, Bytes: 2}}},
+		{name: "overflow safe", budget: ports.MaintenanceBudget{Entries: ^uint64(0), Bytes: ^uint64(0)}, consumed: []ports.MaintenanceBudget{{Entries: ^uint64(0), Bytes: ^uint64(0)}, {Entries: 1, Bytes: 1}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := make([]ports.ReconcileFinding, len(tc.consumed))
+			for i, usage := range tc.consumed {
+				findings[i] = finding
+				findings[i].Consumed = usage
+			}
+			repository := &reconcileRepository{pages: map[uint64]reconcilePage{0: {findings: findings}}}
+			catalogue := &checkpointCatalogue{record: record}
+			reconciler := NewReconciler(NewCoordinator(catalogue, repository, nil, nil), catalogue, repository, tc.budget)
+			_, _, err := reconciler.Step(context.Background(), ports.ReconcileCursor{})
+			require.EqualError(t, err, "recovery: repository exceeded reconciliation budget")
+		})
+	}
+}
+
+func TestReconciliationDefersConflictAndContinues(t *testing.T) {
+	first := healthyReconcileRecord()
+	first.Name = "first"
+	staleRecord := first
+	stale := forwardCandidate(staleRecord, 2, staleRecord.Committed)
+	first = shiftedCheckpoint(first, domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{9}})
+	second := healthyReconcileRecord()
+	second.Name = "second"
+	adoptable := forwardCandidate(second, 2, second.Committed)
+	catalogue := &reconcileConflictCatalogue{transactionCatalogue: newTransactionCatalogue(first, second), stale: staleRecord}
+	repository := &reconcileRepository{pages: map[uint64]reconcilePage{0: {findings: []ports.ReconcileFinding{
+		{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileValidated, Candidate: stale, Consumed: ports.MaintenanceBudget{Entries: 1, Bytes: 1}},
+		{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileValidated, Candidate: adoptable, Consumed: ports.MaintenanceBudget{Entries: 1, Bytes: 1}},
+	}}}}
+	reconciler := NewReconciler(NewCoordinator(catalogue, repository, nil, nil), catalogue, repository, ports.MaintenanceBudget{Entries: 2, Bytes: 2})
+
+	_, decisions, err := reconciler.Step(context.Background(), ports.ReconcileCursor{})
+	require.NoError(t, err)
+	require.Equal(t, []ports.ReconcileDecisionKind{ports.ReconcileDefer, ports.ReconcileAdopt}, []ports.ReconcileDecisionKind{decisions[0].Kind, decisions[1].Kind})
+	require.Equal(t, "catalogue-conflict", decisions[0].ReasonCode)
+	require.Equal(t, adoptable.Ref, *catalogue.records[second.Name].Committed)
 }
 
 func TestForwardOrphanAdoption(t *testing.T) {

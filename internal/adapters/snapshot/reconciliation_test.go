@@ -2,13 +2,13 @@ package snapshot
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
+	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/require"
 )
 
@@ -108,7 +108,7 @@ func TestReconciliationCursor(t *testing.T) {
 	sessions := filepath.Join(repo.dir, repositorySessionsDir)
 	for i := byte(20); i < 26; i++ {
 		id := domain.IncarnationID{i}
-		require.NoError(t, os.Mkdir(filepath.Join(sessions, id.String()), 0o700))
+		require.NoError(t, safedir.EnsurePrivate(filepath.Join(sessions, id.String())))
 	}
 
 	cursor := ports.ReconcileCursor{}

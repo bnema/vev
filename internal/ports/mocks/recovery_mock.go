@@ -1428,7 +1428,7 @@ func (_c *MockCatalogue_Delete_Call) RunAndReturn(run func(s string) error) *Moc
 }
 
 // Record provides a mock function for the type MockCatalogue
-func (_mock *MockCatalogue) Record(s string) (domain.CatalogueRecord, bool) {
+func (_mock *MockCatalogue) Record(s string) (domain.CatalogueRecord, bool, error) {
 	ret := _mock.Called(s)
 
 	if len(ret) == 0 {
@@ -1437,7 +1437,8 @@ func (_mock *MockCatalogue) Record(s string) (domain.CatalogueRecord, bool) {
 
 	var r0 domain.CatalogueRecord
 	var r1 bool
-	if returnFunc, ok := ret.Get(0).(func(string) (domain.CatalogueRecord, bool)); ok {
+	var r2 error
+	if returnFunc, ok := ret.Get(0).(func(string) (domain.CatalogueRecord, bool, error)); ok {
 		return returnFunc(s)
 	}
 	if returnFunc, ok := ret.Get(0).(func(string) domain.CatalogueRecord); ok {
@@ -1450,7 +1451,12 @@ func (_mock *MockCatalogue) Record(s string) (domain.CatalogueRecord, bool) {
 	} else {
 		r1 = ret.Get(1).(bool)
 	}
-	return r0, r1
+	if returnFunc, ok := ret.Get(2).(func(string) error); ok {
+		r2 = returnFunc(s)
+	} else {
+		r2 = ret.Error(2)
+	}
+	return r0, r1, r2
 }
 
 // MockCatalogue_Record_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Record'
@@ -1477,18 +1483,18 @@ func (_c *MockCatalogue_Record_Call) Run(run func(s string)) *MockCatalogue_Reco
 	return _c
 }
 
-func (_c *MockCatalogue_Record_Call) Return(catalogueRecord domain.CatalogueRecord, b bool) *MockCatalogue_Record_Call {
-	_c.Call.Return(catalogueRecord, b)
+func (_c *MockCatalogue_Record_Call) Return(catalogueRecord domain.CatalogueRecord, b bool, err error) *MockCatalogue_Record_Call {
+	_c.Call.Return(catalogueRecord, b, err)
 	return _c
 }
 
-func (_c *MockCatalogue_Record_Call) RunAndReturn(run func(s string) (domain.CatalogueRecord, bool)) *MockCatalogue_Record_Call {
+func (_c *MockCatalogue_Record_Call) RunAndReturn(run func(s string) (domain.CatalogueRecord, bool, error)) *MockCatalogue_Record_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Records provides a mock function for the type MockCatalogue
-func (_mock *MockCatalogue) Records() []domain.CatalogueRecord {
+func (_mock *MockCatalogue) Records() ([]domain.CatalogueRecord, error) {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
@@ -1496,6 +1502,10 @@ func (_mock *MockCatalogue) Records() []domain.CatalogueRecord {
 	}
 
 	var r0 []domain.CatalogueRecord
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() ([]domain.CatalogueRecord, error)); ok {
+		return returnFunc()
+	}
 	if returnFunc, ok := ret.Get(0).(func() []domain.CatalogueRecord); ok {
 		r0 = returnFunc()
 	} else {
@@ -1503,7 +1513,12 @@ func (_mock *MockCatalogue) Records() []domain.CatalogueRecord {
 			r0 = ret.Get(0).([]domain.CatalogueRecord)
 		}
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockCatalogue_Records_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Records'
@@ -1523,12 +1538,12 @@ func (_c *MockCatalogue_Records_Call) Run(run func()) *MockCatalogue_Records_Cal
 	return _c
 }
 
-func (_c *MockCatalogue_Records_Call) Return(catalogueRecords []domain.CatalogueRecord) *MockCatalogue_Records_Call {
-	_c.Call.Return(catalogueRecords)
+func (_c *MockCatalogue_Records_Call) Return(catalogueRecords []domain.CatalogueRecord, err error) *MockCatalogue_Records_Call {
+	_c.Call.Return(catalogueRecords, err)
 	return _c
 }
 
-func (_c *MockCatalogue_Records_Call) RunAndReturn(run func() []domain.CatalogueRecord) *MockCatalogue_Records_Call {
+func (_c *MockCatalogue_Records_Call) RunAndReturn(run func() ([]domain.CatalogueRecord, error)) *MockCatalogue_Records_Call {
 	_c.Call.Return(run)
 	return _c
 }

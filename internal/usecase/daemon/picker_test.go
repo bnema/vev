@@ -25,26 +25,6 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
-// failingDeleteStore is a ports.Store whose Delete always fails, used to
-// exercise the picker's kill-target error path without disturbing the
-// generated mock's default Delete expectation.
-type failingDeleteStore struct{ err error }
-
-func (failingDeleteStore) Get([]byte) ([]byte, bool) { return nil, false }
-func (failingDeleteStore) Set([]byte, []byte) error  { return nil }
-func (s failingDeleteStore) Batch(changes []ports.StoreChange) error {
-	for _, change := range changes {
-		if change.Delete {
-			return s.err
-		}
-	}
-	return nil
-}
-func (s failingDeleteStore) Delete([]byte) error        { return s.err }
-func (failingDeleteStore) Range(func(k, v []byte) bool) {}
-func (failingDeleteStore) Sync() error                  { return nil }
-func (failingDeleteStore) Close() error                 { return nil }
-
 type refusingSnapshotDeleteRepository struct {
 	noOpSnapshotRepository
 	err error
@@ -277,8 +257,8 @@ func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
 	d.mu.Lock()
 	delete(d.stopped, record.Name)
 	d.sessions[target.id] = target
+	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
-	closeRuntimeRestoreDone(done)
 
 	require.NoError(t, <-result)
 	require.Same(t, target, ac.currentSession())
@@ -294,12 +274,12 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	WithCheckpointCoordinator(coordinator)(d)
 	restoreCtx, cancelRestore := context.WithCancel(context.Background())
 	restored := make(chan struct{})
 	go func() {
-		d.restoreCatalogue(restoreCtx, catalogue.Records())
+		d.restoreCatalogue(restoreCtx, mustDurableRecords(t, catalogue))
 		close(restored)
 	}()
 	<-repository.started
@@ -1150,8 +1130,18 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	d, from, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	cause := errors.New("snapshot delete refused")
-	WithSnapshotRepository(refusingSnapshotDeleteRepository{err: cause}, nil)(d)
+	WithSnapshotRepository(refusingSnapshotDeleteRepository{err: cause})(d)
 	target := d.sessions[domain.SessionID("recent")]
+	store, _ := newMockStore(t)
+	WithStore(store)(d)
+	target.mu.Lock()
+	if target.incarnation == (domain.IncarnationID{}) {
+		target.incarnation = domain.IncarnationID{1}
+	}
+	record := target.persistRecordLocked(1)
+	target.mu.Unlock()
+	record.RecoveryState = domain.RecoveryFresh
+	require.NoError(t, d.catalogue.Create(record))
 
 	d.enterPicker(from, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1184,8 +1174,14 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	defer release()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p)
 	cause := errors.New("delete failed")
-	WithStore(failingDeleteStore{err: cause})(d)
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7}
+	store, state := newMockStore(t)
+	WithStore(store)(d)
+	record := domain.CatalogueRecord{Name: "stopped", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/stopped", CreatedAt: 7, RecoveryState: domain.RecoveryFresh}
+	require.NoError(t, d.catalogue.Create(record))
+	state.mu.Lock()
+	state.deleteErr = func(string) error { return cause }
+	state.mu.Unlock()
+	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, incarnation: record.IncarnationID, record: record}
 
 	d.enterPicker(from, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1202,12 +1198,9 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	toasts := awaitToastCount(t, ac, 1)
 	require.Equal(t, domain.NoticePersistDelete, toasts[0].Code)
 
-	views, _ := d.pickerViews(from)
-	var stillListed bool
-	for _, v := range views {
-		if v.Stopped && v.Name == "stopped" {
-			stillListed = true
-		}
-	}
-	require.True(t, stillListed, "entry must remain listed after refreshPicker when the delete failed")
+	d.mu.Lock()
+	stopped, retained := d.stopped["stopped"]
+	d.mu.Unlock()
+	require.True(t, retained, "failed deletion must retain the reserved name")
+	require.True(t, stopped.purging, "an uncertain deletion stays fenced from restore")
 }

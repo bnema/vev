@@ -8,9 +8,8 @@ import (
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
-func legacyPublication(snapshot snapcodec.Session) (ports.SnapshotPublication, error) {
-	// Legacy payloads have no durable identity; this test-only conversion uses
-	// the fixture's stable synthetic identity.
+func acceptancePublication(snapshot snapcodec.Session) (ports.SnapshotPublication, error) {
+	// acceptancePublication converts a restore fixture to repository form.
 	incarnation := domain.IncarnationID{1}
 	manifest := snapcodec.Manifest{Generation: 1, IncarnationID: incarnation, Name: snapshot.Name, CreatedAt: snapshot.CreatedAt, Active: snapshot.Active, Tabs: make([]snapcodec.ManifestTab, 0, len(snapshot.Tabs))}
 	objects := make([]ports.SnapshotObject, 0)

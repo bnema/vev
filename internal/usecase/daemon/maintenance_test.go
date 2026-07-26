@@ -28,7 +28,7 @@ func (r *cursorMaintenanceReconciler) Step(_ context.Context, cursor ports.Recon
 func TestProductionMaintenanceUsesCatalogueAndResumesCursor(t *testing.T) {
 	record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryFresh}
 	catalogue := portsmocks.NewMockCatalogue(t)
-	catalogue.EXPECT().Records().Return([]domain.CatalogueRecord{record}).Once()
+	catalogue.EXPECT().Records().Return([]domain.CatalogueRecord{record}, nil).Once()
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	repository.EXPECT().MaintainSession(mock.Anything, mock.MatchedBy(func(plan ports.RetentionPlan) bool {
 		return plan.IncarnationID == record.IncarnationID && !plan.PinAll && len(plan.Keep) == 0
@@ -37,9 +37,9 @@ func TestProductionMaintenanceUsesCatalogueAndResumesCursor(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithDurableMaintenance(catalogue, repository, reconciler, nil)(d)
 
-	d.runDurableMaintenanceTick(context.Background())
-	d.runDurableMaintenanceTick(context.Background())
-	d.runDurableMaintenanceTick(context.Background())
+	require.True(t, d.runDurableMaintenanceTick(context.Background()), "partial reconciliation must continue immediately")
+	require.False(t, d.runDurableMaintenanceTick(context.Background()))
+	require.True(t, d.runDurableMaintenanceTick(context.Background()), "the next partial pass must also continue immediately")
 	if len(reconciler.seen) != 3 || reconciler.seen[0].DirectoryCookie != 0 || reconciler.seen[1].DirectoryCookie != 7 || reconciler.seen[2].DirectoryCookie != 0 {
 		t.Fatalf("reconciliation cursors = %v, want [0 7 0]", reconciler.seen)
 	}

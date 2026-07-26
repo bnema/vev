@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,6 +22,17 @@ func privatePath(t *testing.T) string {
 // header followed by self-checksummed record headers.
 func currentFile(records ...[]byte) []byte {
 	buf := fileHeader()
+	for _, record := range records {
+		buf = append(buf, record...)
+	}
+	return buf
+}
+
+// v1File is the previously released VEVK framing: magic and uint16 version,
+// followed directly by the same self-checksummed records used today.
+func v1File(records ...[]byte) []byte {
+	buf := append([]byte(nil), fileMagic[:]...)
+	buf = binary.BigEndian.AppendUint16(buf, formatVersionV1)
 	for _, record := range records {
 		buf = append(buf, record...)
 	}
@@ -378,6 +391,34 @@ func TestRecoverCompactionCleansStaleNextRegardlessOfPrev(t *testing.T) {
 	}
 }
 
+func TestReplayPreservesWrappedDecodeCause(t *testing.T) {
+	path := privatePath(t)
+	writeFile(t, path, currentFile(rawRecord([]byte{0xff, 0, 0})))
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	_, err = replayFile(f)
+	if !errors.Is(err, ErrCorruptWAL) || !errors.Is(err, errBadRecord) {
+		t.Fatalf("replayFile error = %v, want wrapped ErrCorruptWAL and errBadRecord", err)
+	}
+}
+
+func TestBatchLiveSizeAccountsForRemainderExactly(t *testing.T) {
+	data := map[string][]byte{}
+	sizes := map[string]int64{}
+	var live int64
+	applyRecords(data, sizes, &live, []record{
+		{op: opSet, key: []byte("a"), value: []byte("one")},
+		{op: opSet, key: []byte("b"), value: []byte("two")},
+		{op: opSet, key: []byte("c"), value: []byte("three")},
+	}, 10)
+	if live != 10 || sizes["a"]+sizes["b"]+sizes["c"] != 10 {
+		t.Fatalf("live sizes = %v, live = %d, want exact total 10", sizes, live)
+	}
+}
+
 func TestDecodeBatchRejectsImpossibleCountBeforeAllocating(t *testing.T) {
 	payload := []byte{opBatch, 0xff, 0xff, 0xff, 0xff}
 	allocs := testing.AllocsPerRun(10, func() {
@@ -429,14 +470,17 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 		name                string
 		current, next, prev []byte
 		want                string
+		wantErr             bool
 	}{
 		{name: "current-alone", current: oldFile, want: "old"},
 		{name: "current-next", current: oldFile, next: newFile, want: "old"},
 		{name: "prev-next", prev: oldFile, next: newFile, want: "new"},
-		{name: "prev-invalid-next", prev: oldFile, next: currentFile(rawRecord([]byte{0xff, 0, 0})), want: "old"},
+		{name: "next-alone", next: newFile, want: "new"},
+		{name: "invalid-prev-valid-next", prev: currentFile(rawRecord([]byte{0xff, 0, 0})), next: newFile, want: "new"},
+		{name: "valid-prev-invalid-next", prev: oldFile, next: currentFile(rawRecord([]byte{0xff, 0, 0})), want: "old"},
 		{name: "prev-torn-next", prev: oldFile, next: newFile[:len(newFile)-1], want: "old"},
 		{name: "current-prev", current: newFile, prev: oldFile, want: "new"},
-		{name: "invalid-current-prev", current: currentFile(rawRecord([]byte{0xff, 0, 0})), prev: oldFile, want: "old"},
+		{name: "invalid-current-prev", current: currentFile(rawRecord([]byte{0xff, 0, 0})), prev: oldFile, wantErr: true},
 		{name: "prev-alone", prev: oldFile, want: "old"},
 	}
 	for _, tt := range tests {
@@ -452,7 +496,18 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 					}
 				}
 			}
-			if err := recoverCompaction(path, defaultFSHooks()); err != nil {
+			before := candidateBytes(t, path)
+			err := recoverCompaction(path, defaultFSHooks())
+			if tt.wantErr {
+				if !errors.Is(err, ErrCorruptWAL) {
+					t.Fatalf("recoverCompaction error = %v, want ErrCorruptWAL", err)
+				}
+				if got := candidateBytes(t, path); !reflect.DeepEqual(got, before) {
+					t.Fatalf("uncertain candidates changed: got %#v, want %#v", got, before)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			got, err := Replay(path)
@@ -701,25 +756,85 @@ func rawBatchPayload(changes []BatchChange) []byte {
 	return payload
 }
 
-// An oversized length must never drive an allocation. In a legacy file the
-// length is unprotected, so it stays a torn tail; in the current format the
-// header checksum proves the length was written that way, which is corruption.
+// An oversized length must never drive an allocation. Legacy framing is
+// accepted only after complete strict replay, while the current header checksum
+// proves an oversized length was written that way; both fail closed.
+func TestCorruptedCurrentHeaderNeverFallsBackToLegacyOrDeletesPredecessor(t *testing.T) {
+	record, _ := encodeRecord(opSet, []byte("version"), []byte("current"))
+	previous, _ := encodeRecord(opSet, []byte("version"), []byte("previous"))
+
+	tests := []struct {
+		name       string
+		current    []byte
+		standalone bool
+	}{
+		{name: "torn file header", current: append([]byte(nil), fileHeader()[:fileHeaderLen-1]...), standalone: true},
+		{name: "torn current record", current: currentFile(record)[:fileHeaderLen+recordHeaderLen+1]},
+	}
+	for i := range fileMagicLen {
+		corrupted := currentFile(record)
+		corrupted[i] = 0
+		tests = append(tests, struct {
+			name       string
+			current    []byte
+			standalone bool
+		}{name: fmt.Sprintf("corrupted magic byte %d", i), current: corrupted, standalone: true})
+	}
+	for length := 1; length < fileHeaderLen; length++ {
+		tests = append(tests, struct {
+			name       string
+			current    []byte
+			standalone bool
+		}{name: fmt.Sprintf("torn header prefix %d", length), current: append([]byte(nil), fileHeader()[:length]...), standalone: true})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, withCandidates := range []bool{false, true} {
+				if !withCandidates && !tt.standalone {
+					continue
+				}
+				name := "standalone"
+				if withCandidates {
+					name = "with candidates"
+				}
+				t.Run(name, func(t *testing.T) {
+					path := privatePath(t)
+					writeFile(t, path, tt.current)
+					if withCandidates {
+						if err := os.WriteFile(path+".prev", currentFile(previous), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path+".next", currentFile(record), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					before := candidateBytes(t, path)
+					if _, err := Open(path); !errors.Is(err, ErrCorruptWAL) {
+						t.Fatalf("Open error = %v, want ErrCorruptWAL", err)
+					}
+					if got := candidateBytes(t, path); !reflect.DeepEqual(got, before) {
+						t.Fatalf("candidates changed: got %#v, want %#v", got, before)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestReplayRejectsOversizedLengthWithoutAllocating(t *testing.T) {
 	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
 	legacyHeader := make([]byte, legacyHeaderLen)
 	binary.BigEndian.PutUint32(legacyHeader[0:4], 1<<31)
 
-	t.Run("legacy length is a torn tail", func(t *testing.T) {
+	t.Run("legacy incomplete record fails closed", func(t *testing.T) {
 		path := privatePath(t)
-		writeFile(t, path, append(legacyFile(first), legacyHeader...))
-		s, err := Open(path)
-		if err != nil {
-			t.Fatal(err)
+		wal := append(legacyFile(first), legacyHeader...)
+		writeFile(t, path, wal)
+		if _, err := Open(path); !errors.Is(err, ErrCorruptWAL) {
+			t.Fatalf("Open error = %v, want ErrCorruptWAL", err)
 		}
-		defer closeStore(t, s)
-		if got, ok := s.Get([]byte("a")); !ok || string(got) != "one" {
-			t.Fatalf("good record missing before bad length: %q %v", got, ok)
-		}
+		requireFileBytes(t, path, wal)
 	})
 
 	t.Run("current oversized length fails closed", func(t *testing.T) {
@@ -851,13 +966,49 @@ func TestCurrentFormatReplayDecisionTable(t *testing.T) {
 
 // A file written by the released version must keep working: it opens with the
 // original semantics, is upgraded in place, and reopens identically.
+func TestVEVKV1FileOpensAndUpgradesInPlace(t *testing.T) {
+	setA, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
+	setB, _ := encodeRecord(opSet, []byte("b"), bytes.Repeat([]byte("x"), 1<<20))
+	for _, tc := range []struct {
+		name string
+		wal  []byte
+	}{
+		{name: "ordinary catalogue payload", wal: v1File(setA)},
+		{name: "prior large catalogue payload", wal: v1File(setB)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := privatePath(t)
+			writeFile(t, path, tc.wal)
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeStore(t, store)
+			upgraded, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(upgraded[:fileHeaderLen], fileHeader()) {
+				t.Fatalf("upgraded header = %x, want %x", upgraded[:fileHeaderLen], fileHeader())
+			}
+		})
+	}
+}
+
+func TestVEVKV1RejectsOversizedRecordBeforeAllocation(t *testing.T) {
+	path := privatePath(t)
+	writeFile(t, path, v1File(oversizedRecordHeader(maxPayloadLen+1)))
+	if _, err := Open(path); !errors.Is(err, ErrCorruptWAL) {
+		t.Fatalf("Open error = %v, want ErrCorruptWAL", err)
+	}
+}
+
 func TestLegacyFileOpensAndUpgradesInPlace(t *testing.T) {
 	setA, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
 	setB, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
 	replaceA, _ := encodeRecord(opSet, []byte("a"), []byte("uno"))
 	delB, _ := encodeRecord(opDel, []byte("b"), nil)
 	torn, _ := encodeRecord(opSet, []byte("c"), []byte("three"))
-
 	tests := []struct {
 		name string
 		wal  []byte
@@ -896,9 +1047,7 @@ func TestLegacyFileOpensAndUpgradesInPlace(t *testing.T) {
 			}
 			defer closeStore(t, reopened)
 			want := map[string]string{"added": "after-upgrade"}
-			for k, v := range tt.want {
-				want[k] = v
-			}
+			maps.Copy(want, tt.want)
 			requireContents(t, reopened, want)
 			replayed, err := Replay(path)
 			if err != nil {

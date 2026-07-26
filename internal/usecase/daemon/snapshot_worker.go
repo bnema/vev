@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/bnema/vev/internal/domain"
@@ -134,8 +135,12 @@ func (d *Daemon) publishSnapshotCapture(workerCtx context.Context, workerID uint
 			if d.checkpointRecovery != nil {
 				var record domain.CatalogueRecord
 				record, err = d.checkpointRecovery.PublishCheckpoint(publicationContext, capture.name, publication)
-				if err == nil && record.Committed != nil {
-					capture.checkpoint = *record.Committed
+				if err == nil {
+					if record.Committed == nil {
+						err = errors.New("snapshot: checkpoint publication returned no committed checkpoint")
+					} else {
+						capture.checkpoint = *record.Committed
+					}
 				}
 			} else {
 				err = d.snapshotRepository.Publish(publicationContext, publication)
@@ -217,8 +222,12 @@ func (d *Daemon) StopDurableWriters(ctx context.Context) []string {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		// Snapshot identity before cancellation can let a cooperative worker clear
+		// its in-flight capture. The caller persists timeout notices before the
+		// unconditional ownership join.
+		names := d.durableWriterFailureNames()
 		cancel()
-		return d.durableWriterFailureNames()
+		return names
 	}
 }
 
@@ -267,6 +276,9 @@ func (d *Daemon) requestDurableWriterStop() (context.CancelFunc, <-chan struct{}
 	return cancel, d.snapshotWorkerDone
 }
 
+// durableWriterFailureNames includes admitted buffered captures as well as the
+// active and final queues. snapshotAdmitted tracks normal captures from queue
+// admission through completion, so worker dequeue cannot make one disappear.
 func (d *Daemon) durableWriterFailureNames() []string {
 	d.snapshotWorkerMu.Lock()
 	defer d.snapshotWorkerMu.Unlock()
@@ -278,6 +290,9 @@ func (d *Daemon) durableWriterFailureNames() []string {
 	}
 	add(d.snapshotWorkerInFlight)
 	for _, capture := range d.snapshotFinalJobs {
+		add(capture)
+	}
+	for capture := range d.snapshotAdmitted {
 		add(capture)
 	}
 	names := make([]string, 0, len(seen))

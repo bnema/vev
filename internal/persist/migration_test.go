@@ -1,24 +1,29 @@
 package persist
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/kv"
+	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/require"
 )
 
 type migrationStub struct {
 	legacy      bool
+	probePaths  []string
 	probeErr    error
 	heads       map[string]domain.CheckpointRef
 	migrateErr  map[string]error
@@ -26,7 +31,19 @@ type migrationStub struct {
 	sources     map[string]string
 }
 
-func (s *migrationStub) HasLegacyState(context.Context) (bool, error) { return s.legacy, s.probeErr }
+func (s *migrationStub) HasLegacyState(context.Context) (bool, error) {
+	if s.probeErr != nil || s.legacy {
+		return s.legacy, s.probeErr
+	}
+	for _, path := range s.probePaths {
+		if _, err := os.Stat(path); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
+}
 func (s *migrationStub) ReadLegacyHEAD(_ context.Context, name string) (domain.CheckpointRef, error) {
 	if source := s.sources[name]; source != "" {
 		if _, err := os.Stat(source); err != nil {
@@ -74,7 +91,7 @@ func encodeLegacyRecordV0(r legacyCatalogueRecordV0) []byte {
 func writeLegacyCatalogue(t *testing.T, dir string, records ...legacyCatalogueRecordV0) string {
 	t.Helper()
 	require.NoError(t, os.Chmod(dir, 0o700))
-	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, safedir.EnsurePrivate(dir))
 	store, err := kv.Open(StorePath(dir))
 	require.NoError(t, err)
 	for _, record := range records {
@@ -198,7 +215,7 @@ func TestMigrationResumeMatrix(t *testing.T) {
 			}
 			uncertain := recordByName(t, result.Records, "uncertain")
 			require.Equal(t, domain.RecoveryDegraded, uncertain.RecoveryState)
-			require.Contains(t, uncertain.DegradedReason, "corrupt legacy manifest")
+			require.Equal(t, migrationDegradedLegacySnapshotUncertain, uncertain.DegradedReason)
 			require.NoError(t, result.Catalogue.Close())
 
 			reopened, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: io.LimitReader(&countingReader{}, 0), SnapshotMigration: restarted})
@@ -219,12 +236,18 @@ func TestMigrationPreservesUncertain(t *testing.T) {
 	dir := t.TempDir()
 	legacy := writeLegacyCatalogue(t, dir, legacyCatalogueRecordV0{Name: "broken", Cwd: "/tmp"})
 	ref := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
-	result, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: &countingReader{}, SnapshotMigration: &migrationStub{heads: map[string]domain.CheckpointRef{"broken": ref}, migrateErr: map[string]error{"broken": errors.Join(ports.ErrLegacySnapshotUncertain, errors.New("invalid legacy manifest"))}}})
+	adapterCause := strings.Repeat("sensitive-adapter-detail", 64)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	result, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: &countingReader{}, SnapshotMigration: &migrationStub{heads: map[string]domain.CheckpointRef{"broken": ref}, migrateErr: map[string]error{"broken": errors.Join(ports.ErrLegacySnapshotUncertain, errors.New(adapterCause))}}, Logger: logger})
 	require.NoError(t, err)
 	require.NoError(t, result.Catalogue.Close())
 	require.FileExists(t, legacy)
 	require.Equal(t, domain.RecoveryDegraded, result.Records[0].RecoveryState)
-	require.NotEmpty(t, result.Records[0].DegradedReason)
+	require.Equal(t, migrationDegradedLegacySnapshotUncertain, result.Records[0].DegradedReason)
+	require.LessOrEqual(t, len(result.Records[0].DegradedReason), migrationDegradedReasonMaxBytes)
+	require.NotContains(t, result.Records[0].DegradedReason, adapterCause)
+	require.Contains(t, logs.String(), adapterCause, "the full adapter cause must remain diagnosable")
 
 	failClosedDir := t.TempDir()
 	writeLegacyCatalogue(t, failClosedDir, legacyCatalogueRecordV0{Name: "work", Cwd: "/tmp"})
@@ -240,23 +263,36 @@ func TestMigrationPreservesUncertain(t *testing.T) {
 func TestOpenOrMigrateLegacyProbe(t *testing.T) {
 	probeErr := errors.New("probe uncertain")
 	for _, tc := range []struct {
-		name    string
-		stub    *migrationStub
-		wantNew bool
-		wantErr error
+		name       string
+		stub       *migrationStub
+		arrange    func(t *testing.T, dir string, stub *migrationStub)
+		wantNew    bool
+		wantLegacy bool
+		wantErr    error
 	}{
-		{"proven absent", &migrationStub{}, true, nil},
-		{"legacy blob", &migrationStub{legacy: true}, false, nil},
-		{"incremental namespace", &migrationStub{legacy: true}, false, nil},
-		{"probe error", &migrationStub{probeErr: probeErr}, false, probeErr},
+		{name: "proven absent", stub: &migrationStub{}, wantNew: true},
+		{name: "legacy blob", stub: &migrationStub{}, wantLegacy: true, arrange: func(t *testing.T, dir string, stub *migrationStub) {
+			path := filepath.Join(dir, "legacy.snapshot")
+			require.NoError(t, os.WriteFile(path, []byte("legacy"), 0o600))
+			stub.probePaths = []string{path}
+		}},
+		{name: "incremental namespace", stub: &migrationStub{}, wantLegacy: true, arrange: func(t *testing.T, dir string, stub *migrationStub) {
+			path := filepath.Join(dir, "snapshots")
+			require.NoError(t, safedir.EnsurePrivate(path))
+			stub.probePaths = []string{path}
+		}},
+		{name: "probe error", stub: &migrationStub{probeErr: probeErr}, wantErr: probeErr},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			require.NoError(t, os.Chmod(dir, 0o700))
+			if tc.arrange != nil {
+				tc.arrange(t, dir, tc.stub)
+			}
 			result, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: &countingReader{}, SnapshotMigration: tc.stub})
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
-			} else if tc.stub.legacy {
+			} else if tc.wantLegacy {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
@@ -270,12 +306,28 @@ func TestOpenOrMigrateLegacyProbe(t *testing.T) {
 					require.NoError(t, reopened.Catalogue.Close())
 				}
 			}
-			if tc.stub.legacy || tc.wantErr != nil {
+			if tc.wantLegacy || tc.wantErr != nil {
 				_, statErr := os.Stat(StorePath(dir))
 				require.ErrorIs(t, statErr, os.ErrNotExist)
 			}
 		})
 	}
+}
+
+func TestCatalogueRecordsEqualIsCompleteAndNonMutating(t *testing.T) {
+	committed := &domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
+	left := []domain.CatalogueRecord{
+		{Name: "z", IncarnationID: domain.IncarnationID{1}, Cwd: "/old", CreatedAt: 1, UpdatedAt: 2, LastUsedSeq: 3, TabNames: []string{"shell"}, RecoveryState: domain.RecoveryHealthy, Committed: committed},
+		validRecord("a", 2),
+	}
+	right := []domain.CatalogueRecord{left[1], left[0]}
+	leftOrder, rightOrder := left[0].Name, right[0].Name
+	require.True(t, catalogueRecordsEqual(left, right))
+	require.Equal(t, leftOrder, left[0].Name)
+	require.Equal(t, rightOrder, right[0].Name)
+
+	right[1].Cwd = "/different"
+	require.False(t, catalogueRecordsEqual(left, right), "installed catalogue validation must compare every record field")
 }
 
 func TestAtomicMigrationWriteRemovesTempAfterRenameFailure(t *testing.T) {

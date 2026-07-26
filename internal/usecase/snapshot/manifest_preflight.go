@@ -16,7 +16,10 @@ func preflightManifest(body []byte) error {
 	if err != nil {
 		return err
 	}
-	if generation == 0 || len(r.b) < len(domain.IncarnationID{}) {
+	if generation == 0 {
+		return fmt.Errorf("%w: manifest generation", ErrInvalidData)
+	}
+	if len(r.b) < len(domain.IncarnationID{}) {
 		return ErrShortPayload
 	}
 	var incarnationID domain.IncarnationID

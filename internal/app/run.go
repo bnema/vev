@@ -583,18 +583,22 @@ type fencedRecoveryIdentity struct {
 
 // fencedRecoveries resolves each conflict against the post-recovery catalogue
 // so a fenced session is reported with the incarnation it actually holds now.
-func fencedRecoveries(conflicts []recovery.RecoveryConflict, catalogue ports.Catalogue) []fencedRecoveryIdentity {
+func fencedRecoveries(conflicts []recovery.RecoveryConflict, catalogue ports.Catalogue) ([]fencedRecoveryIdentity, error) {
 	fenced := make([]fencedRecoveryIdentity, 0, len(conflicts))
 	for _, conflict := range conflicts {
 		identity := fencedRecoveryIdentity{name: conflict.Session, kind: conflict.Kind, reasonCode: fencedRecoveryReasonCode(conflict.Err)}
 		if catalogue != nil {
-			if record, ok := catalogue.Record(conflict.Session); ok {
+			record, ok, err := catalogue.Record(conflict.Session)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				identity.id = record.IncarnationID
 			}
 		}
 		fenced = append(fenced, identity)
 	}
-	return fenced
+	return fenced, nil
 }
 
 func fencedRecoveryReasonCode(err error) string {
@@ -674,6 +678,13 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	return runDaemonOwnedWithLogger(ctx, log)
 }
 
+func recoverAuthoritativeCatalogue(ctx context.Context, coordinator *recovery.Coordinator, catalogue ports.Catalogue) ([]domain.CatalogueRecord, error) {
+	if err := coordinator.Recover(ctx); err != nil {
+		return nil, err
+	}
+	return catalogue.Records()
+}
+
 func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr error) {
 	clk := clock.New()
 	observer, observerCloser, err := newPerformanceTrace(clk)
@@ -710,7 +721,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
 	snapshotRepository := snapshotadapter.NewRepository(snapshotDir(), log)
-	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository, snapshotRepository))
+	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository))
 	noticeStore := noticefile.New(platform.StateDir())
 	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticeStore))
 	storePath := persist.StorePath(platform.StateDir())
@@ -736,13 +747,21 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		return errors.Join(fmt.Errorf("vev: inspect durable session transactions: %w", err), opened.Catalogue.Close())
 	}
 	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, journal, rand.Reader)
-	if err := coordinator.Recover(ctx); err != nil {
-		return errors.Join(fmt.Errorf("vev: recover durable session transactions: %w", err), opened.Catalogue.Close())
+	// Recovery may roll catalogue changes forward, so reload the authoritative
+	// snapshot before constructing runtime reservations. A failed reload aborts
+	// startup rather than treating durable sessions as absent.
+	recoveredRecords, err := recoverAuthoritativeCatalogue(ctx, coordinator, opened.Catalogue)
+	if err != nil {
+		return errors.Join(fmt.Errorf("vev: recover and reload durable session transactions: %w", err), opened.Catalogue.Close())
 	}
+	opened.Records = recoveredRecords
 	// Recovery fences a session instead of failing startup when only that
 	// session's durable state is self-inconsistent. The daemon then comes up
 	// looking healthy, so every fenced session must be reported and persisted.
-	fenced := fencedRecoveries(coordinator.Conflicts(), opened.Catalogue)
+	fenced, err := fencedRecoveries(coordinator.Conflicts(), opened.Catalogue)
+	if err != nil {
+		return errors.Join(fmt.Errorf("vev: read fenced recovery identities: %w", err), opened.Catalogue.Close())
+	}
 	logFencedRecoveries(log, fenced)
 	if err := persistTransactionRecoveryNotices(noticeStore, pendingRecoveries, clk.Now()); err != nil {
 		log.Error("transaction_recovery_notice_failed", "err", err)
@@ -1558,7 +1577,9 @@ func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, opened.Catalogue.Close()) }()
 
-	if _, ok := opened.Catalogue.Record(name); !ok {
+	if _, ok, err := opened.Catalogue.Record(name); err != nil {
+		return fmt.Errorf("vev: reading stored session: %w", err)
+	} else if !ok {
 		return fmt.Errorf("vev: no such session: %s", name)
 	}
 	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, recoveryfs.New(platform.StateDir()), rand.Reader)

@@ -13,15 +13,16 @@ import (
 )
 
 func (r *Repository) ensureSession(id domain.IncarnationID) error {
+	sessionPath := r.sessionPath(id)
 	for _, directory := range []struct {
 		path  string
 		phase string
 	}{
 		{r.dir, "repository"},
 		{filepath.Join(r.dir, repositorySessionsDir), "sessions"},
-		{r.sessionPath(id), "session"},
-		{filepath.Join(r.sessionPath(id), repositoryObjectsDir), "objects"},
-		{filepath.Join(r.sessionPath(id), repositoryGenerations), "generations"},
+		{sessionPath, "session"},
+		{filepath.Join(sessionPath, repositoryObjectsDir), "objects"},
+		{filepath.Join(sessionPath, repositoryGenerations), "generations"},
 	} {
 		if err := r.ensurePrivateDirectoryPhase(directory.path, directory.phase); err != nil {
 			return fmt.Errorf("create snapshot repository directory: %w", err)

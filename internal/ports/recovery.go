@@ -157,8 +157,8 @@ type DegradedRecoveryCoordinator interface {
 }
 
 type Catalogue interface {
-	Records() []domain.CatalogueRecord
-	Record(string) (domain.CatalogueRecord, bool)
+	Records() ([]domain.CatalogueRecord, error)
+	Record(string) (domain.CatalogueRecord, bool, error)
 	Create(domain.CatalogueRecord) error
 	UpdateMetadata(domain.CatalogueMetadataUpdate) error
 	Replace(string, domain.CatalogueRecord) error

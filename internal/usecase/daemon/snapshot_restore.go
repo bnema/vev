@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 
@@ -13,6 +14,20 @@ import (
 )
 
 func (d *Daemon) closeRestoreDone() {
+	d.mu.Lock()
+	for name, entry := range d.stopped {
+		if entry.state != runtimeRestoring {
+			continue
+		}
+		entry.state = runtimeDegraded
+		entry.record.RecoveryState = domain.RecoveryDegraded
+		if entry.record.DegradedReason == "" {
+			entry.record.DegradedReason = "restore unavailable"
+		}
+		d.stopped[name] = entry
+		closeRuntimeRestoreDoneLocked(entry.restoreDone)
+	}
+	d.mu.Unlock()
 	d.restoreOnce.Do(func() { close(d.restoreDone) })
 }
 
@@ -293,13 +308,15 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 			}
 		}
 	}
-	// An existing catalogue checkpoint already authorizes this runtime. Only a
-	// legacy snapshot without a catalogue record creates fresh metadata here.
+	// Restoration is catalogue-authorized. Missing or unreadable authority is a
+	// hard failure; migration creates catalogue records before daemon startup.
 	if d.persistEnabled {
-		if _, ok := d.catalogueRecord(sess.name); !ok {
-			if err := d.createCatalogueRecord(sess.persistRecordLocked(sess.createdAt)); err != nil {
-				return false, err
-			}
+		_, ok, err := d.catalogueRecord(sess.name)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, errors.New("snapshot: restored session is absent from catalogue")
 		}
 	}
 	d.mu.Lock()

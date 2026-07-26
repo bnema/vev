@@ -17,10 +17,45 @@ import (
 
 // TestSnapshotWorkerPublishesContentAddressedCapture verifies that all new
 // checkpoints use the repository publication contract.
+func TestWithSnapshotRepositoryRejectsTypedNil(t *testing.T) {
+	var repository *snapshotAcceptanceRepository
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+
+	WithSnapshotRepository(repository)(d)
+
+	require.Nil(t, d.snapshotRepository)
+	require.False(t, d.snapsEnabled)
+}
+
+func TestDurableWriterFailureNamesIncludesBufferedCapture(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	capture := &snapshotCapture{name: "work", session: newSnapshotTestSession(t, "work", false, "/work")}
+	d.snapshotWorkerMu.Lock()
+	d.snapshotAdmitted[capture] = struct{}{}
+	d.snapshotJobs <- capture
+	d.snapshotWorkerMu.Unlock()
+
+	require.Equal(t, []string{"work"}, d.durableWriterFailureNames())
+}
+
+func TestCheckpointPublicationWithoutCommittedRefFailsCapture(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotRepository(portsmocks.NewMockSnapshotRepository(t))(d)
+	coordinator := portsmocks.NewMockCheckpointCoordinator(t)
+	WithCheckpointCoordinator(coordinator)(d)
+	startSnapshotEncodeWorker(t, d)
+	coordinator.EXPECT().PublishCheckpoint(mock.Anything, "work", mock.Anything).Return(domain.CatalogueRecord{Name: "work"}, nil).Once()
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	require.True(t, d.captureSession(sess))
+	awaitSnapshotIdle(t, sess)
+	require.True(t, sess.snapDirty.Load(), "nil committed publication must remain retryable")
+}
+
 func TestSnapshotWorkerPublishesContentAddressedCapture(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	repository.EXPECT().Publish(mock.Anything, mock.MatchedBy(func(p ports.SnapshotPublication) bool {
@@ -57,6 +92,9 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 // focused test sinks that only need to observe publication or deletion calls.
 type noOpSnapshotRepository struct{}
 
+var _ ports.SnapshotRepository = noOpSnapshotRepository{}
+
+func (noOpSnapshotRepository) Publish(context.Context, ports.SnapshotPublication) error { return nil }
 func (noOpSnapshotRepository) LoadCheckpoint(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error) {
 	return ports.SnapshotGeneration{}, errors.New("unused")
 }

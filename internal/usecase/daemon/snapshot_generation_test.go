@@ -17,7 +17,7 @@ import (
 func TestSnapshotMultipleMutationsPublishNextRepositoryGeneration(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	publications := make(chan ports.SnapshotPublication, 1)
@@ -44,7 +44,7 @@ func TestSnapshotMultipleMutationsPublishNextRepositoryGeneration(t *testing.T) 
 func TestSnapshotRetryKeepsRepositoryGeneration(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	startSnapshotEncodeWorker(t, d)
 
 	publications := make(chan ports.SnapshotPublication, 2)

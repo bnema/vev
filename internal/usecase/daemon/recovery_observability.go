@@ -22,7 +22,12 @@ func (d *Daemon) logSessionDegraded(record domain.CatalogueRecord, reasonCode st
 func (d *Daemon) logStartupRecoveryCounts(restoring int) {
 	var records []domain.CatalogueRecord
 	if d.catalogue != nil {
-		records = d.catalogue.Records()
+		var err error
+		records, err = d.catalogue.Records()
+		if err != nil {
+			d.log.Error("daemon_startup_catalogue_read_failed", "err", err)
+			return
+		}
 	} else {
 		d.mu.Lock()
 		records = make([]domain.CatalogueRecord, 0, len(d.stopped))

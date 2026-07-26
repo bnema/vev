@@ -17,15 +17,21 @@ import (
 // capture/compose/emit transaction holds that attachment's sendMu, so these
 // buffers cannot be observed or reused before emission completes.
 type renderCaptureScratch struct {
-	state      capturedRenderState
-	panes      []capturedPaneRenderState
-	placements []layout.Placement
-	dividers   []layout.Divider
-	statusTabs []statusTab
-	mru        []recentSession
-	ranked     []rankedRecent
-	titleIDs   []layout.PaneID
-	receipts   []damageReceipt
+	state             capturedRenderState
+	panes             []capturedPaneRenderState
+	placements        []layout.Placement
+	dividers          []layout.Divider
+	layoutTab         *tab
+	layoutGeneration  uint64
+	layoutArea        domain.Rect
+	layoutFocus       layout.PaneID
+	layoutFingerprint string
+	layoutValid       bool
+	statusTabs        []statusTab
+	mru               []recentSession
+	ranked            []rankedRecent
+	titleIDs          []layout.PaneID
+	receipts          []damageReceipt
 }
 
 type damageReceipt struct {
@@ -225,9 +231,28 @@ func capturePrimaryRenderState(
 
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
-	layoutSnap := solveTabLayoutLocked(tb)
-	scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
-	scratch.dividers = append(scratch.dividers[:0], layoutSnap.dividers...)
+	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	var focus layout.PaneID
+	if tb.tree != nil {
+		focus = tb.tree.Focus
+	}
+	layoutSnap := tabLayoutSnapshot{
+		area: area, focus: focus, placements: scratch.placements,
+		dividers: scratch.dividers, fingerprint: scratch.layoutFingerprint, ok: scratch.layoutValid,
+	}
+	if scratch.layoutTab != tb || scratch.layoutGeneration != tb.layoutGeneration || scratch.layoutArea != area || scratch.layoutFocus != focus {
+		layoutSnap = solveTabLayoutLocked(tb)
+		scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
+		scratch.dividers = append(scratch.dividers[:0], layoutSnap.dividers...)
+		scratch.layoutTab = tb
+		scratch.layoutGeneration = tb.layoutGeneration
+		scratch.layoutArea = area
+		scratch.layoutFocus = focus
+		scratch.layoutFingerprint = layoutSnap.fingerprint
+		scratch.layoutValid = layoutSnap.ok
+		layoutSnap.placements = scratch.placements
+		layoutSnap.dividers = scratch.dividers
+	}
 	state := &scratch.state
 	*state = capturedRenderState{
 		attachment: ac, lease: lease, reset: reset, bars: bars, theme: bars.theme,

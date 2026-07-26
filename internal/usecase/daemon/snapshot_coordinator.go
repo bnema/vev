@@ -108,6 +108,14 @@ func (d *Daemon) waitForSnapshotGenerationWithDeadline(sess *session, generation
 		return d.waitForSnapshotGeneration(sess, generation)
 	}
 	for {
+		// Once the shared deadline is observable, timeout wins even if publication
+		// completion becomes ready concurrently. This preserves the timed-out
+		// session identity and avoids nondeterministic success after the budget.
+		select {
+		case <-deadline.Done():
+			return false
+		default:
+		}
 		sess.snapshotMu.Lock()
 		published := sess.snapshotPublishedMutationRevision >= generation
 		changed := sess.snapshotChangeLocked()
@@ -207,6 +215,11 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		capture.session.signalSnapshotChangedLocked()
 		wake := capture.session.snapshotWake
 		capture.session.snapshotMu.Unlock()
+		if capture.normalWorkerAdmitted {
+			d.snapshotWorkerMu.Lock()
+			delete(d.snapshotAdmitted, capture)
+			d.snapshotWorkerMu.Unlock()
+		}
 		if wake != nil {
 			select {
 			case wake <- struct{}{}:

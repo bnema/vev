@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -47,22 +46,31 @@ type session struct {
 	// tab, or pane locks. The owner performs teardown without holding teardownMu;
 	// duplicate daemon-shutdown callers can therefore bound their ownership wait
 	// with Serve's shared snapshot deadline.
-	teardownMu             sync.Mutex
-	teardownActive         bool
-	teardownDone           chan struct{}
-	teardownWaiters        uint
-	teardownChanged        chan struct{}
-	lifecycleStopOnce      sync.Once
-	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
-	themeMu                sync.Mutex
-	tabs                   []*tab
-	active                 int
-	client                 *attachedClient
-	clipboardQueue         []clipboardForward
-	clipboardWorkerRunning bool
-	renameInProgress       bool
-	cwd                    string
-	terminal               terminalEnv
+	teardownMu        sync.Mutex
+	teardownActive    bool
+	teardownDone      chan struct{}
+	teardownWaiters   uint
+	teardownChanged   chan struct{}
+	lifecycleStopOnce sync.Once
+	mu                sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
+	// metadataPersistMu serializes authority writes and post-I/O rollback. State
+	// mutation paths must release d.mu and mu before acquiring it. After durable
+	// I/O completes it may acquire d.mu then mu to reconcile failed revisions.
+	metadataPersistMu       sync.Mutex
+	metadataVersion         uint64                 // guarded by mu; every durable metadata snapshot receives a revision
+	metadataDurableVersion  uint64                 // guarded by metadataPersistMu
+	metadataLiveVersion     uint64                 // rollback cursor guarded by metadataPersistMu
+	metadataFailedRollbacks map[uint64]func() bool // guarded by metadataPersistMu
+	themeMu                 sync.Mutex
+	tabs                    []*tab
+	active                  int
+	client                  *attachedClient
+	clipboardQueue          []clipboardForward
+	clipboardWorkerRunning  bool
+	renameInProgress        bool
+	renameDone              chan struct{}
+	cwd                     string
+	terminal                terminalEnv
 	// env is the authoritative immutable environment snapshot for future PTY children.
 	// It is guarded by mu and is always copied on ingress and egress.
 	env          []string
@@ -167,12 +175,14 @@ func (d *Daemon) touchMRU(sess *session) {
 	}
 	seq := d.mruSeq.Add(1)
 	updated := false
+	var previous uint64
 	for {
 		old := sess.mruAt.Load()
 		if old >= seq {
 			return
 		}
 		if sess.mruAt.CompareAndSwap(old, seq) {
+			previous = old
 			updated = true
 			break
 		}
@@ -182,19 +192,49 @@ func (d *Daemon) touchMRU(sess *session) {
 	}
 	sess.mu.Lock()
 	name := sess.name
-	incarnation := sess.incarnation
 	ephemeral := sess.ephemeral
+	var record domain.CatalogueRecord
+	var version uint64
+	if !ephemeral {
+		record, version = sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
+	}
 	sess.mu.Unlock()
 	if !ephemeral {
-		if err := d.updateCatalogueMetadata(domain.CatalogueMetadataUpdate{Name: name, IncarnationID: incarnation, LastUsedSeq: &seq}); err != nil {
+		rollback := func() bool {
+			return sess.mruAt.CompareAndSwap(seq, previous)
+		}
+		if err := d.persistSessionMetadata(sess, version, record.MetadataUpdate(), rollback); err != nil {
 			d.log.Warn("touching persisted session recency failed", "err", err, "session", name)
 		}
 	}
 }
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
+	// Historical focused tests call this helper directly. Acquire mu for those
+	// callers while preserving the production contract that an owning caller
+	// receives it still locked on return.
+	acquiredMu := d.mu.TryLock()
+	if acquiredMu {
+		defer d.mu.Unlock()
+	}
 	env = copyEnvironment(env)
+	if _, reserved := d.creating[name]; reserved {
+		return nil, errSessionNameInUse
+	}
+	d.creating[name] = struct{}{}
+	defer delete(d.creating, name)
 	stopped, resuming := d.stopped[name]
+	var authoritative domain.CatalogueRecord
+	var authoritativeExists bool
+	if !ephemeral && resuming && d.persistEnabled {
+		d.mu.Unlock()
+		var err error
+		authoritative, authoritativeExists, err = d.catalogueRecord(name)
+		d.mu.Lock()
+		if err != nil {
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't read session catalogue", err)
+		}
+	}
 	var createdAt int64
 	var incarnation domain.IncarnationID
 	if !ephemeral {
@@ -203,9 +243,9 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			// the persisted identity rather than receive a fresh timestamp.
 			createdAt = stopped.createdAt
 			incarnation = stopped.incarnation
-			if authoritative, ok := d.catalogueRecord(name); ok {
-				incarnation = authoritative.IncarnationID
+			if authoritativeExists {
 				createdAt = authoritative.CreatedAt
+				incarnation = authoritative.IncarnationID
 			}
 			if createdAt > d.lastAllocatedCreatedAt {
 				d.lastAllocatedCreatedAt = createdAt
@@ -263,6 +303,9 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	if !ephemeral && resuming {
 		lastUsedSeq = stopped.lastUsedSeq
 	}
+	if lastUsedSeq == 0 {
+		lastUsedSeq = d.mruSeq.Add(1)
+	}
 	sess := &session{
 		id:           id,
 		name:         name,
@@ -286,34 +329,50 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	sess.snapEligible.Store(!ephemeral && name != "")
 	if !ephemeral {
 		if d.persistEnabled {
-			record := persist.Record{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names, RecoveryState: domain.RecoveryFresh}
-			var err error
-			if resuming {
-				if _, ok := d.catalogueRecord(name); ok {
-					err = d.updateCatalogueMetadata(record.MetadataUpdate())
-				} else if d.lifecycleRecovery != nil {
-					record, err = d.lifecycleRecovery.Create(context.Background(), record)
-				} else {
-					err = d.createCatalogueRecord(record)
-				}
-			} else if d.lifecycleRecovery != nil {
-				record, err = d.lifecycleRecovery.Create(context.Background(), record)
-			} else {
-				err = d.createCatalogueRecord(record)
+			record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names, RecoveryState: domain.RecoveryFresh}
+			if d.lifecycleRecovery == nil {
+				closeTabs(tabs)
+				cancel()
+				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("durable session authority is not configured"))
 			}
+			// The name reservation remains visible while durable authority I/O runs,
+			// but daemon/session mutexes are released so storage cannot block routing.
+			d.mu.Unlock()
+			var err error
+			if resuming && authoritativeExists {
+				err = d.updateCatalogueMetadata(record.MetadataUpdate())
+			} else {
+				record, err = d.lifecycleRecovery.Create(d.serveCtx, record)
+			}
+			d.mu.Lock()
 			if err != nil {
 				closeTabs(tabs)
 				cancel()
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
+			}
+			if d.closing {
+				// Creation lost its race with shutdown. Roll back a newly committed
+				// authority record without holding mu; resumed metadata remains owned
+				// by the existing stopped lifecycle.
+				if !resuming {
+					d.mu.Unlock()
+					rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(d.serveCtx), snapshotFinalFlushTimeout)
+					rollbackErr := d.lifecycleRecovery.Delete(rollbackCtx, name)
+					rollbackCancel()
+					d.mu.Lock()
+					if rollbackErr != nil {
+						d.log.Warn("rolling back session creation during shutdown failed", "session", name, "err", rollbackErr)
+					}
+				}
+				closeTabs(tabs)
+				cancel()
+				return nil, errors.New("daemon is shutting down")
 			}
 			sess.incarnation = record.IncarnationID
 		}
 		delete(d.stopped, name)
 	}
 	d.sessions[id] = sess
-	if lastUsedSeq == 0 {
-		d.touchMRU(sess)
-	}
 	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
 	for i, tb := range tabs {
 		d.log.Info("tab created", "session", name, "tab", i)
@@ -445,25 +504,41 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
 	tabIndex := sess.active
-	record := sess.persistRecordLocked(time.Now().UnixNano())
+	record, metadataVersion := sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
 	ephemeral := sess.ephemeral
+	sess.mu.Unlock()
+	d.mu.Unlock()
 	if !ephemeral {
-		if err := d.updateCatalogueMetadata(record.MetadataUpdate()); err != nil {
-			sess.tabs = sess.tabs[:len(sess.tabs)-1]
-			sess.active = oldActive
+		rollback := func() bool {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			if d.sessions[sess.id] != sess {
+				return true
+			}
+			sess.mu.Lock()
+			if !slices.Contains(sess.tabs, tb) {
+				sess.mu.Unlock()
+				return true
+			}
+			if sess.tabs[len(sess.tabs)-1] != tb {
+				sess.mu.Unlock()
+				return false
+			}
+			sess.tabs = slices.DeleteFunc(sess.tabs, func(candidate *tab) bool { return candidate == tb })
+			sess.active = min(oldActive, len(sess.tabs)-1)
+			sess.mu.Unlock()
 			if tb.cancel != nil {
 				tb.cancel()
 			}
-			sess.mu.Unlock()
-			d.mu.Unlock()
 			_ = pty.Close()
+			return true
+		}
+		if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
 			return err
 		}
 	}
-	sess.mu.Unlock()
 	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
-	d.mu.Unlock()
 	d.activateTab(sess, tb)
 	markSnapshotDirty(sess)
 	return nil
@@ -686,51 +761,43 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		}
 	}
 	lastUsedSeq := sess.mruAt.Load()
-	record := sess.persistRecordLocked(d.nowUnixNano())
+	record := sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
 	record.Name = name
 	record.CreatedAt = createdAt
 	record.LastUsedSeq = lastUsedSeq
 	sess.renameInProgress = true
+	sess.renameDone = make(chan struct{})
 	sess.mu.Unlock()
 	d.mu.Unlock()
 
 	rollback := func(err error) error {
 		sess.mu.Lock()
 		sess.renameInProgress = false
+		if sess.renameDone != nil {
+			close(sess.renameDone)
+			sess.renameDone = nil
+		}
 		sess.mu.Unlock()
 		return err
 	}
 	// Durable named renames are one atomic catalogue batch. The incarnation-keyed
 	// snapshot namespace is intentionally untouched.
 	if (wasEphemeral || oldName != name) && d.persistEnabled {
-		if d.lifecycleRecovery != nil {
+		if d.lifecycleRecovery == nil {
+			return rollback(errors.New("durable session authority is not configured"))
+		}
+		{
 			var committed domain.CatalogueRecord
 			var err error
 			if wasEphemeral {
-				committed, err = d.lifecycleRecovery.Create(context.Background(), record)
+				committed, err = d.lifecycleRecovery.Create(d.serveCtx, record)
 			} else {
-				committed, err = d.lifecycleRecovery.Rename(context.Background(), oldName, name)
+				committed, err = d.lifecycleRecovery.Rename(d.serveCtx, oldName, name)
 			}
 			if err != nil {
 				return rollback(err)
 			}
 			record = committed
-		} else if wasEphemeral {
-			if err := d.createCatalogueRecord(record); err != nil {
-				return rollback(err)
-			}
-		} else {
-			if current, ok := d.catalogueRecord(oldName); ok {
-				current.Name = name
-				current.Cwd = record.Cwd
-				current.UpdatedAt = record.UpdatedAt
-				current.LastUsedSeq = record.LastUsedSeq
-				current.TabNames = append([]string(nil), record.TabNames...)
-				record = current
-			}
-			if err := d.catalogue.Rename(oldName, record); err != nil {
-				return rollback(err)
-			}
 		}
 	}
 
@@ -745,6 +812,10 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	sess.incarnation = record.IncarnationID
 	sess.ephemeral = false
 	sess.renameInProgress = false
+	if sess.renameDone != nil {
+		close(sess.renameDone)
+		sess.renameDone = nil
+	}
 	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()
 	d.mu.Unlock()
@@ -774,22 +845,42 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 	}
 	oldName := tb.name
 	tb.name = name
-	record := sess.persistRecordLocked(time.Now().UnixNano())
+	record, metadataVersion := sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
 	ephemeral := sess.ephemeral
-	if !ephemeral {
-		if err := d.updateCatalogueMetadata(record.MetadataUpdate()); err != nil {
-			tb.name = oldName
-			sess.mu.Unlock()
-			d.mu.Unlock()
-			return err
-		}
-	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
+	if ephemeral {
+		return nil
+	}
+	rollback := func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.sessions[sess.id] != sess {
+			return true
+		}
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if !slices.Contains(sess.tabs, tb) {
+			return true
+		}
+		if tb.name != name {
+			return false
+		}
+		tb.name = oldName
+		return true
+	}
+	if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
+		return err
+	}
 	return nil
 }
 
-func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
+func (s *session) nextPersistRecordLocked(updatedAt int64) (domain.CatalogueRecord, uint64) {
+	s.metadataVersion++
+	return s.persistRecordLocked(updatedAt), s.metadataVersion
+}
+
+func (s *session) persistRecordLocked(updatedAt int64) domain.CatalogueRecord {
 	createdAt := s.createdAt
 	tabNames := make([]string, len(s.tabs))
 	lastCustom := -1
@@ -804,7 +895,7 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 	} else {
 		tabNames = tabNames[:lastCustom+1]
 	}
-	return persist.Record{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames, RecoveryState: domain.RecoveryFresh}
+	return domain.CatalogueRecord{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames, RecoveryState: domain.RecoveryFresh}
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
@@ -843,8 +934,10 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 		return nil
 	}
 	ringing := tb.attention
+	oldActive := sess.active
 	wasActive := idx == sess.active
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
+	tabsAfterClose := len(sess.tabs)
 	if sess.active >= len(sess.tabs) {
 		sess.active = len(sess.tabs) - 1
 	} else if idx < sess.active {
@@ -853,15 +946,34 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 	destination := sess.tabs[sess.active]
 	ac := sess.client
 	name := sess.name
-	record := sess.persistRecordLocked(time.Now().UnixNano())
+	record, metadataVersion := sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
 	ephemeral := sess.ephemeral
-	if !ephemeral {
-		if err := d.updateCatalogueMetadata(record.MetadataUpdate()); err != nil {
-			d.log.Warn("persisting closed tab failed", "err", err, "session", name)
-		}
-	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
+	if !ephemeral {
+		rollback := func() bool {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			if d.sessions[sess.id] != sess {
+				return true
+			}
+			sess.mu.Lock()
+			defer sess.mu.Unlock()
+			if slices.Contains(sess.tabs, tb) {
+				return true
+			}
+			if len(sess.tabs) != tabsAfterClose {
+				return false
+			}
+			sess.tabs = slices.Insert(sess.tabs, min(idx, len(sess.tabs)), tb)
+			sess.active = min(oldActive, len(sess.tabs)-1)
+			return true
+		}
+		if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
+			d.log.Warn("persisting closed tab failed", "err", err, "session", name)
+			return err
+		}
+	}
 	d.log.Info("tab closed", "session", name)
 	markSnapshotDirty(sess)
 
@@ -900,57 +1012,45 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 // beginSnapshotPurge commits a logical named-session kill before its live
 // identity or persisted metadata is removed. It never runs under daemon or
 // session locks.
-func (d *Daemon) beginSnapshotPurge(name string, incarnation domain.IncarnationID) error {
-	if d.lifecycleRecovery != nil {
-		// The lifecycle coordinator performs the complete ordered protocol after
-		// snapshot writers have joined.
-		return nil
+func (d *Daemon) beginSnapshotPurge(_ string, _ domain.IncarnationID) error {
+	if d.persistEnabled && d.lifecycleRecovery == nil {
+		return errors.New("durable session authority is not configured")
 	}
-	if d.snapshotRepository == nil || name == "" {
-		return nil
-	}
-	return d.snapshotRepository.WriteDeletionTombstone(context.Background(), domain.DeletionTombstone{Name: name, IncarnationID: incarnation})
+	// The lifecycle coordinator performs the complete ordered protocol after
+	// snapshot writers have joined.
+	return nil
 }
 
 // finishSnapshotPurge deletes both independently durable snapshot sources,
 // then metadata, and only then clears the tombstone. Any failure deliberately
 // leaves the marker in place so startup cannot restore or import the name and
 // a later live/offline kill can retry the idempotent source deletes.
-func (d *Daemon) finishSnapshotPurge(name string, incarnation domain.IncarnationID) error {
-	if d.lifecycleRecovery != nil {
-		return d.lifecycleRecovery.Delete(context.Background(), name)
+func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, _ domain.IncarnationID) error {
+	if !d.persistEnabled {
+		return nil
 	}
-	if d.snapshotRepository == nil {
-		return d.deleteCatalogueRecord(name)
+	if d.lifecycleRecovery == nil {
+		return errors.New("durable session authority is not configured")
 	}
-	if err := d.snapshotRepository.QuarantineDeletionSources(context.Background(), domain.DeletionTombstone{Name: name, IncarnationID: incarnation}, false); err != nil {
-		return err
+	if ctx == nil {
+		ctx = d.serveCtx
 	}
-	if err := d.deleteCatalogueRecord(name); err != nil {
-		return err
-	}
-	return d.snapshotRepository.DeleteDeletionTombstone(context.Background(), incarnation)
+	purgeCtx, cancel := context.WithTimeout(ctx, snapshotFinalFlushTimeout)
+	defer cancel()
+	return d.lifecycleRecovery.Delete(purgeCtx, name)
 }
 
 // retryStoppedPurge completes a previously closed session's durable purge.
 // It keeps the stopped record hidden until all sources and metadata cross their
 // deletion boundaries.
 func (d *Daemon) retryStoppedPurge(name string) error {
+	return d.retryStoppedPurgeContext(d.serveCtx, name)
+}
+
+func (d *Daemon) retryStoppedPurgeContext(ctx context.Context, name string) error {
 	d.mu.Lock()
 	stopped, ok := d.stopped[name]
 	if !ok {
-		d.mu.Unlock()
-		return nil
-	}
-	// Without a repository there is no restore/import source to fence, so the
-	// stopped record retains the metadata-only deletion behavior.
-	if d.snapshotRepository == nil {
-		d.mu.Unlock()
-		if err := d.deleteCatalogueRecord(name); err != nil {
-			return err
-		}
-		d.mu.Lock()
-		delete(d.stopped, name)
 		d.mu.Unlock()
 		return nil
 	}
@@ -961,7 +1061,7 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 	if err := d.beginSnapshotPurge(name, stopped.incarnation); err != nil {
 		return err
 	}
-	if err := d.finishSnapshotPurge(name, stopped.incarnation); err != nil {
+	if err := d.finishSnapshotPurge(ctx, name, stopped.incarnation); err != nil {
 		return err
 	}
 	d.mu.Lock()
@@ -1089,6 +1189,23 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	}
 	defer sess.finishTeardown()
 
+	// A rename reserves durable identity while coordinator I/O runs unlocked.
+	// Teardown waits for that reservation before selecting the purge name.
+	sess.mu.Lock()
+	renameDone := sess.renameDone
+	sess.mu.Unlock()
+	if renameDone != nil {
+		if deadline == nil {
+			<-renameDone
+		} else {
+			select {
+			case <-renameDone:
+			case <-deadline.Done():
+				return context.DeadlineExceeded
+			}
+		}
+	}
+
 	d.mu.Lock()
 	current := d.sessions[sess.id]
 	d.mu.Unlock()
@@ -1106,13 +1223,14 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	sess.mu.Lock()
 	isEphemeral := sess.ephemeral
 	name := sess.name
+	incarnation := sess.incarnation
 	sess.mu.Unlock()
 	// Commit the tombstone before changing live identity or metadata. A
 	// repository delete must never race an older publication that could recreate
 	// the just-quarantined name. Do not hold daemon or session locks while
 	// tombstoning or joining: a repository implementation may block on I/O.
 	if purge && !isEphemeral {
-		if err := d.beginSnapshotPurge(name, sess.incarnation); err != nil {
+		if err := d.beginSnapshotPurge(name, incarnation); err != nil {
 			return err
 		}
 		if d.snapshotRepository != nil {
@@ -1188,7 +1306,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, incarnation: sess.incarnation, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, incarnation: incarnation, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
 		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0
@@ -1248,7 +1366,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	// tombstone and hidden stopped record when any source or metadata operation
 	// fails; retryStoppedPurge (including a repeated live kill) resumes safely.
 	if !ephemeral && purge {
-		if err := d.finishSnapshotPurge(stoppedName, sess.incarnation); err != nil {
+		if err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation); err != nil {
 			purgeErr = errors.Join(purgeErr, err)
 			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
 		} else {
@@ -1302,8 +1420,11 @@ func (d *Daemon) nameLiveOrStoppedLocked(name string) bool {
 	if d.findByNameLocked(name) != nil {
 		return true
 	}
-	_, ok := d.stopped[name]
-	return ok
+	if _, ok := d.stopped[name]; ok {
+		return true
+	}
+	_, reserved := d.creating[name]
+	return reserved
 }
 
 func (d *Daemon) cwdSampler(ctx context.Context) {
@@ -1363,19 +1484,38 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 		d.mu.Unlock()
 		return
 	}
+	oldCwd := sess.cwd
 	sess.cwd = cwd
 	name := sess.name
-	incarnation := sess.incarnation
 	ephemeral := sess.ephemeral
-	sess.mu.Unlock()
+	var record domain.CatalogueRecord
+	var metadataVersion uint64
 	if !ephemeral {
-		updatedAt := time.Now().UnixNano()
-		if err := d.updateCatalogueMetadata(domain.CatalogueMetadataUpdate{Name: name, IncarnationID: incarnation, Cwd: &cwd, UpdatedAt: &updatedAt}); err != nil {
+		record, metadataVersion = sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
+	}
+	sess.mu.Unlock()
+	d.mu.Unlock()
+	if !ephemeral {
+		rollback := func() bool {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			if d.sessions[sess.id] != sess {
+				return true
+			}
+			sess.mu.Lock()
+			defer sess.mu.Unlock()
+			if sess.cwd != cwd {
+				return false
+			}
+			sess.cwd = oldCwd
+			return true
+		}
+		if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
 			d.log.Warn("touching persisted session cwd failed", "err", err, "session", name)
+			return
 		}
 		markSnapshotDirty(sess)
 	}
-	d.mu.Unlock()
 }
 
 // childEnv retains the daemon-environment helper for daemon-local legacy callers.
@@ -1389,11 +1529,8 @@ func copyEnvironment(env []string) []string {
 }
 
 func environmentEntry(entry string) (name, value string, ok bool) {
-	i := strings.IndexByte(entry, '=')
-	if i < 0 {
-		return "", "", false
-	}
-	return entry[:i], entry[i+1:], true
+	name, value, ok = strings.Cut(entry, "=")
+	return name, value, ok
 }
 
 func (d *Daemon) ptyCommand(env []string) (string, []string) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +38,8 @@ type OpenDeps struct {
 	StateDir          string
 	Random            io.Reader
 	SnapshotMigration ports.SnapshotMigration
+	// Logger receives full adapter causes; durable degraded reasons are sanitized.
+	Logger *slog.Logger
 	// Fault is a test-only crash seam called after named durable boundaries.
 	Fault func(string) error
 }
@@ -65,6 +68,9 @@ const (
 	catalogueFormatName           = "durable-session-v1.format"
 	migrationRecordMagic          = "VEVJ"
 	migrationRecordVersion uint16 = 1
+
+	migrationDegradedLegacySnapshotUncertain = "legacy_snapshot_uncertain"
+	migrationDegradedReasonMaxBytes          = 64
 )
 
 func OpenOrMigrate(ctx context.Context, deps OpenDeps) (OpenResult, error) {
@@ -300,11 +306,12 @@ func resumeLegacyMigration(ctx context.Context, deps OpenDeps) (OpenResult, erro
 				if !errors.Is(err, ports.ErrLegacySnapshotUncertain) {
 					return OpenResult{}, fmt.Errorf("persist: migrate legacy snapshot %q: %w", legacy.Name, err)
 				}
+				migrationLogger(deps).Error("legacy snapshot migration uncertain", "session", legacy.Name, "err", err)
 				if ref.Generation != 0 && ref.ManifestDigest != ([32]byte{}) {
 					legacyRef := ref
 					record.Validated[legacy.Name] = &legacyRef
 				}
-				record.Degraded[legacy.Name] = err.Error()
+				record.Degraded[legacy.Name] = migrationDegradedLegacySnapshotUncertain
 			}
 			if err := writeMigrationRecord(intent, record); err != nil {
 				return OpenResult{}, err
@@ -372,6 +379,13 @@ func resumeLegacyMigration(ctx context.Context, deps OpenDeps) (OpenResult, erro
 		}
 	}
 	return OpenResult{Catalogue: catalogue, Records: opened, Migrated: true}, nil
+}
+
+func migrationLogger(deps OpenDeps) *slog.Logger {
+	if deps.Logger != nil {
+		return deps.Logger
+	}
+	return slog.Default()
 }
 
 func migrationBoundary(deps OpenDeps, name string) error {
@@ -609,10 +623,12 @@ func catalogueRecordsEqual(a, b []domain.CatalogueRecord) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	sort.Slice(a, func(i, j int) bool { return a[i].Name < a[j].Name })
-	sort.Slice(b, func(i, j int) bool { return b[i].Name < b[j].Name })
-	for i := range a {
-		if a[i].Name != b[i].Name || a[i].IncarnationID != b[i].IncarnationID || a[i].RecoveryState != b[i].RecoveryState {
+	left := append([]domain.CatalogueRecord(nil), a...)
+	right := append([]domain.CatalogueRecord(nil), b...)
+	sort.Slice(left, func(i, j int) bool { return left[i].Name < left[j].Name })
+	sort.Slice(right, func(i, j int) bool { return right[i].Name < right[j].Name })
+	for i := range left {
+		if !left[i].Equal(right[i]) {
 			return false
 		}
 	}

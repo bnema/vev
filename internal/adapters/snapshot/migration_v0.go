@@ -49,7 +49,7 @@ func decodeManifestV1(data []byte) (legacyManifestV1, error) {
 	objects := make([]legacyObjectV1, 0)
 	add := func(ref codec.ObjectRef) error {
 		if _, ok := seen[ref.Digest]; ok {
-			return errors.New("snapshot: duplicate legacy object digest")
+			return nil
 		}
 		seen[ref.Digest] = struct{}{}
 		objects = append(objects, legacyObjectV1{Kind: uint8(ref.Kind), Digest: ref.Digest, Size: uint64(ref.Size)})
@@ -209,7 +209,7 @@ func uncertainLegacyError(operation string, cause error) error {
 	if cause == nil {
 		return fmt.Errorf("%w: %s", ports.ErrLegacySnapshotUncertain, operation)
 	}
-	return fmt.Errorf("%w: %s: %v", ports.ErrLegacySnapshotUncertain, operation, cause)
+	return fmt.Errorf("%w: %s: %w", ports.ErrLegacySnapshotUncertain, operation, cause)
 }
 
 // MigrateV1Checkpoint is the migration-only admission path for an authoritative
@@ -244,7 +244,10 @@ func (r *Repository) MigrateV1Checkpoint(ctx context.Context, req ports.Snapshot
 	if manifest.Name != req.LegacyName || manifest.Generation != req.LegacyRef.Generation {
 		return domain.CheckpointRef{}, uncertainLegacyError("manifest identity mismatch", nil)
 	}
-	key, _ := incarnationKey(req.IncarnationID)
+	key, err := incarnationKey(req.IncarnationID)
+	if err != nil {
+		return domain.CheckpointRef{}, err
+	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
 	if err := r.ensureSession(req.IncarnationID); err != nil {

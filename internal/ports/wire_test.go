@@ -744,12 +744,27 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestSessionInfoRecoveryState(t *testing.T) {
-	payload := MarshalSessions(Sessions{Sessions: []SessionInfo{{Name: "broken", State: SessionDegraded}}})
-	got, err := UnmarshalSessions(payload)
-	require.NoError(t, err)
-	require.Equal(t, SessionDegraded, got.Sessions[0].State)
-	assertAllPrefixesFail(t, payload, UnmarshalSessions)
-	assertTrailingGarbageFails(t, payload, UnmarshalSessions)
+	tests := []struct {
+		name  string
+		state SessionState
+		want  []byte
+	}{
+		{name: "running", state: SessionRunning, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
+		{name: "stopped", state: SessionStopped, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
+		{name: "restoring", state: SessionRestoring, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 3}},
+		{name: "degraded", state: SessionDegraded, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 4}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: tt.state}}})
+			require.Equal(t, tt.want, payload)
+			got, err := UnmarshalSessions(payload)
+			require.NoError(t, err)
+			require.Equal(t, tt.state, got.Sessions[0].State)
+			assertAllPrefixesFail(t, payload, UnmarshalSessions)
+			assertTrailingGarbageFails(t, payload, UnmarshalSessions)
+		})
+	}
 }
 
 func TestSessionsGoldenAndRoundTrip(t *testing.T) {

@@ -19,8 +19,9 @@ const (
 	// place by Open; nothing ever writes this framing again.
 	legacyHeaderLen = 8
 
-	// Current framing. Every file starts with fileMagic plus a uint16 format
-	// version, and every record carries a self-verifying header:
+	// Current framing. Every file starts with fileMagic, a uint16 format
+	// version, and CRC32 over that six-byte identity. Every record carries a
+	// self-verifying header:
 	//
 	//	[0:4]   payload length, big endian
 	//	[4:8]   CRC32(payload)
@@ -29,10 +30,13 @@ const (
 	// The header checksum is what makes the length trustworthy: a corrupt
 	// length now fails closed instead of masquerading as a torn tail and
 	// silently truncating every record that follows it.
-	recordHeaderLen = 12
-	fileMagicLen    = 4
-	fileHeaderLen   = fileMagicLen + 2
-	formatVersion   = 1
+	recordHeaderLen   = 12
+	fileMagicLen      = 4
+	fileHeaderV1Len   = fileMagicLen + 2
+	fileHeaderBodyLen = fileHeaderV1Len
+	fileHeaderLen     = fileHeaderBodyLen + 4
+	formatVersionV1   = 1
+	formatVersion     = 2
 
 	// maxPayloadLen bounds any allocation driven by a length field. Catalogue
 	// records and batches are orders of magnitude smaller than this.
@@ -145,7 +149,8 @@ func encodeBatch(changes []BatchChange) ([]byte, error) {
 func fileHeader() []byte {
 	buf := make([]byte, fileHeaderLen)
 	copy(buf, fileMagic[:])
-	binary.BigEndian.PutUint16(buf[fileMagicLen:], formatVersion)
+	binary.BigEndian.PutUint16(buf[fileMagicLen:fileHeaderBodyLen], formatVersion)
+	binary.BigEndian.PutUint32(buf[fileHeaderBodyLen:], crc32.ChecksumIEEE(buf[:fileHeaderBodyLen]))
 	return buf
 }
 

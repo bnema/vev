@@ -117,16 +117,29 @@ func TestSessionRecoveryCommand(t *testing.T) {
 	}{
 		{args: []string{"retry"}, wantCall: "session-recovery:retry:"},
 		{args: []string{"restore", "7"}, wantCall: "session-recovery:restore:7"},
+		{args: []string{"restore", "18446744073709551615"}, wantCall: "session-recovery:restore:18446744073709551615"},
 		{args: []string{"export", "/tmp/export"}, wantCall: "session-recovery:export:/tmp/export"},
 		{args: []string{"discard"}, wantCall: "session-recovery:discard:"},
+		{args: nil, wantErr: ErrInvalidArguments},
+		{args: []string{"retry", "extra"}, wantErr: ErrInvalidArguments},
+		{args: []string{"restore"}, wantErr: ErrInvalidArguments},
 		{args: []string{"restore", "0"}, wantErr: ErrInvalidArguments},
+		{args: []string{"restore", "01"}, wantErr: ErrInvalidArguments},
+		{args: []string{"restore", "18446744073709551616"}, wantErr: ErrInvalidArguments},
+		{args: []string{"export", "relative/path"}, wantErr: ErrInvalidArguments},
+		{args: []string{"export"}, wantErr: ErrInvalidArguments},
+		{args: []string{"discard", "extra"}, wantErr: ErrInvalidArguments},
 		{args: []string{"unknown"}, wantErr: ErrInvalidArguments},
 	}
 	for _, test := range tests {
-		ctx := &controlSpy{}
-		_, err := cmd.Control(ctx, test.args, ControlOptions{})
-		if !errors.Is(err, test.wantErr) || ctx.call != test.wantCall {
-			t.Errorf("args %v: call/error = %q/%v, want %q/%v", test.args, ctx.call, err, test.wantCall, test.wantErr)
+		ctx := &controlSpy{recoveryOutput: "recovery output"}
+		got, err := cmd.Control(ctx, test.args, ControlOptions{})
+		wantOutput := ""
+		if test.wantCall != "" {
+			wantOutput = ctx.recoveryOutput
+		}
+		if !errors.Is(err, test.wantErr) || ctx.call != test.wantCall || got.Output != wantOutput {
+			t.Errorf("args %v: call/output/error = %q/%q/%v, want %q/%q/%v", test.args, ctx.call, got.Output, err, test.wantCall, wantOutput, test.wantErr)
 		}
 	}
 }
@@ -175,7 +188,10 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 	}
 }
 
-type controlSpy struct{ call string }
+type controlSpy struct {
+	call           string
+	recoveryOutput string
+}
 
 func (s *controlSpy) record(call string) error          { s.call = call; return nil }
 func (s *controlSpy) CreateTab() error                  { return s.record("new-tab") }
@@ -205,7 +221,7 @@ func (s *controlSpy) Toast(level, message string) error {
 	return s.record("toast:" + level + ":" + message)
 }
 func (s *controlSpy) SessionRecovery(action, argument string) (string, error) {
-	return "", s.record("session-recovery:" + action + ":" + argument)
+	return s.recoveryOutput, s.record("session-recovery:" + action + ":" + argument)
 }
 func (s *controlSpy) ListSessions(json bool) (string, error) {
 	_ = s.record("list-sessions:" + strconv.FormatBool(json))

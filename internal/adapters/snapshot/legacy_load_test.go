@@ -69,7 +69,6 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 
 func (r *Repository) load(ctx context.Context, name, key string) (ports.SnapshotGeneration, error) {
 	preferred, preferredDigest, err := r.readLegacyHead(key)
-	skipped := errors.Is(err, ErrInvalidHEAD)
 	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, ErrInvalidHEAD) {
 		return ports.SnapshotGeneration{}, fmt.Errorf("read snapshot HEAD: %w", err)
 	}
@@ -78,7 +77,6 @@ func (r *Repository) load(ctx context.Context, name, key string) (ports.Snapshot
 		if err == nil && sha256.Sum256(got.Manifest) == preferredDigest {
 			return got, nil
 		}
-		skipped = true
 	}
 
 	budget := maxDirectoryTraversalEntries
@@ -89,10 +87,8 @@ func (r *Repository) load(ctx context.Context, name, key string) (ports.Snapshot
 	for _, generation := range candidates {
 		got, err := r.loadGeneration(ctx, name, key, generation)
 		if err != nil {
-			skipped = true
 			continue
 		}
-		_ = skipped
 		return got, nil
 	}
 	return ports.SnapshotGeneration{}, fmt.Errorf("no complete snapshot generation for %q", name)

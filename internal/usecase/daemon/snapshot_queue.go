@@ -107,10 +107,16 @@ func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
 	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
 		return false
 	}
+	capture.normalWorkerAdmitted = true
 	select {
 	case d.snapshotJobs <- capture:
+		if d.snapshotAdmitted == nil {
+			d.snapshotAdmitted = make(map[*snapshotCapture]struct{})
+		}
+		d.snapshotAdmitted[capture] = struct{}{}
 		return true
 	default:
+		capture.normalWorkerAdmitted = false
 		return false
 	}
 }

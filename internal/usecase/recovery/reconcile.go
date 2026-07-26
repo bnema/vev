@@ -29,23 +29,41 @@ func (r *Reconciler) Step(ctx context.Context, cursor ports.ReconcileCursor) (po
 	if err := ctx.Err(); err != nil {
 		return cursor, nil, err
 	}
-	next, findings, err := r.repository.Reconcile(ctx, r.catalogue.Records(), cursor, r.budget)
+	records, err := r.catalogue.Records()
+	if err != nil {
+		return cursor, nil, err
+	}
+	next, findings, err := r.repository.Reconcile(ctx, records, cursor, r.budget)
 	if err != nil {
 		return cursor, nil, err
 	}
 	decisions := make([]ports.ReconcileDecision, 0, len(findings))
+	consumed := ports.MaintenanceBudget{}
 	for _, finding := range findings {
-		if finding.Consumed.Entries > r.budget.Entries || finding.Consumed.Bytes > r.budget.Bytes {
+		// Compare against the remainder before adding. This both enforces the
+		// page-wide budget and avoids uint64 wraparound.
+		if finding.Consumed.Entries > r.budget.Entries-consumed.Entries ||
+			finding.Consumed.Bytes > r.budget.Bytes-consumed.Bytes {
 			return cursor, nil, errors.New("recovery: repository exceeded reconciliation budget")
 		}
-		record, ok := r.catalogue.Record(finding.Candidate.Name)
+		consumed.Entries += finding.Consumed.Entries
+		consumed.Bytes += finding.Consumed.Bytes
+		record, ok, err := r.catalogue.Record(finding.Candidate.Name)
+		if err != nil {
+			return cursor, nil, err
+		}
 		if !ok {
 			record = domain.CatalogueRecord{}
 		}
 		decision := classifyFinding(record, finding)
 		if decision.Kind == ports.ReconcileAdopt {
 			if _, err := r.coordinator.PublishReconciledCheckpoint(ctx, finding.Candidate.Name, finding.Candidate, finding.AncestorChain); err != nil {
-				return cursor, nil, err
+				if !errors.Is(err, ErrCheckpointConflict) && !errors.Is(err, ErrCheckpointRecordNotFound) {
+					return cursor, nil, err
+				}
+				decision.Kind = ports.ReconcileDefer
+				decision.ReasonCode = "catalogue-conflict"
+				decision.RetentionResolved = false
 			}
 		}
 		decisions = append(decisions, decision)
@@ -132,7 +150,10 @@ func (c *Coordinator) PublishReconciledCheckpoint(ctx context.Context, name stri
 	if err := ctx.Err(); err != nil {
 		return domain.CatalogueRecord{}, err
 	}
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return domain.CatalogueRecord{}, err
+	}
 	if !ok {
 		return domain.CatalogueRecord{}, ErrCheckpointRecordNotFound
 	}

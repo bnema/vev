@@ -67,25 +67,29 @@ var defaultBackoff = backoffConfig{
 	total:   5 * time.Second,
 }
 
-func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg backoffConfig) (lifecycleOwnership, error) {
+func retryAttempts[T any](ctx context.Context, cfg backoffConfig, attempt func() (T, bool, error)) (T, error) {
 	deadline := time.Now().Add(cfg.total)
 	backoff := cfg.initial
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			var zero T
+			return zero, err
 		}
-		owner, err := daemonLifecycleProbe.TryAcquire(runtimeDir)
-		if err == nil {
-			return owner, nil
+		result, done, err := attempt()
+		if err != nil {
+			var zero T
+			return zero, err
 		}
-		if !errors.Is(err, lifecycle.ErrBusy) {
-			return nil, err
+		if done {
+			return result, nil
 		}
 		if !time.Now().Before(deadline) {
-			return nil, ErrDaemonUnreachable
+			var zero T
+			return zero, ErrDaemonUnreachable
 		}
 		if err := waitBackoff(ctx, backoff); err != nil {
-			return nil, err
+			var zero T
+			return zero, err
 		}
 		if backoff *= 2; backoff > cfg.max {
 			backoff = cfg.max
@@ -93,33 +97,39 @@ func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg ba
 	}
 }
 
-func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, lifecycleOwnership, error) {
-	deadline := time.Now().Add(cfg.total)
-	backoff := cfg.initial
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg backoffConfig) (lifecycleOwnership, error) {
+	return retryAttempts(ctx, cfg, func() (lifecycleOwnership, bool, error) {
+		owner, err := daemonLifecycleProbe.TryAcquire(runtimeDir)
+		if err == nil {
+			return owner, true, nil
 		}
+		if !errors.Is(err, lifecycle.ErrBusy) {
+			return nil, false, err
+		}
+		return nil, false, nil
+	})
+}
+
+type daemonOrLifecycle struct {
+	transport ports.Transport
+	owner     lifecycleOwnership
+}
+
+func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, lifecycleOwnership, error) {
+	result, err := retryAttempts(ctx, cfg, func() (daemonOrLifecycle, bool, error) {
 		if transport, err := dial(ctx, dir); err == nil {
-			return transport, nil, nil
+			return daemonOrLifecycle{transport: transport}, true, nil
 		}
 		owner, err := daemonLifecycleProbe.TryAcquire(dir)
 		if err == nil {
-			return nil, owner, nil
+			return daemonOrLifecycle{owner: owner}, true, nil
 		}
 		if !errors.Is(err, lifecycle.ErrBusy) {
-			return nil, nil, err
+			return daemonOrLifecycle{}, false, err
 		}
-		if !time.Now().Before(deadline) {
-			return nil, nil, ErrDaemonUnreachable
-		}
-		if err := waitBackoff(ctx, backoff); err != nil {
-			return nil, nil, err
-		}
-		if backoff *= 2; backoff > cfg.max {
-			backoff = cfg.max
-		}
-	}
+		return daemonOrLifecycle{}, false, nil
+	})
+	return result.transport, result.owner, err
 }
 
 func waitBackoff(ctx context.Context, duration time.Duration) error {
@@ -224,28 +234,14 @@ func acquireSpawnLock(dir string) (release func(), acquired bool, err error) {
 // retryDial dials repeatedly with exponential backoff until the daemon
 // answers, the context is cancelled, or the total budget is exhausted.
 func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, error) {
-	deadline := time.Now().Add(cfg.total)
-	backoff := cfg.initial
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if t, err := dial(ctx, dir); err == nil {
-			return t, nil
-		}
-		if !time.Now().Before(deadline) {
-			slog.Error("daemon did not become reachable before retry budget expired", "socket_dir", dir, "budget", cfg.total)
-			return nil, ErrDaemonUnreachable
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(backoff):
-		}
-		if backoff *= 2; backoff > cfg.max {
-			backoff = cfg.max
-		}
+	transport, err := retryAttempts(ctx, cfg, func() (ports.Transport, bool, error) {
+		transport, err := dial(ctx, dir)
+		return transport, err == nil, nil
+	})
+	if errors.Is(err, ErrDaemonUnreachable) {
+		slog.Error("daemon did not become reachable before retry budget expired", "socket_dir", dir, "budget", cfg.total)
 	}
+	return transport, err
 }
 
 // realDial is the production dialer.

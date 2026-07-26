@@ -31,6 +31,37 @@ type manifestMaintenance struct {
 	complete bool
 }
 
+type retentionEntryKind uint8
+
+const (
+	retentionManifest retentionEntryKind = iota + 1
+	retentionObject
+)
+
+type retentionEntryPolicy struct {
+	kind        retentionEntryKind
+	generations map[uint64]ports.SnapshotDigest
+	objects     map[ports.SnapshotDigest]struct{}
+}
+
+func (p retentionEntryPolicy) delete(entry maintenanceDirEntry) bool {
+	if entry.isDir {
+		return false
+	}
+	switch p.kind {
+	case retentionManifest:
+		generation, canonical := parseGenerationFilename(entry.name)
+		_, retained := p.generations[generation]
+		return canonical && !retained
+	case retentionObject:
+		digest, canonical := parseObjectDigest(entry.name)
+		_, retained := p.objects[digest]
+		return canonical && !retained
+	default:
+		return false
+	}
+}
+
 type sessionMaintenance struct {
 	lock            *sessionMutex
 	token           string
@@ -370,6 +401,44 @@ func keepSet(plan ports.RetentionPlan) map[uint64]ports.SnapshotDigest {
 
 // MaintainSession incrementally validates and retains only catalogue-indexed
 // checkpoints. Every incarnation owns its budget and continuation state.
+// processRetentionEntries charges stat-reported size for every entry, requeues
+// the unadmitted suffix, and removes only canonical entries rejected by policy.
+func (r *Repository) processRetentionEntries(ctx context.Context, dir, purpose string, entries []maintenanceDirEntry, budget *ports.MaintenanceBudget, consumedBefore bool, policy retentionEntryPolicy) (bool, error) {
+	for i, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		path := filepath.Join(dir, entry.name)
+		info, statErr := r.stat(path)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return false, statErr
+		}
+		size := uint64(0)
+		if statErr == nil && info.Size() > 0 {
+			size = uint64(info.Size())
+		}
+		if budget.Entries == 0 || size > budget.Bytes {
+			r.requeueMaintenanceEntries(dir, purpose, entries[i:])
+			if !consumedBefore && i == 0 {
+				return false, ErrMaintenanceBudgetTooSmall
+			}
+			return false, nil
+		}
+		budget.Entries--
+		budget.Bytes -= size
+		if !policy.delete(entry) {
+			continue
+		}
+		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+		if err := r.syncDirectory(dir); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPlan, budget ports.MaintenanceBudget) (done bool, err error) {
 	requested := budget
 	if err := ctx.Err(); err != nil {
@@ -459,34 +528,14 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 		if err != nil {
 			return false, err
 		}
-		for i, entry := range entries {
-			path := r.manifestPath(plan.IncarnationID, 0)
-			path = filepath.Join(filepath.Dir(path), entry.name)
-			info, statErr := r.stat(path)
-			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-				return false, statErr
-			}
-			size := uint64(0)
-			if statErr == nil && info.Size() > 0 {
-				size = uint64(info.Size())
-			}
-			if budget.Entries == 0 || size > budget.Bytes {
-				r.requeueMaintenanceEntries(filepath.Dir(path), purpose, entries[i:])
-				return false, nil
-			}
-			budget.Entries--
-			budget.Bytes -= size
-			generation, canonical := parseGenerationFilename(entry.name)
-			if !entry.isDir && canonical {
-				if _, retained := keep[generation]; !retained {
-					if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-						return false, err
-					}
-					if err := r.syncDirectory(filepath.Dir(path)); err != nil {
-						return false, err
-					}
-				}
-			}
+		dir := filepath.Join(r.sessionPath(plan.IncarnationID), repositoryGenerations)
+		consumedBefore := requested.Entries != budget.Entries || requested.Bytes != budget.Bytes
+		admitted, err := r.processRetentionEntries(ctx, dir, purpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionManifest, generations: keep})
+		if err != nil {
+			return false, err
+		}
+		if !admitted {
+			return false, nil
 		}
 		state.manifestsDone = done
 		if len(entries) == 0 && !done {
@@ -511,33 +560,13 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 			if err != nil {
 				return false, err
 			}
-			for i, entry := range entries {
-				path := filepath.Join(dir, entry.name)
-				info, statErr := r.stat(path)
-				if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-					return false, statErr
-				}
-				size := uint64(0)
-				if statErr == nil && info.Size() > 0 {
-					size = uint64(info.Size())
-				}
-				if budget.Entries == 0 || size > budget.Bytes {
-					r.requeueMaintenanceEntries(dir, objectPurpose, entries[i:])
-					return false, nil
-				}
-				budget.Entries--
-				budget.Bytes -= size
-				digest, canonical := parseObjectDigest(entry.name)
-				if !entry.isDir && canonical {
-					if _, retained := state.references[digest]; !retained {
-						if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-							return false, err
-						}
-						if err := r.syncDirectory(dir); err != nil {
-							return false, err
-						}
-					}
-				}
+			consumedBefore := requested.Entries != budget.Entries || requested.Bytes != budget.Bytes
+			admitted, err := r.processRetentionEntries(ctx, dir, objectPurpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionObject, objects: state.references})
+			if err != nil {
+				return false, err
+			}
+			if !admitted {
+				return false, nil
 			}
 			if done {
 				state.objectShard = ""
@@ -587,15 +616,15 @@ func retentionToken(plan ports.RetentionPlan) string {
 	return b.String()
 }
 
-// validateMaintenanceCheckpoint admits every payload by stat-reported size
-// before reading it. It validates directly instead of calling LoadCheckpoint,
-// which would materialize a complete generation before maintenance could
-// enforce its byte budget.
 type validatedMaintenanceCheckpoint struct {
 	refs   map[ports.SnapshotDigest]codec.ObjectRef
 	parent *domain.CheckpointRef
 }
 
+// validateMaintenanceCheckpoint admits every payload by stat-reported size
+// before reading it. It validates directly instead of calling LoadCheckpoint,
+// which would materialize a complete generation before maintenance could
+// enforce its byte budget.
 func (r *Repository) validateMaintenanceCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef, byteBudget uint64) (validatedMaintenanceCheckpoint, uint64, bool, error) {
 	manifestPath := r.manifestPath(id, ref.Generation)
 	info, err := r.stat(manifestPath)
@@ -692,8 +721,6 @@ func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRe
 		byIncarnation[record.IncarnationID] = record
 	}
 
-	r.maintenanceMu.Lock()
-	defer r.maintenanceMu.Unlock()
 	root := filepath.Join(r.dir, repositorySessionsDir)
 	state := &maintenanceCursor{offset: offset}
 	findingCapacity := maintenanceBatch

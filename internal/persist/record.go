@@ -26,7 +26,11 @@ func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
 	buf = append(buf, catalogueMagic[:]...)
 	buf = binary.BigEndian.AppendUint16(buf, catalogueRecordVersion)
 	buf = append(buf, record.IncarnationID[:]...)
-	buf = appendString(buf, record.Cwd)
+	var err error
+	buf, err = appendCheckedString(buf, record.Cwd)
+	if err != nil {
+		return nil, err
+	}
 	buf = binary.BigEndian.AppendUint64(buf, uint64(record.CreatedAt))
 	buf = binary.BigEndian.AppendUint64(buf, uint64(record.UpdatedAt))
 	buf = binary.BigEndian.AppendUint64(buf, record.LastUsedSeq)
@@ -35,7 +39,6 @@ func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
 	}
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(record.TabNames)))
 	for _, name := range record.TabNames {
-		var err error
 		buf, err = appendCheckedString(buf, name)
 		if err != nil {
 			return nil, err
@@ -45,7 +48,6 @@ func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
 	buf = appendRef(buf, record.Committed)
 	buf = appendRef(buf, record.Fallbacks[0])
 	buf = appendRef(buf, record.Fallbacks[1])
-	var err error
 	buf, err = appendCheckedString(buf, record.DegradedReason)
 	return buf, err
 }
@@ -118,7 +120,7 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 		return domain.CatalogueRecord{}, errMalformedRecord
 	}
 	if err := record.Validate(); err != nil {
-		return domain.CatalogueRecord{}, fmt.Errorf("%w: %v", errMalformedRecord, err)
+		return domain.CatalogueRecord{}, errors.Join(errMalformedRecord, fmt.Errorf("persist: invalid catalogue record: %w", err))
 	}
 	return record, nil
 }

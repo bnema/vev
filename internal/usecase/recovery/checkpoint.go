@@ -37,7 +37,10 @@ func (c *Coordinator) PublishCheckpoint(ctx context.Context, name string, public
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
 
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return domain.CatalogueRecord{}, err
+	}
 	if !ok {
 		return domain.CatalogueRecord{}, ErrCheckpointRecordNotFound
 	}
@@ -74,7 +77,10 @@ func (c *Coordinator) PromoteFallback(ctx context.Context, name string, ref doma
 }
 
 func (c *Coordinator) promoteFallbackLocked(ctx context.Context, name string, ref domain.CheckpointRef) (ports.FallbackPromotionOutcome, error) {
-	record, ok := c.catalogue.Record(name)
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return ports.FallbackPromotionOutcome{}, err
+	}
 	if !ok {
 		return ports.FallbackPromotionOutcome{}, ErrCheckpointRecordNotFound
 	}
@@ -129,24 +135,15 @@ func (c *Coordinator) validateCheckpoint(ctx context.Context, record domain.Cata
 	if err != nil {
 		return err
 	}
-	if generation.IncarnationID != record.IncarnationID || generation.Name != record.Name || generation.Generation != ref.Generation ||
-		sha256.Sum256(generation.Manifest) != ref.ManifestDigest {
-		return ErrCheckpointConflict
-	}
-	return nil
+	return validateLoadedGeneration(record, ref, generation)
 }
 
-func equalCheckpointRefs(a, b *domain.CheckpointRef) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
+func equalCheckpointRefs(a, b *domain.CheckpointRef) bool { return a.Equal(b) }
 
 func copyCheckpointRef(ref *domain.CheckpointRef) *domain.CheckpointRef {
 	if ref == nil {
 		return nil
 	}
-	copy := *ref
-	return &copy
+	cloned := *ref
+	return &cloned
 }

@@ -175,7 +175,7 @@ func restoreAcceptanceSession(t *testing.T, name string) snapcodec.Session {
 
 func acceptanceGeneration(t *testing.T, snapshot snapcodec.Session, generation uint64) ports.SnapshotGeneration {
 	t.Helper()
-	publication, err := legacyPublication(snapshot)
+	publication, err := acceptancePublication(snapshot)
 	require.NoError(t, err)
 	manifest, err := snapcodec.UnmarshalManifest(publication.Manifest)
 	require.NoError(t, err)
@@ -218,13 +218,12 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
 	pty, release := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	store, _ := newMockStore(t)
-	WithStore(store)(d)
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), RecoveryState: domain.RecoveryHealthy, Committed: &checkpoint}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil, nil))(d)
 	t.Cleanup(func() { release(); d.sessWg.Wait() })
 
 	d.restoreIncrementalSnapshots(context.Background())
@@ -277,7 +276,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-	WithSnapshotRepository(repository, nil)(d)
+	WithSnapshotRepository(repository)(d)
 	WithCheckpointCoordinator(coordinator)(d)
 	t.Cleanup(func() { release(); d.sessWg.Wait() })
 
@@ -291,7 +290,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	updates := catalogue.MetadataUpdates()
 	require.Len(t, updates, 1, "the authoritative Catalogue port must receive restored-session metadata updates")
 	require.Equal(t, record.IncarnationID, updates[0].IncarnationID)
-	updated, ok := catalogue.Record(record.Name)
+	updated, ok, _ := catalogue.Record(record.Name)
 	require.True(t, ok)
 	require.Equal(t, record.IncarnationID, updated.IncarnationID)
 	require.Equal(t, record.RecoveryState, updated.RecoveryState)
@@ -310,7 +309,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	require.Empty(t, failure)
 	require.Len(t, repository.publishes, 1)
 	require.Equal(t, record.Committed, repository.publishes[0].ParentCheckpoint)
-	published, ok := catalogue.Record(record.Name)
+	published, ok, _ := catalogue.Record(record.Name)
 	require.True(t, ok)
 	require.Equal(t, uint64(10), published.Committed.Generation)
 	require.Equal(t, committed, *published.Fallbacks[0])
