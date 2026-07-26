@@ -419,6 +419,10 @@ type lifecycleOwnership interface {
 	Release() error
 }
 
+func joinLifecycleReleaseError(retErr *error, owner lifecycleOwnership) {
+	*retErr = errors.Join(*retErr, owner.Release())
+}
+
 type lifecycleStartupDeps struct {
 	ensurePrivate func(string) error
 	acquire       func(context.Context, string, time.Duration) (lifecycleOwnership, error)
@@ -1213,13 +1217,13 @@ func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger
 
 // runList prints the daemon's session listing. With no daemon running, it
 // falls back to the persisted stopped-session records.
-func runList(ctx context.Context) error {
+func runList(ctx context.Context) (retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
 		return fmt.Errorf("vev: waiting for durable session state: %w", err)
 	}
 	if owner != nil {
-		defer func() { _ = owner.Release() }()
+		defer joinLifecycleReleaseError(&retErr, owner)
 		records, loadErr := persist.LoadReadOnly(platform.StateDir())
 		if loadErr != nil {
 			return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
@@ -1340,13 +1344,13 @@ func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 }
 
 // runKill asks the daemon to terminate a named session, every session, or the daemon.
-func runKill(ctx context.Context, name string, all, daemon bool) error {
+func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
 		return fmt.Errorf("vev: waiting for durable session state: %w", err)
 	}
 	if owner != nil {
-		defer func() { _ = owner.Release() }()
+		defer joinLifecycleReleaseError(&retErr, owner)
 		if name != "" && !all && !daemon {
 			if err := runOfflineNamedKill(ctx, name); err != nil {
 				return err

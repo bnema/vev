@@ -33,6 +33,92 @@ type fakeLifecycleOwnership struct {
 
 func (o fakeLifecycleOwnership) Release() error { return o.release() }
 
+type fakeLifecycleProbe struct {
+	owner lifecycleOwnership
+	err   error
+}
+
+func (p fakeLifecycleProbe) TryAcquire(string) (lifecycleOwnership, error) {
+	return p.owner, p.err
+}
+
+func TestJoinLifecycleReleaseError(t *testing.T) {
+	operationErr := errors.New("operation failed")
+	releaseErr := errors.New("release failed")
+
+	tests := []struct {
+		name         string
+		operationErr error
+		releaseErr   error
+		wantErrors   []error
+	}{
+		{
+			name:       "successful operation preserves release failure",
+			releaseErr: releaseErr,
+			wantErrors: []error{releaseErr},
+		},
+		{
+			name:         "operation and release failures are joined",
+			operationErr: operationErr,
+			releaseErr:   releaseErr,
+			wantErrors:   []error{operationErr, releaseErr},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.operationErr
+			joinLifecycleReleaseError(&got, fakeLifecycleOwnership{release: func() error {
+				return tt.releaseErr
+			}})
+
+			for _, wantErr := range tt.wantErrors {
+				require.ErrorIs(t, got, wantErr)
+			}
+		})
+	}
+}
+
+func TestOfflineCommandsPropagateLifecycleReleaseErrors(t *testing.T) {
+	releaseErr := errors.New("release failed")
+
+	tests := []struct {
+		name             string
+		run              func(context.Context) error
+		wantOperationErr string
+	}{
+		{
+			name: "list joins release failure to success",
+			run:  runList,
+		},
+		{
+			name: "kill joins release failure to operation failure",
+			run: func(ctx context.Context) error {
+				return runKill(ctx, "", false, false)
+			},
+			wantOperationErr: "vev: no daemon running",
+		},
+	}
+
+	originalProbe := daemonLifecycleProbe
+	t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			daemonLifecycleProbe = fakeLifecycleProbe{
+				owner: fakeLifecycleOwnership{release: func() error { return releaseErr }},
+			}
+
+			err := tt.run(context.Background())
+			require.ErrorIs(t, err, releaseErr)
+			if tt.wantOperationErr != "" {
+				require.ErrorContains(t, err, tt.wantOperationErr)
+			}
+		})
+	}
+}
+
 func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
 	var events []string
 	_, _, err := constructDaemonBeforeSocketPublication(

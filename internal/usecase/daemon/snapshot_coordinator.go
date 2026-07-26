@@ -1,23 +1,11 @@
 package daemon
 
-import (
-	"context"
-	"time"
-)
-
-// snapshotCoordinatorQuarantine identifies one stop request. A later teardown
-// can supersede it, in which case only that later owner may resume publication.
-type snapshotCoordinatorQuarantine struct {
-	done  <-chan struct{}
-	epoch uint64
-}
-
 // quarantineSnapshotCoordinator prevents a deleted session from starting any
 // further publication. The returned join channel is closed after an already
 // started repository call returns; callers must wait without daemon or session
 // locks before deleting repository state.
 func quarantineSnapshotCoordinator(sess *session) <-chan struct{} {
-	return quarantineSnapshotCoordinatorWithEpoch(sess).done
+	return quarantineSnapshotCoordinatorWithOptions(sess, false)
 }
 
 // quarantineSnapshotCoordinatorRetainingQueuedCapture is used after a forced
@@ -26,22 +14,16 @@ func quarantineSnapshotCoordinator(sess *session) <-chan struct{} {
 // quarantined, and the worker eventually discards it after its blocked call
 // returns.
 func quarantineSnapshotCoordinatorRetainingQueuedCapture(sess *session) <-chan struct{} {
-	return quarantineSnapshotCoordinatorWithOptions(sess, true).done
+	return quarantineSnapshotCoordinatorWithOptions(sess, true)
 }
 
-func quarantineSnapshotCoordinatorWithEpoch(sess *session) snapshotCoordinatorQuarantine {
-	return quarantineSnapshotCoordinatorWithOptions(sess, false)
-}
-
-func quarantineSnapshotCoordinatorWithOptions(sess *session, retainQueuedCapture bool) snapshotCoordinatorQuarantine {
+func quarantineSnapshotCoordinatorWithOptions(sess *session, retainQueuedCapture bool) <-chan struct{} {
 	if sess == nil {
 		done := make(chan struct{})
 		close(done)
-		return snapshotCoordinatorQuarantine{done: done}
+		return done
 	}
 	sess.snapshotMu.Lock()
-	sess.snapshotQuarantineEpoch++
-	epoch := sess.snapshotQuarantineEpoch
 	sess.snapshotQuarantined = true
 	sess.snapEligible.Store(false)
 	if sess.snapshotPublicationCancel != nil {
@@ -65,48 +47,7 @@ func quarantineSnapshotCoordinatorWithOptions(sess *session, retainQueuedCapture
 	}
 	sess.signalSnapshotChangedLocked()
 	sess.snapshotMu.Unlock()
-	return snapshotCoordinatorQuarantine{done: done, epoch: epoch}
-}
-
-// resumeSnapshotCoordinatorForNewIdentity starts a fresh repository lineage
-// only after rename committed its new in-memory name. The epoch prevents a
-// concurrent teardown from being undone by a late rename completion.
-func resumeSnapshotCoordinatorForNewIdentity(sess *session, quarantine snapshotCoordinatorQuarantine) bool {
-	if sess == nil {
-		return false
-	}
-	sess.snapshotMu.Lock()
-	if !sess.snapshotQuarantined || sess.snapshotQuarantineEpoch != quarantine.epoch {
-		sess.snapshotMu.Unlock()
-		return false
-	}
-	if sess.snapshotPublicationCancel != nil {
-		sess.snapshotPublicationCancel()
-	}
-	sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
-	sess.snapshotQuarantined = false
-	// A repository name owns its own generation stream. Reset all scheduler
-	// state while eligibility remains false, then atomically make generation 1
-	// dirty and wake the scheduler.
-	sess.snapshotGeneration = 1
-	sess.snapshotPublishedGeneration = 0
-	sess.snapshotPublishedCheckpoint = nil
-	sess.snapshotPublishedMutationRevision = 0
-	sess.snapshotForcedGeneration = 0
-	sess.snapshotNextEligibleAt = time.Time{}
-	sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
-	sess.snapDirty.Store(true)
-	sess.snapEligible.Store(true)
-	sess.signalSnapshotChangedLocked()
-	wake := sess.snapshotWake
-	sess.snapshotMu.Unlock()
-	if wake != nil {
-		select {
-		case wake <- struct{}{}:
-		default:
-		}
-	}
-	return true
+	return done
 }
 
 func markSnapshotDirty(sess *session) {

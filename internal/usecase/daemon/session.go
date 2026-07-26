@@ -96,7 +96,6 @@ type session struct {
 	snapshotPublicationContext context.Context
 	snapshotPublicationCancel  context.CancelFunc
 	snapshotQuarantined        bool
-	snapshotQuarantineEpoch    uint64
 	// snapshotChunkCache retains encoded sealed history only for this named
 	// session. snapshotMu owns it so cache touches never contend with pane
 	// state or mutate bytes retained by queued/in-flight publications.

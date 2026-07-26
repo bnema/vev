@@ -41,12 +41,12 @@ type dialFunc func(ctx context.Context, dir string) (ports.Transport, error)
 type spawnFunc func() error
 
 type lifecycleProbe interface {
-	TryAcquire(string) (*lifecycle.Owner, error)
+	TryAcquire(string) (lifecycleOwnership, error)
 }
 
 type osLifecycleProbe struct{}
 
-func (osLifecycleProbe) TryAcquire(runtimeDir string) (*lifecycle.Owner, error) {
+func (osLifecycleProbe) TryAcquire(runtimeDir string) (lifecycleOwnership, error) {
 	return lifecycle.TryAcquire(runtimeDir)
 }
 
@@ -67,7 +67,7 @@ var defaultBackoff = backoffConfig{
 	total:   5 * time.Second,
 }
 
-func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg backoffConfig) (*lifecycle.Owner, error) {
+func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg backoffConfig) (lifecycleOwnership, error) {
 	deadline := time.Now().Add(cfg.total)
 	backoff := cfg.initial
 	for {
@@ -93,7 +93,7 @@ func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg ba
 	}
 }
 
-func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, *lifecycle.Owner, error) {
+func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, lifecycleOwnership, error) {
 	deadline := time.Now().Add(cfg.total)
 	backoff := cfg.initial
 	for {
