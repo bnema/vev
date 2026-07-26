@@ -28,6 +28,7 @@ var (
 	ErrRecoveryRecordNotFound = errors.New("recovery: session not found")
 	ErrSessionNotDegraded     = errors.New("recovery: session is not degraded")
 	ErrDiscardConflict        = errors.New("recovery: discard intent conflicts with catalogue")
+	ErrDiscardIntentInvalid   = errors.New("recovery: discard intent is unusable")
 )
 
 // Retry directly validates the committed checkpoint. A failed validation is
@@ -212,7 +213,7 @@ func (c *Coordinator) recoverDiscardLocked(ctx context.Context, intent domain.Di
 	}
 	next := freshReplacement(intent)
 	if err := next.Validate(); err != nil {
-		return fmt.Errorf("recovery: invalid discard replacement: %w", err)
+		return fmt.Errorf("%w: invalid discard replacement: %w", ErrDiscardIntentInvalid, err)
 	}
 	switch current.IncarnationID {
 	case intent.OldIncarnation:
@@ -220,8 +221,14 @@ func (c *Coordinator) recoverDiscardLocked(ctx context.Context, intent domain.Di
 			return fmt.Errorf("%w: old record changed", ErrDiscardConflict)
 		}
 	case intent.NewIncarnation:
-		if !catalogueRecordsEqual(current, next) {
-			return fmt.Errorf("%w: replacement record changed", ErrDiscardConflict)
+		// Step 4 is already durable. The replacement is live from this point on,
+		// so it may legitimately have advanced to a committed checkpoint before a
+		// later step failed. Only its identity may be required here: demanding
+		// byte equality with the pristine replacement would fail closed forever
+		// on a session that is in fact healthy, and destroy committed state if it
+		// were overwritten. Steps 2-3 and 5 below are idempotent.
+		if current.Name != intent.SessionName {
+			return fmt.Errorf("%w: replacement session identity changed", ErrDiscardConflict)
 		}
 	default:
 		return fmt.Errorf("%w: unexpected incarnation", ErrDiscardConflict)
@@ -243,11 +250,11 @@ func (c *Coordinator) recoverDiscardLocked(ctx context.Context, intent domain.Di
 
 func validateDiscardIntent(intent domain.DiscardIntent) error {
 	if err := intent.OldRecord.Validate(); err != nil {
-		return fmt.Errorf("recovery: invalid discard old record: %w", err)
+		return fmt.Errorf("%w: invalid old record: %w", ErrDiscardIntentInvalid, err)
 	}
 	if intent.SessionName != intent.OldRecord.Name || intent.OldIncarnation != intent.OldRecord.IncarnationID ||
 		intent.NewIncarnation == (domain.IncarnationID{}) || intent.NewIncarnation == intent.OldIncarnation || intent.Reason == "" {
-		return errors.New("recovery: invalid discard intent")
+		return fmt.Errorf("%w: inconsistent intent fields", ErrDiscardIntentInvalid)
 	}
 	return nil
 }

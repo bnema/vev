@@ -92,6 +92,7 @@ type transactionRepository struct {
 	tombstones     map[domain.IncarnationID]domain.DeletionTombstone
 	generations    map[domain.CheckpointRef]ports.SnapshotGeneration
 	loadErr        error
+	quarantineErr  error
 	events         []string
 	quarantine     []bool
 	descriptors    []domain.QuarantineDescriptor
@@ -163,7 +164,7 @@ func (r *transactionRepository) QuarantineDeletionSources(_ context.Context, _ d
 	defer r.mu.Unlock()
 	r.events = append(r.events, "quarantine")
 	r.quarantine = append(r.quarantine, includeLegacyName)
-	return nil
+	return r.quarantineErr
 }
 func (r *transactionRepository) DeleteDeletionTombstone(_ context.Context, id domain.IncarnationID) error {
 	r.mu.Lock()
@@ -280,6 +281,8 @@ func TestDegradedExportIsReadOnly(t *testing.T) {
 	require.Empty(t, catalogue.events)
 }
 
+// A third incarnation still fails closed for that session: its intent and
+// record are retained untouched, but startup is no longer aborted.
 func TestDiscardIncarnationConflict(t *testing.T) {
 	old := degradedTransactionRecord()
 	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: old.Name, Reason: "discard"}
@@ -288,11 +291,122 @@ func TestDiscardIncarnationConflict(t *testing.T) {
 	catalogue := newTransactionCatalogue(conflict)
 	journal := newTransactionJournal()
 	journal.intents[old.IncarnationID] = intent
-	coordinator := NewCoordinator(catalogue, newTransactionRepository(), journal, nil)
+	repository := newTransactionRepository()
+	coordinator := NewCoordinator(catalogue, repository, journal, nil)
 
-	require.Error(t, coordinator.Recover(context.Background()))
+	require.NoError(t, coordinator.Recover(context.Background()))
 	require.Equal(t, conflict, catalogue.records[old.Name])
 	require.Contains(t, journal.intents, old.IncarnationID)
+	require.Empty(t, repository.events)
+	conflicts := coordinator.Conflicts()
+	require.Len(t, conflicts, 1)
+	require.Equal(t, old.Name, conflicts[0].Session)
+	require.Equal(t, "discard-intent", conflicts[0].Kind)
+	require.ErrorIs(t, conflicts[0].Err, ErrDiscardConflict)
+}
+
+// A discard whose replacement is already durable, live, and checkpointed must
+// roll forward. Requiring byte equality with the pristine replacement would
+// leave the intent unresolvable and abort every future startup.
+func TestDiscardRecoveryRollsForwardEvolvedReplacement(t *testing.T) {
+	old := degradedTransactionRecord()
+	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: old.Name, Reason: "discard"}
+	evolved := freshReplacement(intent)
+	evolved.RecoveryState = domain.RecoveryHealthy
+	evolved.Committed = &domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
+	evolved.UpdatedAt = 1234
+	evolved.LastUsedSeq = 9
+	evolved.TabNames = []string{"one"}
+	require.NoError(t, evolved.Validate())
+
+	catalogue := newTransactionCatalogue(evolved)
+	journal := newTransactionJournal()
+	journal.intents[old.IncarnationID] = intent
+	repository := newTransactionRepository()
+	coordinator := NewCoordinator(catalogue, repository, journal, nil)
+
+	require.NoError(t, coordinator.Recover(context.Background()))
+	require.Empty(t, coordinator.Conflicts())
+	require.Equal(t, evolved, catalogue.records[old.Name], "committed replacement state must survive roll-forward")
+	require.Empty(t, catalogue.events, "the live replacement record must not be rewritten")
+	require.Equal(t, []domain.QuarantineDescriptor{quarantineDescriptor(intent)}, repository.descriptors)
+	require.Equal(t, []domain.IncarnationID{intent.OldIncarnation}, repository.quarantinedIDs)
+	require.NotContains(t, journal.intents, old.IncarnationID)
+}
+
+// Goal 3: one session's self-inconsistent durable state must not stop a healthy
+// neighbour from being recovered, and must not silently resolve itself either.
+func TestRecoverFencesOneSessionAndContinues(t *testing.T) {
+	ctx := context.Background()
+	broken := degradedTransactionRecord()
+	intent := domain.DiscardIntent{OldRecord: broken, OldIncarnation: broken.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: broken.Name, Reason: "discard"}
+	conflict := broken
+	conflict.IncarnationID = domain.IncarnationID{3}
+	deleting := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{4}, RecoveryState: domain.RecoveryDeleting}
+
+	catalogue := newTransactionCatalogue(conflict, deleting)
+	journal := newTransactionJournal()
+	journal.intents[broken.IncarnationID] = intent
+	repository := newTransactionRepository()
+	coordinator := NewCoordinator(catalogue, repository, journal, nil)
+
+	require.NoError(t, coordinator.Recover(ctx))
+	require.NotContains(t, catalogue.records, deleting.Name, "healthy deletion must complete next to a fenced session")
+	require.Empty(t, repository.tombstones)
+	require.Equal(t, conflict, catalogue.records[broken.Name])
+	require.Contains(t, journal.intents, broken.IncarnationID)
+	require.Len(t, coordinator.Conflicts(), 1)
+}
+
+// A tombstone that disagrees with a live healthy record degrades exactly that
+// record, keeps the tombstone, and leaves every sibling tombstone processed.
+func TestRecoverDegradesSessionOnTombstoneConflict(t *testing.T) {
+	ctx := context.Background()
+	live := domain.CatalogueRecord{
+		Name: "live", IncarnationID: domain.IncarnationID{5}, RecoveryState: domain.RecoveryHealthy,
+		Committed: &domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}},
+	}
+	conflicting := domain.DeletionTombstone{Name: live.Name, IncarnationID: live.IncarnationID}
+	orphan := domain.DeletionTombstone{Name: "gone", IncarnationID: domain.IncarnationID{6}}
+
+	catalogue := newTransactionCatalogue(live)
+	repository := newTransactionRepository()
+	repository.tombstones[conflicting.IncarnationID] = conflicting
+	repository.tombstones[orphan.IncarnationID] = orphan
+	coordinator := NewCoordinator(catalogue, repository, journalStub{}, nil)
+
+	require.NoError(t, coordinator.Recover(ctx))
+	got := catalogue.records[live.Name]
+	require.Equal(t, domain.RecoveryDegraded, got.RecoveryState)
+	require.Equal(t, degradedReasonTombstone, got.DegradedReason)
+	require.Equal(t, live.Committed, got.Committed)
+	require.Contains(t, repository.tombstones, conflicting.IncarnationID, "a fenced tombstone is never removed")
+	require.NotContains(t, repository.tombstones, orphan.IncarnationID)
+	conflicts := coordinator.Conflicts()
+	require.Len(t, conflicts, 1)
+	require.Equal(t, "deletion-tombstone", conflicts[0].Kind)
+	require.ErrorIs(t, conflicts[0].Err, ErrDeletionTombstoneConflict)
+}
+
+// Infrastructure failures still abort startup: they say nothing about any one
+// session, so continuing would mutate durable state on a broken substrate.
+func TestRecoverFailsOnInfrastructureErrors(t *testing.T) {
+	ctx := context.Background()
+	cause := errors.New("io failure")
+	tombstone := domain.DeletionTombstone{Name: "work", IncarnationID: domain.IncarnationID{4}}
+
+	t.Run("journal listing", func(t *testing.T) {
+		coordinator := NewCoordinator(newTransactionCatalogue(), newTransactionRepository(), journalStub{err: cause}, nil)
+		require.ErrorIs(t, coordinator.Recover(ctx), cause)
+	})
+	t.Run("quarantine write", func(t *testing.T) {
+		repository := newTransactionRepository()
+		repository.tombstones[tombstone.IncarnationID] = tombstone
+		repository.quarantineErr = cause
+		coordinator := NewCoordinator(newTransactionCatalogue(), repository, journalStub{}, nil)
+		require.ErrorIs(t, coordinator.Recover(ctx), cause)
+		require.Empty(t, coordinator.Conflicts())
+	})
 }
 
 func TestDeleteRecoveryAfterCatalogueRemoval(t *testing.T) {
