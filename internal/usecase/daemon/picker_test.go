@@ -353,8 +353,11 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 			sets := storeState.sets
 			storeState.mu.Unlock()
 			require.Zero(t, sets, "unsafe target must not mutate the catalogue")
-			require.Equal(t, record, d.stopped[record.Name].record)
-			require.Equal(t, tt.runtimeState, d.stopped[record.Name].state)
+			d.mu.Lock()
+			entry := d.stopped[record.Name]
+			d.mu.Unlock()
+			require.Equal(t, record, entry.record)
+			require.Equal(t, tt.runtimeState, entry.state)
 		})
 	}
 }

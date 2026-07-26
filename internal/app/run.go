@@ -575,7 +575,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
-	snapshotRepository := snapshotadapter.NewRepository(snapshotDir(), log)
+	snapshotRepository := snapshotadapter.NewRepositoryWithLogger(snapshotDir(), log)
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository))
 	noticeStore := noticefile.New(platform.StateDir())
 	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticeStore))
@@ -1370,28 +1370,18 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 }
 
 func unreadableCatalogueError(stateDir string) error {
-	return fmt.Errorf("vev: durable session state at %s cannot be read and was left untouched.\n"+
+	return fmt.Errorf("%w: vev: durable session state at %s cannot be read and was left untouched.\n"+
 		"vev does not erase it automatically. To start fresh, remove it:\n"+
-		"    rm -rf %s", stateDir, stateDir)
+		"    rm -rf %s", persist.ErrCatalogueUnreadable, stateDir, stateDir)
 }
 
 func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 	stateDir := platform.StateDir()
-	records, err := persist.LoadReadOnly(stateDir)
-	if err != nil {
-		return unreadableCatalogueError(stateDir)
-	}
-	found := false
-	for _, record := range records {
-		if record.Name == name {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if _, err := os.Stat(persist.StorePath(stateDir)); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("vev: no such session: %s", name)
+	} else if err != nil {
+		return fmt.Errorf("vev: reading stored sessions: %w", err)
 	}
-
 	repository := snapshotadapter.NewRepository(snapshotDir())
 	opened, err := openCatalogue(stateDir)
 	if err != nil {

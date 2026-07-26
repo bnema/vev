@@ -144,6 +144,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 // because its manifest bytes happen to match the requested publication.
 func (r *Repository) unchangedPublication(ctx context.Context, publication ports.SnapshotPublication) (bool, error) {
 	generation, digest, err := r.readHead(publication.IncarnationID)
+	_ = err // A missing or unreadable HEAD is not treated as a replay.
 	if err != nil || generation != publication.Generation {
 		return false, nil
 	}

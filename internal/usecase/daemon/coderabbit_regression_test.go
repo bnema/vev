@@ -109,6 +109,45 @@ func TestFinishRecordRestoreAlwaysClosesProvidedBarrier(t *testing.T) {
 	}
 }
 
+type blockingRecordCatalogue struct {
+	ports.Catalogue
+	record  domain.CatalogueRecord
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingRecordCatalogue) Record(string) (domain.CatalogueRecord, bool, error) {
+	close(c.entered)
+	<-c.release
+	return c.record, true, nil
+}
+
+func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	catalogue := &blockingRecordCatalogue{record: record, entered: make(chan struct{}), release: make(chan struct{})}
+	d := newTestDaemon(t, nil, stubClock{})
+	d.catalogue = catalogue
+	d.persistEnabled = true
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionStopped, make(chan struct{}))
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := createSessionForTest(d, record.Name, false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+		result <- err
+	}()
+	<-catalogue.entered
+	d.mu.Lock()
+	d.closing = true
+	d.mu.Unlock()
+	close(catalogue.release)
+
+	err := <-result
+	require.ErrorContains(t, err, "daemon is shutting down")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	require.Empty(t, d.sessions)
+}
+
 func TestSnapshotStopContextCancelIsIdempotent(t *testing.T) {
 	deadline := &snapshotShutdownDeadline{done: make(chan struct{})}
 	_, cancel := snapshotStopContext(deadline)

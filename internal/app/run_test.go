@@ -25,6 +25,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/kv"
+	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -334,7 +335,7 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 		runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
 		runtimeDir := filepath.Join(runtimeRoot, "vev")
 		stateDir := filepath.Join(stateRoot, "vev")
-		require.NoError(t, os.Mkdir(stateDir, 0o700))
+		require.NoError(t, safedir.EnsurePrivate(stateDir))
 		store, err := kv.Open(persist.StorePath(stateDir))
 		require.NoError(t, err)
 		require.NoError(t, store.Set([]byte("work"), []byte("malformed catalogue value")))
@@ -727,7 +728,7 @@ func TestRunListUnreadableCatalogueProvidesResetGuidance(t *testing.T) {
 	runtimeDir := filepath.Join(runtimeRoot, "vev")
 	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-	require.NoError(t, os.Mkdir(stateDir, 0o700))
+	require.NoError(t, safedir.EnsurePrivate(stateDir))
 
 	catalogue := persist.StorePath(stateDir)
 	before := []byte("corrupt catalogue")

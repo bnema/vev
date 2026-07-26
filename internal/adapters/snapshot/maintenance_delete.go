@@ -24,7 +24,7 @@ func (r *Repository) DeleteIncarnation(ctx context.Context, id domain.Incarnatio
 	defer r.unlockSession(lock)
 
 	path := r.sessionPath(id)
-	if err := os.RemoveAll(path); err != nil {
+	if err := r.removeIncarnationLocked(id); err != nil {
 		return fmt.Errorf("remove snapshot incarnation %s: %w", id.String(), safeFilesystemError(err))
 	}
 	if err := ctx.Err(); err != nil {
@@ -37,4 +37,18 @@ func (r *Repository) DeleteIncarnation(ctx context.Context, id domain.Incarnatio
 		return err
 	}
 	return r.syncDirectory(parent)
+}
+
+// removeIncarnationLocked removes an incarnation through a root-pinned path.
+// The caller must hold the incarnation's session lock.
+func (r *Repository) removeIncarnationLocked(id domain.IncarnationID) (err error) {
+	root, err := r.openRoot()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
+	return root.RemoveAll(filepath.Join(repositorySessionsDir, id.String()))
 }

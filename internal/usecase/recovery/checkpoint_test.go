@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -140,6 +141,26 @@ func TestCheckpointCommits(t *testing.T) {
 			require.Equal(t, tc.wantCommitted, record.Committed.Generation)
 			require.Empty(t, record.DegradedReason)
 			require.Equal(t, tc.count, catalogue.replaces)
+		})
+	}
+}
+
+func TestCheckpointRejectsNonIncreasingGeneration(t *testing.T) {
+	prior := checkpointRecord()
+	priorRef := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
+	prior.Committed = &priorRef
+
+	for _, generation := range []uint64{7, 6} {
+		t.Run(fmt.Sprintf("generation-%d", generation), func(t *testing.T) {
+			catalogue := &checkpointCatalogue{record: prior}
+			repository := &checkpointRepository{}
+			coordinator := NewCoordinator(catalogue, repository, nil)
+
+			_, err := coordinator.PublishCheckpoint(context.Background(), prior.Name, checkpointPublication(prior, generation))
+
+			require.ErrorIs(t, err, ErrCheckpointConflict)
+			require.Empty(t, repository.publications)
+			require.Zero(t, catalogue.replaces)
 		})
 	}
 }

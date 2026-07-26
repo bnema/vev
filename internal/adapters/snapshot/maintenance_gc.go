@@ -43,12 +43,24 @@ func (r *Repository) CollectGarbage(ctx context.Context, keep map[domain.Incarna
 		}
 		committed, known := keep[id]
 		if !known {
-			path := r.sessionPath(id)
-			if err := os.RemoveAll(path); err != nil {
+			key, keyErr := incarnationKey(id)
+			if keyErr != nil {
+				collected = errors.Join(collected, keyErr)
+				continue
+			}
+			lock := r.lockSession(key)
+			_, known = keep[id]
+			if !known {
+				err = r.removeIncarnationLocked(id)
+			}
+			r.unlockSession(lock)
+			if err != nil {
 				collected = errors.Join(collected, fmt.Errorf("remove orphan snapshot incarnation %s: %w", id.String(), safeFilesystemError(err)))
 				continue
 			}
-			r.log.Info("snapshot_garbage_collected", "incarnation", id.String(), "action", "remove-incarnation")
+			if !known {
+				r.log.Info("snapshot_garbage_collected", "incarnation", id.String(), "action", "remove-incarnation")
+			}
 			continue
 		}
 		if err := r.pruneGenerations(ctx, id, committed); err != nil {

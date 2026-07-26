@@ -86,9 +86,22 @@ func TestOpenFailsClosedWithoutMutation(t *testing.T) {
 	}{
 		{name: "empty", raw: []byte{}},
 		{name: "short magic", raw: []byte("VE")},
-		{name: "unknown magic", raw: []byte("NOPE\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00")},
-		{name: "unknown version", raw: func() []byte { b := validEmptyFile(); binary.BigEndian.PutUint16(b[4:6], 99); return b }()},
-		{name: "truncated entry", raw: append(validEmptyFile()[:10], 0, 0, 0, 1)},
+		{name: "unknown magic", raw: func() []byte {
+			payload := append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+			copy(payload[:4], "NOPE")
+			return appendCRC(payload)
+		}()},
+		{name: "unknown version", raw: func() []byte {
+			payload := append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+			binary.BigEndian.PutUint16(payload[4:6], 99)
+			return appendCRC(payload)
+		}()},
+		{name: "truncated entry", raw: func() []byte {
+			payload := append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+			binary.BigEndian.PutUint32(payload[6:10], 1)
+			payload = append(payload, 0, 0, 0, 1)
+			return appendCRC(payload)
+		}()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -185,9 +198,9 @@ func TestDecodeRejectsDuplicateKeysAndTrailingData(t *testing.T) {
 	_, err := decodeFile(raw)
 	require.ErrorIs(t, err, ErrCorrupt)
 
-	valid := validEmptyFile()
-	valid = append(valid, 0)
-	_, err = decodeFile(valid)
+	payload = append([]byte(nil), validEmptyFile()[:filePrefixLen]...)
+	payload = append(payload, 0)
+	_, err = decodeFile(appendCRC(payload))
 	require.True(t, errors.Is(err, ErrCorrupt))
 }
 

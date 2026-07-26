@@ -266,11 +266,15 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 
 		d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-		require.Equal(t, ports.SessionStopped, d.stopped[healthy.Name].state)
-		require.Equal(t, ports.SessionBroken, d.stopped[broken.Name].state)
-		for _, name := range []string{healthy.Name, broken.Name} {
+		d.mu.Lock()
+		healthyEntry := d.stopped[healthy.Name]
+		brokenEntry := d.stopped[broken.Name]
+		d.mu.Unlock()
+		require.Equal(t, ports.SessionStopped, healthyEntry.state)
+		require.Equal(t, ports.SessionBroken, brokenEntry.state)
+		for name, done := range map[string]<-chan struct{}{healthy.Name: healthyEntry.restoreDone, broken.Name: brokenEntry.restoreDone} {
 			select {
-			case <-d.stopped[name].restoreDone:
+			case <-done:
 			default:
 				t.Fatalf("restore completion for %q was not closed", name)
 			}

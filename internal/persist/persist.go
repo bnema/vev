@@ -143,7 +143,10 @@ func LoadCatalogueReadOnly(dir string) ([]domain.CatalogueRecord, error) {
 
 func (p *Persister) Save(record domain.CatalogueRecord) error { return p.Replace(record.Name, record) }
 func (p *Persister) Create(record domain.CatalogueRecord) error {
-	if p == nil || p.store == nil {
+	if p == nil {
+		return nil
+	}
+	if p.store == nil {
 		return errPersistenceUnavailable
 	}
 	p.mu.Lock()
@@ -159,7 +162,10 @@ func (p *Persister) Create(record domain.CatalogueRecord) error {
 
 func (p *Persister) Records() ([]domain.CatalogueRecord, error) { return p.LoadCatalogue() }
 func (p *Persister) Record(name string) (domain.CatalogueRecord, bool, error) {
-	if p == nil || p.store == nil {
+	if p == nil {
+		return domain.CatalogueRecord{}, false, nil
+	}
+	if p.store == nil {
 		return domain.CatalogueRecord{}, false, errPersistenceUnavailable
 	}
 	p.mu.Lock()

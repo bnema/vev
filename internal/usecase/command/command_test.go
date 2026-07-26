@@ -16,6 +16,11 @@ func TestParsePositiveUint64(t *testing.T) {
 		{name: "overflow", args: []string{"18446744073709551616"}, invalid: true},
 		{name: "zero", args: []string{"0"}, invalid: true},
 		{name: "leading zero", args: []string{"01"}, invalid: true},
+		{name: "empty string", args: []string{""}, invalid: true},
+		{name: "positive sign", args: []string{"+1"}, invalid: true},
+		{name: "negative sign", args: []string{"-1"}, invalid: true},
+		{name: "whitespace", args: []string{"1 2"}, invalid: true},
+		{name: "non-digit", args: []string{"1x"}, invalid: true},
 		{name: "empty arguments", invalid: true},
 		{name: "multiple arguments", args: []string{"1", "2"}, invalid: true},
 	} {

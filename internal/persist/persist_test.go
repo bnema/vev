@@ -11,6 +11,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 func privateDir(t *testing.T) string { t.Helper(); return filepath.Join(t.TempDir(), "vev") }
@@ -35,7 +36,7 @@ func TestOpenOrCreate(t *testing.T) {
 			t.Parallel()
 			dir := privateDir(t)
 			if tt.write != nil {
-				require.NoError(t, os.MkdirAll(dir, 0o700))
+				require.NoError(t, safedir.EnsurePrivate(dir))
 				require.NoError(t, os.WriteFile(StorePath(dir), tt.write, 0o600))
 			}
 			got, err := OpenOrCreate(dir)
@@ -71,7 +72,7 @@ func TestOpenOrCreateRejectsNonCurrentDurableStateWithoutMutation(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := privateDir(t)
-			require.NoError(t, os.MkdirAll(dir, 0o700))
+			require.NoError(t, safedir.EnsurePrivate(dir))
 			for name, data := range tt.files {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o600))
 			}
@@ -299,11 +300,11 @@ func (s *failClosedStore) CloseWithoutSync() error {
 }
 
 func copyStoreData(data map[string][]byte) map[string][]byte {
-	copy := make(map[string][]byte, len(data))
+	cloned := make(map[string][]byte, len(data))
 	for key, value := range data {
-		copy[key] = append([]byte(nil), value...)
+		cloned[key] = append([]byte(nil), value...)
 	}
-	return copy
+	return cloned
 }
 
 func TestRejectedIdentityWriteFencesCatalogue(t *testing.T) {

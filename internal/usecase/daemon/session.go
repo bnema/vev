@@ -201,6 +201,10 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		if err != nil {
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't read session catalogue", err)
 		}
+		if d.closing {
+			return nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		}
+		stopped, resuming = d.stopped[name]
 	}
 	var createdAt int64
 	var incarnation domain.IncarnationID

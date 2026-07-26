@@ -16,8 +16,7 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-// TestSnapshotWorkerPublishesContentAddressedCapture verifies that all new
-// checkpoints use the repository publication contract.
+// TestWithSnapshotRepositoryRejectsTypedNil verifies typed nil repositories are disabled.
 func TestWithSnapshotRepositoryRejectsTypedNil(t *testing.T) {
 	var repository *snapshotAcceptanceRepository
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
@@ -60,6 +59,8 @@ func TestCheckpointCatalogueFailureKeepsCaptureRetryable(t *testing.T) {
 	require.True(t, sess.snapDirty.Load(), "failed catalogue commit must remain retryable")
 }
 
+// TestSnapshotWorkerPublishesContentAddressedCapture verifies that all new
+// checkpoints use the repository publication contract.
 func TestSnapshotWorkerPublishesContentAddressedCapture(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)

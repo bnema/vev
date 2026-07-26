@@ -30,12 +30,16 @@ type Repository struct {
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
 
-// NewRepository creates a repository rooted at dir. It does not create files
-// until the first publication, so merely constructing it is side-effect free.
-func NewRepository(dir string, logs ...*slog.Logger) *Repository {
-	log := slog.Default()
-	if len(logs) > 0 && logs[0] != nil {
-		log = logs[0]
+// NewRepository creates a repository rooted at dir with the default logger. It
+// does not create files until the first publication, so construction is side-effect free.
+func NewRepository(dir string) *Repository {
+	return NewRepositoryWithLogger(dir, slog.Default())
+}
+
+// NewRepositoryWithLogger creates a repository rooted at dir with log.
+func NewRepositoryWithLogger(dir string, log *slog.Logger) *Repository {
+	if log == nil {
+		log = slog.Default()
 	}
 	return &Repository{
 		dir:   dir,

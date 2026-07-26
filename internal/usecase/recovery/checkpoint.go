@@ -37,8 +37,12 @@ func (c *Coordinator) PublishCheckpoint(ctx context.Context, name string, public
 	if !ok {
 		return domain.CatalogueRecord{}, ErrCheckpointRecordNotFound
 	}
+	currentGeneration := uint64(0)
+	if record.Committed != nil {
+		currentGeneration = record.Committed.Generation
+	}
 	if publication.Name != name || publication.Name != record.Name || publication.IncarnationID != record.IncarnationID ||
-		publication.Generation == 0 || len(publication.Manifest) == 0 ||
+		publication.Generation <= currentGeneration || len(publication.Manifest) == 0 ||
 		!equalCheckpointRefs(publication.ParentCheckpoint, record.Committed) {
 		return domain.CatalogueRecord{}, ErrCheckpointConflict
 	}

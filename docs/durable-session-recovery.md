@@ -8,12 +8,9 @@ vev opens named-session state only while holding `$XDG_RUNTIME_DIR/vev/lifecycle
 
 ## Recovery commands
 
-- `vev cmd -s NAME session-recovery retry`
-- `vev cmd -s NAME session-recovery restore GENERATION`
-- `vev cmd -s NAME session-recovery export /ABSOLUTE/PATH`
 - `vev cmd -s NAME session-recovery discard`
 
-Retry validates persisted state without replacing it. Restore validates and promotes the selected catalogue fallback. Export writes recoverable data without mutation and requires an absolute destination path. Discard creates a new incarnation and retains the old record and snapshots under `quarantine/` until an explicit later purge.
+Discard creates a new incarnation and retains the old record and snapshots under `snapshots/quarantine/` until an explicit later purge.
 
 ## Migration and retention
 

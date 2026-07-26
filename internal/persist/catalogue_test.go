@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/kv"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 func TestCatalogue(t *testing.T) {
@@ -87,7 +88,7 @@ func testCatalogueOpenFailsClosed(t *testing.T) {
 	_, _, err := openCurrentCatalogue(dir, false)
 	require.Error(t, err)
 
-	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, safedir.EnsurePrivate(dir))
 	raw := []byte("corrupt catalogue")
 	require.NoError(t, os.WriteFile(StorePath(dir), raw, 0o600))
 	_, _, err = openCurrentCatalogue(dir, false)
