@@ -1,7 +1,9 @@
 package persist
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"testing"
 
@@ -64,16 +66,87 @@ func TestCatalogueBatchFailureDoesNotSync(t *testing.T) {
 	require.ErrorIs(t, err, batchErr)
 }
 
-func TestCatalogueNilStoreIsNoOp(t *testing.T) {
-	persisters := []*Persister{nil, New(nil)}
-	for _, p := range persisters {
-		require.NoError(t, p.Save(validRecord("one", 1)))
-		require.NoError(t, p.Apply(map[string]*domain.CatalogueRecord{"one": nil}))
-		require.NoError(t, p.UpdateMetadata(validRecord("one", 1).MetadataUpdate()))
-		require.NoError(t, p.Delete("one"))
-		records, err := p.LoadAll()
-		require.NoError(t, err)
-		require.Empty(t, records)
-		require.NoError(t, p.Close())
+// TestCatalogueNilPersisterIsNoOp covers the ephemeral/optional-persistence
+// sentinel: a nil *Persister. Every mutating and reading method must be a
+// silent no-op so callers that never enable persistence don't need nil
+// checks of their own.
+func TestCatalogueNilPersisterIsNoOp(t *testing.T) {
+	var p *Persister
+	require.NoError(t, p.Save(validRecord("one", 1)))
+	require.NoError(t, p.Apply(map[string]*domain.CatalogueRecord{"one": nil}))
+	require.NoError(t, p.UpdateMetadata(validRecord("one", 1).MetadataUpdate()))
+	require.NoError(t, p.Delete("one"))
+	records, err := p.LoadAll()
+	require.NoError(t, err)
+	require.Empty(t, records)
+	require.NoError(t, p.Close())
+	require.Empty(t, p.Records())
+}
+
+// TestCatalogueUnavailableStoreErrors covers a non-nil Persister with no
+// backing store (e.g. New(nil)). Unlike the nil-persister sentinel above,
+// this is a Persister that was supposed to have a store: silently no-oping
+// here previously made recovery.Coordinator's checkpoint publish/retry/
+// discard paths believe a durable commit happened when nothing was written.
+// Every mutation and read-with-error must surface errPersistenceUnavailable,
+// matching Create; only Records() (which ports.Catalogue gives no error
+// return for) degrades to an empty slice, with the failure logged instead.
+func TestCatalogueUnavailableStoreErrors(t *testing.T) {
+	p := New(nil)
+	require.ErrorIs(t, p.Save(validRecord("one", 1)), errPersistenceUnavailable)
+	require.ErrorIs(t, p.Apply(map[string]*domain.CatalogueRecord{"one": nil}), errPersistenceUnavailable)
+	require.ErrorIs(t, p.Rename("one", validRecord("two", 1)), errPersistenceUnavailable)
+	require.ErrorIs(t, p.UpdateMetadata(validRecord("one", 1).MetadataUpdate()), errPersistenceUnavailable)
+	require.ErrorIs(t, p.Delete("one"), errPersistenceUnavailable)
+	require.ErrorIs(t, p.Create(validRecord("one", 1)), errPersistenceUnavailable)
+	records, err := p.LoadAll()
+	require.ErrorIs(t, err, errPersistenceUnavailable)
+	require.Empty(t, records)
+	require.Empty(t, p.Records())
+	require.NoError(t, p.Close())
+}
+
+// TestCatalogueRecordsMakesLoadFailureObservable covers Records(), which
+// ports.Catalogue.Records() gives no error return for: a load failure must
+// not silently look like an empty catalogue to every caller. Records()
+// degrades to an empty slice but must emit the underlying error through its
+// (nil-safe, optional) logger rather than swallowing it outright.
+func TestCatalogueRecordsMakesLoadFailureObservable(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T, log *slog.Logger) *Persister
+	}{
+		{
+			name: "unavailable-store",
+			build: func(t *testing.T, log *slog.Logger) *Persister {
+				return New(nil, WithLogger(log))
+			},
+		},
+		{
+			name: "malformed-record",
+			build: func(t *testing.T, log *slog.Logger) *Persister {
+				store := portsmocks.NewMockStore(t)
+				store.EXPECT().Range(mock.Anything).Run(func(fn func([]byte, []byte) bool) {
+					fn([]byte("bad"), []byte{0, 1})
+				})
+				return New(store, WithLogger(log))
+			},
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			p := tt.build(t, slog.New(slog.NewTextHandler(&buf, nil)))
+			require.Empty(t, p.Records())
+			require.Contains(t, buf.String(), "loading catalogue records failed")
+		})
+	}
+}
+
+// TestCatalogueRecordsDefaultsToSlogDefaultLogger covers the nil-safe logger
+// fallback: a Persister built without WithLogger must not panic when a load
+// failure needs to be reported.
+func TestCatalogueRecordsDefaultsToSlogDefaultLogger(t *testing.T) {
+	p := New(nil)
+	require.NotPanics(t, func() { require.Empty(t, p.Records()) })
 }

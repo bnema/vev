@@ -3,6 +3,7 @@ package persist
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,25 @@ func StorePath(dir string) string { return filepath.Join(dir, filename) }
 type Persister struct {
 	store ports.Store
 	mu    sync.Mutex
+	log   *slog.Logger
+}
+
+// Option configures a Persister at construction time.
+type Option func(*Persister)
+
+// WithLogger directs diagnostics for failures that ports.Catalogue has no
+// error return for (see Records) to log instead of the default logger.
+func WithLogger(log *slog.Logger) Option {
+	return func(p *Persister) { p.log = log }
+}
+
+// logger returns a nil-safe logger, defaulting to slog.Default() when no
+// logger was configured.
+func (p *Persister) logger() *slog.Logger {
+	if p != nil && p.log != nil {
+		return p.log
+	}
+	return slog.Default()
 }
 
 // KVStore adapts the reusable WAL implementation to the persistence port.
@@ -56,7 +76,13 @@ func Open(dir string) (*Persister, error) {
 	p, _, err := openCurrentCatalogue(dir, false)
 	return p, err
 }
-func New(store ports.Store) *Persister { return &Persister{store: store} }
+func New(store ports.Store, opts ...Option) *Persister {
+	p := &Persister{store: store}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
 
 func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []domain.CatalogueRecord, error) {
 	path := StorePath(dir)
@@ -87,16 +113,26 @@ func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []dom
 }
 
 func LoadReadOnly(dir string) ([]domain.CatalogueRecord, error) { return LoadCatalogueReadOnly(dir) }
+
+// LoadCatalogueReadOnly loads the catalogue without retaining a store handle.
+// A fresh install with no catalogue candidate at all is not an error: it
+// returns an empty slice. Whenever any candidate (sessions.kv, .next, or
+// .prev) exists, it goes through the same fixed-path compaction recovery the
+// daemon applies on startup (via openCurrentCatalogue / kv.Open), so a
+// .next-only or .prev-only crash state still yields every valid record.
+// Malformed or corrupt data is still a hard error.
 func LoadCatalogueReadOnly(dir string) ([]domain.CatalogueRecord, error) {
-	path := StorePath(dir)
-	if _, err := os.Stat(path); err != nil {
-		return nil, err
-	}
-	data, err := kv.Replay(path)
+	p, records, err := openCurrentCatalogue(dir, false)
 	if err != nil {
+		if errors.Is(err, errPersistenceUnavailable) {
+			return []domain.CatalogueRecord{}, nil
+		}
 		return nil, err
 	}
-	return decodeAll(data)
+	if err := p.Close(); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 func (p *Persister) Save(record domain.CatalogueRecord) error { return p.Replace(record.Name, record) }
@@ -111,8 +147,17 @@ func (p *Persister) Create(record domain.CatalogueRecord) error {
 	}
 	return p.applyLocked(map[string]*domain.CatalogueRecord{record.Name: &record})
 }
+
+// Records satisfies ports.Catalogue, whose signature has no error return. A
+// load failure (unavailable store, or a malformed record surfaced by
+// decodeAll) must not silently look like an empty catalogue, so it is logged
+// here instead of being swallowed.
 func (p *Persister) Records() []domain.CatalogueRecord {
-	records, _ := p.LoadCatalogue()
+	records, err := p.LoadCatalogue()
+	if err != nil {
+		p.logger().Error("persist: loading catalogue records failed", "err", err)
+		return []domain.CatalogueRecord{}
+	}
 	return records
 }
 func (p *Persister) Record(name string) (domain.CatalogueRecord, bool) {
@@ -129,8 +174,11 @@ func (p *Persister) Record(name string) (domain.CatalogueRecord, bool) {
 	return record, err == nil
 }
 func (p *Persister) Apply(records map[string]*domain.CatalogueRecord) error {
-	if p == nil || p.store == nil {
+	if p == nil {
 		return nil
+	}
+	if p.store == nil {
+		return errPersistenceUnavailable
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -193,8 +241,11 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 	return p.store.Sync()
 }
 func (p *Persister) Rename(oldName string, next domain.CatalogueRecord) error {
-	if p == nil || p.store == nil {
+	if p == nil {
 		return nil
+	}
+	if p.store == nil {
+		return errPersistenceUnavailable
 	}
 	if oldName == next.Name {
 		return errors.New("persist: rename requires distinct names")
@@ -209,8 +260,11 @@ func (p *Persister) Replace(name string, next domain.CatalogueRecord) error {
 // authoritative incarnation. Recovery and transaction fields are retained from
 // the stored record rather than accepted from a potentially stale runtime copy.
 func (p *Persister) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
-	if p == nil || p.store == nil {
+	if p == nil {
 		return nil
+	}
+	if p.store == nil {
+		return errPersistenceUnavailable
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -245,8 +299,11 @@ func (p *Persister) Delete(name string) error {
 }
 func (p *Persister) LoadAll() ([]domain.CatalogueRecord, error) { return p.LoadCatalogue() }
 func (p *Persister) LoadCatalogue() ([]domain.CatalogueRecord, error) {
-	if p == nil || p.store == nil {
+	if p == nil {
 		return []domain.CatalogueRecord{}, nil
+	}
+	if p.store == nil {
+		return nil, errPersistenceUnavailable
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

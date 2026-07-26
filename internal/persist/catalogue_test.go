@@ -18,6 +18,8 @@ func TestCatalogue(t *testing.T) {
 	t.Run("apply-rename-replace", testCatalogueApplyRenameReplace)
 	t.Run("metadata-update-preserves-authority", testCatalogueMetadataUpdatePreservesAuthority)
 	t.Run("read-only-malformed", testCatalogueLoadReadOnlyRejectsMalformedValue)
+	t.Run("read-only-fresh-install", testCatalogueLoadReadOnlyFreshInstallHasNoSessions)
+	t.Run("read-only-recovers-crash-states", testCatalogueLoadReadOnlyRecoversCrashStates)
 }
 
 func testCatalogueRecordRoundTrip(t *testing.T) {
@@ -144,4 +146,86 @@ func testCatalogueLoadReadOnlyRejectsMalformedValue(t *testing.T) {
 	require.NoError(t, store.Close())
 	_, err = LoadCatalogueReadOnly(dir)
 	require.Error(t, err)
+}
+
+// testCatalogueLoadReadOnlyFreshInstallHasNoSessions covers `vev ls` on a
+// machine with no daemon and no catalogue: none of sessions.kv, .next, or
+// .prev exist. This must yield an empty catalogue, not an error (regression:
+// a bare os.Stat propagated ErrNotExist and made `vev ls` exit 1).
+func testCatalogueLoadReadOnlyFreshInstallHasNoSessions(t *testing.T) {
+	dir := privateDir(t)
+	records, err := LoadCatalogueReadOnly(dir)
+	require.NoError(t, err)
+	require.Empty(t, records)
+}
+
+// testCatalogueLoadReadOnlyRecoversCrashStates covers spec acceptance
+// criterion 3 ("every valid catalogue record appears in vev list") for a
+// listing taken while no daemon is running: whenever any compaction
+// candidate exists, LoadCatalogueReadOnly must apply the same fixed-path
+// recovery the daemon uses on startup rather than failing the read.
+func testCatalogueLoadReadOnlyRecoversCrashStates(t *testing.T) {
+	// Built through an unrelated scratch path and copied into place, rather
+	// than kv.Open'd directly at the target path: kv.Open recovers its own
+	// base path on every call, and target paths here deliberately coexist
+	// with sibling .next/.prev candidates that would otherwise be recovered
+	// away before the test gets to arrange its crash state.
+	writeCandidate := func(t *testing.T, path string, records ...domain.CatalogueRecord) {
+		t.Helper()
+		scratch := filepath.Join(t.TempDir(), "scratch", "store.kv")
+		store, err := kv.Open(scratch)
+		require.NoError(t, err)
+		for _, record := range records {
+			value, err := encodeRecordValue(record)
+			require.NoError(t, err)
+			require.NoError(t, store.Set([]byte(record.Name), value))
+		}
+		require.NoError(t, store.Close())
+		data, err := os.ReadFile(scratch)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0o600))
+	}
+
+	tests := []struct {
+		name  string
+		write func(t *testing.T, dir string, want domain.CatalogueRecord)
+	}{
+		{
+			// Crash between "rename current->.prev" and "rename .next->current":
+			// no current, both .prev (stale) and .next (authoritative) exist.
+			name: "prev-and-next-recovers-from-next",
+			write: func(t *testing.T, dir string, want domain.CatalogueRecord) {
+				stale := want
+				stale.IncarnationID = domain.IncarnationID{9}
+				writeCandidate(t, StorePath(dir)+".prev", stale)
+				writeCandidate(t, StorePath(dir)+".next", want)
+			},
+		},
+		{
+			// Crash leaves only a predecessor behind; no current, no successor.
+			name: "prev-only-recovers-from-prev",
+			write: func(t *testing.T, dir string, want domain.CatalogueRecord) {
+				writeCandidate(t, StorePath(dir)+".prev", want)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := privateDir(t)
+			require.NoError(t, os.MkdirAll(dir, 0o700))
+			want := validRecord("recovered", 1)
+			tt.write(t, dir, want)
+
+			records, err := LoadCatalogueReadOnly(dir)
+			require.NoError(t, err)
+			require.ElementsMatch(t, []domain.CatalogueRecord{want}, records)
+
+			_, statErr := os.Stat(StorePath(dir))
+			require.NoError(t, statErr, "recovery must leave a valid current catalogue in place")
+			_, nextErr := os.Stat(StorePath(dir) + ".next")
+			require.True(t, os.IsNotExist(nextErr), ".next must not survive recovery")
+			_, prevErr := os.Stat(StorePath(dir) + ".prev")
+			require.True(t, os.IsNotExist(prevErr), ".prev must not survive recovery")
+		})
+	}
 }
