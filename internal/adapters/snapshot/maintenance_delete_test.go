@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -184,12 +185,19 @@ func TestQuarantineDeletionSourcesSerializesConcurrentPublication(t *testing.T) 
 	go func() { quarantineDone <- repo.QuarantineDeletionSources(context.Background(), tombstone, false) }()
 	<-quarantined
 
+	publishAttempted := make(chan struct{})
+	repo.hooks.beforeSessionLock = func(string) { close(publishAttempted) }
 	publishDone := make(chan error, 1)
 	go func() { publishDone <- repo.Publish(context.Background(), publication) }()
 	select {
+	case <-publishAttempted:
+	case <-time.After(time.Second):
+		t.Fatal("Publish did not attempt the incarnation lock")
+	}
+	select {
 	case err := <-publishDone:
 		t.Fatalf("Publish completed while quarantine held the incarnation lock: %v", err)
-	default:
+	case <-time.After(25 * time.Millisecond):
 	}
 	close(release)
 	if err := <-quarantineDone; err != nil {

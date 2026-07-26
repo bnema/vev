@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -16,6 +17,7 @@ import (
 )
 
 type retentionMaintenance struct {
+	invalidated    atomic.Bool
 	token          string
 	cursors        map[string]*maintenanceCursor
 	references     map[ports.SnapshotDigest]struct{}
@@ -404,8 +406,21 @@ func keepSet(plan ports.RetentionPlan) map[uint64]ports.SnapshotDigest {
 // checkpoints. Every incarnation owns its budget and continuation state.
 // processRetentionEntries charges stat-reported size for every entry, requeues
 // the unadmitted suffix, and removes only canonical entries rejected by policy.
-func (r *Repository) processRetentionEntries(ctx context.Context, state *retentionMaintenance, dir, purpose string, entries []maintenanceDirEntry, budget *ports.MaintenanceBudget, consumedBefore bool, policy retentionEntryPolicy) (bool, error) {
+func (r *Repository) processRetentionEntries(ctx context.Context, state *retentionMaintenance, dir, purpose string, entries []maintenanceDirEntry, budget *ports.MaintenanceBudget, consumedBefore bool, policy retentionEntryPolicy) (admitted bool, err error) {
+	removed := false
+	defer func() {
+		if !removed {
+			return
+		}
+		if syncErr := r.syncDirectory(dir); syncErr != nil {
+			admitted = false
+			err = errors.Join(err, syncErr)
+		}
+	}()
 	for i, entry := range entries {
+		if state.invalidated.Load() {
+			return false, nil
+		}
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
@@ -430,11 +445,12 @@ func (r *Repository) processRetentionEntries(ctx context.Context, state *retenti
 		if !policy.delete(entry) {
 			continue
 		}
-		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return false, err
-		}
-		if err := r.syncDirectory(dir); err != nil {
-			return false, err
+		if err := r.remove(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return false, err
+			}
+		} else {
+			removed = true
 		}
 	}
 	return true, nil
@@ -463,23 +479,21 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 		)
 	}()
 	if plan.PinAll {
-		// Lock order is maintenanceMu -> session mutex. Pinning the same
-		// incarnation waits for its active retention pass, while unrelated
-		// incarnations never wait for that pass's payload I/O.
 		r.maintenanceMu.Lock()
-		lock := r.lockSession(key)
+		if state := r.retentionSessions[key]; state != nil {
+			state.invalidated.Store(true)
+		}
 		r.clearRetentionMaintenance(key)
-		r.unlockSession(lock)
 		r.maintenanceMu.Unlock()
 		return true, nil
 	}
 	if budget.Entries == 0 || budget.Bytes == 0 {
-		return false, nil
+		return false, ErrMaintenanceBudgetTooSmall
 	}
 
 	// Establish per-incarnation state under maintenanceMu, then retain only the
 	// session mutex across payload I/O. Never reacquire maintenanceMu while the
-	// session mutex is held; PinAll relies on maintenanceMu -> session ordering.
+	// session mutex is held; PinAll invalidates active state without waiting.
 	r.maintenanceMu.Lock()
 	lock := r.lockSession(key)
 	if r.retentionSessions == nil {
@@ -665,7 +679,10 @@ func (r *Repository) requeueRetentionEntries(state *retentionMaintenance, dir, p
 		cursor = &maintenanceCursor{done: true}
 		state.cursors[id] = cursor
 	}
-	cursor.pending = append(entries, cursor.pending...)
+	pending := make([]maintenanceDirEntry, 0, len(entries)+len(cursor.pending))
+	pending = append(pending, entries...)
+	pending = append(pending, cursor.pending...)
+	cursor.pending = pending
 }
 
 func retentionToken(plan ports.RetentionPlan) string {

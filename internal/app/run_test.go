@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,35 +143,99 @@ func TestStartupReloadsCatalogueAfterRolledForwardDeletion(t *testing.T) {
 }
 
 func TestFencedRecoveryObservability(t *testing.T) {
-	ctx := context.Background()
-	stateDir := filepath.Join(t.TempDir(), "vev")
+	// Keep the runtime path short enough for Darwin's smaller unix socket limit.
+	runtimeRoot, err := os.MkdirTemp("/tmp", "vev-r-")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(runtimeRoot)) })
+	stateRoot := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("VEV_PPROF_ADDR", "")
+
+	stateDir := filepath.Join(stateRoot, "vev")
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
 	catalogue := newTestPersister(t, stateDir)
-	t.Cleanup(func() { _ = catalogue.Close() })
-
 	live := domain.CatalogueRecord{
 		Name: "work", IncarnationID: domain.IncarnationID{7}, Cwd: t.TempDir(),
 		CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryHealthy,
 		Committed: &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}},
 	}
 	require.NoError(t, catalogue.Save(live))
-	require.NoError(t, repository.WriteDeletionTombstone(ctx, domain.DeletionTombstone{Name: live.Name, IncarnationID: live.IncarnationID}))
+	require.NoError(t, catalogue.Close(), "startup must reopen the on-disk catalogue")
+	require.NoError(t, repository.WriteDeletionTombstone(t.Context(), domain.DeletionTombstone{
+		Name: live.Name, IncarnationID: live.IncarnationID,
+	}))
 
-	coordinator := recovery.NewCoordinator(catalogue, repository, recoveryfs.New(stateDir), rand.Reader)
-	require.NoError(t, coordinator.Recover(ctx), "a session-scoped conflict must not abort startup")
-	fenced, err := fencedRecoveries(coordinator.Conflicts(), catalogue)
-	require.NoError(t, err)
-	require.Equal(t, []fencedRecoveryIdentity{{
-		name: live.Name, id: live.IncarnationID, kind: "deletion-tombstone", reasonCode: "deletion-tombstone-conflict",
-	}}, fenced)
+	// Pause immediately before socket publication so the test can reopen and
+	// claim the notice before the daemon's restore worker consumes it.
+	originalListenDaemon := listenDaemon
+	listenEntered := make(chan struct{})
+	allowListen := make(chan struct{})
+	var allowListenOnce sync.Once
+	releaseListen := func() { allowListenOnce.Do(func() { close(allowListen) }) }
+	listenDaemon = func(dir string, observer ports.SerializedRuntimeObserver) (ports.Listener, error) {
+		close(listenEntered)
+		<-allowListen
+		return originalListenDaemon(dir, observer)
+	}
+	t.Cleanup(func() {
+		releaseListen()
+		listenDaemon = originalListenDaemon
+	})
 
 	var logBuffer bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logBuffer, nil))
-	logFencedRecoveries(log, fenced)
-	logTransactionRecovery(log, 1, len(fenced))
-	records, err := catalogue.Records()
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan error, 1)
+	go func() { started <- runDaemonOwnedWithLogger(ctx, log) }()
+
+	var shutdownErr error
+	var shutdownOnce sync.Once
+	shutdown := func() error {
+		shutdownOnce.Do(func() {
+			releaseListen()
+			cancel()
+			select {
+			case shutdownErr = <-started:
+			case <-time.After(5 * time.Second):
+				shutdownErr = errors.New("daemon did not stop after cancellation")
+			}
+		})
+		return shutdownErr
+	}
+	t.Cleanup(func() { require.NoError(t, shutdown()) })
+
+	select {
+	case <-listenEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not reach socket publication")
+	}
+	reopenedNotices := noticefile.New(stateDir)
+	pending, err := reopenedNotices.Claim()
 	require.NoError(t, err)
-	logStartupRecoveryCounts(log, records, 0)
+	require.Len(t, pending, 2, "startup persists both the interrupted and fenced recovery notices")
+	var fencedNotice *domain.Notification
+	for i := range pending {
+		if strings.Contains(pending[i].Details, "reason_code=deletion-tombstone-conflict") {
+			fencedNotice = &pending[i]
+		}
+	}
+	require.NotNil(t, fencedNotice)
+	require.Equal(t, domain.NoticeSnapshotRestore, fencedNotice.Code)
+	require.Equal(t, domain.NoticeWarn, fencedNotice.Severity)
+	require.Equal(t, domain.SessionID(live.IncarnationID.String()), fencedNotice.SessionID)
+	require.Contains(t, fencedNotice.Details, "session="+live.Name)
+	require.NotContains(t, fmt.Sprint(fencedNotice), "conflicts with catalogue")
+	require.NoError(t, reopenedNotices.Ack(), "notice claim lock must be released before daemon startup resumes")
+
+	releaseListen()
+	socketPath := filepath.Join(runtimeRoot, "vev", "daemon.sock")
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(socketPath)
+		return statErr == nil
+	}, 5*time.Second, time.Millisecond, "fenced recovery must not prevent socket publication")
+	require.NoError(t, shutdown(), "fenced recovery must allow clean daemon startup and shutdown")
 
 	entries := decodeJSONLogs(t, logBuffer.Bytes())
 	event := requireEvent(t, entries, "interrupted_transaction_fenced")
@@ -179,27 +244,16 @@ func TestFencedRecoveryObservability(t *testing.T) {
 	require.Equal(t, live.IncarnationID.String(), event["incarnation"])
 	require.Equal(t, "deletion-tombstone", event["kind"])
 	require.Equal(t, "deletion-tombstone-conflict", event["reason_code"])
-	require.NotContains(t, fmt.Sprint(event), "conflicts with catalogue", "raw cause text must not be logged")
 	recovered := requireEvent(t, entries, "interrupted_transaction_recovery_complete")
 	require.EqualValues(t, 1, recovered["sessions_fenced"])
 	require.Equal(t, "fenced", recovered["outcome"])
-	require.Contains(t, eventNames(entries), "daemon_startup_complete")
+	startup := requireEvent(t, entries, "daemon_startup_complete")
+	require.EqualValues(t, 1, startup["degraded"])
+	require.NotContains(t, logBuffer.String(), "conflicts with catalogue", "raw conflict text must not be logged")
 
-	store := noticefile.New(stateDir)
-	require.NoError(t, persistFencedRecoveryNotices(store, fenced, time.Unix(1, 0)))
-	reopened := noticefile.New(stateDir)
-	pending, err := reopened.Claim()
-	require.NoError(t, err)
-	require.Len(t, pending, 1)
-	notice := pending[0]
-	require.Equal(t, domain.NoticeSnapshotRestore, notice.Code)
-	require.Equal(t, domain.NoticeWarn, notice.Severity)
-	require.Equal(t, domain.SessionID(live.IncarnationID.String()), notice.SessionID)
-	require.Contains(t, notice.Details, "session="+live.Name)
-	require.Contains(t, notice.Details, "reason_code=deletion-tombstone-conflict")
-	require.NoError(t, reopened.Ack())
-
-	degraded, ok, err := catalogue.Record(live.Name)
+	reopenedCatalogue := newTestPersister(t, stateDir)
+	t.Cleanup(func() { require.NoError(t, reopenedCatalogue.Close()) })
+	degraded, ok, err := reopenedCatalogue.Record(live.Name)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, domain.RecoveryDegraded, degraded.RecoveryState)

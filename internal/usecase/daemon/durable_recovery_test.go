@@ -31,6 +31,15 @@ type durableRecoveryCatalogue struct {
 	metadataUpdates []domain.CatalogueMetadataUpdate
 }
 
+type recordErrorCatalogue struct {
+	*durableRecoveryCatalogue
+	err error
+}
+
+func (c recordErrorCatalogue) Record(string) (domain.CatalogueRecord, bool, error) {
+	return domain.CatalogueRecord{}, false, c.err
+}
+
 func newDurableRecoveryCatalogue(records []domain.CatalogueRecord) *durableRecoveryCatalogue {
 	catalogue := &durableRecoveryCatalogue{records: make(map[string]domain.CatalogueRecord, len(records))}
 	for _, record := range records {
@@ -224,7 +233,10 @@ func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
 	got, ok, _ := catalogue.Record(prior.Name)
 	require.True(t, ok)
 	require.Equal(t, prior, got, "a timed-out final checkpoint must not change authoritative bytes")
-	require.Equal(t, priorRef, *sess.snapshotPublishedCheckpoint)
+	sess.snapshotMu.Lock()
+	published := sess.snapshotPublishedCheckpoint
+	sess.snapshotMu.Unlock()
+	require.Equal(t, priorRef, *published)
 }
 
 func TestCatalogueRestoreIndependent(t *testing.T) {
@@ -486,6 +498,7 @@ func TestExplicitRecoveryRemainsRetryableAfterRepeatedTransientFailures(t *testi
 	for range 2 {
 		err := exec.restoreExplicitRecovery(t.Context())
 		require.ErrorIs(t, err, errRetryableRestoreLoad)
+		require.ErrorIs(t, err, ports.ErrBudgetExhausted)
 
 		d.mu.Lock()
 		entry := d.stopped[record.Name]
@@ -522,6 +535,69 @@ func TestExplicitRecoveryRemainsRetryableAfterRepeatedTransientFailures(t *testi
 	repository.mu.Lock()
 	require.Equal(t, 3, repository.loads[record.Name])
 	repository.mu.Unlock()
+}
+
+func TestFinishRecordRestoreDoesNotDegradeStaleCatalogueAuthority(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setup func(*Daemon, *durableRecoveryCatalogue, domain.CatalogueRecord)
+	}{
+		{
+			name: "missing record",
+			setup: func(_ *Daemon, c *durableRecoveryCatalogue, record domain.CatalogueRecord) {
+				c.mu.Lock()
+				delete(c.records, record.Name)
+				c.mu.Unlock()
+			},
+		},
+		{
+			name: "replacement incarnation",
+			setup: func(_ *Daemon, c *durableRecoveryCatalogue, record domain.CatalogueRecord) {
+				record.IncarnationID = domain.IncarnationID{99}
+				c.mu.Lock()
+				c.records[record.Name] = record
+				c.mu.Unlock()
+			},
+		},
+		{
+			name: "catalogue read error",
+			setup: func(d *Daemon, c *durableRecoveryCatalogue, _ domain.CatalogueRecord) {
+				d.catalogue = recordErrorCatalogue{durableRecoveryCatalogue: c, err: errors.New("read failed")}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			record := durableRecoveryRecord(0)
+			d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
+			tt.setup(d, catalogue, record)
+			d.mu.Lock()
+			before := d.stopped[record.Name]
+			d.mu.Unlock()
+
+			d.finishRecordRestore(record, errors.New("invalid checkpoint"), before.restoreDone)
+
+			d.mu.Lock()
+			after := d.stopped[record.Name]
+			d.mu.Unlock()
+			require.Equal(t, before.record, after.record)
+			require.Equal(t, before.state, after.state)
+		})
+	}
+}
+
+func TestPersistAndRegisterRestoredSessionRejectsReplacementIncarnation(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
+	replacement := record
+	replacement.IncarnationID = domain.IncarnationID{99}
+	require.NoError(t, catalogue.Replace(record.Name, replacement))
+	sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
+	sess.incarnation = record.IncarnationID
+
+	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)
+	require.ErrorContains(t, err, "incarnation")
+	require.False(t, registered)
+	require.Empty(t, d.sessions)
 }
 
 func TestExplicitRecoveryRejectsConcurrentRestore(t *testing.T) {

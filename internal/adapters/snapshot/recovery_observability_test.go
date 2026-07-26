@@ -19,6 +19,7 @@ func TestGCBudgetDiagnostic(t *testing.T) {
 		arrange         func(*testing.T, *Repository) ports.RetentionPlan
 		budget          ports.MaintenanceBudget
 		wantDone        bool
+		wantErr         error
 		wantExhausted   bool
 		wantConsumption bool
 	}{
@@ -27,7 +28,7 @@ func TestGCBudgetDiagnostic(t *testing.T) {
 			arrange: func(_ *testing.T, _ *Repository) ports.RetentionPlan {
 				return ports.RetentionPlan{IncarnationID: domain.IncarnationID{1}, Keep: []ports.CheckpointRef{{Generation: 3}, {Generation: 2}, {Generation: 1}}}
 			},
-			wantExhausted: true,
+			wantErr: ErrMaintenanceBudgetTooSmall,
 		},
 		{
 			name: "sufficient",
@@ -48,7 +49,11 @@ func TestGCBudgetDiagnostic(t *testing.T) {
 			buffer.Reset()
 
 			done, err := repository.MaintainSession(context.Background(), plan, tc.budget)
-			require.NoError(t, err)
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tc.wantErr)
+			}
 			require.Equal(t, tc.wantDone, done)
 
 			scanner := bufio.NewScanner(bytes.NewReader(buffer.Bytes()))

@@ -281,8 +281,8 @@ func TestDegradedExportIsReadOnly(t *testing.T) {
 	require.Empty(t, catalogue.events)
 }
 
-// A third incarnation still fails closed for that session: its intent and
-// record are retained untouched, but startup is no longer aborted.
+// An absent catalogue record means the discard no longer has durable name
+// authority to replace, so recovery removes the completed intent.
 func TestDiscardRecoveryRemovesIntentWhenCatalogueRecordIsAbsent(t *testing.T) {
 	old := degradedTransactionRecord()
 	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: old.Name, Reason: "discard"}

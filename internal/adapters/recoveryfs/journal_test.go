@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,7 +81,7 @@ func TestRecoveryJournalRoundTripAndIdempotentDelete(t *testing.T) {
 
 func TestRecoveryJournalIgnoresAtomicLeftoversWhenCountingDiscards(t *testing.T) {
 	j := New(t.TempDir())
-	require.NoError(t, os.MkdirAll(j.dir, 0o700))
+	require.NoError(t, safedir.EnsurePrivate(j.dir))
 	for i := range maxDiscardIntents + 1 {
 		require.NoError(t, os.WriteFile(filepath.Join(j.dir, fmt.Sprintf(".intent-leftover-%04d", i)), nil, 0o600))
 	}
@@ -101,7 +102,7 @@ func TestRecoveryJournalRejectsMalformedIntent(t *testing.T) {
 func TestRecoveryJournalBoundsEnumerationAndIntentReads(t *testing.T) {
 	state := t.TempDir()
 	j := New(state)
-	require.NoError(t, os.MkdirAll(j.dir, 0o700))
+	require.NoError(t, safedir.EnsurePrivate(j.dir))
 	for i := range maxDiscardIntents + 1 {
 		require.NoError(t, os.WriteFile(filepath.Join(j.dir, fmt.Sprintf("discard-extra-%04d", i)), nil, 0o600))
 	}
@@ -109,7 +110,7 @@ func TestRecoveryJournalBoundsEnumerationAndIntentReads(t *testing.T) {
 	require.ErrorContains(t, err, "entry limit exceeded")
 
 	require.NoError(t, os.RemoveAll(j.dir))
-	require.NoError(t, os.MkdirAll(j.dir, 0o700))
+	require.NoError(t, safedir.EnsurePrivate(j.dir))
 	require.NoError(t, os.WriteFile(filepath.Join(j.dir, "discard-oversized"), make([]byte, maxDiscardIntentSize+1), 0o600))
 	_, err = j.ListDiscards(context.Background())
 	require.ErrorContains(t, err, "size limit exceeded")

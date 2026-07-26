@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -37,6 +38,31 @@ func TestStartupRecoveryCounts(t *testing.T) {
 	require.EqualValues(t, 2, startup["healthy"])
 	require.EqualValues(t, 1, startup["fresh"])
 	require.EqualValues(t, 0, startup["restoring"])
+	require.EqualValues(t, 1, startup["degraded"])
+}
+
+type failingRecordsCatalogue struct {
+	*durableRecoveryCatalogue
+	err error
+}
+
+func (c failingRecordsCatalogue) Records() ([]domain.CatalogueRecord, error) {
+	return nil, c.err
+}
+
+func TestStartupRecoveryCountsFallsBackWhenCatalogueReadFails(t *testing.T) {
+	var buffer bytes.Buffer
+	record := domain.CatalogueRecord{Name: "broken", IncarnationID: domain.IncarnationID{4}, RecoveryState: domain.RecoveryDegraded, DegradedReason: "invalid"}
+	d := New(nil, stubClock{}, slog.New(slog.NewJSONHandler(&buffer, nil)))
+	d.persistEnabled = true
+	d.catalogue = failingRecordsCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil), err: errors.New("read failed")}
+	d.stopped[record.Name] = stoppedSession{record: record}
+
+	d.logStartupRecoveryCounts(0)
+
+	entries := daemonJSONLogs(t, buffer.Bytes())
+	daemonRequireEvent(t, entries, "daemon_startup_catalogue_read_failed")
+	startup := daemonRequireEvent(t, entries, "daemon_startup_complete")
 	require.EqualValues(t, 1, startup["degraded"])
 }
 

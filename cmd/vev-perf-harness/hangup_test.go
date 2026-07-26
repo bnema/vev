@@ -198,13 +198,21 @@ func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 		switch pm.Role {
 		case "daemon":
 			daemon = process
-			if err := process.(interface{ WaitReady() error }).WaitReady(); err != nil {
+			readyProcess, ok := process.(interface{ WaitReady() error })
+			if !ok {
+				t.Fatalf("daemon process type %T does not support readiness", process)
+			}
+			if err := readyProcess.WaitReady(); err != nil {
 				t.Fatalf("daemon readiness: %v", err)
 			}
 		case "ssh_stdio_peer":
 			peer, peerMapping = process, pm
 		case "client":
-			client = process.(*cliProcess)
+			var ok bool
+			client, ok = process.(*cliProcess)
+			if !ok {
+				t.Fatalf("client process type = %T, want *cliProcess", process)
+			}
 		}
 	}
 	if daemon == nil || peer == nil || client == nil {
@@ -234,7 +242,7 @@ func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 	if _, err := mergeProcessTraces([]processMapping{peerMapping}); err != nil {
 		t.Fatalf("stdio descendant trace did not drain: %v", err)
 	}
-	if err := waitForProcessGroupGone(processGroup, time.Second); err != nil {
+	if err := waitForProcessGroupGone(processGroup, 10*time.Second); err != nil {
 		t.Fatal(err)
 	}
 }

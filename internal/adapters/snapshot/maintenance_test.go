@@ -20,6 +20,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 func TestReadMaintenanceDirentPreservesCursorAndCloseFailuresWithoutPaths(t *testing.T) {
@@ -1048,7 +1049,7 @@ func TestRetentionSlots(t *testing.T) {
 func TestUnresolvedDataPinned(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	publications := publishMaintenanceGenerations(t, repo, "unresolved", 4)
-	done, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: publications[0].IncarnationID, PinAll: true}, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
+	done, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: publications[0].IncarnationID, PinAll: true}, ports.MaintenanceBudget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1057,6 +1058,100 @@ func TestUnresolvedDataPinned(t *testing.T) {
 	}
 	if got := remainingMaintenanceGenerations(t, repo, publications[0].IncarnationID); !slices.Equal(got, []uint64{4, 3, 2, 1}) {
 		t.Fatalf("pinned generations = %v", got)
+	}
+}
+
+func TestPinAllDoesNotWaitForSameSessionRetention(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	publications := publishMaintenanceGenerations(t, repo, "pin-active", 2)
+	publication := publications[0]
+	plan := ports.RetentionPlan{IncarnationID: publication.IncarnationID, Keep: []ports.CheckpointRef{checkpointRefForPublication(publication)}}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	repo.hooks.beforeMaintenancePayloadRead = func(string) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	}
+	activeDone := make(chan error, 1)
+	go func() {
+		_, err := repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
+		activeDone <- err
+	}()
+	<-entered
+
+	pinDone := make(chan error, 1)
+	go func() {
+		_, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: publication.IncarnationID, PinAll: true}, ports.MaintenanceBudget{})
+		pinDone <- err
+	}()
+	select {
+	case err := <-pinDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(remainingTestTime(t) / 2):
+		close(release)
+		t.Fatal("PinAll waited for active retention on the same incarnation")
+	}
+	close(release)
+	if err := <-activeDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := remainingMaintenanceGenerations(t, repo, publication.IncarnationID); !slices.Equal(got, []uint64{2, 1}) {
+		t.Fatalf("PinAll allowed active retention to delete generations: %v", got)
+	}
+}
+
+func TestMaintainSessionRejectsZeroBudget(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	id := domain.IncarnationID{1}
+	done, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: id}, ports.MaintenanceBudget{})
+	if done || !errors.Is(err, ErrMaintenanceBudgetTooSmall) {
+		t.Fatalf("zero budget: done=%v err=%v", done, err)
+	}
+}
+
+func TestProcessRetentionEntriesSyncsRemovalBatchOnce(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	dir := filepath.Join(repo.dir, "batch")
+	if err := safedir.EnsurePrivate(dir); err != nil {
+		t.Fatal(err)
+	}
+	entries := []maintenanceDirEntry{{name: generationFilename(1), cookie: 1}, {name: generationFilename(2), cookie: 2}}
+	for _, entry := range entries {
+		if err := os.WriteFile(filepath.Join(dir, entry.name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncs := 0
+	repo.hooks.syncDirectory = func(got string) error {
+		if got == dir {
+			syncs++
+		}
+		return nil
+	}
+	state := &retentionMaintenance{cursors: make(map[string]*maintenanceCursor)}
+	budget := ports.MaintenanceBudget{Entries: 2, Bytes: 2}
+	admitted, err := repo.processRetentionEntries(context.Background(), state, dir, "batch", entries, &budget, false, retentionEntryPolicy{kind: retentionManifest})
+	if err != nil || !admitted {
+		t.Fatalf("batch processing: admitted=%v err=%v", admitted, err)
+	}
+	if syncs != 1 {
+		t.Fatalf("directory syncs = %d, want 1", syncs)
+	}
+}
+
+func TestRequeueRetentionEntriesDoesNotAliasInput(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	state := &retentionMaintenance{cursors: make(map[string]*maintenanceCursor)}
+	entries := []maintenanceDirEntry{{name: "one", cookie: 1}}
+	repo.requeueRetentionEntries(state, "/dir", "purpose", entries)
+	entries[0].name = "mutated"
+	pending := state.cursors[maintenanceCursorID("/dir", "purpose")].pending
+	if pending[0].name != "one" {
+		t.Fatalf("queued entry aliased caller input: %q", pending[0].name)
 	}
 }
 
@@ -1132,12 +1227,9 @@ func TestReconcileDoesNotHoldMaintenanceLockDuringPayloadRead(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(release) })
+	var enteredOnce sync.Once
 	repo.hooks.beforeMaintenancePayloadRead = func(string) {
-		select {
-		case <-entered:
-		default:
-			close(entered)
-		}
+		enteredOnce.Do(func() { close(entered) })
 		<-release
 	}
 	reconcileDone := make(chan error, 1)

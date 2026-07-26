@@ -311,12 +311,15 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	// Restoration is catalogue-authorized. Missing or unreadable authority is a
 	// hard failure; migration creates catalogue records before daemon startup.
 	if d.persistEnabled {
-		_, ok, err := d.catalogueRecord(sess.name)
+		record, ok, err := d.catalogueRecord(sess.name)
 		if err != nil {
 			return false, err
 		}
 		if !ok {
 			return false, errors.New("snapshot: restored session is absent from catalogue")
+		}
+		if record.IncarnationID != sess.incarnation {
+			return false, errors.New("snapshot: restored session incarnation differs from catalogue")
 		}
 	}
 	d.mu.Lock()

@@ -267,7 +267,10 @@ func TestCLILauncherIsolatesRoleXDGEnvironmentAcrossRepetitions(t *testing.T) {
 			}
 			// The fixture exits on its own. Synchronize with that exit instead of
 			// letting Close race its SIGTERM against the environment capture.
-			proc := p.(*cliProcess)
+			proc, ok := p.(*cliProcess)
+			if !ok {
+				t.Fatalf("run %d %s process type = %T, want *cliProcess", run, role, p)
+			}
 			exitErr := <-proc.waitErr
 			proc.waitErr <- exitErr
 			runtimeDir := launcher.runtimes[runDir]

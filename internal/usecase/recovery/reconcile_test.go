@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -192,7 +193,7 @@ func TestForwardOrphanAdoption(t *testing.T) {
 	})
 
 	for _, state := range []domain.RecoveryState{domain.RecoveryDegraded, domain.RecoveryDeleting} {
-		t.Run("non-healthy record is not reconciled", func(t *testing.T) {
+		t.Run(fmt.Sprintf("non-healthy record %d is not reconciled", state), func(t *testing.T) {
 			record := healthyReconcileRecord()
 			record.RecoveryState = state
 			if state == domain.RecoveryDegraded {

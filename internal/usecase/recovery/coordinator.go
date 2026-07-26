@@ -212,6 +212,9 @@ func (c *Coordinator) Delete(ctx context.Context, name string) error {
 	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
 		return errors.New("recovery: incomplete delete dependencies")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
 	record, ok, err := c.catalogue.Record(name)

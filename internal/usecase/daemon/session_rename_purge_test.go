@@ -27,7 +27,10 @@ func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
 			WithStore(t, store)(d)
 			sess := newSnapshotTestSession(t, "old", false, "/work")
 			d.sessions = map[domain.SessionID]*session{sess.id: sess}
-			require.NoError(t, testPersister(t, d).Save(sess.persistRecordLocked(1)))
+			sess.mu.Lock()
+			record := sess.persistRecordLocked(1)
+			sess.mu.Unlock()
+			require.NoError(t, testPersister(t, d).Save(record))
 
 			require.NoError(t, d.renameSession(sess, "new"))
 			require.Empty(t, repository.calls, "rename must not invoke source deletion, including a failing legacy source")

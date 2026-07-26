@@ -316,9 +316,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	if !ephemeral && name != "" {
 		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
 	}
-	if lastUsedSeq > 0 {
-		sess.mruAt.Store(lastUsedSeq)
-	}
+	sess.mruAt.Store(lastUsedSeq)
 	sess.snapEligible.Store(!ephemeral && name != "")
 	if !ephemeral {
 		if d.persistEnabled {

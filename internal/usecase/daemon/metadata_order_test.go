@@ -42,7 +42,9 @@ func (c *blockingMetadataCatalogue) UpdateMetadata(update domain.CatalogueMetada
 }
 
 func newBlockingCatalogue(sess *session, firstErr error) (*durableRecoveryCatalogue, *blockingMetadataCatalogue) {
+	sess.mu.Lock()
 	record := sess.persistRecordLocked(sess.createdAt)
+	sess.mu.Unlock()
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 	return catalogue, &blockingMetadataCatalogue{
 		Catalogue:    catalogue,
@@ -166,7 +168,10 @@ func TestConsecutiveMetadataFailuresRestoreDurableState(t *testing.T) {
 func TestNewerMetadataFailureDoesNotSkipOlderSnapshot(t *testing.T) {
 	failure := errors.New("newer metadata write failed")
 	sess := newSnapshotTestSession(t, "work", false, "/work")
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{sess.persistRecordLocked(sess.createdAt)})
+	sess.mu.Lock()
+	record := sess.persistRecordLocked(sess.createdAt)
+	sess.mu.Unlock()
+	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 	blocking := &blockingMetadataCatalogue{
 		Catalogue:    catalogue,
 		firstStarted: make(chan struct{}),

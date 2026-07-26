@@ -22,6 +22,16 @@ func (j journalStub) ListDiscards(context.Context) ([]domain.DiscardIntent, erro
 }
 func (j journalStub) DeleteDiscard(context.Context, domain.IncarnationID) error { return nil }
 
+func TestDeleteChecksCancellationBeforeCatalogueAccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	catalogue := portsmocks.NewMockCatalogue(t)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	coordinator := NewCoordinator(catalogue, repository, journalStub{}, nil)
+
+	require.ErrorIs(t, coordinator.Delete(ctx, "work"), context.Canceled)
+}
+
 func TestCoordinatorRecoverRollsPendingDiscardForward(t *testing.T) {
 	ctx := context.Background()
 	old := domain.CatalogueRecord{

@@ -144,26 +144,23 @@ func (d *Daemon) finishExplicitRecordRestore(record domain.CatalogueRecord, rest
 
 func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, restoreErr error, done chan struct{}, resetRetryable bool) {
 	retryable := errors.Is(restoreErr, errRetryableRestoreLoad)
-	if restoreErr != nil && !retryable {
-		catalogueReadable := true
-		if d.catalogue != nil {
-			current, ok, readErr := d.catalogue.Record(record.Name)
-			if readErr != nil {
-				catalogueReadable = false
-				d.log.Error("reading catalogue before degradation failed", "session", record.Name, "err", readErr)
-			} else if ok && current.IncarnationID == record.IncarnationID {
-				record = current
+	degraded := false
+	if restoreErr != nil && !retryable && d.catalogue != nil {
+		current, ok, readErr := d.catalogue.Record(record.Name)
+		switch {
+		case readErr != nil:
+			d.log.Error("reading catalogue before degradation failed", "session", record.Name, "err", readErr)
+		case ok && current.IncarnationID == record.IncarnationID:
+			record = current
+			record.RecoveryState = domain.RecoveryDegraded
+			record.DegradedReason = "checkpoint validation failed"
+			if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
+				record.DegradedReason = "restore interrupted"
 			}
-		}
-		record.RecoveryState = domain.RecoveryDegraded
-		record.DegradedReason = "checkpoint validation failed"
-		if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
-			record.DegradedReason = "restore interrupted"
-		}
-		if d.catalogue != nil && catalogueReadable {
 			if err := d.catalogue.Replace(record.Name, record); err != nil {
 				d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
 			}
+			degraded = true
 		}
 	}
 
@@ -171,7 +168,7 @@ func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, resto
 	entry, ok := d.stopped[record.Name]
 	if ok {
 		switch {
-		case restoreErr != nil && !retryable:
+		case degraded:
 			entry.record = record
 			entry.state = runtimeDegraded
 			entry.cwd = record.Cwd
@@ -187,7 +184,7 @@ func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, resto
 	}
 	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
-	if restoreErr != nil && !retryable {
+	if degraded {
 		reasonCode := "checkpoint-invalid"
 		if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
 			reasonCode = "restore-interrupted"
@@ -263,7 +260,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	}
 	if selectedIndex < 0 {
 		if retryableLoadErr != nil {
-			return fmt.Errorf("%w: %v", errRetryableRestoreLoad, retryableLoadErr)
+			return fmt.Errorf("%w: %w", errRetryableRestoreLoad, retryableLoadErr)
 		}
 		return errors.New("snapshot: no catalogue checkpoint validated")
 	}
