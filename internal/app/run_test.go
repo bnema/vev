@@ -721,6 +721,30 @@ func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 	}
 }
 
+func TestRunListUnreadableCatalogueProvidesResetGuidance(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	stateDir := filepath.Join(stateRoot, "vev")
+	runtimeDir := filepath.Join(runtimeRoot, "vev")
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	require.NoError(t, os.Mkdir(stateDir, 0o700))
+
+	catalogue := persist.StorePath(stateDir)
+	before := []byte("corrupt catalogue")
+	require.NoError(t, os.WriteFile(catalogue, before, 0o600))
+
+	var runErr error
+	stdout := captureStdout(t, func() { runErr = Run([]string{"ls"}) })
+	require.Empty(t, stdout)
+	require.Error(t, runErr)
+	require.ErrorContains(t, runErr, stateDir)
+	require.ErrorContains(t, runErr, "rm -rf "+stateDir)
+	require.NoFileExists(t, filepath.Join(runtimeDir, "daemon.sock"))
+	after, err := os.ReadFile(catalogue)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
 func TestRunKillMissingStoppedSessionDoesNotCreateStore(t *testing.T) {
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateRoot)

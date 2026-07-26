@@ -1297,6 +1297,9 @@ func runList(ctx context.Context) (retErr error) {
 		defer joinLifecycleReleaseError(&retErr, owner)
 		records, loadErr := persist.LoadReadOnly(platform.StateDir())
 		if loadErr != nil {
+			if errors.Is(loadErr, persist.ErrCatalogueUnreadable) {
+				return unreadableCatalogueError(platform.StateDir())
+			}
 			return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
 		}
 		infos := make([]ports.SessionInfo, 0, len(records))

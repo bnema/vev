@@ -133,7 +133,7 @@ func LoadCatalogueReadOnly(dir string) ([]domain.CatalogueRecord, error) {
 		if errors.Is(err, errPersistenceUnavailable) {
 			return []domain.CatalogueRecord{}, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, StorePath(dir), err)
 	}
 	if err := p.Close(); err != nil {
 		return nil, err
