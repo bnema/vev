@@ -72,9 +72,15 @@ func classifyFinding(record domain.CatalogueRecord, finding ports.ReconcileFindi
 		decision.ReasonCode = "incarnation-mismatch"
 		return decision
 	}
-	if finding.Kind != ports.ReconcileForwardOrphan || record.Committed == nil || finding.Candidate.Ref.Generation <= record.Committed.Generation {
+	if finding.Status == ports.ReconcileValidated && record.Committed != nil && (finding.Kind != ports.ReconcileForwardOrphan || finding.Candidate.Ref.Generation <= record.Committed.Generation) {
 		decision.Kind = ports.ReconcileKeepQuarantined
 		decision.ReasonCode = "not-forward"
+		decision.RetentionResolved = true
+		return decision
+	}
+	if finding.Kind != ports.ReconcileForwardOrphan || record.Committed == nil {
+		decision.Kind = ports.ReconcileKeepQuarantined
+		decision.ReasonCode = "invalid-candidate"
 		return decision
 	}
 	if finding.Status != ports.ReconcileValidated || !validForwardChain(*record.Committed, finding.Candidate, finding.AncestorChain) {
@@ -83,6 +89,7 @@ func classifyFinding(record domain.CatalogueRecord, finding ports.ReconcileFindi
 		return decision
 	}
 	decision.Kind = ports.ReconcileAdopt
+	decision.RetentionResolved = true
 	return decision
 }
 

@@ -99,6 +99,9 @@ type ReconcileDecision struct {
 	Name       string
 	Candidate  *domain.CheckpointRef
 	ReasonCode string
+	// RetentionResolved permits collection after a conclusive adoption or
+	// not-forward decision. Its zero value conservatively pins known sessions.
+	RetentionResolved bool
 }
 
 var (

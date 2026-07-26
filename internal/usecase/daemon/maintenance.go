@@ -116,7 +116,7 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) {
 	deps.cursor = next
 	for _, decision := range decisions {
 		record, ok := deps.catalogue.Record(decision.Name)
-		if ok && decision.Kind != ports.ReconcileAdopt {
+		if ok && !decision.RetentionResolved {
 			deps.repairUncertain[record.IncarnationID] = struct{}{}
 		}
 		d.log.Info("durable_reconciliation_decision",

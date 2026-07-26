@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 type cursorMaintenanceReconciler struct {
@@ -36,8 +39,117 @@ func TestProductionMaintenanceUsesCatalogueAndResumesCursor(t *testing.T) {
 
 	d.runDurableMaintenanceTick(context.Background())
 	d.runDurableMaintenanceTick(context.Background())
-	if len(reconciler.seen) != 2 || reconciler.seen[0].DirectoryCookie != 0 || reconciler.seen[1].DirectoryCookie != 7 {
-		t.Fatalf("reconciliation cursors = %v, want [0 7]", reconciler.seen)
+	d.runDurableMaintenanceTick(context.Background())
+	if len(reconciler.seen) != 3 || reconciler.seen[0].DirectoryCookie != 0 || reconciler.seen[1].DirectoryCookie != 7 || reconciler.seen[2].DirectoryCookie != 0 {
+		t.Fatalf("reconciliation cursors = %v, want [0 7 0]", reconciler.seen)
+	}
+}
+
+type reconciliationMaintenanceRepository struct {
+	ports.SnapshotRepository
+	findings []ports.ReconcileFinding
+	err      error
+	plans    []ports.RetentionPlan
+}
+
+func (r *reconciliationMaintenanceRepository) Reconcile(context.Context, []domain.CatalogueRecord, ports.ReconcileCursor, ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
+	return ports.ReconcileCursor{}, r.findings, r.err
+}
+
+func (r *reconciliationMaintenanceRepository) MaintainSession(_ context.Context, plan ports.RetentionPlan, _ ports.MaintenanceBudget) (bool, error) {
+	r.plans = append(r.plans, plan)
+	return true, nil
+}
+
+func TestMaintenanceRetentionUsesReconciliationOutcome(t *testing.T) {
+	committed := domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}}
+	fallback1 := domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
+	fallback2 := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+	record := domain.CatalogueRecord{
+		Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryHealthy,
+		Committed: &committed, Fallbacks: [2]*domain.CheckpointRef{&fallback1, &fallback2},
+	}
+	wrongParent := domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{9}}
+
+	for _, tc := range []struct {
+		name         string
+		finding      ports.ReconcileFinding
+		reconcileErr error
+		wantPlan     *ports.RetentionPlan
+	}{
+		{
+			name: "current HEAD is conclusively not forward",
+			finding: ports.ReconcileFinding{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileValidated, Candidate: ports.ReconcileCandidate{
+				Name: record.Name, IncarnationID: record.IncarnationID, Ref: committed, Parent: &fallback1,
+			}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed, fallback1, fallback2}},
+		},
+		{
+			name: "known predecessor is conclusively not forward",
+			finding: ports.ReconcileFinding{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileValidated, Candidate: ports.ReconcileCandidate{
+				Name: record.Name, IncarnationID: record.IncarnationID, Ref: fallback1, Parent: &fallback2,
+			}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed, fallback1, fallback2}},
+		},
+		{
+			name: "non-forward candidate kind does not pin",
+			finding: ports.ReconcileFinding{Kind: ports.ReconcileInvalidCandidate, Status: ports.ReconcileValidated, Candidate: ports.ReconcileCandidate{
+				Name: record.Name, IncarnationID: record.IncarnationID, Ref: domain.CheckpointRef{Generation: 4, ManifestDigest: [32]byte{4}},
+			}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed, fallback1, fallback2}},
+		},
+		{
+			name: "unreadable candidate remains pinned",
+			finding: ports.ReconcileFinding{Kind: ports.ReconcileInvalidCandidate, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{
+				Name: record.Name, IncarnationID: record.IncarnationID,
+			}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, PinAll: true},
+		},
+		{
+			name: "quarantined forward candidate remains pinned",
+			finding: ports.ReconcileFinding{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{
+				Name: record.Name, IncarnationID: record.IncarnationID, Ref: domain.CheckpointRef{Generation: 4, ManifestDigest: [32]byte{4}}, Parent: &wrongParent,
+			}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, PinAll: true},
+		},
+		{
+			name: "incarnation mismatch remains pinned",
+			finding: ports.ReconcileFinding{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileValidated, Candidate: ports.ReconcileCandidate{
+				Name: record.Name, IncarnationID: domain.IncarnationID{9}, Ref: domain.CheckpointRef{Generation: 4, ManifestDigest: [32]byte{4}}, Parent: &committed,
+			}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, PinAll: true},
+		},
+		{
+			name: "incomplete decision remains pinned",
+			finding: ports.ReconcileFinding{Status: ports.ReconcileBudgetExhausted, Candidate: ports.ReconcileCandidate{
+				Name: record.Name, IncarnationID: record.IncarnationID, Ref: domain.CheckpointRef{Generation: 4, ManifestDigest: [32]byte{4}},
+			}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, PinAll: true},
+		},
+		{
+			name:         "reconciliation error withholds maintenance",
+			reconcileErr: errors.New("scan failed"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+			repository := &reconciliationMaintenanceRepository{err: tc.reconcileErr}
+			if tc.finding.Candidate.Name != "" {
+				repository.findings = []ports.ReconcileFinding{tc.finding}
+			}
+			coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+			reconciler := recoveryusecase.NewReconciler(coordinator, catalogue, repository, ports.MaintenanceBudget{Entries: 8, Bytes: 1024})
+			d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+			WithDurableMaintenance(catalogue, repository, reconciler, nil)(d)
+
+			d.runDurableMaintenanceTick(context.Background())
+
+			if tc.wantPlan == nil {
+				require.Empty(t, repository.plans)
+				return
+			}
+			require.Equal(t, []ports.RetentionPlan{*tc.wantPlan}, repository.plans)
+		})
 	}
 }
 
