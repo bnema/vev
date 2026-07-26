@@ -101,36 +101,20 @@ func TestLegacyPublicationMarshalObjectErrorsIdentifyPaneAndStage(t *testing.T) 
 	}
 }
 
-func TestImportLegacyPublishesCompleteGenerationBeforeDeletingSource(t *testing.T) {
+func TestImportLegacySnapshotsIsRetiredRuntimeNoop(t *testing.T) {
 	snapshot := legacyAcceptanceSnapshot(t)
 	repository := &snapshotAcceptanceRepository{generations: make(map[string]ports.SnapshotGeneration)}
 	legacy := &snapshotAcceptanceLegacySource{blobs: []ports.LegacySnapshot{legacyAcceptanceBlob(t, snapshot)}}
 	d := newTestDaemon(t, nil, stubClock{})
 	WithSnapshotRepository(repository, legacy)(d)
-	expected, verifyErr := legacyPublication(snapshot)
-	require.NoError(t, verifyErr)
-	_, verifyErr = snapcodec.Unmarshal(legacy.blobs[0].Data)
-	require.NoError(t, verifyErr)
-	require.NoError(t, verifyLegacyImportGeneration(acceptanceGeneration(t, snapshot, 1), expected))
 
 	d.importLegacySnapshots(context.Background())
 
-	require.Len(t, repository.publishes, 1)
-	publication := repository.publishes[0]
-	require.Equal(t, snapshot.Name, publication.Name)
-	require.EqualValues(t, 1, publication.Generation)
-	manifest, err := snapcodec.UnmarshalManifest(publication.Manifest)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), manifest.Generation)
-	require.Empty(t, manifest.Tabs)
-	for _, object := range publication.Objects {
-		kind, _, err := snapcodec.UnmarshalObject(object.Data)
-		require.NoError(t, err)
-		require.Contains(t, []snapcodec.ObjectKind{snapcodec.HistoryChunk, snapcodec.HistoryTail, snapcodec.Visible}, kind)
-		require.Equal(t, object.Digest, snapcodec.ManifestDigest(object.Data))
-	}
-	require.Equal(t, []string{snapshot.Name}, legacy.deleteCalls)
-	require.Empty(t, legacy.blobs)
+	// Migration is adapter-owned. The daemon must never name-scan, publish, or
+	// delete a legacy source during normal recovery.
+	require.Empty(t, repository.publishes)
+	require.Empty(t, legacy.deleteCalls)
+	require.Len(t, legacy.blobs, 1)
 }
 
 func TestImportLegacyExistingIncrementalSkipsLegacy(t *testing.T) {
@@ -176,40 +160,4 @@ func TestImportLegacyRetainsSourceUntilExactReloadVerification(t *testing.T) {
 			require.Len(t, legacy.blobs, 1)
 		})
 	}
-}
-
-func TestImportLegacyDeleteFailureRetriesWithoutRepublishing(t *testing.T) {
-	snapshot := legacyAcceptanceSnapshot(t)
-	repository := &snapshotAcceptanceRepository{generations: make(map[string]ports.SnapshotGeneration)}
-	legacy := &snapshotAcceptanceLegacySource{blobs: []ports.LegacySnapshot{legacyAcceptanceBlob(t, snapshot)}, deleteErr: errors.New("sync failed")}
-	d := newTestDaemon(t, nil, stubClock{})
-	WithSnapshotRepository(repository, legacy)(d)
-
-	d.importLegacySnapshots(context.Background())
-	legacy.deleteErr = nil
-	d.importLegacySnapshots(context.Background())
-
-	require.Len(t, repository.publishes, 1, "a retry must only retry source deletion")
-	require.Equal(t, []string{snapshot.Name, snapshot.Name}, legacy.deleteCalls)
-	require.Empty(t, legacy.blobs)
-}
-
-func TestImportLegacyCancellationAndPerSessionContinuation(t *testing.T) {
-	bad := legacyAcceptanceSnapshot(t)
-	good := legacyAcceptanceSnapshot(t)
-	badBlob := legacyAcceptanceBlob(t, bad)
-	badBlob.Data = []byte("not-a-v3-snapshot")
-	repository := &snapshotAcceptanceRepository{generations: make(map[string]ports.SnapshotGeneration)}
-	legacy := &snapshotAcceptanceLegacySource{blobs: []ports.LegacySnapshot{badBlob, legacyAcceptanceBlob(t, good)}}
-	d := newTestDaemon(t, nil, stubClock{})
-	WithSnapshotRepository(repository, legacy)(d)
-
-	d.importLegacySnapshots(context.Background())
-	require.Len(t, repository.publishes, 1, "a corrupt session must not block later sessions")
-	require.Equal(t, []string{good.Name}, legacy.deleteCalls)
-
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	d.importLegacySnapshots(cancelled)
-	require.Equal(t, 1, legacy.loadCalls, "a canceled import must not touch the legacy source")
 }

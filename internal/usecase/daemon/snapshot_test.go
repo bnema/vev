@@ -53,6 +53,44 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	return sess
 }
 
+// noOpSnapshotRepository supplies the current durable repository contract to
+// focused test sinks that only need to observe publication or deletion calls.
+type noOpSnapshotRepository struct{}
+
+func (noOpSnapshotRepository) LoadCheckpoint(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+	return ports.SnapshotGeneration{}, errors.New("unused")
+}
+func (noOpSnapshotRepository) RepairHEAD(context.Context, domain.IncarnationID, ports.CheckpointRef) error {
+	return nil
+}
+func (noOpSnapshotRepository) WriteDeletionTombstone(context.Context, domain.DeletionTombstone) error {
+	return nil
+}
+func (noOpSnapshotRepository) ListDeletionTombstones(context.Context, ports.DeletionTombstoneCursor, ports.MaintenanceBudget) (ports.DeletionTombstonePage, error) {
+	return ports.DeletionTombstonePage{Done: true}, nil
+}
+func (noOpSnapshotRepository) QuarantineDeletionSources(context.Context, domain.DeletionTombstone, bool) error {
+	return nil
+}
+func (noOpSnapshotRepository) DeleteDeletionTombstone(context.Context, domain.IncarnationID) error {
+	return nil
+}
+func (noOpSnapshotRepository) SaveQuarantineDescriptor(context.Context, domain.QuarantineDescriptor) error {
+	return nil
+}
+func (noOpSnapshotRepository) QuarantineIncarnation(context.Context, domain.IncarnationID) error {
+	return nil
+}
+func (noOpSnapshotRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
+	return nil
+}
+func (noOpSnapshotRepository) MaintainSession(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) (bool, error) {
+	return true, nil
+}
+func (noOpSnapshotRepository) Reconcile(context.Context, []domain.CatalogueRecord, ports.ReconcileCursor, ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
+	return ports.ReconcileCursor{}, nil, nil
+}
+
 func awaitSnapshotIdle(t testing.TB, sess *session) {
 	t.Helper()
 	timer := time.NewTimer(testWaitTimeout)

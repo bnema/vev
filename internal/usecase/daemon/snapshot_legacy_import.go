@@ -3,12 +3,16 @@ package daemon
 import (
 	"fmt"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 func legacyPublication(snapshot snapcodec.Session) (ports.SnapshotPublication, error) {
-	manifest := snapcodec.Manifest{Generation: 1, Name: snapshot.Name, CreatedAt: snapshot.CreatedAt, Active: snapshot.Active, Tabs: make([]snapcodec.ManifestTab, 0, len(snapshot.Tabs))}
+	// Legacy payloads have no durable identity; this test-only conversion uses
+	// the fixture's stable synthetic identity.
+	incarnation := domain.IncarnationID{1}
+	manifest := snapcodec.Manifest{Generation: 1, IncarnationID: incarnation, Name: snapshot.Name, CreatedAt: snapshot.CreatedAt, Active: snapshot.Active, Tabs: make([]snapcodec.ManifestTab, 0, len(snapshot.Tabs))}
 	objects := make([]ports.SnapshotObject, 0)
 	for _, tab := range snapshot.Tabs {
 		outTab := snapcodec.ManifestTab{StableID: tab.StableID, Cols: tab.Cols, Rows: tab.Rows, NextPaneID: tab.NextPaneID, Focus: tab.Focus, Tree: tab.Tree, Panes: make([]snapcodec.ManifestPane, 0, len(tab.Panes))}
@@ -40,5 +44,5 @@ func legacyPublication(snapshot snapcodec.Session) (ports.SnapshotPublication, e
 	if err != nil {
 		return ports.SnapshotPublication{}, fmt.Errorf("snapshot: marshal legacy import manifest: %w", err)
 	}
-	return ports.SnapshotPublication{Name: snapshot.Name, Generation: 1, Manifest: encoded, Objects: objects}, nil
+	return ports.SnapshotPublication{IncarnationID: incarnation, Name: snapshot.Name, Generation: 1, Manifest: encoded, Objects: objects}, nil
 }

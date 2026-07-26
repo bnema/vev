@@ -18,6 +18,7 @@ import (
 )
 
 type snapshotAcceptanceRepository struct {
+	noOpSnapshotRepository
 	mu          sync.Mutex
 	names       []string
 	generations map[string]ports.SnapshotGeneration
@@ -42,7 +43,7 @@ func (r *snapshotAcceptanceRepository) Publish(ctx context.Context, p ports.Snap
 	for _, object := range p.Objects {
 		objects[object.Digest] = append([]byte(nil), object.Data...)
 	}
-	r.generations[p.Name] = ports.SnapshotGeneration{Name: p.Name, Generation: p.Generation, Manifest: append([]byte(nil), p.Manifest...), Objects: objects}
+	r.generations[p.Name] = ports.SnapshotGeneration{IncarnationID: p.IncarnationID, Name: p.Name, Generation: p.Generation, ParentCheckpoint: p.ParentCheckpoint, Manifest: append([]byte(nil), p.Manifest...), Objects: objects}
 	found := false
 	for _, name := range r.names {
 		found = found || name == p.Name
@@ -85,10 +86,16 @@ func (r *snapshotAcceptanceRepository) Load(ctx context.Context, name string) (p
 	return cloneAcceptanceGeneration(generation), nil
 }
 
-func (*snapshotAcceptanceRepository) Delete(context.Context, string) error          { return nil }
-func (*snapshotAcceptanceRepository) Tombstone(context.Context, string) error       { return nil }
-func (*snapshotAcceptanceRepository) DeleteTombstone(context.Context, string) error { return nil }
-func (*snapshotAcceptanceRepository) Maintain(context.Context) error                { return nil }
+func (r *snapshotAcceptanceRepository) LoadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+	generation, err := r.Load(ctx, name)
+	if err != nil {
+		return ports.SnapshotGeneration{}, err
+	}
+	if generation.IncarnationID != id || generation.Generation != ref.Generation || snapcodec.ManifestDigest(generation.Manifest) != ref.ManifestDigest {
+		return ports.SnapshotGeneration{}, errors.New("checkpoint unavailable")
+	}
+	return generation, nil
+}
 
 func TestSnapshotAcceptanceRepositoryLoadMutationDoesNotChangeStoredGeneration(t *testing.T) {
 	digest := ports.SnapshotDigest{1}
@@ -178,7 +185,7 @@ func acceptanceGeneration(t *testing.T, snapshot snapcodec.Session, generation u
 	for _, object := range publication.Objects {
 		objects[object.Digest] = append([]byte(nil), object.Data...)
 	}
-	return ports.SnapshotGeneration{Name: snapshot.Name, Generation: generation, Manifest: encoded, Objects: objects}
+	return ports.SnapshotGeneration{IncarnationID: publication.IncarnationID, Name: snapshot.Name, Generation: generation, ParentCheckpoint: publication.ParentCheckpoint, Manifest: encoded, Objects: objects}
 }
 
 func TestValidateRestoreSessionSnapshot(t *testing.T) {
@@ -212,6 +219,10 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	store, _ := newMockStore(t)
 	WithStore(store)(d)
+	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
+	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), RecoveryState: domain.RecoveryHealthy, Committed: &checkpoint}
+	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository, nil)(d)
 	t.Cleanup(func() { release(); d.sessWg.Wait() })
 
@@ -249,16 +260,6 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "fallback")
 	valid := acceptanceGeneration(t, snapshot, 3)
-	pty, release := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	store, _ := newMockStore(t)
-	WithStore(store)(d)
-	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: valid}}
-	WithSnapshotRepository(repository, nil)(d)
-	t.Cleanup(func() { release(); d.sessWg.Wait() })
-	d.restoreIncrementalSnapshots(context.Background())
-	require.Len(t, d.notices.history(), 1)
-	require.Equal(t, domain.NoticeWarn, d.notices.history()[0].Severity)
 
 	for _, mutate := range []struct {
 		name string

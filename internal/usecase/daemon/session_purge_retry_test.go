@@ -13,6 +13,7 @@ import (
 )
 
 type retryablePurgeRepository struct {
+	noOpSnapshotRepository
 	incrementalErr error
 	legacyErr      error
 	tombstoned     map[string]bool
@@ -22,38 +23,35 @@ type retryablePurgeRepository struct {
 func (r *retryablePurgeRepository) Publish(context.Context, ports.SnapshotPublication) error {
 	return nil
 }
-func (r *retryablePurgeRepository) List(context.Context) ([]string, error) { return nil, nil }
-func (r *retryablePurgeRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
-	return ports.SnapshotGeneration{}, errors.New("unused")
-}
-func (r *retryablePurgeRepository) Maintain(context.Context) error { return nil }
-func (r *retryablePurgeRepository) Delete(_ context.Context, name string) error {
-	r.calls = append(r.calls, "incremental")
-	return r.incrementalErr
-}
-func (r *retryablePurgeRepository) LoadLegacy(context.Context) ([]ports.LegacySnapshot, error) {
-	return nil, nil
-}
-func (r *retryablePurgeRepository) DeleteVerifiedLegacy(ctx context.Context, blob ports.LegacySnapshot) error {
-	return r.DeleteLegacy(ctx, blob.Name)
-}
-func (r *retryablePurgeRepository) DeleteLegacy(_ context.Context, name string) error {
-	r.calls = append(r.calls, "legacy")
-	return r.legacyErr
-}
-func (r *retryablePurgeRepository) Tombstone(_ context.Context, name string) error {
+func (r *retryablePurgeRepository) WriteDeletionTombstone(_ context.Context, tombstone domain.DeletionTombstone) error {
 	if r.tombstoned == nil {
 		r.tombstoned = make(map[string]bool)
 	}
 	r.calls = append(r.calls, "tombstone")
-	r.tombstoned[name] = true
+	r.tombstoned[tombstone.Name] = true
 	return nil
 }
-func (r *retryablePurgeRepository) DeleteTombstone(_ context.Context, name string) error {
+func (r *retryablePurgeRepository) QuarantineDeletionSources(_ context.Context, tombstone domain.DeletionTombstone, _ bool) error {
+	r.calls = append(r.calls, "incremental", "legacy")
+	if r.incrementalErr != nil {
+		return r.incrementalErr
+	}
+	return r.legacyErr
+}
+func (r *retryablePurgeRepository) DeleteDeletionTombstone(_ context.Context, _ domain.IncarnationID) error {
 	r.calls = append(r.calls, "clear tombstone")
-	delete(r.tombstoned, name)
+	for name := range r.tombstoned {
+		delete(r.tombstoned, name)
+	}
 	return nil
 }
+func (*retryablePurgeRepository) LoadLegacy(context.Context) ([]ports.LegacySnapshot, error) {
+	return nil, nil
+}
+func (*retryablePurgeRepository) DeleteVerifiedLegacy(context.Context, ports.LegacySnapshot) error {
+	return nil
+}
+func (*retryablePurgeRepository) DeleteLegacy(context.Context, string) error { return nil }
 
 func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 	for _, tt := range []struct {

@@ -627,6 +627,12 @@ func publishBenchmarkSnapshot(b testing.TB, fixture *performanceFixture, generat
 	if err := fixture.snapshots.Publish(context.Background(), publication); err != nil {
 		b.Fatal(err)
 	}
+	checkpoint := domain.CheckpointRef{Generation: generation, ManifestDigest: snapcodec.ManifestDigest(publication.Manifest)}
+	capture.checkpoint = checkpoint
+	fixture.sess.snapshotMu.Lock()
+	fixture.sess.snapshotPublishedGeneration = generation
+	fixture.sess.snapshotPublishedCheckpoint = &checkpoint
+	fixture.sess.snapshotMu.Unlock()
 	markSnapshotCaptureObjectsPublished(capture)
 }
 
@@ -1036,6 +1042,7 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 	ac.size = config.size
 	sess.name = "performance"
 	sess.ephemeral = false
+	sess.incarnation = domain.IncarnationID{1}
 	sess.snapEligible.Store(true)
 
 	fixture := &performanceFixture{
@@ -1376,6 +1383,7 @@ type countingSnapshotMetrics struct {
 	writes, objectBytes, historyBlobBytes, suppliedObjectBytes, suppliedHistoryBytes, manifestBytes, headBytes uint64
 }
 type countingSnapshotRepository struct {
+	noOpSnapshotRepository
 	mu sync.Mutex
 	countingSnapshotMetrics
 	objects map[string]map[ports.SnapshotDigest]struct{}
@@ -1418,14 +1426,6 @@ func (s *countingSnapshotRepository) Publish(_ context.Context, publication port
 	s.last = publication.Manifest
 	return nil
 }
-func (*countingSnapshotRepository) List(context.Context) ([]string, error) { return nil, nil }
-func (*countingSnapshotRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
-	return ports.SnapshotGeneration{}, nil
-}
-func (*countingSnapshotRepository) Delete(context.Context, string) error          { return nil }
-func (*countingSnapshotRepository) Tombstone(context.Context, string) error       { return nil }
-func (*countingSnapshotRepository) DeleteTombstone(context.Context, string) error { return nil }
-func (*countingSnapshotRepository) Maintain(context.Context) error                { return nil }
 func (s *countingSnapshotRepository) reset() {
 	s.mu.Lock()
 	s.countingSnapshotMetrics = countingSnapshotMetrics{}

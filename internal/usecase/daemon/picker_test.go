@@ -45,21 +45,17 @@ func (failingDeleteStore) Range(func(k, v []byte) bool) {}
 func (failingDeleteStore) Sync() error                  { return nil }
 func (failingDeleteStore) Close() error                 { return nil }
 
-type refusingSnapshotDeleteRepository struct{ err error }
+type refusingSnapshotDeleteRepository struct {
+	noOpSnapshotRepository
+	err error
+}
 
 func (refusingSnapshotDeleteRepository) Publish(context.Context, ports.SnapshotPublication) error {
 	return nil
 }
-func (refusingSnapshotDeleteRepository) List(context.Context) ([]string, error) { return nil, nil }
-func (refusingSnapshotDeleteRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
-	return ports.SnapshotGeneration{}, nil
+func (s refusingSnapshotDeleteRepository) QuarantineDeletionSources(context.Context, domain.DeletionTombstone, bool) error {
+	return s.err
 }
-func (s refusingSnapshotDeleteRepository) Delete(context.Context, string) error  { return s.err }
-func (refusingSnapshotDeleteRepository) Tombstone(context.Context, string) error { return nil }
-func (refusingSnapshotDeleteRepository) DeleteTombstone(context.Context, string) error {
-	return nil
-}
-func (refusingSnapshotDeleteRepository) Maintain(context.Context) error { return nil }
 
 func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
