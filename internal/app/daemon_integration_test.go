@@ -685,11 +685,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 	go func() {
 		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
 			defer close(callbackReturned)
-			opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
-				StateDir:          stateDir,
-				Random:            rand.Reader,
-				SnapshotMigration: repository,
-			})
+			opened, err := persist.OpenOrCreate(stateDir)
 			if err != nil {
 				return err
 			}
@@ -745,11 +741,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
-		StateDir:          stateDir,
-		Random:            rand.Reader,
-		SnapshotMigration: repository,
-	})
+	opened, err := persist.OpenOrCreate(stateDir)
 	require.NoError(t, err)
 	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, recoveryfs.New(stateDir), rand.Reader)
 	require.NoError(t, coordinator.Recover(ctx))
@@ -1007,11 +999,7 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 
 	oldOwner, err := lifecycle.TryAcquire(runtimeDir)
 	require.NoError(t, err)
-	oldOpened, err := persist.OpenOrMigrate(context.Background(), persist.OpenDeps{
-		StateDir:          stateDir,
-		Random:            rand.Reader,
-		SnapshotMigration: snapshotRepository,
-	})
+	oldOpened, err := persist.OpenOrCreate(stateDir)
 	require.NoError(t, err)
 	oldListener, err := ipc.Listen(runtimeDir)
 	require.NoError(t, err)
@@ -1062,11 +1050,7 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	go func() {
 		newDone <- runWithLifecycleOwnerDeps(context.Background(), runtimeDir, stateDir, func(ctx context.Context) error {
 			close(newDurableOpen)
-			opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
-				StateDir:          stateDir,
-				Random:            rand.Reader,
-				SnapshotMigration: snapshotRepository,
-			})
+			opened, err := persist.OpenOrCreate(stateDir)
 			if err != nil {
 				return err
 			}

@@ -370,9 +370,9 @@ func TestOfflineCommandsPropagateLifecycleReleaseErrors(t *testing.T) {
 }
 
 func TestCatalogueFailureDoesNotListen(t *testing.T) {
-	originalOpenOrMigrate, originalListenDaemon := openOrMigrate, listenDaemon
+	originalOpenCatalogue, originalListenDaemon := openCatalogue, listenDaemon
 	t.Cleanup(func() {
-		openOrMigrate = originalOpenOrMigrate
+		openCatalogue = originalOpenCatalogue
 		listenDaemon = originalListenDaemon
 	})
 
@@ -385,8 +385,8 @@ func TestCatalogueFailureDoesNotListen(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", stateRoot)
 
 			listenCalls := 0
-			openOrMigrate = func(_ context.Context, deps persist.OpenDeps) (persist.OpenResult, error) {
-				require.Equal(t, stateDir, deps.StateDir)
+			openCatalogue = func(gotStateDir string) (persist.OpenResult, error) {
+				require.Equal(t, stateDir, gotStateDir)
 				return persist.OpenResult{}, catalogueErr
 			}
 			listenDaemon = func(string, ports.SerializedRuntimeObserver) (ports.Listener, error) {
@@ -512,9 +512,15 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 
 		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 		t.Setenv("XDG_STATE_HOME", stateRoot)
+		before, err := os.ReadFile(persist.StorePath(stateDir))
+		require.NoError(t, err)
 		err = runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, runDaemonOwned)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "open or migrate durable session state")
+		require.Contains(t, err.Error(), stateDir)
+		require.Contains(t, err.Error(), "rm -rf "+stateDir)
+		after, readErr := os.ReadFile(persist.StorePath(stateDir))
+		require.NoError(t, readErr)
+		require.Equal(t, before, after, "failed startup must leave the catalogue untouched")
 		_, statErr := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
 		require.ErrorIs(t, statErr, os.ErrNotExist)
 	})

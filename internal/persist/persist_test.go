@@ -2,6 +2,7 @@ package persist
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -16,6 +17,42 @@ import (
 func privateDir(t *testing.T) string { t.Helper(); return filepath.Join(t.TempDir(), "vev") }
 func validRecord(name string, id byte) domain.CatalogueRecord {
 	return domain.CatalogueRecord{Name: name, IncarnationID: domain.IncarnationID{id}, RecoveryState: domain.RecoveryFresh}
+}
+
+func TestOpenOrCreate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		write   []byte // nil means "no file at all"
+		wantNew bool
+		wantErr error
+	}{
+		{name: "absent file starts empty", write: nil, wantNew: true},
+		{name: "garbage fails closed", write: []byte("not a vev catalogue"), wantErr: ErrCatalogueUnreadable},
+		{name: "legacy headerless record fails closed", write: []byte{0x08, 0x00, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef}, wantErr: ErrCatalogueUnreadable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := privateDir(t)
+			if tt.write != nil {
+				require.NoError(t, os.MkdirAll(dir, 0o700))
+				require.NoError(t, os.WriteFile(StorePath(dir), tt.write, 0o600))
+			}
+			got, err := OpenOrCreate(dir)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				after, readErr := os.ReadFile(StorePath(dir))
+				require.NoError(t, readErr)
+				require.Equal(t, tt.write, after, "unreadable catalogue must remain untouched")
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = got.Catalogue.Close() })
+			require.Equal(t, tt.wantNew, got.NewInstall)
+			require.Empty(t, got.Records)
+		})
+	}
 }
 
 func TestCatalogueDecodeAllFailsOnMalformedRecord(t *testing.T) {

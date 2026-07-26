@@ -118,7 +118,7 @@ var (
 	commit  = "none"
 	date    = "unknown"
 
-	openOrMigrate = persist.OpenOrMigrate
+	openCatalogue = persist.OpenOrCreate
 	listenDaemon  = func(dir string, observer ports.SerializedRuntimeObserver) (ports.Listener, error) {
 		return ipc.Listen(dir, ipc.WithRuntimeObserver(observer))
 	}
@@ -723,21 +723,19 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository))
 	noticeStore := noticefile.New(platform.StateDir())
 	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticeStore))
-	storePath := persist.StorePath(platform.StateDir())
-	opened, err := openOrMigrate(ctx, persist.OpenDeps{
-		StateDir:          platform.StateDir(),
-		Random:            rand.Reader,
-		SnapshotMigration: snapshotRepository,
-	})
+	stateDir := platform.StateDir()
+	storePath := persist.StorePath(stateDir)
+	opened, err := openCatalogue(stateDir)
 	if err != nil {
 		log.Error("catalogue_validation_failed", "path", storePath, "reason_code", "open-failed")
-		return fmt.Errorf("vev: open or migrate durable session state %s: %w", storePath, err)
+		if errors.Is(err, persist.ErrCatalogueUnreadable) {
+			return unreadableCatalogueError(stateDir)
+		}
+		return fmt.Errorf("vev: open durable session state %s: %w", storePath, err)
 	}
 	recoveryMode := "current"
 	if opened.NewInstall {
 		recoveryMode = "new-install"
-	} else if opened.Migrated {
-		recoveryMode = "migrated"
 	}
 	logCatalogueRecovery(log, opened.Records, recoveryMode)
 	journal := recoveryfs.New(platform.StateDir())
@@ -1541,18 +1539,17 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	_ = tw.Flush()
 }
 
+func unreadableCatalogueError(stateDir string) error {
+	return fmt.Errorf("vev: durable session state at %s cannot be read and was left untouched.\n"+
+		"vev does not erase it automatically. To start fresh, remove it:\n"+
+		"    rm -rf %s", stateDir, stateDir)
+}
+
 func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
-	// LoadReadOnly already distinguishes a genuinely absent catalogue (empty
-	// slice, nil error) from a real IO error, and recovers the same
-	// fixed-path crash states LoadCatalogueReadOnly does, so a stray .next or
-	// .prev left by a crash mid-compaction no longer wrongly denies a session
-	// that still exists. A separate os.Stat precheck here was both redundant
-	// with that recovery and a regression of the same bug class: it treated
-	// "no sessions.kv" as "no such session" even when a recoverable .next or
-	// .prev candidate was present.
-	records, err := persist.LoadReadOnly(platform.StateDir())
+	stateDir := platform.StateDir()
+	records, err := persist.LoadReadOnly(stateDir)
 	if err != nil {
-		return fmt.Errorf("vev: reading stored sessions: %w", err)
+		return unreadableCatalogueError(stateDir)
 	}
 	found := false
 	for _, record := range records {
@@ -1566,12 +1563,11 @@ func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 	}
 
 	repository := snapshotadapter.NewRepository(snapshotDir())
-	opened, err := openOrMigrate(ctx, persist.OpenDeps{
-		StateDir:          platform.StateDir(),
-		Random:            rand.Reader,
-		SnapshotMigration: repository,
-	})
+	opened, err := openCatalogue(stateDir)
 	if err != nil {
+		if errors.Is(err, persist.ErrCatalogueUnreadable) {
+			return unreadableCatalogueError(stateDir)
+		}
 		return fmt.Errorf("vev: opening stored sessions: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, opened.Catalogue.Close()) }()

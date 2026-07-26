@@ -104,22 +104,7 @@ type ReconcileDecision struct {
 	RetentionResolved bool
 }
 
-var (
-	ErrLegacySnapshotUncertain = errors.New("legacy snapshot state is uncertain")
-	ErrBudgetExhausted         = errors.New("snapshot maintenance budget exhausted")
-)
-
-type SnapshotMigrationRequest struct {
-	LegacyName    string
-	IncarnationID domain.IncarnationID
-	LegacyRef     domain.CheckpointRef
-}
-
-type SnapshotMigration interface {
-	HasLegacyState(context.Context) (bool, error)
-	ReadLegacyHEAD(context.Context, string) (domain.CheckpointRef, error)
-	MigrateV1Checkpoint(context.Context, SnapshotMigrationRequest) (domain.CheckpointRef, error)
-}
+var ErrBudgetExhausted = errors.New("snapshot maintenance budget exhausted")
 
 type RecoveryJournal interface {
 	SaveDiscard(context.Context, domain.DiscardIntent) error

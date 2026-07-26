@@ -14,7 +14,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 )
 
-func TestRunOfflineNamedKillUsesOpenOrMigrateSeam(t *testing.T) {
+func TestRunOfflineNamedKillUsesOpenCatalogueSeam(t *testing.T) {
 	stateRoot := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateRoot)
 	stateDir := filepath.Join(stateRoot, "vev")
@@ -24,15 +24,13 @@ func TestRunOfflineNamedKillUsesOpenOrMigrateSeam(t *testing.T) {
 	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}))
 	require.NoError(t, p.Close())
 
-	original := openOrMigrate
-	t.Cleanup(func() { openOrMigrate = original })
+	original := openCatalogue
+	t.Cleanup(func() { openCatalogue = original })
 	wantErr := errors.New("open seam called")
 	called := false
-	openOrMigrate = func(_ context.Context, deps persist.OpenDeps) (persist.OpenResult, error) {
+	openCatalogue = func(gotStateDir string) (persist.OpenResult, error) {
 		called = true
-		require.Equal(t, stateDir, deps.StateDir)
-		require.NotNil(t, deps.Random)
-		require.NotNil(t, deps.SnapshotMigration)
+		require.Equal(t, stateDir, gotStateDir)
 		return persist.OpenResult{}, wantErr
 	}
 

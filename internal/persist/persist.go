@@ -3,6 +3,7 @@ package persist
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -15,6 +16,17 @@ import (
 const filename = "sessions.kv"
 
 var errPersistenceUnavailable = errors.New("persist: catalogue unavailable")
+
+// ErrCatalogueUnreadable reports durable state that exists but cannot be
+// decoded. vev never repairs or erases it; the operator resets explicitly.
+var ErrCatalogueUnreadable = errors.New("persist: catalogue unreadable")
+
+// OpenResult is the outcome of opening durable session state at startup.
+type OpenResult struct {
+	Catalogue  *Persister
+	Records    []domain.CatalogueRecord
+	NewInstall bool
+}
 
 func StorePath(dir string) string { return filepath.Join(dir, filename) }
 
@@ -59,7 +71,51 @@ func Open(dir string) (*Persister, error) {
 	p, _, err := openCurrentCatalogue(dir, false)
 	return p, err
 }
+
+// OpenOrCreate opens the catalogue, or creates a proven-empty one when no
+// durable state exists. Any state that exists but does not decode is returned
+// as ErrCatalogueUnreadable and left untouched on disk.
+func OpenOrCreate(dir string) (OpenResult, error) {
+	existed := true
+	if _, err := os.Stat(StorePath(dir)); errors.Is(err, os.ErrNotExist) {
+		existed = false
+	}
+	path := StorePath(dir)
+	if existed {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
+		}
+		if len(raw) < 4 || string(raw[:4]) != "VEVK" {
+			return OpenResult{}, fmt.Errorf("%w: %s: unknown catalogue format", ErrCatalogueUnreadable, path)
+		}
+		data, err := kv.Replay(path)
+		if err != nil {
+			return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
+		}
+		if _, err := decodeAll(data); err != nil {
+			return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
+		}
+	}
+	catalogue, records, err := openCurrentCatalogue(dir, true)
+	if err != nil {
+		return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
+	}
+	return OpenResult{Catalogue: catalogue, Records: records, NewInstall: !existed}, nil
+}
+
 func New(store ports.Store) *Persister { return &Persister{store: store} }
+
+func catalogueCandidatesPresent(path string) (bool, error) {
+	for _, candidate := range []string{path, path + ".next", path + ".prev"} {
+		if _, err := os.Stat(candidate); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
+}
 
 func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []domain.CatalogueRecord, error) {
 	path := StorePath(dir)
