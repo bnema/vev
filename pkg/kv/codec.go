@@ -5,236 +5,106 @@ import (
 	"errors"
 	"hash/crc32"
 	"math"
+	"sort"
 )
+
+var ErrCorrupt = errors.New("kv: corrupt store file")
+
+var fileMagic = [4]byte{'V', 'E', 'V', 'K'}
 
 const (
-	opSet byte = iota
-	opDel
-	opBatch
-
-	// Legacy record framing (files with no file header): a 4-byte big-endian
-	// payload length followed by CRC32(payload). The length itself is
-	// unprotected, so a bit flip in it is indistinguishable from a torn tail.
-	// These files are replayed with the original semantics and upgraded in
-	// place by Open; nothing ever writes this framing again.
-	legacyHeaderLen = 8
-
-	// Current framing. Every file starts with fileMagic, a uint16 format
-	// version, and CRC32 over that six-byte identity. Every record carries a
-	// self-verifying header:
-	//
-	//	[0:4]   payload length, big endian
-	//	[4:8]   CRC32(payload)
-	//	[8:12]  CRC32(header[0:8])
-	//
-	// The header checksum is what makes the length trustworthy: a corrupt
-	// length now fails closed instead of masquerading as a torn tail and
-	// silently truncating every record that follows it.
-	recordHeaderLen   = 12
-	fileMagicLen      = 4
-	fileHeaderV1Len   = fileMagicLen + 2
-	fileHeaderBodyLen = fileHeaderV1Len
-	fileHeaderLen     = fileHeaderBodyLen + 4
-	formatVersionV1   = 1
-	formatVersion     = 2
-
-	// maxPayloadLen bounds any allocation driven by a length field. Catalogue
-	// records and batches are orders of magnitude smaller than this.
-	maxPayloadLen = 64 << 20
-
-	payloadPrefixLen    = 3
-	batchEntryPrefixLen = 7
-	compactThreshold    = 64
-	compactWasteRatio   = 0.5
-	maxKeyLen           = 1<<16 - 1
+	fileVersion    uint16 = 3
+	filePrefixLen         = 4 + 2 + 4
+	entryPrefixLen        = 4 + 4
+	crcLen                = 4
 )
 
-// fileMagic cannot be mistaken for a legacy record header: read as a legacy
-// big-endian length it is ~1.4 GiB, far beyond maxPayloadLen.
-var fileMagic = [fileMagicLen]byte{'V', 'E', 'V', 'K'}
+// encodeFile writes magic | version | count | (keyLen key valLen val)* | crc32.
+func encodeFile(data map[string][]byte) []byte {
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
 
-var (
-	errBadRecord  = errors.New("bad record")
-	ErrCorruptWAL = errors.New("kv: corrupt WAL")
-)
-
-type record struct {
-	op    byte
-	key   []byte
-	value []byte
+	size := filePrefixLen + crcLen
+	for _, key := range keys {
+		size += entryPrefixLen + len(key) + len(data[key])
+	}
+	buf := make([]byte, 0, size)
+	buf = append(buf, fileMagic[:]...)
+	buf = binary.BigEndian.AppendUint16(buf, fileVersion)
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(keys)))
+	for _, key := range keys {
+		value := data[key]
+		buf = binary.BigEndian.AppendUint32(buf, uint32(len(key)))
+		buf = append(buf, key...)
+		buf = binary.BigEndian.AppendUint32(buf, uint32(len(value)))
+		buf = append(buf, value...)
+	}
+	return appendCRC(buf)
 }
 
-// BatchChange is one key mutation contained in a single atomic WAL record.
-type BatchChange struct {
-	Key    []byte
-	Value  []byte
-	Delete bool
+func appendCRC(payload []byte) []byte {
+	return binary.BigEndian.AppendUint32(payload, crc32.ChecksumIEEE(payload))
 }
 
-func encodeRecord(op byte, key, value []byte) ([]byte, error) {
-	if len(key) > maxKeyLen {
-		return nil, errors.New("key too large")
+// decodeFile validates the single trailing CRC and rejects every malformed
+// existing file. Callers must not replace or truncate a file that fails here.
+func decodeFile(raw []byte) (map[string][]byte, error) {
+	if len(raw) < filePrefixLen+crcLen {
+		return nil, ErrCorrupt
 	}
-	if op != opSet && op != opDel {
-		return nil, errBadRecord
+	payload := raw[:len(raw)-crcLen]
+	wantCRC := binary.BigEndian.Uint32(raw[len(raw)-crcLen:])
+	if crc32.ChecksumIEEE(payload) != wantCRC {
+		return nil, ErrCorrupt
 	}
-	payloadLen := payloadPrefixLen + len(key)
-	if op == opSet {
-		payloadLen += len(value)
+	if string(payload[:4]) != string(fileMagic[:]) || binary.BigEndian.Uint16(payload[4:6]) != fileVersion {
+		return nil, ErrCorrupt
 	}
-	if payloadLen > maxPayloadLen {
-		return nil, errors.New("payload too large")
-	}
-	payload := make([]byte, payloadLen)
-	payload[0] = op
-	binary.BigEndian.PutUint16(payload[1:3], uint16(len(key)))
-	copy(payload[3:], key)
-	if op == opSet {
-		copy(payload[3+len(key):], value)
-	}
-	return framePayload(payload), nil
-}
 
-func encodeBatch(changes []BatchChange) ([]byte, error) {
-	if len(changes) == 0 {
-		return nil, errors.New("kv: empty batch")
-	}
-	if uint64(len(changes)) > math.MaxUint32 {
-		return nil, errors.New("kv: too many batch changes")
-	}
-	seen := make(map[string]struct{}, len(changes))
-	payloadLen := 1 + 4
-	for _, change := range changes {
-		if len(change.Key) > maxKeyLen {
-			return nil, errors.New("key too large")
-		}
-		if _, exists := seen[string(change.Key)]; exists {
-			return nil, errors.New("kv: duplicate batch key")
-		}
-		seen[string(change.Key)] = struct{}{}
-		valueLen := len(change.Value)
-		if change.Delete {
-			if valueLen != 0 {
-				return nil, errors.New("kv: delete batch change has value")
-			}
-		}
-		payloadLen += 1 + 2 + len(change.Key) + 4 + valueLen
-		if payloadLen > maxPayloadLen {
-			return nil, errors.New("payload too large")
-		}
-	}
-	payload := make([]byte, payloadLen)
-	payload[0] = opBatch
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(changes)))
-	off := 5
-	for _, change := range changes {
-		payload[off] = opSet
-		if change.Delete {
-			payload[off] = opDel
-		}
-		off++
-		binary.BigEndian.PutUint16(payload[off:off+2], uint16(len(change.Key)))
-		off += 2
-		copy(payload[off:], change.Key)
-		off += len(change.Key)
-		binary.BigEndian.PutUint32(payload[off:off+4], uint32(len(change.Value)))
-		off += 4
-		copy(payload[off:], change.Value)
-		off += len(change.Value)
-	}
-	return framePayload(payload), nil
-}
-
-// fileHeader is the fixed prefix of every file written in the current format.
-func fileHeader() []byte {
-	buf := make([]byte, fileHeaderLen)
-	copy(buf, fileMagic[:])
-	binary.BigEndian.PutUint16(buf[fileMagicLen:fileHeaderBodyLen], formatVersion)
-	binary.BigEndian.PutUint32(buf[fileHeaderBodyLen:], crc32.ChecksumIEEE(buf[:fileHeaderBodyLen]))
-	return buf
-}
-
-func framePayload(payload []byte) []byte {
-	buf := make([]byte, recordHeaderLen+len(payload))
-	binary.BigEndian.PutUint32(buf[0:4], uint32(len(payload)))
-	binary.BigEndian.PutUint32(buf[4:8], crc32.ChecksumIEEE(payload))
-	binary.BigEndian.PutUint32(buf[8:recordHeaderLen], crc32.ChecksumIEEE(buf[0:8]))
-	copy(buf[recordHeaderLen:], payload)
-	return buf
-}
-
-func decodePayload(payload []byte) (record, error) {
-	if len(payload) < payloadPrefixLen {
-		return record{}, errBadRecord
-	}
-	op := payload[0]
-	if op != opSet && op != opDel {
-		return record{}, errBadRecord
-	}
-	keyLen := int(binary.BigEndian.Uint16(payload[1:3]))
-	if len(payload) < payloadPrefixLen+keyLen {
-		return record{}, errBadRecord
-	}
-	if op == opDel && len(payload) != payloadPrefixLen+keyLen {
-		return record{}, errBadRecord
-	}
-	key := append([]byte(nil), payload[payloadPrefixLen:payloadPrefixLen+keyLen]...)
-	var value []byte
-	if op == opSet {
-		value = append([]byte(nil), payload[payloadPrefixLen+keyLen:]...)
-	}
-	return record{op: op, key: key, value: value}, nil
-}
-
-func decodeBatch(payload []byte) ([]record, error) {
-	if len(payload) < 5 || payload[0] != opBatch {
-		return nil, errBadRecord
-	}
-	count := binary.BigEndian.Uint32(payload[1:5])
-	if count == 0 {
-		return nil, errBadRecord
-	}
-	off := 5
-	maxCount := uint64(len(payload)-off) / batchEntryPrefixLen
-	if uint64(count) > maxCount {
-		return nil, errBadRecord
-	}
-	records := make([]record, 0, int(count))
-	seen := make(map[string]struct{}, int(count))
+	count := binary.BigEndian.Uint32(payload[6:10])
+	off := filePrefixLen
+	data := make(map[string][]byte)
 	for range count {
-		if len(payload)-off < 7 {
-			return nil, errBadRecord
+		keyLen, next, ok := decodeLength(payload, off)
+		if !ok {
+			return nil, ErrCorrupt
 		}
-		op := payload[off]
-		off++
-		if op != opSet && op != opDel {
-			return nil, errBadRecord
+		off = next
+		if keyLen > uint64(len(payload)-off) {
+			return nil, ErrCorrupt
 		}
-		keyLen := int(binary.BigEndian.Uint16(payload[off : off+2]))
-		off += 2
-		if keyLen > len(payload)-off-4 {
-			return nil, errBadRecord
+		key := string(payload[off : off+int(keyLen)])
+		off += int(keyLen)
+		valueLen, next, ok := decodeLength(payload, off)
+		if !ok {
+			return nil, ErrCorrupt
 		}
-		key := append([]byte(nil), payload[off:off+keyLen]...)
-		off += keyLen
-		valueLen := uint64(binary.BigEndian.Uint32(payload[off : off+4]))
-		off += 4
+		off = next
 		if valueLen > uint64(len(payload)-off) {
-			return nil, errBadRecord
+			return nil, ErrCorrupt
 		}
-		if op == opDel && valueLen != 0 {
-			return nil, errBadRecord
+		if _, duplicate := data[key]; duplicate {
+			return nil, ErrCorrupt
 		}
-		value := append([]byte(nil), payload[off:off+int(valueLen)]...)
+		data[key] = append([]byte(nil), payload[off:off+int(valueLen)]...)
 		off += int(valueLen)
-		if _, exists := seen[string(key)]; exists {
-			return nil, errBadRecord
-		}
-		seen[string(key)] = struct{}{}
-		records = append(records, record{op: op, key: key, value: value})
 	}
 	if off != len(payload) {
-		return nil, errBadRecord
+		return nil, ErrCorrupt
 	}
-	return records, nil
+	return data, nil
+}
+
+func decodeLength(payload []byte, off int) (uint64, int, bool) {
+	if off < 0 || len(payload)-off < 4 {
+		return 0, off, false
+	}
+	length := uint64(binary.BigEndian.Uint32(payload[off : off+4]))
+	if length > uint64(math.MaxInt) {
+		return 0, off, false
+	}
+	return length, off + 4, true
 }

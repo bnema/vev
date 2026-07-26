@@ -701,49 +701,6 @@ func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
 		state.data[string(k)] = append([]byte(nil), v...)
 		return nil
 	}).Maybe()
-	store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
-		if len(changes) == 0 {
-			return errors.New("empty batch")
-		}
-		state.mu.Lock()
-		seen := make(map[string]struct{}, len(changes))
-		for _, change := range changes {
-			key := string(change.Key)
-			if _, duplicate := seen[key]; duplicate {
-				state.mu.Unlock()
-				return errors.New("duplicate batch key")
-			}
-			seen[key] = struct{}{}
-			if change.Delete && state.deleteErr != nil {
-				if err := state.deleteErr(key); err != nil {
-					state.mu.Unlock()
-					return err
-				}
-			}
-		}
-		deleted := false
-		for _, change := range changes {
-			key := string(change.Key)
-			if change.Delete {
-				state.dels = append(state.dels, key)
-				delete(state.data, key)
-				deleted = true
-				continue
-			}
-			state.sets++
-			state.data[key] = append([]byte(nil), change.Value...)
-		}
-		var deleteDone chan struct{}
-		if deleted {
-			deleteDone = state.deleteDone
-			state.deleteDone = nil
-		}
-		state.mu.Unlock()
-		if deleteDone != nil {
-			close(deleteDone)
-		}
-		return nil
-	}).Maybe()
 	store.EXPECT().Delete(mock.Anything).RunAndReturn(func(k []byte) error {
 		state.mu.Lock()
 		key := string(k)
@@ -815,32 +772,12 @@ func (s newStaticStore) Get(key []byte) ([]byte, bool) {
 	v, ok := s[string(key)]
 	return append([]byte(nil), v...), ok
 }
-func (s newStaticStore) Set(_, _ []byte) error { return nil }
-func (s newStaticStore) Delete(_ []byte) error { return nil }
-func (s newStaticStore) Batch(changes []ports.StoreChange) error {
-	if len(changes) == 0 {
-		return errors.New("empty batch")
-	}
-	prepared := make([]ports.StoreChange, len(changes))
-	seen := make(map[string]struct{}, len(changes))
-	for i, change := range changes {
-		key := string(change.Key)
-		if _, exists := seen[key]; exists {
-			return errors.New("duplicate batch key")
-		}
-		if change.Delete && len(change.Value) != 0 {
-			return errors.New("delete batch change has value")
-		}
-		seen[key] = struct{}{}
-		prepared[i] = ports.StoreChange{Key: append([]byte(nil), change.Key...), Value: append([]byte(nil), change.Value...), Delete: change.Delete}
-	}
-	for _, change := range prepared {
-		if change.Delete {
-			delete(s, string(change.Key))
-		} else {
-			s[string(change.Key)] = change.Value
-		}
-	}
+func (s newStaticStore) Set(key, value []byte) error {
+	s[string(key)] = append([]byte(nil), value...)
+	return nil
+}
+func (s newStaticStore) Delete(key []byte) error {
+	delete(s, string(key))
 	return nil
 }
 func (s newStaticStore) Range(fn func(k, v []byte) bool) {
@@ -1251,11 +1188,8 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		var attempted map[string][]byte
 		store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {}).Times(3)
 		store.EXPECT().Get([]byte("named")).Return(nil, false).Times(4)
-		store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
-			attempted = make(map[string][]byte, len(changes))
-			for _, change := range changes {
-				attempted[string(change.Key)] = append([]byte(nil), change.Value...)
-			}
+		store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
+			attempted = map[string][]byte{string(key): append([]byte(nil), value...)}
 			return errors.New("disk full")
 		}).Once()
 		clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
@@ -1274,7 +1208,7 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		require.Len(t, records, 1)
 		require.Equal(t, int64(100), records[0].CreatedAt, "a promotion must never attempt to persist a zero lifecycle identity")
 
-		store.EXPECT().Batch(mock.Anything).Return(nil).Once()
+		store.EXPECT().Set(mock.Anything, mock.Anything).Return(nil).Once()
 		store.EXPECT().Sync().Return(nil).Once()
 		require.NoError(t, d.renameSession(sess, "named"))
 		require.Equal(t, int64(101), sess.createdAt, "the high-water mark must remain monotonic after a failed promotion")

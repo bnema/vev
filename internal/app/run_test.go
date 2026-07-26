@@ -88,7 +88,7 @@ func TestRecoveryObservability(t *testing.T) {
 	}, deps))
 
 	entries := decodeJSONLogs(t, logBuffer.Bytes())
-	for _, name := range []string{"lifecycle_owner_wait", "lifecycle_owner_acquired", "catalogue_validated", "catalogue_compaction_recovery_complete", "daemon_startup_complete", "lifecycle_owner_released"} {
+	for _, name := range []string{"lifecycle_owner_wait", "lifecycle_owner_acquired", "catalogue_validated", "daemon_startup_complete", "lifecycle_owner_released"} {
 		require.Contains(t, eventNames(entries), name)
 	}
 	startup := requireEvent(t, entries, "daemon_startup_complete")

@@ -501,7 +501,6 @@ func runDaemon() (retErr error) {
 
 func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, recoveryMode string) {
 	log.Info("catalogue_validated", "records", len(records), "recovery", recoveryMode)
-	log.Info("catalogue_compaction_recovery_complete", "recovery", recoveryMode)
 }
 
 func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord, restoring int) {

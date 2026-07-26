@@ -46,11 +46,11 @@ func TestRunKillOfflineUsesIncarnationDeletionProtocol(t *testing.T) {
 	}{
 		{name: "normal"},
 		{
-			name: ".prev crash hook",
+			name: "stray tmp is ignored",
 			crashHook: func(t *testing.T, stateDir string) {
 				t.Helper()
 				storePath := persist.StorePath(stateDir)
-				require.NoError(t, os.Rename(storePath, storePath+".prev"))
+				require.NoError(t, os.WriteFile(storePath+".tmp", []byte("partial rewrite"), 0o600))
 			},
 		},
 	}

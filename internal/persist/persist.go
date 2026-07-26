@@ -1,7 +1,6 @@
 package persist
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -14,10 +13,7 @@ import (
 	"github.com/bnema/vev/pkg/kv"
 )
 
-const (
-	filename                = "sessions.kv"
-	currentCatalogueVersion = 2
-)
+const filename = "sessions.kv"
 
 var errPersistenceUnavailable = errors.New("persist: catalogue unavailable")
 
@@ -43,7 +39,7 @@ type Persister struct {
 	incarnationIndex  bool
 }
 
-// KVStore adapts the reusable WAL implementation to the persistence port.
+// KVStore adapts the reusable whole-file store to the persistence port.
 type KVStore struct{ store *kv.Store }
 
 func OpenStore(path string) (*KVStore, error) {
@@ -62,13 +58,6 @@ func (s *KVStore) Range(fn func(key, value []byte) bool) {
 }
 func (s *KVStore) Sync() error  { return s.store.Sync() }
 func (s *KVStore) Close() error { return s.store.Close() }
-func (s *KVStore) Batch(changes []ports.StoreChange) error {
-	batch := make([]kv.BatchChange, len(changes))
-	for i, change := range changes {
-		batch[i] = kv.BatchChange{Key: change.Key, Value: change.Value, Delete: change.Delete}
-	}
-	return s.store.Batch(batch)
-}
 
 // Open opens an existing strict catalogue and never creates an unproven empty one.
 func Open(dir string) (*Persister, error) {
@@ -86,31 +75,6 @@ func OpenOrCreate(dir string) (OpenResult, error) {
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, statErr)
 	}
-	if !existed {
-		for _, companion := range []string{path + ".next", path + ".prev"} {
-			if _, err := os.Stat(companion); err == nil {
-				return OpenResult{}, fmt.Errorf("%w: %s exists without %s", ErrCatalogueUnreadable, companion, path)
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, companion, err)
-			}
-		}
-	}
-	if existed {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
-		}
-		if len(raw) < 6 || string(raw[:4]) != "VEVK" || binary.BigEndian.Uint16(raw[4:6]) != currentCatalogueVersion {
-			return OpenResult{}, fmt.Errorf("%w: %s: unknown catalogue format", ErrCatalogueUnreadable, path)
-		}
-		data, err := kv.Replay(path)
-		if err != nil {
-			return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
-		}
-		if _, err := decodeAll(data); err != nil {
-			return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
-		}
-	}
 	catalogue, records, err := openCurrentCatalogue(dir, true)
 	if err != nil {
 		return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
@@ -120,20 +84,18 @@ func OpenOrCreate(dir string) (OpenResult, error) {
 
 func New(store ports.Store) *Persister { return &Persister{store: store} }
 
-func catalogueCandidatesPresent(path string) (bool, error) {
-	for _, candidate := range []string{path, path + ".next", path + ".prev"} {
-		if _, err := os.Stat(candidate); err == nil {
-			return true, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return false, err
-		}
+func cataloguePresent(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
 	}
 	return false, nil
 }
 
 func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []domain.CatalogueRecord, error) {
 	path := StorePath(dir)
-	present, err := catalogueCandidatesPresent(path)
+	present, err := cataloguePresent(path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -155,12 +117,8 @@ func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []dom
 func LoadReadOnly(dir string) ([]domain.CatalogueRecord, error) { return LoadCatalogueReadOnly(dir) }
 
 // LoadCatalogueReadOnly loads the catalogue without retaining a store handle.
-// A fresh install with no catalogue candidate at all is not an error: it
-// returns an empty slice. Whenever any candidate (sessions.kv, .next, or
-// .prev) exists, it goes through the same fixed-path compaction recovery the
-// daemon applies on startup (via openCurrentCatalogue / kv.Open), so a
-// .next-only or .prev-only crash state still yields every valid record.
-// Malformed or corrupt data is still a hard error.
+// A fresh install with no main catalogue is not an error. Stray temporary
+// files are ignored, while malformed main files fail closed.
 func LoadCatalogueReadOnly(dir string) ([]domain.CatalogueRecord, error) {
 	p, records, err := openCurrentCatalogue(dir, false)
 	if err != nil {
@@ -223,7 +181,12 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 	if err := p.ensureIncarnationIndexLocked(); err != nil {
 		return err
 	}
-	changes := make([]ports.StoreChange, 0, len(records))
+	type mutation struct {
+		key    []byte
+		value  []byte
+		delete bool
+	}
+	changes := make([]mutation, 0, len(records))
 	keys := make([]string, 0, len(records))
 	for name := range records {
 		keys = append(keys, name)
@@ -235,7 +198,7 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 			return err
 		}
 		if record == nil {
-			changes = append(changes, ports.StoreChange{Key: []byte(name), Delete: true})
+			changes = append(changes, mutation{key: []byte(name), delete: true})
 			continue
 		}
 		if record.Name != name {
@@ -245,7 +208,7 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 		if err != nil {
 			return err
 		}
-		changes = append(changes, ports.StoreChange{Key: []byte(name), Value: value})
+		changes = append(changes, mutation{key: []byte(name), value: value})
 	}
 	incoming := make(map[domain.IncarnationID]string, len(records))
 	for name, record := range records {
@@ -263,9 +226,17 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 			}
 		}
 	}
-	if err := p.store.Batch(changes); err != nil {
-		p.incarnationIndex = false
-		return err
+	for _, change := range changes {
+		var err error
+		if change.delete {
+			err = p.store.Delete(change.key)
+		} else {
+			err = p.store.Set(change.key, change.value)
+		}
+		if err != nil {
+			p.incarnationIndex = false
+			return err
+		}
 	}
 	if err := p.store.Sync(); err != nil {
 		p.incarnationIndex = false

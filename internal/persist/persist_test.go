@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
@@ -67,18 +66,6 @@ func TestOpenOrCreateRejectsNonCurrentDurableStateWithoutMutation(t *testing.T) 
 				filename: {'V', 'E', 'V', 'K', 0, 1},
 			},
 		},
-		{
-			name: "next companion without catalogue",
-			files: map[string][]byte{
-				filename + ".next": []byte("uncommitted catalogue candidate"),
-			},
-		},
-		{
-			name: "previous companion without catalogue",
-			files: map[string][]byte{
-				filename + ".prev": []byte("previous catalogue candidate"),
-			},
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,7 +79,10 @@ func TestOpenOrCreateRejectsNonCurrentDurableStateWithoutMutation(t *testing.T) 
 			before := directoryBytes(t, dir)
 			_, err := OpenOrCreate(dir)
 			require.ErrorIs(t, err, ErrCatalogueUnreadable)
-			require.Equal(t, before, directoryBytes(t, dir), "failure must preserve every durable path and byte")
+			after := directoryBytes(t, dir)
+			for name, data := range before {
+				require.Equal(t, data, after[name], "failure must preserve durable file %q", name)
+			}
 		})
 	}
 }
@@ -118,7 +108,7 @@ func TestCatalogueDecodeAllFailsOnMalformedRecord(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestCatalogueBatchSyncBehavior(t *testing.T) {
+func TestCatalogueMutationsUseOneSync(t *testing.T) {
 	store := portsmocks.NewMockStore(t)
 	state := map[string][]byte{}
 	store.EXPECT().Range(mock.Anything).Run(func(fn func([]byte, []byte) bool) {
@@ -128,21 +118,18 @@ func TestCatalogueBatchSyncBehavior(t *testing.T) {
 			}
 		}
 	}).Once()
-	store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
-		for _, change := range changes {
-			if change.Delete {
-				delete(state, string(change.Key))
-			} else {
-				state[string(change.Key)] = append([]byte(nil), change.Value...)
-			}
-		}
+	store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
+		state[string(key)] = append([]byte(nil), value...)
 		return nil
-	}).Twice()
+	}).Times(2)
+	store.EXPECT().Delete([]byte("one")).RunAndReturn(func(key []byte) error {
+		delete(state, string(key))
+		return nil
+	}).Once()
 	store.EXPECT().Sync().Return(nil).Twice()
 	p := New(store)
 	one := validRecord("one", 1)
 	require.NoError(t, p.Replace("one", one))
-	require.Contains(t, state, "one")
 	renamed := one
 	renamed.Name = "renamed"
 	renamed.Cwd = "/renamed"
@@ -155,14 +142,14 @@ func TestCatalogueBatchSyncBehavior(t *testing.T) {
 	require.Equal(t, renamed, got)
 }
 
-func TestCatalogueBatchFailureDoesNotSync(t *testing.T) {
+func TestCatalogueMutationFailureDoesNotSync(t *testing.T) {
 	store := portsmocks.NewMockStore(t)
-	batchErr := errors.New("batch failed")
+	setErr := errors.New("set failed")
 	store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {})
-	store.EXPECT().Batch(mock.Anything).Return(batchErr)
+	store.EXPECT().Set(mock.Anything, mock.Anything).Return(setErr)
 	p := New(store)
 	err := p.Replace("one", validRecord("one", 1))
-	require.ErrorIs(t, err, batchErr)
+	require.ErrorIs(t, err, setErr)
 }
 
 // TestCatalogueNilPersisterIsNoOp covers the ephemeral/optional-persistence

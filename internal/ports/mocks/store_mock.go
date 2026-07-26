@@ -5,7 +5,6 @@
 package portsmocks
 
 import (
-	"github.com/bnema/vev/internal/ports"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -34,57 +33,6 @@ type MockStore_Expecter struct {
 
 func (_m *MockStore) EXPECT() *MockStore_Expecter {
 	return &MockStore_Expecter{mock: &_m.Mock}
-}
-
-// Batch provides a mock function for the type MockStore
-func (_mock *MockStore) Batch(storeChanges []ports.StoreChange) error {
-	ret := _mock.Called(storeChanges)
-
-	if len(ret) == 0 {
-		panic("no return value specified for Batch")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func([]ports.StoreChange) error); ok {
-		r0 = returnFunc(storeChanges)
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// MockStore_Batch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Batch'
-type MockStore_Batch_Call struct {
-	*mock.Call
-}
-
-// Batch is a helper method to define mock.On call
-//   - storeChanges []ports.StoreChange
-func (_e *MockStore_Expecter) Batch(storeChanges any) *MockStore_Batch_Call {
-	return &MockStore_Batch_Call{Call: _e.mock.On("Batch", storeChanges)}
-}
-
-func (_c *MockStore_Batch_Call) Run(run func(storeChanges []ports.StoreChange)) *MockStore_Batch_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 []ports.StoreChange
-		if args[0] != nil {
-			arg0 = args[0].([]ports.StoreChange)
-		}
-		run(
-			arg0,
-		)
-	})
-	return _c
-}
-
-func (_c *MockStore_Batch_Call) Return(err error) *MockStore_Batch_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *MockStore_Batch_Call) RunAndReturn(run func(storeChanges []ports.StoreChange) error) *MockStore_Batch_Call {
-	_c.Call.Return(run)
-	return _c
 }
 
 // Close provides a mock function for the type MockStore
