@@ -998,6 +998,57 @@ func (_c *MockCatalogue_Replace_Call) RunAndReturn(run func(s string, catalogueR
 	return _c
 }
 
+// UpdateMetadata provides a mock function for the type MockCatalogue
+func (_mock *MockCatalogue) UpdateMetadata(catalogueMetadataUpdate domain.CatalogueMetadataUpdate) error {
+	ret := _mock.Called(catalogueMetadataUpdate)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateMetadata")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(domain.CatalogueMetadataUpdate) error); ok {
+		r0 = returnFunc(catalogueMetadataUpdate)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockCatalogue_UpdateMetadata_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateMetadata'
+type MockCatalogue_UpdateMetadata_Call struct {
+	*mock.Call
+}
+
+// UpdateMetadata is a helper method to define mock.On call
+//   - catalogueMetadataUpdate domain.CatalogueMetadataUpdate
+func (_e *MockCatalogue_Expecter) UpdateMetadata(catalogueMetadataUpdate any) *MockCatalogue_UpdateMetadata_Call {
+	return &MockCatalogue_UpdateMetadata_Call{Call: _e.mock.On("UpdateMetadata", catalogueMetadataUpdate)}
+}
+
+func (_c *MockCatalogue_UpdateMetadata_Call) Run(run func(catalogueMetadataUpdate domain.CatalogueMetadataUpdate)) *MockCatalogue_UpdateMetadata_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 domain.CatalogueMetadataUpdate
+		if args[0] != nil {
+			arg0 = args[0].(domain.CatalogueMetadataUpdate)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockCatalogue_UpdateMetadata_Call) Return(err error) *MockCatalogue_UpdateMetadata_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockCatalogue_UpdateMetadata_Call) RunAndReturn(run func(catalogueMetadataUpdate domain.CatalogueMetadataUpdate) error) *MockCatalogue_UpdateMetadata_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // NewMockSnapshotRepository creates a new instance of MockSnapshotRepository. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
 // The first argument is typically a *testing.T value.
 func NewMockSnapshotRepository(t interface {

@@ -268,11 +268,13 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 			}
 		}
 	}
-	// The catalogue checkpoint already authorizes this runtime. Rewriting it
-	// during restoration would discard committed/fallback recovery metadata.
-	if d.catalogue == nil && d.persistEnabled {
-		if err := d.persist.Create(sess.persistRecordLocked(sess.createdAt)); err != nil {
-			return false, err
+	// An existing catalogue checkpoint already authorizes this runtime. Only a
+	// legacy snapshot without a catalogue record creates fresh metadata here.
+	if d.persistEnabled {
+		if _, ok := d.catalogueRecord(sess.name); !ok {
+			if err := d.createCatalogueRecord(sess.persistRecordLocked(sess.createdAt)); err != nil {
+				return false, err
+			}
 		}
 	}
 	d.mu.Lock()

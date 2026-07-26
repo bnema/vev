@@ -186,8 +186,8 @@ func (d *Daemon) touchMRU(sess *session) {
 	incarnation := sess.incarnation
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
-	if !ephemeral && d.persist != nil {
-		if err := d.persist.TouchMRU(name, incarnation, seq); err != nil {
+	if !ephemeral {
+		if err := d.updateCatalogueMetadata(domain.CatalogueMetadataUpdate{Name: name, IncarnationID: incarnation, LastUsedSeq: &seq}); err != nil {
 			d.log.Warn("touching persisted session recency failed", "err", err, "session", name)
 		}
 	}
@@ -204,7 +204,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			// the persisted identity rather than receive a fresh timestamp.
 			createdAt = stopped.createdAt
 			incarnation = stopped.incarnation
-			if authoritative, ok := d.persist.Record(name); ok {
+			if authoritative, ok := d.catalogueRecord(name); ok {
 				incarnation = authoritative.IncarnationID
 				createdAt = authoritative.CreatedAt
 			}
@@ -290,13 +290,13 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			record := persist.Record{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names, RecoveryState: domain.RecoveryFresh}
 			var err error
 			if resuming {
-				if _, ok := d.persist.Record(name); ok {
-					err = d.persist.UpdateMetadata(record)
+				if _, ok := d.catalogueRecord(name); ok {
+					err = d.updateCatalogueMetadata(record.MetadataUpdate())
 				} else {
-					err = d.persist.Create(record)
+					err = d.createCatalogueRecord(record)
 				}
 			} else {
-				err = d.persist.Create(record)
+				err = d.createCatalogueRecord(record)
 			}
 			if err != nil {
 				closeTabs(tabs)
@@ -444,7 +444,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	record := sess.persistRecordLocked(time.Now().UnixNano())
 	ephemeral := sess.ephemeral
 	if !ephemeral {
-		if err := d.persist.UpdateMetadata(record); err != nil {
+		if err := d.updateCatalogueMetadata(record.MetadataUpdate()); err != nil {
 			sess.tabs = sess.tabs[:len(sess.tabs)-1]
 			sess.active = oldActive
 			if tb.cancel != nil {
@@ -714,7 +714,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	// the old tombstone transaction. Ephemeral promotion has no old durable
 	// identity and can create its first record directly.
 	if (wasEphemeral || oldName != name) && d.persistEnabled {
-		if err := d.persist.Create(record); err != nil {
+		if err := d.createCatalogueRecord(record); err != nil {
 			return rollback(err)
 		}
 	}
@@ -774,7 +774,7 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 	record := sess.persistRecordLocked(time.Now().UnixNano())
 	ephemeral := sess.ephemeral
 	if !ephemeral {
-		if err := d.persist.UpdateMetadata(record); err != nil {
+		if err := d.updateCatalogueMetadata(record.MetadataUpdate()); err != nil {
 			tb.name = oldName
 			sess.mu.Unlock()
 			d.mu.Unlock()
@@ -853,7 +853,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 	record := sess.persistRecordLocked(time.Now().UnixNano())
 	ephemeral := sess.ephemeral
 	if !ephemeral {
-		if err := d.persist.UpdateMetadata(record); err != nil {
+		if err := d.updateCatalogueMetadata(record.MetadataUpdate()); err != nil {
 			d.log.Warn("persisting closed tab failed", "err", err, "session", name)
 		}
 	}
@@ -910,12 +910,12 @@ func (d *Daemon) beginSnapshotPurge(name string, incarnation domain.IncarnationI
 // a later live/offline kill can retry the idempotent source deletes.
 func (d *Daemon) finishSnapshotPurge(name string, incarnation domain.IncarnationID) error {
 	if d.snapshotRepository == nil {
-		return d.persist.Delete(name)
+		return d.deleteCatalogueRecord(name)
 	}
 	if err := d.snapshotRepository.QuarantineDeletionSources(context.Background(), domain.DeletionTombstone{Name: name, IncarnationID: incarnation}, false); err != nil {
 		return err
 	}
-	if err := d.persist.Delete(name); err != nil {
+	if err := d.deleteCatalogueRecord(name); err != nil {
 		return err
 	}
 	return d.snapshotRepository.DeleteDeletionTombstone(context.Background(), incarnation)
@@ -935,7 +935,7 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 	// stopped record retains the metadata-only deletion behavior.
 	if d.snapshotRepository == nil {
 		d.mu.Unlock()
-		if err := d.persist.Delete(name); err != nil {
+		if err := d.deleteCatalogueRecord(name); err != nil {
 			return err
 		}
 		d.mu.Lock()
@@ -1358,7 +1358,8 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		if err := d.persist.Touch(name, incarnation, cwd, time.Now().UnixNano()); err != nil {
+		updatedAt := time.Now().UnixNano()
+		if err := d.updateCatalogueMetadata(domain.CatalogueMetadataUpdate{Name: name, IncarnationID: incarnation, Cwd: &cwd, UpdatedAt: &updatedAt}); err != nil {
 			d.log.Warn("touching persisted session cwd failed", "err", err, "session", name)
 		}
 		markSnapshotDirty(sess)

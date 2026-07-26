@@ -208,79 +208,38 @@ func (p *Persister) Replace(name string, next domain.CatalogueRecord) error {
 // UpdateMetadata atomically updates ordinary session metadata on the existing
 // authoritative incarnation. Recovery and transaction fields are retained from
 // the stored record rather than accepted from a potentially stale runtime copy.
-func (p *Persister) UpdateMetadata(next domain.CatalogueRecord) error {
+func (p *Persister) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
 	if p == nil || p.store == nil {
 		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	value, ok := p.store.Get([]byte(next.Name))
+	value, ok := p.store.Get([]byte(update.Name))
 	if !ok {
 		return errors.New("persist: session not found")
 	}
-	current, err := decodeRecordValue(next.Name, value)
+	current, err := decodeRecordValue(update.Name, value)
 	if err != nil {
 		return err
 	}
-	if next.IncarnationID == (domain.IncarnationID{}) || current.IncarnationID != next.IncarnationID {
+	if update.IncarnationID == (domain.IncarnationID{}) || current.IncarnationID != update.IncarnationID {
 		return errors.New("persist: session incarnation changed")
 	}
-	current.Cwd = next.Cwd
-	current.UpdatedAt = next.UpdatedAt
-	current.LastUsedSeq = next.LastUsedSeq
-	current.TabNames = append([]string(nil), next.TabNames...)
+	if update.Cwd != nil {
+		current.Cwd = *update.Cwd
+	}
+	if update.UpdatedAt != nil {
+		current.UpdatedAt = *update.UpdatedAt
+	}
+	if update.LastUsedSeq != nil {
+		current.LastUsedSeq = *update.LastUsedSeq
+	}
+	if update.TabNames != nil {
+		current.TabNames = append([]string(nil), (*update.TabNames)...)
+	}
 	return p.applyLocked(map[string]*domain.CatalogueRecord{current.Name: &current})
 }
 
-// Touch updates metadata while retaining the durable identity and recovery state.
-func (p *Persister) Touch(name string, incarnation domain.IncarnationID, cwd string, at int64) error {
-	if p == nil || p.store == nil {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	value, ok := p.store.Get([]byte(name))
-	if !ok {
-		return errors.New("persist: session not found")
-	}
-	record, err := decodeRecordValue(name, value)
-	if err != nil {
-		return err
-	}
-	if incarnation == (domain.IncarnationID{}) || record.IncarnationID != incarnation {
-		return errors.New("persist: session incarnation changed")
-	}
-	record.Cwd, record.UpdatedAt = cwd, at
-	encoded, err := encodeRecordValue(record)
-	if err != nil {
-		return err
-	}
-	return p.store.Set([]byte(name), encoded)
-}
-func (p *Persister) TouchMRU(name string, incarnation domain.IncarnationID, sequence uint64) error {
-	if p == nil || p.store == nil {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	value, ok := p.store.Get([]byte(name))
-	if !ok {
-		return errors.New("persist: session not found")
-	}
-	record, err := decodeRecordValue(name, value)
-	if err != nil {
-		return err
-	}
-	if incarnation == (domain.IncarnationID{}) || record.IncarnationID != incarnation {
-		return errors.New("persist: session incarnation changed")
-	}
-	record.LastUsedSeq = sequence
-	encoded, err := encodeRecordValue(record)
-	if err != nil {
-		return err
-	}
-	return p.store.Set([]byte(name), encoded)
-}
 func (p *Persister) Delete(name string) error {
 	return p.Apply(map[string]*domain.CatalogueRecord{name: nil})
 }

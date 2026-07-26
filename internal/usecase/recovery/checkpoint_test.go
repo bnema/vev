@@ -29,6 +29,9 @@ func (c *checkpointCatalogue) Record(name string) (domain.CatalogueRecord, bool)
 	return c.record, c.record.Name == name
 }
 func (c *checkpointCatalogue) Create(domain.CatalogueRecord) error { return nil }
+func (c *checkpointCatalogue) UpdateMetadata(domain.CatalogueMetadataUpdate) error {
+	return nil
+}
 func (c *checkpointCatalogue) Replace(name string, record domain.CatalogueRecord) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -105,13 +105,23 @@ func testCatalogueMetadataUpdatePreservesAuthority(t *testing.T) {
 	}
 	require.NoError(t, p.Create(original))
 
-	update := domain.CatalogueRecord{Name: "work", IncarnationID: original.IncarnationID, Cwd: "/new", UpdatedAt: 22, LastUsedSeq: 23, TabNames: []string{"editor", "logs"}}
+	next := domain.CatalogueRecord{Name: "work", IncarnationID: original.IncarnationID, Cwd: "/new", UpdatedAt: 22, LastUsedSeq: 23, TabNames: []string{"editor", "logs"}}
+	update := next.MetadataUpdate()
 	require.NoError(t, p.UpdateMetadata(update))
 	got, ok := p.Record("work")
 	require.True(t, ok)
 	expected := original
-	expected.Cwd, expected.UpdatedAt, expected.LastUsedSeq, expected.TabNames = update.Cwd, update.UpdatedAt, update.LastUsedSeq, update.TabNames
+	expected.Cwd, expected.UpdatedAt, expected.LastUsedSeq, expected.TabNames = next.Cwd, next.UpdatedAt, next.LastUsedSeq, next.TabNames
 	require.Equal(t, expected, got)
+
+	lastUsedSeq := uint64(24)
+	require.NoError(t, p.UpdateMetadata(domain.CatalogueMetadataUpdate{
+		Name: "work", IncarnationID: original.IncarnationID, LastUsedSeq: &lastUsedSeq,
+	}))
+	expected.LastUsedSeq = lastUsedSeq
+	partiallyUpdated, ok := p.Record("work")
+	require.True(t, ok)
+	require.Equal(t, expected, partiallyUpdated, "a partial metadata update must not clear other mutable or authority-owned fields")
 
 	stale := update
 	stale.IncarnationID = domain.IncarnationID{2}

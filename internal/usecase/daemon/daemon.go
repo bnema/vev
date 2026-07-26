@@ -256,6 +256,7 @@ func WithShell(cmd string, args []string) Option {
 func WithStore(store ports.Store) Option {
 	return func(d *Daemon) {
 		d.persist = persist.New(store)
+		d.catalogue = d.persist
 		d.persistEnabled = store != nil
 	}
 }
@@ -265,9 +266,6 @@ func WithStore(store ports.Store) Option {
 func WithCatalogue(catalogue ports.Catalogue, records []domain.CatalogueRecord) Option {
 	return func(d *Daemon) {
 		d.catalogue = catalogue
-		if persister, ok := catalogue.(*persist.Persister); ok {
-			d.persist = persister
-		}
 		d.persistEnabled = catalogue != nil
 		d.catalogueRecords = append([]domain.CatalogueRecord(nil), records...)
 		d.catalogueRecordsProvided = true

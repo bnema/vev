@@ -22,8 +22,9 @@ import (
 
 type durableRecoveryCatalogue struct {
 	ports.Catalogue
-	mu      sync.Mutex
-	records map[string]domain.CatalogueRecord
+	mu              sync.Mutex
+	records         map[string]domain.CatalogueRecord
+	metadataUpdates []domain.CatalogueMetadataUpdate
 }
 
 func newDurableRecoveryCatalogue(records []domain.CatalogueRecord) *durableRecoveryCatalogue {
@@ -59,6 +60,39 @@ func (c *durableRecoveryCatalogue) Replace(name string, record domain.CatalogueR
 	}
 	c.records[name] = record
 	return nil
+}
+
+func (c *durableRecoveryCatalogue) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	record, ok := c.records[update.Name]
+	if !ok {
+		return errors.New("catalogue record not found")
+	}
+	if update.IncarnationID == (domain.IncarnationID{}) || record.IncarnationID != update.IncarnationID {
+		return errors.New("catalogue incarnation changed")
+	}
+	if update.Cwd != nil {
+		record.Cwd = *update.Cwd
+	}
+	if update.UpdatedAt != nil {
+		record.UpdatedAt = *update.UpdatedAt
+	}
+	if update.LastUsedSeq != nil {
+		record.LastUsedSeq = *update.LastUsedSeq
+	}
+	if update.TabNames != nil {
+		record.TabNames = append([]string(nil), (*update.TabNames)...)
+	}
+	c.records[update.Name] = record
+	c.metadataUpdates = append(c.metadataUpdates, update)
+	return nil
+}
+
+func (c *durableRecoveryCatalogue) MetadataUpdates() []domain.CatalogueMetadataUpdate {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]domain.CatalogueMetadataUpdate(nil), c.metadataUpdates...)
 }
 
 func (c *durableRecoveryCatalogue) Close() error { return nil }

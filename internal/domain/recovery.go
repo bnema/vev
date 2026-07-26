@@ -42,6 +42,28 @@ type CatalogueRecord struct {
 	DegradedReason string
 }
 
+// CatalogueMetadataUpdate changes mutable runtime metadata for one catalogue
+// incarnation without carrying authority-owned recovery or checkpoint fields.
+type CatalogueMetadataUpdate struct {
+	Name          string
+	IncarnationID IncarnationID
+	Cwd           *string
+	UpdatedAt     *int64
+	LastUsedSeq   *uint64
+	TabNames      *[]string
+}
+
+// MetadataUpdate returns a complete mutable-metadata update for r. Catalogue
+// implementations retain all recovery and checkpoint fields they own.
+func (r CatalogueRecord) MetadataUpdate() CatalogueMetadataUpdate {
+	cwd, updatedAt, lastUsedSeq := r.Cwd, r.UpdatedAt, r.LastUsedSeq
+	tabNames := append([]string(nil), r.TabNames...)
+	return CatalogueMetadataUpdate{
+		Name: r.Name, IncarnationID: r.IncarnationID,
+		Cwd: &cwd, UpdatedAt: &updatedAt, LastUsedSeq: &lastUsedSeq, TabNames: &tabNames,
+	}
+}
+
 // DiscardIntent records a requested replacement of uncertain persisted state.
 type DiscardIntent struct {
 	OldRecord      CatalogueRecord

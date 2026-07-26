@@ -138,6 +138,7 @@ type Catalogue interface {
 	Records() []domain.CatalogueRecord
 	Record(string) (domain.CatalogueRecord, bool)
 	Create(domain.CatalogueRecord) error
+	UpdateMetadata(domain.CatalogueMetadataUpdate) error
 	Replace(string, domain.CatalogueRecord) error
 	Rename(string, domain.CatalogueRecord) error
 	Delete(string) error

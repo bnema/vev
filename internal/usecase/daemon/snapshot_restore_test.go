@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
@@ -263,8 +262,6 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "restored")
 	generation := acceptanceGeneration(t, snapshot, 9)
 	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
-	store, _ := newMockStore(t)
-	catalogue := persist.New(store)
 	committed := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	fallback1 := domain.CheckpointRef{Generation: 8, ManifestDigest: [32]byte{8}}
 	fallback2 := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
@@ -274,7 +271,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 		TabNames: []string{"before"}, RecoveryState: domain.RecoveryHealthy,
 		Committed: &committed, Fallbacks: [2]*domain.CheckpointRef{&fallback1, &fallback2},
 	}
-	require.NoError(t, catalogue.Create(record))
+	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 
 	pty, release := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
@@ -291,6 +288,9 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	require.NotNil(t, restored)
 	require.NoError(t, d.renameTab(restored, restored.tabs[0], "after"))
 
+	updates := catalogue.MetadataUpdates()
+	require.Len(t, updates, 1, "the authoritative Catalogue port must receive restored-session metadata updates")
+	require.Equal(t, record.IncarnationID, updates[0].IncarnationID)
 	updated, ok := catalogue.Record(record.Name)
 	require.True(t, ok)
 	require.Equal(t, record.IncarnationID, updated.IncarnationID)
