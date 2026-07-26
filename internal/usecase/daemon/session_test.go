@@ -787,8 +787,9 @@ func (s newStaticStore) Range(fn func(k, v []byte) bool) {
 		}
 	}
 }
-func (s newStaticStore) Sync() error  { return nil }
-func (s newStaticStore) Close() error { return nil }
+func (s newStaticStore) Sync() error             { return nil }
+func (s newStaticStore) CloseWithoutSync() error { return nil }
+func (s newStaticStore) Close() error            { return nil }
 
 func TestNamedSessionCreationIsAllowedWithNilStore(t *testing.T) {
 	pty, release := newBlockingPTY(t)

@@ -256,14 +256,12 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord, dura
 			err = p.store.Set(change.key, change.value)
 		}
 		if err != nil {
-			p.restoreLocked(previous)
-			return p.fenceLocked(err)
+			return p.fenceLocked(errors.Join(err, p.restoreLocked(previous)))
 		}
 	}
 	if durable {
 		if err := p.store.Sync(); err != nil {
-			p.restoreLocked(previous)
-			return p.fenceLocked(err)
+			return p.fenceLocked(errors.Join(err, p.restoreLocked(previous)))
 		}
 	}
 	for name := range records {
@@ -288,14 +286,16 @@ type storedValue struct {
 
 // restoreLocked restores only keys affected by the rejected identity mutation.
 // It intentionally does not Sync: the Persister is fenced immediately after.
-func (p *Persister) restoreLocked(previous map[string]storedValue) {
+func (p *Persister) restoreLocked(previous map[string]storedValue) error {
+	var err error
 	for key, old := range previous {
 		if old.exists {
-			_ = p.store.Set([]byte(key), old.value)
+			err = errors.Join(err, p.store.Set([]byte(key), old.value))
 		} else {
-			_ = p.store.Delete([]byte(key))
+			err = errors.Join(err, p.store.Delete([]byte(key)))
 		}
 	}
+	return err
 }
 
 func (p *Persister) fenceLocked(cause error) error {
@@ -445,13 +445,7 @@ func (p *Persister) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.terminalLocked(); err != nil {
-		if store, ok := p.store.(interface{ CloseWithoutSync() error }); ok {
-			if closeErr := store.CloseWithoutSync(); closeErr != nil {
-				return errors.Join(err, closeErr)
-			}
-			return err
-		}
-		if closeErr := p.store.Close(); closeErr != nil {
+		if closeErr := p.store.CloseWithoutSync(); closeErr != nil {
 			return errors.Join(err, closeErr)
 		}
 		return err

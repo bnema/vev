@@ -191,13 +191,14 @@ func TestDecodeRejectsDuplicateKeysAndTrailingData(t *testing.T) {
 	require.True(t, errors.Is(err, ErrCorrupt))
 }
 
-func TestCloseWithoutSyncDiscardsDirtyStore(t *testing.T) {
+func TestCloseWithoutSyncPreventsLaterCloseFromSyncing(t *testing.T) {
 	t.Parallel()
 	path := privateStorePath(t)
 	store, err := Open(path)
 	require.NoError(t, err)
 	require.NoError(t, store.Set([]byte("rejected"), []byte("value")))
 	require.NoError(t, store.CloseWithoutSync())
+	require.NoError(t, store.Close(), "a later normal Close must remain a no-op")
 
 	reopened, err := Open(path)
 	require.NoError(t, err)

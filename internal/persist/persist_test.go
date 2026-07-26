@@ -216,17 +216,26 @@ type failClosedStore struct {
 	data    map[string][]byte
 	durable map[string][]byte
 
-	setFailures    int
-	deleteFailures int
-	syncFailures   int
-	failure        error
+	setFailures           int
+	deleteFailures        int
+	syncFailures          int
+	restoreSetFailures    int
+	restoreDeleteFailures int
+	restoring             bool
+	failure               error
+	restoreFailure        error
 
 	closeFlushed bool
 	closeAborted bool
 }
 
 func newFailClosedStore(data map[string][]byte) *failClosedStore {
-	return &failClosedStore{data: copyStoreData(data), durable: copyStoreData(data), failure: errors.New("store write failed")}
+	return &failClosedStore{
+		data:           copyStoreData(data),
+		durable:        copyStoreData(data),
+		failure:        errors.New("store write failed"),
+		restoreFailure: errors.New("store restore failed"),
+	}
 }
 
 func (s *failClosedStore) Get(key []byte) ([]byte, bool) {
@@ -236,6 +245,10 @@ func (s *failClosedStore) Get(key []byte) ([]byte, bool) {
 
 func (s *failClosedStore) Set(key, value []byte) error {
 	s.data[string(key)] = append([]byte(nil), value...)
+	if s.restoring && s.restoreSetFailures > 0 {
+		s.restoreSetFailures--
+		return s.restoreFailure
+	}
 	if s.setFailures > 0 {
 		s.setFailures--
 		return s.failure
@@ -245,6 +258,10 @@ func (s *failClosedStore) Set(key, value []byte) error {
 
 func (s *failClosedStore) Delete(key []byte) error {
 	delete(s.data, string(key))
+	if s.restoring && s.restoreDeleteFailures > 0 {
+		s.restoreDeleteFailures--
+		return s.restoreFailure
+	}
 	if s.deleteFailures > 0 {
 		s.deleteFailures--
 		return s.failure
@@ -263,6 +280,7 @@ func (s *failClosedStore) Range(fn func([]byte, []byte) bool) {
 func (s *failClosedStore) Sync() error {
 	if s.syncFailures > 0 {
 		s.syncFailures--
+		s.restoring = true
 		return s.failure
 	}
 	s.durable = copyStoreData(s.data)
@@ -409,6 +427,34 @@ func TestRejectedIdentityWriteFencesCatalogue(t *testing.T) {
 			require.Equal(t, tt.initial, store.durable, "Close must not make rejected state durable")
 		})
 	}
+}
+
+func TestFailedSyncRetainsRepeatedRollbackFailuresAndAborts(t *testing.T) {
+	t.Parallel()
+	encoded, err := encodeRecordValue(validRecord("work", 1))
+	require.NoError(t, err)
+	store := newFailClosedStore(map[string][]byte{"work": encoded})
+	store.syncFailures = 1
+	store.restoreSetFailures = 1
+	store.restoreDeleteFailures = 1
+	p := New(store)
+
+	err = p.Rename("work", validRecord("renamed", 1))
+	require.ErrorIs(t, err, ErrCatalogueDurability)
+	require.ErrorIs(t, err, store.failure)
+	require.ErrorIs(t, err, store.restoreFailure)
+	require.Zero(t, store.restoreSetFailures, "rollback Set failure must be observed")
+	require.Zero(t, store.restoreDeleteFailures, "rollback Delete failure must be observed")
+
+	terminal := p.Sync()
+	require.Same(t, err, terminal, "the fenced terminal error must remain stable")
+	require.ErrorIs(t, terminal, store.failure)
+	require.ErrorIs(t, terminal, store.restoreFailure)
+	require.ErrorIs(t, p.Close(), ErrCatalogueDurability)
+	require.True(t, store.closeAborted)
+	require.False(t, store.closeFlushed)
+	require.Equal(t, map[string][]byte{"work": encoded}, store.durable,
+		"aborting a fenced store must not persist dirty rejected state")
 }
 
 func TestRejectedIdentityWriteRestoresBufferedMetadata(t *testing.T) {

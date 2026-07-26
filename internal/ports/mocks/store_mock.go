@@ -79,6 +79,50 @@ func (_c *MockStore_Close_Call) RunAndReturn(run func() error) *MockStore_Close_
 	return _c
 }
 
+// CloseWithoutSync provides a mock function for the type MockStore
+func (_mock *MockStore) CloseWithoutSync() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for CloseWithoutSync")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_CloseWithoutSync_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CloseWithoutSync'
+type MockStore_CloseWithoutSync_Call struct {
+	*mock.Call
+}
+
+// CloseWithoutSync is a helper method to define mock.On call
+func (_e *MockStore_Expecter) CloseWithoutSync() *MockStore_CloseWithoutSync_Call {
+	return &MockStore_CloseWithoutSync_Call{Call: _e.mock.On("CloseWithoutSync")}
+}
+
+func (_c *MockStore_CloseWithoutSync_Call) Run(run func()) *MockStore_CloseWithoutSync_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockStore_CloseWithoutSync_Call) Return(err error) *MockStore_CloseWithoutSync_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_CloseWithoutSync_Call) RunAndReturn(run func() error) *MockStore_CloseWithoutSync_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Delete provides a mock function for the type MockStore
 func (_mock *MockStore) Delete(key []byte) error {
 	ret := _mock.Called(key)

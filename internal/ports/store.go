@@ -16,6 +16,9 @@ type Store interface {
 	// or mutate either slice after Range returns.
 	Range(fn func(k, v []byte) bool)
 	Sync() error
+	// CloseWithoutSync releases the store without persisting buffered writes.
+	// Callers use it after a rejected durable mutation.
+	CloseWithoutSync() error
 	Close() error
 }
 
