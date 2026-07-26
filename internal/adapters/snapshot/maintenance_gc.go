@@ -431,7 +431,7 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 			if budget.Entries == 0 {
 				return false, nil
 			}
-			refs, consumedBytes, admitted, err := r.validateMaintenanceCheckpoint(ctx, plan.IncarnationID, ref, budget.Bytes)
+			validated, consumedBytes, admitted, err := r.validateMaintenanceCheckpoint(ctx, plan.IncarnationID, ref, budget.Bytes)
 			if err != nil {
 				return false, fmt.Errorf("validate retained manifest %d: %w", ref.Generation, err)
 			}
@@ -440,7 +440,7 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 			}
 			budget.Entries--
 			budget.Bytes -= consumedBytes
-			for digest := range refs {
+			for digest := range validated.refs {
 				state.references[digest] = struct{}{}
 			}
 			state.validateIndex++
@@ -591,14 +591,19 @@ func retentionToken(plan ports.RetentionPlan) string {
 // before reading it. It validates directly instead of calling LoadCheckpoint,
 // which would materialize a complete generation before maintenance could
 // enforce its byte budget.
-func (r *Repository) validateMaintenanceCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef, byteBudget uint64) (map[ports.SnapshotDigest]codec.ObjectRef, uint64, bool, error) {
+type validatedMaintenanceCheckpoint struct {
+	refs   map[ports.SnapshotDigest]codec.ObjectRef
+	parent *domain.CheckpointRef
+}
+
+func (r *Repository) validateMaintenanceCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef, byteBudget uint64) (validatedMaintenanceCheckpoint, uint64, bool, error) {
 	manifestPath := r.manifestPath(id, ref.Generation)
 	info, err := r.stat(manifestPath)
 	if err != nil {
-		return nil, 0, false, err
+		return validatedMaintenanceCheckpoint{}, 0, false, err
 	}
 	if info.Size() < 0 || uint64(info.Size()) > byteBudget {
-		return nil, 0, false, nil
+		return validatedMaintenanceCheckpoint{}, 0, false, nil
 	}
 	consumed := uint64(info.Size())
 	if hook := r.hooks.beforeMaintenancePayloadRead; hook != nil {
@@ -606,27 +611,27 @@ func (r *Repository) validateMaintenanceCheckpoint(ctx context.Context, id domai
 	}
 	data, err := r.readBounded(manifestPath)
 	if err != nil {
-		return nil, 0, false, err
+		return validatedMaintenanceCheckpoint{}, consumed, false, err
 	}
 	manifest, err := codec.UnmarshalManifest(data)
 	if err != nil || manifest.Generation != ref.Generation || manifest.IncarnationID != id || sha256.Sum256(data) != ref.ManifestDigest {
-		return nil, 0, false, errors.New("catalogue reference mismatch")
+		return validatedMaintenanceCheckpoint{}, consumed, false, errors.New("catalogue reference mismatch")
 	}
 	refs, valid := maintenanceManifestRefs(manifest)
 	if !valid || !withinGenerationBudget(len(data), refs) {
-		return nil, 0, false, errors.New("invalid manifest references")
+		return validatedMaintenanceCheckpoint{}, consumed, false, errors.New("invalid manifest references")
 	}
 	for digest, objectRef := range refs {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, false, err
+			return validatedMaintenanceCheckpoint{}, consumed, false, err
 		}
 		path := r.objectPath(id, digest)
 		info, err := r.stat(path)
 		if err != nil {
-			return nil, 0, false, err
+			return validatedMaintenanceCheckpoint{}, consumed, false, err
 		}
 		if info.Size() < 0 || uint64(info.Size()) > byteBudget-consumed {
-			return nil, 0, false, nil
+			return validatedMaintenanceCheckpoint{}, consumed, false, nil
 		}
 		consumed += uint64(info.Size())
 		if hook := r.hooks.beforeMaintenancePayloadRead; hook != nil {
@@ -634,13 +639,13 @@ func (r *Repository) validateMaintenanceCheckpoint(ctx context.Context, id domai
 		}
 		object, err := r.readBounded(path)
 		if err != nil {
-			return nil, 0, false, err
+			return validatedMaintenanceCheckpoint{}, consumed, false, err
 		}
 		if sha256.Sum256(object) != digest || !validObject(object, objectRef) {
-			return nil, 0, false, errors.New("invalid retained object")
+			return validatedMaintenanceCheckpoint{}, consumed, false, errors.New("invalid retained object")
 		}
 	}
-	return refs, consumed, true, nil
+	return validatedMaintenanceCheckpoint{refs: refs, parent: manifest.ParentCheckpoint}, consumed, true, nil
 }
 
 // Reconcile scans top-level incarnation namespaces from an external seek
@@ -696,7 +701,8 @@ func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRe
 		findingCapacity = int(budget.Entries)
 	}
 	findings = make([]ports.ReconcileFinding, 0, findingCapacity)
-	for scanned := uint64(0); scanned < budget.Entries; scanned++ {
+	stepConsumed := ports.MaintenanceBudget{}
+	for scanned := uint64(0); scanned < budget.Entries && stepConsumed.Entries < budget.Entries; scanned++ {
 		entries, done, err := r.readMaintenanceDirent(root, 1, state)
 		if errors.Is(err, os.ErrNotExist) {
 			return ports.ReconcileCursor{}, findings, nil
@@ -718,15 +724,21 @@ func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRe
 			}
 			continue
 		}
+		findingIndex := len(findings)
 		var id domain.IncarnationID
 		if err := id.UnmarshalText([]byte(entry.name)); err != nil {
 			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name}, Cursor: next, Consumed: ports.MaintenanceBudget{Entries: 1}})
 		} else if record, ok := byIncarnation[id]; !ok {
 			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name, IncarnationID: id}, Cursor: next, Consumed: ports.MaintenanceBudget{Entries: 1}})
 		} else {
-			finding := r.reconcileIncarnation(ctx, record, budget)
+			remaining := ports.MaintenanceBudget{Entries: budget.Entries - stepConsumed.Entries, Bytes: budget.Bytes - stepConsumed.Bytes}
+			finding := r.reconcileIncarnation(ctx, record, remaining)
 			finding.Cursor = next
 			findings = append(findings, finding)
+		}
+		if len(findings) > findingIndex {
+			stepConsumed.Entries += findings[findingIndex].Consumed.Entries
+			stepConsumed.Bytes += findings[findingIndex].Consumed.Bytes
 		}
 		if done {
 			return ports.ReconcileCursor{}, findings, nil
@@ -739,6 +751,20 @@ func (r *Repository) reconcileIncarnation(ctx context.Context, record domain.Cat
 	finding := ports.ReconcileFinding{Kind: ports.ReconcileInvalidCandidate, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: record.Name, IncarnationID: record.IncarnationID}, Consumed: ports.MaintenanceBudget{Entries: 1}}
 	if record.Committed == nil {
 		return finding
+	}
+	headPath := r.headPath(record.IncarnationID)
+	info, err := r.stat(headPath)
+	if err != nil || info.Size() < 0 {
+		return finding
+	}
+	headBytes := uint64(info.Size())
+	if headBytes > budget.Bytes-finding.Consumed.Bytes {
+		finding.Status = ports.ReconcileBudgetExhausted
+		return finding
+	}
+	finding.Consumed.Bytes += headBytes
+	if hook := r.hooks.beforeMaintenancePayloadRead; hook != nil {
+		hook(headPath)
 	}
 	generation, digest, err := r.readHead(record.IncarnationID)
 	if err != nil {
@@ -760,8 +786,8 @@ func (r *Repository) reconcileIncarnation(ctx context.Context, record domain.Cat
 	if err != nil {
 		return finding
 	}
-	finding.Candidate.Parent = candidate.ParentCheckpoint
-	parent := candidate.ParentCheckpoint
+	finding.Candidate.Parent = candidate.parent
+	parent := candidate.parent
 	for parent != nil && *parent != *record.Committed {
 		ancestor, exhausted, err := r.reconcileLoad(ctx, record, *parent, &finding.Consumed, budget)
 		if exhausted {
@@ -771,8 +797,8 @@ func (r *Repository) reconcileIncarnation(ctx context.Context, record domain.Cat
 		if err != nil {
 			return finding
 		}
-		finding.AncestorChain = append(finding.AncestorChain, ports.ValidatedCheckpoint{Ref: *parent, Parent: ancestor.ParentCheckpoint})
-		parent = ancestor.ParentCheckpoint
+		finding.AncestorChain = append(finding.AncestorChain, ports.ValidatedCheckpoint{Ref: *parent, Parent: ancestor.parent})
+		parent = ancestor.parent
 	}
 	if parent == nil {
 		return finding
@@ -781,24 +807,20 @@ func (r *Repository) reconcileIncarnation(ctx context.Context, record domain.Cat
 	return finding
 }
 
-func (r *Repository) reconcileLoad(ctx context.Context, record domain.CatalogueRecord, ref domain.CheckpointRef, consumed *ports.MaintenanceBudget, budget ports.MaintenanceBudget) (ports.SnapshotGeneration, bool, error) {
+func (r *Repository) reconcileLoad(ctx context.Context, record domain.CatalogueRecord, ref domain.CheckpointRef, consumed *ports.MaintenanceBudget, budget ports.MaintenanceBudget) (validatedMaintenanceCheckpoint, bool, error) {
 	if consumed.Entries >= budget.Entries || consumed.Bytes >= budget.Bytes {
-		return ports.SnapshotGeneration{}, true, nil
+		return validatedMaintenanceCheckpoint{}, true, nil
 	}
-	_, bytes, admitted, err := r.validateMaintenanceCheckpoint(ctx, record.IncarnationID, ref, budget.Bytes-consumed.Bytes)
+	validated, bytes, admitted, err := r.validateMaintenanceCheckpoint(ctx, record.IncarnationID, ref, budget.Bytes-consumed.Bytes)
+	consumed.Bytes += bytes
 	if err != nil {
-		return ports.SnapshotGeneration{}, false, err
+		return validatedMaintenanceCheckpoint{}, false, err
 	}
 	if !admitted {
-		return ports.SnapshotGeneration{}, true, nil
-	}
-	generation, err := r.LoadCheckpoint(ctx, record.IncarnationID, record.Name, ref)
-	if err != nil {
-		return ports.SnapshotGeneration{}, false, err
+		return validatedMaintenanceCheckpoint{}, true, nil
 	}
 	consumed.Entries++
-	consumed.Bytes += bytes
-	return generation, false, nil
+	return validated, false, nil
 }
 
 func retainedReferences(marked map[uint64]manifestMaintenance, conservative bool) map[ports.SnapshotDigest]struct{} {

@@ -99,7 +99,7 @@ func TestForwardOrphanAdoption(t *testing.T) {
 		})
 	}
 
-	t.Run("catalogue replacement precedes head repair", func(t *testing.T) {
+	t.Run("validated head publishes without repository reread", func(t *testing.T) {
 		record := healthyReconcileRecord()
 		events := []string{}
 		catalogue := &checkpointCatalogue{record: record, events: &events}
@@ -110,7 +110,8 @@ func TestForwardOrphanAdoption(t *testing.T) {
 		next, err := coordinator.PublishReconciledCheckpoint(context.Background(), record.Name, candidate, nil)
 		require.NoError(t, err)
 		require.Equal(t, candidate.Ref, *next.Committed)
-		require.Equal(t, []string{"catalogue", "head"}, events)
+		require.Equal(t, []string{"catalogue"}, events)
+		require.Empty(t, repository.repairs)
 	})
 
 	t.Run("stale decision after concurrent commit", func(t *testing.T) {

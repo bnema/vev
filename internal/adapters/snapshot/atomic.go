@@ -344,6 +344,9 @@ func (r *Repository) readBoundedRoot(root *os.Root, path string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
+	if hook := r.hooks.beforePayloadRead; hook != nil {
+		hook(path)
+	}
 	return readBoundedFile(f)
 }
 

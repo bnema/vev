@@ -63,6 +63,9 @@ type repositoryHooks struct {
 	// beforeMaintenancePayloadRead instruments payload reads after maintenance
 	// has admitted their stat-reported size against the current byte budget.
 	beforeMaintenancePayloadRead func(string)
+	// beforePayloadRead observes every bounded repository payload read. It is
+	// test-only accounting instrumentation and runs immediately before the read.
+	beforePayloadRead            func(string)
 	beforeObjectHash             func([]byte)
 	beforeObjectCopy             func([]byte)
 	beforeHeadRead               func(string) error

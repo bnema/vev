@@ -114,7 +114,8 @@ func validForwardChain(committed domain.CheckpointRef, candidate ports.Reconcile
 }
 
 // PublishReconciledCheckpoint rechecks the chain while holding the session
-// transaction lock. Files are already durable and validated by the adapter.
+// transaction lock. The candidate is already the durable HEAD and its payloads
+// were validated by the adapter, so publication performs no repository reread.
 func (c *Coordinator) PublishReconciledCheckpoint(ctx context.Context, name string, candidate ports.ReconcileCandidate, ancestors []ports.ValidatedCheckpoint) (domain.CatalogueRecord, error) {
 	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
 		return domain.CatalogueRecord{}, errors.New("recovery: incomplete reconciled checkpoint dependencies")
@@ -137,9 +138,6 @@ func (c *Coordinator) PublishReconciledCheckpoint(ctx context.Context, name stri
 	}
 	if err := c.catalogue.Replace(name, next); err != nil {
 		return domain.CatalogueRecord{}, err
-	}
-	if err := c.repository.RepairHEAD(ctx, record.IncarnationID, candidate.Ref); err != nil {
-		return next, err
 	}
 	return next, nil
 }
