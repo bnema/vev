@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/persist"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
@@ -25,10 +24,10 @@ func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
 			repository := &retryablePurgeRepository{legacyErr: tt.legacyErr}
 			WithSnapshotRepository(repository)(d)
 			store, state := newMockStore(t)
-			WithStore(store)(d)
+			WithStore(t, store)(d)
 			sess := newSnapshotTestSession(t, "old", false, "/work")
 			d.sessions = map[domain.SessionID]*session{sess.id: sess}
-			require.NoError(t, d.catalogue.(*persist.Persister).Save(sess.persistRecordLocked(1)))
+			require.NoError(t, testPersister(t, d).Save(sess.persistRecordLocked(1)))
 
 			require.NoError(t, d.renameSession(sess, "new"))
 			require.Empty(t, repository.calls, "rename must not invoke source deletion, including a failing legacy source")

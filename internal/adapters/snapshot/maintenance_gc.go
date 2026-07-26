@@ -17,6 +17,7 @@ import (
 
 type retentionMaintenance struct {
 	token          string
+	cursors        map[string]*maintenanceCursor
 	references     map[ports.SnapshotDigest]struct{}
 	validateQueue  []ports.CheckpointRef
 	validateIndex  int
@@ -403,7 +404,7 @@ func keepSet(plan ports.RetentionPlan) map[uint64]ports.SnapshotDigest {
 // checkpoints. Every incarnation owns its budget and continuation state.
 // processRetentionEntries charges stat-reported size for every entry, requeues
 // the unadmitted suffix, and removes only canonical entries rejected by policy.
-func (r *Repository) processRetentionEntries(ctx context.Context, dir, purpose string, entries []maintenanceDirEntry, budget *ports.MaintenanceBudget, consumedBefore bool, policy retentionEntryPolicy) (bool, error) {
+func (r *Repository) processRetentionEntries(ctx context.Context, state *retentionMaintenance, dir, purpose string, entries []maintenanceDirEntry, budget *ports.MaintenanceBudget, consumedBefore bool, policy retentionEntryPolicy) (bool, error) {
 	for i, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return false, err
@@ -418,7 +419,7 @@ func (r *Repository) processRetentionEntries(ctx context.Context, dir, purpose s
 			size = uint64(info.Size())
 		}
 		if budget.Entries == 0 || size > budget.Bytes {
-			r.requeueMaintenanceEntries(dir, purpose, entries[i:])
+			r.requeueRetentionEntries(state, dir, purpose, entries[i:])
 			if !consumedBefore && i == 0 {
 				return false, ErrMaintenanceBudgetTooSmall
 			}
@@ -462,8 +463,13 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 		)
 	}()
 	if plan.PinAll {
+		// Lock order is maintenanceMu -> session mutex. Pinning the same
+		// incarnation waits for its active retention pass, while unrelated
+		// incarnations never wait for that pass's payload I/O.
 		r.maintenanceMu.Lock()
+		lock := r.lockSession(key)
 		r.clearRetentionMaintenance(key)
+		r.unlockSession(lock)
 		r.maintenanceMu.Unlock()
 		return true, nil
 	}
@@ -471,13 +477,11 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 		return false, nil
 	}
 
+	// Establish per-incarnation state under maintenanceMu, then retain only the
+	// session mutex across payload I/O. Never reacquire maintenanceMu while the
+	// session mutex is held; PinAll relies on maintenanceMu -> session ordering.
 	r.maintenanceMu.Lock()
-	defer r.maintenanceMu.Unlock()
 	lock := r.lockSession(key)
-	defer r.unlockSession(lock)
-	if r.maintenanceCursors == nil {
-		r.maintenanceCursors = make(map[string]*maintenanceCursor)
-	}
 	if r.retentionSessions == nil {
 		r.retentionSessions = make(map[string]*retentionMaintenance)
 	}
@@ -488,11 +492,23 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 		r.clearRetentionMaintenance(key)
 		state = &retentionMaintenance{
 			token:         token,
+			cursors:       make(map[string]*maintenanceCursor),
 			references:    make(map[ports.SnapshotDigest]struct{}),
 			validateQueue: append([]ports.CheckpointRef(nil), plan.Keep...),
 		}
 		r.retentionSessions[key] = state
 	}
+	r.maintenanceMu.Unlock()
+	defer func() {
+		r.unlockSession(lock)
+		if done {
+			r.maintenanceMu.Lock()
+			if r.retentionSessions[key] == state {
+				delete(r.retentionSessions, key)
+			}
+			r.maintenanceMu.Unlock()
+		}
+	}()
 	keep := keepSet(plan)
 	if !state.validated {
 		for state.validateIndex < len(state.validateQueue) {
@@ -505,6 +521,9 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 				return false, fmt.Errorf("validate retained manifest %d: %w", ref.Generation, err)
 			}
 			if !admitted {
+				if requested.Entries == budget.Entries && requested.Bytes == budget.Bytes {
+					return false, ErrMaintenanceBudgetTooSmall
+				}
 				return false, nil
 			}
 			budget.Entries--
@@ -520,7 +539,7 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 	purpose := "retention-manifests:" + key + ":" + token
 	for !state.manifestsDone && budget.Entries > 0 && budget.Bytes > 0 {
 		limit := int(min(budget.Entries, uint64(maintenanceBatch)))
-		entries, done, err := r.readMaintenanceDir(filepath.Join(r.sessionPath(plan.IncarnationID), repositoryGenerations), limit, purpose)
+		entries, done, err := r.readRetentionDir(state, filepath.Join(r.sessionPath(plan.IncarnationID), repositoryGenerations), limit, purpose)
 		if errors.Is(err, os.ErrNotExist) {
 			state.manifestsDone = true
 			break
@@ -530,7 +549,7 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 		}
 		dir := filepath.Join(r.sessionPath(plan.IncarnationID), repositoryGenerations)
 		consumedBefore := requested.Entries != budget.Entries || requested.Bytes != budget.Bytes
-		admitted, err := r.processRetentionEntries(ctx, dir, purpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionManifest, generations: keep})
+		admitted, err := r.processRetentionEntries(ctx, state, dir, purpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionManifest, generations: keep})
 		if err != nil {
 			return false, err
 		}
@@ -552,7 +571,7 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 			shard := state.objectShard
 			dir := filepath.Join(objectsRoot, shard)
 			objectPurpose := "retention-objects:" + key + ":" + shard + ":" + token
-			entries, done, err := r.readMaintenanceDir(dir, int(min(budget.Entries, uint64(maintenanceBatch))), objectPurpose)
+			entries, done, err := r.readRetentionDir(state, dir, int(min(budget.Entries, uint64(maintenanceBatch))), objectPurpose)
 			if errors.Is(err, os.ErrNotExist) {
 				state.objectShard = ""
 				continue
@@ -561,7 +580,7 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 				return false, err
 			}
 			consumedBefore := requested.Entries != budget.Entries || requested.Bytes != budget.Bytes
-			admitted, err := r.processRetentionEntries(ctx, dir, objectPurpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionObject, objects: state.references})
+			admitted, err := r.processRetentionEntries(ctx, state, dir, objectPurpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionObject, objects: state.references})
 			if err != nil {
 				return false, err
 			}
@@ -576,23 +595,25 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 			continue
 		}
 		if state.objectRootDone {
-			delete(r.retentionSessions, key)
 			return true, nil
 		}
-		entries, done, err := r.readMaintenanceDir(objectsRoot, 1, "retention-shards:"+key+":"+token)
+		entries, done, err := r.readRetentionDir(state, objectsRoot, 1, "retention-shards:"+key+":"+token)
 		if errors.Is(err, os.ErrNotExist) {
-			delete(r.retentionSessions, key)
 			return true, nil
 		}
 		if err != nil {
 			return false, err
 		}
 		state.objectRootDone = done
-		if len(entries) != 0 {
-			budget.Entries--
-			if entries[0].isDir {
-				state.objectShard = entries[0].name
+		if len(entries) == 0 {
+			if !done {
+				return false, nil
 			}
+			continue
+		}
+		budget.Entries--
+		if entries[0].isDir {
+			state.objectShard = entries[0].name
 		}
 	}
 	return false, nil
@@ -600,11 +621,48 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 
 func (r *Repository) clearRetentionMaintenance(key string) {
 	delete(r.retentionSessions, key)
-	for id := range r.maintenanceCursors {
-		if strings.Contains(id, "retention-") && strings.Contains(id, key) {
-			delete(r.maintenanceCursors, id)
+}
+
+func (r *Repository) readRetentionDir(state *retentionMaintenance, dir string, n int, purpose string) ([]maintenanceDirEntry, bool, error) {
+	id := maintenanceCursorID(dir, purpose)
+	cursor := state.cursors[id]
+	if cursor != nil && cursor.pending != nil {
+		count := min(n, len(cursor.pending))
+		entries := cursor.pending[:count]
+		cursor.pending = cursor.pending[count:]
+		done := cursor.done && len(cursor.pending) == 0
+		if done {
+			delete(state.cursors, id)
+		} else if count > 0 && len(cursor.pending) == 0 {
+			cursor.pending = nil
 		}
+		return entries, done, nil
 	}
+	if cursor == nil {
+		if len(state.cursors) >= maxMaintenanceCursors {
+			return nil, false, errMaintenanceCursorLimit
+		}
+		cursor = &maintenanceCursor{}
+		state.cursors[id] = cursor
+	}
+	entries, done, err := r.readMaintenanceDirent(dir, n, cursor)
+	if err != nil || done {
+		delete(state.cursors, id)
+	}
+	return entries, done, err
+}
+
+func (r *Repository) requeueRetentionEntries(state *retentionMaintenance, dir, purpose string, entries []maintenanceDirEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	id := maintenanceCursorID(dir, purpose)
+	cursor := state.cursors[id]
+	if cursor == nil {
+		cursor = &maintenanceCursor{done: true}
+		state.cursors[id] = cursor
+	}
+	cursor.pending = append(entries, cursor.pending...)
 }
 
 func retentionToken(plan ports.RetentionPlan) string {

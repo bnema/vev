@@ -579,7 +579,6 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 		t.Fatal("Serve callback returned after shutdown deadline while maintenance was blocked")
 	case <-time.After(100 * time.Millisecond):
 	}
-	assertLifecycleStagePending(t, callbackReturned, "Serve callback return while maintenance is blocked")
 	assertLifecycleStagePending(t, catalogue.closed, "catalogue close while maintenance is blocked")
 	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return while maintenance is blocked")
 	_, err := lifecycle.TryAcquire(runtimeDir)
@@ -963,8 +962,29 @@ func (t *lifecycleManualTimer) Reset(delay time.Duration) bool {
 }
 func (t *lifecycleManualTimer) Stop() bool { return !t.stopped.Swap(true) }
 func (t *lifecycleManualTimer) fire() {
-	if !t.stopped.Load() {
-		t.ch <- time.Now()
+	if t.stopped.Load() {
+		return
+	}
+	select {
+	case t.ch <- time.Now():
+	default:
+	}
+}
+
+func TestLifecycleManualTimerRepeatedFireIsNonBlocking(t *testing.T) {
+	timer := &lifecycleManualTimer{t: t, ch: make(chan time.Time, 1)}
+	timer.fire()
+
+	returned := make(chan struct{})
+	go func() {
+		timer.fire()
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("repeated manual timer fire blocked on a pending tick")
 	}
 }
 

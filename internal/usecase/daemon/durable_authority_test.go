@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
@@ -24,16 +27,15 @@ func (testLifecycleRepository) DeleteDeletionTombstone(context.Context, domain.I
 
 // WithStore is package-test composition glue. Production injects the same
 // recovery coordinator explicitly from internal/app.
-func WithStore(store ports.Store) Option {
+func WithStore(t testing.TB, store ports.Store) Option {
+	t.Helper()
 	return func(d *Daemon) {
 		if store == nil {
 			return
 		}
 		catalogue := persist.New(store)
 		records, err := catalogue.Records()
-		if err != nil {
-			return
-		}
+		require.NoError(t, err)
 		d.catalogue = catalogue
 		d.persistEnabled = true
 		d.catalogueRecords = records
@@ -46,4 +48,11 @@ func WithStore(store ports.Store) Option {
 		d.lifecycleRecovery = authority
 		d.checkpointRecovery = authority
 	}
+}
+
+func testPersister(t testing.TB, d *Daemon) *persist.Persister {
+	t.Helper()
+	persister, ok := d.catalogue.(*persist.Persister)
+	require.True(t, ok, "catalogue type %T is not *persist.Persister", d.catalogue)
+	return persister
 }

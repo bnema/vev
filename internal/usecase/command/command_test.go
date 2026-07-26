@@ -6,13 +6,31 @@ import (
 )
 
 func TestParsePositiveUint64(t *testing.T) {
-	const maxUint64 = "18446744073709551615"
-	got, err := ParsePositiveUint64([]string{maxUint64})
-	if err != nil || got != ^uint64(0) {
-		t.Fatalf("ParsePositiveUint64(max) = %d, %v", got, err)
-	}
-	if _, err := ParsePositiveUint64([]string{"18446744073709551616"}); !errors.Is(err, ErrInvalidArguments) {
-		t.Fatalf("ParsePositiveUint64(overflow) error = %v", err)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		want    uint64
+		invalid bool
+	}{
+		{name: "maximum", args: []string{"18446744073709551615"}, want: ^uint64(0)},
+		{name: "overflow", args: []string{"18446744073709551616"}, invalid: true},
+		{name: "zero", args: []string{"0"}, invalid: true},
+		{name: "leading zero", args: []string{"01"}, invalid: true},
+		{name: "empty arguments", invalid: true},
+		{name: "multiple arguments", args: []string{"1", "2"}, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParsePositiveUint64(tt.args)
+			if tt.invalid {
+				if !errors.Is(err, ErrInvalidArguments) {
+					t.Fatalf("error = %v", err)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("ParsePositiveUint64() = %d, %v", got, err)
+			}
+		})
 	}
 }
 

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package lifecycle provides exclusive process ownership of vev's durable
 // state for the complete daemon lifetime.
 package lifecycle

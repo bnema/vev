@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,33 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 )
+
+func TestRunOfflineNamedKillUsesOpenOrMigrateSeam(t *testing.T) {
+	stateRoot := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	stateDir := filepath.Join(stateRoot, "vev")
+
+	p := newTestPersister(t, stateDir)
+	now := time.Now().UnixNano()
+	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, p.Close())
+
+	original := openOrMigrate
+	t.Cleanup(func() { openOrMigrate = original })
+	wantErr := errors.New("open seam called")
+	called := false
+	openOrMigrate = func(_ context.Context, deps persist.OpenDeps) (persist.OpenResult, error) {
+		called = true
+		require.Equal(t, stateDir, deps.StateDir)
+		require.NotNil(t, deps.Random)
+		require.NotNil(t, deps.SnapshotMigration)
+		return persist.OpenResult{}, wantErr
+	}
+
+	err := runOfflineNamedKill(context.Background(), "named")
+	require.ErrorIs(t, err, wantErr)
+	require.True(t, called)
+}
 
 func TestRunKillOfflineUsesIncarnationDeletionProtocol(t *testing.T) {
 	tests := []struct {

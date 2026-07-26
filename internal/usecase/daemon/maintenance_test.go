@@ -25,6 +25,22 @@ func (r *cursorMaintenanceReconciler) Step(_ context.Context, cursor ports.Recon
 	return ports.ReconcileCursor{}, nil, nil
 }
 
+type stalledMaintenanceReconciler struct{}
+
+func (stalledMaintenanceReconciler) Step(_ context.Context, cursor ports.ReconcileCursor) (ports.ReconcileCursor, []ports.ReconcileDecision, error) {
+	if cursor.DirectoryCookie == 0 {
+		return ports.ReconcileCursor{DirectoryCookie: 7}, nil, nil
+	}
+	return cursor, nil, nil
+}
+
+func TestMaintenanceDoesNotImmediatelyRetryStalledCursor(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.maintenance = newMaintenanceDependencies(portsmocks.NewMockCatalogue(t), portsmocks.NewMockSnapshotRepository(t), stalledMaintenanceReconciler{}, nil)
+	require.True(t, d.runDurableMaintenanceTick(context.Background()))
+	require.False(t, d.runDurableMaintenanceTick(context.Background()))
+}
+
 func TestProductionMaintenanceUsesCatalogueAndResumesCursor(t *testing.T) {
 	record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryFresh}
 	catalogue := portsmocks.NewMockCatalogue(t)
@@ -92,11 +108,11 @@ func TestMaintenanceRetentionUsesReconciliationOutcome(t *testing.T) {
 			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed, fallback1, fallback2}},
 		},
 		{
-			name: "non-forward candidate kind does not pin",
+			name: "non-forward candidate kind remains pinned",
 			finding: ports.ReconcileFinding{Kind: ports.ReconcileInvalidCandidate, Status: ports.ReconcileValidated, Candidate: ports.ReconcileCandidate{
 				Name: record.Name, IncarnationID: record.IncarnationID, Ref: domain.CheckpointRef{Generation: 4, ManifestDigest: [32]byte{4}},
 			}},
-			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed, fallback1, fallback2}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, PinAll: true},
 		},
 		{
 			name: "unreadable candidate remains pinned",

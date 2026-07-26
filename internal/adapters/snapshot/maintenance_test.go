@@ -383,7 +383,7 @@ func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 		}
 	}
 	key := legacyIncarnationID("named").String()
-	for pass := 0; pass < maintenanceBatch; pass++ {
+	for pass := range maintenanceBatch {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -551,7 +551,7 @@ func TestRepositoryDeleteRetriesPendingQuarantineSyncWithoutDeletingRecreatedSes
 func TestRepositoryMaintainResumesNestedQuarantineWithinBatch(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	quarantine := filepath.Join(repo.dir, repositorySessionsDir, ".deleting-named-test")
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		path := filepath.Join(quarantine, "nested", string(rune('a'+i)))
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -566,7 +566,7 @@ func TestRepositoryMaintainResumesNestedQuarantineWithinBatch(t *testing.T) {
 	if _, err := os.Lstat(quarantine); errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("quarantine after one bounded call = %v, want remaining tree", err)
 	}
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -582,12 +582,12 @@ func TestRepositoryMaintainResumesNestedQuarantineWithinBatch(t *testing.T) {
 func TestRepositoryMaintainClosesContinuationDirectories(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	sessions := filepath.Join(repo.dir, repositorySessionsDir)
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		generations := filepath.Join(sessions, fmt.Sprintf("named-%03d", i), repositoryGenerations)
 		if err := os.MkdirAll(generations, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for j := 0; j < maintenanceBatch+1; j++ {
+		for j := range maintenanceBatch + 1 {
 			if err := os.WriteFile(filepath.Join(generations, fmt.Sprintf("unclassified-%03d", j)), []byte("state"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -606,14 +606,14 @@ func TestRepositoryMaintainBoundsQueuedShardNames(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	key := legacyIncarnationID("named").String()
 	root := filepath.Join(repo.legacySessionPath(key), repositoryObjectsDir)
-	for i := 0; i < maintenanceBatch*2; i++ {
+	for i := range maintenanceBatch * 2 {
 		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("%02x", i)), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	repo.maintenanceCursors = make(map[string]*maintenanceCursor)
 	state := &sessionMaintenance{marked: make(map[uint64]manifestMaintenance), markDone: true}
-	for i := 0; i < maintenanceBatch+2; i++ {
+	for range maintenanceBatch + 2 {
 		budget := maintenanceBatch
 		if err := repo.sweepSession(context.Background(), key, state, &budget); err != nil {
 			t.Fatal(err)
@@ -629,7 +629,7 @@ func TestRepositoryMaintainResumesCursorAfterDirectoryMutation(t *testing.T) {
 	if err := os.Mkdir(repo.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		if err := os.WriteFile(filepath.Join(repo.dir, fmt.Sprintf("live-%03d", i)), []byte("live"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -646,7 +646,7 @@ func TestRepositoryMaintainResumesCursorAfterDirectoryMutation(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -664,17 +664,17 @@ func TestRepositoryMaintainDoesNotStarveLaterTemporaryEntries(t *testing.T) {
 	}
 	// The live entries precede the stale entries in directory insertion order.
 	// A fresh ReadDir from the start on every call would never reach the latter.
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		if err := os.WriteFile(filepath.Join(repo.dir, "live-"+string(rune('a'+i))), []byte("live"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		if err := os.WriteFile(filepath.Join(repo.dir, ".tmp-later-"+string(rune('a'+i))), []byte("stale"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -694,7 +694,7 @@ func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	var newest ports.SnapshotPublication
 	for generation := uint64(1); generation <= maintenanceBatch+2; generation++ {
-		publication := repositoryPublicationAfter(t, repo, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
+		publication := repositoryPublicationAfter(t, repo, "named", generation, fmt.Appendf(nil, "state-%d", generation))
 		if err := repo.Publish(context.Background(), publication); err != nil {
 			t.Fatal(err)
 		}
@@ -724,7 +724,7 @@ func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
 		}
 	}
 
-	for i := 0; i < 600; i++ {
+	for i := range 600 {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -747,7 +747,7 @@ func TestRepositoryMaintainUsesFixedRemovalBatch(t *testing.T) {
 	if err := os.Mkdir(repo.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		if err := os.WriteFile(filepath.Join(repo.dir, ".tmp-"+string(rune('a'+i))), []byte("stale"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -774,7 +774,7 @@ func TestRepositoryMaintainQueuesFetchedSessionsPastWorkBudget(t *testing.T) {
 	}
 
 	removed := make(map[string]int)
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		path := filepath.Join(repo.dir, repositorySessionsDir, fmt.Sprintf(".deleting-%03d", i))
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal(err)
@@ -804,7 +804,7 @@ func TestRepositoryMaintainQueuesFetchedSessionsPastWorkBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	queued := fetched[len(fetched)-1].Name()
-	for i := 0; i < maintenanceBatch+4; i++ {
+	for i := range maintenanceBatch + 4 {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -818,7 +818,7 @@ func TestRepositoryMaintainQueuesFetchedSessionsPastWorkBudget(t *testing.T) {
 		t.Fatalf("unread session %q = %v, want queued entry to run first", unread[0].Name(), err)
 	}
 
-	for i := 0; i < maintenanceBatch+4; i++ {
+	for range maintenanceBatch + 4 {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -876,7 +876,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 			key := legacyIncarnationID("named").String()
 			publications := make([]ports.SnapshotPublication, 0, maintenanceBatch+2)
 			for generation := uint64(1); generation <= maintenanceBatch+2; generation++ {
-				publication := repositoryPublicationAfter(t, repo, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
+				publication := repositoryPublicationAfter(t, repo, "named", generation, fmt.Appendf(nil, "state-%d", generation))
 				if err := repo.Publish(context.Background(), publication); err != nil {
 					t.Fatal(err)
 				}
@@ -904,7 +904,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 				}
 			}
 
-			for i := 0; i < 600; i++ {
+			for i := range 600 {
 				if err := repo.Maintain(context.Background()); err != nil {
 					t.Fatal(err)
 				}
@@ -928,7 +928,7 @@ func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
 	key := legacyIncarnationID("named").String()
 	first := publicationWithTailShard(t, "named", 1, "ff")
 	stalePaths := make([]string, 0, maintenanceBatch+1)
-	for i := 0; i < maintenanceBatch+1; i++ {
+	for i := range maintenanceBatch + 1 {
 		digest := digestInShard(t, "00", i)
 		path := repo.legacyObjectPath(key, digest)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -967,7 +967,7 @@ func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
 	}
 	repo.hooks.beforeHeadWrite = nil
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -991,8 +991,8 @@ func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
 
 func publicationWithTailShard(t *testing.T, name string, generation uint64, shard string) ports.SnapshotPublication {
 	t.Helper()
-	for i := 0; i < 4096; i++ {
-		publication := repositoryPublication(t, name, generation, []byte(fmt.Sprintf("state-%d-%d", generation, i)))
+	for i := range 4096 {
+		publication := repositoryPublication(t, name, generation, fmt.Appendf(nil, "state-%d-%d", generation, i))
 		if fmt.Sprintf("%02x", publication.Objects[0].Digest[0]) == shard {
 			return publication
 		}
@@ -1003,8 +1003,8 @@ func publicationWithTailShard(t *testing.T, name string, generation uint64, shar
 
 func digestInShard(t *testing.T, shard string, n int) ports.SnapshotDigest {
 	t.Helper()
-	for i := 0; i < 4096; i++ {
-		digest := sha256.Sum256([]byte(fmt.Sprintf("stale-%d-%d", n, i)))
+	for i := range 4096 {
+		digest := sha256.Sum256(fmt.Appendf(nil, "stale-%d-%d", n, i))
 		if fmt.Sprintf("%02x", digest[0]) == shard {
 			return digest
 		}
@@ -1068,8 +1068,8 @@ func TestMaintenanceBudgetAdmitsPayloadsBeforeRead(t *testing.T) {
 	var reads []string
 	repo.hooks.beforeMaintenancePayloadRead = func(path string) { reads = append(reads, path) }
 	done, err := repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrMaintenanceBudgetTooSmall) {
+		t.Fatalf("undersized manifest budget error = %v, want ErrMaintenanceBudgetTooSmall", err)
 	}
 	if done || len(reads) != 0 {
 		t.Fatalf("undersized manifest budget: done=%v payload reads=%v", done, reads)
@@ -1082,8 +1082,8 @@ func TestMaintenanceBudgetAdmitsPayloadsBeforeRead(t *testing.T) {
 	}
 	reads = nil
 	done, err = repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 1, Bytes: uint64(info.Size())})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrMaintenanceBudgetTooSmall) {
+		t.Fatalf("manifest-only budget error = %v, want ErrMaintenanceBudgetTooSmall", err)
 	}
 	if done {
 		t.Fatal("manifest-only budget unexpectedly admitted the generation objects")
@@ -1157,13 +1157,87 @@ func TestReconcileDoesNotHoldMaintenanceLockDuringPayloadRead(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(remainingTestTime(t) / 2):
 		t.Fatal("maintenance lock remained held during reconciliation payload I/O")
 	}
 	releaseOnce.Do(func() { close(release) })
 	if err := <-reconcileDone; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestMaintainSessionYieldsOnEmptyNonDoneObjectShardBatch(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	publication := publishMaintenanceGenerations(t, repo, "empty-shard-batch", 1)[0]
+	plan := ports.RetentionPlan{IncarnationID: publication.IncarnationID}
+	key := publication.IncarnationID.String()
+	token := retentionToken(plan)
+	root := filepath.Join(repo.sessionPath(plan.IncarnationID), repositoryObjectsDir)
+	purpose := "retention-shards:" + key + ":" + token
+	state := &retentionMaintenance{
+		token:         token,
+		cursors:       map[string]*maintenanceCursor{maintenanceCursorID(root, purpose): {pending: []maintenanceDirEntry{}}},
+		references:    make(map[ports.SnapshotDigest]struct{}),
+		validated:     true,
+		manifestsDone: true,
+	}
+	repo.retentionSessions[key] = state
+
+	done, err := repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 1, Bytes: 1024})
+	if err != nil || done {
+		t.Fatalf("empty non-done shard batch: done=%v err=%v", done, err)
+	}
+	if state.objectRootDone {
+		t.Fatal("empty non-done shard batch advanced object-root completion")
+	}
+}
+
+func TestMaintainSessionDoesNotHoldMaintenanceLockDuringPayloadIO(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	active := publishMaintenanceGenerations(t, repo, "active-lock", 1)
+	other := publishMaintenanceGenerations(t, repo, "other-lock", 1)
+	plan := ports.RetentionPlan{IncarnationID: active[0].IncarnationID, Keep: []ports.CheckpointRef{checkpointRefForPublication(active[0])}}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	repo.hooks.beforeMaintenancePayloadRead = func(string) {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	activeDone := make(chan error, 1)
+	go func() {
+		_, err := repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
+		activeDone <- err
+	}()
+	<-entered
+
+	pinDone := make(chan error, 1)
+	go func() {
+		_, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: other[0].IncarnationID, PinAll: true}, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
+		pinDone <- err
+	}()
+	select {
+	case err := <-pinDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(remainingTestTime(t) / 2):
+		close(release)
+		t.Fatal("unrelated PinAll was blocked by retention payload I/O")
+	}
+	close(release)
+	if err := <-activeDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func remainingTestTime(t *testing.T) time.Duration {
+	t.Helper()
+	if deadline, ok := t.Deadline(); ok {
+		return time.Until(deadline)
+	}
+	return 30 * time.Second
 }
 
 func TestPerSessionBudgetIsolation(t *testing.T) {
@@ -1174,8 +1248,8 @@ func TestPerSessionBudgetIsolation(t *testing.T) {
 	smallPlan := ports.RetentionPlan{IncarnationID: small[0].IncarnationID, Keep: []ports.CheckpointRef{checkpointRefForPublication(small[1])}}
 
 	done, err := repo.MaintainSession(context.Background(), largePlan, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrMaintenanceBudgetTooSmall) {
+		t.Fatalf("large session error = %v, want ErrMaintenanceBudgetTooSmall", err)
 	}
 	if done {
 		t.Fatal("large session unexpectedly exhausted no budget")

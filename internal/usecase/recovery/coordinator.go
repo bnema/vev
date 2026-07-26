@@ -123,7 +123,7 @@ type RecoveryConflict struct {
 	Err     error
 }
 
-// Conflicts returns the session-scoped items fenced by the last Recover calls.
+// Conflicts returns the session-scoped items fenced by the most recent Recover call.
 func (c *Coordinator) Conflicts() []RecoveryConflict {
 	if c == nil {
 		return nil
@@ -264,6 +264,10 @@ func (c *Coordinator) Recover(ctx context.Context) error {
 	if c == nil || c.catalogue == nil || c.repository == nil || c.journal == nil || c.locks == nil {
 		return errors.New("recovery: incomplete coordinator dependencies")
 	}
+	c.conflictMu.Lock()
+	c.conflicts = nil
+	c.conflictMu.Unlock()
+
 	intents, err := c.journal.ListDiscards(ctx)
 	if err != nil {
 		return err

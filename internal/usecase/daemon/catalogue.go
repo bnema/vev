@@ -25,15 +25,15 @@ func (d *Daemon) updateCatalogueMetadata(update domain.CatalogueMetadataUpdate) 
 // session state locks during I/O. Only a successfully committed newer revision
 // subsumes an older caller. Failed revisions retain their rollback until later
 // failed mutations have unwound, keeping live metadata at the durable boundary.
-func (d *Daemon) persistSessionMetadata(sess *session, version uint64, update domain.CatalogueMetadataUpdate, rollback func() bool) error {
+func (d *Daemon) persistSessionMetadata(sess *session, version uint64, update domain.CatalogueMetadataUpdate, rollback func() bool) (bool, error) {
 	if sess == nil {
-		return nil
+		return false, nil
 	}
 	sess.metadataPersistMu.Lock()
 	defer sess.metadataPersistMu.Unlock()
 
 	if sess.metadataDurableVersion >= version {
-		return nil
+		return false, nil
 	}
 	if err := d.updateCatalogueMetadata(update); err != nil {
 		if sess.metadataFailedRollbacks == nil {
@@ -48,8 +48,8 @@ func (d *Daemon) persistSessionMetadata(sess *session, version uint64, update do
 		if current > sess.metadataLiveVersion {
 			sess.metadataLiveVersion = current
 		}
-		sess.reconcileFailedMetadataLocked()
-		return err
+		rollbackRejected := sess.reconcileFailedMetadataLocked()
+		return rollbackRejected, err
 	}
 
 	sess.metadataDurableVersion = version
@@ -58,24 +58,25 @@ func (d *Daemon) persistSessionMetadata(sess *session, version uint64, update do
 			delete(sess.metadataFailedRollbacks, failedVersion)
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // reconcileFailedMetadataLocked unwinds only a contiguous failed suffix. An
 // older failure remains pending while a newer mutation is still writing.
 // Rollbacks run only after authority I/O has returned and acquire state locks in
 // the daemon-before-session order.
-func (s *session) reconcileFailedMetadataLocked() {
+func (s *session) reconcileFailedMetadataLocked() bool {
 	for s.metadataLiveVersion > s.metadataDurableVersion {
 		version := s.metadataLiveVersion
 		rollback, failed := s.metadataFailedRollbacks[version]
 		if !failed {
-			return
+			return false
 		}
 		if rollback != nil && !rollback() {
-			return
+			return true
 		}
 		delete(s.metadataFailedRollbacks, version)
 		s.metadataLiveVersion--
 	}
+	return false
 }

@@ -819,7 +819,6 @@ func TestSnapshotSchedulerImmediateEligibilityAndStaleCapturesRemainDirty(t *tes
 	now := time.Unix(100, 0)
 	clock := newDeterministicSnapshotClock(now)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
-	WithSnapshotRepository(portsmocks.NewMockSnapshotRepository(t))(d)
 
 	t.Run("no prior attempt is immediately eligible", func(t *testing.T) {
 		published := make(chan ports.SnapshotPublication, 1)

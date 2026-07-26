@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"crypto/sha256"
 	"fmt"
 
 	"github.com/bnema/vev/internal/domain"
@@ -162,7 +161,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	if err != nil {
 		return ports.SnapshotPublication{}, err
 	}
-	capture.checkpoint = domain.CheckpointRef{Generation: capture.generation, ManifestDigest: sha256.Sum256(encoded)}
+	capture.checkpoint = domain.CheckpointRef{Generation: capture.generation, ManifestDigest: snapcodec.ManifestDigest(encoded)}
 	return ports.SnapshotPublication{IncarnationID: capture.incarnation, Name: capture.name, Generation: capture.generation, ParentCheckpoint: capture.parentCheckpoint, Manifest: encoded, Objects: objects}, nil
 }
 

@@ -91,6 +91,9 @@ func manifestFieldOffsets(t *testing.T, encoded []byte) (nameOffset, nodeKindOff
 	}
 	_, err := r.getUint64()
 	must(err)
+	if len(r.b) < len(domain.IncarnationID{}) {
+		t.Fatalf("manifest body has %d incarnation bytes, want at least %d", len(r.b), len(domain.IncarnationID{}))
+	}
 	r.b = r.b[len(domain.IncarnationID{}):]
 	_, err = r.getUint8()
 	must(err)
@@ -117,7 +120,15 @@ func manifestFieldOffsets(t *testing.T, encoded []byte) (nameOffset, nodeKindOff
 	must(err)
 	_, err = r.getString()
 	must(err)
-	return nameOffset, len(encoded) - len(r.b)
+	nodeKindOffset = len(encoded) - len(r.b)
+	const wantName = "named"
+	if nameOffset < 0 || nameOffset+len(wantName) > len(encoded) || string(encoded[nameOffset:nameOffset+len(wantName)]) != wantName {
+		t.Fatalf("name offset %d does not point to %q", nameOffset, wantName)
+	}
+	if nodeKindOffset < 0 || nodeKindOffset >= len(encoded) || encoded[nodeKindOffset] != manifestNodeLeaf {
+		t.Fatalf("node kind offset %d does not point to leaf kind", nodeKindOffset)
+	}
+	return nameOffset, nodeKindOffset
 }
 
 func TestManifestObjectRefKinds(t *testing.T) {

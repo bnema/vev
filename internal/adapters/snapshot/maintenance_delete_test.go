@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -94,7 +95,7 @@ func TestDiscardCrashMatrix(t *testing.T) {
 			repo := NewRepository(privateDir(t))
 			source := repo.sessionPath(old)
 			destinationDir := filepath.Join(repo.dir, "quarantine", old.String())
-			if err := os.MkdirAll(source, 0o700); err != nil {
+			if err := repo.ensurePrivateDirectory(source); err != nil {
 				t.Fatal(err)
 			}
 			if err := repo.ensurePrivateDirectory(destinationDir); err != nil {
@@ -139,7 +140,7 @@ func TestDiscardCrashMatrix(t *testing.T) {
 	t.Run("quarantine never removes source data", func(t *testing.T) {
 		repo := NewRepository(privateDir(t))
 		source := repo.sessionPath(old)
-		if err := os.MkdirAll(source, 0o700); err != nil {
+		if err := repo.ensurePrivateDirectory(source); err != nil {
 			t.Fatal(err)
 		}
 		payload := filepath.Join(source, "payload")
@@ -161,6 +162,48 @@ func TestDiscardCrashMatrix(t *testing.T) {
 			t.Fatalf("idempotent retry: %v", err)
 		}
 	})
+}
+
+func TestQuarantineDeletionSourcesSerializesConcurrentPublication(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	id := domain.IncarnationID{9}
+	tombstone := domain.DeletionTombstone{Name: "work", IncarnationID: id}
+	publication := incarnationPublication(t, id, "work", 1, nil)
+	if err := repo.Publish(context.Background(), publication); err != nil {
+		t.Fatal(err)
+	}
+
+	quarantined := make(chan struct{})
+	release := make(chan struct{})
+	repo.hooks.afterDeletionIncarnationQuarantine = func() error {
+		close(quarantined)
+		<-release
+		return nil
+	}
+	quarantineDone := make(chan error, 1)
+	go func() { quarantineDone <- repo.QuarantineDeletionSources(context.Background(), tombstone, false) }()
+	<-quarantined
+
+	publishDone := make(chan error, 1)
+	go func() { publishDone <- repo.Publish(context.Background(), publication) }()
+	select {
+	case err := <-publishDone:
+		t.Fatalf("Publish completed while quarantine held the incarnation lock: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-quarantineDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-publishDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(repo.headPath(id)); err != nil {
+		t.Fatalf("republished HEAD: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo.dir, "quarantine", id.String(), "snapshot", repositoryHead)); err != nil {
+		t.Fatalf("quarantined HEAD: %v", err)
+	}
 }
 
 func TestDeletionTombstoneCodec(t *testing.T) {
@@ -283,6 +326,51 @@ func TestDeletionTombstoneListingResumesAcrossRepositoryRecreation(t *testing.T)
 	}
 }
 
+func TestDeletionTombstoneListingBatchesSortedCandidatesWithinScanBudget(t *testing.T) {
+	dir := privateDir(t)
+	repo := NewRepository(dir)
+	ctx := context.Background()
+	want := make([]domain.DeletionTombstone, 5)
+	for i := range want {
+		want[i] = domain.DeletionTombstone{Name: fmt.Sprintf("session-%d", i), IncarnationID: domain.IncarnationID{15: byte(i + 1)}}
+	}
+	for _, i := range []int{4, 1, 3, 0, 2} {
+		if err := repo.WriteDeletionTombstone(ctx, want[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cursor := ports.DeletionTombstoneCursor{}
+	var got []domain.DeletionTombstone
+	reads := 0
+	for calls := range 64 {
+		repo = NewRepository(dir)
+		repo.hooks.beforeDeletionTombstoneRead = func(string) { reads++ }
+		entryBudget := uint64(2)
+		if calls > 0 {
+			entryBudget = 1 // A resumed caller may reduce its per-pass budget.
+		}
+		page, err := repo.ListDeletionTombstones(ctx, cursor, ports.MaintenanceBudget{Entries: entryBudget, Bytes: 4096})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if uint64(len(page.Tombstones)) > entryBudget {
+			t.Fatalf("page %d returned %d tombstones over entry budget %d", calls, len(page.Tombstones), entryBudget)
+		}
+		got = append(got, page.Tombstones...)
+		if page.Done {
+			break
+		}
+		cursor = page.Next
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("tombstones = %#v, want %#v", got, want)
+	}
+	if reads != len(want) {
+		t.Fatalf("payload reads = %d, want %d", reads, len(want))
+	}
+}
+
 func TestMalformedDeletionTombstone(t *testing.T) {
 	dir := privateDir(t)
 	repo := NewRepository(dir)
@@ -346,15 +434,8 @@ func TestDeletionTombstoneListing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Done || len(page.Tombstones) != 1 || page.Tombstones[0] != first || page.Next.After == "" {
-		t.Fatalf("first page = %#v", page)
-	}
-	page, err = repo.ListDeletionTombstones(ctx, page.Next, ports.MaintenanceBudget{Entries: 3, Bytes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !page.Done || len(page.Tombstones) != 1 || page.Tombstones[0] != second || page.Next.After == "" {
-		t.Fatalf("second page = %#v", page)
+	if !page.Done || !slices.Equal(page.Tombstones, []domain.DeletionTombstone{first, second}) || page.Next.After == "" {
+		t.Fatalf("batched page = %#v", page)
 	}
 	if _, err := repo.ListDeletionTombstones(ctx, ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 3, Bytes: 1}); err == nil {
 		t.Fatal("non-advancing budget accepted")

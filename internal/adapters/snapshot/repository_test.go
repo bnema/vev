@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"crypto/sha256"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -44,7 +43,7 @@ func TestRepositoryDoesNotRewriteVerifiedImmutableBlob(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifest.Generation = 2
-	parent := &domain.CheckpointRef{Generation: 1, ManifestDigest: codecDigestForTest(pub.Manifest)}
+	parent := &domain.CheckpointRef{Generation: 1, ManifestDigest: codec.ManifestDigest(pub.Manifest)}
 	manifest.ParentCheckpoint = parent
 	pub.ParentCheckpoint = parent
 	pub.Manifest, err = codec.MarshalManifest(manifest)
@@ -59,15 +58,14 @@ func TestRepositoryDoesNotRewriteVerifiedImmutableBlob(t *testing.T) {
 	}
 }
 
-func codecDigestForTest(data []byte) [32]byte {
-	return sha256.Sum256(data)
-}
-
 func repositoryPublicationAfter(t *testing.T, repo *Repository, name string, generation uint64, payload []byte) ports.SnapshotPublication {
 	t.Helper()
 	return publicationWithCurrentParent(t, repo, repositoryPublication(t, name, generation, payload))
 }
 
+// publicationWithCurrentParent requires repositories to contain HEAD for every
+// publication after generation one. Callers such as prepareHeadStage and
+// seedCompletePublication must seed or publish the parent generation first.
 func publicationWithCurrentParent(t *testing.T, repo *Repository, publication ports.SnapshotPublication) ports.SnapshotPublication {
 	t.Helper()
 	if publication.Generation == 1 {

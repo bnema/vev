@@ -21,7 +21,7 @@ func (d *Daemon) logSessionDegraded(record domain.CatalogueRecord, reasonCode st
 
 func (d *Daemon) logStartupRecoveryCounts(restoring int) {
 	var records []domain.CatalogueRecord
-	if d.catalogue != nil {
+	if d.persistEnabled && d.catalogue != nil {
 		var err error
 		records, err = d.catalogue.Records()
 		if err != nil {

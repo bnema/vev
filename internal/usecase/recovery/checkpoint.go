@@ -103,7 +103,10 @@ func (c *Coordinator) promoteFallbackLocked(ctx context.Context, name string, re
 	candidates = append(candidates, record.Committed)
 	candidates = append(candidates, record.Fallbacks[:]...)
 	for _, candidate := range candidates {
-		if candidate == nil || *candidate == ref || candidate.Generation >= ref.Generation || len(alternatives) == 2 {
+		if len(alternatives) == 2 {
+			break
+		}
+		if candidate == nil || *candidate == ref || candidate.Generation >= ref.Generation {
 			continue
 		}
 		if err := c.validateCheckpoint(ctx, record, *candidate); err == nil {

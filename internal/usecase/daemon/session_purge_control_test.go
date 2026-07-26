@@ -15,7 +15,7 @@ func TestStoppedPurgeMetadataFailureRemainsFencedForRetry(t *testing.T) {
 	repository := &retryablePurgeRepository{}
 	WithSnapshotRepository(repository)(d)
 	store, state := newMockStore(t)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryFresh}
 	require.NoError(t, d.catalogue.Create(record))
 	metadataErr := errors.New("metadata delete failed")

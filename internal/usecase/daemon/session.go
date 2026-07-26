@@ -203,20 +203,13 @@ func (d *Daemon) touchMRU(sess *session) {
 		rollback := func() bool {
 			return sess.mruAt.CompareAndSwap(seq, previous)
 		}
-		if err := d.persistSessionMetadata(sess, version, record.MetadataUpdate(), rollback); err != nil {
+		if _, err := d.persistSessionMetadata(sess, version, record.MetadataUpdate(), rollback); err != nil {
 			d.log.Warn("touching persisted session recency failed", "err", err, "session", name)
 		}
 	}
 }
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
-	// Historical focused tests call this helper directly. Acquire mu for those
-	// callers while preserving the production contract that an owning caller
-	// receives it still locked on return.
-	acquiredMu := d.mu.TryLock()
-	if acquiredMu {
-		defer d.mu.Unlock()
-	}
 	env = copyEnvironment(env)
 	if _, reserved := d.creating[name]; reserved {
 		return nil, errSessionNameInUse
@@ -533,7 +526,22 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 			_ = pty.Close()
 			return true
 		}
-		if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
+		rollbackRejected, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback)
+		if err != nil {
+			if rollbackRejected {
+				d.mu.Lock()
+				if d.sessions[sess.id] == sess {
+					sess.mu.Lock()
+					sess.tabs = slices.DeleteFunc(sess.tabs, func(candidate *tab) bool { return candidate == tb })
+					sess.active = min(sess.active, len(sess.tabs)-1)
+					sess.mu.Unlock()
+				}
+				d.mu.Unlock()
+				if tb.cancel != nil {
+					tb.cancel()
+				}
+				tb.closeAllPanes()
+			}
 			return err
 		}
 	}
@@ -745,6 +753,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	oldName := sess.name
 	wasEphemeral := sess.ephemeral
 	createdAt := sess.createdAt
+	priorIncarnation := sess.incarnation
 	if wasEphemeral {
 		var err error
 		createdAt, err = d.allocateLifecycleCreatedAtLocked()
@@ -772,6 +781,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 
 	rollback := func(err error) error {
 		sess.mu.Lock()
+		sess.incarnation = priorIncarnation
 		sess.renameInProgress = false
 		if sess.renameDone != nil {
 			close(sess.renameDone)
@@ -869,7 +879,7 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 		tb.name = oldName
 		return true
 	}
-	if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
+	if _, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
 		return err
 	}
 	return nil
@@ -969,8 +979,15 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 			sess.active = min(oldActive, len(sess.tabs)-1)
 			return true
 		}
-		if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
+		rollbackRejected, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback)
+		if err != nil {
 			d.log.Warn("persisting closed tab failed", "err", err, "session", name)
+			if rollbackRejected {
+				if tb.cancel != nil {
+					tb.cancel()
+				}
+				tb.closeAllPanes()
+			}
 			return err
 		}
 	}
@@ -1510,7 +1527,7 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 			sess.cwd = oldCwd
 			return true
 		}
-		if err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
+		if _, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
 			d.log.Warn("touching persisted session cwd failed", "err", err, "session", name)
 			return
 		}

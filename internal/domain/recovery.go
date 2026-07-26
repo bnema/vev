@@ -43,8 +43,6 @@ type CatalogueRecord struct {
 	DegradedReason string
 }
 
-// CatalogueMetadataUpdate changes mutable runtime metadata for one catalogue
-// incarnation without carrying authority-owned recovery or checkpoint fields.
 // Equal reports canonical value equality between checkpoint references.
 func (r *CheckpointRef) Equal(other *CheckpointRef) bool {
 	if r == nil || other == nil {
@@ -63,6 +61,8 @@ func (r CatalogueRecord) Equal(other CatalogueRecord) bool {
 		r.Fallbacks[1].Equal(other.Fallbacks[1]) && r.DegradedReason == other.DegradedReason
 }
 
+// CatalogueMetadataUpdate changes mutable runtime metadata for one catalogue
+// incarnation without carrying authority-owned recovery or checkpoint fields.
 type CatalogueMetadataUpdate struct {
 	Name          string
 	IncarnationID IncarnationID

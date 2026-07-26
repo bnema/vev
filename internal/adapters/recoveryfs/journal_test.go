@@ -3,6 +3,7 @@ package recoveryfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,7 +46,6 @@ func TestDiscardCrashMatrix(t *testing.T) {
 		_, statErr := os.Stat(path)
 		require.NoError(t, statErr)
 		require.Error(t, j.SaveDiscard(ctx, intent))
-		require.NoError(t, os.WriteFile(path, encoded, 0o600))
 	})
 
 	t.Run("delete sync failure rolls forward", func(t *testing.T) {
@@ -81,8 +81,8 @@ func TestRecoveryJournalRoundTripAndIdempotentDelete(t *testing.T) {
 func TestRecoveryJournalIgnoresAtomicLeftoversWhenCountingDiscards(t *testing.T) {
 	j := New(t.TempDir())
 	require.NoError(t, os.MkdirAll(j.dir, 0o700))
-	for i := 0; i < maxDiscardIntents+1; i++ {
-		require.NoError(t, os.WriteFile(filepath.Join(j.dir, ".intent-leftover-"+string(rune(0x1000+i))), nil, 0o600))
+	for i := range maxDiscardIntents + 1 {
+		require.NoError(t, os.WriteFile(filepath.Join(j.dir, fmt.Sprintf(".intent-leftover-%04d", i)), nil, 0o600))
 	}
 
 	got, err := j.ListDiscards(context.Background())
@@ -93,14 +93,17 @@ func TestRecoveryJournalIgnoresAtomicLeftoversWhenCountingDiscards(t *testing.T)
 func TestRecoveryJournalRejectsMalformedIntent(t *testing.T) {
 	j := New(t.TempDir())
 	require.Error(t, j.SaveDiscard(context.Background(), domain.DiscardIntent{}))
+
+	_, err := decodeDiscard([]byte(`{"version":1,"intent":{}} !`))
+	require.ErrorContains(t, err, "invalid character")
 }
 
 func TestRecoveryJournalBoundsEnumerationAndIntentReads(t *testing.T) {
 	state := t.TempDir()
 	j := New(state)
 	require.NoError(t, os.MkdirAll(j.dir, 0o700))
-	for i := 0; i <= maxDiscardIntents; i++ {
-		require.NoError(t, os.WriteFile(filepath.Join(j.dir, "discard-extra-"+string(rune(0x1000+i))), nil, 0o600))
+	for i := range maxDiscardIntents + 1 {
+		require.NoError(t, os.WriteFile(filepath.Join(j.dir, fmt.Sprintf("discard-extra-%04d", i)), nil, 0o600))
 	}
 	_, err := j.ListDiscards(context.Background())
 	require.ErrorContains(t, err, "entry limit exceeded")

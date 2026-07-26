@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 
@@ -29,14 +30,27 @@ func TestRepositoryCurrentGenerationPropagatesOperationalHeadErrors(t *testing.T
 	require.ErrorIs(t, err, syscall.EIO)
 }
 
+func TestRepositoryLoadUsesEstablishedLegacySessionKey(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	publication := repositoryPublication(t, "named", 1, []byte("legacy-state"))
+	require.NoError(t, repo.Publish(context.Background(), publication))
+	require.NoError(t, os.Rename(repo.sessionPath(publication.IncarnationID), filepath.Join(repo.dir, repositorySessionsDir, sessionKey(publication.Name))))
+
+	got, err := repo.Load(context.Background(), publication.Name)
+	require.NoError(t, err)
+	require.Equal(t, publication.Objects[0].Data, got.Objects[publication.Objects[0].Digest])
+}
+
 func TestRepositoryLoadFallsBackFromInvalidHead(t *testing.T) {
 	repo := NewRepository(privateDir(t))
-	require.NoError(t, repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))))
+	publication := repositoryPublication(t, "named", 1, []byte("state"))
+	require.NoError(t, repo.Publish(context.Background(), publication))
 	require.NoError(t, os.WriteFile(repo.legacyHeadPath(legacyIncarnationID("named").String()), []byte("invalid"), 0o600))
 
 	got, err := repo.Load(context.Background(), "named")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), got.Generation)
+	require.Equal(t, publication.Objects[0].Data, got.Objects[publication.Objects[0].Digest])
 }
 
 func TestRepositoryLoadFallsBackAcrossMultipleCorruptCandidates(t *testing.T) {
@@ -53,6 +67,8 @@ func TestRepositoryLoadFallsBackAcrossMultipleCorruptCandidates(t *testing.T) {
 	got, err := repo.Load(context.Background(), "named")
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), got.Generation)
+	fallback := repositoryPublication(t, "named", 2, []byte{2})
+	require.Equal(t, fallback.Objects[0].Data, got.Objects[fallback.Objects[0].Digest])
 }
 
 func TestRepositoryLoadHoldsSessionLockAcrossTombstoneCheck(t *testing.T) {

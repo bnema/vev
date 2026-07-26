@@ -62,6 +62,9 @@ func decodeDiscard(data []byte) (domain.DiscardIntent, error) {
 		return domain.DiscardIntent{}, err
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return domain.DiscardIntent{}, err
+		}
 		return domain.DiscardIntent{}, errors.New("recovery journal: trailing data")
 	}
 	if file.Version != discardVersion {

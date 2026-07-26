@@ -179,12 +179,12 @@ func decodeManifest(body []byte) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if len(r.b) < len(domain.IncarnationID{}) {
-		return Manifest{}, ErrShortPayload
+	incarnationBytes, err := r.getBytes(len(domain.IncarnationID{}))
+	if err != nil {
+		return Manifest{}, err
 	}
 	var incarnationID domain.IncarnationID
-	copy(incarnationID[:], r.b[:len(incarnationID)])
-	r.b = r.b[len(incarnationID):]
+	copy(incarnationID[:], incarnationBytes)
 	parentPresent, err := r.getUint8()
 	if err != nil {
 		return Manifest{}, err
@@ -198,11 +198,11 @@ func decodeManifest(body []byte) (Manifest, error) {
 		if err != nil {
 			return Manifest{}, err
 		}
-		if len(r.b) < len(parent.ManifestDigest) {
-			return Manifest{}, ErrShortPayload
+		digest, err := r.getBytes(len(parent.ManifestDigest))
+		if err != nil {
+			return Manifest{}, err
 		}
-		copy(parent.ManifestDigest[:], r.b[:len(parent.ManifestDigest)])
-		r.b = r.b[len(parent.ManifestDigest):]
+		copy(parent.ManifestDigest[:], digest)
 	default:
 		return Manifest{}, fmt.Errorf("%w: parent checkpoint presence", ErrInvalidData)
 	}

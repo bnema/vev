@@ -465,6 +465,9 @@ func (e controlExec) SessionRecovery(action, argument string) (string, error) {
 	if ctx == nil {
 		ctx = e.d.serveCtx
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	switch action {
 	case "retry":
 		if err := e.d.degradedRecovery.Retry(ctx, e.recoveryName); err != nil {
@@ -549,7 +552,7 @@ func (e controlExec) restoreExplicitRecovery(ctx context.Context) error {
 	e.d.stopped[record.Name] = entry
 	e.d.mu.Unlock()
 	err = e.d.restoreRecord(ctx, record)
-	e.d.finishRecordRestore(record, err, done)
+	e.d.finishExplicitRecordRestore(record, err, done)
 	return err
 }
 

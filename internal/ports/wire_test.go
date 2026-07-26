@@ -765,6 +765,12 @@ func TestSessionInfoRecoveryState(t *testing.T) {
 			assertTrailingGarbageFails(t, payload, UnmarshalSessions)
 		})
 	}
+	for _, state := range []byte{0, 5} {
+		payload := append([]byte(nil), tests[0].want...)
+		payload[len(payload)-1] = state
+		_, err := UnmarshalSessions(payload)
+		require.Error(t, err, "state %d", state)
+	}
 }
 
 func TestSessionsGoldenAndRoundTrip(t *testing.T) {

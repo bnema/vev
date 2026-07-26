@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
@@ -94,13 +95,14 @@ const (
 )
 
 type deletionListingState struct {
-	After     string                `json:"after,omitempty"`
-	Offset    int64                 `json:"offset,omitempty"`
-	Pending   []maintenanceDirEntry `json:"pending,omitempty"`
-	PendingAt int                   `json:"pending_at,omitempty"`
-	ScanDone  bool                  `json:"scan_done,omitempty"`
-	Candidate string                `json:"candidate,omitempty"`
-	Found     uint8                 `json:"found,omitempty"`
+	After      string                `json:"after,omitempty"`
+	Offset     int64                 `json:"offset,omitempty"`
+	Pending    []maintenanceDirEntry `json:"pending,omitempty"`
+	PendingAt  int                   `json:"pending_at,omitempty"`
+	ScanDone   bool                  `json:"scan_done,omitempty"`
+	Candidates []string              `json:"candidates,omitempty"`
+	More       bool                  `json:"more,omitempty"`
+	BatchLimit int                   `json:"batch_limit,omitempty"`
 }
 
 // MarshalJSON keeps maintenanceDirEntry private while making a continuation
@@ -165,14 +167,16 @@ func validateDeletionListingState(state deletionListingState) error {
 	if state.After != "" && !canonicalDeletionTombstoneFilename(state.After) {
 		return fmt.Errorf("snapshot: non-canonical deletion tombstone continuation key")
 	}
-	if state.Offset < 0 || state.PendingAt < 0 || state.PendingAt > len(state.Pending) || state.Found > 2 {
+	if state.Offset < 0 || state.PendingAt < 0 || state.PendingAt > len(state.Pending) || state.BatchLimit < 0 || state.BatchLimit > maintenanceBatch || len(state.Candidates) > state.BatchLimit {
 		return fmt.Errorf("snapshot: malformed deletion tombstone continuation")
 	}
-	if state.After == "" && state.Offset == 0 && len(state.Pending) == 0 && !state.ScanDone && state.Candidate == "" {
+	if state.After == "" && state.Offset == 0 && len(state.Pending) == 0 && !state.ScanDone && len(state.Candidates) == 0 {
 		return fmt.Errorf("snapshot: non-advancing deletion tombstone continuation")
 	}
-	if (state.Candidate == "") != (state.Found == 0) || (state.Candidate != "" && (!canonicalDeletionTombstoneFilename(state.Candidate) || state.Candidate <= state.After)) {
-		return fmt.Errorf("snapshot: non-advancing deletion tombstone continuation")
+	for i, candidate := range state.Candidates {
+		if !canonicalDeletionTombstoneFilename(candidate) || candidate <= state.After || (i > 0 && candidate <= state.Candidates[i-1]) {
+			return fmt.Errorf("snapshot: non-advancing deletion tombstone continuation")
+		}
 	}
 	if len(state.Pending) > maintenanceDirentBufferSize {
 		return fmt.Errorf("snapshot: malformed deletion tombstone continuation")
@@ -228,31 +232,56 @@ func (r *Repository) ListDeletionTombstones(ctx context.Context, cursor ports.De
 	r.maintenanceMu.Lock()
 	defer r.maintenanceMu.Unlock()
 
-	entryLimit := budget.Entries
-	if maxInt := uint64(^uint(0) >> 1); entryLimit > maxInt {
-		entryLimit = maxInt
+	batchLimit := int(min(budget.Entries, uint64(maintenanceBatch)))
+	if state.BatchLimit == 0 {
+		state.BatchLimit = batchLimit
+	} else if state.BatchLimit > batchLimit {
+		state.BatchLimit = batchLimit
+		if len(state.Candidates) > state.BatchLimit {
+			state.Candidates = state.Candidates[:state.BatchLimit]
+			state.More = true
+		}
 	}
-	entries, done, err := r.readDeletionListingEntries(dir, int(entryLimit), &state)
-	if errors.Is(err, os.ErrNotExist) {
-		return ports.DeletionTombstonePage{Done: true}, nil
-	}
-	if err != nil {
-		return ports.DeletionTombstonePage{}, err
-	}
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
+	remainingEntries := budget.Entries
+	done := state.ScanDone
+	for !done && remainingEntries > 0 {
+		limit := remainingEntries
+		if maxInt := uint64(^uint(0) >> 1); limit > maxInt {
+			limit = maxInt
+		}
+		entries, batchDone, err := r.readDeletionListingEntries(dir, int(limit), &state)
+		if errors.Is(err, os.ErrNotExist) {
+			return ports.DeletionTombstonePage{Done: true}, nil
+		}
+		if err != nil {
 			return ports.DeletionTombstonePage{}, err
 		}
-		if entry.isDir || !canonicalDeletionTombstoneFilename(entry.name) {
-			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: invalid deletion tombstone entry")
+		remainingEntries -= uint64(len(entries))
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return ports.DeletionTombstonePage{}, err
+			}
+			if entry.isDir || !canonicalDeletionTombstoneFilename(entry.name) {
+				return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: invalid deletion tombstone entry")
+			}
+			if entry.name <= state.After {
+				continue
+			}
+			at := sort.SearchStrings(state.Candidates, entry.name)
+			if at < len(state.Candidates) && state.Candidates[at] == entry.name {
+				continue
+			}
+			state.Candidates = append(state.Candidates, "")
+			copy(state.Candidates[at+1:], state.Candidates[at:])
+			state.Candidates[at] = entry.name
+			if len(state.Candidates) > state.BatchLimit {
+				state.Candidates = state.Candidates[:state.BatchLimit]
+				state.More = true
+			}
 		}
-		if entry.name > state.After {
-			if state.Found < 2 {
-				state.Found++
-			}
-			if state.Candidate == "" || entry.name < state.Candidate {
-				state.Candidate = entry.name
-			}
+		done = batchDone
+		if len(entries) == 0 && !batchDone {
+			break
 		}
 	}
 	if !done {
@@ -265,41 +294,50 @@ func (r *Repository) ListDeletionTombstones(ctx context.Context, cursor ports.De
 		}
 		return ports.DeletionTombstonePage{Next: next}, nil
 	}
-	if state.Candidate == "" {
+	if len(state.Candidates) == 0 {
 		return ports.DeletionTombstonePage{Done: true}, nil
 	}
-	path := filepath.Join(dir, state.Candidate)
-	info, err := r.stat(path)
+
+	remainingBytes := budget.Bytes
+	tombstones := make([]domain.DeletionTombstone, 0, len(state.Candidates))
+	last := ""
+	for _, candidate := range state.Candidates {
+		path := filepath.Join(dir, candidate)
+		info, err := r.stat(path)
+		if err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		charge := uint64(len(candidate))
+		if info.Size() < 0 || uint64(info.Size()) > remainingBytes || charge > remainingBytes-uint64(info.Size()) {
+			if len(tombstones) == 0 {
+				return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
+			}
+			state.More = true
+			break
+		}
+		remainingBytes -= charge + uint64(info.Size())
+		if hook := r.hooks.beforeDeletionTombstoneRead; hook != nil {
+			hook(path)
+		}
+		data, err := r.readBounded(path)
+		if err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		decoded, err := decodeDeletionTombstone(data)
+		if err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		if candidate != decoded.IncarnationID.String()+".tombstone" {
+			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: non-canonical deletion tombstone filename")
+		}
+		tombstones = append(tombstones, decoded)
+		last = candidate
+	}
+	next, err := encodeDeletionListingCursor(deletionListingState{After: last})
 	if err != nil {
 		return ports.DeletionTombstonePage{}, err
 	}
-	charge := uint64(len(state.Candidate))
-	if info.Size() < 0 || uint64(info.Size()) > budget.Bytes || charge > budget.Bytes-uint64(info.Size()) {
-		return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
-	}
-	if hook := r.hooks.beforeDeletionTombstoneRead; hook != nil {
-		hook(path)
-	}
-	data, err := r.readBounded(path)
-	if err != nil {
-		return ports.DeletionTombstonePage{}, err
-	}
-	decoded, err := decodeDeletionTombstone(data)
-	if err != nil {
-		return ports.DeletionTombstonePage{}, err
-	}
-	if state.Candidate != decoded.IncarnationID.String()+".tombstone" {
-		return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: non-canonical deletion tombstone filename")
-	}
-	next, err := encodeDeletionListingCursor(deletionListingState{After: state.Candidate})
-	if err != nil {
-		return ports.DeletionTombstonePage{}, err
-	}
-	return ports.DeletionTombstonePage{
-		Tombstones: []domain.DeletionTombstone{decoded},
-		Next:       next,
-		Done:       state.Found == 1,
-	}, nil
+	return ports.DeletionTombstonePage{Tombstones: tombstones, Next: next, Done: !state.More && len(tombstones) == len(state.Candidates)}, nil
 }
 
 func (r *Repository) DeleteDeletionTombstone(ctx context.Context, id domain.IncarnationID) error {
@@ -329,8 +367,7 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	id := legacyIncarnationID(name)
-	key, err := incarnationKey(id)
+	key, err := r.legacyRepositoryKey(name)
 	if err != nil {
 		return err
 	}
@@ -340,7 +377,7 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 		return err
 	}
 
-	canonical := r.sessionPath(id)
+	canonical := r.legacySessionPath(key)
 	sessions := filepath.Dir(canonical)
 	// A prior rename may have succeeded while its parent sync failed. Complete
 	// that durability boundary before considering a canonical directory: this
@@ -520,6 +557,13 @@ func (r *Repository) QuarantineDeletionSources(ctx context.Context, tombstone do
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	key, err := incarnationKey(tombstone.IncarnationID)
+	if err != nil {
+		return err
+	}
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
+	r.invalidateStorageEpoch(key)
 	quarantineDir := filepath.Join(r.dir, "quarantine", tombstone.IncarnationID.String())
 	if err := r.ensurePrivateDirectory(quarantineDir); err != nil {
 		return err
@@ -546,8 +590,8 @@ func (r *Repository) QuarantineDeletionSources(ctx context.Context, tombstone do
 }
 
 func (r *Repository) quarantineSource(source, target string) error {
-	if _, err := os.Lstat(target); err == nil {
-		if _, sourceErr := os.Lstat(source); errors.Is(sourceErr, os.ErrNotExist) {
+	if _, err := r.stat(target); err == nil {
+		if _, sourceErr := r.stat(source); errors.Is(sourceErr, os.ErrNotExist) {
 			if err := r.syncDirectory(filepath.Dir(source)); err != nil {
 				return err
 			}
@@ -560,7 +604,7 @@ func (r *Repository) quarantineSource(source, target string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if _, err := os.Lstat(source); errors.Is(err, os.ErrNotExist) {
+	if _, err := r.stat(source); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err

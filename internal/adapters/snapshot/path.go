@@ -3,7 +3,9 @@ package snapshot
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -27,8 +29,9 @@ func filenameForName(name string) string {
 	return "@" + hex.EncodeToString(sum[:])[:40] + ".snap"
 }
 
-// legacyIncarnationID is used only by retired name-keyed compatibility
-// operations. New callers must supply the durable catalogue incarnation ID.
+// legacyIncarnationID identifies snapshots produced by the short-lived
+// incarnation bridge. Established name-keyed repositories use sessionKey.
+// New callers must supply the durable catalogue incarnation ID.
 func legacyIncarnationID(name string) domain.IncarnationID {
 	id := domain.IncarnationID{}
 	digest := sha256.Sum256([]byte(name))
@@ -60,6 +63,19 @@ func (r *Repository) headPath(id domain.IncarnationID) string {
 // Legacy path helpers are isolated from normal incarnation-keyed operations.
 func (r *Repository) legacySessionPath(key string) string {
 	return filepath.Join(r.dir, repositorySessionsDir, key)
+}
+
+// legacyRepositoryKey resolves the established name-keyed namespace first.
+// The digest fallback keeps the retired bridge readable without changing any
+// durable catalogue incarnation identity.
+func (r *Repository) legacyRepositoryKey(name string) (string, error) {
+	key := sessionKey(name)
+	if _, err := r.stat(r.legacySessionPath(key)); err == nil {
+		return key, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return legacyIncarnationID(name).String(), nil
 }
 func (r *Repository) legacyObjectPath(key string, digest ports.SnapshotDigest) string {
 	hexDigest := hex.EncodeToString(digest[:])

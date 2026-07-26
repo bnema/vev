@@ -148,7 +148,7 @@ func largeIncrementalPublications(t testing.TB, name string, count int) (ports.S
 	sealed := make([]codec.ObjectRef, 0, count)
 	objects := make([]ports.SnapshotObject, 0, count+2)
 	for i := range count {
-		object, err := codec.MarshalObject(codec.HistoryChunk, []byte(fmt.Sprintf("history-%d", i)))
+		object, err := codec.MarshalObject(codec.HistoryChunk, fmt.Appendf(nil, "history-%d", i))
 		if err != nil {
 			t.Fatal(err)
 		}

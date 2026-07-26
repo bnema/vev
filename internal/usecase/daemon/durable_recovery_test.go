@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -226,67 +228,73 @@ func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
 }
 
 func TestCatalogueRestoreIndependent(t *testing.T) {
-	emptyDaemon, emptyCatalogue := newDurableRecoveryDaemon(t, nil, &durableRecoveryRepository{})
-	emptyDone := make(chan struct{})
-	go func() {
-		emptyDaemon.restoreCatalogue(context.Background(), mustDurableRecords(t, emptyCatalogue))
-		close(emptyDone)
-	}()
-	select {
-	case <-emptyDone:
-	case <-time.After(time.Second):
-		t.Fatal("empty catalogue restoration blocked")
-	}
-
-	healthy := durableRecoveryRecord(0)
-	broken := durableRecoveryRecord(1)
-	repository := &durableRecoveryRepository{
-		generations: map[string]ports.SnapshotGeneration{healthy.Name: validGeneration(t, healthy)},
-		errors:      map[string]error{broken.Name: ports.ErrBudgetExhausted},
-		loads:       make(map[string]int),
-		repairs:     make(map[string]domain.CheckpointRef),
-	}
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{healthy, broken}, repository)
-
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
-
-	require.Equal(t, runtimeHealthy, d.stopped[healthy.Name].state)
-	require.Equal(t, runtimeDegraded, d.stopped[broken.Name].state)
-	for _, name := range []string{healthy.Name, broken.Name} {
+	t.Run("empty catalogue restoration", func(t *testing.T) {
+		emptyDaemon, emptyCatalogue := newDurableRecoveryDaemon(t, nil, &durableRecoveryRepository{})
+		emptyDone := make(chan struct{})
+		go func() {
+			emptyDaemon.restoreCatalogue(context.Background(), mustDurableRecords(t, emptyCatalogue))
+			close(emptyDone)
+		}()
 		select {
-		case <-d.stopped[name].restoreDone:
-		default:
-			t.Fatalf("restore completion for %q was not closed", name)
+		case <-emptyDone:
+		case <-time.After(time.Second):
+			t.Fatal("empty catalogue restoration blocked")
 		}
-	}
-	degraded, ok, _ := catalogue.Record(broken.Name)
-	require.True(t, ok)
-	require.Equal(t, domain.RecoveryDegraded, degraded.RecoveryState)
-	require.Equal(t, 1, repository.loads[healthy.Name])
-	require.Equal(t, 1, repository.loads[broken.Name])
-	require.Empty(t, d.sessions, "a corrupt record must never open a replacement runtime")
+	})
 
-	fallback := durableRecoveryRecord(2)
-	fallbackRef := domain.CheckpointRef{Generation: fallback.Committed.Generation - 1}
-	fallbackSnapshotRecord := fallback
-	fallbackSnapshotRecord.Committed = &fallbackRef
-	fallbackGeneration := validGeneration(t, fallbackSnapshotRecord)
-	fallbackRef.ManifestDigest = sha256.Sum256(fallbackGeneration.Manifest)
-	fallback.Fallbacks[0] = &fallbackRef
-	fallbackRepository := &durableRecoveryRepository{
-		generations: map[string]ports.SnapshotGeneration{fallback.Name: fallbackGeneration},
-		errors:      make(map[string]error),
-		loads:       make(map[string]int),
-		repairs:     make(map[string]domain.CheckpointRef),
-	}
-	fallbackDaemon, fallbackCatalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fallback}, fallbackRepository)
-	fallbackDaemon.restoreCatalogue(context.Background(), mustDurableRecords(t, fallbackCatalogue))
-	promoted, ok, _ := fallbackCatalogue.Record(fallback.Name)
-	require.True(t, ok)
-	require.Equal(t, fallbackRef, *promoted.Committed)
-	require.Equal(t, runtimeHealthy, fallbackDaemon.stopped[fallback.Name].state)
-	require.Equal(t, 3, fallbackRepository.loads[fallback.Name])
-	require.Equal(t, fallbackRef, fallbackRepository.repairs[fallback.IncarnationID.String()])
+	t.Run("healthy and broken restoration", func(t *testing.T) {
+		healthy := durableRecoveryRecord(0)
+		broken := durableRecoveryRecord(1)
+		repository := &durableRecoveryRepository{
+			generations: map[string]ports.SnapshotGeneration{healthy.Name: validGeneration(t, healthy)},
+			errors:      map[string]error{broken.Name: errors.New("corrupt checkpoint")},
+			loads:       make(map[string]int),
+			repairs:     make(map[string]domain.CheckpointRef),
+		}
+		d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{healthy, broken}, repository)
+
+		d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+
+		require.Equal(t, runtimeHealthy, d.stopped[healthy.Name].state)
+		require.Equal(t, runtimeDegraded, d.stopped[broken.Name].state)
+		for _, name := range []string{healthy.Name, broken.Name} {
+			select {
+			case <-d.stopped[name].restoreDone:
+			default:
+				t.Fatalf("restore completion for %q was not closed", name)
+			}
+		}
+		degraded, ok, _ := catalogue.Record(broken.Name)
+		require.True(t, ok)
+		require.Equal(t, domain.RecoveryDegraded, degraded.RecoveryState)
+		require.Equal(t, 1, repository.loads[healthy.Name])
+		require.Equal(t, 1, repository.loads[broken.Name])
+		require.Empty(t, d.sessions, "a corrupt record must never open a replacement runtime")
+	})
+
+	t.Run("fallback promotion", func(t *testing.T) {
+		fallback := durableRecoveryRecord(2)
+		fallbackRef := domain.CheckpointRef{Generation: fallback.Committed.Generation - 1}
+		fallbackSnapshotRecord := fallback
+		fallbackSnapshotRecord.Committed = &fallbackRef
+		fallbackGeneration := validGeneration(t, fallbackSnapshotRecord)
+		fallbackRef.ManifestDigest = sha256.Sum256(fallbackGeneration.Manifest)
+		fallback.Fallbacks[0] = &fallbackRef
+		fallbackRepository := &durableRecoveryRepository{
+			generations: map[string]ports.SnapshotGeneration{fallback.Name: fallbackGeneration},
+			errors:      make(map[string]error),
+			loads:       make(map[string]int),
+			repairs:     make(map[string]domain.CheckpointRef),
+		}
+		fallbackDaemon, fallbackCatalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fallback}, fallbackRepository)
+		fallbackDaemon.restoreCatalogue(context.Background(), mustDurableRecords(t, fallbackCatalogue))
+		promoted, ok, _ := fallbackCatalogue.Record(fallback.Name)
+		require.True(t, ok)
+		require.Equal(t, fallbackRef, *promoted.Committed)
+		require.Equal(t, runtimeHealthy, fallbackDaemon.stopped[fallback.Name].state)
+		require.Equal(t, 3, fallbackRepository.loads[fallback.Name])
+		require.Equal(t, fallbackRef, fallbackRepository.repairs[fallback.IncarnationID.String()])
+	})
 }
 
 func TestCatalogueRestoreKeepsCommittedFallbackHealthyWhenHEADRepairFails(t *testing.T) {
@@ -431,6 +439,89 @@ func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
 	_, err := (controlExec{ctx: ctx, d: d, recoveryName: "work"}).SessionRecovery("retry", "")
 	require.ErrorIs(t, err, wantErr)
 	require.True(t, stub.seen)
+}
+
+type temporaryRestoreError struct{}
+
+func (temporaryRestoreError) Error() string   { return "temporary restore failure" }
+func (temporaryRestoreError) Temporary() bool { return true }
+
+func TestRetryableRestoreLoadErrorClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{name: "budget exhausted", err: fmt.Errorf("wrapped: %w", ports.ErrBudgetExhausted), retryable: true},
+		{name: "missing path", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.ENOENT})},
+		{name: "permission denied", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.EACCES})},
+		{name: "invalid path operation", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.EINVAL})},
+		{name: "temporary path failure", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.EAGAIN}), retryable: true},
+		{name: "resource exhausted path", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.ENOSPC}), retryable: true},
+		{name: "temporary interface", err: fmt.Errorf("wrapped: %w", temporaryRestoreError{}), retryable: true},
+		{name: "corrupt data", err: errors.New("corrupt checkpoint")},
+		{name: "context canceled", err: context.Canceled},
+		{name: "context deadline exceeded", err: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.retryable, isRetryableRestoreLoadError(tt.err))
+		})
+	}
+}
+
+func TestExplicitRecoveryRemainsRetryableAfterRepeatedTransientFailures(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	repository := &durableRecoveryRepository{
+		generations: map[string]ports.SnapshotGeneration{record.Name: validGeneration(t, record)},
+		errors:      map[string]error{record.Name: ports.ErrBudgetExhausted},
+		loads:       make(map[string]int),
+		repairs:     make(map[string]domain.CheckpointRef),
+	}
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	d.setStoppedRecovery(record, runtimeDegraded)
+	exec := controlExec{d: d, recoveryName: record.Name}
+
+	var attemptBarriers []chan struct{}
+	for range 2 {
+		err := exec.restoreExplicitRecovery(t.Context())
+		require.ErrorIs(t, err, errRetryableRestoreLoad)
+
+		d.mu.Lock()
+		entry := d.stopped[record.Name]
+		d.mu.Unlock()
+		require.Equal(t, runtimeDegraded, entry.state)
+		require.Equal(t, domain.RecoveryHealthy, entry.record.RecoveryState)
+		select {
+		case <-entry.restoreDone:
+		default:
+			t.Fatal("failed attempt completion barrier remained open")
+		}
+		for _, prior := range attemptBarriers {
+			require.NotEqual(t, prior, entry.restoreDone, "a closed completion barrier must not be reused")
+		}
+		attemptBarriers = append(attemptBarriers, entry.restoreDone)
+
+		persisted, ok, catalogueErr := catalogue.Record(record.Name)
+		require.NoError(t, catalogueErr)
+		require.True(t, ok)
+		require.Equal(t, record, persisted, "transient restore failure must preserve healthy durable authority")
+	}
+
+	repository.mu.Lock()
+	delete(repository.errors, record.Name)
+	repository.mu.Unlock()
+	require.NoError(t, exec.restoreExplicitRecovery(t.Context()))
+	d.mu.Lock()
+	require.Equal(t, runtimeHealthy, d.stopped[record.Name].state)
+	d.mu.Unlock()
+	persisted, ok, err := catalogue.Record(record.Name)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, domain.RecoveryHealthy, persisted.RecoveryState)
+	repository.mu.Lock()
+	require.Equal(t, 3, repository.loads[record.Name])
+	repository.mu.Unlock()
 }
 
 func TestExplicitRecoveryRejectsConcurrentRestore(t *testing.T) {

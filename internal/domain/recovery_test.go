@@ -31,19 +31,15 @@ func TestIncarnationIDText(t *testing.T) {
 }
 
 func TestCatalogueRecordValidate(t *testing.T) {
-	valid := CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh}
-	require.NoError(t, valid.Validate())
-	valid.RecoveryState = RecoveryHealthy
-	valid.Committed = &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}
-	require.NoError(t, valid.Validate())
-	valid.Fallbacks[0] = &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{2}}
-	require.Error(t, valid.Validate(), "duplicate generations are malformed")
-
 	validRef := &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}
 	tests := []struct {
-		name   string
-		record CatalogueRecord
+		name      string
+		record    CatalogueRecord
+		wantValid bool
 	}{
+		{name: "fresh valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh}, wantValid: true},
+		{name: "healthy with committed checkpoint valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}}, wantValid: true},
+		{name: "duplicate generation invalid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}, Fallbacks: [2]*CheckpointRef{{Generation: 7, ManifestDigest: [32]byte{2}}}}},
 		{name: "invalid session name", record: CatalogueRecord{Name: "bad/name", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh}},
 		{name: "zero incarnation", record: CatalogueRecord{Name: "work", RecoveryState: RecoveryFresh}},
 		{name: "unknown recovery state", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryState(99)}},
@@ -59,7 +55,12 @@ func TestCatalogueRecordValidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Error(t, tt.record.Validate())
+			err := tt.record.Validate()
+			if tt.wantValid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
 		})
 	}
 }
@@ -69,8 +70,8 @@ func TestCatalogueRecordEqualUsesCheckpointValuesAndOrderedTabs(t *testing.T) {
 	left := CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, TabNames: []string{"shell", "logs"}, RecoveryState: RecoveryHealthy, Committed: &committed}
 	right := left
 	right.TabNames = append([]string(nil), left.TabNames...)
-	copy := committed
-	right.Committed = &copy
+	committedCopy := committed
+	right.Committed = &committedCopy
 	require.True(t, left.Equal(right))
 
 	right.TabNames[0], right.TabNames[1] = right.TabNames[1], right.TabNames[0]

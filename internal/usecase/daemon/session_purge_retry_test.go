@@ -37,10 +37,11 @@ func (r *retryablePurgeRepository) WriteDeletionTombstone(ctx context.Context, t
 func (r *retryablePurgeRepository) QuarantineDeletionSources(ctx context.Context, tombstone domain.DeletionTombstone, _ bool) error {
 	_, hasDeadline := ctx.Deadline()
 	r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
-	r.calls = append(r.calls, "incremental", "legacy")
+	r.calls = append(r.calls, "incremental")
 	if r.incrementalErr != nil {
 		return r.incrementalErr
 	}
+	r.calls = append(r.calls, "legacy")
 	return r.legacyErr
 }
 func (r *retryablePurgeRepository) DeleteDeletionTombstone(ctx context.Context, _ domain.IncarnationID) error {
@@ -74,7 +75,7 @@ func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 			repository := &retryablePurgeRepository{incrementalErr: tt.incremental, legacyErr: tt.legacy}
 			WithSnapshotRepository(repository)(d)
 			store, _ := newMockStore(t)
-			WithStore(store)(d)
+			WithStore(t, store)(d)
 			sess := newSnapshotTestSession(t, "work", false, "/work")
 			record := sess.persistRecordLocked(1)
 			record.RecoveryState = domain.RecoveryFresh
@@ -86,7 +87,11 @@ func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 
 			require.Error(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 			require.True(t, repository.tombstoned["work"], "partial purge must fence startup restore/import")
-			require.Equal(t, []string{"tombstone", "incremental", "legacy"}, repository.calls)
+			wantCalls := []string{"tombstone", "incremental"}
+			if tt.incremental == nil {
+				wantCalls = append(wantCalls, "legacy")
+			}
+			require.Equal(t, wantCalls, repository.calls)
 			d.mu.Lock()
 			stopped, ok := d.stopped["work"]
 			d.mu.Unlock()
@@ -97,7 +102,8 @@ func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 			repository.legacyErr = nil
 			require.NoError(t, d.retryStoppedPurge("work"))
 			require.False(t, repository.tombstoned["work"])
-			require.Equal(t, []string{"tombstone", "incremental", "legacy", "tombstone", "incremental", "legacy", "clear tombstone"}, repository.calls)
+			wantCalls = append(wantCalls, "tombstone", "incremental", "legacy", "clear tombstone")
+			require.Equal(t, wantCalls, repository.calls)
 			require.NotEmpty(t, repository.deadlineScoped)
 			for _, scoped := range repository.deadlineScoped {
 				require.True(t, scoped, "every purge repository call must receive a deadline-scoped context")

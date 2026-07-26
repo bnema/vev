@@ -205,8 +205,10 @@ func TestNewerMetadataFailureDoesNotSkipOlderSnapshot(t *testing.T) {
 		return true
 	}
 
-	require.ErrorIs(t, d.persistSessionMetadata(sess, secondVersion, secondRecord.MetadataUpdate(), secondRollback), failure)
-	require.NoError(t, d.persistSessionMetadata(sess, firstVersion, firstRecord.MetadataUpdate(), firstRollback))
+	_, err := d.persistSessionMetadata(sess, secondVersion, secondRecord.MetadataUpdate(), secondRollback)
+	require.ErrorIs(t, err, failure)
+	_, err = d.persistSessionMetadata(sess, firstVersion, firstRecord.MetadataUpdate(), firstRollback)
+	require.NoError(t, err)
 
 	persisted, ok, err := catalogue.Record("work")
 	require.NoError(t, err)
@@ -239,7 +241,9 @@ func TestLatestMetadataFailureRollsBackRename(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Empty(t, persisted.TabNames)
+	sess.mu.Lock()
 	require.Empty(t, sess.tabs[0].name)
+	sess.mu.Unlock()
 }
 
 func TestBlockedCwdWriteCannotOverwriteLaterTabMetadata(t *testing.T) {

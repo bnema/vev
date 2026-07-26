@@ -76,43 +76,44 @@ func (r *Repository) LoadCheckpoint(ctx context.Context, id domain.IncarnationID
 	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
-	return r.loadCheckpointLocked(ctx, id, name, ref)
+	generation, _, err := r.loadCheckpointLocked(ctx, id, name, ref)
+	return generation, err
 }
 
-func (r *Repository) loadCheckpointLocked(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+func (r *Repository) loadCheckpointLocked(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, codec.Manifest, error) {
 	if ref.Generation == 0 || ref.ManifestDigest == ([32]byte{}) {
-		return ports.SnapshotGeneration{}, fmt.Errorf("invalid checkpoint reference")
+		return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("invalid checkpoint reference")
 	}
 	data, err := r.readBounded(r.manifestPath(id, ref.Generation))
 	if err != nil {
-		return ports.SnapshotGeneration{}, err
+		return ports.SnapshotGeneration{}, codec.Manifest{}, err
 	}
 	if sha256.Sum256(data) != ref.ManifestDigest {
-		return ports.SnapshotGeneration{}, fmt.Errorf("manifest digest mismatch")
+		return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("manifest digest mismatch")
 	}
 	manifest, err := codec.UnmarshalManifest(data)
 	if err != nil || manifest.IncarnationID != id || manifest.Generation != ref.Generation {
-		return ports.SnapshotGeneration{}, fmt.Errorf("invalid manifest")
+		return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("invalid manifest")
 	}
 	refs := manifestRefs(manifest)
 	if refs == nil || !withinGenerationBudget(len(data), refs) {
-		return ports.SnapshotGeneration{}, fmt.Errorf("snapshot generation too large")
+		return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("snapshot generation too large")
 	}
 	objects := make(map[ports.SnapshotDigest][]byte, len(refs))
 	for digest, objectRef := range refs {
 		if err := ctx.Err(); err != nil {
-			return ports.SnapshotGeneration{}, err
+			return ports.SnapshotGeneration{}, codec.Manifest{}, err
 		}
 		object, err := r.readBounded(r.objectPath(id, digest))
 		if err != nil {
-			return ports.SnapshotGeneration{}, err
+			return ports.SnapshotGeneration{}, codec.Manifest{}, err
 		}
 		if sha256.Sum256(object) != digest || !validObject(object, objectRef) {
-			return ports.SnapshotGeneration{}, fmt.Errorf("invalid object")
+			return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("invalid object")
 		}
 		objects[digest] = object
 	}
-	return ports.SnapshotGeneration{IncarnationID: id, Name: name, Generation: ref.Generation, ParentCheckpoint: manifest.ParentCheckpoint, Manifest: data, Objects: objects}, nil
+	return ports.SnapshotGeneration{IncarnationID: id, Name: name, Generation: ref.Generation, ParentCheckpoint: manifest.ParentCheckpoint, Manifest: data, Objects: objects}, manifest, nil
 }
 
 func (r *Repository) RepairHEAD(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
@@ -125,19 +126,12 @@ func (r *Repository) RepairHEAD(ctx context.Context, id domain.IncarnationID, re
 	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
-	data, err := r.readBounded(r.manifestPath(id, ref.Generation))
+	_, manifest, err := r.loadCheckpointLocked(ctx, id, "", ref)
 	if err != nil {
 		return fmt.Errorf("validate checkpoint before HEAD repair: %w", err)
 	}
-	if sha256.Sum256(data) != ref.ManifestDigest {
-		return fmt.Errorf("validate checkpoint before HEAD repair: manifest digest mismatch")
-	}
-	manifest, err := codec.UnmarshalManifest(data)
-	if err != nil || manifest.IncarnationID != id || manifest.Generation != ref.Generation {
-		return fmt.Errorf("validate checkpoint before HEAD repair: invalid manifest")
-	}
-	if _, err := r.loadCheckpointLocked(ctx, id, manifest.Name, ref); err != nil {
-		return err
+	if manifest.Name == "" {
+		return fmt.Errorf("validate checkpoint before HEAD repair: invalid manifest name")
 	}
 	return r.writeMutable(r.headPath(id), marshalHead(ref.Generation, ref.ManifestDigest))
 }

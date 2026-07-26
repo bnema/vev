@@ -702,18 +702,30 @@ func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
 		return nil
 	}).Maybe()
 	store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
+		if len(changes) == 0 {
+			return errors.New("empty batch")
+		}
 		state.mu.Lock()
+		seen := make(map[string]struct{}, len(changes))
+		for _, change := range changes {
+			key := string(change.Key)
+			if _, duplicate := seen[key]; duplicate {
+				state.mu.Unlock()
+				return errors.New("duplicate batch key")
+			}
+			seen[key] = struct{}{}
+			if change.Delete && state.deleteErr != nil {
+				if err := state.deleteErr(key); err != nil {
+					state.mu.Unlock()
+					return err
+				}
+			}
+		}
 		deleted := false
 		for _, change := range changes {
 			key := string(change.Key)
 			if change.Delete {
 				state.dels = append(state.dels, key)
-				if state.deleteErr != nil {
-					if err := state.deleteErr(key); err != nil {
-						state.mu.Unlock()
-						return err
-					}
-				}
 				delete(state.data, key)
 				deleted = true
 				continue
@@ -845,9 +857,9 @@ func TestNamedSessionCreationIsAllowedWithNilStore(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	WithStore(nil)(d)
+	WithStore(t, nil)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.Equal(t, "work", sess.name)
 	require.False(t, d.persistEnabled)
@@ -855,11 +867,11 @@ func TestNamedSessionCreationIsAllowedWithNilStore(t *testing.T) {
 
 func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	store, _ := newMockStore(t)
-	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
+	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
 	incarnation := domain.IncarnationID{1}
-	require.NoError(t, seed.catalogue.(*persist.Persister).Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9, RecoveryState: domain.RecoveryFresh}))
 
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
 	d.mu.Lock()
 	stopped := d.stopped["work"]
 	d.mu.Unlock()
@@ -876,7 +888,7 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 
 // TestDaemonNewWithoutPersistenceLogsNoLoadWarning covers the default,
 // persistence-free construction path (no WithStore/WithCatalogue option):
-// d.catalogue.(*persist.Persister) is the persist.New(nil) sentinel, so LoadAll now returns
+// testPersister(t, d) is the persist.New(nil) sentinel, so LoadAll now returns
 // errPersistenceUnavailable instead of an empty slice. That must not surface
 // as a "loading persisted sessions failed" warning, since nothing failed —
 // persistence simply was never configured.
@@ -890,7 +902,7 @@ func TestDaemonNewWithoutPersistenceLogsNoLoadWarning(t *testing.T) {
 }
 
 func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
-	d := &Daemon{}
+	d := &Daemon{clock: stubClock{}}
 	sess := &session{}
 	const goroutines = 16
 	const iterations = 1000
@@ -937,9 +949,9 @@ func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
 func TestTouchMRUPersistsNamedButNotEphemeral(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	named := &session{name: "work", tabs: []*tab{{}}, createdAt: 1, incarnation: domain.IncarnationID{1}}
-	require.NoError(t, d.catalogue.(*persist.Persister).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
 
 	d.touchMRU(named)
 	require.Equal(t, named.mruAt.Load(), state.record(t, "work").LastUsedSeq)
@@ -957,11 +969,11 @@ func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
 	defer release()
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
 	d.mruSeq.Store(42)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), sess.mruAt.Load())
 	require.Equal(t, uint64(42), state.record(t, "work").LastUsedSeq)
@@ -975,9 +987,9 @@ func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	defer release2()
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.True(t, state.has("work"))
 	created := state.record(t, "work")
@@ -1006,13 +1018,13 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	defer release()
 	store, _ := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 
-	records, err := d.catalogue.(*persist.Persister).LoadAll()
+	records, err := testPersister(t, d).LoadAll()
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	require.Equal(t, "work", records[0].Name)
@@ -1059,10 +1071,10 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			}
 			store, _ := newMockStore(t)
 			d := newTestDaemon(t, newFactorySeq(t, ptys...), stubClock{})
-			WithStore(store)(d)
+			WithStore(t, store)(d)
 			sz := domain.Size{Cols: 80, Rows: 24}
 
-			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+			sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 			require.NoError(t, err)
 			require.NoError(t, d.createTab(sess, sz))
 			require.NoError(t, d.createTab(sess, sz))
@@ -1071,7 +1083,7 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			}
 
 			require.NoError(t, d.closeTab(sess, sess.tabs[tt.closeIndex], false))
-			records, err := d.catalogue.(*persist.Persister).LoadAll()
+			records, err := testPersister(t, d).LoadAll()
 			require.NoError(t, err)
 			require.Len(t, records, 1)
 			require.Equal(t, tt.want, records[0].TabNames)
@@ -1108,15 +1120,15 @@ func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	defer release()
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "0", true, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 	require.Equal(t, "shell", sess.tabs[0].name)
 
 	require.False(t, state.has("0"))
-	records, err := d.catalogue.(*persist.Persister).LoadAll()
+	records, err := testPersister(t, d).LoadAll()
 	require.NoError(t, err)
 	require.Empty(t, records)
 }
@@ -1129,8 +1141,8 @@ func TestAttachRestoresPersistedTabNames(t *testing.T) {
 	defer release2()
 	store, _ := newMockStore(t)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
-	WithStore(store)(d)
-	require.NoError(t, d.catalogue.(*persist.Persister).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}, RecoveryState: domain.RecoveryFresh}))
+	WithStore(t, store)(d)
+	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}, RecoveryState: domain.RecoveryFresh}))
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
@@ -1150,10 +1162,10 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	defer release()
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "0", true, "/tmp/e", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.False(t, state.has("0"))
 	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
@@ -1167,9 +1179,9 @@ func TestEphemeralPromotionAssignsAndPersistsLifecycleIdentity(t *testing.T) {
 	store, state := newMockStore(t)
 	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100)}}
 	d := newTestDaemon(t, newFactory(t, p), clock)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 
-	sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.Zero(t, sess.createdAt, "regression fixture: ephemerals have no lifecycle identity")
 
@@ -1194,9 +1206,9 @@ func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testin
 	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
 	d.clock = clock
 	d.ptys = newFactorySeq(t, firstPTY, secondPTY)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 
-	first, err := d.createSessionLocked("0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	first, err := createSessionForTest(d, "0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameSession(first, "named"))
 	staleCreatedAt := first.createdAt
@@ -1204,7 +1216,7 @@ func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testin
 	require.NoError(t, d.killSession(first, ports.ReasonSessionKilled, true))
 	d.sessWg.Wait()
 
-	second, err := d.createSessionLocked("0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	second, err := createSessionForTest(d, "0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameSession(second, "named"))
 	require.NotEqual(t, staleCreatedAt, second.createdAt)
@@ -1221,10 +1233,10 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		defer release()
 		store, state := newMockStore(t)
 		d := newTestDaemon(t, newFactory(t, p), stubClock{})
-		WithStore(store)(d)
+		WithStore(t, store)(d)
 		d.lastAllocatedCreatedAt = math.MaxInt64
 
-		sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 		require.NoError(t, err)
 		require.EqualError(t, d.renameSession(sess, "named"), "daemon: lifecycle identities exhausted")
 		require.Equal(t, "0", sess.name)
@@ -1250,9 +1262,9 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		}).Once()
 		clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
 		d := newTestDaemon(t, newFactory(t, p), clock)
-		WithStore(store)(d)
+		WithStore(t, store)(d)
 
-		sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 		require.NoError(t, err)
 		require.EqualError(t, d.renameSession(sess, "named"), "disk full")
 		require.Equal(t, "0", sess.name)
@@ -1277,11 +1289,11 @@ func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 	defer release()
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	cwd := "/tmp/work"
 	WithCwdReader(func(int) (string, error) { return cwd, nil })(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	state.mu.Lock()
 	setsAfterCreate := state.sets
@@ -1305,7 +1317,7 @@ func TestAttachResumesStoppedSessionFromStoredCwd(t *testing.T) {
 	defer release()
 	store, _ := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	cwd := t.TempDir()
 	d.stopped["work"] = stoppedSession{name: "work", cwd: cwd, createdAt: 1}
 	tr := portsmocks.NewMockTransport(t)
@@ -1329,7 +1341,7 @@ func TestAttachStoppedMissingCwdFallsBackToHome(t *testing.T) {
 	defer release()
 	store, _ := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/definitely/missing/vev", createdAt: 1}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
@@ -1343,8 +1355,8 @@ func TestAttachStoppedMissingCwdFallsBackToHome(t *testing.T) {
 func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	WithStore(store)(d)
-	require.NoError(t, d.catalogue.(*persist.Persister).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
+	WithStore(t, store)(d)
+	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
 	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp", createdAt: 1}
 	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
 	require.False(t, state.has("old"))
@@ -1378,7 +1390,7 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 	d := newTestDaemon(t, f, stubClock{})
 	d.baseEnv = []string{"KEEP=1", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{TrueColor: true}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{TrueColor: true}, d.baseEnv)
 	require.NoError(t, err)
 	defer func() {
 		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -1434,7 +1446,7 @@ func TestRenameSessionUnsafeNameRejected(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
 }
@@ -1444,7 +1456,7 @@ func TestCreateTabPtyFailureIsUserError(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 
 	cause := errors.New("fork/exec: no such file")
@@ -1471,12 +1483,12 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	defer release2()
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	WithCwdReader(func(int) (string, error) { return "/tmp/latest", nil })(d)
 
-	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
+	natural, err := createSessionForTest(d, "natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
-	other, err := d.createSessionLocked("other", false, "/tmp/other", sz, terminalEnv{}, d.baseEnv)
+	other, err := createSessionForTest(d, "other", false, "/tmp/other", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	_ = d.killSession(natural, ports.ReasonSessionKilled, false)
 	require.True(t, state.has("natural"))
@@ -1792,7 +1804,7 @@ func TestNamedSessionLifecycleTimestampsAreMonotonicAcrossClockRegression(t *tes
 
 	var got []int64
 	for _, name := range []string{"one", "two", "three"} {
-		sess, err := d.createSessionLocked(name, false, "/tmp", sz, terminalEnv{}, d.baseEnv)
+		sess, err := createSessionForTest(d, name, false, "/tmp", sz, terminalEnv{}, d.baseEnv)
 		require.NoError(t, err)
 		got = append(got, sess.createdAt)
 	}
@@ -1805,7 +1817,7 @@ func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) 
 	d.nextID = 17
 	d.stopped["retained"] = stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}
 
-	sess, err := d.createSessionLocked("new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 
 	require.ErrorContains(t, err, "lifecycle identities exhausted")
 	require.Nil(t, sess)
@@ -1855,18 +1867,18 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 
 func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *testing.T) {
 	store, _ := newMockStore(t)
-	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
-	require.NoError(t, seed.catalogue.(*persist.Persister).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900, RecoveryState: domain.RecoveryFresh}))
+	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
+	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900, RecoveryState: domain.RecoveryFresh}))
 
 	p, release := newBlockingPTY(t)
 	defer release()
 	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100)}}
 	// Constructing with persistence must establish the lifecycle high-water mark.
-	d := New(newFactory(t, p), clock, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
+	d := New(newFactory(t, p), clock, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	t.Cleanup(d.serveCancel)
 
-	sess, err := d.createSessionLocked("new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	sess, err := createSessionForTest(d, "new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.Equal(t, int64(901), sess.createdAt)
 }
@@ -1878,7 +1890,7 @@ func TestResumingStoppedSessionPreservesLifecycleIdentityInPersistence(t *testin
 	defer releaseTarget()
 	d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
 	store, state := newMockStore(t)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	d.ptys = newFactory(t, targetPTY)
 	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 77}
 

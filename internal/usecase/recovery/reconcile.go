@@ -90,15 +90,15 @@ func classifyFinding(record domain.CatalogueRecord, finding ports.ReconcileFindi
 		decision.ReasonCode = "incarnation-mismatch"
 		return decision
 	}
-	if finding.Status == ports.ReconcileValidated && record.Committed != nil && (finding.Kind != ports.ReconcileForwardOrphan || finding.Candidate.Ref.Generation <= record.Committed.Generation) {
-		decision.Kind = ports.ReconcileKeepQuarantined
-		decision.ReasonCode = "not-forward"
-		decision.RetentionResolved = true
-		return decision
-	}
 	if finding.Kind != ports.ReconcileForwardOrphan || record.Committed == nil {
 		decision.Kind = ports.ReconcileKeepQuarantined
 		decision.ReasonCode = "invalid-candidate"
+		return decision
+	}
+	if finding.Status == ports.ReconcileValidated && finding.Candidate.Ref.Generation <= record.Committed.Generation {
+		decision.Kind = ports.ReconcileKeepQuarantined
+		decision.ReasonCode = "not-forward"
+		decision.RetentionResolved = true
 		return decision
 	}
 	if finding.Status != ports.ReconcileValidated || !validForwardChain(*record.Committed, finding.Candidate, finding.AncestorChain) {
@@ -157,7 +157,7 @@ func (c *Coordinator) PublishReconciledCheckpoint(ctx context.Context, name stri
 	if !ok {
 		return domain.CatalogueRecord{}, ErrCheckpointRecordNotFound
 	}
-	if candidate.Name != name || candidate.IncarnationID != record.IncarnationID || record.Committed == nil || !validForwardChain(*record.Committed, candidate, ancestors) {
+	if record.RecoveryState != domain.RecoveryHealthy || candidate.Name != name || candidate.IncarnationID != record.IncarnationID || record.Committed == nil || !validForwardChain(*record.Committed, candidate, ancestors) {
 		return domain.CatalogueRecord{}, ErrCheckpointConflict
 	}
 	next := shiftedCheckpoint(record, candidate.Ref)

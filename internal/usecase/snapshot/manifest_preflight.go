@@ -19,12 +19,12 @@ func preflightManifest(body []byte) error {
 	if generation == 0 {
 		return fmt.Errorf("%w: manifest generation", ErrInvalidData)
 	}
-	if len(r.b) < len(domain.IncarnationID{}) {
-		return ErrShortPayload
+	incarnationBytes, err := r.getBytes(len(domain.IncarnationID{}))
+	if err != nil {
+		return err
 	}
 	var incarnationID domain.IncarnationID
-	copy(incarnationID[:], r.b[:len(incarnationID)])
-	r.b = r.b[len(incarnationID):]
+	copy(incarnationID[:], incarnationBytes)
 	if incarnationID == (domain.IncarnationID{}) {
 		return fmt.Errorf("%w: manifest incarnation", ErrInvalidData)
 	}
@@ -39,11 +39,10 @@ func preflightManifest(body []byte) error {
 		if err != nil {
 			return err
 		}
-		if len(r.b) < 32 {
-			return ErrShortPayload
+		digest, err := r.getBytes(len(SnapshotDigest{}))
+		if err != nil {
+			return err
 		}
-		digest := r.b[:32]
-		r.b = r.b[32:]
 		if parentGeneration == 0 || parentGeneration >= generation || isZeroDigestBytes(digest) {
 			return fmt.Errorf("%w: parent checkpoint", ErrInvalidData)
 		}

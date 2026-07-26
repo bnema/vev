@@ -52,15 +52,29 @@ func testCatalogueRecordRoundTrip(t *testing.T) {
 func TestDecodeRecordValueWrapsMalformedAndValidationErrors(t *testing.T) {
 	encoded, err := encodeRecordValue(validRecord("work", 1))
 	require.NoError(t, err)
-	const recoveryStateOffset = 4 + 2 + 16 + 4 + 8 + 8 + 8 + 4
-	encoded[recoveryStateOffset] = 99
+	encoded[recoveryStateFieldOffset(t, encoded)] = 99
 
 	_, err = decodeRecordValue("work", encoded)
 	require.ErrorIs(t, err, errMalformedRecord)
-	joined, ok := err.(interface{ Unwrap() []error })
+	require.ErrorContains(t, err, "invalid recovery state")
+}
+
+func recoveryStateFieldOffset(t *testing.T, encoded []byte) int {
+	t.Helper()
+	r := valueReader{data: encoded}
+	_, ok := r.take(len(catalogueMagic) + 2 + len(domain.IncarnationID{}))
 	require.True(t, ok)
-	require.Len(t, joined.Unwrap(), 2)
-	require.ErrorContains(t, joined.Unwrap()[1], "invalid recovery state")
+	_, ok = r.str()
+	require.True(t, ok)
+	_, ok = r.take(8 + 8 + 8)
+	require.True(t, ok)
+	count, ok := r.u32()
+	require.True(t, ok)
+	for range count {
+		_, ok = r.str()
+		require.True(t, ok)
+	}
+	return len(encoded) - r.remaining()
 }
 
 func testCatalogueDuplicateIncarnations(t *testing.T) {

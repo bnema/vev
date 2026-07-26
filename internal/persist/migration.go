@@ -419,6 +419,17 @@ func installMigratedCatalogue(stateDir string, records []domain.CatalogueRecord)
 	if err := p.Close(); err != nil {
 		return err
 	}
+	staged, opened, err := openCurrentCatalogue(stage, false)
+	if err != nil {
+		return err
+	}
+	if !catalogueRecordsEqual(records, opened) {
+		_ = staged.Close()
+		return errors.New("persist: staged catalogue validation mismatch")
+	}
+	if err := staged.Close(); err != nil {
+		return err
+	}
 	source := StorePath(stage)
 	target := StorePath(stateDir)
 	if err := os.Rename(source, target); err != nil {
@@ -487,9 +498,13 @@ func decodeLegacyRecordV0(name string, value []byte) (legacyCatalogueRecordV0, e
 }
 
 func writeMigrationRecord(path string, record MigrationRecord) error {
-	return atomicMigrationWrite(path, encodeMigrationRecord(record))
+	encoded, err := encodeMigrationRecord(record)
+	if err != nil {
+		return err
+	}
+	return atomicMigrationWrite(path, encoded)
 }
-func encodeMigrationRecord(record MigrationRecord) []byte {
+func encodeMigrationRecord(record MigrationRecord) ([]byte, error) {
 	out := append([]byte(migrationRecordMagic), byte(migrationRecordVersion>>8), byte(migrationRecordVersion), byte(record.Phase))
 	names := make([]string, 0, len(record.Assignments))
 	for name := range record.Assignments {
@@ -498,7 +513,11 @@ func encodeMigrationRecord(record MigrationRecord) []byte {
 	sort.Strings(names)
 	out = binary.BigEndian.AppendUint32(out, uint32(len(names)))
 	for _, name := range names {
-		out = appendMigrationString(out, name)
+		var err error
+		out, err = appendCheckedString(out, name)
+		if err != nil {
+			return nil, err
+		}
 		id := record.Assignments[name]
 		out = append(out, id[:]...)
 		if ref := record.Validated[name]; ref != nil {
@@ -508,9 +527,12 @@ func encodeMigrationRecord(record MigrationRecord) []byte {
 		} else {
 			out = append(out, 0)
 		}
-		out = appendMigrationString(out, record.Degraded[name])
+		out, err = appendCheckedString(out, record.Degraded[name])
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out
+	return out, nil
 }
 func readMigrationRecord(path string) (MigrationRecord, error) {
 	data, err := os.ReadFile(path)
@@ -572,10 +594,6 @@ func readMigrationRecord(path string) (MigrationRecord, error) {
 		return MigrationRecord{}, errMalformedRecord
 	}
 	return record, nil
-}
-func appendMigrationString(out []byte, value string) []byte {
-	out = binary.BigEndian.AppendUint32(out, uint32(len(value)))
-	return append(out, value...)
 }
 func atomicMigrationWrite(path string, data []byte) (retErr error) {
 	dir := filepath.Dir(path)

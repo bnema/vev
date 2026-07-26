@@ -49,6 +49,10 @@ func testLifecycleLockProcessContentionAndReacquire(t *testing.T) {
 	require.NoError(t, err)
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	}()
 
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	require.NoError(t, err)

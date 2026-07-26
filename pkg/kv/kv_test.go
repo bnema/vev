@@ -11,7 +11,16 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/bnema/vev/pkg/safedir"
 )
+
+var compactionFaultPoints = []string{
+	"before-write-next", "after-write-next", "before-sync-next", "after-sync-next",
+	"after-sync-dir-next", "after-remove-stale-prev", "after-rename-current-prev",
+	"after-sync-dir-prev", "after-rename-next-current", "after-sync-dir-current",
+	"before-reopen-current", "after-reopen-current", "after-remove-prev", "after-final-sync-dir",
+}
 
 func privatePath(t *testing.T) string {
 	t.Helper()
@@ -56,7 +65,7 @@ func legacyFile(records ...[]byte) []byte {
 
 func writeFile(t *testing.T, path string, data []byte) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -173,7 +182,7 @@ func TestOpenTruncatesMidRecordTail(t *testing.T) {
 	path := privatePath(t)
 	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
 	second, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, currentFile(first, second[:len(second)/2]), 0o600); err != nil {
@@ -206,7 +215,7 @@ func TestCRCcorruptionOfLastRecordFailsClosed(t *testing.T) {
 	second, _ := encodeRecord(opSet, []byte("k"), []byte("new"))
 	buf := currentFile(first, second)
 	buf[fileHeaderLen+len(first)+recordHeaderLen+payloadPrefixLen+1] ^= 0xff
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, buf, 0o600); err != nil {
@@ -311,7 +320,7 @@ func TestReplayStrict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := privatePath(t)
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(path, tt.wal, 0o600); err != nil {
@@ -361,7 +370,7 @@ func TestRecoverCompactionCleansStaleNextRegardlessOfPrev(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := privatePath(t)
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 				t.Fatal(err)
 			}
 			for suffix, data := range map[string][]byte{"": tt.current, ".next": tt.next, ".prev": tt.prev} {
@@ -486,7 +495,7 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := privatePath(t)
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 				t.Fatal(err)
 			}
 			for suffix, data := range map[string][]byte{"": tt.current, ".next": tt.next, ".prev": tt.prev} {
@@ -520,16 +529,10 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 		})
 	}
 
-	faultPoints := []string{
-		"before-write-next", "after-write-next", "before-sync-next", "after-sync-next",
-		"after-sync-dir-next", "after-remove-stale-prev", "after-rename-current-prev",
-		"after-sync-dir-prev", "after-rename-next-current", "after-sync-dir-current",
-		"before-reopen-current", "after-reopen-current", "after-remove-prev", "after-final-sync-dir",
-	}
-	for _, point := range faultPoints {
+	for _, point := range compactionFaultPoints {
 		t.Run("fault-"+point, func(t *testing.T) {
 			path := privatePath(t)
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(path, oldFile, 0o600); err != nil {
@@ -632,7 +635,7 @@ func TestCompactionFilesystemOperationFailuresPoisonAndRecover(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := privatePath(t)
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(path, oldFile, 0o600); err != nil {
@@ -1083,13 +1086,7 @@ func TestLegacyUpgradeCrashSafety(t *testing.T) {
 	legacy := legacyFile(setA, setB)
 	want := map[string]string{"a": "one", "b": "two"}
 
-	faultPoints := []string{
-		"before-write-next", "after-write-next", "before-sync-next", "after-sync-next",
-		"after-sync-dir-next", "after-remove-stale-prev", "after-rename-current-prev",
-		"after-sync-dir-prev", "after-rename-next-current", "after-sync-dir-current",
-		"before-reopen-current", "after-reopen-current", "after-remove-prev", "after-final-sync-dir",
-	}
-	for _, point := range faultPoints {
+	for _, point := range compactionFaultPoints {
 		t.Run("fault-"+point, func(t *testing.T) {
 			path := privatePath(t)
 			writeFile(t, path, legacy)

@@ -34,7 +34,7 @@ func TestCatalogueBatchSyncBehavior(t *testing.T) {
 				return
 			}
 		}
-	}).Twice()
+	}).Once()
 	store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
 		for _, change := range changes {
 			if change.Delete {

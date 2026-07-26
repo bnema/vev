@@ -416,17 +416,26 @@ func (d *Daemon) allocateLifecycleCreatedAtLocked() (int64, error) {
 }
 
 func (d *Daemon) nowUnixNano() int64 {
-	if d == nil || d.clock == nil {
-		return time.Now().UnixNano()
-	}
 	return d.clock.Now().UnixNano()
 }
+
+type systemClock struct{}
+type systemTimer struct{ *time.Timer }
+
+func (systemClock) Now() time.Time { return time.Now() }
+func (systemClock) NewTimer(delay time.Duration) ports.Timer {
+	return systemTimer{Timer: time.NewTimer(delay)}
+}
+func (t systemTimer) C() <-chan time.Time { return t.Timer.C }
 
 // New constructs a Daemon. ptys spawns PTY-backed children, clock drives the
 // render debounce, and log receives diagnostics (defaults to slog.Default).
 func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Option) *Daemon {
 	if log == nil {
 		log = slog.Default()
+	}
+	if clock == nil {
+		clock = systemClock{}
 	}
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -613,7 +622,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		closeErr = d.catalogue.Close()
 	}
 	if closeErr != nil {
-		d.log.Warn("closing session persister failed", "err", closeErr)
+		d.log.Warn("closing session catalogue failed", "err", closeErr)
 	}
 	return nil
 }
@@ -745,8 +754,9 @@ func snapshotStopContext(deadline *snapshotShutdownDeadline) (context.Context, c
 		case <-stop:
 		}
 	}()
+	var stopOnce sync.Once
 	return ctx, func() {
-		close(stop)
+		stopOnce.Do(func() { close(stop) })
 		cancel()
 	}
 }

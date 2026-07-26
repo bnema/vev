@@ -21,6 +21,10 @@ func StorePath(dir string) string { return filepath.Join(dir, filename) }
 type Persister struct {
 	store ports.Store
 	mu    sync.Mutex
+
+	incarnationOwners map[domain.IncarnationID]string
+	nameIncarnations  map[string]domain.IncarnationID
+	incarnationIndex  bool
 }
 
 // KVStore adapts the reusable WAL implementation to the persistence port.
@@ -146,19 +150,8 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 	if len(records) == 0 {
 		return errors.New("persist: empty catalogue batch")
 	}
-	projected := make(map[string]domain.CatalogueRecord)
-	var decodeErr error
-	p.store.Range(func(key, value []byte) bool {
-		record, err := decodeRecordValue(string(key), value)
-		if err != nil {
-			decodeErr = err
-			return false
-		}
-		projected[string(key)] = record
-		return true
-	})
-	if decodeErr != nil {
-		return decodeErr
+	if err := p.ensureIncarnationIndexLocked(); err != nil {
+		return err
 	}
 	changes := make([]ports.StoreChange, 0, len(records))
 	keys := make([]string, 0, len(records))
@@ -172,7 +165,6 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 			return err
 		}
 		if record == nil {
-			delete(projected, name)
 			changes = append(changes, ports.StoreChange{Key: []byte(name), Delete: true})
 			continue
 		}
@@ -183,20 +175,76 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 		if err != nil {
 			return err
 		}
-		projected[name] = *record
 		changes = append(changes, ports.StoreChange{Key: []byte(name), Value: value})
 	}
-	all := make([]domain.CatalogueRecord, 0, len(projected))
-	for _, record := range projected {
-		all = append(all, record)
-	}
-	if err := validateUniqueIncarnations(all); err != nil {
-		return err
+	incoming := make(map[domain.IncarnationID]string, len(records))
+	for name, record := range records {
+		if record == nil {
+			continue
+		}
+		if previous, ok := incoming[record.IncarnationID]; ok && previous != name {
+			return fmt.Errorf("persist: duplicate incarnation for %q and %q", previous, name)
+		}
+		incoming[record.IncarnationID] = name
+		if owner, ok := p.incarnationOwners[record.IncarnationID]; ok && owner != name {
+			ownerNext, ownerTouched := records[owner]
+			if !ownerTouched || (ownerNext != nil && ownerNext.IncarnationID == record.IncarnationID) {
+				return fmt.Errorf("persist: duplicate incarnation for %q and %q", owner, name)
+			}
+		}
 	}
 	if err := p.store.Batch(changes); err != nil {
+		p.incarnationIndex = false
 		return err
 	}
-	return p.store.Sync()
+	if err := p.store.Sync(); err != nil {
+		p.incarnationIndex = false
+		return err
+	}
+	for name := range records {
+		if id, ok := p.nameIncarnations[name]; ok {
+			delete(p.incarnationOwners, id)
+			delete(p.nameIncarnations, name)
+		}
+	}
+	for name, record := range records {
+		if record != nil {
+			p.incarnationOwners[record.IncarnationID] = name
+			p.nameIncarnations[name] = record.IncarnationID
+		}
+	}
+	return nil
+}
+
+func (p *Persister) ensureIncarnationIndexLocked() error {
+	if p.incarnationIndex {
+		return nil
+	}
+	owners := make(map[domain.IncarnationID]string)
+	names := make(map[string]domain.IncarnationID)
+	var indexErr error
+	p.store.Range(func(key, value []byte) bool {
+		name := string(key)
+		record, err := decodeRecordValue(name, value)
+		if err != nil {
+			indexErr = err
+			return false
+		}
+		if previous, ok := owners[record.IncarnationID]; ok {
+			indexErr = fmt.Errorf("persist: duplicate incarnation for %q and %q", previous, name)
+			return false
+		}
+		owners[record.IncarnationID] = name
+		names[name] = record.IncarnationID
+		return true
+	})
+	if indexErr != nil {
+		return indexErr
+	}
+	p.incarnationOwners = owners
+	p.nameIncarnations = names
+	p.incarnationIndex = true
+	return nil
 }
 func (p *Persister) Rename(oldName string, next domain.CatalogueRecord) error {
 	if p == nil {

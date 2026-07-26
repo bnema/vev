@@ -45,32 +45,29 @@ func decodeManifestV1(data []byte) (legacyManifestV1, error) {
 	if err != nil {
 		return legacyManifestV1{}, err
 	}
+	return legacyObjectsOf(manifest), nil
+}
+
+func legacyObjectsOf(manifest codec.Manifest) legacyManifestV1 {
 	seen := make(map[ports.SnapshotDigest]struct{})
 	objects := make([]legacyObjectV1, 0)
-	add := func(ref codec.ObjectRef) error {
+	add := func(ref codec.ObjectRef) {
 		if _, ok := seen[ref.Digest]; ok {
-			return nil
+			return
 		}
 		seen[ref.Digest] = struct{}{}
 		objects = append(objects, legacyObjectV1{Kind: uint8(ref.Kind), Digest: ref.Digest, Size: uint64(ref.Size)})
-		return nil
 	}
 	for _, tab := range manifest.Tabs {
 		for _, pane := range tab.Panes {
 			for _, ref := range pane.Sealed {
-				if err := add(ref); err != nil {
-					return legacyManifestV1{}, err
-				}
+				add(ref)
 			}
-			if err := add(pane.Tail); err != nil {
-				return legacyManifestV1{}, err
-			}
-			if err := add(pane.Visible); err != nil {
-				return legacyManifestV1{}, err
-			}
+			add(pane.Tail)
+			add(pane.Visible)
 		}
 	}
-	return legacyManifestV1{Name: manifest.Name, Generation: manifest.Generation, Objects: objects}, nil
+	return legacyManifestV1{Name: manifest.Name, Generation: manifest.Generation, Objects: objects}
 }
 
 func upgradeManifestV1(data []byte, id domain.IncarnationID) (codec.Manifest, []byte, error) {
@@ -237,10 +234,7 @@ func (r *Repository) MigrateV1Checkpoint(ctx context.Context, req ports.Snapshot
 	if err != nil {
 		return domain.CheckpointRef{}, uncertainLegacyError("decode manifest", err)
 	}
-	decoded, err := decodeManifestV1(data)
-	if err != nil {
-		return domain.CheckpointRef{}, uncertainLegacyError("decode manifest objects", err)
-	}
+	legacy := legacyObjectsOf(manifest)
 	if manifest.Name != req.LegacyName || manifest.Generation != req.LegacyRef.Generation {
 		return domain.CheckpointRef{}, uncertainLegacyError("manifest identity mismatch", nil)
 	}
@@ -253,7 +247,7 @@ func (r *Repository) MigrateV1Checkpoint(ctx context.Context, req ports.Snapshot
 	if err := r.ensureSession(req.IncarnationID); err != nil {
 		return domain.CheckpointRef{}, err
 	}
-	for _, ref := range decoded.Objects {
+	for _, ref := range legacy.Objects {
 		if err := ctx.Err(); err != nil {
 			return domain.CheckpointRef{}, err
 		}

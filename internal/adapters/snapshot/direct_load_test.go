@@ -76,8 +76,17 @@ func TestRepairHEAD(t *testing.T) {
 		t.Fatal(err)
 	}
 	valid := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(pub.Manifest)}
+	manifestReads := 0
+	repo.hooks.beforePayloadRead = func(path string) {
+		if path == repo.manifestPath(id, valid.Generation) {
+			manifestReads++
+		}
+	}
 	if err := repo.RepairHEAD(context.Background(), id, valid); err != nil {
 		t.Fatal(err)
+	}
+	if manifestReads != 1 {
+		t.Fatalf("RepairHEAD manifest reads = %d, want 1", manifestReads)
 	}
 	before, err := os.ReadFile(repo.headPath(id))
 	if err != nil {

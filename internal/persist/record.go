@@ -125,15 +125,12 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 	return record, nil
 }
 
-func appendString(buf []byte, value string) []byte {
-	buf = binary.BigEndian.AppendUint32(buf, uint32(len(value)))
-	return append(buf, value...)
-}
 func appendCheckedString(buf []byte, value string) ([]byte, error) {
 	if uint64(len(value)) > math.MaxUint32 {
 		return nil, errors.New("persist: string too large")
 	}
-	return appendString(buf, value), nil
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(value)))
+	return append(buf, value...), nil
 }
 func appendRef(buf []byte, ref *domain.CheckpointRef) []byte {
 	if ref == nil {

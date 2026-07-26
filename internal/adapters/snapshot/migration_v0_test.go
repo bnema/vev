@@ -24,7 +24,18 @@ func legacyManifestBytes(name string, generation uint64) []byte {
 	body = binary.BigEndian.AppendUint64(body, 1)
 	body = binary.BigEndian.AppendUint16(body, 0)
 	body = binary.BigEndian.AppendUint16(body, 0)
-	out := make([]byte, 16, 16+len(body))
+	return legacyEnvelope(body)
+}
+
+func legacyBodyFromModern(modern []byte) []byte {
+	body := append([]byte(nil), modern[legacyManifestHeaderSize:]...)
+	const generationSize = 8
+	modernOnly := generationSize + len(domain.IncarnationID{}) + 1 // incarnation and parent flag follow generation in v2.
+	return append(body[:generationSize], body[modernOnly:]...)
+}
+
+func legacyEnvelope(body []byte) []byte {
+	out := make([]byte, legacyManifestHeaderSize, legacyManifestHeaderSize+len(body))
 	copy(out, "VEVM")
 	binary.BigEndian.PutUint16(out[4:6], 1)
 	binary.BigEndian.PutUint32(out[8:12], uint32(len(body)))
@@ -57,14 +68,7 @@ func TestLegacyManifestV1DeduplicatesObjectsPreservingFirst(t *testing.T) {
 	manifest := codec.Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "work", Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: []codec.ObjectRef{chunkRef, chunkRef}, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}}
 	modern, err := codec.MarshalManifest(manifest)
 	require.NoError(t, err)
-	body := append([]byte(nil), modern[legacyManifestHeaderSize:]...)
-	body = append(body[:8], body[25:]...)
-	legacy := make([]byte, legacyManifestHeaderSize, legacyManifestHeaderSize+len(body))
-	copy(legacy, "VEVM")
-	binary.BigEndian.PutUint16(legacy[4:6], 1)
-	binary.BigEndian.PutUint32(legacy[8:12], uint32(len(body)))
-	binary.BigEndian.PutUint32(legacy[12:16], crc32.ChecksumIEEE(body))
-	legacy = append(legacy, body...)
+	legacy := legacyEnvelope(legacyBodyFromModern(modern))
 
 	decoded, err := decodeManifestV1(legacy)
 	require.NoError(t, err)
@@ -98,8 +102,8 @@ func TestHasLegacyState(t *testing.T) {
 		}, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			require.NoError(t, os.Chmod(dir, 0o700))
+			dir := privateDir(t)
+			require.NoError(t, NewRepository(dir).ensurePrivateDirectory(dir))
 			tc.setup(dir)
 			got, err := NewRepository(dir).HasLegacyState(context.Background())
 			if tc.budget {
@@ -139,14 +143,7 @@ func TestMigrateV1CheckpointValidatesObjectEnvelopeAndKind(t *testing.T) {
 			manifest := codec.Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "work", Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: object.Digest, Size: uint32(len(object.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}}
 			modern, err := codec.MarshalManifest(manifest)
 			require.NoError(t, err)
-			body := append([]byte(nil), modern[legacyManifestHeaderSize:]...)
-			body = append(body[:8], body[25:]...)
-			legacyManifest := make([]byte, legacyManifestHeaderSize, legacyManifestHeaderSize+len(body))
-			copy(legacyManifest, "VEVM")
-			binary.BigEndian.PutUint16(legacyManifest[4:6], 1)
-			binary.BigEndian.PutUint32(legacyManifest[8:12], uint32(len(body)))
-			binary.BigEndian.PutUint32(legacyManifest[12:16], crc32.ChecksumIEEE(body))
-			legacyManifest = append(legacyManifest, body...)
+			legacyManifest := legacyEnvelope(legacyBodyFromModern(modern))
 			key := sessionKey("work")
 			for _, stored := range []ports.SnapshotObject{object, visible} {
 				require.NoError(t, os.MkdirAll(filepath.Dir(repo.legacyObjectPath(key, stored.Digest)), 0o700))
@@ -165,23 +162,25 @@ func TestMigrateV1CheckpointValidatesObjectEnvelopeAndKind(t *testing.T) {
 }
 
 func TestMigrateV1CheckpointAcceptsLegacyNilParentBeyondGenerationOne(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.Chmod(dir, 0o700))
+	dir := privateDir(t)
 	repo := NewRepository(dir)
+	require.NoError(t, repo.ensurePrivateDirectory(dir))
 	name := "work"
 	key := sessionKey(name)
 	generations := filepath.Join(dir, "sessions", key, "generations")
 	require.NoError(t, os.MkdirAll(generations, 0o700))
-	for i := 1; i <= 5000; i++ {
+	// Place the authoritative generation just beyond the bounded legacy scan.
+	highestGeneration := maxDirectoryTraversalEntries + 1
+	for i := 1; i < highestGeneration; i++ {
 		require.NoError(t, os.WriteFile(filepath.Join(generations, generationFilename(uint64(i))), []byte("stale"), 0o600))
 	}
-	legacy := legacyManifestBytes(name, 5001)
+	legacy := legacyManifestBytes(name, uint64(highestGeneration))
 	legacyDigest := sha256.Sum256(legacy)
-	require.NoError(t, os.WriteFile(filepath.Join(generations, generationFilename(5001)), legacy, 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "sessions", key, "HEAD"), marshalHead(5001, legacyDigest), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(generations, generationFilename(uint64(highestGeneration))), legacy, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sessions", key, "HEAD"), marshalHead(uint64(highestGeneration), legacyDigest), 0o600))
 	ref, err := repo.ReadLegacyHEAD(context.Background(), name)
 	require.NoError(t, err)
-	require.Equal(t, uint64(5001), ref.Generation)
+	require.Equal(t, uint64(highestGeneration), ref.Generation)
 	id := domain.IncarnationID{1}
 	migrated, err := repo.MigrateV1Checkpoint(context.Background(), ports.SnapshotMigrationRequest{LegacyName: name, IncarnationID: id, LegacyRef: ref})
 	require.NoError(t, err)
@@ -191,7 +190,7 @@ func TestMigrateV1CheckpointAcceptsLegacyNilParentBeyondGenerationOne(t *testing
 	require.NoError(t, err)
 	require.Equal(t, id, manifest.IncarnationID)
 	require.Nil(t, manifest.ParentCheckpoint)
-	for i := 1; i <= 5000; i++ {
+	for i := 1; i < highestGeneration; i++ {
 		require.FileExists(t, filepath.Join(generations, generationFilename(uint64(i))))
 	}
 }

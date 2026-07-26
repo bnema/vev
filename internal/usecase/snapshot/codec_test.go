@@ -14,6 +14,35 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
+func TestPayloadReaderGetBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		input     []byte
+		n         int
+		want      []byte
+		remaining []byte
+		wantErr   error
+	}{
+		{name: "reads and advances", input: []byte{1, 2, 3}, n: 2, want: []byte{1, 2}, remaining: []byte{3}},
+		{name: "reads empty", input: []byte{1}, n: 0, want: []byte{}, remaining: []byte{1}},
+		{name: "short payload does not advance", input: []byte{1}, n: 2, remaining: []byte{1}, wantErr: ErrShortPayload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := payloadReader{b: append([]byte(nil), tc.input...)}
+			got, err := r.getBytes(tc.n)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("getBytes(%d) error = %v, want %v", tc.n, err, tc.wantErr)
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("getBytes(%d) = %v, want %v", tc.n, got, tc.want)
+			}
+			if !bytes.Equal(r.b, tc.remaining) {
+				t.Fatalf("remaining bytes = %v, want %v", r.b, tc.remaining)
+			}
+		})
+	}
+}
+
 func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
 	indexed := renderer.DefaultStyle()
 	indexed.Bold, indexed.Inverse = true, true

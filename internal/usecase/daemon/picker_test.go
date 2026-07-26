@@ -293,7 +293,9 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 	require.Error(t, <-result)
 	<-restored
 	require.Same(t, from, ac.currentSession())
+	d.mu.Lock()
 	entry := d.stopped[record.Name]
+	d.mu.Unlock()
 	require.Equal(t, runtimeDegraded, entry.state)
 	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
 	select {
@@ -1133,7 +1135,7 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	WithSnapshotRepository(refusingSnapshotDeleteRepository{err: cause})(d)
 	target := d.sessions[domain.SessionID("recent")]
 	store, _ := newMockStore(t)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	target.mu.Lock()
 	if target.incarnation == (domain.IncarnationID{}) {
 		target.incarnation = domain.IncarnationID{1}
@@ -1175,7 +1177,7 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	d, from, ac, sends := newManualSessionWithPTYs(t, p)
 	cause := errors.New("delete failed")
 	store, state := newMockStore(t)
-	WithStore(store)(d)
+	WithStore(t, store)(d)
 	record := domain.CatalogueRecord{Name: "stopped", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/stopped", CreatedAt: 7, RecoveryState: domain.RecoveryFresh}
 	require.NoError(t, d.catalogue.Create(record))
 	state.mu.Lock()

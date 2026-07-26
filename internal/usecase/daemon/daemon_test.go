@@ -68,6 +68,12 @@ func newTestDaemon(t testing.TB, ptys ports.PTYFactory, clk ports.Clock) *Daemon
 	return newTestDaemonWithCleanup(t, ptys, clk, true)
 }
 
+func createSessionForTest(d *Daemon, name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.createSessionLocked(name, ephemeral, cwd, sz, term, env, restoredTabNames...)
+}
+
 func newTestDaemonWithCleanup(t testing.TB, ptys ports.PTYFactory, clk ports.Clock, registerCleanup bool) *Daemon {
 	t.Helper()
 	d := New(ptys, clk, slog.New(slog.NewTextHandler(io.Discard, nil)))

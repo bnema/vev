@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
@@ -272,7 +273,9 @@ func TestDegradedExportIsReadOnly(t *testing.T) {
 
 	require.NoError(t, coordinator.Export(context.Background(), record.Name, &exported))
 	require.NoError(t, coordinator.Export(context.Background(), record.Name, &repeated))
-	require.NotEmpty(t, exported.Bytes())
+	golden, err := hex.DecodeString("5645565800010100000000000000000000000000000000000000000000030000000662726f6b656e000000086d616e69666573740000000201000000000000000000000000000000000000000000000000000000000000000000000566697273740200000000000000000000000000000000000000000000000000000000000000000000067365636f6e64")
+	require.NoError(t, err)
+	require.Equal(t, golden, exported.Bytes())
 	require.Equal(t, exported.Bytes(), repeated.Bytes())
 	require.Equal(t, record, catalogue.records[record.Name])
 	require.Empty(t, catalogue.events)
@@ -314,6 +317,10 @@ func TestDiscardIncarnationConflict(t *testing.T) {
 	require.Equal(t, old.Name, conflicts[0].Session)
 	require.Equal(t, "discard-intent", conflicts[0].Kind)
 	require.ErrorIs(t, conflicts[0].Err, ErrDiscardConflict)
+
+	delete(journal.intents, old.IncarnationID)
+	require.NoError(t, coordinator.Recover(context.Background()))
+	require.Empty(t, coordinator.Conflicts(), "a later recovery reports only its own conflicts")
 }
 
 // A discard whose replacement is already durable, live, and checkpointed must

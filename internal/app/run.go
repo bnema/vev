@@ -436,13 +436,18 @@ type lifecycleStartupDeps struct {
 
 const lifecycleAcquireRetry = 25 * time.Millisecond
 
-func runWithLifecycleOwner(ctx context.Context, runtimeDir, stateDir string, start ownedDaemonStart) error {
-	return runWithLifecycleOwnerDeps(ctx, runtimeDir, stateDir, start, lifecycleStartupDeps{
+func lifecycleStartupDependencies(log *slog.Logger) lifecycleStartupDeps {
+	return lifecycleStartupDeps{
 		ensurePrivate: safedir.EnsurePrivate,
 		acquire: func(ctx context.Context, runtimeDir string, retry time.Duration) (lifecycleOwnership, error) {
 			return lifecycle.Acquire(ctx, runtimeDir, retry)
 		},
-	})
+		log: log,
+	}
+}
+
+func runWithLifecycleOwner(ctx context.Context, runtimeDir, stateDir string, start ownedDaemonStart) error {
+	return runWithLifecycleOwnerDeps(ctx, runtimeDir, stateDir, start, lifecycleStartupDependencies(nil))
 }
 
 func runWithLifecycleOwnerDeps(ctx context.Context, runtimeDir, stateDir string, start ownedDaemonStart, deps lifecycleStartupDeps) (retErr error) {
@@ -492,13 +497,7 @@ func runDaemon() (retErr error) {
 	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
 	return runWithLifecycleOwnerDeps(ctx, ipc.SocketDir(), platform.StateDir(), func(ctx context.Context) error {
 		return runDaemonOwnedWithLogger(ctx, log)
-	}, lifecycleStartupDeps{
-		ensurePrivate: safedir.EnsurePrivate,
-		acquire: func(ctx context.Context, runtimeDir string, retry time.Duration) (lifecycleOwnership, error) {
-			return lifecycle.Acquire(ctx, runtimeDir, retry)
-		},
-		log: log,
-	})
+	}, lifecycleStartupDependencies(log))
 }
 
 func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, recoveryMode string) {
@@ -1567,7 +1566,7 @@ func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 	}
 
 	repository := snapshotadapter.NewRepository(snapshotDir())
-	opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
+	opened, err := openOrMigrate(ctx, persist.OpenDeps{
 		StateDir:          platform.StateDir(),
 		Random:            rand.Reader,
 		SnapshotMigration: repository,

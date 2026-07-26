@@ -160,9 +160,9 @@ func TestForwardOrphanAdoption(t *testing.T) {
 		{name: "generation reversal", mutate: func(record domain.CatalogueRecord, finding *ports.ReconcileFinding) {
 			finding.Candidate.Ref.Generation = record.Committed.Generation
 		}, wantKind: ports.ReconcileKeepQuarantined, wantCause: "not-forward"},
-		{name: "not forward orphan", mutate: func(record domain.CatalogueRecord, finding *ports.ReconcileFinding) {
+		{name: "non-orphan invalid candidate", mutate: func(record domain.CatalogueRecord, finding *ports.ReconcileFinding) {
 			finding.Kind = ports.ReconcileInvalidCandidate
-		}, wantKind: ports.ReconcileKeepQuarantined, wantCause: "not-forward"},
+		}, wantKind: ports.ReconcileKeepQuarantined, wantCause: "invalid-candidate"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			record := healthyReconcileRecord()
@@ -190,6 +190,23 @@ func TestForwardOrphanAdoption(t *testing.T) {
 		require.Equal(t, []string{"catalogue"}, events)
 		require.Empty(t, repository.repairs)
 	})
+
+	for _, state := range []domain.RecoveryState{domain.RecoveryDegraded, domain.RecoveryDeleting} {
+		t.Run("non-healthy record is not reconciled", func(t *testing.T) {
+			record := healthyReconcileRecord()
+			record.RecoveryState = state
+			if state == domain.RecoveryDegraded {
+				record.DegradedReason = "uncertain"
+			} else {
+				record.Committed = nil
+			}
+			candidate := forwardCandidate(healthyReconcileRecord(), 2, healthyReconcileRecord().Committed)
+			coordinator := NewCoordinator(&checkpointCatalogue{record: record}, &reconcileRepository{}, nil, nil)
+
+			_, err := coordinator.PublishReconciledCheckpoint(context.Background(), record.Name, candidate, nil)
+			require.ErrorIs(t, err, ErrCheckpointConflict)
+		})
+	}
 
 	t.Run("stale decision after concurrent commit", func(t *testing.T) {
 		record := healthyReconcileRecord()

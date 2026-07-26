@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -131,7 +130,7 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstRef := domain.CheckpointRef{Generation: first.Generation, ManifestDigest: sha256.Sum256(first.Manifest)}
+	firstRef := domain.CheckpointRef{Generation: first.Generation, ManifestDigest: snapcodec.ManifestDigest(first.Manifest)}
 	capture.generation = 2
 	capture.parentCheckpoint = &firstRef
 	second, err := d.incrementalPublication(capture)

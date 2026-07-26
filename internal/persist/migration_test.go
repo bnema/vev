@@ -126,7 +126,7 @@ func TestMigrationExistingState(t *testing.T) {
 	require.NoError(t, reopened.Catalogue.Close())
 }
 
-func TestMigrationOver4096(t *testing.T) {
+func TestMigrationPreservesLargeGeneration(t *testing.T) {
 	dir := t.TempDir()
 	writeLegacyCatalogue(t, dir, legacyCatalogueRecordV0{Name: "large", Cwd: "/tmp"})
 	migration := &migrationStub{heads: map[string]domain.CheckpointRef{"large": {Generation: 5001, ManifestDigest: [32]byte{1}}}, migrateErr: map[string]error{}}
@@ -248,16 +248,28 @@ func TestMigrationPreservesUncertain(t *testing.T) {
 	require.LessOrEqual(t, len(result.Records[0].DegradedReason), migrationDegradedReasonMaxBytes)
 	require.NotContains(t, result.Records[0].DegradedReason, adapterCause)
 	require.Contains(t, logs.String(), adapterCause, "the full adapter cause must remain diagnosable")
+}
 
-	failClosedDir := t.TempDir()
-	writeLegacyCatalogue(t, failClosedDir, legacyCatalogueRecordV0{Name: "work", Cwd: "/tmp"})
-	_, err = OpenOrMigrate(context.Background(), OpenDeps{StateDir: failClosedDir, Random: &countingReader{}, SnapshotMigration: &migrationStub{heads: map[string]domain.CheckpointRef{"work": ref}, migrateErr: map[string]error{"work": errors.New("repository unavailable")}}})
-	require.ErrorContains(t, err, "repository unavailable")
-	data, replayErr := kv.Replay(StorePath(failClosedDir))
-	require.NoError(t, replayErr)
-	_, legacyFormat, classifyErr := classifyCatalogue(data)
-	require.NoError(t, classifyErr)
-	require.True(t, legacyFormat, "migration-port failure must not install a new catalogue")
+func TestMigrationFailsClosedOnSnapshotError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "repository unavailable", err: errors.New("repository unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeLegacyCatalogue(t, dir, legacyCatalogueRecordV0{Name: "work", Cwd: "/tmp"})
+			ref := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+			_, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: &countingReader{}, SnapshotMigration: &migrationStub{heads: map[string]domain.CheckpointRef{"work": ref}, migrateErr: map[string]error{"work": tc.err}}})
+			require.ErrorContains(t, err, tc.err.Error())
+			data, replayErr := kv.Replay(StorePath(dir))
+			require.NoError(t, replayErr)
+			_, legacyFormat, classifyErr := classifyCatalogue(data)
+			require.NoError(t, classifyErr)
+			require.True(t, legacyFormat, "migration-port failure must not install a new catalogue")
+		})
+	}
 }
 
 func TestOpenOrMigrateLegacyProbe(t *testing.T) {

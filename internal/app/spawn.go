@@ -70,6 +70,9 @@ var defaultBackoff = backoffConfig{
 func retryAttempts[T any](ctx context.Context, cfg backoffConfig, attempt func() (T, bool, error)) (T, error) {
 	deadline := time.Now().Add(cfg.total)
 	backoff := cfg.initial
+	if backoff <= 0 {
+		backoff = time.Millisecond
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			var zero T

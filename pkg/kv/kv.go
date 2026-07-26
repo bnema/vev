@@ -150,8 +150,7 @@ func openWithHooks(path string, hooks fsHooks) (*Store, error) {
 	// retries from whichever complete file recovery selects.
 	if result.Format != formatCurrent || s.shouldCompact() {
 		if err := s.compactLocked(); err != nil {
-			_ = f.Close()
-			return cleanupLock(err)
+			return nil, err
 		}
 	}
 	return s, nil
@@ -719,9 +718,6 @@ func recoverCompaction(path string, hooks fsHooks) error {
 			}
 		}
 		return hooks.SyncDir(dir)
-	}
-	if currentExists && currentErr != nil {
-		return fmt.Errorf("%w: no valid current", ErrCorruptWAL)
 	}
 	return nil
 }

@@ -119,7 +119,8 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 	// Reconcile before collection. Until a complete top-level scan reaches EOF,
 	// an unseen forward orphan may still be repairable, so retention yields
 	// without deleting any incarnation data.
-	next, decisions, err := deps.reconciler.Step(ctx, deps.cursor)
+	previousCursor := deps.cursor
+	next, decisions, err := deps.reconciler.Step(ctx, previousCursor)
 	if err != nil {
 		d.log.Warn("durable_reconciliation_tick", "action", "scan", "cursor", deps.cursor.DirectoryCookie, "done", false, "err", err)
 		return false
@@ -151,7 +152,7 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 	}
 	d.log.Info("durable_reconciliation_tick", "action", "scan", "cursor", next.DirectoryCookie, "done", next.DirectoryCookie == 0, "err", nil)
 	if next.DirectoryCookie != 0 {
-		return true
+		return next.DirectoryCookie != previousCursor.DirectoryCookie
 	}
 
 	records, err := deps.catalogue.Records()
@@ -159,6 +160,15 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 		d.log.Warn("durable_maintenance_tick", "action", "catalogue-read", "done", false, "err", err)
 		return false
 	}
+	d.mu.Lock()
+	restoringIncarnations := make(map[domain.IncarnationID]struct{})
+	for _, stopped := range d.stopped {
+		if stopped.state == runtimeRestoring {
+			restoringIncarnations[stopped.incarnation] = struct{}{}
+		}
+	}
+	d.mu.Unlock()
+
 	incomplete := false
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
@@ -166,7 +176,7 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 		}
 		_, unresolved := deps.unresolved[record.IncarnationID]
 		_, uncertainRepair := deps.repairUncertain[record.IncarnationID]
-		restoring := d.incarnationRestoring(record.IncarnationID)
+		_, restoring := restoringIncarnations[record.IncarnationID]
 		plan := retentionPlan(record, unresolved || uncertainRepair, restoring)
 		done, err := deps.repository.MaintainSession(ctx, plan, ports.MaintenanceBudget{Entries: maintenanceEntries, Bytes: maintenanceBytes})
 		if err == nil && !done {
@@ -184,15 +194,4 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 	}
 	clear(deps.repairUncertain)
 	return incomplete
-}
-
-func (d *Daemon) incarnationRestoring(id domain.IncarnationID) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, stopped := range d.stopped {
-		if stopped.incarnation == id && stopped.state == runtimeRestoring {
-			return true
-		}
-	}
-	return false
 }

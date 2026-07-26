@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
+	"syscall"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -13,6 +15,8 @@ import (
 )
 
 const catalogueRestoreConcurrency = 8
+
+var errRetryableRestoreLoad = errors.New("snapshot: retryable checkpoint load")
 
 func initialRuntimeRecoveryState(record domain.CatalogueRecord) (runtimeRecoveryState, chan struct{}) {
 	done := make(chan struct{})
@@ -131,7 +135,16 @@ func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state runtime
 }
 
 func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
-	if restoreErr != nil {
+	d.finishRecordRestoreAttempt(record, restoreErr, done, false)
+}
+
+func (d *Daemon) finishExplicitRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
+	d.finishRecordRestoreAttempt(record, restoreErr, done, true)
+}
+
+func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, restoreErr error, done chan struct{}, resetRetryable bool) {
+	retryable := errors.Is(restoreErr, errRetryableRestoreLoad)
+	if restoreErr != nil && !retryable {
 		catalogueReadable := true
 		if d.catalogue != nil {
 			current, ok, readErr := d.catalogue.Record(record.Name)
@@ -157,7 +170,8 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 	d.mu.Lock()
 	entry, ok := d.stopped[record.Name]
 	if ok {
-		if restoreErr != nil {
+		switch {
+		case restoreErr != nil && !retryable:
 			entry.record = record
 			entry.state = runtimeDegraded
 			entry.cwd = record.Cwd
@@ -166,11 +180,14 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 			entry.lastUsedSeq = record.LastUsedSeq
 			entry.tabNames = append([]string(nil), record.TabNames...)
 			d.stopped[record.Name] = entry
+		case retryable && resetRetryable && entry.state == runtimeRestoring && entry.restoreDone == done:
+			entry.state = runtimeDegraded
+			d.stopped[record.Name] = entry
 		}
-		closeRuntimeRestoreDoneLocked(done)
 	}
+	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
-	if restoreErr != nil {
+	if restoreErr != nil && !retryable {
 		reasonCode := "checkpoint-invalid"
 		if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
 			reasonCode = "restore-interrupted"
@@ -210,12 +227,16 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	var selectedSnapshot snapcodec.Session
 	selectedIndex := -1
 	selectedFallback := false
+	var retryableLoadErr error
 	for i, candidate := range candidates {
 		fallback := record.Committed == nil || i > 0
 		generation, err := d.snapshotRepository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, candidate)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
+			}
+			if isRetryableRestoreLoadError(err) {
+				retryableLoadErr = err
 			}
 			d.logRejectedRestoreCandidate(record, candidate, fallback, "load-failed", err)
 			continue
@@ -241,6 +262,9 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		break
 	}
 	if selectedIndex < 0 {
+		if retryableLoadErr != nil {
+			return fmt.Errorf("%w: %v", errRetryableRestoreLoad, retryableLoadErr)
+		}
 		return errors.New("snapshot: no catalogue checkpoint validated")
 	}
 
@@ -274,6 +298,28 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	d.setStoppedRecovery(record, runtimeHealthy)
 	d.logSessionRestoreComplete(record, selected.Generation, selectedFallback)
 	return nil
+}
+
+func isRetryableRestoreLoadError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, ports.ErrBudgetExhausted) ||
+		errors.Is(err, syscall.ENOSPC) ||
+		errors.Is(err, syscall.ENOMEM) ||
+		errors.Is(err, syscall.EMFILE) ||
+		errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.EDQUOT) {
+		return true
+	}
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+		return true
+	}
+	temporary, ok := errors.AsType[interface {
+		error
+		Temporary() bool
+	}](err)
+	return ok && temporary.Temporary()
 }
 
 func (d *Daemon) logRejectedRestoreCandidate(record domain.CatalogueRecord, candidate domain.CheckpointRef, fallback bool, reason string, err error) {

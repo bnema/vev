@@ -47,8 +47,7 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 	if err := ctx.Err(); err != nil {
 		return ports.SnapshotGeneration{}, err
 	}
-	id := legacyIncarnationID(name)
-	key, err := incarnationKey(id)
+	key, err := r.legacyRepositoryKey(name)
 	if err != nil {
 		return ports.SnapshotGeneration{}, err
 	}
@@ -84,12 +83,17 @@ func (r *Repository) load(ctx context.Context, name, key string) (ports.Snapshot
 	if err != nil {
 		return ports.SnapshotGeneration{}, err
 	}
+	var lastLoadErr error
 	for _, generation := range candidates {
 		got, err := r.loadGeneration(ctx, name, key, generation)
 		if err != nil {
+			lastLoadErr = err
 			continue
 		}
 		return got, nil
+	}
+	if lastLoadErr != nil {
+		return ports.SnapshotGeneration{}, fmt.Errorf("no complete snapshot generation for %q: %w", name, lastLoadErr)
 	}
 	return ports.SnapshotGeneration{}, fmt.Errorf("no complete snapshot generation for %q", name)
 }
