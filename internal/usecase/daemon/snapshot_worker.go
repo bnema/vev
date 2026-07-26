@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"sort"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -193,44 +194,102 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 	if d == nil {
 		return
 	}
-	deadline := newSnapshotShutdownDeadline(d.clock)
-	defer deadline.stop()
-	d.stopSnapshotEncodeWorkerWithDeadline(deadline)
+	_ = d.StopDurableWriters(context.Background())
+	d.WaitDurableWriters()
 }
 
-// stopSnapshotEncodeWorkerWithDeadline performs the one deadline-aware join
-// for a Serve shutdown. Queues are never closed, and detached writers only
-// retain immutable captures plus contexts/channels that remain live, so an
-// uncooperative repository call cannot race teardown or block process exit.
-func (d *Daemon) stopSnapshotEncodeWorkerWithDeadline(deadline *snapshotShutdownDeadline) {
+// StopDurableWriters stops admission and requests the worker's final drain.
+// The context bounds checkpoint success only: cancellation asks cooperative
+// repository calls to stop, but it never detaches the worker from its owner.
+func (d *Daemon) StopDurableWriters(ctx context.Context) []string {
+	if d == nil {
+		return nil
+	}
+	cancel, done := d.requestDurableWriterStop()
+	if done == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		cancel()
+		return d.durableWriterFailureNames()
+	}
+}
+
+// WaitDurableWriters is the unconditional ownership barrier. It has no timeout
+// or status branch: every writer goroutine must exit before Serve may return.
+func (d *Daemon) WaitDurableWriters() {
 	if d == nil {
 		return
 	}
 	d.snapshotWorkerMu.Lock()
-	cancel := d.snapshotWorkerCancel
-	if cancel == nil || d.snapshotWorkerClosing {
-		d.snapshotWorkerMu.Unlock()
+	done := d.snapshotWorkerDone
+	d.snapshotWorkerMu.Unlock()
+	if done == nil {
 		return
 	}
-	// Stop accepting producers, then let the single worker drain its bounded
-	// queue. A non-context-aware store may still block indefinitely, so the
-	// shared shutdown deadline bounds the one and only join.
-	d.snapshotWorkerClosing = true
-	flush := d.snapshotWorkerFlush
-	done := d.snapshotWorkerDone
-	close(flush)
-	d.snapshotWorkerMu.Unlock()
+	<-done
+	d.finishStoppedSnapshotWorker(false)
+}
 
+func (d *Daemon) requestDurableWriterStop() (context.CancelFunc, <-chan struct{}) {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	cancel := d.snapshotWorkerCancel
+	if cancel == nil {
+		return nil, nil
+	}
+	if !d.snapshotWorkerClosing {
+		d.snapshotWorkerClosing = true
+		close(d.snapshotWorkerFlush)
+	}
+	return cancel, d.snapshotWorkerDone
+}
+
+func (d *Daemon) durableWriterFailureNames() []string {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	seen := make(map[string]struct{})
+	add := func(capture *snapshotCapture) {
+		if capture != nil && capture.name != "" {
+			seen[capture.name] = struct{}{}
+		}
+	}
+	add(d.snapshotWorkerInFlight)
+	for _, capture := range d.snapshotFinalJobs {
+		add(capture)
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// stopSnapshotEncodeWorkerWithDeadline bounds the final checkpoint attempt,
+// but deliberately does not bound the ownership join that follows it.
+func (d *Daemon) stopSnapshotEncodeWorkerWithDeadline(deadline *snapshotShutdownDeadline) {
+	if d == nil {
+		return
+	}
+	cancel, done := d.requestDurableWriterStop()
+	if done == nil {
+		return
+	}
 	if deadline == nil {
-		deadline = newSnapshotShutdownDeadline(d.clock)
-		defer deadline.stop()
+		<-done
+		return
 	}
 	select {
 	case <-done:
-		d.finishStoppedSnapshotWorker(false)
 	case <-deadline.Done():
 		cancel()
-		d.finishStoppedSnapshotWorker(true)
 	}
 }
 

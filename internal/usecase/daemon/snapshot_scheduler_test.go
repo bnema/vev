@@ -285,7 +285,7 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	}
 }
 
-func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
+func TestServeShutdownDeadlineStillJoinsPaneExitWriter(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	clock := newServeShutdownClock()
 	d := newTestDaemon(t, newFactory(t, pty), clock)
@@ -328,9 +328,9 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 	// deadline.
 	ownerDeadlineTimer := clock.nextFinalTimer(t)
 
-	// Cleanup is the only place that releases the competing owner. It also fires
-	// that owner's independent budget and joins the real pane reader, proving no
-	// teardown goroutine is leaked without making Serve depend on repository I/O.
+	// Cleanup fires the pane-exit owner's independent budget and joins the real
+	// pane reader. Serve itself must remain owned until the repository writer is
+	// released below, even after its checkpoint deadline expires.
 	t.Cleanup(func() {
 		releaseSnapshot()
 		ownerDeadlineTimer.fire()
@@ -343,9 +343,15 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 
 	select {
 	case err := <-served:
+		t.Fatalf("Serve returned with a durable writer alive: %v", err)
+	default:
+	}
+	releaseSnapshot()
+	select {
+	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(testWaitTimeout):
-		t.Fatal("Serve did not return after its shared deadline while the pane-exit owner remained blocked")
+		t.Fatal("Serve did not return after the durable writer exited")
 	}
 
 	sess.snapshotMu.Lock()
@@ -488,7 +494,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 	}
 }
 
-func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository(t *testing.T) {
+func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	clock := newServeShutdownClock()
@@ -544,21 +550,24 @@ func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository
 	workerDone := d.snapshotWorkerDone
 	d.snapshotWorkerMu.Unlock()
 	require.NotNil(t, workerDone)
-	defer func() {
-		close(releaseTerminalPublication)
-		select {
-		case <-workerDone:
-		case <-time.After(testWaitTimeout):
-			t.Error("snapshot worker leaked after its repository call was released")
-		}
-	}()
 	clock.nextFinalTimer(t).fire()
 
 	select {
 	case err := <-served:
+		t.Fatalf("Serve returned with an uncooperative durable writer alive: %v", err)
+	default:
+	}
+	close(releaseTerminalPublication)
+	select {
+	case <-workerDone:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshot worker leaked after its repository call was released")
+	}
+	select {
+	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(testWaitTimeout):
-		t.Fatal("Serve waited beyond the terminal checkpoint deadline")
+		t.Fatal("Serve did not return after the uncooperative writer exited")
 	}
 	require.LessOrEqual(t, clock.finalBudget.Load(), int64(snapshotFinalFlushTimeout), "shutdown must consume at most one snapshot deadline")
 	require.Equal(t, uint64(1), lastValid.Load(), "the last valid checkpoint remains available after the terminal attempt times out")

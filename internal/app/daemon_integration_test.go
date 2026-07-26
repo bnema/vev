@@ -529,6 +529,198 @@ func TestKillDaemonWaitsForOwnershipTransfer(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestLifecycleOwnershipOutlivesSnapshotWriter(t *testing.T) {
+	result := runBlockedSnapshotWriterShutdown(t)
+	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
+	assertLifecycleResultPending(t, result.wrapperReturned, "lifecycle wrapper return while snapshot writer is blocked")
+	owner, err := lifecycle.TryAcquire(result.runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	result.releaseWriter()
+	awaitLifecycleStage(t, result.publishReturned, "snapshot writer return")
+	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
+	owner, err = lifecycle.TryAcquire(result.runtimeDir)
+	require.NoError(t, err)
+	require.NoError(t, owner.Release())
+}
+
+func TestLifecycleCallbackWaitsForEveryWriter(t *testing.T) {
+	result := runBlockedSnapshotWriterShutdown(t)
+	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
+
+	result.releaseWriter()
+	awaitLifecycleStage(t, result.publishReturned, "snapshot writer return")
+	awaitLifecycleStage(t, result.callbackReturned, "Serve callback return after snapshot writer")
+	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
+}
+
+func TestFinalCheckpointTimeoutKeepsOwner(t *testing.T) {
+	result := runBlockedSnapshotWriterShutdown(t)
+	assertLifecycleResultPending(t, result.wrapperReturned, "ownership release after checkpoint timeout with writer alive")
+	_, err := lifecycle.TryAcquire(result.runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	result.releaseWriter()
+	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
+}
+
+type blockedSnapshotWriterShutdown struct {
+	runtimeDir       string
+	callbackReturned <-chan struct{}
+	wrapperReturned  <-chan error
+	publishReturned  <-chan struct{}
+	releaseWriter    func()
+}
+
+func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdown {
+	t.Helper()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	shutdownClock := newLifecycleShutdownClock()
+	repository := newLifecycleBlockingRepository()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	listenerReady := make(chan struct{})
+	listenerClosed := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	wrapperReturned := make(chan error, 1)
+	go func() {
+		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
+			defer close(callbackReturned)
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return err
+			}
+			observed := &lifecycleObservedListener{Listener: listener, closed: listenerClosed}
+			close(listenerReady)
+			d := daemon.New(
+				pty.NewFactory(),
+				shutdownClock,
+				discardLog(),
+				daemon.WithShell("/bin/cat", nil),
+				daemon.WithSnapshotRepository(repository, nil),
+			)
+			return d.Serve(ctx, observed)
+		})
+	}()
+
+	awaitLifecycleStage(t, listenerReady, "daemon listener")
+	tr, _ := attach(t, runtimeDir, ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("dirty state\n")})}))
+	awaitLifecycleStage(t, repository.entered, "snapshot publication")
+	require.NoError(t, tr.Close())
+	require.Eventually(t, func() bool {
+		sessions := listRemoteSessions(t, runtimeDir)
+		return len(sessions.Sessions) == 1 && !sessions.Sessions[0].Attached
+	}, time.Second, 10*time.Millisecond)
+	cancel()
+	awaitLifecycleStage(t, listenerClosed, "listener close")
+
+	shutdownClock.nextTimer(t).fire()
+	select {
+	case <-callbackReturned:
+		t.Fatal("Serve callback returned after checkpoint timeout while snapshot writer was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertLifecycleStagePending(t, callbackReturned, "Serve callback return after checkpoint timeout")
+	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return after checkpoint timeout")
+
+	var releaseOnce sync.Once
+	releaseWriter := func() { releaseOnce.Do(func() { close(repository.release) }) }
+	t.Cleanup(releaseWriter)
+	return blockedSnapshotWriterShutdown{
+		runtimeDir:       runtimeDir,
+		callbackReturned: callbackReturned,
+		wrapperReturned:  wrapperReturned,
+		publishReturned:  repository.returned,
+		releaseWriter:    releaseWriter,
+	}
+}
+
+type lifecycleBlockingRepository struct {
+	ports.SnapshotRepository
+	entered    chan struct{}
+	release    chan struct{}
+	returned   chan struct{}
+	enterOnce  sync.Once
+	returnOnce sync.Once
+}
+
+func newLifecycleBlockingRepository() *lifecycleBlockingRepository {
+	return &lifecycleBlockingRepository{
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+}
+
+func (r *lifecycleBlockingRepository) Publish(context.Context, ports.SnapshotPublication) error {
+	r.enterOnce.Do(func() { close(r.entered) })
+	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
+	r.returnOnce.Do(func() { close(r.returned) })
+	return nil
+}
+
+type lifecycleShutdownClock struct {
+	base   ports.Clock
+	timers chan *lifecycleManualTimer
+}
+
+func newLifecycleShutdownClock() *lifecycleShutdownClock {
+	return &lifecycleShutdownClock{base: clock.New(), timers: make(chan *lifecycleManualTimer, 4)}
+}
+
+func (c *lifecycleShutdownClock) Now() time.Time { return c.base.Now() }
+func (c *lifecycleShutdownClock) NewTimer(delay time.Duration) ports.Timer {
+	if delay != time.Second {
+		return c.base.NewTimer(delay)
+	}
+	timer := &lifecycleManualTimer{ch: make(chan time.Time, 1)}
+	c.timers <- timer
+	return timer
+}
+
+func (c *lifecycleShutdownClock) nextTimer(t *testing.T) *lifecycleManualTimer {
+	t.Helper()
+	select {
+	case timer := <-c.timers:
+		return timer
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for shutdown deadline timer")
+		return nil
+	}
+}
+
+type lifecycleManualTimer struct {
+	ch      chan time.Time
+	stopped atomic.Bool
+}
+
+func (t *lifecycleManualTimer) C() <-chan time.Time { return t.ch }
+func (t *lifecycleManualTimer) Reset(time.Duration) bool {
+	t.stopped.Store(false)
+	return false
+}
+func (t *lifecycleManualTimer) Stop() bool { return !t.stopped.Swap(true) }
+func (t *lifecycleManualTimer) fire() {
+	if !t.stopped.Load() {
+		t.ch <- time.Now()
+	}
+}
+
+type lifecycleObservedListener struct {
+	ports.Listener
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *lifecycleObservedListener) Close() error {
+	err := l.Listener.Close()
+	l.once.Do(func() { close(l.closed) })
+	return err
+}
+
 func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -686,6 +878,15 @@ func assertLifecycleStagePending(t *testing.T, stage <-chan struct{}, name strin
 	select {
 	case <-stage:
 		t.Fatalf("unexpected %s", name)
+	default:
+	}
+}
+
+func assertLifecycleResultPending(t *testing.T, result <-chan error, name string) {
+	t.Helper()
+	select {
+	case err := <-result:
+		t.Fatalf("unexpected %s: %v", name, err)
 	default:
 	}
 }

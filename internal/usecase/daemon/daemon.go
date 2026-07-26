@@ -586,9 +586,10 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.connWg.Wait()
 	d.attachmentCleanupWg.Wait()
 	// Forced terminal checkpoints run before shutdown stops producers or the
-	// worker. The same deadline bounds the worker's final drain, including a
-	// repository call that ignores cancellation.
+	// worker. The deadline may abandon checkpoint success and cancel cooperative
+	// I/O, but ownership remains pinned until every writer has actually exited.
 	d.stopSnapshotEncodeWorkerWithDeadline(snapshotDeadline)
+	d.WaitDurableWriters()
 	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
 	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
 	d.waitNotifies()
