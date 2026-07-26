@@ -564,7 +564,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 				shutdownClock,
 				discardLog(),
 				daemon.WithSnapshotRepository(repository),
-				daemon.WithDurableMaintenance(catalogue, maintenanceRepository, nil),
+				daemon.WithDurableMaintenance(catalogue, maintenanceRepository),
 				daemon.WithCatalogue(catalogue, nil),
 			)
 			return d.Serve(ctx, listener)
@@ -604,11 +604,11 @@ type lifecycleBlockingMaintenanceRepository struct {
 	returnOnce sync.Once
 }
 
-func (r *lifecycleBlockingMaintenanceRepository) MaintainSession(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) (bool, error) {
+func (r *lifecycleBlockingMaintenanceRepository) CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error {
 	r.enterOnce.Do(func() { close(r.entered) })
 	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
 	r.returnOnce.Do(func() { close(r.returned) })
-	return true, nil
+	return nil
 }
 
 type lifecycleObservedCatalogue struct {
@@ -746,7 +746,6 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 	opened, err := persist.OpenOrCreate(stateDir)
 	require.NoError(t, err)
 	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
-	require.NoError(t, coordinator.Recover(ctx))
 	listener, err := ipc.Listen(runtimeDir)
 	require.NoError(t, err)
 	d := daemon.New(
@@ -997,8 +996,6 @@ func (l *lifecycleObservedListener) Close() error {
 func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	stateDir := filepath.Join(t.TempDir(), "state")
-	snapshotRepository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
-
 	oldOwner, err := lifecycle.TryAcquire(runtimeDir)
 	require.NoError(t, err)
 	oldOpened, err := persist.OpenOrCreate(stateDir)
@@ -1056,11 +1053,7 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, rand.Reader)
-			if err := coordinator.Recover(ctx); err != nil {
-				return errors.Join(err, opened.Catalogue.Close())
-			}
-			startupEvents <- "durable-open-recover"
+			startupEvents <- "durable-open"
 
 			close(newListen)
 			listener, err := ipc.Listen(runtimeDir)
@@ -1111,7 +1104,7 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 		<-teardownEvents,
 		<-teardownEvents,
 	})
-	require.Equal(t, []string{"owner-acquired", "durable-open-recover", "listen"}, []string{
+	require.Equal(t, []string{"owner-acquired", "durable-open", "listen"}, []string{
 		<-startupEvents,
 		<-startupEvents,
 		<-startupEvents,

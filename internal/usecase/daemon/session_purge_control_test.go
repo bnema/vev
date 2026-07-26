@@ -25,12 +25,11 @@ func TestStoppedPurgeMetadataFailureRemainsFencedForRetry(t *testing.T) {
 	d.stopped["work"] = stoppedSession{name: "work", incarnation: record.IncarnationID, record: record}
 
 	require.ErrorIs(t, d.retryStoppedPurge("work"), metadataErr)
-	require.True(t, repository.tombstoned["work"])
-	require.Equal(t, []string{"tombstone", "delete incarnation"}, repository.calls)
+	require.Empty(t, repository.calls, "snapshot deletion must wait for catalogue removal")
 
 	state.mu.Lock()
 	state.deleteErr = nil
 	state.mu.Unlock()
 	require.NoError(t, d.retryStoppedPurge("work"))
-	require.Equal(t, []string{"tombstone", "delete incarnation", "tombstone", "delete incarnation", "clear tombstone"}, repository.calls)
+	require.Equal(t, []string{"delete incarnation"}, repository.calls)
 }

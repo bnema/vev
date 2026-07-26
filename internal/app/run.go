@@ -504,134 +504,6 @@ func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, re
 	log.Info("catalogue_compaction_recovery_complete", "recovery", recoveryMode)
 }
 
-// logTransactionRecovery reports the recovery outcome. A startup that fenced
-// any session is never reported as clean: the daemon comes up, but one or more
-// sessions were skipped and still need an operator decision.
-func logTransactionRecovery(log *slog.Logger, examined, fenced int) {
-	outcome := "clean"
-	if fenced > 0 {
-		outcome = "fenced"
-	}
-	log.Info("interrupted_transaction_recovery_complete", "sessions_examined", examined, "sessions_fenced", fenced, "outcome", outcome)
-}
-
-type interruptedRecoveryIdentity struct {
-	name string
-	id   domain.IncarnationID
-}
-
-func pendingInterruptedRecoveries(ctx context.Context, records []domain.CatalogueRecord, repository ports.SnapshotRepository) ([]interruptedRecoveryIdentity, error) {
-	pending := make([]interruptedRecoveryIdentity, 0)
-	for _, record := range records {
-		if record.RecoveryState == domain.RecoveryDeleting {
-			pending = append(pending, interruptedRecoveryIdentity{name: record.Name, id: record.IncarnationID})
-		}
-	}
-	cursor := ports.DeletionTombstoneCursor{}
-	for {
-		page, err := repository.ListDeletionTombstones(ctx, cursor, ports.MaintenanceBudget{Entries: 64, Bytes: 64 << 10})
-		if err != nil {
-			return nil, err
-		}
-		for _, tombstone := range page.Tombstones {
-			pending = append(pending, interruptedRecoveryIdentity{name: tombstone.Name, id: tombstone.IncarnationID})
-		}
-		if page.Done {
-			return pending, nil
-		}
-		if page.Next.After == cursor.After {
-			return nil, errors.New("vev: recovery tombstone listing did not advance")
-		}
-		cursor = page.Next
-	}
-}
-
-func persistTransactionRecoveryNotices(store ports.NoticeStore, recovered []interruptedRecoveryIdentity, now time.Time) error {
-	for _, item := range recovered {
-		if err := store.Append(domain.Notification{
-			Code:      domain.NoticeSnapshotRestore,
-			Severity:  domain.NoticeWarn,
-			Message:   "recovered an interrupted durable session transaction",
-			Details:   "session=" + item.name + " incarnation=" + item.id.String(),
-			Time:      now,
-			SessionID: domain.SessionID(item.id.String()),
-		}); err != nil {
-			return fmt.Errorf("persist interrupted transaction recovery notice for session %q incarnation %s: %w", item.name, item.id.String(), err)
-		}
-	}
-	return nil
-}
-
-// fencedRecoveryIdentity is one session that recovery fenced instead of failing
-// startup for. Only the session identity and a sentinel-derived reason code are
-// retained: raw causes can embed paths or operator input.
-type fencedRecoveryIdentity struct {
-	name       string
-	id         domain.IncarnationID
-	kind       string
-	reasonCode string
-}
-
-// fencedRecoveries resolves each conflict against the post-recovery catalogue
-// so a fenced session is reported with the incarnation it actually holds now.
-func fencedRecoveries(conflicts []recovery.RecoveryConflict, catalogue ports.Catalogue) ([]fencedRecoveryIdentity, error) {
-	fenced := make([]fencedRecoveryIdentity, 0, len(conflicts))
-	for _, conflict := range conflicts {
-		identity := fencedRecoveryIdentity{name: conflict.Session, kind: conflict.Kind, reasonCode: fencedRecoveryReasonCode(conflict.Err)}
-		if catalogue != nil {
-			record, ok, err := catalogue.Record(conflict.Session)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				identity.id = record.IncarnationID
-			}
-		}
-		fenced = append(fenced, identity)
-	}
-	return fenced, nil
-}
-
-func fencedRecoveryReasonCode(err error) string {
-	switch {
-	case errors.Is(err, recovery.ErrDeletionTombstoneConflict):
-		return "deletion-tombstone-conflict"
-	case errors.Is(err, recovery.ErrDeletionTombstoneInvalid):
-		return "deletion-tombstone-invalid"
-	case errors.Is(err, recovery.ErrSessionRecordInvalid):
-		return "catalogue-record-invalid"
-	default:
-		return "unclassified"
-	}
-}
-
-func logFencedRecoveries(log *slog.Logger, fenced []fencedRecoveryIdentity) {
-	for _, item := range fenced {
-		log.Warn("interrupted_transaction_fenced",
-			"session", item.name,
-			"incarnation", item.id.String(),
-			"kind", item.kind,
-			"reason_code", item.reasonCode,
-		)
-	}
-}
-
-func persistFencedRecoveryNotices(store ports.NoticeStore, fenced []fencedRecoveryIdentity, now time.Time) error {
-	for _, item := range fenced {
-		if err := store.Append(domain.Notification{
-			Code:      domain.NoticeSnapshotRestore,
-			Severity:  domain.NoticeWarn,
-			Message:   "skipped a durable session transaction that conflicts with its session state",
-			Details:   "session=" + item.name + " incarnation=" + item.id.String() + " kind=" + item.kind + " reason_code=" + item.reasonCode,
-			Time:      now,
-			SessionID: domain.SessionID(item.id.String()),
-		}); err != nil {
-			return fmt.Errorf("persist fenced transaction notice for session %q incarnation %s: %w", item.name, item.id.String(), err)
-		}
-	}
-	return nil
-}
-
 func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord, restoring int) {
 	healthy, fresh, degraded := 0, 0, 0
 	for _, record := range records {
@@ -663,13 +535,6 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
 	return runDaemonOwnedWithLogger(ctx, log)
-}
-
-func recoverAuthoritativeCatalogue(ctx context.Context, coordinator *recovery.Coordinator, catalogue ports.Catalogue) ([]domain.CatalogueRecord, error) {
-	if err := coordinator.Recover(ctx); err != nil {
-		return nil, err
-	}
-	return catalogue.Records()
 }
 
 func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr error) {
@@ -726,42 +591,9 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		recoveryMode = "new-install"
 	}
 	logCatalogueRecovery(log, opened.Records, recoveryMode)
-	pendingRecoveries, err := pendingInterruptedRecoveries(ctx, opened.Records, snapshotRepository)
-	if err != nil {
-		return errors.Join(fmt.Errorf("vev: inspect durable session transactions: %w", err), opened.Catalogue.Close())
-	}
 	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, rand.Reader)
-	// Recovery may roll catalogue changes forward, so reload the authoritative
-	// snapshot before constructing runtime reservations. A failed reload aborts
-	// startup rather than treating durable sessions as absent.
-	recoveredRecords, err := recoverAuthoritativeCatalogue(ctx, coordinator, opened.Catalogue)
-	if err != nil {
-		return errors.Join(fmt.Errorf("vev: recover and reload durable session transactions: %w", err), opened.Catalogue.Close())
-	}
-	opened.Records = recoveredRecords
-	// Recovery fences a session instead of failing startup when only that
-	// session's durable state is self-inconsistent. The daemon then comes up
-	// looking healthy, so every fenced session must be reported and persisted.
-	fenced, err := fencedRecoveries(coordinator.Conflicts(), opened.Catalogue)
-	if err != nil {
-		return errors.Join(fmt.Errorf("vev: read fenced recovery identities: %w", err), opened.Catalogue.Close())
-	}
-	logFencedRecoveries(log, fenced)
-	if err := persistTransactionRecoveryNotices(noticeStore, pendingRecoveries, clk.Now()); err != nil {
-		log.Error("transaction_recovery_notice_failed", "err", err)
-		return errors.Join(fmt.Errorf("vev: persist durable transaction recovery notice: %w", err), opened.Catalogue.Close())
-	}
-	if err := persistFencedRecoveryNotices(noticeStore, fenced, clk.Now()); err != nil {
-		log.Error("transaction_recovery_notice_failed", "reason_code", "fenced-notice-failed")
-		return errors.Join(fmt.Errorf("vev: persist fenced transaction notice: %w", err), opened.Catalogue.Close())
-	}
-	logTransactionRecovery(log, len(pendingRecoveries), len(fenced))
 	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))
-	unresolved := make([]domain.IncarnationID, 0, len(pendingRecoveries))
-	for _, pending := range pendingRecoveries {
-		unresolved = append(unresolved, pending.id)
-	}
-	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository, unresolved))
+	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository))
 	log.Info("session persistence enabled", "path", storePath)
 	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))
 
@@ -1564,9 +1396,6 @@ func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 		return fmt.Errorf("vev: no such session: %s", name)
 	}
 	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
-	if err := coordinator.Recover(ctx); err != nil {
-		return fmt.Errorf("vev: recovering stored session transactions: %w", err)
-	}
 	if err := coordinator.Delete(ctx, name); err != nil {
 		return fmt.Errorf("vev: deleting stored session: %w", err)
 	}

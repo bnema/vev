@@ -81,23 +81,6 @@ func (r CatalogueRecord) MetadataUpdate() CatalogueMetadataUpdate {
 	}
 }
 
-// DeletionTombstone identifies exactly one deleted session incarnation.
-type DeletionTombstone struct {
-	Name          string
-	IncarnationID IncarnationID
-}
-
-// Validate rejects incomplete deletion identities.
-func (t DeletionTombstone) Validate() error {
-	if err := ValidateSessionName(t.Name); err != nil {
-		return err
-	}
-	if t.IncarnationID == (IncarnationID{}) {
-		return errors.New("zero deletion incarnation ID")
-	}
-	return nil
-}
-
 // NewIncarnationID reads a new non-zero identity from r.
 func NewIncarnationID(r io.Reader) (IncarnationID, error) {
 	var id IncarnationID

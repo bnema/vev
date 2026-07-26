@@ -8,6 +8,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/bnema/vev/internal/domain"
+	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
@@ -41,8 +44,9 @@ func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
 	if _, err := loadPublication(context.Background(), repo, publication); err == nil {
 		t.Fatal("LoadCheckpoint succeeded through replaced configured-root symlink")
 	}
-	if err := repo.Maintain(context.Background()); err == nil {
-		t.Fatal("Maintain succeeded through replaced configured-root symlink")
+	keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {Generation: publication.Generation, ManifestDigest: codec.ManifestDigest(publication.Manifest)}}
+	if err := repo.CollectGarbage(context.Background(), keep); err == nil {
+		t.Fatal("CollectGarbage succeeded through replaced configured-root symlink")
 	}
 	loaded, err := loadPublication(context.Background(), external, externalPublication)
 	if err != nil {
@@ -168,8 +172,9 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 			if _, err := loadPublication(context.Background(), repo, publication); err == nil {
 				t.Fatal("LoadCheckpoint succeeded through symlinked repository component")
 			}
-			if err := repo.Maintain(context.Background()); err == nil {
-				t.Fatal("Maintain succeeded through symlinked repository component")
+			keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {Generation: publication.Generation, ManifestDigest: codec.ManifestDigest(publication.Manifest)}}
+			if err := repo.CollectGarbage(context.Background(), keep); err == nil {
+				t.Fatal("CollectGarbage succeeded through symlinked repository component")
 			}
 			got, err := os.ReadFile(guard)
 			if err != nil || string(got) != "guard" {

@@ -7,817 +7,237 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
-	"sync/atomic"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
-type retentionMaintenance struct {
-	invalidated    atomic.Bool
-	token          string
-	cursors        map[string]*maintenanceCursor
-	references     map[ports.SnapshotDigest]struct{}
-	validateQueue  []ports.CheckpointRef
-	validateIndex  int
-	validated      bool
-	manifestsDone  bool
-	objectShard    string
-	objectRootDone bool
-}
-
-type manifestMaintenance struct {
-	refs     map[ports.SnapshotDigest]codec.ObjectRef
-	complete bool
-}
-
-type retentionEntryKind uint8
-
-const (
-	retentionManifest retentionEntryKind = iota + 1
-	retentionObject
-)
-
-type retentionEntryPolicy struct {
-	kind        retentionEntryKind
-	generations map[uint64]ports.SnapshotDigest
-	objects     map[ports.SnapshotDigest]struct{}
-}
-
-func (p retentionEntryPolicy) delete(entry maintenanceDirEntry) bool {
-	if entry.isDir {
-		return false
-	}
-	switch p.kind {
-	case retentionManifest:
-		generation, canonical := parseGenerationFilename(entry.name)
-		_, retained := p.generations[generation]
-		return canonical && !retained
-	case retentionObject:
-		digest, canonical := parseObjectDigest(entry.name)
-		_, retained := p.objects[digest]
-		return canonical && !retained
-	default:
-		return false
-	}
-}
-
-type sessionMaintenance struct {
-	lock            *sessionMutex
-	token           string
-	epoch           uint64
-	marked          map[uint64]manifestMaintenance
-	referenceCount  int
-	uncertain       bool
-	conservative    bool
-	markDone        bool
-	manifestQueue   []uint64
-	objectTempShard string
-	objectTempsDone bool
-	sweepShard      string
-	sweepRootDone   bool
-}
-
-// canRetainManifest reserves bounded state before retaining a manifest's
-// reference map. The caller must leave the map unretained when it returns
-// false, and make the cycle conservative instead.
-func (s *sessionMaintenance) canRetainManifest(referenceCount int) bool {
-	if referenceCount < 0 || len(s.marked) >= maxMaintenanceMarkedGenerations {
-		return false
-	}
-	if referenceCount > maxMaintenanceReferences-s.referenceCount {
-		return false
-	}
-	s.referenceCount += referenceCount
-	return true
-}
-
-func (r *Repository) maintainSession(ctx context.Context, key string, budget *int) error {
+// CollectGarbage applies the complete snapshot retention policy. The keep map
+// must come from a catalogue that loaded and validated successfully: only then
+// is an incarnation absent from keep known to be an orphan.
+func (r *Repository) CollectGarbage(ctx context.Context, keep map[domain.IncarnationID]domain.CheckpointRef) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	state, err := r.sessionMaintenanceState(key)
-	if err != nil {
-		return err
-	}
-	if _, err := r.removeTemps(ctx, filepath.Join(r.legacySessionPath(key), repositoryGenerations), budget, "generation-temps:"+key); err != nil || *budget == 0 {
-		return err
-	}
-	if !state.objectTempsDone {
-		done, err := r.removeObjectTemps(ctx, key, state, budget)
-		if err != nil || !done || *budget == 0 {
-			return err
-		}
-	}
-	if !state.markDone {
-		if err := r.markSession(ctx, key, state); err != nil {
-			return err
-		}
-		if !state.markDone {
-			return nil
-		}
-	}
-	if state.epoch != r.storageEpoch(key) {
-		// A publication may have left an unpublished manifest after this mark.
-		// Discard all mark and sweep cursors; the next pass starts from it.
-		r.clearSessionMaintenance(key)
-		return nil
-	}
-	if state.uncertain {
-		// An unreadable, invalid, or unretained manifest may reference any
-		// existing blob. Do not collect manifests or sweep in this cycle; retry
-		// marking from a fresh directory pass.
-		r.clearSessionMaintenance(key)
-		return nil
-	}
-	if err := r.removeObsoleteManifests(ctx, key, state, budget); err != nil || *budget == 0 {
-		return err
-	}
-	if err := r.sweepSession(ctx, key, state, budget); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (r *Repository) sessionMaintenanceState(key string) (*sessionMaintenance, error) {
-	token, conservative, err := r.maintenanceToken(key)
-	if err != nil {
-		return nil, err
-	}
-	state := r.maintenanceSessions[key]
-	if state == nil || state.token != token || state.epoch != r.storageEpoch(key) {
-		r.clearSessionMaintenance(key)
-		state = &sessionMaintenance{
-			lock:         r.retainSessionState(key),
-			token:        token,
-			epoch:        r.storageEpoch(key),
-			conservative: conservative,
-			marked:       make(map[uint64]manifestMaintenance),
-		}
-		r.maintenanceSessions[key] = state
-	}
-	return state, nil
-}
-
-// maintenanceToken is the publication boundary. A missing or corrupt HEAD is
-// itself stable maintenance state: we retain every classified reference until a
-// valid publication changes that state, rather than restarting the mark pass.
-func (r *Repository) maintenanceToken(key string) (string, bool, error) {
-	data, exists, err := r.readOptionalBounded(r.legacyHeadPath(key))
-	if err != nil {
-		return "", false, err
-	}
-	if !exists {
-		return "missing", true, nil
-	}
-	sum := sha256.Sum256(data)
-	if _, _, err := r.readLegacyHead(key); err != nil {
-		return fmt.Sprintf("invalid:%x", sum), true, nil
-	}
-	return fmt.Sprintf("valid:%x", sum), false, nil
-}
-
-func (r *Repository) clearSessionMaintenance(key string) {
-	if state := r.maintenanceSessions[key]; state != nil && state.lock != nil {
-		r.releaseSessionReference(state.lock)
-	}
-	delete(r.maintenanceSessions, key)
-	prefix := "\x00" + filepath.Clean(r.legacySessionPath(key))
-	for id := range r.maintenanceCursors {
-		if strings.HasSuffix(id, prefix) || strings.Contains(id, ":"+key+":") || strings.Contains(id, ":"+key+"\x00") {
-			delete(r.maintenanceCursors, id)
-		}
-	}
-}
-
-func (r *Repository) markSession(ctx context.Context, key string, state *sessionMaintenance) error {
-	dir := filepath.Join(r.legacySessionPath(key), repositoryGenerations)
-	entries, done, err := r.readMaintenanceDir(dir, maintenanceBatch, "mark-generations:"+key)
+	sessions := filepath.Join(r.dir, repositorySessionsDir)
+	entries, err := r.readGarbageCollectionDirectory(sessions)
 	if errors.Is(err, os.ErrNotExist) {
-		state.markDone = true
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read snapshot generations: %w", safeFilesystemError(err))
+		return fmt.Errorf("read snapshot incarnations: %w", safeFilesystemError(err))
 	}
+
+	var collected error
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(collected, err)
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		var id domain.IncarnationID
+		if err := id.UnmarshalText([]byte(entry.Name())); err != nil {
+			continue
+		}
+		committed, known := keep[id]
+		if !known {
+			path := r.sessionPath(id)
+			if err := os.RemoveAll(path); err != nil {
+				collected = errors.Join(collected, fmt.Errorf("remove orphan snapshot incarnation %s: %w", id.String(), safeFilesystemError(err)))
+				continue
+			}
+			r.log.Info("snapshot_garbage_collected", "incarnation", id.String(), "action", "remove-incarnation")
+			continue
+		}
+		if err := r.pruneGenerations(ctx, id, committed); err != nil {
+			collected = errors.Join(collected, err)
+		}
+	}
+	if err := r.syncDirectory(sessions); err != nil {
+		collected = errors.Join(collected, fmt.Errorf("sync snapshot sessions directory: %w", safeFilesystemError(err)))
+	}
+	return collected
+}
+
+// pruneGenerations keeps the committed generation and its immediate
+// predecessor. Everything else, including a forward orphan newer than the
+// catalogue commit, is removed before unreferenced objects are swept.
+func (r *Repository) pruneGenerations(ctx context.Context, id domain.IncarnationID, committed domain.CheckpointRef) error {
+	key, err := incarnationKey(id)
+	if err != nil {
+		return err
+	}
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
+
+	generationsDir := filepath.Join(r.sessionPath(id), repositoryGenerations)
+	entries, err := r.readGarbageCollectionDirectory(generationsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read snapshot generations for %s: %w", id.String(), safeFilesystemError(err))
+	}
+
+	kept := make(map[uint64]struct{}, 2)
+	if committed.Generation > 0 {
+		kept[committed.Generation] = struct{}{}
+	}
+	if committed.Generation > 1 {
+		kept[committed.Generation-1] = struct{}{}
+	}
+	references, err := r.referencesForGenerations(id, entries, kept, committed)
+	if err != nil {
+		return fmt.Errorf("mark snapshot objects for %s: %w", id.String(), err)
+	}
+
+	removed := 0
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.isDir {
+		generation, canonical := parseGenerationFilename(entry.Name())
+		if !canonical || entry.IsDir() {
 			continue
 		}
-		generation, ok := parseGenerationFilename(entry.name)
-		if !ok {
+		if _, retain := kept[generation]; retain {
 			continue
 		}
-		data, err := r.readBounded(r.legacyManifestPath(key, generation))
+		if err := r.remove(filepath.Join(generationsDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove snapshot generation %d for %s: %w", generation, id.String(), safeFilesystemError(err))
+		}
+		removed++
+	}
+	if removed > 0 {
+		if err := r.syncDirectory(generationsDir); err != nil {
+			return fmt.Errorf("sync snapshot generations for %s: %w", id.String(), safeFilesystemError(err))
+		}
+		r.log.Info("snapshot_garbage_collected", "incarnation", id.String(), "action", "remove-generations", "removed", removed)
+	}
+	return r.sweepUnreferencedObjects(ctx, id, references)
+}
+
+func (r *Repository) referencesForGenerations(id domain.IncarnationID, entries []os.DirEntry, keep map[uint64]struct{}, committed domain.CheckpointRef) (map[ports.SnapshotDigest]struct{}, error) {
+	references := make(map[ports.SnapshotDigest]struct{})
+	committedFound := committed.Generation == 0
+	for _, entry := range entries {
+		generation, canonical := parseGenerationFilename(entry.Name())
+		if !canonical || entry.IsDir() {
+			continue
+		}
+		if _, retained := keep[generation]; !retained {
+			continue
+		}
+		data, err := r.readBounded(r.manifestPath(id, generation))
 		if err != nil {
-			state.uncertain = true
-			continue
+			return nil, err
 		}
 		manifest, err := codec.UnmarshalManifest(data)
-		if err != nil || manifest.Generation != generation || manifest.IncarnationID.String() != key {
-			state.uncertain = true
-			continue
+		if err != nil || manifest.IncarnationID != id || manifest.Generation != generation {
+			return nil, fmt.Errorf("invalid retained manifest generation %d", generation)
 		}
-		refs, validRefs := maintenanceManifestRefs(manifest)
-		if !validRefs || !withinGenerationBudget(len(data), refs) || !state.canRetainManifest(len(refs)) {
-			state.uncertain = true
-			continue
-		}
-		// Valid but incomplete generations are marked too. This protects blobs
-		// written before a failed or in-flight publication reaches HEAD.
-		_, loadErr := r.loadGeneration(ctx, manifest.Name, key, generation)
-		state.marked[generation] = manifestMaintenance{refs: refs, complete: loadErr == nil}
-	}
-	if done {
-		state.markDone = true
-		if !state.conservative {
-			state.manifestQueue = retainedManifestQueue(state.marked)
-		}
-	}
-	return nil
-}
-
-// maintenanceManifestRefs applies the GC reference ceiling while building its
-// map, rather than first materializing a hostile manifest's entire reference
-// set. Conflicting references are invalid just as they are for publication.
-func maintenanceManifestRefs(manifest codec.Manifest) (map[ports.SnapshotDigest]codec.ObjectRef, bool) {
-	refs := make(map[ports.SnapshotDigest]codec.ObjectRef)
-	add := func(ref codec.ObjectRef) bool {
-		if old, ok := refs[ref.Digest]; ok {
-			return old == ref
-		}
-		if len(refs) == maxMaintenanceReferences {
-			return false
-		}
-		refs[ref.Digest] = ref
-		return true
-	}
-	for _, tab := range manifest.Tabs {
-		for _, pane := range tab.Panes {
-			for _, ref := range pane.Sealed {
-				if !add(ref) {
-					return nil, false
-				}
-			}
-			if !add(pane.Tail) || !add(pane.Visible) {
-				return nil, false
+		if generation == committed.Generation {
+			committedFound = true
+			if sha256.Sum256(data) != committed.ManifestDigest {
+				return nil, fmt.Errorf("committed manifest digest mismatch")
 			}
 		}
+		refs := manifestRefs(manifest)
+		if refs == nil || !withinGenerationBudget(len(data), refs) {
+			return nil, fmt.Errorf("invalid retained manifest references generation %d", generation)
+		}
+		for digest := range refs {
+			references[digest] = struct{}{}
+		}
 	}
-	return refs, true
+	if !committedFound {
+		return nil, fmt.Errorf("committed manifest generation %d is missing", committed.Generation)
+	}
+	return references, nil
 }
 
-// completeGenerationsDescending returns only complete generations in canonical
-// newest-first order for both manifest and object retention.
-func completeGenerationsDescending(marked map[uint64]manifestMaintenance) []uint64 {
-	complete := make([]uint64, 0, len(marked))
-	for generation, item := range marked {
-		if item.complete {
-			complete = append(complete, generation)
-		}
-	}
-	sort.Slice(complete, func(i, j int) bool { return complete[i] > complete[j] })
-	return complete
+type safePathError struct {
+	op    string
+	cause error
 }
 
-func retainedManifestQueue(marked map[uint64]manifestMaintenance) []uint64 {
-	complete := completeGenerationsDescending(marked)
-	if len(complete) <= 2 {
-		return nil
+func (e safePathError) Error() string { return e.op + ": " + e.cause.Error() }
+func (e safePathError) Unwrap() error { return e.cause }
+
+// safeFilesystemError preserves error matching without exposing repository
+// paths in terminal-facing errors.
+func safeFilesystemError(err error) error {
+	var linkError *os.LinkError
+	if errors.As(err, &linkError) {
+		return safePathError{op: linkError.Op, cause: linkError.Err}
 	}
-	return complete[2:]
+	var pathError *os.PathError
+	if errors.As(err, &pathError) {
+		return safePathError{op: pathError.Op, cause: pathError.Err}
+	}
+	return err
 }
 
-func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, state *sessionMaintenance, budget *int) error {
-	for len(state.manifestQueue) != 0 && *budget > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		generation := state.manifestQueue[0]
-		path := r.legacyManifestPath(key, generation)
-		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove snapshot manifest %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := r.syncDirectory(filepath.Dir(path)); err != nil {
-			return fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-		}
-		state.manifestQueue = state.manifestQueue[1:]
-		*budget--
+func (r *Repository) readGarbageCollectionDirectory(path string) (entries []os.DirEntry, err error) {
+	directory, err := r.openDirectory(path)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	defer func() {
+		if closeErr := directory.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+	return directory.ReadDir(-1)
 }
 
-// removeObjectTemps performs at most one shard traversal or one root-entry
-// discovery per Maintain call. Empty attacker-controlled shards consume no
-// removal budget, so this fixed step ceiling prevents an unbounded scan of
-// them while retaining only the root cursor and one active shard cursor.
-func (r *Repository) removeObjectTemps(ctx context.Context, key string, state *sessionMaintenance, budget *int) (bool, error) {
-	root := filepath.Join(r.legacySessionPath(key), repositoryObjectsDir)
-	if *budget == 0 {
-		return false, nil
-	}
-	if state.objectTempShard != "" {
-		done, err := r.removeTemps(ctx, filepath.Join(root, state.objectTempShard), budget, "object-temps:"+key+":"+state.objectTempShard)
-		if err != nil || !done {
-			return false, err
-		}
-		state.objectTempShard = ""
-		return state.objectTempsDone, nil
-	}
-	if state.objectTempsDone {
-		return true, nil
-	}
-	entries, done, err := r.readMaintenanceDir(root, 1, "object-temps-shards:"+key)
+func (r *Repository) sweepUnreferencedObjects(ctx context.Context, id domain.IncarnationID, references map[ports.SnapshotDigest]struct{}) error {
+	objectsRoot := filepath.Join(r.sessionPath(id), repositoryObjectsDir)
+	shards, err := r.readGarbageCollectionDirectory(objectsRoot)
 	if errors.Is(err, os.ErrNotExist) {
-		state.objectTempsDone = true
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read snapshot object shards: %w", safeFilesystemError(err))
-	}
-	state.objectTempsDone = done
-	if len(entries) != 0 && entries[0].isDir {
-		state.objectTempShard = entries[0].name
-	}
-	return state.objectTempsDone && state.objectTempShard == "", nil
-}
-
-func (r *Repository) sweepSession(ctx context.Context, key string, state *sessionMaintenance, budget *int) error {
-	// Every bounded sweep batch is tied to the mark's storage epoch. Do not use
-	// stale references after any publication or replacement.
-	if state.epoch != r.storageEpoch(key) {
-		r.clearSessionMaintenance(key)
 		return nil
 	}
-	referenced := retainedReferences(state.marked, state.conservative)
-	root := filepath.Join(r.legacySessionPath(key), repositoryObjectsDir)
-	if state.sweepShard != "" && *budget > 0 {
-		shard := state.sweepShard
-		done, err := r.sweepShard(ctx, filepath.Join(root, shard), referenced, budget, key, shard)
-		if err != nil {
+	if err != nil {
+		return fmt.Errorf("read snapshot objects for %s: %w", id.String(), safeFilesystemError(err))
+	}
+	removed := 0
+	for _, shard := range shards {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !done {
-			return nil
-		}
-		state.sweepShard = ""
-		// Release this shard's cursor before discovering another shard.
-		return nil
-	}
-	if !state.sweepRootDone {
-		entries, done, err := r.readMaintenanceDir(root, 1, "sweep-shards:"+key)
-		if errors.Is(err, os.ErrNotExist) {
-			state.sweepRootDone = true
-		} else if err != nil {
-			return fmt.Errorf("read snapshot objects: %w", safeFilesystemError(err))
-		} else {
-			state.sweepRootDone = done
-			if len(entries) != 0 && entries[0].isDir {
-				state.sweepShard = entries[0].name
-			}
-		}
-	}
-	if state.sweepRootDone && state.sweepShard == "" {
-		r.clearSessionMaintenance(key)
-	}
-	return nil
-}
-
-// keepSet is the complete catalogue-owned retention index. Directory order and
-// HEAD never grant retention authority.
-func keepSet(plan ports.RetentionPlan) map[uint64]ports.SnapshotDigest {
-	keep := make(map[uint64]ports.SnapshotDigest, len(plan.Keep))
-	for _, ref := range plan.Keep {
-		keep[ref.Generation] = ref.ManifestDigest
-	}
-	return keep
-}
-
-// MaintainSession incrementally validates and retains only catalogue-indexed
-// checkpoints. Every incarnation owns its budget and continuation state.
-// processRetentionEntries charges stat-reported size for every entry, requeues
-// the unadmitted suffix, and removes only canonical entries rejected by policy.
-func (r *Repository) processRetentionEntries(ctx context.Context, state *retentionMaintenance, dir, purpose string, entries []maintenanceDirEntry, budget *ports.MaintenanceBudget, consumedBefore bool, policy retentionEntryPolicy) (admitted bool, err error) {
-	removed := false
-	defer func() {
-		if !removed {
-			return
-		}
-		if syncErr := r.syncDirectory(dir); syncErr != nil {
-			admitted = false
-			err = errors.Join(err, syncErr)
-		}
-	}()
-	for i, entry := range entries {
-		if state.invalidated.Load() {
-			return false, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		path := filepath.Join(dir, entry.name)
-		info, statErr := r.stat(path)
-		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			return false, statErr
-		}
-		size := uint64(0)
-		if statErr == nil && info.Size() > 0 {
-			size = uint64(info.Size())
-		}
-		if budget.Entries == 0 || size > budget.Bytes {
-			r.requeueRetentionEntries(state, dir, purpose, entries[i:])
-			if !consumedBefore && i == 0 {
-				return false, ErrMaintenanceBudgetTooSmall
-			}
-			return false, nil
-		}
-		budget.Entries--
-		budget.Bytes -= size
-		if !policy.delete(entry) {
+		if !shard.IsDir() || len(shard.Name()) != 2 {
 			continue
 		}
-		if err := r.remove(path); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return false, err
-			}
-		} else {
-			removed = true
-		}
-	}
-	return true, nil
-}
-
-func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPlan, budget ports.MaintenanceBudget) (done bool, err error) {
-	requested := budget
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	key, err := incarnationKey(plan.IncarnationID)
-	if err != nil {
-		return false, err
-	}
-	defer func() {
-		r.log.Info("snapshot_maintenance_progress",
-			"incarnation", plan.IncarnationID.String(),
-			"action", "retention",
-			"retained", len(plan.Keep),
-			"cursor", key,
-			"consumed_entries", requested.Entries-budget.Entries,
-			"consumed_bytes", requested.Bytes-budget.Bytes,
-			"done", done,
-			"budget_exhausted", !done && err == nil,
-			"err", err,
-		)
-	}()
-	if plan.PinAll {
-		r.maintenanceMu.Lock()
-		if state := r.retentionSessions[key]; state != nil {
-			state.invalidated.Store(true)
-		}
-		r.clearRetentionMaintenance(key)
-		r.maintenanceMu.Unlock()
-		return true, nil
-	}
-	if budget.Entries == 0 || budget.Bytes == 0 {
-		return false, ErrMaintenanceBudgetTooSmall
-	}
-
-	// Establish per-incarnation state under maintenanceMu, then retain only the
-	// session mutex across payload I/O. Never reacquire maintenanceMu while the
-	// session mutex is held; PinAll invalidates active state without waiting.
-	r.maintenanceMu.Lock()
-	lock := r.lockSession(key)
-	if r.retentionSessions == nil {
-		r.retentionSessions = make(map[string]*retentionMaintenance)
-	}
-
-	token := retentionToken(plan)
-	state := r.retentionSessions[key]
-	if state == nil || state.token != token {
-		r.clearRetentionMaintenance(key)
-		state = &retentionMaintenance{
-			token:         token,
-			cursors:       make(map[string]*maintenanceCursor),
-			references:    make(map[ports.SnapshotDigest]struct{}),
-			validateQueue: append([]ports.CheckpointRef(nil), plan.Keep...),
-		}
-		r.retentionSessions[key] = state
-	}
-	r.maintenanceMu.Unlock()
-	defer func() {
-		r.unlockSession(lock)
-		if done {
-			r.maintenanceMu.Lock()
-			if r.retentionSessions[key] == state {
-				delete(r.retentionSessions, key)
-			}
-			r.maintenanceMu.Unlock()
-		}
-	}()
-	keep := keepSet(plan)
-	if !state.validated {
-		for state.validateIndex < len(state.validateQueue) {
-			ref := state.validateQueue[state.validateIndex]
-			if budget.Entries == 0 {
-				return false, nil
-			}
-			validated, consumedBytes, admitted, err := r.validateMaintenanceCheckpoint(ctx, plan.IncarnationID, ref, budget.Bytes)
-			if err != nil {
-				return false, fmt.Errorf("validate retained manifest %d: %w", ref.Generation, err)
-			}
-			if !admitted {
-				if requested.Entries == budget.Entries && requested.Bytes == budget.Bytes {
-					return false, ErrMaintenanceBudgetTooSmall
-				}
-				return false, nil
-			}
-			budget.Entries--
-			budget.Bytes -= consumedBytes
-			for digest := range validated.refs {
-				state.references[digest] = struct{}{}
-			}
-			state.validateIndex++
-		}
-		state.validated = true
-	}
-
-	purpose := "retention-manifests:" + key + ":" + token
-	for !state.manifestsDone && budget.Entries > 0 && budget.Bytes > 0 {
-		limit := int(min(budget.Entries, uint64(maintenanceBatch)))
-		entries, done, err := r.readRetentionDir(state, filepath.Join(r.sessionPath(plan.IncarnationID), repositoryGenerations), limit, purpose)
-		if errors.Is(err, os.ErrNotExist) {
-			state.manifestsDone = true
-			break
-		}
+		dir := filepath.Join(objectsRoot, shard.Name())
+		objects, err := r.readGarbageCollectionDirectory(dir)
 		if err != nil {
-			return false, err
+			return fmt.Errorf("read snapshot object shard for %s: %w", id.String(), safeFilesystemError(err))
 		}
-		dir := filepath.Join(r.sessionPath(plan.IncarnationID), repositoryGenerations)
-		consumedBefore := requested.Entries != budget.Entries || requested.Bytes != budget.Bytes
-		admitted, err := r.processRetentionEntries(ctx, state, dir, purpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionManifest, generations: keep})
-		if err != nil {
-			return false, err
-		}
-		if !admitted {
-			return false, nil
-		}
-		state.manifestsDone = done
-		if len(entries) == 0 && !done {
-			return false, nil
-		}
-	}
-	if !state.manifestsDone {
-		return false, nil
-	}
-
-	objectsRoot := filepath.Join(r.sessionPath(plan.IncarnationID), repositoryObjectsDir)
-	for budget.Entries > 0 && budget.Bytes > 0 {
-		if state.objectShard != "" {
-			shard := state.objectShard
-			dir := filepath.Join(objectsRoot, shard)
-			objectPurpose := "retention-objects:" + key + ":" + shard + ":" + token
-			entries, done, err := r.readRetentionDir(state, dir, int(min(budget.Entries, uint64(maintenanceBatch))), objectPurpose)
-			if errors.Is(err, os.ErrNotExist) {
-				state.objectShard = ""
+		shardRemoved := false
+		for _, object := range objects {
+			digest, canonical := parseObjectDigest(object.Name())
+			if !canonical || object.IsDir() {
 				continue
 			}
-			if err != nil {
-				return false, err
+			if _, retained := references[digest]; retained {
+				continue
 			}
-			consumedBefore := requested.Entries != budget.Entries || requested.Bytes != budget.Bytes
-			admitted, err := r.processRetentionEntries(ctx, state, dir, objectPurpose, entries, &budget, consumedBefore, retentionEntryPolicy{kind: retentionObject, objects: state.references})
-			if err != nil {
-				return false, err
+			if err := r.remove(filepath.Join(dir, object.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove snapshot object for %s: %w", id.String(), safeFilesystemError(err))
 			}
-			if !admitted {
-				return false, nil
-			}
-			if done {
-				state.objectShard = ""
-			} else if len(entries) == 0 {
-				return false, nil
-			}
-			continue
+			removed++
+			shardRemoved = true
 		}
-		if state.objectRootDone {
-			return true, nil
-		}
-		entries, done, err := r.readRetentionDir(state, objectsRoot, 1, "retention-shards:"+key+":"+token)
-		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		state.objectRootDone = done
-		if len(entries) == 0 {
-			if !done {
-				return false, nil
-			}
-			continue
-		}
-		budget.Entries--
-		if entries[0].isDir {
-			state.objectShard = entries[0].name
-		}
-	}
-	return false, nil
-}
-
-func (r *Repository) clearRetentionMaintenance(key string) {
-	delete(r.retentionSessions, key)
-}
-
-func (r *Repository) readRetentionDir(state *retentionMaintenance, dir string, n int, purpose string) ([]maintenanceDirEntry, bool, error) {
-	id := maintenanceCursorID(dir, purpose)
-	cursor := state.cursors[id]
-	if cursor != nil && cursor.pending != nil {
-		count := min(n, len(cursor.pending))
-		entries := cursor.pending[:count]
-		cursor.pending = cursor.pending[count:]
-		if len(entries) != 0 {
-			cursor.offset = entries[len(entries)-1].cookie
-		}
-		done := cursor.done && len(cursor.pending) == 0
-		if done {
-			delete(state.cursors, id)
-		} else if count > 0 && len(cursor.pending) == 0 {
-			cursor.pending = nil
-		}
-		return entries, done, nil
-	}
-	if cursor == nil {
-		if len(state.cursors) >= maxMaintenanceCursors {
-			return nil, false, errMaintenanceCursorLimit
-		}
-		cursor = &maintenanceCursor{}
-		state.cursors[id] = cursor
-	}
-	entries, done, err := r.readMaintenanceDirent(dir, n, cursor)
-	if err != nil || done {
-		delete(state.cursors, id)
-	}
-	return entries, done, err
-}
-
-func (r *Repository) requeueRetentionEntries(state *retentionMaintenance, dir, purpose string, entries []maintenanceDirEntry) {
-	if len(entries) == 0 {
-		return
-	}
-	id := maintenanceCursorID(dir, purpose)
-	cursor := state.cursors[id]
-	if cursor == nil {
-		cursor = &maintenanceCursor{done: true}
-		state.cursors[id] = cursor
-	}
-	pending := make([]maintenanceDirEntry, 0, len(entries)+len(cursor.pending))
-	pending = append(pending, entries...)
-	pending = append(pending, cursor.pending...)
-	cursor.pending = pending
-}
-
-func retentionToken(plan ports.RetentionPlan) string {
-	var b strings.Builder
-	b.WriteString(plan.IncarnationID.String())
-	for _, ref := range plan.Keep {
-		fmt.Fprintf(&b, ":%d:%x", ref.Generation, ref.ManifestDigest)
-	}
-	return b.String()
-}
-
-type validatedMaintenanceCheckpoint struct {
-	refs   map[ports.SnapshotDigest]codec.ObjectRef
-	parent *domain.CheckpointRef
-}
-
-// validateMaintenanceCheckpoint admits every payload by stat-reported size
-// before reading it. It validates directly instead of calling LoadCheckpoint,
-// which would materialize a complete generation before maintenance could
-// enforce its byte budget.
-func (r *Repository) validateMaintenanceCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef, byteBudget uint64) (validatedMaintenanceCheckpoint, uint64, bool, error) {
-	manifestPath := r.manifestPath(id, ref.Generation)
-	info, err := r.stat(manifestPath)
-	if err != nil {
-		return validatedMaintenanceCheckpoint{}, 0, false, err
-	}
-	if info.Size() < 0 || uint64(info.Size()) > byteBudget {
-		return validatedMaintenanceCheckpoint{}, 0, false, nil
-	}
-	consumed := uint64(info.Size())
-	if hook := r.hooks.beforeMaintenancePayloadRead; hook != nil {
-		hook(manifestPath)
-	}
-	data, err := r.readBounded(manifestPath)
-	if err != nil {
-		return validatedMaintenanceCheckpoint{}, consumed, false, err
-	}
-	manifest, err := codec.UnmarshalManifest(data)
-	if err != nil || manifest.Generation != ref.Generation || manifest.IncarnationID != id || sha256.Sum256(data) != ref.ManifestDigest {
-		return validatedMaintenanceCheckpoint{}, consumed, false, errors.New("catalogue reference mismatch")
-	}
-	refs, valid := maintenanceManifestRefs(manifest)
-	if !valid || !withinGenerationBudget(len(data), refs) {
-		return validatedMaintenanceCheckpoint{}, consumed, false, errors.New("invalid manifest references")
-	}
-	for digest, objectRef := range refs {
-		if err := ctx.Err(); err != nil {
-			return validatedMaintenanceCheckpoint{}, consumed, false, err
-		}
-		path := r.objectPath(id, digest)
-		info, err := r.stat(path)
-		if err != nil {
-			return validatedMaintenanceCheckpoint{}, consumed, false, err
-		}
-		if info.Size() < 0 || uint64(info.Size()) > byteBudget-consumed {
-			return validatedMaintenanceCheckpoint{}, consumed, false, nil
-		}
-		consumed += uint64(info.Size())
-		if hook := r.hooks.beforeMaintenancePayloadRead; hook != nil {
-			hook(path)
-		}
-		object, err := r.readBounded(path)
-		if err != nil {
-			return validatedMaintenanceCheckpoint{}, consumed, false, err
-		}
-		if sha256.Sum256(object) != digest || !validObject(object, objectRef) {
-			return validatedMaintenanceCheckpoint{}, consumed, false, errors.New("invalid retained object")
-		}
-	}
-	return validatedMaintenanceCheckpoint{refs: refs, parent: manifest.ParentCheckpoint}, consumed, true, nil
-}
-
-func retainedReferences(marked map[uint64]manifestMaintenance, conservative bool) map[ports.SnapshotDigest]struct{} {
-	if conservative {
-		references := make(map[ports.SnapshotDigest]struct{})
-		for _, item := range marked {
-			for digest := range item.refs {
-				references[digest] = struct{}{}
-			}
-		}
-		return references
-	}
-	complete := completeGenerationsDescending(marked)
-	keep := make(map[uint64]bool, 2)
-	for _, generation := range complete {
-		if len(keep) == 2 {
-			break
-		}
-		keep[generation] = true
-	}
-	references := make(map[ports.SnapshotDigest]struct{})
-	for generation, item := range marked {
-		if !item.complete || keep[generation] {
-			for digest := range item.refs {
-				references[digest] = struct{}{}
+		if shardRemoved {
+			if err := r.syncDirectory(dir); err != nil {
+				return fmt.Errorf("sync snapshot object shard for %s: %w", id.String(), safeFilesystemError(err))
 			}
 		}
 	}
-	return references
-}
-
-func (r *Repository) sweepShard(ctx context.Context, dir string, referenced map[ports.SnapshotDigest]struct{}, budget *int, key, shard string) (bool, error) {
-	entries, done, err := r.readMaintenanceDir(dir, maintenanceBatch, "sweep-objects:"+key+":"+shard)
-	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
+	if removed > 0 {
+		r.log.Info("snapshot_garbage_collected", "incarnation", id.String(), "action", "remove-objects", "removed", removed)
 	}
-	if err != nil {
-		return false, fmt.Errorf("read snapshot object shard: %w", safeFilesystemError(err))
-	}
-	for i, object := range entries {
-		if *budget == 0 {
-			r.requeueMaintenanceEntries(dir, "sweep-objects:"+key+":"+shard, entries[i:])
-			return false, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		digest, ok := parseObjectDigest(object.name)
-		if !ok || object.isDir {
-			continue
-		}
-		if _, used := referenced[digest]; used {
-			continue
-		}
-		path := filepath.Join(dir, object.name)
-		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return false, fmt.Errorf("remove snapshot object %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-		}
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if err := r.syncDirectory(dir); err != nil {
-			return false, fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-		}
-		*budget--
-	}
-	return done, nil
+	return nil
 }

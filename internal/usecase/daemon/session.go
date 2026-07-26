@@ -728,10 +728,8 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		return err
 	}
 
-	// Reserve the rename while state is inspected, then perform persistence and
-	// repository I/O without daemon/session locks. The old identity is first
-	// quarantined and durably purged; committing the new record before that
-	// transaction completes could leave a restorable old legacy source.
+	// Reserve the rename while state is inspected, then persist the new name
+	// without changing the incarnation-keyed snapshot namespace.
 	d.mu.Lock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
 		d.mu.Unlock()
@@ -1036,10 +1034,9 @@ func (d *Daemon) beginSnapshotPurge(_ string, _ domain.IncarnationID) error {
 	return nil
 }
 
-// finishSnapshotPurge deletes both independently durable snapshot sources,
-// then metadata, and only then clears the tombstone. Any failure deliberately
-// leaves the marker in place so startup cannot restore or import the name and
-// a later live/offline kill can retry the idempotent source deletes.
+// finishSnapshotPurge removes catalogue metadata first, then deletes the
+// incarnation directory. Startup garbage collection removes the directory if
+// the second step is interrupted.
 func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, _ domain.IncarnationID) error {
 	if !d.persistEnabled {
 		return nil
@@ -1240,10 +1237,8 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	name := sess.name
 	incarnation := sess.incarnation
 	sess.mu.Unlock()
-	// Commit the tombstone before changing live identity or metadata. A
-	// repository delete must never race an older publication that could recreate
-	// the just-quarantined name. Do not hold daemon or session locks while
-	// tombstoning or joining: a repository implementation may block on I/O.
+	// Join snapshot publication before changing live identity or deleting the
+	// incarnation directory, so an older publication cannot recreate it.
 	if purge && !isEphemeral {
 		if err := d.beginSnapshotPurge(name, incarnation); err != nil {
 			return err
@@ -1377,9 +1372,8 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		}
 	}
 	// The coordinator and all panes are now stopped, so no producer can publish
-	// another generation after this destructive source deletion. Keep the
-	// tombstone and hidden stopped record when any source or metadata operation
-	// fails; retryStoppedPurge (including a repeated live kill) resumes safely.
+	// another generation after this destructive source deletion. Keep the hidden
+	// stopped record when deletion fails so a repeated live kill can retry.
 	if !ephemeral && purge {
 		if err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation); err != nil {
 			purgeErr = errors.Join(purgeErr, err)

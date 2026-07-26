@@ -397,7 +397,6 @@ func TestRetryableRestoreLoadErrorClassification(t *testing.T) {
 		err       error
 		retryable bool
 	}{
-		{name: "budget exhausted", err: fmt.Errorf("wrapped: %w", ports.ErrBudgetExhausted), retryable: true},
 		{name: "missing path", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.ENOENT})},
 		{name: "permission denied", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.EACCES})},
 		{name: "invalid path operation", err: fmt.Errorf("wrapped: %w", &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.EINVAL})},

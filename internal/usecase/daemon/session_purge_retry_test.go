@@ -15,24 +15,8 @@ import (
 type retryablePurgeRepository struct {
 	noOpSnapshotRepository
 	deleteErr      error
-	tombstoned     map[string]bool
 	calls          []string
 	deadlineScoped []bool
-}
-
-func (r *retryablePurgeRepository) Publish(context.Context, ports.SnapshotPublication) error {
-	return nil
-}
-
-func (r *retryablePurgeRepository) WriteDeletionTombstone(ctx context.Context, tombstone domain.DeletionTombstone) error {
-	_, hasDeadline := ctx.Deadline()
-	r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
-	if r.tombstoned == nil {
-		r.tombstoned = make(map[string]bool)
-	}
-	r.calls = append(r.calls, "tombstone")
-	r.tombstoned[tombstone.Name] = true
-	return nil
 }
 
 func (r *retryablePurgeRepository) DeleteIncarnation(ctx context.Context, _ domain.IncarnationID) error {
@@ -42,15 +26,7 @@ func (r *retryablePurgeRepository) DeleteIncarnation(ctx context.Context, _ doma
 	return r.deleteErr
 }
 
-func (r *retryablePurgeRepository) DeleteDeletionTombstone(ctx context.Context, _ domain.IncarnationID) error {
-	_, hasDeadline := ctx.Deadline()
-	r.deadlineScoped = append(r.deadlineScoped, hasDeadline)
-	r.calls = append(r.calls, "clear tombstone")
-	clear(r.tombstoned)
-	return nil
-}
-
-func TestLivePurgeRetainsTombstoneAcrossPartialDeletion(t *testing.T) {
+func TestLivePurgeLeavesFailedDirectoryDeletionForStartupGarbageCollection(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := &retryablePurgeRepository{deleteErr: errors.New("delete failed")}
 	WithSnapshotRepository(repository)(d)
@@ -66,14 +42,9 @@ func TestLivePurgeRetainsTombstoneAcrossPartialDeletion(t *testing.T) {
 	d.sessions = map[domain.SessionID]*session{sess.id: sess}
 
 	require.Error(t, d.killSession(sess, ports.ReasonSessionKilled, true))
-	require.True(t, repository.tombstoned["work"])
-	require.Equal(t, []string{"tombstone", "delete incarnation"}, repository.calls)
-
-	repository.deleteErr = nil
-	require.NoError(t, d.retryStoppedPurge("work"))
-	require.False(t, repository.tombstoned["work"])
-	require.Equal(t, []string{"tombstone", "delete incarnation", "tombstone", "delete incarnation", "clear tombstone"}, repository.calls)
-	for _, scoped := range repository.deadlineScoped {
-		require.True(t, scoped)
-	}
+	require.Equal(t, []string{"delete incarnation"}, repository.calls)
+	_, exists, err := d.catalogue.Record("work")
+	require.NoError(t, err)
+	require.False(t, exists, "catalogue removal commits before best-effort directory deletion")
+	require.Equal(t, []bool{true}, repository.deadlineScoped)
 }

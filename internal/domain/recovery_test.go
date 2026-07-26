@@ -76,25 +76,3 @@ func TestCatalogueRecordEqualUsesCheckpointValuesAndOrderedTabs(t *testing.T) {
 	require.True(t, (*CheckpointRef)(nil).Equal(nil))
 	require.False(t, left.Committed.Equal(nil))
 }
-
-func TestDeletionTombstoneValidate(t *testing.T) {
-	tests := []struct {
-		name      string
-		tombstone DeletionTombstone
-		wantErr   bool
-	}{
-		{name: "valid", tombstone: DeletionTombstone{Name: "work", IncarnationID: IncarnationID{1}}},
-		{name: "invalid name", tombstone: DeletionTombstone{Name: "bad/name", IncarnationID: IncarnationID{1}}, wantErr: true},
-		{name: "zero incarnation", tombstone: DeletionTombstone{Name: "work"}, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.tombstone.Validate()
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}

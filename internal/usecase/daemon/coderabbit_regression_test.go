@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,7 +15,7 @@ import (
 func TestRestoreTransientLoadFailureBecomesDiscardable(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	repository := &durableRecoveryRepository{
-		errors:  map[string]error{record.Name: ports.ErrBudgetExhausted},
+		errors:  map[string]error{record.Name: syscall.ENOSPC},
 		loads:   make(map[string]int),
 		repairs: make(map[string]domain.CheckpointRef),
 	}

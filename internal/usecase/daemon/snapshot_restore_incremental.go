@@ -260,8 +260,7 @@ func isRetryableRestoreLoadError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if errors.Is(err, ports.ErrBudgetExhausted) ||
-		errors.Is(err, syscall.ENOSPC) ||
+	if errors.Is(err, syscall.ENOSPC) ||
 		errors.Is(err, syscall.ENOMEM) ||
 		errors.Is(err, syscall.EMFILE) ||
 		errors.Is(err, syscall.ENFILE) ||

@@ -29,15 +29,6 @@ type Repository struct {
 	locks          map[string]*sessionMutex
 	storageEpochs  map[string]uint64
 	nextEpoch      uint64
-
-	// maintenanceMu owns bounded continuation metadata: seek cookies and
-	// pending directory entries. Directory descriptors are opened and closed
-	// for each maintenance call.
-	maintenanceMu         sync.Mutex
-	maintenanceCursors    map[string]*maintenanceCursor
-	maintenanceSessions   map[string]*sessionMaintenance
-	retentionSessions     map[string]*retentionMaintenance
-	maintenanceQuarantine *quarantineMaintenance
 }
 
 // repositoryHooks makes each persistence boundary fault-injectable. Hooks run
@@ -50,38 +41,27 @@ type repositoryHooks struct {
 	// the steady-state cost of retained history observable without exposing a
 	// production metrics surface.
 	beforeObjectRead func(string)
-	// beforeMaintenancePayloadRead instruments payload reads after maintenance
-	// has admitted their stat-reported size against the current byte budget.
-	beforeMaintenancePayloadRead func(string)
 	// beforePayloadRead observes every bounded repository payload read. It is
 	// test-only accounting instrumentation and runs immediately before the read.
-	beforePayloadRead            func(string)
-	beforeObjectHash             func([]byte)
-	beforeObjectCopy             func([]byte)
-	beforeHeadRead               func(string) error
-	beforeHeadWrite              func(string) error
-	beforeTombstoneCheck         func(string)
-	beforePendingQuarantineCheck func(string)
-	createTemp                   func(string) error
-	writeTemp                    func(string) error
-	syncFile                     func(string) error
-	closeFile                    func(string) error
-	installImmutable             func(string) error
-	rename                       func(string) error
-	syncDirectory                func(string) error
-	remove                       func(string) error
+	beforePayloadRead func(string)
+	beforeObjectHash  func([]byte)
+	beforeObjectCopy  func([]byte)
+	beforeHeadRead    func(string) error
+	beforeHeadWrite   func(string) error
+	createTemp        func(string) error
+	writeTemp         func(string) error
+	syncFile          func(string) error
+	closeFile         func(string) error
+	installImmutable  func(string) error
+	rename            func(string) error
+	syncDirectory     func(string) error
+	remove            func(string) error
 	// afterOpenRoot and closeRoot make descriptor race and close-error paths
 	// deterministic in package tests. closeRoot never replaces the real close.
-	afterOpenRoot               func()
-	closeRoot                   func() error
-	openMaintenanceDirectory    func(string) (maintenanceDirectory, error)
-	maintenanceDirentConfig     *maintenanceDirentConfig
-	beforeDirectoryRead         func(string)
-	beforeDeletionTombstoneRead func(string)
-	// beforeMaintenanceWork observes each budgeted quarantine filesystem step.
-	// It is test-only instrumentation for hostile traversal bounds.
-	beforeMaintenanceWork func(string)
-	beforeSessionLock     func(string)
+	afterOpenRoot       func()
+	closeRoot           func() error
+	beforeDirectoryRead func(string)
+	beforeSessionLock   func(string)
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
@@ -94,13 +74,10 @@ func NewRepository(dir string, logs ...*slog.Logger) *Repository {
 		log = logs[0]
 	}
 	return &Repository{
-		dir:                 dir,
-		log:                 log,
-		locks:               make(map[string]*sessionMutex),
-		storageEpochs:       make(map[string]uint64),
-		maintenanceCursors:  make(map[string]*maintenanceCursor),
-		maintenanceSessions: make(map[string]*sessionMaintenance),
-		retentionSessions:   make(map[string]*retentionMaintenance),
+		dir:           dir,
+		log:           log,
+		locks:         make(map[string]*sessionMutex),
+		storageEpochs: make(map[string]uint64),
 	}
 }
 

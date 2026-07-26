@@ -15,13 +15,10 @@ import (
 
 type testLifecycleRepository struct{ ports.SnapshotRepository }
 
-func (testLifecycleRepository) WriteDeletionTombstone(context.Context, domain.DeletionTombstone) error {
-	return nil
-}
 func (testLifecycleRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
 	return nil
 }
-func (testLifecycleRepository) DeleteDeletionTombstone(context.Context, domain.IncarnationID) error {
+func (testLifecycleRepository) CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error {
 	return nil
 }
 

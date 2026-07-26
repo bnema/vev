@@ -325,11 +325,11 @@ func WithNoticeStore(store ports.NoticeStore) Option {
 	return func(d *Daemon) { d.noticeStore = store }
 }
 
-// WithDurableMaintenance schedules bounded retention after catalogue-driven
-// restoration. Unresolved incarnation IDs remain pinned for this daemon lifetime.
-func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository, unresolved []domain.IncarnationID) Option {
+// WithDurableMaintenance schedules one garbage-collection pass after
+// catalogue-driven restoration completes.
+func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository) Option {
 	return func(d *Daemon) {
-		d.maintenance = newMaintenanceDependencies(catalogue, repository, unresolved)
+		d.maintenance = newMaintenanceDependencies(catalogue, repository)
 	}
 }
 
@@ -865,9 +865,8 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	if target == nil {
 		if _, ok := d.stopped[k.Name]; ok {
 			d.mu.Unlock()
-			// Stopped sessions follow the same tombstone-backed transaction as
-			// live and offline purges. In particular, a retained legacy source
-			// must never outlive metadata after an interrupted control kill.
+			// Stopped sessions use the same catalogue-first, incarnation-second
+			// deletion order as live and offline purges.
 			if err := d.retryStoppedPurge(k.Name); err != nil {
 				d.log.Warn("deleting stopped session failed", "err", err, "session", k.Name)
 				_ = tr.Send(frameError(ports.ErrInternal, "deleting stopped session failed"))

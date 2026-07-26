@@ -975,44 +975,44 @@ func (_m *MockSnapshotRepository) EXPECT() *MockSnapshotRepository_Expecter {
 	return &MockSnapshotRepository_Expecter{mock: &_m.Mock}
 }
 
-// DeleteDeletionTombstone provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) DeleteDeletionTombstone(context1 context.Context, incarnationID domain.IncarnationID) error {
-	ret := _mock.Called(context1, incarnationID)
+// CollectGarbage provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) CollectGarbage(context1 context.Context, incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef) error {
+	ret := _mock.Called(context1, incarnationIDToCheckpointRef)
 
 	if len(ret) == 0 {
-		panic("no return value specified for DeleteDeletionTombstone")
+		panic("no return value specified for CollectGarbage")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.IncarnationID) error); ok {
-		r0 = returnFunc(context1, incarnationID)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error); ok {
+		r0 = returnFunc(context1, incarnationIDToCheckpointRef)
 	} else {
 		r0 = ret.Error(0)
 	}
 	return r0
 }
 
-// MockSnapshotRepository_DeleteDeletionTombstone_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteDeletionTombstone'
-type MockSnapshotRepository_DeleteDeletionTombstone_Call struct {
+// MockSnapshotRepository_CollectGarbage_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CollectGarbage'
+type MockSnapshotRepository_CollectGarbage_Call struct {
 	*mock.Call
 }
 
-// DeleteDeletionTombstone is a helper method to define mock.On call
+// CollectGarbage is a helper method to define mock.On call
 //   - context1 context.Context
-//   - incarnationID domain.IncarnationID
-func (_e *MockSnapshotRepository_Expecter) DeleteDeletionTombstone(context1 any, incarnationID any) *MockSnapshotRepository_DeleteDeletionTombstone_Call {
-	return &MockSnapshotRepository_DeleteDeletionTombstone_Call{Call: _e.mock.On("DeleteDeletionTombstone", context1, incarnationID)}
+//   - incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef
+func (_e *MockSnapshotRepository_Expecter) CollectGarbage(context1 any, incarnationIDToCheckpointRef any) *MockSnapshotRepository_CollectGarbage_Call {
+	return &MockSnapshotRepository_CollectGarbage_Call{Call: _e.mock.On("CollectGarbage", context1, incarnationIDToCheckpointRef)}
 }
 
-func (_c *MockSnapshotRepository_DeleteDeletionTombstone_Call) Run(run func(context1 context.Context, incarnationID domain.IncarnationID)) *MockSnapshotRepository_DeleteDeletionTombstone_Call {
+func (_c *MockSnapshotRepository_CollectGarbage_Call) Run(run func(context1 context.Context, incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef)) *MockSnapshotRepository_CollectGarbage_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 domain.IncarnationID
+		var arg1 map[domain.IncarnationID]domain.CheckpointRef
 		if args[1] != nil {
-			arg1 = args[1].(domain.IncarnationID)
+			arg1 = args[1].(map[domain.IncarnationID]domain.CheckpointRef)
 		}
 		run(
 			arg0,
@@ -1022,12 +1022,12 @@ func (_c *MockSnapshotRepository_DeleteDeletionTombstone_Call) Run(run func(cont
 	return _c
 }
 
-func (_c *MockSnapshotRepository_DeleteDeletionTombstone_Call) Return(err error) *MockSnapshotRepository_DeleteDeletionTombstone_Call {
+func (_c *MockSnapshotRepository_CollectGarbage_Call) Return(err error) *MockSnapshotRepository_CollectGarbage_Call {
 	_c.Call.Return(err)
 	return _c
 }
 
-func (_c *MockSnapshotRepository_DeleteDeletionTombstone_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID) error) *MockSnapshotRepository_DeleteDeletionTombstone_Call {
+func (_c *MockSnapshotRepository_CollectGarbage_Call) RunAndReturn(run func(context1 context.Context, incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef) error) *MockSnapshotRepository_CollectGarbage_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1085,78 +1085,6 @@ func (_c *MockSnapshotRepository_DeleteIncarnation_Call) Return(err error) *Mock
 }
 
 func (_c *MockSnapshotRepository_DeleteIncarnation_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID) error) *MockSnapshotRepository_DeleteIncarnation_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// ListDeletionTombstones provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) ListDeletionTombstones(context1 context.Context, deletionTombstoneCursor ports.DeletionTombstoneCursor, maintenanceBudget ports.MaintenanceBudget) (ports.DeletionTombstonePage, error) {
-	ret := _mock.Called(context1, deletionTombstoneCursor, maintenanceBudget)
-
-	if len(ret) == 0 {
-		panic("no return value specified for ListDeletionTombstones")
-	}
-
-	var r0 ports.DeletionTombstonePage
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.DeletionTombstoneCursor, ports.MaintenanceBudget) (ports.DeletionTombstonePage, error)); ok {
-		return returnFunc(context1, deletionTombstoneCursor, maintenanceBudget)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.DeletionTombstoneCursor, ports.MaintenanceBudget) ports.DeletionTombstonePage); ok {
-		r0 = returnFunc(context1, deletionTombstoneCursor, maintenanceBudget)
-	} else {
-		r0 = ret.Get(0).(ports.DeletionTombstonePage)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.DeletionTombstoneCursor, ports.MaintenanceBudget) error); ok {
-		r1 = returnFunc(context1, deletionTombstoneCursor, maintenanceBudget)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockSnapshotRepository_ListDeletionTombstones_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListDeletionTombstones'
-type MockSnapshotRepository_ListDeletionTombstones_Call struct {
-	*mock.Call
-}
-
-// ListDeletionTombstones is a helper method to define mock.On call
-//   - context1 context.Context
-//   - deletionTombstoneCursor ports.DeletionTombstoneCursor
-//   - maintenanceBudget ports.MaintenanceBudget
-func (_e *MockSnapshotRepository_Expecter) ListDeletionTombstones(context1 any, deletionTombstoneCursor any, maintenanceBudget any) *MockSnapshotRepository_ListDeletionTombstones_Call {
-	return &MockSnapshotRepository_ListDeletionTombstones_Call{Call: _e.mock.On("ListDeletionTombstones", context1, deletionTombstoneCursor, maintenanceBudget)}
-}
-
-func (_c *MockSnapshotRepository_ListDeletionTombstones_Call) Run(run func(context1 context.Context, deletionTombstoneCursor ports.DeletionTombstoneCursor, maintenanceBudget ports.MaintenanceBudget)) *MockSnapshotRepository_ListDeletionTombstones_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 ports.DeletionTombstoneCursor
-		if args[1] != nil {
-			arg1 = args[1].(ports.DeletionTombstoneCursor)
-		}
-		var arg2 ports.MaintenanceBudget
-		if args[2] != nil {
-			arg2 = args[2].(ports.MaintenanceBudget)
-		}
-		run(
-			arg0,
-			arg1,
-			arg2,
-		)
-	})
-	return _c
-}
-
-func (_c *MockSnapshotRepository_ListDeletionTombstones_Call) Return(deletionTombstonePage ports.DeletionTombstonePage, err error) *MockSnapshotRepository_ListDeletionTombstones_Call {
-	_c.Call.Return(deletionTombstonePage, err)
-	return _c
-}
-
-func (_c *MockSnapshotRepository_ListDeletionTombstones_Call) RunAndReturn(run func(context1 context.Context, deletionTombstoneCursor ports.DeletionTombstoneCursor, maintenanceBudget ports.MaintenanceBudget) (ports.DeletionTombstonePage, error)) *MockSnapshotRepository_ListDeletionTombstones_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1235,78 +1163,6 @@ func (_c *MockSnapshotRepository_LoadCheckpoint_Call) Return(snapshotGeneration 
 }
 
 func (_c *MockSnapshotRepository_LoadCheckpoint_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, s string, v ports.CheckpointRef) (ports.SnapshotGeneration, error)) *MockSnapshotRepository_LoadCheckpoint_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// MaintainSession provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) MaintainSession(context1 context.Context, retentionPlan ports.RetentionPlan, maintenanceBudget ports.MaintenanceBudget) (bool, error) {
-	ret := _mock.Called(context1, retentionPlan, maintenanceBudget)
-
-	if len(ret) == 0 {
-		panic("no return value specified for MaintainSession")
-	}
-
-	var r0 bool
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) (bool, error)); ok {
-		return returnFunc(context1, retentionPlan, maintenanceBudget)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) bool); ok {
-		r0 = returnFunc(context1, retentionPlan, maintenanceBudget)
-	} else {
-		r0 = ret.Get(0).(bool)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) error); ok {
-		r1 = returnFunc(context1, retentionPlan, maintenanceBudget)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockSnapshotRepository_MaintainSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'MaintainSession'
-type MockSnapshotRepository_MaintainSession_Call struct {
-	*mock.Call
-}
-
-// MaintainSession is a helper method to define mock.On call
-//   - context1 context.Context
-//   - retentionPlan ports.RetentionPlan
-//   - maintenanceBudget ports.MaintenanceBudget
-func (_e *MockSnapshotRepository_Expecter) MaintainSession(context1 any, retentionPlan any, maintenanceBudget any) *MockSnapshotRepository_MaintainSession_Call {
-	return &MockSnapshotRepository_MaintainSession_Call{Call: _e.mock.On("MaintainSession", context1, retentionPlan, maintenanceBudget)}
-}
-
-func (_c *MockSnapshotRepository_MaintainSession_Call) Run(run func(context1 context.Context, retentionPlan ports.RetentionPlan, maintenanceBudget ports.MaintenanceBudget)) *MockSnapshotRepository_MaintainSession_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 ports.RetentionPlan
-		if args[1] != nil {
-			arg1 = args[1].(ports.RetentionPlan)
-		}
-		var arg2 ports.MaintenanceBudget
-		if args[2] != nil {
-			arg2 = args[2].(ports.MaintenanceBudget)
-		}
-		run(
-			arg0,
-			arg1,
-			arg2,
-		)
-	})
-	return _c
-}
-
-func (_c *MockSnapshotRepository_MaintainSession_Call) Return(b bool, err error) *MockSnapshotRepository_MaintainSession_Call {
-	_c.Call.Return(b, err)
-	return _c
-}
-
-func (_c *MockSnapshotRepository_MaintainSession_Call) RunAndReturn(run func(context1 context.Context, retentionPlan ports.RetentionPlan, maintenanceBudget ports.MaintenanceBudget) (bool, error)) *MockSnapshotRepository_MaintainSession_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1427,63 +1283,6 @@ func (_c *MockSnapshotRepository_RepairHEAD_Call) Return(err error) *MockSnapsho
 }
 
 func (_c *MockSnapshotRepository_RepairHEAD_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef) error) *MockSnapshotRepository_RepairHEAD_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// WriteDeletionTombstone provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) WriteDeletionTombstone(context1 context.Context, deletionTombstone domain.DeletionTombstone) error {
-	ret := _mock.Called(context1, deletionTombstone)
-
-	if len(ret) == 0 {
-		panic("no return value specified for WriteDeletionTombstone")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.DeletionTombstone) error); ok {
-		r0 = returnFunc(context1, deletionTombstone)
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// MockSnapshotRepository_WriteDeletionTombstone_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'WriteDeletionTombstone'
-type MockSnapshotRepository_WriteDeletionTombstone_Call struct {
-	*mock.Call
-}
-
-// WriteDeletionTombstone is a helper method to define mock.On call
-//   - context1 context.Context
-//   - deletionTombstone domain.DeletionTombstone
-func (_e *MockSnapshotRepository_Expecter) WriteDeletionTombstone(context1 any, deletionTombstone any) *MockSnapshotRepository_WriteDeletionTombstone_Call {
-	return &MockSnapshotRepository_WriteDeletionTombstone_Call{Call: _e.mock.On("WriteDeletionTombstone", context1, deletionTombstone)}
-}
-
-func (_c *MockSnapshotRepository_WriteDeletionTombstone_Call) Run(run func(context1 context.Context, deletionTombstone domain.DeletionTombstone)) *MockSnapshotRepository_WriteDeletionTombstone_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 domain.DeletionTombstone
-		if args[1] != nil {
-			arg1 = args[1].(domain.DeletionTombstone)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockSnapshotRepository_WriteDeletionTombstone_Call) Return(err error) *MockSnapshotRepository_WriteDeletionTombstone_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *MockSnapshotRepository_WriteDeletionTombstone_Call) RunAndReturn(run func(context1 context.Context, deletionTombstone domain.DeletionTombstone) error) *MockSnapshotRepository_WriteDeletionTombstone_Call {
 	_c.Call.Return(run)
 	return _c
 }

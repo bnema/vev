@@ -2,7 +2,6 @@ package ports
 
 import (
 	"context"
-	"errors"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -26,27 +25,6 @@ type SnapshotGeneration struct {
 	Manifest         []byte
 	Objects          map[SnapshotDigest][]byte
 }
-
-type RetentionPlan struct {
-	IncarnationID domain.IncarnationID
-	Keep          []CheckpointRef
-	PinAll        bool
-}
-
-type MaintenanceBudget struct {
-	Entries uint64
-	Bytes   uint64
-}
-
-type DeletionTombstoneCursor struct{ After string }
-
-type DeletionTombstonePage struct {
-	Tombstones []domain.DeletionTombstone
-	Next       DeletionTombstoneCursor
-	Done       bool
-}
-
-var ErrBudgetExhausted = errors.New("snapshot maintenance budget exhausted")
 
 type CheckpointCoordinator interface {
 	PublishCheckpoint(context.Context, string, SnapshotPublication) (domain.CatalogueRecord, error)
@@ -82,9 +60,6 @@ type SnapshotRepository interface {
 	Publish(context.Context, SnapshotPublication) error
 	LoadCheckpoint(context.Context, domain.IncarnationID, string, CheckpointRef) (SnapshotGeneration, error)
 	RepairHEAD(context.Context, domain.IncarnationID, CheckpointRef) error
-	WriteDeletionTombstone(context.Context, domain.DeletionTombstone) error
-	ListDeletionTombstones(context.Context, DeletionTombstoneCursor, MaintenanceBudget) (DeletionTombstonePage, error)
-	DeleteDeletionTombstone(context.Context, domain.IncarnationID) error
 	DeleteIncarnation(context.Context, domain.IncarnationID) error
-	MaintainSession(context.Context, RetentionPlan, MaintenanceBudget) (bool, error)
+	CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error
 }

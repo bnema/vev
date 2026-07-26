@@ -76,7 +76,6 @@ func TestRunKillOfflineUsesIncarnationDeletionProtocol(t *testing.T) {
 
 			require.NoError(t, runKill(context.Background(), "named", false, false))
 			require.NoDirExists(t, source)
-			require.NoDirExists(t, filepath.Join(stateDir, "snapshots", "quarantine", id.String()))
 		})
 	}
 }

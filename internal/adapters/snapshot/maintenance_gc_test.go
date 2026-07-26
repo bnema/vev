@@ -1,0 +1,91 @@
+package snapshot
+
+import (
+	"context"
+	"crypto/sha256"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/require"
+)
+
+func TestCollectGarbage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		committed       uint64
+		known           bool
+		wantGenerations []uint64
+	}{
+		{name: "incarnation absent from catalogue is removed whole"},
+		{name: "committed and immediate predecessor survive", committed: 3, known: true, wantGenerations: []uint64{2, 3}},
+		{name: "forward orphan newer than committed is removed", committed: 3, known: true, wantGenerations: []uint64{2, 3}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repository := NewRepository(privateDir(t))
+			publications := publishGarbageCollectionGenerations(t, repository, "work", 4)
+			id := publications[0].IncarnationID
+			keep := make(map[domain.IncarnationID]domain.CheckpointRef)
+			if tt.known {
+				publication := publications[tt.committed-1]
+				keep[id] = domain.CheckpointRef{Generation: tt.committed, ManifestDigest: sha256.Sum256(publication.Manifest)}
+			}
+
+			require.NoError(t, repository.CollectGarbage(context.Background(), keep))
+			if !tt.known {
+				_, err := os.Stat(repository.sessionPath(id))
+				require.ErrorIs(t, err, os.ErrNotExist)
+				return
+			}
+			require.Equal(t, tt.wantGenerations, garbageCollectionGenerations(t, repository, id))
+			retainedObjects := make(map[ports.SnapshotDigest]struct{})
+			for _, publication := range publications[tt.committed-2 : tt.committed] {
+				for _, object := range publication.Objects {
+					retainedObjects[object.Digest] = struct{}{}
+				}
+			}
+			for _, publication := range publications {
+				for _, object := range publication.Objects {
+					_, retained := retainedObjects[object.Digest]
+					_, err := os.Stat(repository.objectPath(id, object.Digest))
+					if retained {
+						require.NoError(t, err)
+					} else {
+						require.ErrorIs(t, err, os.ErrNotExist)
+					}
+				}
+			}
+		})
+	}
+}
+
+func publishGarbageCollectionGenerations(t *testing.T, repository *Repository, name string, count uint64) []ports.SnapshotPublication {
+	t.Helper()
+	publications := make([]ports.SnapshotPublication, 0, count)
+	for generation := uint64(1); generation <= count; generation++ {
+		publication := repositoryPublicationAfter(t, repository, name, generation, []byte{byte(generation)})
+		require.NoError(t, repository.Publish(context.Background(), publication))
+		publications = append(publications, publication)
+	}
+	return publications
+}
+
+func garbageCollectionGenerations(t *testing.T, repository *Repository, id domain.IncarnationID) []uint64 {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(repository.sessionPath(id), repositoryGenerations))
+	require.NoError(t, err)
+	generations := make([]uint64, 0, len(entries))
+	for _, entry := range entries {
+		if generation, ok := parseGenerationFilename(entry.Name()); ok {
+			generations = append(generations, generation)
+		}
+	}
+	slices.Sort(generations)
+	return generations
+}
