@@ -1,27 +1,11 @@
 package recovery
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"slices"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
-)
-
-// RecoveryAction identifies an explicit operator choice for degraded state.
-type RecoveryAction uint8
-
-const (
-	RecoveryRetry RecoveryAction = iota + 1
-	RecoveryRestoreFallback
-	RecoveryExport
-	RecoveryDiscard
 )
 
 var (
@@ -30,143 +14,6 @@ var (
 	ErrDiscardConflict        = errors.New("recovery: discard intent conflicts with catalogue")
 	ErrDiscardIntentInvalid   = errors.New("recovery: discard intent is unusable")
 )
-
-// Retry directly validates the committed checkpoint. A failed validation is
-// read-only; only a successful validation is allowed to clear degraded state.
-func (c *Coordinator) Retry(ctx context.Context, name string) error {
-	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
-		return errors.New("recovery: incomplete retry dependencies")
-	}
-	unlock := c.locks.Lock([]string{name})
-	defer unlock()
-	record, ok, err := c.catalogue.Record(name)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrRecoveryRecordNotFound
-	}
-	if record.RecoveryState != domain.RecoveryDegraded || record.Committed == nil {
-		return ErrSessionNotDegraded
-	}
-	if err := c.validateCheckpoint(ctx, record, *record.Committed); err != nil {
-		return err
-	}
-	next := record
-	next.RecoveryState = domain.RecoveryHealthy
-	next.DegradedReason = ""
-	if err := next.Validate(); err != nil {
-		return fmt.Errorf("recovery: invalid retry transition: %w", err)
-	}
-	return c.catalogue.Replace(name, next)
-}
-
-// RestoreFallback promotes only a fallback already displayed from the
-// catalogue. PromoteFallback performs direct validation before replacement.
-func (c *Coordinator) RestoreFallback(ctx context.Context, name string, ref domain.CheckpointRef) error {
-	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
-		return errors.New("recovery: incomplete fallback dependencies")
-	}
-	unlock := c.locks.Lock([]string{name})
-	defer unlock()
-	record, ok, err := c.catalogue.Record(name)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrRecoveryRecordNotFound
-	}
-	if record.RecoveryState != domain.RecoveryDegraded {
-		return ErrSessionNotDegraded
-	}
-	outcome, err := c.promoteFallbackLocked(ctx, name, ref)
-	if err != nil {
-		return err
-	}
-	return outcome.HEADRepairError
-}
-
-// Export writes a deterministic, self-contained copy of the committed
-// generation without changing catalogue or repository state.
-func (c *Coordinator) Export(ctx context.Context, name string, w io.Writer) error {
-	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil || w == nil {
-		return errors.New("recovery: incomplete export dependencies")
-	}
-	unlock := c.locks.Lock([]string{name})
-	defer unlock()
-	record, ok, err := c.catalogue.Record(name)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrRecoveryRecordNotFound
-	}
-	if record.RecoveryState != domain.RecoveryDegraded || record.Committed == nil {
-		return ErrSessionNotDegraded
-	}
-	generation, err := c.repository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, *record.Committed)
-	if err != nil {
-		return err
-	}
-	if err := validateLoadedGeneration(record, *record.Committed, generation); err != nil {
-		return err
-	}
-	encoded, err := encodeExport(generation)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(encoded)
-	return err
-}
-
-func validateLoadedGeneration(record domain.CatalogueRecord, ref domain.CheckpointRef, generation ports.SnapshotGeneration) error {
-	if generation.IncarnationID != record.IncarnationID || generation.Name != record.Name ||
-		generation.Generation != ref.Generation || sha256.Sum256(generation.Manifest) != ref.ManifestDigest {
-		return ErrCheckpointConflict
-	}
-	return nil
-}
-
-func encodeExport(generation ports.SnapshotGeneration) ([]byte, error) {
-	var out bytes.Buffer
-	out.WriteString("VEVX")
-	_ = binary.Write(&out, binary.BigEndian, uint16(1))
-	out.Write(generation.IncarnationID[:])
-	_ = binary.Write(&out, binary.BigEndian, generation.Generation)
-	if err := writeExportBytes(&out, []byte(generation.Name)); err != nil {
-		return nil, err
-	}
-	if err := writeExportBytes(&out, generation.Manifest); err != nil {
-		return nil, err
-	}
-	digests := make([]ports.SnapshotDigest, 0, len(generation.Objects))
-	for digest := range generation.Objects {
-		digests = append(digests, digest)
-	}
-	slices.SortFunc(digests, func(a, b ports.SnapshotDigest) int { return bytes.Compare(a[:], b[:]) })
-	if uint64(len(digests)) > uint64(^uint32(0)) {
-		return nil, errors.New("recovery: too many export objects")
-	}
-	_ = binary.Write(&out, binary.BigEndian, uint32(len(digests)))
-	for _, digest := range digests {
-		out.Write(digest[:])
-		if err := writeExportBytes(&out, generation.Objects[digest]); err != nil {
-			return nil, err
-		}
-	}
-	return out.Bytes(), nil
-}
-
-func writeExportBytes(w io.Writer, data []byte) error {
-	if uint64(len(data)) > uint64(^uint32(0)) {
-		return errors.New("recovery: export field too large")
-	}
-	if err := binary.Write(w, binary.BigEndian, uint32(len(data))); err != nil {
-		return err
-	}
-	_, err := w.Write(data)
-	return err
-}
 
 // Discard commits to a new incarnation by saving the complete intent before
 // any quarantine or catalogue mutation. There is no rollback after that point.
@@ -289,7 +136,6 @@ func freshReplacement(intent domain.DiscardIntent) domain.CatalogueRecord {
 	next.IncarnationID = intent.NewIncarnation
 	next.RecoveryState = domain.RecoveryFresh
 	next.Committed = nil
-	next.Fallbacks = [2]*domain.CheckpointRef{}
 	next.DegradedReason = ""
 	return next
 }

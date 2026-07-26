@@ -39,7 +39,6 @@ type CatalogueRecord struct {
 	TabNames       []string
 	RecoveryState  RecoveryState
 	Committed      *CheckpointRef
-	Fallbacks      [2]*CheckpointRef
 	DegradedReason string
 }
 
@@ -57,8 +56,7 @@ func (r CatalogueRecord) Equal(other CatalogueRecord) bool {
 	return r.Name == other.Name && r.IncarnationID == other.IncarnationID && r.Cwd == other.Cwd &&
 		r.CreatedAt == other.CreatedAt && r.UpdatedAt == other.UpdatedAt && r.LastUsedSeq == other.LastUsedSeq &&
 		slices.Equal(r.TabNames, other.TabNames) && r.RecoveryState == other.RecoveryState &&
-		r.Committed.Equal(other.Committed) && r.Fallbacks[0].Equal(other.Fallbacks[0]) &&
-		r.Fallbacks[1].Equal(other.Fallbacks[1]) && r.DegradedReason == other.DegradedReason
+		r.Committed.Equal(other.Committed) && r.DegradedReason == other.DegradedReason
 }
 
 // CatalogueMetadataUpdate changes mutable runtime metadata for one catalogue
@@ -169,8 +167,8 @@ func (r CatalogueRecord) Validate() error {
 
 	switch r.RecoveryState {
 	case RecoveryFresh:
-		if r.Committed != nil || r.Fallbacks[0] != nil || r.Fallbacks[1] != nil {
-			return errors.New("fresh session has checkpoint references")
+		if r.Committed != nil {
+			return errors.New("fresh session has checkpoint reference")
 		}
 	case RecoveryHealthy:
 		if r.Committed == nil {
@@ -192,33 +190,13 @@ func (r CatalogueRecord) Validate() error {
 	if r.RecoveryState != RecoveryDegraded && r.DegradedReason != "" {
 		return errors.New("non-degraded session has degraded reason")
 	}
-	if r.Fallbacks[1] != nil && r.Fallbacks[0] == nil {
-		return errors.New("second fallback populated without first fallback")
-	}
-	if r.Committed == nil && (r.Fallbacks[0] != nil || r.Fallbacks[1] != nil) {
-		return errors.New("fallback populated without committed checkpoint")
-	}
-
-	seen := make(map[uint64]struct{}, 3)
-	var previous uint64
-	for i, ref := range []*CheckpointRef{r.Committed, r.Fallbacks[0], r.Fallbacks[1]} {
-		if ref == nil {
-			continue
-		}
-		if ref.Generation == 0 {
+	if r.Committed != nil {
+		if r.Committed.Generation == 0 {
 			return errors.New("zero checkpoint generation")
 		}
-		if ref.ManifestDigest == ([32]byte{}) {
+		if r.Committed.ManifestDigest == ([32]byte{}) {
 			return errors.New("zero checkpoint manifest digest")
 		}
-		if _, ok := seen[ref.Generation]; ok {
-			return errors.New("duplicate checkpoint generation")
-		}
-		seen[ref.Generation] = struct{}{}
-		if i > 0 && previous <= ref.Generation {
-			return errors.New("checkpoint generations are not newest to oldest")
-		}
-		previous = ref.Generation
 	}
 	return nil
 }

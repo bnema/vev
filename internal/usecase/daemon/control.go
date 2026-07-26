@@ -5,11 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
@@ -457,8 +454,8 @@ func (e controlExec) Toast(severity, message string) error {
 	return nil
 }
 
-func (e controlExec) SessionRecovery(action, argument string) (string, error) {
-	if e.d == nil || e.d.degradedRecovery == nil || e.recoveryName == "" {
+func (e controlExec) SessionRecovery(action string) (string, error) {
+	if e.d == nil || e.d.degradedRecovery == nil || e.recoveryName == "" || action != "discard" {
 		return "", command.ErrInvalidArguments
 	}
 	ctx := e.ctx
@@ -468,92 +465,11 @@ func (e controlExec) SessionRecovery(action, argument string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	switch action {
-	case "retry":
-		if err := e.d.degradedRecovery.Retry(ctx, e.recoveryName); err != nil {
-			return "", err
-		}
-		return "", e.restoreExplicitRecovery(ctx)
-	case "restore":
-		if e.d.catalogue == nil {
-			return "", errors.New("durable session catalogue unavailable")
-		}
-		generation, err := strconv.ParseUint(argument, 10, 64)
-		if err != nil || generation == 0 {
-			return "", command.ErrInvalidArguments
-		}
-		record, ok, err := e.d.catalogue.Record(e.recoveryName)
-		if err != nil {
-			return "", err
-		}
-		if !ok {
-			return "", errors.New("session recovery record not found")
-		}
-		for _, fallback := range record.Fallbacks {
-			if fallback != nil && fallback.Generation == generation {
-				if err := e.d.degradedRecovery.RestoreFallback(ctx, e.recoveryName, *fallback); err != nil {
-					return "", err
-				}
-				return "", e.restoreExplicitRecovery(ctx)
-			}
-		}
-		return "", errors.New("requested recovery fallback is not available")
-	case "export":
-		if !filepath.IsAbs(argument) {
-			return "", command.ErrInvalidArguments
-		}
-		file, err := os.OpenFile(argument, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			return "", err
-		}
-		exportErr := e.d.degradedRecovery.Export(ctx, e.recoveryName, file)
-		closeErr := file.Close()
-		if exportErr != nil || closeErr != nil {
-			removeErr := os.Remove(argument)
-			return "", errors.Join(exportErr, closeErr, removeErr)
-		}
-		return argument, nil
-	case "discard":
-		record, err := e.d.degradedRecovery.Discard(ctx, e.recoveryName, "explicit operator discard")
-		if err == nil {
-			e.d.setStoppedRecovery(record, runtimeFresh)
-		}
-		return "", err
-	default:
-		return "", command.ErrInvalidArguments
+	record, err := e.d.degradedRecovery.Discard(ctx, e.recoveryName, "explicit operator discard")
+	if err == nil {
+		e.d.setStoppedRecovery(record, runtimeFresh)
 	}
-}
-
-func (e controlExec) restoreExplicitRecovery(ctx context.Context) error {
-	if e.d.catalogue == nil {
-		return errors.New("durable session catalogue unavailable")
-	}
-	record, ok, err := e.d.catalogue.Record(e.recoveryName)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("session recovery record not found")
-	}
-	done := make(chan struct{})
-	e.d.mu.Lock()
-	entry, exists := e.d.stopped[record.Name]
-	if !exists || entry.incarnation != record.IncarnationID {
-		e.d.mu.Unlock()
-		return errors.New("session recovery runtime record not found")
-	}
-	if entry.purging || entry.state != runtimeDegraded {
-		e.d.mu.Unlock()
-		return errors.New("session recovery is not available in the current state")
-	}
-	entry.record = record
-	entry.state = runtimeRestoring
-	entry.restoreDone = done
-	e.d.stopped[record.Name] = entry
-	e.d.mu.Unlock()
-	err = e.d.restoreRecord(ctx, record)
-	e.d.finishExplicitRecordRestore(record, err, done)
-	return err
+	return "", err
 }
 
 func (e controlExec) ListSessions(asJSON bool) (string, error) {

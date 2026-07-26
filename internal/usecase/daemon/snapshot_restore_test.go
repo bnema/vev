@@ -262,13 +262,11 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	generation := acceptanceGeneration(t, snapshot, 9)
 	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
 	committed := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
-	fallback1 := domain.CheckpointRef{Generation: 8, ManifestDigest: [32]byte{8}}
-	fallback2 := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
 	record := domain.CatalogueRecord{
 		Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd",
 		CreatedAt: int64(snapshot.CreatedAt), UpdatedAt: 81, LastUsedSeq: 17,
 		TabNames: []string{"before"}, RecoveryState: domain.RecoveryHealthy,
-		Committed: &committed, Fallbacks: [2]*domain.CheckpointRef{&fallback1, &fallback2},
+		Committed: &committed,
 	}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 
@@ -296,7 +294,6 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	require.Equal(t, record.IncarnationID, updated.IncarnationID)
 	require.Equal(t, record.RecoveryState, updated.RecoveryState)
 	require.Equal(t, record.Committed, updated.Committed)
-	require.Equal(t, record.Fallbacks, updated.Fallbacks)
 	require.Equal(t, record.DegradedReason, updated.DegradedReason)
 	require.Equal(t, []string{"after"}, updated.TabNames)
 
@@ -314,8 +311,6 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint64(10), published.Committed.Generation)
-	require.Equal(t, committed, *published.Fallbacks[0])
-	require.Equal(t, fallback1, *published.Fallbacks[1])
 }
 
 func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {

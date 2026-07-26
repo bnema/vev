@@ -138,10 +138,6 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 	d.finishRecordRestoreAttempt(record, restoreErr, done, false)
 }
 
-func (d *Daemon) finishExplicitRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
-	d.finishRecordRestoreAttempt(record, restoreErr, done, true)
-}
-
 func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, restoreErr error, done chan struct{}, resetRetryable bool) {
 	retryable := errors.Is(restoreErr, errRetryableRestoreLoad)
 	degraded := false
@@ -215,75 +211,39 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		return errors.New("snapshot: repository unavailable")
 	}
 
-	candidates := checkpointCandidates(record)
-	if len(candidates) == 0 {
+	if record.Committed == nil {
 		return errors.New("snapshot: healthy record has no checkpoint")
 	}
-	var selected domain.CheckpointRef
-	var selectedGeneration ports.SnapshotGeneration
-	var selectedSnapshot snapcodec.Session
-	selectedIndex := -1
-	selectedFallback := false
-	var retryableLoadErr error
-	for i, candidate := range candidates {
-		fallback := record.Committed == nil || i > 0
-		generation, err := d.snapshotRepository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, candidate)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			if isRetryableRestoreLoadError(err) {
-				retryableLoadErr = err
-			}
-			d.logRejectedRestoreCandidate(record, candidate, fallback, "load-failed", err)
-			continue
+	selected := *record.Committed
+	selectedGeneration, err := d.snapshotRepository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, selected)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
-		snapshot, decodeErr := sessionFromGeneration(generation)
-		if decodeErr != nil {
-			d.logRejectedRestoreCandidate(record, candidate, fallback, "decode-failed", decodeErr)
-			continue
+		if isRetryableRestoreLoadError(err) {
+			return fmt.Errorf("%w: %w", errRetryableRestoreLoad, err)
 		}
-		if generation.IncarnationID != record.IncarnationID {
-			d.logRejectedRestoreCandidate(record, candidate, fallback, "incarnation-mismatch", nil)
-			continue
-		}
-		if generation.Name != record.Name {
-			d.logRejectedRestoreCandidate(record, candidate, fallback, "name-mismatch", nil)
-			continue
-		}
-		if generation.Generation != candidate.Generation {
-			d.logRejectedRestoreCandidate(record, candidate, fallback, "generation-mismatch", nil)
-			continue
-		}
-		selected, selectedGeneration, selectedSnapshot, selectedIndex, selectedFallback = candidate, generation, snapshot, i, fallback
-		break
+		d.logRejectedRestoreCandidate(record, selected, false, "load-failed", err)
+		return errors.New("snapshot: committed checkpoint did not validate")
 	}
-	if selectedIndex < 0 {
-		if retryableLoadErr != nil {
-			return fmt.Errorf("%w: %w", errRetryableRestoreLoad, retryableLoadErr)
-		}
-		return errors.New("snapshot: no catalogue checkpoint validated")
+	selectedSnapshot, err := sessionFromGeneration(selectedGeneration)
+	if err != nil {
+		d.logRejectedRestoreCandidate(record, selected, false, "decode-failed", err)
+		return errors.New("snapshot: committed checkpoint did not validate")
 	}
-
-	if selectedFallback {
-		if d.checkpointRecovery == nil {
-			return errors.New("snapshot: checkpoint coordinator unavailable for fallback promotion")
-		}
-		outcome, err := d.checkpointRecovery.PromoteFallback(ctx, record.Name, selected)
-		if err != nil {
-			return fmt.Errorf("snapshot: promote fallback: %w", err)
-		}
-		if !outcome.CatalogueCommitted {
-			return errors.New("snapshot: fallback promotion did not commit catalogue")
-		}
-		record = outcome.Record
-		if outcome.HEADRepairError != nil {
-			d.log.Warn("snapshot_head_repair_pending", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation, "reason_code", "repair-failed")
-		} else {
-			d.log.Info("fallback_checkpoint_promoted", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
-			d.log.Info("snapshot_head_repair_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
-		}
-	} else if err := d.snapshotRepository.RepairHEAD(ctx, record.IncarnationID, selected); err != nil {
+	if selectedGeneration.IncarnationID != record.IncarnationID {
+		d.logRejectedRestoreCandidate(record, selected, false, "incarnation-mismatch", nil)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	if selectedGeneration.Name != record.Name {
+		d.logRejectedRestoreCandidate(record, selected, false, "name-mismatch", nil)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	if selectedGeneration.Generation != selected.Generation {
+		d.logRejectedRestoreCandidate(record, selected, false, "generation-mismatch", nil)
+		return errors.New("snapshot: committed checkpoint did not validate")
+	}
+	if err := d.snapshotRepository.RepairHEAD(ctx, record.IncarnationID, selected); err != nil {
 		d.log.Warn("snapshot_head_repair_pending", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation, "reason_code", "repair-failed")
 	} else {
 		d.log.Info("snapshot_head_repair_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
@@ -293,7 +253,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		return err
 	}
 	d.setStoppedRecovery(record, runtimeHealthy)
-	d.logSessionRestoreComplete(record, selected.Generation, selectedFallback)
+	d.logSessionRestoreComplete(record, selected.Generation, false)
 	return nil
 }
 
@@ -332,19 +292,6 @@ func (d *Daemon) logRejectedRestoreCandidate(record domain.CatalogueRecord, cand
 		"reason_code", reason,
 		"err", err,
 	)
-}
-
-func checkpointCandidates(record domain.CatalogueRecord) []domain.CheckpointRef {
-	candidates := make([]domain.CheckpointRef, 0, 3)
-	if record.Committed != nil {
-		candidates = append(candidates, *record.Committed)
-	}
-	for _, fallback := range record.Fallbacks {
-		if fallback != nil {
-			candidates = append(candidates, *fallback)
-		}
-	}
-	return candidates
 }
 
 func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Session, error) {

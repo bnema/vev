@@ -3,7 +3,6 @@ package ports
 import (
 	"context"
 	"errors"
-	"io"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -112,15 +111,8 @@ type RecoveryJournal interface {
 	DeleteDiscard(context.Context, domain.IncarnationID) error
 }
 
-type FallbackPromotionOutcome struct {
-	Record             domain.CatalogueRecord
-	CatalogueCommitted bool
-	HEADRepairError    error
-}
-
 type CheckpointCoordinator interface {
 	PublishCheckpoint(context.Context, string, SnapshotPublication) (domain.CatalogueRecord, error)
-	PromoteFallback(context.Context, string, domain.CheckpointRef) (FallbackPromotionOutcome, error)
 }
 
 // SessionLifecycleCoordinator owns durable named-session create, rename, and
@@ -133,11 +125,8 @@ type SessionLifecycleCoordinator interface {
 	Delete(context.Context, string) error
 }
 
-// DegradedRecoveryCoordinator exposes only explicit operator recovery actions.
+// DegradedRecoveryCoordinator exposes only the explicit operator discard action.
 type DegradedRecoveryCoordinator interface {
-	Retry(context.Context, string) error
-	RestoreFallback(context.Context, string, domain.CheckpointRef) error
-	Export(context.Context, string, io.Writer) error
 	Discard(context.Context, string, string) (domain.CatalogueRecord, error)
 }
 

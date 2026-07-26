@@ -39,7 +39,6 @@ func TestCatalogueRecordValidate(t *testing.T) {
 	}{
 		{name: "fresh valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh}, wantValid: true},
 		{name: "healthy with committed checkpoint valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}}, wantValid: true},
-		{name: "duplicate generation invalid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}, Fallbacks: [2]*CheckpointRef{{Generation: 7, ManifestDigest: [32]byte{2}}}}},
 		{name: "invalid session name", record: CatalogueRecord{Name: "bad/name", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh}},
 		{name: "zero incarnation", record: CatalogueRecord{Name: "work", RecoveryState: RecoveryFresh}},
 		{name: "unknown recovery state", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryState(99)}},
@@ -50,8 +49,6 @@ func TestCatalogueRecordValidate(t *testing.T) {
 		{name: "healthy with degraded reason", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: validRef, DegradedReason: "missing manifest"}},
 		{name: "zero checkpoint generation", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{ManifestDigest: [32]byte{1}}}},
 		{name: "zero checkpoint digest", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7}}},
-		{name: "second fallback without first", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: validRef, Fallbacks: [2]*CheckpointRef{nil, {Generation: 6, ManifestDigest: [32]byte{2}}}}},
-		{name: "fallback newer than committed", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 6, ManifestDigest: [32]byte{1}}, Fallbacks: [2]*CheckpointRef{{Generation: 7, ManifestDigest: [32]byte{2}}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

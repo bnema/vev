@@ -115,21 +115,11 @@ func TestSessionRecoveryCommand(t *testing.T) {
 		wantCall string
 		wantErr  error
 	}{
-		{args: []string{"retry"}, wantCall: "session-recovery:retry:"},
-		{args: []string{"restore", "7"}, wantCall: "session-recovery:restore:7"},
-		{args: []string{"restore", "18446744073709551615"}, wantCall: "session-recovery:restore:18446744073709551615"},
-		{args: []string{"export", "/tmp/export"}, wantCall: "session-recovery:export:/tmp/export"},
-		{args: []string{"discard"}, wantCall: "session-recovery:discard:"},
+		{args: []string{"discard"}, wantCall: "session-recovery:discard"},
+		{args: []string{"retry"}, wantErr: ErrInvalidArguments},
+		{args: []string{"restore", "7"}, wantErr: ErrInvalidArguments},
+		{args: []string{"export", "/tmp/export"}, wantErr: ErrInvalidArguments},
 		{args: nil, wantErr: ErrInvalidArguments},
-		{args: []string{"retry", "extra"}, wantErr: ErrInvalidArguments},
-		{args: []string{"restore"}, wantErr: ErrInvalidArguments},
-		{args: []string{"restore", "0"}, wantErr: ErrInvalidArguments},
-		{args: []string{"restore", "01"}, wantErr: ErrInvalidArguments},
-		{args: []string{"restore", "18446744073709551616"}, wantErr: ErrInvalidArguments},
-		{args: []string{"export", "relative/path"}, wantErr: ErrInvalidArguments},
-		{args: []string{"export"}, wantErr: ErrInvalidArguments},
-		{args: []string{"discard", "extra"}, wantErr: ErrInvalidArguments},
-		{args: []string{"unknown"}, wantErr: ErrInvalidArguments},
 	}
 	for _, test := range tests {
 		ctx := &controlSpy{recoveryOutput: "recovery output"}
@@ -220,8 +210,8 @@ func (s *controlSpy) RenameTabTo(v string) error        { return s.record("renam
 func (s *controlSpy) Toast(level, message string) error {
 	return s.record("toast:" + level + ":" + message)
 }
-func (s *controlSpy) SessionRecovery(action, argument string) (string, error) {
-	return s.recoveryOutput, s.record("session-recovery:" + action + ":" + argument)
+func (s *controlSpy) SessionRecovery(action string) (string, error) {
+	return s.recoveryOutput, s.record("session-recovery:" + action)
 }
 func (s *controlSpy) ListSessions(json bool) (string, error) {
 	_ = s.record("list-sessions:" + strconv.FormatBool(json))

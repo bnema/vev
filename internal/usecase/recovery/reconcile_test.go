@@ -124,7 +124,7 @@ func TestReconciliationDefersConflictAndContinues(t *testing.T) {
 	first.Name = "first"
 	staleRecord := first
 	stale := forwardCandidate(staleRecord, 2, staleRecord.Committed)
-	first = shiftedCheckpoint(first, domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{9}})
+	first.Committed = &domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{9}}
 	second := healthyReconcileRecord()
 	second.Name = "second"
 	adoptable := forwardCandidate(second, 2, second.Committed)
@@ -213,7 +213,7 @@ func TestForwardOrphanAdoption(t *testing.T) {
 		record := healthyReconcileRecord()
 		candidate := forwardCandidate(record, 2, record.Committed)
 		concurrent := domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{7}}
-		record = shiftedCheckpoint(record, concurrent)
+		record.Committed = &concurrent
 		catalogue := &checkpointCatalogue{record: record}
 		repository := &reconcileRepository{}
 		coordinator := NewCoordinator(catalogue, repository, nil, nil)

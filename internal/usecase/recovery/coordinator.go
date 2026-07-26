@@ -160,7 +160,6 @@ func (c *Coordinator) Create(ctx context.Context, record domain.CatalogueRecord)
 	record.IncarnationID = id
 	record.RecoveryState = domain.RecoveryFresh
 	record.Committed = nil
-	record.Fallbacks = [2]*domain.CheckpointRef{}
 	record.DegradedReason = ""
 	if err := record.Validate(); err != nil {
 		return domain.CatalogueRecord{}, fmt.Errorf("recovery: invalid fresh record: %w", err)

@@ -133,7 +133,7 @@ type ControlContext interface {
 	RenameSessionTo(name string) error
 	RenameTabTo(name string) error
 	Toast(severity, message string) error
-	SessionRecovery(action, argument string) (string, error)
+	SessionRecovery(action string) (string, error)
 	ListSessions(json bool) (string, error)
 	ListTabs(json bool) (string, error)
 	ListPanes(json bool) (string, error)

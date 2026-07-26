@@ -2,7 +2,6 @@ package recovery
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"sync"
 	"testing"
@@ -108,16 +107,6 @@ func checkpointPublication(record domain.CatalogueRecord, generation uint64) por
 	}
 }
 
-func populatedGenerations(refs [2]*domain.CheckpointRef) []uint64 {
-	var generations []uint64
-	for _, ref := range refs {
-		if ref != nil {
-			generations = append(generations, ref.Generation)
-		}
-	}
-	return generations
-}
-
 func runCheckpointCommit(t *testing.T, count int) (domain.CatalogueRecord, *checkpointCatalogue, *checkpointRepository) {
 	t.Helper()
 	events := make([]string, 0, count*2)
@@ -140,75 +129,20 @@ func TestCheckpointCommits(t *testing.T) {
 		name          string
 		count         int
 		wantCommitted uint64
-		wantFallbacks []uint64
 	}{
 		{name: "first", count: 1, wantCommitted: 1},
-		{name: "second", count: 2, wantCommitted: 2, wantFallbacks: []uint64{1}},
-		{name: "third", count: 3, wantCommitted: 3, wantFallbacks: []uint64{2, 1}},
-		{name: "fourth", count: 4, wantCommitted: 4, wantFallbacks: []uint64{3, 2}},
+		{name: "second", count: 2, wantCommitted: 2},
+		{name: "third", count: 3, wantCommitted: 3},
+		{name: "fourth", count: 4, wantCommitted: 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			record, catalogue, _ := runCheckpointCommit(t, tc.count)
 			require.Equal(t, tc.wantCommitted, record.Committed.Generation)
-			require.Equal(t, tc.wantFallbacks, populatedGenerations(record.Fallbacks))
 			require.Equal(t, domain.RecoveryHealthy, record.RecoveryState)
 			require.Empty(t, record.DegradedReason)
 			require.Equal(t, tc.count, catalogue.replaces)
 		})
 	}
-}
-
-func TestCheckpointCommitThirdPromotesOnlyValidatedDirectFallbacks(t *testing.T) {
-	refs := []domain.CheckpointRef{
-		{Generation: 3, ManifestDigest: sha256.Sum256([]byte("third"))},
-		{Generation: 2, ManifestDigest: sha256.Sum256([]byte("second"))},
-		{Generation: 1, ManifestDigest: sha256.Sum256([]byte("first"))},
-	}
-	record := checkpointRecord()
-	record.RecoveryState = domain.RecoveryHealthy
-	record.Committed = &refs[0]
-	record.Fallbacks = [2]*domain.CheckpointRef{&refs[1], &refs[2]}
-	catalogue := &checkpointCatalogue{record: record}
-	repository := &checkpointRepository{
-		generations: map[uint64]ports.SnapshotGeneration{
-			2: {IncarnationID: record.IncarnationID, Name: record.Name, Generation: 2, Manifest: []byte("second")},
-			1: {IncarnationID: record.IncarnationID, Name: record.Name, Generation: 1, Manifest: []byte("first")},
-		},
-	}
-	coordinator := NewCoordinator(catalogue, repository, nil, nil)
-
-	promoted, err := coordinator.PromoteFallback(context.Background(), record.Name, refs[1])
-	require.NoError(t, err)
-	require.Equal(t, refs[1], *promoted.Record.Committed)
-	require.Equal(t, []uint64{1}, populatedGenerations(promoted.Record.Fallbacks))
-	require.Equal(t, []uint64{2, 1}, repository.loads, "only the selected and older catalogue-indexed fallbacks are read directly")
-	require.Equal(t, []domain.CheckpointRef{refs[1]}, repository.repairs)
-	require.Equal(t, 1, catalogue.replaces)
-}
-
-func TestPromoteFallbackReportsPostCommitHEADRepairFailure(t *testing.T) {
-	selected := domain.CheckpointRef{Generation: 2, ManifestDigest: sha256.Sum256([]byte("second"))}
-	record := checkpointRecord()
-	record.RecoveryState = domain.RecoveryHealthy
-	record.Committed = &domain.CheckpointRef{Generation: 3, ManifestDigest: sha256.Sum256([]byte("third"))}
-	record.Fallbacks[0] = &selected
-	catalogue := &checkpointCatalogue{record: record}
-	repairErr := errors.New("head repair failed")
-	repository := &checkpointRepository{
-		generations: map[uint64]ports.SnapshotGeneration{
-			2: {IncarnationID: record.IncarnationID, Name: record.Name, Generation: 2, Manifest: []byte("second")},
-		},
-		repairErr: repairErr,
-	}
-	coordinator := NewCoordinator(catalogue, repository, nil, nil)
-
-	outcome, err := coordinator.PromoteFallback(context.Background(), record.Name, selected)
-	require.NoError(t, err)
-	require.True(t, outcome.CatalogueCommitted)
-	require.ErrorIs(t, outcome.HEADRepairError, repairErr)
-	require.Equal(t, selected, *outcome.Record.Committed)
-	require.Equal(t, domain.RecoveryHealthy, catalogue.record.RecoveryState)
-	require.Equal(t, selected, *catalogue.record.Committed)
 }
 
 func TestCheckpointCommitPublishOrphan(t *testing.T) {

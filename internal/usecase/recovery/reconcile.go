@@ -160,7 +160,9 @@ func (c *Coordinator) PublishReconciledCheckpoint(ctx context.Context, name stri
 	if record.RecoveryState != domain.RecoveryHealthy || candidate.Name != name || candidate.IncarnationID != record.IncarnationID || record.Committed == nil || !validForwardChain(*record.Committed, candidate, ancestors) {
 		return domain.CatalogueRecord{}, ErrCheckpointConflict
 	}
-	next := shiftedCheckpoint(record, candidate.Ref)
+	next := record
+	next.Committed = copyCheckpointRef(&candidate.Ref)
+	next.DegradedReason = ""
 	if err := next.Validate(); err != nil {
 		return domain.CatalogueRecord{}, fmt.Errorf("recovery: invalid reconciled checkpoint transition: %w", err)
 	}

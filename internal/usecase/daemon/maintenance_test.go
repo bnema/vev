@@ -83,7 +83,7 @@ func TestMaintenanceRetentionUsesReconciliationOutcome(t *testing.T) {
 	fallback2 := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
 	record := domain.CatalogueRecord{
 		Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryHealthy,
-		Committed: &committed, Fallbacks: [2]*domain.CheckpointRef{&fallback1, &fallback2},
+		Committed: &committed,
 	}
 	wrongParent := domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{9}}
 
@@ -98,14 +98,14 @@ func TestMaintenanceRetentionUsesReconciliationOutcome(t *testing.T) {
 			finding: ports.ReconcileFinding{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileValidated, Candidate: ports.ReconcileCandidate{
 				Name: record.Name, IncarnationID: record.IncarnationID, Ref: committed, Parent: &fallback1,
 			}},
-			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed, fallback1, fallback2}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed}},
 		},
 		{
 			name: "known predecessor is conclusively not forward",
 			finding: ports.ReconcileFinding{Kind: ports.ReconcileForwardOrphan, Status: ports.ReconcileValidated, Candidate: ports.ReconcileCandidate{
 				Name: record.Name, IncarnationID: record.IncarnationID, Ref: fallback1, Parent: &fallback2,
 			}},
-			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed, fallback1, fallback2}},
+			wantPlan: &ports.RetentionPlan{IncarnationID: record.IncarnationID, Keep: []ports.CheckpointRef{committed}},
 		},
 		{
 			name: "non-forward candidate kind remains pinned",
@@ -171,11 +171,9 @@ func TestMaintenanceRetentionUsesReconciliationOutcome(t *testing.T) {
 
 func TestRetentionPlanPinsEveryUnresolvedRuntimeState(t *testing.T) {
 	committed := domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}}
-	fallback1 := domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
-	fallback2 := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
 	healthy := domain.CatalogueRecord{
 		Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryHealthy,
-		Committed: &committed, Fallbacks: [2]*domain.CheckpointRef{&fallback1, &fallback2},
+		Committed: &committed,
 	}
 
 	for _, tc := range []struct {
@@ -196,8 +194,8 @@ func TestRetentionPlanPinsEveryUnresolvedRuntimeState(t *testing.T) {
 			if plan.PinAll != tc.wantPin {
 				t.Fatalf("PinAll = %v, want %v", plan.PinAll, tc.wantPin)
 			}
-			if !tc.wantPin && len(plan.Keep) != 3 {
-				t.Fatalf("healthy keep set = %v, want committed plus two fallbacks", plan.Keep)
+			if !tc.wantPin && len(plan.Keep) != 1 {
+				t.Fatalf("healthy keep set = %v, want committed only", plan.Keep)
 			}
 		})
 	}

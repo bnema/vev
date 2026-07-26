@@ -24,13 +24,10 @@ func TestCatalogue(t *testing.T) {
 
 func testCatalogueRecordRoundTrip(t *testing.T) {
 	ref1 := &domain.CheckpointRef{Generation: 9, ManifestDigest: [32]byte{1}}
-	ref2 := &domain.CheckpointRef{Generation: 8, ManifestDigest: [32]byte{2}}
-	ref3 := &domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{3}}
 	tests := []domain.CatalogueRecord{
 		{Name: "fresh", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", RecoveryState: domain.RecoveryFresh},
 		{Name: "healthy", IncarnationID: domain.IncarnationID{2}, RecoveryState: domain.RecoveryHealthy, Committed: ref1},
-		{Name: "healthy-one-fallback", IncarnationID: domain.IncarnationID{3}, RecoveryState: domain.RecoveryHealthy, Committed: ref1, Fallbacks: [2]*domain.CheckpointRef{ref2}},
-		{Name: "degraded", IncarnationID: domain.IncarnationID{4}, RecoveryState: domain.RecoveryDegraded, Committed: ref1, Fallbacks: [2]*domain.CheckpointRef{ref2, ref3}, DegradedReason: "invalid manifest"},
+		{Name: "degraded", IncarnationID: domain.IncarnationID{4}, RecoveryState: domain.RecoveryDegraded, Committed: ref1, DegradedReason: "invalid manifest"},
 		{Name: "deleting", IncarnationID: domain.IncarnationID{5}, RecoveryState: domain.RecoveryDeleting},
 	}
 	for _, record := range tests {
@@ -129,13 +126,10 @@ func testCatalogueMetadataUpdatePreservesAuthority(t *testing.T) {
 	defer func() { require.NoError(t, p.Close()) }()
 
 	committed := &domain.CheckpointRef{Generation: 9, ManifestDigest: [32]byte{1}}
-	fallback1 := &domain.CheckpointRef{Generation: 8, ManifestDigest: [32]byte{2}}
-	fallback2 := &domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{3}}
 	original := domain.CatalogueRecord{
 		Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/old", CreatedAt: 11,
 		UpdatedAt: 12, LastUsedSeq: 13, TabNames: []string{"old"},
-		RecoveryState: domain.RecoveryDegraded, Committed: committed,
-		Fallbacks: [2]*domain.CheckpointRef{fallback1, fallback2}, DegradedReason: "repair pending",
+		RecoveryState: domain.RecoveryDegraded, Committed: committed, DegradedReason: "repair pending",
 	}
 	require.NoError(t, p.Create(original))
 

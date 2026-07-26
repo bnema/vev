@@ -53,11 +53,6 @@ func retentionPlan(record domain.CatalogueRecord, unresolved, restoring bool) po
 	if record.Committed != nil {
 		plan.Keep = append(plan.Keep, *record.Committed)
 	}
-	for _, fallback := range record.Fallbacks {
-		if fallback != nil {
-			plan.Keep = append(plan.Keep, *fallback)
-		}
-	}
 	return plan
 }
 

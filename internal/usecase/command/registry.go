@@ -1,9 +1,6 @@
 package command
 
-import (
-	"path/filepath"
-	"strings"
-)
+import "strings"
 
 // Registry returns all palette and control commands in stable display order.
 func Registry() []Command {
@@ -95,25 +92,14 @@ func toastCommand() Command {
 
 func sessionRecoveryCommand() Command {
 	return Command{
-		Slug: "session-recovery", Name: "Session recovery", Desc: "Explicitly recover a degraded durable session",
-		Usage:      "session-recovery retry\nsession-recovery restore <generation>\nsession-recovery export <path>\nsession-recovery discard",
+		Slug: "session-recovery", Name: "Session recovery", Desc: "Discard a broken durable session's persisted state",
+		Usage:      "session-recovery discard",
 		Scriptable: true, Target: TargetNone,
 		Control: func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
-			var action, argument string
-			switch {
-			case len(args) == 1 && (args[0] == "retry" || args[0] == "discard"):
-				action = args[0]
-			case len(args) == 2 && args[0] == "restore":
-				if _, err := ParsePositiveUint64(args[1:]); err != nil {
-					return ControlResult{}, ErrInvalidArguments
-				}
-				action, argument = args[0], args[1]
-			case len(args) == 2 && args[0] == "export" && filepath.IsAbs(args[1]):
-				action, argument = args[0], args[1]
-			default:
+			if len(args) != 1 || args[0] != "discard" {
 				return ControlResult{}, ErrInvalidArguments
 			}
-			output, err := ctx.SessionRecovery(action, argument)
+			output, err := ctx.SessionRecovery("discard")
 			return ControlResult{Output: output}, err
 		},
 	}

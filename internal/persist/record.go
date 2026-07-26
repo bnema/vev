@@ -9,7 +9,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-const catalogueRecordVersion uint16 = 1
+const catalogueRecordVersion uint16 = 2
 
 var errMalformedRecord = errors.New("persist: malformed catalogue record")
 
@@ -46,8 +46,6 @@ func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
 	}
 	buf = append(buf, byte(record.RecoveryState))
 	buf = appendRef(buf, record.Committed)
-	buf = appendRef(buf, record.Fallbacks[0])
-	buf = appendRef(buf, record.Fallbacks[1])
 	buf, err = appendCheckedString(buf, record.DegradedReason)
 	return buf, err
 }
@@ -108,12 +106,6 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 	}
 	record.RecoveryState = domain.RecoveryState(state)
 	if record.Committed, ok = reader.ref(); !ok {
-		return domain.CatalogueRecord{}, errMalformedRecord
-	}
-	if record.Fallbacks[0], ok = reader.ref(); !ok {
-		return domain.CatalogueRecord{}, errMalformedRecord
-	}
-	if record.Fallbacks[1], ok = reader.ref(); !ok {
 		return domain.CatalogueRecord{}, errMalformedRecord
 	}
 	if record.DegradedReason, ok = reader.str(); !ok || reader.remaining() != 0 {

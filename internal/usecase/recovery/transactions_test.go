@@ -1,10 +1,7 @@
 package recovery
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
@@ -212,77 +209,10 @@ func degradedTransactionRecord() domain.CatalogueRecord {
 	return domain.CatalogueRecord{
 		Name: "broken", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryDegraded,
 		Committed:      &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
-		Fallbacks:      [2]*domain.CheckpointRef{{Generation: 2, ManifestDigest: [32]byte{2}}, {Generation: 1, ManifestDigest: [32]byte{1}}},
 		DegradedReason: "checkpoint unreadable",
 	}
 }
 
-func TestDegradedRetryIsReadOnly(t *testing.T) {
-	record := degradedTransactionRecord()
-	catalogue := newTransactionCatalogue(record)
-	repository := newTransactionRepository()
-	repository.loadErr = errors.New("corrupt checkpoint")
-	coordinator := NewCoordinator(catalogue, repository, newTransactionJournal(), bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
-
-	require.Error(t, coordinator.Retry(context.Background(), record.Name))
-	require.Equal(t, record, catalogue.records[record.Name])
-	require.Empty(t, catalogue.events)
-}
-
-func TestFallbackPromotion(t *testing.T) {
-	record := degradedTransactionRecord()
-	fallback := *record.Fallbacks[0]
-	catalogue := newTransactionCatalogue(record)
-	repository := newTransactionRepository()
-	manifest := []byte("fallback")
-	fallback.ManifestDigest = checkpointDigest(manifest)
-	record.Fallbacks[0] = &fallback
-	catalogue.records[record.Name] = record
-	repository.generations[fallback] = ports.SnapshotGeneration{
-		IncarnationID: record.IncarnationID, Name: record.Name, Generation: fallback.Generation,
-		Manifest: manifest,
-	}
-	coordinator := NewCoordinator(catalogue, repository, newTransactionJournal(), nil)
-
-	require.NoError(t, coordinator.RestoreFallback(context.Background(), record.Name, fallback))
-	got := catalogue.records[record.Name]
-	require.Equal(t, domain.RecoveryHealthy, got.RecoveryState)
-	require.Equal(t, fallback, *got.Committed)
-	require.Equal(t, []domain.CheckpointRef{fallback}, repository.repaired)
-	require.Equal(t, []string{"load", "load", "repair-head"}, repository.events)
-}
-
-func checkpointDigest(data []byte) [32]byte {
-	return sha256.Sum256(data)
-}
-
-func TestDegradedExportIsReadOnly(t *testing.T) {
-	record := degradedTransactionRecord()
-	manifest := []byte("manifest")
-	ref := *record.Committed
-	ref.ManifestDigest = checkpointDigest(manifest)
-	record.Committed = &ref
-	catalogue := newTransactionCatalogue(record)
-	repository := newTransactionRepository()
-	repository.generations[ref] = ports.SnapshotGeneration{
-		IncarnationID: record.IncarnationID, Name: record.Name, Generation: ref.Generation,
-		Manifest: manifest, Objects: map[ports.SnapshotDigest][]byte{{2}: []byte("second"), {1}: []byte("first")},
-	}
-	coordinator := NewCoordinator(catalogue, repository, newTransactionJournal(), nil)
-	var exported, repeated bytes.Buffer
-
-	require.NoError(t, coordinator.Export(context.Background(), record.Name, &exported))
-	require.NoError(t, coordinator.Export(context.Background(), record.Name, &repeated))
-	golden, err := hex.DecodeString("5645565800010100000000000000000000000000000000000000000000030000000662726f6b656e000000086d616e69666573740000000201000000000000000000000000000000000000000000000000000000000000000000000566697273740200000000000000000000000000000000000000000000000000000000000000000000067365636f6e64")
-	require.NoError(t, err)
-	require.Equal(t, golden, exported.Bytes())
-	require.Equal(t, exported.Bytes(), repeated.Bytes())
-	require.Equal(t, record, catalogue.records[record.Name])
-	require.Empty(t, catalogue.events)
-}
-
-// An absent catalogue record means the discard no longer has durable name
-// authority to replace, so recovery removes the completed intent.
 func TestDiscardRecoveryRemovesIntentWhenCatalogueRecordIsAbsent(t *testing.T) {
 	old := degradedTransactionRecord()
 	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: old.Name, Reason: "discard"}

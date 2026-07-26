@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +18,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/usecase/command"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -284,63 +282,6 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 		require.Empty(t, d.sessions, "a corrupt record must never open a replacement runtime")
 	})
 
-	t.Run("fallback promotion", func(t *testing.T) {
-		fallback := durableRecoveryRecord(2)
-		fallbackRef := domain.CheckpointRef{Generation: fallback.Committed.Generation - 1}
-		fallbackSnapshotRecord := fallback
-		fallbackSnapshotRecord.Committed = &fallbackRef
-		fallbackGeneration := validGeneration(t, fallbackSnapshotRecord)
-		fallbackRef.ManifestDigest = sha256.Sum256(fallbackGeneration.Manifest)
-		fallback.Fallbacks[0] = &fallbackRef
-		fallbackRepository := &durableRecoveryRepository{
-			generations: map[string]ports.SnapshotGeneration{fallback.Name: fallbackGeneration},
-			errors:      make(map[string]error),
-			loads:       make(map[string]int),
-			repairs:     make(map[string]domain.CheckpointRef),
-		}
-		fallbackDaemon, fallbackCatalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fallback}, fallbackRepository)
-		fallbackDaemon.restoreCatalogue(context.Background(), mustDurableRecords(t, fallbackCatalogue))
-		promoted, ok, _ := fallbackCatalogue.Record(fallback.Name)
-		require.True(t, ok)
-		require.Equal(t, fallbackRef, *promoted.Committed)
-		require.Equal(t, runtimeHealthy, fallbackDaemon.stopped[fallback.Name].state)
-		require.Equal(t, 3, fallbackRepository.loads[fallback.Name])
-		require.Equal(t, fallbackRef, fallbackRepository.repairs[fallback.IncarnationID.String()])
-	})
-}
-
-func TestCatalogueRestoreKeepsCommittedFallbackHealthyWhenHEADRepairFails(t *testing.T) {
-	record := durableRecoveryRecord(2)
-	fallbackRef := domain.CheckpointRef{Generation: record.Committed.Generation - 1}
-	fallbackRecord := record
-	fallbackRecord.Committed = &fallbackRef
-	generation := validGeneration(t, fallbackRecord)
-	fallbackRef.ManifestDigest = sha256.Sum256(generation.Manifest)
-	record.Fallbacks[0] = &fallbackRef
-	repository := &durableRecoveryRepository{
-		generations: map[string]ports.SnapshotGeneration{record.Name: generation},
-		errors:      make(map[string]error),
-		loads:       make(map[string]int),
-		repairs:     make(map[string]domain.CheckpointRef),
-		repairErr:   errors.New("head repair unavailable"),
-	}
-
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
-
-	committed, ok, _ := catalogue.Record(record.Name)
-	require.True(t, ok)
-	require.Equal(t, domain.RecoveryHealthy, committed.RecoveryState)
-	require.Equal(t, fallbackRef, *committed.Committed)
-	require.Equal(t, runtimeHealthy, d.stopped[record.Name].state)
-	require.Equal(t, 1, repository.repairCalls)
-
-	repository.repairErr = nil
-	next, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{committed}, repository)
-	next.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
-	require.Equal(t, runtimeHealthy, next.stopped[record.Name].state)
-	require.Equal(t, 2, repository.repairCalls, "the next startup retries the pending HEAD repair")
-	require.Equal(t, fallbackRef, repository.repairs[record.IncarnationID.String()])
 }
 
 func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
@@ -414,14 +355,6 @@ type explicitRecoveryStub struct {
 	record domain.CatalogueRecord
 }
 
-func (s explicitRecoveryStub) Retry(context.Context, string) error { return nil }
-func (s explicitRecoveryStub) RestoreFallback(context.Context, string, domain.CheckpointRef) error {
-	return nil
-}
-func (s explicitRecoveryStub) Export(_ context.Context, _ string, w io.Writer) error {
-	_, err := w.Write([]byte("export"))
-	return err
-}
 func (s explicitRecoveryStub) Discard(context.Context, string, string) (domain.CatalogueRecord, error) {
 	return s.record, nil
 }
@@ -434,9 +367,9 @@ type contextRecoveryStub struct {
 	err     error
 }
 
-func (s *contextRecoveryStub) Retry(ctx context.Context, _ string) error {
+func (s *contextRecoveryStub) Discard(ctx context.Context, _, _ string) (domain.CatalogueRecord, error) {
 	s.seen = ctx.Value(s.wantKey) == s.want
-	return s.err
+	return domain.CatalogueRecord{}, s.err
 }
 
 func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
@@ -448,7 +381,7 @@ func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	d.degradedRecovery = stub
 
-	_, err := (controlExec{ctx: ctx, d: d, recoveryName: "work"}).SessionRecovery("retry", "")
+	_, err := (controlExec{ctx: ctx, d: d, recoveryName: "work"}).SessionRecovery("discard")
 	require.ErrorIs(t, err, wantErr)
 	require.True(t, stub.seen)
 }
@@ -480,61 +413,6 @@ func TestRetryableRestoreLoadErrorClassification(t *testing.T) {
 			require.Equal(t, tt.retryable, isRetryableRestoreLoadError(tt.err))
 		})
 	}
-}
-
-func TestExplicitRecoveryRemainsRetryableAfterRepeatedTransientFailures(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	repository := &durableRecoveryRepository{
-		generations: map[string]ports.SnapshotGeneration{record.Name: validGeneration(t, record)},
-		errors:      map[string]error{record.Name: ports.ErrBudgetExhausted},
-		loads:       make(map[string]int),
-		repairs:     make(map[string]domain.CheckpointRef),
-	}
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
-	d.setStoppedRecovery(record, runtimeDegraded)
-	exec := controlExec{d: d, recoveryName: record.Name}
-
-	var attemptBarriers []chan struct{}
-	for range 2 {
-		err := exec.restoreExplicitRecovery(t.Context())
-		require.ErrorIs(t, err, errRetryableRestoreLoad)
-		require.ErrorIs(t, err, ports.ErrBudgetExhausted)
-
-		d.mu.Lock()
-		entry := d.stopped[record.Name]
-		d.mu.Unlock()
-		require.Equal(t, runtimeDegraded, entry.state)
-		require.Equal(t, domain.RecoveryHealthy, entry.record.RecoveryState)
-		select {
-		case <-entry.restoreDone:
-		default:
-			t.Fatal("failed attempt completion barrier remained open")
-		}
-		for _, prior := range attemptBarriers {
-			require.NotEqual(t, prior, entry.restoreDone, "a closed completion barrier must not be reused")
-		}
-		attemptBarriers = append(attemptBarriers, entry.restoreDone)
-
-		persisted, ok, catalogueErr := catalogue.Record(record.Name)
-		require.NoError(t, catalogueErr)
-		require.True(t, ok)
-		require.Equal(t, record, persisted, "transient restore failure must preserve healthy durable authority")
-	}
-
-	repository.mu.Lock()
-	delete(repository.errors, record.Name)
-	repository.mu.Unlock()
-	require.NoError(t, exec.restoreExplicitRecovery(t.Context()))
-	d.mu.Lock()
-	require.Equal(t, runtimeHealthy, d.stopped[record.Name].state)
-	d.mu.Unlock()
-	persisted, ok, err := catalogue.Record(record.Name)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, domain.RecoveryHealthy, persisted.RecoveryState)
-	repository.mu.Lock()
-	require.Equal(t, 3, repository.loads[record.Name])
-	repository.mu.Unlock()
 }
 
 func TestFinishRecordRestoreDoesNotDegradeStaleCatalogueAuthority(t *testing.T) {
@@ -600,32 +478,6 @@ func TestPersistAndRegisterRestoredSessionRejectsReplacementIncarnation(t *testi
 	require.Empty(t, d.sessions)
 }
 
-func TestExplicitRecoveryRejectsConcurrentRestore(t *testing.T) {
-	record := durableRecoveryRecord(0)
-	record.RecoveryState = domain.RecoveryDegraded
-	record.DegradedReason = "checkpoint validation failed"
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
-	d.mu.Lock()
-	entry := d.stopped[record.Name]
-	entry.state = runtimeRestoring
-	originalDone := entry.restoreDone
-	d.stopped[record.Name] = entry
-	d.mu.Unlock()
-
-	err := (controlExec{d: d, recoveryName: record.Name}).restoreExplicitRecovery(t.Context())
-	require.ErrorContains(t, err, "current state")
-	d.mu.Lock()
-	require.Equal(t, originalDone, d.stopped[record.Name].restoreDone)
-	d.mu.Unlock()
-}
-
-func TestSessionRecoveryExportRequiresAbsolutePath(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	d.degradedRecovery = explicitRecoveryStub{}
-	_, err := (controlExec{ctx: t.Context(), d: d, recoveryName: "work"}).SessionRecovery("export", "relative.snapshot")
-	require.ErrorIs(t, err, command.ErrInvalidArguments)
-}
-
 func TestSessionRecoveryCommand(t *testing.T) {
 	degraded := durableRecoveryRecord(2)
 	degraded.RecoveryState = domain.RecoveryDegraded
@@ -635,11 +487,10 @@ func TestSessionRecoveryCommand(t *testing.T) {
 	fresh.IncarnationID = domain.IncarnationID{9}
 	fresh.RecoveryState = domain.RecoveryFresh
 	fresh.Committed = nil
-	fresh.Fallbacks = [2]*domain.CheckpointRef{}
 	fresh.DegradedReason = ""
 	d.degradedRecovery = explicitRecoveryStub{record: fresh}
 
-	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard", "")
+	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard")
 	require.NoError(t, err)
 	require.Equal(t, runtimeFresh, d.stopped[degraded.Name].state)
 	require.Equal(t, fresh, d.stopped[degraded.Name].record)
