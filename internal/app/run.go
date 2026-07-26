@@ -117,6 +117,11 @@ var (
 	version = "0.1.0-dev"
 	commit  = "none"
 	date    = "unknown"
+
+	openOrMigrate = persist.OpenOrMigrate
+	listenDaemon  = func(dir string, observer ports.SerializedRuntimeObserver) (ports.Listener, error) {
+		return ipc.Listen(dir, ipc.WithRuntimeObserver(observer))
+	}
 )
 
 // versionLine renders the --version output.
@@ -632,7 +637,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	noticeStore := noticefile.New(platform.StateDir())
 	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticeStore))
 	storePath := persist.StorePath(platform.StateDir())
-	opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
+	opened, err := openOrMigrate(ctx, persist.OpenDeps{
 		StateDir:          platform.StateDir(),
 		Random:            rand.Reader,
 		SnapshotMigration: snapshotRepository,
@@ -676,7 +681,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	// publication. Phase 3 snapshot restoration remains asynchronous in Serve.
 	d, ln, err := constructDaemonBeforeSocketPublication(
 		func() *daemon.Daemon { return daemon.New(pty.NewFactory(), clk, log, daemonOpts...) },
-		func() (ports.Listener, error) { return ipc.Listen(ipc.SocketDir(), ipc.WithRuntimeObserver(observer)) },
+		func() (ports.Listener, error) { return listenDaemon(ipc.SocketDir(), observer) },
 	)
 	if err != nil {
 		closeErr := opened.Catalogue.Close()

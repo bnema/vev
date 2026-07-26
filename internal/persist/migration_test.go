@@ -278,6 +278,21 @@ func TestOpenOrMigrateLegacyProbe(t *testing.T) {
 	}
 }
 
+func TestAtomicMigrationWriteRemovesTempAfterRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	require.NoError(t, os.Mkdir(target, 0o700))
+
+	err := atomicMigrationWrite(target, []byte("intent"))
+	require.Error(t, err)
+
+	entries, readErr := os.ReadDir(dir)
+	require.NoError(t, readErr)
+	for _, entry := range entries {
+		require.NotContains(t, entry.Name(), ".migration-", "failed publication must remove its temporary intent")
+	}
+}
+
 type countingReader struct{ next byte }
 
 func (r *countingReader) Read(p []byte) (int, error) {

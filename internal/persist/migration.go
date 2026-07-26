@@ -563,7 +563,7 @@ func appendMigrationString(out []byte, value string) []byte {
 	out = binary.BigEndian.AppendUint32(out, uint32(len(value)))
 	return append(out, value...)
 }
-func atomicMigrationWrite(path string, data []byte) error {
+func atomicMigrationWrite(path string, data []byte) (retErr error) {
 	dir := filepath.Dir(path)
 	if err := safedir.EnsurePrivate(dir); err != nil {
 		return err
@@ -573,18 +573,21 @@ func atomicMigrationWrite(path string, data []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	published := false
+	defer func() {
+		if !published {
+			// A failed publication must not leave a replayable partial intent.
+			retErr = errors.Join(retErr, os.Remove(tmpName))
+		}
+	}()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Close(); err != nil {
 		return err
@@ -592,6 +595,7 @@ func atomicMigrationWrite(path string, data []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
+	published = true
 	return syncMigrationDir(dir)
 }
 func syncMigrationDir(dir string) error {
@@ -599,8 +603,7 @@ func syncMigrationDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return f.Sync()
+	return errors.Join(f.Sync(), f.Close())
 }
 func catalogueRecordsEqual(a, b []domain.CatalogueRecord) bool {
 	if len(a) != len(b) {

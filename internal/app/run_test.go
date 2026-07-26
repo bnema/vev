@@ -212,6 +212,45 @@ func TestOfflineCommandsPropagateLifecycleReleaseErrors(t *testing.T) {
 	}
 }
 
+func TestCatalogueFailureDoesNotListen(t *testing.T) {
+	originalOpenOrMigrate, originalListenDaemon := openOrMigrate, listenDaemon
+	t.Cleanup(func() {
+		openOrMigrate = originalOpenOrMigrate
+		listenDaemon = originalListenDaemon
+	})
+
+	for _, catalogueErr := range []error{errors.New("catalogue corrupt"), errors.New("catalogue unavailable")} {
+		t.Run(catalogueErr.Error(), func(t *testing.T) {
+			runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
+			runtimeDir := filepath.Join(runtimeRoot, "vev")
+			stateDir := filepath.Join(stateRoot, "vev")
+			t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+			t.Setenv("XDG_STATE_HOME", stateRoot)
+
+			listenCalls := 0
+			openOrMigrate = func(_ context.Context, deps persist.OpenDeps) (persist.OpenResult, error) {
+				require.Equal(t, stateDir, deps.StateDir)
+				return persist.OpenResult{}, catalogueErr
+			}
+			listenDaemon = func(string, ports.SerializedRuntimeObserver) (ports.Listener, error) {
+				listenCalls++
+				return nil, errors.New("IPC listen must not run after catalogue failure")
+			}
+
+			err := runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, func(ctx context.Context) error {
+				return runDaemonOwnedWithLogger(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			})
+			require.ErrorIs(t, err, catalogueErr)
+			require.Zero(t, listenCalls)
+			require.NoFileExists(t, filepath.Join(runtimeDir, "daemon.sock"))
+
+			owner, acquireErr := lifecycle.TryAcquire(runtimeDir)
+			require.NoError(t, acquireErr, "catalogue failure must release lifecycle ownership")
+			require.NoError(t, owner.Release())
+		})
+	}
+}
+
 func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
 	var events []string
 	_, _, err := constructDaemonBeforeSocketPublication(

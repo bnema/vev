@@ -725,7 +725,14 @@ func snapshotGeneration(publication ports.SnapshotPublication) ports.SnapshotGen
 	for _, object := range publication.Objects {
 		objects[object.Digest] = object.Data
 	}
-	return ports.SnapshotGeneration{Name: publication.Name, Generation: publication.Generation, Manifest: publication.Manifest, Objects: objects}
+	return ports.SnapshotGeneration{
+		IncarnationID:    publication.IncarnationID,
+		Name:             publication.Name,
+		Generation:       publication.Generation,
+		ParentCheckpoint: publication.ParentCheckpoint,
+		Manifest:         publication.Manifest,
+		Objects:          objects,
+	}
 }
 
 func snapshotObjectBytes(publication ports.SnapshotPublication) uint64 {
