@@ -88,7 +88,7 @@ func TestRecoveryObservability(t *testing.T) {
 	require.NoError(t, runWithLifecycleOwnerDeps(context.Background(), "/runtime/vev", "/state/vev", func(context.Context) error {
 		logCatalogueRecovery(log, records, "current")
 		logTransactionRecovery(log, 2)
-		persistTransactionRecoveryNotices(noticeStore, []interruptedRecoveryIdentity{{name: "work", id: domain.IncarnationID{9}}}, time.Unix(1, 0))
+		require.NoError(t, persistTransactionRecoveryNotices(noticeStore, []interruptedRecoveryIdentity{{name: "work", id: domain.IncarnationID{9}}}, time.Unix(1, 0)))
 		logStartupRecoveryCounts(log, records, 0)
 		return nil
 	}, deps))
@@ -110,6 +110,14 @@ func TestRecoveryObservability(t *testing.T) {
 	require.Equal(t, domain.NoticeSnapshotRestore, recoveryNotice.Code)
 	require.Equal(t, domain.SessionID(domain.IncarnationID{9}.String()), recoveryNotice.SessionID)
 	require.NotContains(t, fmt.Sprint(recoveryNotice), "terminal contents")
+}
+
+func TestTransactionRecoveryNoticeFailurePropagates(t *testing.T) {
+	store := portsmocks.NewMockNoticeStore(t)
+	store.EXPECT().Append(mock.Anything).Return(errors.New("disk full")).Once()
+	err := persistTransactionRecoveryNotices(store, []interruptedRecoveryIdentity{{name: "work", id: domain.IncarnationID{1}}}, time.Unix(1, 0))
+	require.ErrorContains(t, err, "session \"work\"")
+	require.ErrorContains(t, err, domain.IncarnationID{1}.String())
 }
 
 type fakeLifecycleOwnership struct {

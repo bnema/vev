@@ -543,17 +543,20 @@ func pendingInterruptedRecoveries(ctx context.Context, records []domain.Catalogu
 	}
 }
 
-func persistTransactionRecoveryNotices(store ports.NoticeStore, recovered []interruptedRecoveryIdentity, now time.Time) {
+func persistTransactionRecoveryNotices(store ports.NoticeStore, recovered []interruptedRecoveryIdentity, now time.Time) error {
 	for _, item := range recovered {
-		_ = store.Append(domain.Notification{
+		if err := store.Append(domain.Notification{
 			Code:      domain.NoticeSnapshotRestore,
 			Severity:  domain.NoticeWarn,
 			Message:   "recovered an interrupted durable session transaction",
 			Details:   "session=" + item.name + " incarnation=" + item.id.String(),
 			Time:      now,
 			SessionID: domain.SessionID(item.id.String()),
-		})
+		}); err != nil {
+			return fmt.Errorf("persist interrupted transaction recovery notice for session %q incarnation %s: %w", item.name, item.id.String(), err)
+		}
 	}
+	return nil
 }
 
 func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord, restoring int) {
@@ -654,9 +657,18 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if err := coordinator.Recover(ctx); err != nil {
 		return errors.Join(fmt.Errorf("vev: recover durable session transactions: %w", err), opened.Catalogue.Close())
 	}
-	persistTransactionRecoveryNotices(noticeStore, pendingRecoveries, clk.Now())
+	if err := persistTransactionRecoveryNotices(noticeStore, pendingRecoveries, clk.Now()); err != nil {
+		log.Error("transaction_recovery_notice_failed", "err", err)
+		return errors.Join(fmt.Errorf("vev: persist durable transaction recovery notice: %w", err), opened.Catalogue.Close())
+	}
 	logTransactionRecovery(log, len(pendingRecoveries))
 	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))
+	unresolved := make([]domain.IncarnationID, 0, len(pendingRecoveries))
+	for _, pending := range pendingRecoveries {
+		unresolved = append(unresolved, pending.id)
+	}
+	reconciler := recovery.NewReconciler(coordinator, opened.Catalogue, snapshotRepository, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
+	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository, reconciler, unresolved))
 	log.Info("session persistence enabled", "path", storePath)
 	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))
 

@@ -371,6 +371,7 @@ func keepSet(plan ports.RetentionPlan) map[uint64]ports.SnapshotDigest {
 // MaintainSession incrementally validates and retains only catalogue-indexed
 // checkpoints. Every incarnation owns its budget and continuation state.
 func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPlan, budget ports.MaintenanceBudget) (done bool, err error) {
+	requested := budget
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -381,9 +382,14 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 	defer func() {
 		r.log.Info("snapshot_maintenance_progress",
 			"incarnation", plan.IncarnationID.String(),
+			"action", "retention",
 			"retained", len(plan.Keep),
 			"cursor", key,
+			"consumed_entries", requested.Entries-budget.Entries,
+			"consumed_bytes", requested.Bytes-budget.Bytes,
+			"done", done,
 			"budget_exhausted", !done && err == nil,
+			"err", err,
 		)
 	}()
 	if plan.PinAll {
@@ -422,29 +428,19 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 	if !state.validated {
 		for state.validateIndex < len(state.validateQueue) {
 			ref := state.validateQueue[state.validateIndex]
-			generation, digest := ref.Generation, ref.ManifestDigest
-			data, err := r.readBounded(r.manifestPath(plan.IncarnationID, generation))
+			if budget.Entries == 0 {
+				return false, nil
+			}
+			refs, consumedBytes, admitted, err := r.validateMaintenanceCheckpoint(ctx, plan.IncarnationID, ref, budget.Bytes)
 			if err != nil {
-				return false, fmt.Errorf("validate retained manifest %d: %w", generation, err)
+				return false, fmt.Errorf("validate retained manifest %d: %w", ref.Generation, err)
 			}
-			manifest, err := codec.UnmarshalManifest(data)
-			if err != nil || manifest.Generation != generation || manifest.IncarnationID != plan.IncarnationID || sha256.Sum256(data) != digest {
-				return false, fmt.Errorf("validate retained manifest %d: catalogue reference mismatch", generation)
-			}
-			loaded, err := r.loadGeneration(ctx, manifest.Name, key, generation)
-			if err != nil {
-				return false, fmt.Errorf("validate retained manifest %d: %w", generation, err)
-			}
-			consumedBytes := uint64(len(data))
-			for _, object := range loaded.Objects {
-				consumedBytes += uint64(len(object))
-			}
-			if budget.Entries == 0 || consumedBytes > budget.Bytes {
+			if !admitted {
 				return false, nil
 			}
 			budget.Entries--
 			budget.Bytes -= consumedBytes
-			for digest := range loaded.Objects {
+			for digest := range refs {
 				state.references[digest] = struct{}{}
 			}
 			state.validateIndex++
@@ -591,9 +587,91 @@ func retentionToken(plan ports.RetentionPlan) string {
 	return b.String()
 }
 
+// validateMaintenanceCheckpoint admits every payload by stat-reported size
+// before reading it. It validates directly instead of calling LoadCheckpoint,
+// which would materialize a complete generation before maintenance could
+// enforce its byte budget.
+func (r *Repository) validateMaintenanceCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef, byteBudget uint64) (map[ports.SnapshotDigest]codec.ObjectRef, uint64, bool, error) {
+	manifestPath := r.manifestPath(id, ref.Generation)
+	info, err := r.stat(manifestPath)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if info.Size() < 0 || uint64(info.Size()) > byteBudget {
+		return nil, 0, false, nil
+	}
+	consumed := uint64(info.Size())
+	if hook := r.hooks.beforeMaintenancePayloadRead; hook != nil {
+		hook(manifestPath)
+	}
+	data, err := r.readBounded(manifestPath)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	manifest, err := codec.UnmarshalManifest(data)
+	if err != nil || manifest.Generation != ref.Generation || manifest.IncarnationID != id || sha256.Sum256(data) != ref.ManifestDigest {
+		return nil, 0, false, errors.New("catalogue reference mismatch")
+	}
+	refs, valid := maintenanceManifestRefs(manifest)
+	if !valid || !withinGenerationBudget(len(data), refs) {
+		return nil, 0, false, errors.New("invalid manifest references")
+	}
+	for digest, objectRef := range refs {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, false, err
+		}
+		path := r.objectPath(id, digest)
+		info, err := r.stat(path)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if info.Size() < 0 || uint64(info.Size()) > byteBudget-consumed {
+			return nil, 0, false, nil
+		}
+		consumed += uint64(info.Size())
+		if hook := r.hooks.beforeMaintenancePayloadRead; hook != nil {
+			hook(path)
+		}
+		object, err := r.readBounded(path)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if sha256.Sum256(object) != digest || !validObject(object, objectRef) {
+			return nil, 0, false, errors.New("invalid retained object")
+		}
+	}
+	return refs, consumed, true, nil
+}
+
 // Reconcile scans top-level incarnation namespaces from an external seek
 // cookie. Checkpoint-chain work receives a fresh budget for every directory.
-func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRecord, cursor ports.ReconcileCursor, budget ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
+func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRecord, cursor ports.ReconcileCursor, budget ports.MaintenanceBudget) (nextCursor ports.ReconcileCursor, findings []ports.ReconcileFinding, retErr error) {
+	requested := budget
+	defer func() {
+		consumed := ports.MaintenanceBudget{}
+		for _, finding := range findings {
+			consumed.Entries += finding.Consumed.Entries
+			consumed.Bytes += finding.Consumed.Bytes
+			r.log.Info("snapshot_reconciliation_progress",
+				"incarnation", finding.Candidate.IncarnationID.String(),
+				"action", finding.Kind,
+				"status", finding.Status,
+				"consumed_entries", finding.Consumed.Entries,
+				"consumed_bytes", finding.Consumed.Bytes,
+				"cursor", finding.Cursor.DirectoryCookie,
+			)
+		}
+		r.log.Info("snapshot_reconciliation_complete",
+			"action", "scan",
+			"cursor", nextCursor.DirectoryCookie,
+			"requested_entries", requested.Entries,
+			"requested_bytes", requested.Bytes,
+			"consumed_entries", consumed.Entries,
+			"consumed_bytes", consumed.Bytes,
+			"done", nextCursor.DirectoryCookie == 0 && retErr == nil,
+			"err", retErr,
+		)
+	}()
 	if err := ctx.Err(); err != nil {
 		return cursor, nil, err
 	}
@@ -617,7 +695,7 @@ func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRe
 	if budget.Entries < maintenanceBatch {
 		findingCapacity = int(budget.Entries)
 	}
-	findings := make([]ports.ReconcileFinding, 0, findingCapacity)
+	findings = make([]ports.ReconcileFinding, 0, findingCapacity)
 	for scanned := uint64(0); scanned < budget.Entries; scanned++ {
 		entries, done, err := r.readMaintenanceDirent(root, 1, state)
 		if errors.Is(err, os.ErrNotExist) {
@@ -704,19 +782,19 @@ func (r *Repository) reconcileIncarnation(ctx context.Context, record domain.Cat
 }
 
 func (r *Repository) reconcileLoad(ctx context.Context, record domain.CatalogueRecord, ref domain.CheckpointRef, consumed *ports.MaintenanceBudget, budget ports.MaintenanceBudget) (ports.SnapshotGeneration, bool, error) {
-	if consumed.Entries >= budget.Entries {
+	if consumed.Entries >= budget.Entries || consumed.Bytes >= budget.Bytes {
+		return ports.SnapshotGeneration{}, true, nil
+	}
+	_, bytes, admitted, err := r.validateMaintenanceCheckpoint(ctx, record.IncarnationID, ref, budget.Bytes-consumed.Bytes)
+	if err != nil {
+		return ports.SnapshotGeneration{}, false, err
+	}
+	if !admitted {
 		return ports.SnapshotGeneration{}, true, nil
 	}
 	generation, err := r.LoadCheckpoint(ctx, record.IncarnationID, record.Name, ref)
 	if err != nil {
 		return ports.SnapshotGeneration{}, false, err
-	}
-	bytes := uint64(len(generation.Manifest))
-	for _, object := range generation.Objects {
-		bytes += uint64(len(object))
-	}
-	if bytes > budget.Bytes-consumed.Bytes {
-		return ports.SnapshotGeneration{}, true, nil
 	}
 	consumed.Entries++
 	consumed.Bytes += bytes

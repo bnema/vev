@@ -59,7 +59,10 @@ type repositoryHooks struct {
 	// Object hooks instrument the publication path in package tests. They keep
 	// the steady-state cost of retained history observable without exposing a
 	// production metrics surface.
-	beforeObjectRead             func(string)
+	beforeObjectRead func(string)
+	// beforeMaintenancePayloadRead instruments payload reads after maintenance
+	// has admitted their stat-reported size against the current byte budget.
+	beforeMaintenancePayloadRead func(string)
 	beforeObjectHash             func([]byte)
 	beforeObjectCopy             func([]byte)
 	beforeHeadRead               func(string) error

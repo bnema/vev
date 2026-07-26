@@ -533,13 +533,13 @@ func TestLifecycleOwnershipOutlivesSnapshotWriter(t *testing.T) {
 	result := runBlockedSnapshotWriterShutdown(t)
 	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
 	assertLifecycleResultPending(t, result.wrapperReturned, "lifecycle wrapper return while snapshot writer is blocked")
-	owner, err := lifecycle.TryAcquire(result.runtimeDir)
+	_, err := lifecycle.TryAcquire(result.runtimeDir)
 	require.ErrorIs(t, err, lifecycle.ErrBusy)
 
 	result.releaseWriter()
 	awaitLifecycleStage(t, result.publishReturned, "snapshot writer return")
 	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
-	owner, err = lifecycle.TryAcquire(result.runtimeDir)
+	owner, err := lifecycle.TryAcquire(result.runtimeDir)
 	require.NoError(t, err)
 	require.NoError(t, owner.Release())
 }

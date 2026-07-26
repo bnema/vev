@@ -272,27 +272,6 @@ func (d *Daemon) durableWriterFailureNames() []string {
 	return names
 }
 
-// stopSnapshotEncodeWorkerWithDeadline bounds the final checkpoint attempt,
-// but deliberately does not bound the ownership join that follows it.
-func (d *Daemon) stopSnapshotEncodeWorkerWithDeadline(deadline *snapshotShutdownDeadline) {
-	if d == nil {
-		return
-	}
-	cancel, done := d.requestDurableWriterStop()
-	if done == nil {
-		return
-	}
-	if deadline == nil {
-		<-done
-		return
-	}
-	select {
-	case <-done:
-	case <-deadline.Done():
-		cancel()
-	}
-}
-
 func (d *Daemon) finishStoppedSnapshotWorker(abandoned bool) {
 	d.snapshotWorkerMu.Lock()
 	inFlight := d.snapshotWorkerInFlight

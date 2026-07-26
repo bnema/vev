@@ -1061,6 +1061,39 @@ func TestUnresolvedDataPinned(t *testing.T) {
 	}
 }
 
+func TestMaintenanceBudgetAdmitsPayloadsBeforeRead(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	publications := publishMaintenanceGenerations(t, repo, "budget", 1)
+	plan := ports.RetentionPlan{IncarnationID: publications[0].IncarnationID, Keep: []ports.CheckpointRef{checkpointRefForPublication(publications[0])}}
+
+	var reads []string
+	repo.hooks.beforeMaintenancePayloadRead = func(path string) { reads = append(reads, path) }
+	done, err := repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done || len(reads) != 0 {
+		t.Fatalf("undersized manifest budget: done=%v payload reads=%v", done, reads)
+	}
+
+	manifestPath := repo.manifestPath(plan.IncarnationID, 1)
+	info, err := repo.stat(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads = nil
+	done, err = repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 1, Bytes: uint64(info.Size())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("manifest-only budget unexpectedly admitted the generation objects")
+	}
+	if len(reads) != 1 || reads[0] != manifestPath {
+		t.Fatalf("payload reads = %v, want only admitted manifest %q", reads, manifestPath)
+	}
+}
+
 func TestPerSessionBudgetIsolation(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	large := publishMaintenanceGenerations(t, repo, "large", 4)

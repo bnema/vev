@@ -128,6 +128,7 @@ type Daemon struct {
 	checkpointRecovery ports.CheckpointCoordinator
 	lifecycleRecovery  ports.SessionLifecycleCoordinator
 	degradedRecovery   ports.DegradedRecoveryCoordinator
+	maintenance        maintenanceDependencies
 	legacySnapshots    ports.LegacySnapshotSource
 	snapsEnabled       bool
 	noticeStore        ports.NoticeStore
@@ -155,6 +156,8 @@ type Daemon struct {
 	// producer or a repository worker.
 	snapshotNoticeMu               sync.Mutex
 	snapshotActiveFailureSignature string
+	shutdownNoticeMu               sync.Mutex
+	shutdownNoticedSessions        map[string]struct{}
 	restoreDone                    chan struct{}
 	restoreOnce                    sync.Once
 	procCwd                        func(int) (string, error)
@@ -317,6 +320,15 @@ func WithSnapshotRepository(repository any, legacy ports.LegacySnapshotSource) O
 // restarts. A nil store keeps the daemon in no-op notice-persistence mode.
 func WithNoticeStore(store ports.NoticeStore) Option {
 	return func(d *Daemon) { d.noticeStore = store }
+}
+
+// WithDurableMaintenance schedules bounded retention and reconciliation after
+// catalogue-driven restoration. Each call receives an independent budget;
+// unresolved incarnation IDs remain pinned for this daemon lifetime.
+func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository, reconciler maintenanceReconciler, unresolved []domain.IncarnationID) Option {
+	return func(d *Daemon) {
+		d.maintenance = newMaintenanceDependencies(catalogue, repository, reconciler, unresolved)
+	}
 }
 
 // WithCwdReader overrides the process cwd reader used for persistence tests.
@@ -533,6 +545,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	} else {
 		d.closeRestoreDone()
 	}
+	if d.maintenance.reconciler != nil {
+		d.sessWg.Go(func() {
+			d.runDurableMaintenance(d.serveCtx)
+		})
+	}
 
 	// Break the accept loop when either the parent context is cancelled or the
 	// registry drains to empty: both close the listener, which fails Accept.
@@ -586,9 +603,15 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.connWg.Wait()
 	d.attachmentCleanupWg.Wait()
 	// Forced terminal checkpoints run before shutdown stops producers or the
-	// worker. The deadline may abandon checkpoint success and cancel cooperative
-	// I/O, but ownership remains pinned until every writer has actually exited.
-	d.stopSnapshotEncodeWorkerWithDeadline(snapshotDeadline)
+	// worker. StopDurableWriters reports every session whose final capture still
+	// owns work when the shared checkpoint budget expires. Persist one notice per
+	// affected session, then retain ownership until every writer actually exits.
+	stopCtx, stopCancel := snapshotStopContext(snapshotDeadline)
+	timedOutSessions := d.StopDurableWriters(stopCtx)
+	stopCancel()
+	for _, name := range timedOutSessions {
+		d.persistShutdownSnapshotFailure(name, context.DeadlineExceeded)
+	}
 	d.WaitDurableWriters()
 	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
 	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
@@ -699,6 +722,25 @@ func (d *snapshotShutdownDeadline) Done() <-chan struct{} {
 		return nil
 	}
 	return d.done
+}
+
+func snapshotStopContext(deadline *snapshotShutdownDeadline) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if deadline == nil {
+		return ctx, cancel
+	}
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-deadline.Done():
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		close(stop)
+		cancel()
+	}
 }
 
 func (d *Daemon) sessionsSnapshotLocked() []*session {
