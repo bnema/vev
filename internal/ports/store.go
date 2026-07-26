@@ -1,9 +1,6 @@
 package ports
 
-import (
-	"context"
-	"crypto/sha256"
-)
+import "crypto/sha256"
 
 // StoreChange is one key mutation in an atomic store batch.
 type StoreChange struct {
@@ -41,23 +38,4 @@ type SnapshotDigest [sha256.Size]byte
 type SnapshotObject struct {
 	Digest SnapshotDigest
 	Data   []byte
-}
-
-// LegacySnapshot is the pre-incremental named-session blob retained only for
-// one-way migration. Data is caller-owned.
-type LegacySnapshot struct {
-	Name string
-	Data []byte
-}
-
-// LegacySnapshotSource exposes the v3 bridge separately from the new write
-// contract.
-type LegacySnapshotSource interface {
-	LoadLegacy(context.Context) ([]LegacySnapshot, error)
-	// DeleteVerifiedLegacy removes precisely the legacy blob that was verified
-	// after import. Implementations must persist its identity before unlinking.
-	DeleteVerifiedLegacy(context.Context, LegacySnapshot) error
-	// DeleteLegacy is reserved for explicit session purges, which intentionally
-	// delete by name rather than as part of an import receipt.
-	DeleteLegacy(context.Context, string) error
 }

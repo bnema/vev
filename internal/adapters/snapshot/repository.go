@@ -14,14 +14,9 @@ const (
 	repositoryHead        = "HEAD"
 	generationWidth       = 20
 	maxRepositoryRead     = maxSnapshotFileSize
-	// Legacy import is deliberately smaller than the per-file parser ceiling:
-	// importing old snapshots must not accumulate an unbounded startup payload.
-	maxLegacySnapshotFiles = 64
-	maxLegacySnapshotBytes = 8 << 20
 )
 
 // Repository is the crash-safe, content-addressed session snapshot store.
-// Store remains available separately for the one-way legacy bridge.
 type Repository struct {
 	dir   string
 	hooks repositoryHooks
@@ -43,11 +38,6 @@ type Repository struct {
 	maintenanceSessions   map[string]*sessionMaintenance
 	retentionSessions     map[string]*retentionMaintenance
 	maintenanceQuarantine *quarantineMaintenance
-
-	// pendingLegacySync records an unlink whose root-directory sync failed.
-	// It is keyed by the deterministic legacy filename and shares a per-file
-	// lock with DeleteLegacy so a retry cannot acknowledge a recreated file.
-	pendingLegacySync sync.Map // map[string]struct{}
 }
 
 // repositoryHooks makes each persistence boundary fault-injectable. Hooks run
@@ -95,12 +85,10 @@ type repositoryHooks struct {
 	// beforeMaintenanceWork observes each budgeted quarantine filesystem step.
 	// It is test-only instrumentation for hostile traversal bounds.
 	beforeMaintenanceWork func(string)
-	openLegacyDirectory   func(string) (legacyDirectory, error)
 	beforeSessionLock     func(string)
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
-var _ ports.LegacySnapshotSource = (*Repository)(nil)
 
 // NewRepository creates a repository rooted at dir. It does not create files
 // until the first publication, so merely constructing it is side-effect free.

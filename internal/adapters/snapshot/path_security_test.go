@@ -3,7 +3,6 @@ package snapshot
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,20 +197,5 @@ func TestFinalSymlinksRejectedByRootOperations(t *testing.T) {
 	}
 	if _, err := repo.readBounded(link); !errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), repo.dir) {
 		t.Fatalf("readBounded error = %v, want sanitized ELOOP", err)
-	}
-}
-
-func TestRepositoryLoadLegacyChargesUnrelatedRootEntries(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	if err := os.MkdirAll(repo.dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i <= maxDirectoryTraversalEntries; i++ {
-		if err := os.WriteFile(filepath.Join(repo.dir, fmt.Sprintf("unrelated-%05d", i)), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := repo.LoadLegacy(context.Background()); !errors.Is(err, ErrDirectoryTraversalBudget) {
-		t.Fatalf("LoadLegacy error = %v, want traversal budget error", err)
 	}
 }

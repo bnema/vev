@@ -122,9 +122,6 @@ func (r *Repository) currentGeneration(ctx context.Context, name, key string) (u
 	return 0, nil, nil
 }
 
-// loadNewestGeneration validates a single bounded candidate batch in strict
-// descending generation order. It is used by List, whose name is discovered
-// from each manifest rather than supplied by a caller.
 func (r *Repository) loadNewestGeneration(ctx context.Context, key string, budget *int) (ports.SnapshotGeneration, bool, error) {
 	candidates, err := r.generationCandidates(ctx, key, 0, budget)
 	if err != nil {
@@ -154,9 +151,6 @@ func (r *Repository) loadNewestGeneration(ctx context.Context, key string, budge
 	return ports.SnapshotGeneration{}, false, nil
 }
 
-// generationCandidates reads the generations directory once per load attempt.
-// The shared traversal budget bounds both retained names and work; sorting the
-// bounded batch preserves strict newest-to-oldest fallback without rescanning.
 func (r *Repository) generationCandidates(ctx context.Context, key string, exclude uint64, budget *int) ([]uint64, error) {
 	candidates := make([]uint64, 0)
 	err := r.walkDirectory(ctx, filepath.Join(r.legacySessionPath(key), repositoryGenerations), budget, func(entry os.DirEntry) error {
@@ -177,4 +171,52 @@ func (r *Repository) generationCandidates(ctx context.Context, key string, exclu
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i] > candidates[j] })
 	return candidates, nil
+}
+
+func (r *Repository) Tombstone(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key := sessionKey(name)
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.ensurePrivateDirectory(r.dir); err != nil {
+		return fmt.Errorf("create killed session marker directory: %w", safeFilesystemError(err))
+	}
+	path := filepath.Join(r.dir, tombstoneFilename(key))
+	if err := r.writeImmutable(path, []byte(name), func(data []byte) error {
+		if string(data) != name {
+			return fmt.Errorf("killed session marker identity mismatch")
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("write killed session marker: %w", safeFilesystemError(err))
+	}
+	return nil
+}
+
+func tombstoneFilename(key string) string { return ".killed-" + key }
+
+func (r *Repository) tombstoned(name string) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	path := filepath.Join(r.dir, tombstoneFilename(sessionKey(name)))
+	if hook := r.hooks.beforeTombstoneCheck; hook != nil {
+		hook(path)
+	}
+	data, err := r.readBounded(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if string(data) != name {
+		return false, fmt.Errorf("killed session marker identity mismatch")
+	}
+	return true, nil
 }

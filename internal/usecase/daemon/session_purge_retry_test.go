@@ -53,14 +53,6 @@ func (r *retryablePurgeRepository) DeleteDeletionTombstone(ctx context.Context, 
 	}
 	return nil
 }
-func (*retryablePurgeRepository) LoadLegacy(context.Context) ([]ports.LegacySnapshot, error) {
-	return nil, nil
-}
-func (*retryablePurgeRepository) DeleteVerifiedLegacy(context.Context, ports.LegacySnapshot) error {
-	return nil
-}
-func (*retryablePurgeRepository) DeleteLegacy(context.Context, string) error { return nil }
-
 func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
