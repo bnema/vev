@@ -18,9 +18,8 @@ const (
 
 // Repository is the crash-safe, content-addressed session snapshot store.
 type Repository struct {
-	dir   string
-	hooks repositoryHooks
-	log   *slog.Logger
+	dir string
+	log *slog.Logger
 
 	// sessionStateMu owns both maps. A caller retains a reference before it
 	// waits on a session mutex, so an idle entry can never be removed while a
@@ -29,39 +28,6 @@ type Repository struct {
 	locks          map[string]*sessionMutex
 	storageEpochs  map[string]uint64
 	nextEpoch      uint64
-}
-
-// repositoryHooks makes each persistence boundary fault-injectable. Hooks run
-// immediately before their respective syscall and are intentionally package
-// private so production callers cannot weaken repository guarantees.
-type repositoryHooks struct {
-	beforeBlobWrite     func(string) error
-	beforeManifestWrite func(string) error
-	// Object hooks instrument the publication path in package tests. They keep
-	// the steady-state cost of retained history observable without exposing a
-	// production metrics surface.
-	beforeObjectRead func(string)
-	// beforePayloadRead observes every bounded repository payload read. It is
-	// test-only accounting instrumentation and runs immediately before the read.
-	beforePayloadRead func(string)
-	beforeObjectHash  func([]byte)
-	beforeObjectCopy  func([]byte)
-	beforeHeadRead    func(string) error
-	beforeHeadWrite   func(string) error
-	createTemp        func(string) error
-	writeTemp         func(string) error
-	syncFile          func(string) error
-	closeFile         func(string) error
-	installImmutable  func(string) error
-	rename            func(string) error
-	syncDirectory     func(string) error
-	remove            func(string) error
-	// afterOpenRoot and closeRoot make descriptor race and close-error paths
-	// deterministic in package tests. closeRoot never replaces the real close.
-	afterOpenRoot       func()
-	closeRoot           func() error
-	beforeDirectoryRead func(string)
-	beforeSessionLock   func(string)
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
@@ -116,9 +82,6 @@ func (r *Repository) lockSession(key string) *sessionMutex {
 	}
 	lock.references++
 	r.sessionStateMu.Unlock()
-	if hook := r.hooks.beforeSessionLock; hook != nil {
-		hook(key)
-	}
 	lock.mu.Lock()
 	return lock
 }

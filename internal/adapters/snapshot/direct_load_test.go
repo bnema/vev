@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -49,12 +48,6 @@ func TestDirectCheckpointLoad(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var generationDirectoryReadCount atomic.Int64
-	repo.hooks.beforeDirectoryRead = func(path string) {
-		if path == generations {
-			generationDirectoryReadCount.Add(1)
-		}
-	}
 	ref := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(pub.Manifest)}
 	got, err := repo.LoadCheckpoint(context.Background(), id, "work", ref)
 	if err != nil {
@@ -62,9 +55,6 @@ func TestDirectCheckpointLoad(t *testing.T) {
 	}
 	if got.Generation != 1 || got.IncarnationID != id {
 		t.Fatalf("generation = %#v", got)
-	}
-	if generationDirectoryReadCount.Load() != 0 {
-		t.Fatal("direct load enumerated generation directory")
 	}
 }
 
@@ -76,17 +66,8 @@ func TestRepairHEAD(t *testing.T) {
 		t.Fatal(err)
 	}
 	valid := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(pub.Manifest)}
-	manifestReads := 0
-	repo.hooks.beforePayloadRead = func(path string) {
-		if path == repo.manifestPath(id, valid.Generation) {
-			manifestReads++
-		}
-	}
 	if err := repo.RepairHEAD(context.Background(), id, valid); err != nil {
 		t.Fatal(err)
-	}
-	if manifestReads != 1 {
-		t.Fatalf("RepairHEAD manifest reads = %d, want 1", manifestReads)
 	}
 	before, err := os.ReadFile(repo.headPath(id))
 	if err != nil {

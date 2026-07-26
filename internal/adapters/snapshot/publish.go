@@ -94,11 +94,6 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		if err != nil {
 			return err
 		}
-		if r.hooks.beforeBlobWrite != nil {
-			if err := r.hooks.beforeBlobWrite(path); err != nil {
-				return err
-			}
-		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -122,11 +117,6 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return fmt.Errorf("manifest generation %d: immutable conflict", publication.Generation)
 		}
 	} else {
-		if r.hooks.beforeManifestWrite != nil {
-			if err := r.hooks.beforeManifestWrite(manifestPath); err != nil {
-				return err
-			}
-		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -137,11 +127,6 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return nil
 		}); err != nil {
 			return fmt.Errorf("write manifest: %w", err)
-		}
-	}
-	if r.hooks.beforeHeadWrite != nil {
-		if err := r.hooks.beforeHeadWrite(r.headPath(publication.IncarnationID)); err != nil {
-			return err
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -196,9 +181,7 @@ func (r *Repository) currentIncarnationPublication(ctx context.Context, publicat
 	if manifest.IncarnationID != publication.IncarnationID || manifest.Generation != generation {
 		return 0, nil, nil, fmt.Errorf("current manifest identity mismatch")
 	}
-	// Every normal child checkpoint is bound to the exact authoritative HEAD.
-	// Nil-parent checkpoints beyond generation one are admitted only through the
-	// explicitly migration-only MigrateV1Checkpoint path.
+	// Every child checkpoint is bound to the exact authoritative HEAD.
 	if publication.Generation == generation+1 {
 		wantParent := &domain.CheckpointRef{Generation: generation, ManifestDigest: digest}
 		if !checkpointRefEqual(publication.ParentCheckpoint, wantParent) {
@@ -230,7 +213,7 @@ func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]
 	}
 	objects := make(map[ports.SnapshotDigest]ports.SnapshotObject, len(supplied))
 	for digest, entries := range supplied {
-		object, err := validateSuppliedObject(entries, digest, refs[digest], nil)
+		object, err := validateSuppliedObject(entries, digest, refs[digest])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -284,16 +267,13 @@ func retainedObject(currentRefs map[ports.SnapshotDigest]codec.ObjectRef, digest
 }
 
 func (r *Repository) validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef) (ports.SnapshotObject, error) {
-	return validateSuppliedObject(objects, digest, ref, r)
+	return validateSuppliedObject(objects, digest, ref)
 }
 
-func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef, repository *Repository) (ports.SnapshotObject, error) {
+func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef) (ports.SnapshotObject, error) {
 	object := objects[0]
 	for _, candidate := range objects {
 		actual := sha256.Sum256(candidate.Data)
-		if repository != nil {
-			actual = repository.objectDigest(candidate.Data)
-		}
 		if actual != candidate.Digest || candidate.Digest != digest {
 			return ports.SnapshotObject{}, fmt.Errorf("object digest mismatch")
 		}
@@ -304,9 +284,6 @@ func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.Snapsho
 	kind, payload, err := codec.PreflightObject(object.Data)
 	if err != nil || kind != ref.Kind || len(object.Data) != int(ref.Size) || len(payload) == 0 {
 		return ports.SnapshotObject{}, fmt.Errorf("invalid object envelope")
-	}
-	if repository != nil && repository.hooks.beforeObjectCopy != nil {
-		repository.hooks.beforeObjectCopy(object.Data)
 	}
 	return ports.SnapshotObject{Digest: digest, Data: append([]byte(nil), object.Data...)}, nil
 }
@@ -355,16 +332,10 @@ func validObject(data []byte, ref codec.ObjectRef) bool {
 }
 
 func (r *Repository) objectDigest(data []byte) ports.SnapshotDigest {
-	if r.hooks.beforeObjectHash != nil {
-		r.hooks.beforeObjectHash(data)
-	}
 	return sha256.Sum256(data)
 }
 
 func (r *Repository) verifyObjectFile(path string, digest ports.SnapshotDigest, ref codec.ObjectRef) (bool, error) {
-	if r.hooks.beforeObjectRead != nil {
-		r.hooks.beforeObjectRead(path)
-	}
 	data, exists, err := r.readOptionalBounded(path)
 	if err != nil || !exists {
 		return exists, err

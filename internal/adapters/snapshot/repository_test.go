@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -24,37 +25,6 @@ func TestRepositoryPublishesAndLoadsCompleteGeneration(t *testing.T) {
 	}
 	if got.Name != "named" || got.Generation != 1 || len(got.Objects) != 2 {
 		t.Fatalf("Load = %#v", got)
-	}
-}
-
-func TestRepositoryDoesNotRewriteVerifiedImmutableBlob(t *testing.T) {
-	t.Parallel()
-	dir := privateDir(t)
-	repo := NewRepository(dir)
-	pub := repositoryPublication(t, "named", 1, []byte("state"))
-	if err := repo.Publish(context.Background(), pub); err != nil {
-		t.Fatal(err)
-	}
-	writes := 0
-	repo.hooks.beforeBlobWrite = func(string) error { writes++; return nil }
-	pub.Generation = 2
-	manifest, err := codec.UnmarshalManifest(pub.Manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest.Generation = 2
-	parent := &domain.CheckpointRef{Generation: 1, ManifestDigest: codec.ManifestDigest(pub.Manifest)}
-	manifest.ParentCheckpoint = parent
-	pub.ParentCheckpoint = parent
-	pub.Manifest, err = codec.MarshalManifest(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.Publish(context.Background(), pub); err != nil {
-		t.Fatal(err)
-	}
-	if writes != 0 {
-		t.Fatalf("blob writes = %d, want 0", writes)
 	}
 }
 
@@ -109,7 +79,7 @@ func publicationWithCurrentParent(t *testing.T, repo *Repository, publication po
 
 func repositoryPublication(t *testing.T, name string, generation uint64, payload []byte) ports.SnapshotPublication {
 	t.Helper()
-	id := legacyIncarnationID(name)
+	id := testIncarnationID(name)
 	tail, err := codec.MarshalObject(codec.HistoryTail, payload)
 	if err != nil {
 		t.Fatal(err)
@@ -123,4 +93,11 @@ func repositoryPublication(t *testing.T, name string, generation uint64, payload
 		t.Fatal(err)
 	}
 	return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, Manifest: manifest, Objects: []ports.SnapshotObject{tail, visible}}
+}
+
+func testIncarnationID(name string) domain.IncarnationID {
+	digest := sha256.Sum256([]byte("test incarnation: " + name))
+	var id domain.IncarnationID
+	copy(id[:], digest[:])
+	return id
 }

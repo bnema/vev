@@ -31,9 +31,6 @@ var (
 // File.ReadDir maintains a cursor on one descriptor and returns at most one
 // small batch, so no full directory enumeration is retained in memory.
 func (r *Repository) walkDirectory(ctx context.Context, dir string, budget *int, visit func(os.DirEntry) error) (err error) {
-	if hook := r.hooks.beforeDirectoryRead; hook != nil {
-		hook(dir)
-	}
 	file, err := r.openDirectory(dir)
 	if err != nil {
 		return err
@@ -136,36 +133,6 @@ func (r *Repository) RepairHEAD(ctx context.Context, id domain.IncarnationID, re
 	return r.writeMutable(r.headPath(id), marshalHead(ref.Generation, ref.ManifestDigest))
 }
 
-func (r *Repository) loadGeneration(ctx context.Context, name, key string, generation uint64) (ports.SnapshotGeneration, error) {
-	data, err := r.readBounded(r.legacyManifestPath(key, generation))
-	if err != nil {
-		return ports.SnapshotGeneration{}, err
-	}
-	manifest, err := codec.UnmarshalManifest(data)
-	if err != nil || manifest.Name != name || manifest.Generation != generation {
-		return ports.SnapshotGeneration{}, fmt.Errorf("invalid manifest")
-	}
-	refs := manifestRefs(manifest)
-	if refs == nil || !withinGenerationBudget(len(data), refs) {
-		return ports.SnapshotGeneration{}, fmt.Errorf("snapshot generation too large")
-	}
-	objects := make(map[ports.SnapshotDigest][]byte, len(refs))
-	for digest, ref := range refs {
-		if err := ctx.Err(); err != nil {
-			return ports.SnapshotGeneration{}, err
-		}
-		object, err := r.readBounded(r.legacyObjectPath(key, digest))
-		if err != nil {
-			return ports.SnapshotGeneration{}, err
-		}
-		if sha256.Sum256(object) != digest || !validObject(object, ref) {
-			return ports.SnapshotGeneration{}, fmt.Errorf("invalid object")
-		}
-		objects[digest] = object
-	}
-	return ports.SnapshotGeneration{Name: manifest.Name, Generation: generation, Manifest: data, Objects: objects}, nil
-}
-
 func marshalHead(generation uint64, digest ports.SnapshotDigest) []byte {
 	out := make([]byte, 4+8+sha256.Size)
 	copy(out, "VEVH")
@@ -182,11 +149,6 @@ func (r *Repository) readHeadWithRoot(root *os.Root, id domain.IncarnationID) (u
 }
 
 func (r *Repository) readHeadAt(root *os.Root, path string) (uint64, ports.SnapshotDigest, error) {
-	if hook := r.hooks.beforeHeadRead; hook != nil {
-		if err := hook(path); err != nil {
-			return 0, ports.SnapshotDigest{}, err
-		}
-	}
 	var data []byte
 	var err error
 	if root == nil {
@@ -207,8 +169,4 @@ func (r *Repository) readHeadAt(root *os.Root, path string) (uint64, ports.Snaps
 		return 0, ports.SnapshotDigest{}, ErrInvalidHEAD
 	}
 	return generation, digest, nil
-}
-
-func (r *Repository) readLegacyHead(key string) (uint64, ports.SnapshotDigest, error) {
-	return r.readHeadAt(nil, r.legacyHeadPath(key))
 }

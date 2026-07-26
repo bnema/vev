@@ -1,13 +1,9 @@
 package snapshot
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,29 +11,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-var safeNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
-
 const maxSnapshotFileSize = 16 + (256 << 20)
-
-// filenameForName maps a session name to its deterministic legacy filename.
-// It remains only for the one-way v3 import path.
-func filenameForName(name string) string {
-	if safeNameRE.MatchString(name) {
-		return name + ".snap"
-	}
-	sum := sha256.Sum256([]byte(name))
-	return "@" + hex.EncodeToString(sum[:])[:40] + ".snap"
-}
-
-// legacyIncarnationID identifies snapshots produced by the short-lived
-// incarnation bridge. Established name-keyed repositories use sessionKey.
-// New callers must supply the durable catalogue incarnation ID.
-func legacyIncarnationID(name string) domain.IncarnationID {
-	id := domain.IncarnationID{}
-	digest := sha256.Sum256([]byte(name))
-	copy(id[:], digest[:])
-	return id
-}
 
 func incarnationKey(id domain.IncarnationID) (string, error) {
 	if id == (domain.IncarnationID{}) {
@@ -60,50 +34,6 @@ func (r *Repository) headPath(id domain.IncarnationID) string {
 	return filepath.Join(r.sessionPath(id), repositoryHead)
 }
 
-// Legacy path helpers are isolated from normal incarnation-keyed operations.
-func (r *Repository) legacySessionPath(key string) string {
-	return filepath.Join(r.dir, repositorySessionsDir, key)
-}
-
-// legacyRepositoryKey resolves the established name-keyed namespace first.
-// The digest fallback keeps the retired bridge readable without changing any
-// durable catalogue incarnation identity.
-func (r *Repository) legacyRepositoryKey(name string) (string, error) {
-	key := sessionKey(name)
-	if _, err := r.stat(r.legacySessionPath(key)); err == nil {
-		return key, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	return legacyIncarnationID(name).String(), nil
-}
-func (r *Repository) legacyObjectPath(key string, digest ports.SnapshotDigest) string {
-	hexDigest := hex.EncodeToString(digest[:])
-	return filepath.Join(r.legacySessionPath(key), repositoryObjectsDir, hexDigest[:2], hexDigest)
-}
-func (r *Repository) legacyManifestPath(key string, generation uint64) string {
-	return filepath.Join(r.legacySessionPath(key), repositoryGenerations, generationFilename(generation))
-}
-func (r *Repository) legacyHeadPath(key string) string {
-	return filepath.Join(r.legacySessionPath(key), repositoryHead)
-}
-func sessionKey(name string) string {
-	if safeNameRE.MatchString(name) && name != "." && name != ".." {
-		return name
-	}
-	sum := sha256.Sum256([]byte(name))
-	return "@" + hex.EncodeToString(sum[:])
-}
-func canonicalSessionKey(key string) bool {
-	if safeNameRE.MatchString(key) && key != "." && key != ".." {
-		return true
-	}
-	if len(key) != 65 || key[0] != '@' {
-		return false
-	}
-	_, err := hex.DecodeString(key[1:])
-	return err == nil && strings.ToLower(key[1:]) == key[1:]
-}
 func generationFilename(generation uint64) string {
 	return fmt.Sprintf("%0*d.manifest", generationWidth, generation)
 }
