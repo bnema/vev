@@ -46,7 +46,6 @@ func TestCheckpointCatalogueFailureKeepsCaptureRetryable(t *testing.T) {
 	record := domain.CatalogueRecord{
 		Name:          "work",
 		IncarnationID: domain.IncarnationID{1},
-		RecoveryState: domain.RecoveryFresh,
 	}
 	catalogue.EXPECT().Record("work").Return(record, true, nil).Once()
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).Return(nil).Once()

@@ -49,9 +49,7 @@ const (
 	ErrNotScriptable      uint16 = 7
 	ErrInvalidCommandArgs uint16 = 8
 	ErrNoSuchTarget       uint16 = 9
-	ErrSessionRestoring   uint16 = 10
-	ErrSessionDegraded    uint16 = 11
-	ErrAmbiguousTarget    uint16 = 12
+	ErrAmbiguousTarget    uint16 = 10
 	ErrInternal           uint16 = 255
 )
 
@@ -196,10 +194,9 @@ type Kill struct {
 type SessionState uint8
 
 const (
-	SessionRunning SessionState = iota + 1
+	SessionRunning SessionState = iota
 	SessionStopped
-	SessionRestoring
-	SessionDegraded
+	SessionBroken
 )
 
 // SessionInfo describes one session in a Sessions listing.
@@ -926,7 +923,7 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 			return Sessions{}, err
 		}
 		s.State = SessionState(state)
-		if s.State < SessionRunning || s.State > SessionDegraded {
+		if s.State > SessionBroken {
 			return Sessions{}, errors.New("ports: invalid session state")
 		}
 		sessions = append(sessions, s)

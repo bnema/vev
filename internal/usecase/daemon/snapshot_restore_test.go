@@ -219,7 +219,7 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
-	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), RecoveryState: domain.RecoveryHealthy, Committed: &checkpoint}
+	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
@@ -265,8 +265,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	record := domain.CatalogueRecord{
 		Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd",
 		CreatedAt: int64(snapshot.CreatedAt), UpdatedAt: 81, LastUsedSeq: 17,
-		TabNames: []string{"before"}, RecoveryState: domain.RecoveryHealthy,
-		Committed: &committed,
+		TabNames: []string{"before"}, Committed: &committed,
 	}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 
@@ -292,7 +291,6 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, record.IncarnationID, updated.IncarnationID)
-	require.Equal(t, record.RecoveryState, updated.RecoveryState)
 	require.Equal(t, record.Committed, updated.Committed)
 	require.Equal(t, record.DegradedReason, updated.DegradedReason)
 	require.Equal(t, []string{"after"}, updated.TabNames)

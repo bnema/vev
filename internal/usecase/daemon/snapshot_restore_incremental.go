@@ -18,23 +18,13 @@ const catalogueRestoreConcurrency = 8
 
 var errRetryableRestoreLoad = errors.New("snapshot: retryable checkpoint load")
 
-func initialRuntimeRecoveryState(record domain.CatalogueRecord) (runtimeRecoveryState, chan struct{}) {
+func initialSessionState(record domain.CatalogueRecord) (ports.SessionState, chan struct{}) {
 	done := make(chan struct{})
-	var state runtimeRecoveryState
-	switch record.RecoveryState {
-	case domain.RecoveryFresh:
-		state = runtimeFresh
+	state := ports.SessionStopped
+	if record.DegradedReason != "" {
+		state = ports.SessionBroken
 		close(done)
-	case domain.RecoveryHealthy:
-		state = runtimeRestoring
-	case domain.RecoveryDegraded:
-		state = runtimeDegraded
-		close(done)
-	case domain.RecoveryDeleting:
-		state = runtimeDeleting
-		close(done)
-	default:
-		state = runtimeDegraded
+	} else if record.Committed == nil {
 		close(done)
 	}
 	return state, done
@@ -84,7 +74,7 @@ func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) {
 	if entry, ok := d.stopped[record.Name]; ok && entry.restoreDone != nil {
 		return
 	}
-	state, done := initialRuntimeRecoveryState(record)
+	state, done := initialSessionState(record)
 	d.stopped[record.Name] = stoppedSession{
 		name:        record.Name,
 		cwd:         record.Cwd,
@@ -117,7 +107,7 @@ func closeRuntimeRestoreDoneLocked(done chan struct{}) {
 	}
 }
 
-func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state runtimeRecoveryState) {
+func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state ports.SessionState) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	entry, ok := d.stopped[record.Name]
@@ -144,7 +134,6 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 			d.log.Error("reading catalogue before degradation failed", "session", record.Name, "err", readErr)
 		case ok && current.IncarnationID == record.IncarnationID:
 			record = current
-			record.RecoveryState = domain.RecoveryDegraded
 			record.DegradedReason = "checkpoint validation failed"
 			switch {
 			case retryable:
@@ -165,7 +154,7 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 		switch {
 		case degraded:
 			entry.record = record
-			entry.state = runtimeDegraded
+			entry.state = ports.SessionBroken
 			entry.cwd = record.Cwd
 			entry.createdAt = record.CreatedAt
 			entry.incarnation = record.IncarnationID
@@ -189,22 +178,15 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 }
 
 func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecord) error {
-	switch record.RecoveryState {
-	case domain.RecoveryFresh:
-		d.setStoppedRecovery(record, runtimeFresh)
+	if record.DegradedReason != "" {
+		d.setStoppedRecovery(record, ports.SessionBroken)
+		d.logSessionDegraded(record, "persisted-broken")
+		return nil
+	}
+	if record.Committed == nil {
+		d.setStoppedRecovery(record, ports.SessionStopped)
 		d.logSessionRestoreComplete(record, 0, false)
 		return nil
-	case domain.RecoveryDegraded:
-		d.setStoppedRecovery(record, runtimeDegraded)
-		d.logSessionDegraded(record, "persisted-degraded")
-		return nil
-	case domain.RecoveryDeleting:
-		d.setStoppedRecovery(record, runtimeDeleting)
-		return nil
-	case domain.RecoveryHealthy:
-		// Continue below.
-	default:
-		return errors.New("snapshot: invalid catalogue recovery state")
 	}
 	if d.snapshotRepository == nil {
 		return errors.New("snapshot: repository unavailable")
@@ -251,7 +233,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {
 		return err
 	}
-	d.setStoppedRecovery(record, runtimeHealthy)
+	d.setStoppedRecovery(record, ports.SessionStopped)
 	d.logSessionRestoreComplete(record, selected.Generation, false)
 	return nil
 }

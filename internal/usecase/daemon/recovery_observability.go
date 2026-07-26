@@ -31,22 +31,22 @@ func (d *Daemon) logStartupRecoveryCounts(restoring int) {
 	} else {
 		records = d.stoppedRecords()
 	}
-	healthy, fresh, degraded := 0, 0, 0
+	healthy, fresh, broken := 0, 0, 0
 	for _, record := range records {
-		switch record.RecoveryState {
-		case domain.RecoveryHealthy:
-			healthy++
-		case domain.RecoveryFresh:
+		switch {
+		case record.DegradedReason != "":
+			broken++
+		case record.Committed == nil:
 			fresh++
-		case domain.RecoveryDegraded:
-			degraded++
+		default:
+			healthy++
 		}
 	}
 	d.log.Info("daemon_startup_complete",
 		"healthy", healthy,
 		"fresh", fresh,
 		"restoring", restoring,
-		"degraded", degraded,
+		"broken", broken,
 	)
 }
 

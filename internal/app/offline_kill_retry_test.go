@@ -21,7 +21,7 @@ func TestRunOfflineNamedKillUsesOpenCatalogueSeam(t *testing.T) {
 
 	p := newTestPersister(t, stateDir)
 	now := time.Now().UnixNano()
-	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}))
 	require.NoError(t, p.Close())
 
 	original := openCatalogue
@@ -65,7 +65,7 @@ func TestRunKillOfflineUsesIncarnationDeletionProtocol(t *testing.T) {
 			id := domain.IncarnationID{1}
 			p := newTestPersister(t, stateDir)
 			now := time.Now().UnixNano()
-			require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: id, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}))
+			require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: id, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}))
 			require.NoError(t, p.Close())
 			source := filepath.Join(stateDir, "snapshots", "sessions", id.String())
 			require.NoError(t, os.MkdirAll(source, 0o700))

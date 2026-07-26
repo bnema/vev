@@ -869,7 +869,7 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	store, _ := newMockStore(t)
 	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
 	incarnation := domain.IncarnationID{1}
-	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "work", IncarnationID: incarnation, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9}))
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
 	d.mu.Lock()
@@ -880,8 +880,7 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	require.Equal(t, int64(7), stopped.createdAt)
 	require.Equal(t, incarnation, stopped.incarnation)
 	require.Equal(t, uint64(9), stopped.lastUsedSeq)
-	require.Equal(t, domain.RecoveryFresh, stopped.record.RecoveryState)
-	require.Equal(t, runtimeFresh, stopped.state)
+	require.Equal(t, ports.SessionStopped, stopped.state)
 	require.NotNil(t, stopped.restoreDone)
 	require.Equal(t, uint64(9), d.mruSeq.Load())
 }
@@ -951,7 +950,7 @@ func TestTouchMRUPersistsNamedButNotEphemeral(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithStore(t, store)(d)
 	named := &session{name: "work", tabs: []*tab{{}}, createdAt: 1, incarnation: domain.IncarnationID{1}}
-	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1}))
 
 	d.touchMRU(named)
 	require.Equal(t, named.mruAt.Load(), state.record(t, "work").LastUsedSeq)
@@ -994,7 +993,6 @@ func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	require.True(t, state.has("work"))
 	created := state.record(t, "work")
 	require.NotEqual(t, domain.IncarnationID{}, created.IncarnationID)
-	require.Equal(t, domain.RecoveryFresh, created.RecoveryState)
 	require.NoError(t, created.Validate())
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 	require.NoError(t, d.createTab(sess, sz))
@@ -1142,7 +1140,7 @@ func TestAttachRestoresPersistedTabNames(t *testing.T) {
 	store, _ := newMockStore(t)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	WithStore(t, store)(d)
-	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}}))
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
@@ -1356,7 +1354,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithStore(t, store)(d)
-	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
 	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp", createdAt: 1}
 	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
 	require.False(t, state.has("old"))
@@ -1837,15 +1835,15 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 	alphaRef := &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
 	workRef := &domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
 	records := []domain.CatalogueRecord{
-		{Name: "alpha", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/alpha", CreatedAt: 7, LastUsedSeq: 11, TabNames: []string{"shell"}, RecoveryState: domain.RecoveryHealthy, Committed: alphaRef},
-		{Name: "work", IncarnationID: domain.IncarnationID{2}, Cwd: "/tmp/work", CreatedAt: 9, LastUsedSeq: 13, TabNames: []string{"editor", "logs"}, RecoveryState: domain.RecoveryDegraded, Committed: workRef, DegradedReason: "uncertain legacy checkpoint"},
+		{Name: "alpha", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/alpha", CreatedAt: 7, LastUsedSeq: 11, TabNames: []string{"shell"}, Committed: alphaRef},
+		{Name: "work", IncarnationID: domain.IncarnationID{2}, Cwd: "/tmp/work", CreatedAt: 9, LastUsedSeq: 13, TabNames: []string{"editor", "logs"}, Committed: workRef, DegradedReason: "uncertain legacy checkpoint"},
 	}
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(persist.New(nil), records))
 
 	alpha := d.stopped["alpha"]
 	require.Equal(t, records[0], alpha.record)
-	require.Equal(t, runtimeRestoring, alpha.state)
+	require.Equal(t, ports.SessionStopped, alpha.state)
 	require.NotNil(t, alpha.restoreDone)
 	select {
 	case <-alpha.restoreDone:
@@ -1854,7 +1852,7 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 	}
 	work := d.stopped["work"]
 	require.Equal(t, records[1], work.record)
-	require.Equal(t, runtimeDegraded, work.state)
+	require.Equal(t, ports.SessionBroken, work.state)
 	require.NotNil(t, work.restoreDone)
 	select {
 	case <-work.restoreDone:
@@ -1868,7 +1866,7 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *testing.T) {
 	store, _ := newMockStore(t)
 	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
-	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, testPersister(t, seed).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900}))
 
 	p, release := newBlockingPTY(t)
 	defer release()

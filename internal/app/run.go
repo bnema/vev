@@ -505,18 +505,18 @@ func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, re
 }
 
 func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord, restoring int) {
-	healthy, fresh, degraded := 0, 0, 0
+	healthy, fresh, broken := 0, 0, 0
 	for _, record := range records {
-		switch record.RecoveryState {
-		case domain.RecoveryHealthy:
-			healthy++
-		case domain.RecoveryFresh:
+		switch {
+		case record.DegradedReason != "":
+			broken++
+		case record.Committed == nil:
 			fresh++
-		case domain.RecoveryDegraded:
-			degraded++
+		default:
+			healthy++
 		}
 	}
-	log.Info("daemon_startup_complete", "healthy", healthy, "fresh", fresh, "restoring", restoring, "degraded", degraded)
+	log.Info("daemon_startup_complete", "healthy", healthy, "fresh", fresh, "restoring", restoring, "broken", broken)
 }
 
 func constructDaemonBeforeSocketPublication(
@@ -1290,8 +1290,8 @@ func runList(ctx context.Context) (retErr error) {
 		infos := make([]ports.SessionInfo, 0, len(records))
 		for _, r := range records {
 			state := ports.SessionStopped
-			if r.RecoveryState == domain.RecoveryDegraded || r.RecoveryState == domain.RecoveryDeleting {
-				state = ports.SessionDegraded
+			if r.DegradedReason != "" {
+				state = ports.SessionBroken
 			}
 			infos = append(infos, ports.SessionInfo{Name: r.Name, State: state})
 		}
@@ -1338,11 +1338,8 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		case ports.SessionStopped:
 			state = "stopped"
 			tabs = "-"
-		case ports.SessionRestoring:
-			state = "restoring"
-			tabs = "-"
-		case ports.SessionDegraded:
-			state = "degraded"
+		case ports.SessionBroken:
+			state = "broken"
 			tabs = "-"
 		default:
 			if s.Ephemeral {

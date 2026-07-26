@@ -168,7 +168,6 @@ func durableRecoveryRecord(index int) domain.CatalogueRecord {
 		Cwd:           "/tmp",
 		CreatedAt:     int64(index + 1),
 		UpdatedAt:     int64(index + 1),
-		RecoveryState: domain.RecoveryHealthy,
 		Committed:     &ref,
 	}
 }
@@ -208,7 +207,6 @@ func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
 		IncarnationID: domain.IncarnationID{1},
 		Cwd:           "/work",
 		CreatedAt:     42,
-		RecoveryState: domain.RecoveryHealthy,
 		Committed:     &priorRef,
 	}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{prior})
@@ -267,8 +265,8 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 
 		d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-		require.Equal(t, runtimeHealthy, d.stopped[healthy.Name].state)
-		require.Equal(t, runtimeDegraded, d.stopped[broken.Name].state)
+		require.Equal(t, ports.SessionStopped, d.stopped[healthy.Name].state)
+		require.Equal(t, ports.SessionBroken, d.stopped[broken.Name].state)
 		for _, name := range []string{healthy.Name, broken.Name} {
 			select {
 			case <-d.stopped[name].restoreDone:
@@ -276,9 +274,9 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 				t.Fatalf("restore completion for %q was not closed", name)
 			}
 		}
-		degraded, ok, _ := catalogue.Record(broken.Name)
+		brokenRecord, ok, _ := catalogue.Record(broken.Name)
 		require.True(t, ok)
-		require.Equal(t, domain.RecoveryDegraded, degraded.RecoveryState)
+		require.Equal(t, "checkpoint validation failed", brokenRecord.DegradedReason)
 		require.Equal(t, 1, repository.loads[healthy.Name])
 		require.Equal(t, 1, repository.loads[broken.Name])
 		require.Empty(t, d.sessions, "a corrupt record must never open a replacement runtime")
@@ -300,7 +298,7 @@ func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
 
 	require.Len(t, d.stopped, count)
 	for _, record := range records {
-		require.Equal(t, runtimeHealthy, d.stopped[record.Name].state)
+		require.Equal(t, ports.SessionStopped, d.stopped[record.Name].state)
 		require.Equal(t, 1, repository.loads[record.Name])
 	}
 }
@@ -314,7 +312,7 @@ func TestCatalogueRestoreSingleSessionOver4096(t *testing.T) {
 	// discovery API and therefore performs exactly one direct catalogue lookup.
 	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-	require.Equal(t, runtimeHealthy, d.stopped[record.Name].state)
+	require.Equal(t, ports.SessionStopped, d.stopped[record.Name].state)
 	require.Equal(t, 1, repository.loads[record.Name])
 }
 
@@ -327,9 +325,9 @@ func TestCatalogueRestoreIncarnationMismatch(t *testing.T) {
 
 	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-	require.Equal(t, runtimeDegraded, d.stopped[record.Name].state)
+	require.Equal(t, ports.SessionBroken, d.stopped[record.Name].state)
 	got, _, _ := catalogue.Record(record.Name)
-	require.Equal(t, domain.RecoveryDegraded, got.RecoveryState)
+	require.Equal(t, "checkpoint validation failed", got.DegradedReason)
 }
 
 type cancellationRecoveryRepository struct {
@@ -359,7 +357,6 @@ func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
 	ctx := context.WithValue(t.Context(), key, "request")
 	wantErr := errors.New("stop after context capture")
 	record := durableRecoveryRecord(0)
-	record.RecoveryState = domain.RecoveryDegraded
 	record.DegradedReason = "checkpoint validation failed"
 	catalogue := portsmocks.NewMockCatalogue(t)
 	repository := portsmocks.NewMockSnapshotRepository(t)
@@ -472,11 +469,9 @@ func TestPersistAndRegisterRestoredSessionRejectsReplacementIncarnation(t *testi
 
 func TestSessionRecoveryCommand(t *testing.T) {
 	degraded := durableRecoveryRecord(2)
-	degraded.RecoveryState = domain.RecoveryDegraded
 	degraded.DegradedReason = "checkpoint validation failed"
 	fresh := degraded
 	fresh.IncarnationID = domain.IncarnationID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
-	fresh.RecoveryState = domain.RecoveryFresh
 	fresh.Committed = nil
 	fresh.DegradedReason = ""
 	catalogue := portsmocks.NewMockCatalogue(t)
@@ -492,25 +487,23 @@ func TestSessionRecoveryCommand(t *testing.T) {
 
 	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard")
 	require.NoError(t, err)
-	require.Equal(t, runtimeFresh, d.stopped[degraded.Name].state)
+	require.Equal(t, ports.SessionStopped, d.stopped[degraded.Name].state)
 	require.Equal(t, fresh, d.stopped[degraded.Name].record)
 }
 
 func TestListShowsDegraded(t *testing.T) {
 	fresh := durableRecoveryRecord(0)
-	fresh.RecoveryState = domain.RecoveryFresh
 	fresh.Committed = nil
 	restoring := durableRecoveryRecord(1)
 	degraded := durableRecoveryRecord(2)
-	degraded.RecoveryState = domain.RecoveryDegraded
 	degraded.DegradedReason = "checkpoint validation failed"
 	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fresh, restoring, degraded}, &durableRecoveryRepository{})
 
 	listed := listSessions(t, d)
 	require.Equal(t, []ports.SessionInfo{
 		{Name: fresh.Name, State: ports.SessionStopped},
-		{Name: restoring.Name, State: ports.SessionRestoring},
-		{Name: degraded.Name, State: ports.SessionDegraded},
+		{Name: restoring.Name, State: ports.SessionStopped},
+		{Name: degraded.Name, State: ports.SessionBroken},
 	}, listed.Sessions)
 }
 
@@ -520,12 +513,12 @@ func TestListPurgingDominatesRestoringState(t *testing.T) {
 	d.mu.Lock()
 	entry := d.stopped[record.Name]
 	entry.purging = true
-	entry.state = runtimeRestoring
+	entry.state = ports.SessionStopped
 	d.stopped[record.Name] = entry
 	d.mu.Unlock()
 
 	listed := listSessions(t, d)
-	require.Equal(t, []ports.SessionInfo{{Name: record.Name, State: ports.SessionDegraded}}, listed.Sessions)
+	require.Equal(t, []ports.SessionInfo{{Name: record.Name, State: ports.SessionBroken}}, listed.Sessions)
 }
 
 func TestAttachWaitsForRestore(t *testing.T) {
@@ -548,14 +541,30 @@ func TestAttachWaitsForRestore(t *testing.T) {
 	}
 	require.Zero(t, factory.calls.Load())
 
-	d.setStoppedRecovery(record, runtimeDegraded)
+	d.setStoppedRecovery(record, ports.SessionBroken)
 	d.mu.Lock()
 	closeRuntimeRestoreDoneLocked(d.stopped[record.Name].restoreDone)
 	d.mu.Unlock()
 	var protocolError *protoErr
 	require.ErrorAs(t, <-result, &protocolError)
-	require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+	require.Equal(t, ports.ErrInternal, protocolError.code)
 	require.Zero(t, factory.calls.Load())
+}
+
+func TestAttachRestoreWaitHonorsContextCancellation(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- d.waitForTargetRestore(ctx, record.Name) }()
+
+	select {
+	case err := <-result:
+		t.Fatalf("restore wait returned before cancellation: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	cancel()
+	require.ErrorIs(t, <-result, context.Canceled)
 }
 
 func TestRestoreCancellationTransitionsBeforeAttachCompletion(t *testing.T) {
@@ -579,11 +588,10 @@ func TestRestoreCancellationTransitionsBeforeAttachCompletion(t *testing.T) {
 
 	var protocolError *protoErr
 	require.ErrorAs(t, <-attached, &protocolError)
-	require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+	require.Equal(t, ports.ErrInternal, protocolError.code)
 	<-restored
 	entry := d.stopped[record.Name]
-	require.Equal(t, runtimeDegraded, entry.state)
-	require.Equal(t, domain.RecoveryDegraded, entry.record.RecoveryState)
+	require.Equal(t, ports.SessionBroken, entry.state)
 	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
 	select {
 	case <-entry.restoreDone:
@@ -602,13 +610,13 @@ func TestWaitForTargetRestoreRejectsClosedRestoringChannel(t *testing.T) {
 	d.mu.Unlock()
 
 	result := make(chan error, 1)
-	go func() { result <- d.waitForTargetRestore(record.Name) }()
+	go func() { result <- d.waitForTargetRestore(context.Background(), record.Name) }()
 
 	select {
 	case err := <-result:
 		var protocolError *protoErr
 		require.ErrorAs(t, err, &protocolError)
-		require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+		require.Equal(t, ports.ErrInternal, protocolError.code)
 	case <-time.After(time.Second):
 		t.Fatal("waiter spun on a closed restore channel")
 	}
@@ -620,21 +628,23 @@ func TestWaitForTargetRestoreDistinguishesHealthyRuntime(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	tests := []struct {
 		name    string
-		state   runtimeRecoveryState
+		state   ports.SessionState
 		message string
 	}{
-		{name: "healthy record without runtime", state: runtimeHealthy, message: "session was not restored into this daemon: " + record.Name},
-		{name: "degraded durable state", state: runtimeDegraded, message: "session durable state is degraded: " + record.Name},
-		{name: "deleting durable state", state: runtimeDeleting, message: "session durable state is degraded: " + record.Name},
+		{name: "healthy record without runtime", state: ports.SessionStopped, message: "session was not restored into this daemon: " + record.Name},
+		{name: "broken durable state", state: ports.SessionBroken, message: "session durable state is broken: " + record.Name},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
 			d.setStoppedRecovery(record, tt.state)
+			d.mu.Lock()
+			closeRuntimeRestoreDoneLocked(d.stopped[record.Name].restoreDone)
+			d.mu.Unlock()
 
 			var protocolError *protoErr
-			require.ErrorAs(t, d.waitForTargetRestore(record.Name), &protocolError)
-			require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+			require.ErrorAs(t, d.waitForTargetRestore(context.Background(), record.Name), &protocolError)
+			require.Equal(t, ports.ErrInternal, protocolError.code)
 			require.Equal(t, tt.message, protocolError.Error())
 		})
 	}
@@ -642,7 +652,6 @@ func TestWaitForTargetRestoreDistinguishesHealthyRuntime(t *testing.T) {
 
 func TestAttachRejectsDegraded(t *testing.T) {
 	record := durableRecoveryRecord(0)
-	record.RecoveryState = domain.RecoveryDegraded
 	record.DegradedReason = "checkpoint validation failed"
 	factory := &recoveryCountingPTYFactory{}
 	d := New(factory, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
@@ -652,7 +661,7 @@ func TestAttachRejectsDegraded(t *testing.T) {
 	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name}, nil)
 	var protocolError *protoErr
 	require.ErrorAs(t, err, &protocolError)
-	require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+	require.Equal(t, ports.ErrInternal, protocolError.code)
 	require.Zero(t, factory.calls.Load())
 }
 
@@ -664,7 +673,7 @@ func TestRestoreUnavailableReleasesPerRecordWaiters(t *testing.T) {
 	d.mu.Lock()
 	entry := d.stopped[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, runtimeDegraded, entry.state)
+	require.Equal(t, ports.SessionBroken, entry.state)
 	select {
 	case <-entry.restoreDone:
 	default:
@@ -674,13 +683,12 @@ func TestRestoreUnavailableReleasesPerRecordWaiters(t *testing.T) {
 
 func TestCatalogueRestoreDegradedVisible(t *testing.T) {
 	record := durableRecoveryRecord(0)
-	record.RecoveryState = domain.RecoveryDegraded
 	record.DegradedReason = "checkpoint validation failed"
 	repository := &durableRecoveryRepository{generations: make(map[string]ports.SnapshotGeneration), errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
 	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
 	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-	require.Equal(t, runtimeDegraded, d.stopped[record.Name].state)
+	require.Equal(t, ports.SessionBroken, d.stopped[record.Name].state)
 	require.Zero(t, repository.loads[record.Name])
 }

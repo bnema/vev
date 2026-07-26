@@ -448,9 +448,7 @@ func TestCommandErrorCodes(t *testing.T) {
 	require.Equal(t, uint16(7), ErrNotScriptable)
 	require.Equal(t, uint16(8), ErrInvalidCommandArgs)
 	require.Equal(t, uint16(9), ErrNoSuchTarget)
-	require.Equal(t, uint16(10), ErrSessionRestoring)
-	require.Equal(t, uint16(11), ErrSessionDegraded)
-	require.Equal(t, uint16(12), ErrAmbiguousTarget)
+	require.Equal(t, uint16(10), ErrAmbiguousTarget)
 }
 
 func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
@@ -749,10 +747,9 @@ func TestSessionInfoRecoveryState(t *testing.T) {
 		state SessionState
 		want  []byte
 	}{
-		{name: "running", state: SessionRunning, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
-		{name: "stopped", state: SessionStopped, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
-		{name: "restoring", state: SessionRestoring, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 3}},
-		{name: "degraded", state: SessionDegraded, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 4}},
+		{name: "running", state: SessionRunning, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{name: "stopped", state: SessionStopped, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
+		{name: "broken", state: SessionBroken, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -765,7 +762,7 @@ func TestSessionInfoRecoveryState(t *testing.T) {
 			assertTrailingGarbageFails(t, payload, UnmarshalSessions)
 		})
 	}
-	for _, state := range []byte{0, 5} {
+	for _, state := range []byte{3, 255} {
 		payload := append([]byte(nil), tests[0].want...)
 		payload[len(payload)-1] = state
 		_, err := UnmarshalSessions(payload)
@@ -792,8 +789,8 @@ func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 			}},
 			want: []byte{
 				0x00, 0x02,
-				0x00, 0x01, 0x30, 0x00, 0x01, 0x30, 0x01, 0x00, 0x01, 0x00, 0x01,
-				0x00, 0x04, 0x77, 0x6f, 0x72, 0x6b, 0x00, 0x04, 0x70, 0x72, 0x6f, 0x6a, 0x00, 0x00, 0x05, 0x01, 0x02,
+				0x00, 0x01, 0x30, 0x00, 0x01, 0x30, 0x01, 0x00, 0x01, 0x00, 0x00,
+				0x00, 0x04, 0x77, 0x6f, 0x72, 0x6b, 0x00, 0x04, 0x70, 0x72, 0x6f, 0x6a, 0x00, 0x00, 0x05, 0x01, 0x01,
 			},
 		},
 	}

@@ -34,7 +34,6 @@ func TestLivePurgeLeavesFailedDirectoryDeletionForStartupGarbageCollection(t *te
 	WithStore(t, store)(d)
 	sess := newSnapshotTestSession(t, "work", false, "/work")
 	record := sess.persistRecordLocked(1)
-	record.RecoveryState = domain.RecoveryFresh
 	require.NoError(t, d.catalogue.Create(record))
 	pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
 	require.True(t, ok)

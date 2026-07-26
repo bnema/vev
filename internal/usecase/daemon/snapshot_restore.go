@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/vt"
@@ -16,11 +17,15 @@ import (
 func (d *Daemon) closeRestoreDone() {
 	d.mu.Lock()
 	for name, entry := range d.stopped {
-		if entry.state != runtimeRestoring {
+		if entry.restoreDone == nil {
 			continue
 		}
-		entry.state = runtimeDegraded
-		entry.record.RecoveryState = domain.RecoveryDegraded
+		select {
+		case <-entry.restoreDone:
+			continue
+		default:
+		}
+		entry.state = ports.SessionBroken
 		if entry.record.DegradedReason == "" {
 			entry.record.DegradedReason = "restore unavailable"
 		}

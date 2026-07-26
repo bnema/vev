@@ -320,7 +320,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	sess.snapEligible.Store(!ephemeral && name != "")
 	if !ephemeral {
 		if d.persistEnabled {
-			record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names, RecoveryState: domain.RecoveryFresh}
+			record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}
 			if d.recovery == nil {
 				closeTabs(tabs)
 				cancel()
@@ -901,7 +901,7 @@ func (s *session) persistRecordLocked(updatedAt int64) domain.CatalogueRecord {
 	} else {
 		tabNames = tabNames[:lastCustom+1]
 	}
-	return domain.CatalogueRecord{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames, RecoveryState: domain.RecoveryFresh}
+	return domain.CatalogueRecord{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {

@@ -12,16 +12,6 @@ import (
 // IncarnationID permanently distinguishes uses of the same session name.
 type IncarnationID [16]byte
 
-// RecoveryState describes whether and how a named session can be restored.
-type RecoveryState uint8
-
-const (
-	RecoveryFresh RecoveryState = iota + 1
-	RecoveryHealthy
-	RecoveryDegraded
-	RecoveryDeleting
-)
-
 // CheckpointRef identifies one immutable snapshot manifest.
 type CheckpointRef struct {
 	Generation     uint64
@@ -37,7 +27,6 @@ type CatalogueRecord struct {
 	UpdatedAt      int64
 	LastUsedSeq    uint64
 	TabNames       []string
-	RecoveryState  RecoveryState
 	Committed      *CheckpointRef
 	DegradedReason string
 }
@@ -55,8 +44,8 @@ func (r *CheckpointRef) Equal(other *CheckpointRef) bool {
 func (r CatalogueRecord) Equal(other CatalogueRecord) bool {
 	return r.Name == other.Name && r.IncarnationID == other.IncarnationID && r.Cwd == other.Cwd &&
 		r.CreatedAt == other.CreatedAt && r.UpdatedAt == other.UpdatedAt && r.LastUsedSeq == other.LastUsedSeq &&
-		slices.Equal(r.TabNames, other.TabNames) && r.RecoveryState == other.RecoveryState &&
-		r.Committed.Equal(other.Committed) && r.DegradedReason == other.DegradedReason
+		slices.Equal(r.TabNames, other.TabNames) && r.Committed.Equal(other.Committed) &&
+		r.DegradedReason == other.DegradedReason
 }
 
 // CatalogueMetadataUpdate changes mutable runtime metadata for one catalogue
@@ -130,30 +119,8 @@ func (r CatalogueRecord) Validate() error {
 		return errors.New("zero catalogue incarnation ID")
 	}
 
-	switch r.RecoveryState {
-	case RecoveryFresh:
-		if r.Committed != nil {
-			return errors.New("fresh session has checkpoint reference")
-		}
-	case RecoveryHealthy:
-		if r.Committed == nil {
-			return errors.New("healthy session has no committed checkpoint")
-		}
-	case RecoveryDegraded:
-		if r.Committed == nil {
-			return errors.New("degraded session has no committed checkpoint")
-		}
-		if r.DegradedReason == "" {
-			return errors.New("degraded session has no reason")
-		}
-	case RecoveryDeleting:
-		// A fresh or checkpointed session may be deleted.
-	default:
-		return errors.New("invalid recovery state")
-	}
-
-	if r.RecoveryState != RecoveryDegraded && r.DegradedReason != "" {
-		return errors.New("non-degraded session has degraded reason")
+	if r.DegradedReason != "" && r.Committed == nil {
+		return errors.New("broken session has no committed checkpoint")
 	}
 	if r.Committed != nil {
 		if r.Committed.Generation == 0 {

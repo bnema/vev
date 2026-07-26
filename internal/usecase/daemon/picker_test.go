@@ -226,7 +226,7 @@ func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
 	d, from, ac, _ := newManualSessionWithPTYs(t, p)
 	record := durableRecoveryRecord(0)
 	record.Name = "restoring"
-	state, done := initialRuntimeRecoveryState(record)
+	state, done := initialSessionState(record)
 	d.stopped[record.Name] = stoppedSession{
 		name:        record.Name,
 		createdAt:   record.CreatedAt,
@@ -296,7 +296,7 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 	d.mu.Lock()
 	entry := d.stopped[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, runtimeDegraded, entry.state)
+	require.Equal(t, ports.SessionBroken, entry.state)
 	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
 	select {
 	case <-entry.restoreDone:
@@ -308,13 +308,11 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 	tests := []struct {
 		name         string
-		recovery     domain.RecoveryState
-		runtimeState runtimeRecoveryState
+		broken       bool
+		runtimeState ports.SessionState
 	}{
-		{name: "degraded", recovery: domain.RecoveryDegraded, runtimeState: runtimeDegraded},
-		{name: "deleting", recovery: domain.RecoveryDeleting, runtimeState: runtimeDeleting},
-		{name: "healthy with missing runtime state", recovery: domain.RecoveryHealthy},
-		{name: "healthy without restored runtime", recovery: domain.RecoveryHealthy, runtimeState: runtimeHealthy},
+		{name: "broken", broken: true, runtimeState: ports.SessionBroken},
+		{name: "healthy without restored runtime", runtimeState: ports.SessionStopped},
 	}
 
 	for _, tt := range tests {
@@ -325,7 +323,9 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 			store, storeState := newMockStore(t)
 			record := durableRecoveryRecord(0)
 			record.Name = "unsafe"
-			record.RecoveryState = tt.recovery
+			if tt.broken {
+				record.DegradedReason = "checkpoint validation failed"
+			}
 			catalogue := persist.New(store)
 			WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 			d.stopped[record.Name] = stoppedSession{
@@ -345,7 +345,7 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 			require.Equal(t, domain.NoticeSessionUnavailable, userError.Code)
 			var protocolError *protoErr
 			require.ErrorAs(t, err, &protocolError)
-			require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+			require.Equal(t, ports.ErrInternal, protocolError.code)
 			require.Zero(t, factory.calls.Load(), "unsafe target must not open a PTY")
 			require.Same(t, from, ac.currentSession())
 
@@ -368,7 +368,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	defer release3()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactorySeq(t, p2, p3)
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work", RecoveryState: domain.RecoveryFresh}, state: runtimeFresh}
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: ports.SessionStopped}
 
 	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1142,7 +1142,6 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	}
 	record := target.persistRecordLocked(1)
 	target.mu.Unlock()
-	record.RecoveryState = domain.RecoveryFresh
 	require.NoError(t, d.catalogue.Create(record))
 
 	d.enterPicker(from, ac)
@@ -1178,7 +1177,7 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	cause := errors.New("delete failed")
 	store, state := newMockStore(t)
 	WithStore(t, store)(d)
-	record := domain.CatalogueRecord{Name: "stopped", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/stopped", CreatedAt: 7, RecoveryState: domain.RecoveryFresh}
+	record := domain.CatalogueRecord{Name: "stopped", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/stopped", CreatedAt: 7}
 	require.NoError(t, d.catalogue.Create(record))
 	state.mu.Lock()
 	state.deleteErr = func(string) error { return cause }

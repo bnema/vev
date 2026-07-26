@@ -37,18 +37,14 @@ func TestCatalogueRecordValidate(t *testing.T) {
 		record    CatalogueRecord
 		wantValid bool
 	}{
-		{name: "fresh valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh}, wantValid: true},
-		{name: "healthy with committed checkpoint valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}}, wantValid: true},
-		{name: "invalid session name", record: CatalogueRecord{Name: "bad/name", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh}},
-		{name: "zero incarnation", record: CatalogueRecord{Name: "work", RecoveryState: RecoveryFresh}},
-		{name: "unknown recovery state", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryState(99)}},
-		{name: "fresh with committed checkpoint", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryFresh, Committed: validRef}},
-		{name: "healthy without committed checkpoint", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy}},
-		{name: "degraded without committed checkpoint", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryDegraded, DegradedReason: "missing manifest"}},
-		{name: "degraded without reason", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryDegraded, Committed: validRef}},
-		{name: "healthy with degraded reason", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: validRef, DegradedReason: "missing manifest"}},
-		{name: "zero checkpoint generation", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{ManifestDigest: [32]byte{1}}}},
-		{name: "zero checkpoint digest", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, RecoveryState: RecoveryHealthy, Committed: &CheckpointRef{Generation: 7}}},
+		{name: "fresh valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}}, wantValid: true},
+		{name: "healthy with committed checkpoint valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, Committed: &CheckpointRef{Generation: 7, ManifestDigest: [32]byte{1}}}, wantValid: true},
+		{name: "invalid session name", record: CatalogueRecord{Name: "bad/name", IncarnationID: IncarnationID{1}}},
+		{name: "zero incarnation", record: CatalogueRecord{Name: "work"}},
+		{name: "broken with committed checkpoint valid", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, Committed: validRef, DegradedReason: "missing manifest"}, wantValid: true},
+		{name: "broken without committed checkpoint", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, DegradedReason: "missing manifest"}},
+		{name: "zero checkpoint generation", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, Committed: &CheckpointRef{ManifestDigest: [32]byte{1}}}},
+		{name: "zero checkpoint digest", record: CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, Committed: &CheckpointRef{Generation: 7}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -64,7 +60,7 @@ func TestCatalogueRecordValidate(t *testing.T) {
 
 func TestCatalogueRecordEqualUsesCheckpointValuesAndOrderedTabs(t *testing.T) {
 	committed := CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
-	left := CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, TabNames: []string{"shell", "logs"}, RecoveryState: RecoveryHealthy, Committed: &committed}
+	left := CatalogueRecord{Name: "work", IncarnationID: IncarnationID{1}, TabNames: []string{"shell", "logs"}, Committed: &committed}
 	right := left
 	right.TabNames = append([]string(nil), left.TabNames...)
 	committedCopy := committed

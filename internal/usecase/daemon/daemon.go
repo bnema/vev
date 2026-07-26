@@ -221,16 +221,6 @@ type parkedAttachment struct {
 
 // session is a single multiplexed session. It owns one or more full-screen
 
-type runtimeRecoveryState uint8
-
-const (
-	runtimeFresh runtimeRecoveryState = iota + 1
-	runtimeRestoring
-	runtimeHealthy
-	runtimeDegraded
-	runtimeDeleting
-)
-
 type stoppedSession struct {
 	name        string
 	cwd         string
@@ -240,7 +230,7 @@ type stoppedSession struct {
 	tabNames    []string
 	purging     bool
 	record      domain.CatalogueRecord
-	state       runtimeRecoveryState
+	state       ports.SessionState
 	restoreDone chan struct{}
 }
 
@@ -487,7 +477,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		stopped := stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: append([]string(nil), r.TabNames...)}
 		if d.catalogueRecordsProvided {
 			stopped.record = r
-			stopped.state, stopped.restoreDone = initialRuntimeRecoveryState(r)
+			stopped.state, stopped.restoreDone = initialSessionState(r)
 		}
 		d.stopped[r.Name] = stopped
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
@@ -811,17 +801,10 @@ func (d *Daemon) handleList(tr ports.Transport) {
 			continue
 		}
 		state := ports.SessionStopped
-		if stopped.purging {
+		if stopped.purging || stopped.state == ports.SessionBroken {
 			// Purge is the dominant externally visible state: restoration must
 			// never make a deletion-reserved record appear attachable.
-			state = ports.SessionDegraded
-		} else {
-			switch stopped.state {
-			case runtimeRestoring:
-				state = ports.SessionRestoring
-			case runtimeDegraded, runtimeDeleting:
-				state = ports.SessionDegraded
-			}
+			state = ports.SessionBroken
 		}
 		infos = append(infos, ports.SessionInfo{Name: name, State: state})
 	}
@@ -959,63 +942,44 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	return ac
 }
 
-func (d *Daemon) waitForTargetRestore(name string) error {
-	var observedClosed chan struct{}
-	for {
-		d.mu.Lock()
-		if d.findByNameLocked(name) != nil {
-			d.mu.Unlock()
-			return nil
-		}
-		stopped, ok := d.stopped[name]
-		if !ok || stopped.purging {
-			d.mu.Unlock()
-			return nil
-		}
-		switch stopped.state {
-		case runtimeFresh:
-			if stopped.record.Name == "" || stopped.record.RecoveryState == domain.RecoveryFresh {
-				d.mu.Unlock()
-				return nil
-			}
-			d.mu.Unlock()
-			return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
-		case runtimeRestoring:
-			done := stopped.restoreDone
-			if done == nil || done == observedClosed {
-				d.mu.Unlock()
-				return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
-			}
-			var shutdown <-chan struct{}
-			if d.serveCtx != nil {
-				shutdown = d.serveCtx.Done()
-			}
-			d.mu.Unlock()
-			select {
-			case <-done:
-				observedClosed = done
-				continue
-			case <-shutdown:
-				return &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
-			}
-		case runtimeHealthy:
-			// The catalogue record is healthy; only its runtime registration was
-			// skipped (shutdown, or a live session claimed the name first). Saying
-			// "degraded" here would send the operator to durable recovery for a
-			// session whose durable state is intact.
-			d.mu.Unlock()
-			return &protoErr{ports.ErrSessionDegraded, "session was not restored into this daemon: " + name}
-		case runtimeDegraded, runtimeDeleting:
-			d.mu.Unlock()
-			return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
-		default:
-			d.mu.Unlock()
-			if stopped.record.Name != "" {
-				return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
-			}
-			return nil
+func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
+	d.mu.Lock()
+	if d.findByNameLocked(name) != nil {
+		d.mu.Unlock()
+		return nil
+	}
+	stopped, ok := d.stopped[name]
+	if !ok || stopped.purging {
+		d.mu.Unlock()
+		return nil
+	}
+	done := stopped.restoreDone
+	d.mu.Unlock()
+
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.findByNameLocked(name) != nil {
+		return nil
+	}
+	stopped, ok = d.stopped[name]
+	if !ok || stopped.record.Name == "" {
+		return nil
+	}
+	if stopped.state == ports.SessionBroken {
+		return &protoErr{ports.ErrInternal, "session durable state is broken: " + name}
+	}
+	if stopped.record.Committed == nil {
+		return nil
+	}
+	return &protoErr{ports.ErrInternal, "session was not restored into this daemon: " + name}
 }
 
 // route resolves a Hello to a session and a freshly attached client, creating
@@ -1033,7 +997,11 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		}
 	}
 	if h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach {
-		if err := d.waitForTargetRestore(h.Name); err != nil {
+		ctx := d.serveCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := d.waitForTargetRestore(ctx, h.Name); err != nil {
 			return nil, nil, err
 		}
 	}

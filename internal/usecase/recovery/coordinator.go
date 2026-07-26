@@ -113,7 +113,6 @@ func (c *Coordinator) Create(ctx context.Context, record domain.CatalogueRecord)
 		return domain.CatalogueRecord{}, fmt.Errorf("recovery: generate incarnation: %w", err)
 	}
 	record.IncarnationID = id
-	record.RecoveryState = domain.RecoveryFresh
 	record.Committed = nil
 	record.DegradedReason = ""
 	if err := record.Validate(); err != nil {

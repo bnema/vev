@@ -10,7 +10,7 @@ import (
 
 var (
 	ErrRecoveryRecordNotFound = errors.New("recovery: session not found")
-	ErrSessionNotDegraded     = errors.New("recovery: session is not degraded")
+	ErrSessionNotBroken       = errors.New("recovery: session is not broken")
 )
 
 // Discard throws away a broken session's persisted state and replaces it with a
@@ -34,11 +34,11 @@ func (c *Coordinator) Discard(ctx context.Context, name string) error {
 	if !ok {
 		return fmt.Errorf("discard %q: %w", name, ErrRecoveryRecordNotFound)
 	}
-	if record.RecoveryState == domain.RecoveryFresh {
+	if record.Committed == nil {
 		return nil
 	}
-	if record.RecoveryState != domain.RecoveryDegraded {
-		return ErrSessionNotDegraded
+	if record.DegradedReason == "" {
+		return ErrSessionNotBroken
 	}
 
 	old := record.IncarnationID
@@ -48,7 +48,6 @@ func (c *Coordinator) Discard(ctx context.Context, name string) error {
 	}
 	fresh := record
 	fresh.IncarnationID = next
-	fresh.RecoveryState = domain.RecoveryFresh
 	fresh.Committed = nil
 	fresh.DegradedReason = ""
 	if err := fresh.Validate(); err != nil {

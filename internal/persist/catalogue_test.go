@@ -25,10 +25,10 @@ func TestCatalogue(t *testing.T) {
 func testCatalogueRecordRoundTrip(t *testing.T) {
 	ref1 := &domain.CheckpointRef{Generation: 9, ManifestDigest: [32]byte{1}}
 	tests := []domain.CatalogueRecord{
-		{Name: "fresh", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", RecoveryState: domain.RecoveryFresh},
-		{Name: "healthy", IncarnationID: domain.IncarnationID{2}, RecoveryState: domain.RecoveryHealthy, Committed: ref1},
-		{Name: "degraded", IncarnationID: domain.IncarnationID{4}, RecoveryState: domain.RecoveryDegraded, Committed: ref1, DegradedReason: "invalid manifest"},
-		{Name: "deleting", IncarnationID: domain.IncarnationID{5}, RecoveryState: domain.RecoveryDeleting},
+		{Name: "fresh", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp"},
+		{Name: "healthy", IncarnationID: domain.IncarnationID{2}, Committed: ref1},
+		{Name: "broken", IncarnationID: domain.IncarnationID{4}, Committed: ref1, DegradedReason: "invalid manifest"},
+		{Name: "other-fresh", IncarnationID: domain.IncarnationID{5}},
 	}
 	for _, record := range tests {
 		t.Run(record.Name, func(t *testing.T) {
@@ -46,17 +46,16 @@ func testCatalogueRecordRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDecodeRecordValueWrapsMalformedAndValidationErrors(t *testing.T) {
+func TestDecodeRecordValueRejectsMalformedCheckpointMarker(t *testing.T) {
 	encoded, err := encodeRecordValue(validRecord("work", 1))
 	require.NoError(t, err)
-	encoded[recoveryStateFieldOffset(t, encoded)] = 99
+	encoded[checkpointMarkerOffset(t, encoded)] = 99
 
 	_, err = decodeRecordValue("work", encoded)
 	require.ErrorIs(t, err, errMalformedRecord)
-	require.ErrorContains(t, err, "invalid recovery state")
 }
 
-func recoveryStateFieldOffset(t *testing.T, encoded []byte) int {
+func checkpointMarkerOffset(t *testing.T, encoded []byte) int {
 	t.Helper()
 	r := valueReader{data: encoded}
 	_, ok := r.take(len(catalogueMagic) + 2 + len(domain.IncarnationID{}))
@@ -77,8 +76,8 @@ func recoveryStateFieldOffset(t *testing.T, encoded []byte) int {
 func testCatalogueDuplicateIncarnations(t *testing.T) {
 	id := domain.IncarnationID{1}
 	require.Error(t, validateUniqueIncarnations([]domain.CatalogueRecord{
-		{Name: "one", IncarnationID: id, RecoveryState: domain.RecoveryFresh},
-		{Name: "two", IncarnationID: id, RecoveryState: domain.RecoveryFresh},
+		{Name: "one", IncarnationID: id},
+		{Name: "two", IncarnationID: id},
 	}))
 }
 
@@ -105,8 +104,8 @@ func testCatalogueApplyRenameReplace(t *testing.T) {
 	require.Empty(t, records)
 	defer func() { require.NoError(t, p.Close()) }()
 
-	one := domain.CatalogueRecord{Name: "one", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryFresh}
-	two := domain.CatalogueRecord{Name: "two", IncarnationID: domain.IncarnationID{2}, RecoveryState: domain.RecoveryFresh}
+	one := domain.CatalogueRecord{Name: "one", IncarnationID: domain.IncarnationID{1}}
+	two := domain.CatalogueRecord{Name: "two", IncarnationID: domain.IncarnationID{2}}
 	require.NoError(t, p.Apply(map[string]*domain.CatalogueRecord{"one": &one, "two": &two}))
 	renamed := one
 	renamed.Name = "renamed"
@@ -129,7 +128,7 @@ func testCatalogueMetadataUpdatePreservesAuthority(t *testing.T) {
 	original := domain.CatalogueRecord{
 		Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/old", CreatedAt: 11,
 		UpdatedAt: 12, LastUsedSeq: 13, TabNames: []string{"old"},
-		RecoveryState: domain.RecoveryDegraded, Committed: committed, DegradedReason: "repair pending",
+		Committed: committed, DegradedReason: "repair pending",
 	}
 	require.NoError(t, p.Create(original))
 

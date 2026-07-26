@@ -16,7 +16,7 @@ import (
 
 func privateDir(t *testing.T) string { t.Helper(); return filepath.Join(t.TempDir(), "vev") }
 func validRecord(name string, id byte) domain.CatalogueRecord {
-	return domain.CatalogueRecord{Name: name, IncarnationID: domain.IncarnationID{id}, RecoveryState: domain.RecoveryFresh}
+	return domain.CatalogueRecord{Name: name, IncarnationID: domain.IncarnationID{id}}
 }
 
 func TestOpenOrCreate(t *testing.T) {

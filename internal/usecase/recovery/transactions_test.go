@@ -119,8 +119,7 @@ func (r *transactionRepository) DeleteIncarnation(_ context.Context, id domain.I
 
 func degradedTransactionRecord() domain.CatalogueRecord {
 	return domain.CatalogueRecord{
-		Name: "broken", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryDegraded,
-		Committed:      &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
+		Name: "broken", IncarnationID: domain.IncarnationID{1}, Committed: &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
 		DegradedReason: "checkpoint unreadable",
 	}
 }
@@ -157,7 +156,6 @@ func TestDiscardIsRetryIdempotent(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, ok)
 			require.Nil(t, got.Committed)
-			require.Equal(t, domain.RecoveryFresh, got.RecoveryState)
 			require.NotEqual(t, old.IncarnationID, got.IncarnationID)
 			if tt.failBefore {
 				require.Contains(t, repository.deletedIDs, old.IncarnationID)

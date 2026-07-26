@@ -43,7 +43,6 @@ func (c *Coordinator) PublishCheckpoint(ctx context.Context, name string, public
 
 	ref := domain.CheckpointRef{Generation: publication.Generation, ManifestDigest: sha256.Sum256(publication.Manifest)}
 	next := record
-	next.RecoveryState = domain.RecoveryHealthy
 	next.Committed = copyCheckpointRef(&ref)
 	next.DegradedReason = ""
 	if err := next.Validate(); err != nil {

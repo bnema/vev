@@ -93,7 +93,6 @@ func checkpointRecord() domain.CatalogueRecord {
 	return domain.CatalogueRecord{
 		Name:          "work",
 		IncarnationID: domain.IncarnationID{1},
-		RecoveryState: domain.RecoveryFresh,
 	}
 }
 
@@ -138,7 +137,6 @@ func TestCheckpointCommits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			record, catalogue, _ := runCheckpointCommit(t, tc.count)
 			require.Equal(t, tc.wantCommitted, record.Committed.Generation)
-			require.Equal(t, domain.RecoveryHealthy, record.RecoveryState)
 			require.Empty(t, record.DegradedReason)
 			require.Equal(t, tc.count, catalogue.replaces)
 		})
@@ -148,7 +146,6 @@ func TestCheckpointCommits(t *testing.T) {
 func TestCheckpointCommitPublishOrphan(t *testing.T) {
 	prior := checkpointRecord()
 	priorRef := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
-	prior.RecoveryState = domain.RecoveryHealthy
 	prior.Committed = &priorRef
 	cause := errors.New("catalogue sync failed")
 	catalogue := &checkpointCatalogue{record: prior, replaceErr: cause}

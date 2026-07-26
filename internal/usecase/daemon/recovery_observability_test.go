@@ -15,11 +15,12 @@ import (
 func TestStartupRecoveryCounts(t *testing.T) {
 	var buffer bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buffer, nil))
+	ref := &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
 	records := []domain.CatalogueRecord{
-		{Name: "one", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryHealthy},
-		{Name: "two", IncarnationID: domain.IncarnationID{2}, RecoveryState: domain.RecoveryHealthy},
-		{Name: "new", IncarnationID: domain.IncarnationID{3}, RecoveryState: domain.RecoveryFresh},
-		{Name: "broken", IncarnationID: domain.IncarnationID{4}, RecoveryState: domain.RecoveryDegraded, DegradedReason: "terminal contents must not appear"},
+		{Name: "one", IncarnationID: domain.IncarnationID{1}, Committed: ref},
+		{Name: "two", IncarnationID: domain.IncarnationID{2}, Committed: ref},
+		{Name: "new", IncarnationID: domain.IncarnationID{3}},
+		{Name: "broken", IncarnationID: domain.IncarnationID{4}, Committed: ref, DegradedReason: "terminal contents must not appear"},
 	}
 	d := New(nil, stubClock{}, log, WithCatalogue(newDurableRecoveryCatalogue(records), records))
 	d.logSessionRestoreComplete(records[0], 7, false)
@@ -38,7 +39,7 @@ func TestStartupRecoveryCounts(t *testing.T) {
 	require.EqualValues(t, 2, startup["healthy"])
 	require.EqualValues(t, 1, startup["fresh"])
 	require.EqualValues(t, 0, startup["restoring"])
-	require.EqualValues(t, 1, startup["degraded"])
+	require.EqualValues(t, 1, startup["broken"])
 }
 
 type failingRecordsCatalogue struct {
@@ -52,7 +53,7 @@ func (c failingRecordsCatalogue) Records() ([]domain.CatalogueRecord, error) {
 
 func TestStartupRecoveryCountsFallsBackWhenCatalogueReadFails(t *testing.T) {
 	var buffer bytes.Buffer
-	record := domain.CatalogueRecord{Name: "broken", IncarnationID: domain.IncarnationID{4}, RecoveryState: domain.RecoveryDegraded, DegradedReason: "invalid"}
+	record := domain.CatalogueRecord{Name: "broken", IncarnationID: domain.IncarnationID{4}, Committed: &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}, DegradedReason: "invalid"}
 	d := New(nil, stubClock{}, slog.New(slog.NewJSONHandler(&buffer, nil)))
 	d.persistEnabled = true
 	d.catalogue = failingRecordsCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil), err: errors.New("read failed")}
@@ -63,7 +64,7 @@ func TestStartupRecoveryCountsFallsBackWhenCatalogueReadFails(t *testing.T) {
 	entries := daemonJSONLogs(t, buffer.Bytes())
 	daemonRequireEvent(t, entries, "daemon_startup_catalogue_read_failed")
 	startup := daemonRequireEvent(t, entries, "daemon_startup_complete")
-	require.EqualValues(t, 1, startup["degraded"])
+	require.EqualValues(t, 1, startup["broken"])
 }
 
 func daemonJSONLogs(t *testing.T, data []byte) []map[string]any {

@@ -473,7 +473,7 @@ func (e controlExec) SessionRecovery(action string) (string, error) {
 		return "", err
 	}
 	if ok {
-		e.d.setStoppedRecovery(record, runtimeFresh)
+		e.d.setStoppedRecovery(record, ports.SessionStopped)
 	}
 	return "", nil
 }

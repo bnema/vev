@@ -74,11 +74,12 @@ func TestRecoveryObservability(t *testing.T) {
 		},
 		log: log,
 	}
+	ref := &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
 	records := []domain.CatalogueRecord{
-		{RecoveryState: domain.RecoveryHealthy},
-		{RecoveryState: domain.RecoveryHealthy},
-		{RecoveryState: domain.RecoveryFresh},
-		{RecoveryState: domain.RecoveryDegraded},
+		{Committed: ref},
+		{Committed: ref},
+		{},
+		{Committed: ref, DegradedReason: "checkpoint validation failed"},
 	}
 	require.NoError(t, runWithLifecycleOwnerDeps(context.Background(), "/runtime/vev", "/state/vev", func(context.Context) error {
 		logCatalogueRecovery(log, records, "current")
@@ -94,7 +95,7 @@ func TestRecoveryObservability(t *testing.T) {
 	require.EqualValues(t, 2, startup["healthy"])
 	require.EqualValues(t, 1, startup["fresh"])
 	require.EqualValues(t, 0, startup["restoring"])
-	require.EqualValues(t, 1, startup["degraded"])
+	require.EqualValues(t, 1, startup["broken"])
 	require.NotContains(t, eventNames(entries), "interrupted_transaction_recovery_complete")
 }
 
@@ -640,19 +641,19 @@ func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
 	}
 }
 
-func TestListShowsDegraded(t *testing.T) {
+func TestListShowsBroken(t *testing.T) {
 	var out bytes.Buffer
 	printSessions(&out, []ports.SessionInfo{
 		{Name: "fresh", State: ports.SessionStopped},
-		{Name: "loading", State: ports.SessionRestoring},
-		{Name: "broken", State: ports.SessionDegraded},
+		{Name: "loading", State: ports.SessionStopped},
+		{Name: "broken", State: ports.SessionBroken},
 	})
 	require.Contains(t, out.String(), "fresh")
 	require.Contains(t, out.String(), "stopped")
 	require.Contains(t, out.String(), "loading")
-	require.Contains(t, out.String(), "restoring")
 	require.Contains(t, out.String(), "broken")
-	require.Contains(t, out.String(), "degraded")
+	require.NotContains(t, out.String(), "restoring")
+	require.NotContains(t, out.String(), "degraded")
 }
 
 func TestPrintSessionsShowsStoppedState(t *testing.T) {
@@ -696,7 +697,7 @@ func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 
 	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}); err != nil {
+	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatalf("Save error = %v", err)
 	}
 	if err := p.Close(); err != nil {
@@ -736,7 +737,7 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 
 	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}); err != nil {
+	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatalf("Save error = %v", err)
 	}
 	if err := p.Close(); err != nil {

@@ -493,7 +493,7 @@ func TestOfflineKillWaitsForLifecycleOwner(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 	now := time.Now().UnixNano()
-	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, CreatedAt: now, UpdatedAt: now}))
 	require.NoError(t, p.Close())
 	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
 	require.NoError(t, err)
@@ -533,7 +533,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 		Catalogue: newTestPersister(t, stateDir),
 		closed:    make(chan struct{}),
 	}
-	require.NoError(t, catalogue.Create(domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, catalogue.Create(domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}}))
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
 	shutdownClock := newLifecycleShutdownClock(t)
 	maintenanceRepository := &lifecycleBlockingMaintenanceRepository{
@@ -764,7 +764,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("checkpoint me\n")})}))
 	require.Eventually(t, func() bool {
 		record, ok, _ := opened.Catalogue.Record(name)
-		return ok && record.RecoveryState == domain.RecoveryHealthy && record.Committed != nil
+		return ok && record.Committed != nil && record.DegradedReason == ""
 	}, 5*time.Second, 10*time.Millisecond, "session never committed a checkpoint")
 	require.NoError(t, tr.Close())
 
