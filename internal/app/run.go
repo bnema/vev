@@ -521,9 +521,13 @@ func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord
 
 func constructDaemonBeforeSocketPublication(
 	construct func() *daemon.Daemon,
+	prepare func(*daemon.Daemon) error,
 	listen func() (ports.Listener, error),
 ) (*daemon.Daemon, ports.Listener, error) {
 	d := construct()
+	if err := prepare(d); err != nil {
+		return d, nil, err
+	}
 	ln, err := listen()
 	return d, ln, err
 }
@@ -601,12 +605,21 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	// publication. Phase 3 snapshot restoration remains asynchronous in Serve.
 	d, ln, err := constructDaemonBeforeSocketPublication(
 		func() *daemon.Daemon { return daemon.New(pty.NewFactory(), clk, log, daemonOpts...) },
+		func(d *daemon.Daemon) error {
+			if err := d.CollectStartupGarbage(ctx); err != nil {
+				// GC is best-effort, but it is fully finished before socket
+				// publication. A failed pass leaves durable state untouched and
+				// restoration retains its per-session failure isolation.
+				log.Warn("snapshot_garbage_collection_failed", "err", err)
+			}
+			return nil
+		},
 		func() (ports.Listener, error) { return listenDaemon(ipc.SocketDir(), observer) },
 	)
 	if err != nil {
 		closeErr := opened.Catalogue.Close()
-		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
-		return errors.Join(fmt.Errorf("vev: daemon listen: %w", err), closeErr)
+		log.Error("daemon startup preparation failed", "socket_dir", ipc.SocketDir(), "err", err)
+		return errors.Join(fmt.Errorf("vev: prepare daemon startup: %w", err), closeErr)
 	}
 	defer func() { _ = ln.Close() }()
 	log.Info("daemon starting", "socket", ln.Addr())

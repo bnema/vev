@@ -240,14 +240,19 @@ func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
 			events = append(events, "catalogue-registry")
 			return nil
 		},
-		func() (ports.Listener, error) {
+		func(*daemon.Daemon) error {
 			require.Equal(t, []string{"catalogue-registry"}, events)
+			events = append(events, "startup-garbage-collection")
+			return nil
+		},
+		func() (ports.Listener, error) {
+			require.Equal(t, []string{"catalogue-registry", "startup-garbage-collection"}, events)
 			events = append(events, "socket-publication")
 			return nil, nil
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, []string{"catalogue-registry", "socket-publication"}, events)
+	require.Equal(t, []string{"catalogue-registry", "startup-garbage-collection", "socket-publication"}, events)
 }
 
 func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {

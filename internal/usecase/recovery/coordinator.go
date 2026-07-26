@@ -85,6 +85,11 @@ type Coordinator struct {
 	catalogue  ports.Catalogue
 	repository ports.SnapshotRepository
 	locks      *KeyLocks
+	// mutationMu serializes the startup GC snapshot and collection with every
+	// catalogue or checkpoint mutation. Startup normally provides this fence by
+	// running before socket publication; retaining it here also makes the
+	// coordinator safe when used directly by a composition root.
+	mutationMu sync.Mutex
 	random     io.Reader
 }
 
@@ -101,6 +106,8 @@ func (c *Coordinator) Create(ctx context.Context, record domain.CatalogueRecord)
 	if err := ctx.Err(); err != nil {
 		return domain.CatalogueRecord{}, err
 	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
 	unlock := c.locks.Lock([]string{record.Name})
 	defer unlock()
 	if _, exists, err := c.catalogue.Record(record.Name); err != nil {
@@ -133,6 +140,8 @@ func (c *Coordinator) Rename(ctx context.Context, oldName, newName string) (doma
 	if err := ctx.Err(); err != nil {
 		return domain.CatalogueRecord{}, err
 	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
 	unlock := c.locks.Lock([]string{oldName, newName})
 	defer unlock()
 	record, ok, err := c.catalogue.Record(oldName)
@@ -168,6 +177,8 @@ func (c *Coordinator) Delete(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
 	record, ok, err := c.catalogue.Record(name)
@@ -181,4 +192,36 @@ func (c *Coordinator) Delete(ctx context.Context, name string) error {
 		return err
 	}
 	return c.repository.DeleteIncarnation(ctx, record.IncarnationID)
+}
+
+// CollectGarbage takes a catalogue snapshot and applies retention while all
+// catalogue mutations and checkpoint publications are fenced. Its keep map is
+// therefore never stale relative to an operation that creates an incarnation
+// or commits a new generation.
+func (c *Coordinator) CollectGarbage(ctx context.Context) (int, error) {
+	if c == nil || c.catalogue == nil || c.repository == nil {
+		return 0, errors.New("recovery: incomplete garbage collection dependencies")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+
+	records, err := c.catalogue.Records()
+	if err != nil {
+		return 0, err
+	}
+	keep := make(map[domain.IncarnationID]domain.CheckpointRef, len(records))
+	for _, record := range records {
+		if record.Committed != nil {
+			keep[record.IncarnationID] = *record.Committed
+			continue
+		}
+		keep[record.IncarnationID] = domain.CheckpointRef{}
+	}
+	if err := c.repository.CollectGarbage(ctx, keep); err != nil {
+		return len(keep), err
+	}
+	return len(keep), nil
 }

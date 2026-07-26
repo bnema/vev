@@ -25,9 +25,8 @@ func TestStartupGarbageCollectionUsesValidatedCatalogue(t *testing.T) {
 	})).Return(nil).Once()
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithDurableMaintenance(catalogue, repository)(d)
-	d.closeRestoreDone()
 
-	d.runStartupGarbageCollection(context.Background())
+	require.NoError(t, d.CollectStartupGarbage(context.Background()))
 }
 
 func TestStartupGarbageCollectionSkipsUnknownCatalogueState(t *testing.T) {
@@ -36,9 +35,8 @@ func TestStartupGarbageCollectionSkipsUnknownCatalogueState(t *testing.T) {
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithDurableMaintenance(catalogue, repository)(d)
-	d.closeRestoreDone()
 
-	d.runStartupGarbageCollection(context.Background())
+	require.Error(t, d.CollectStartupGarbage(context.Background()))
 	repository.AssertNotCalled(t, "CollectGarbage", mock.Anything, mock.Anything)
 	require.NotNil(t, d.maintenance.catalogue)
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -16,57 +17,43 @@ func newMaintenanceDependencies(catalogue ports.Catalogue, repository ports.Snap
 	return maintenanceDependencies{catalogue: catalogue, repository: repository}
 }
 
-func (d *Daemon) startDurableMaintenance() {
+// CollectStartupGarbage runs the one GC pass before the daemon socket is
+// published. In production the recovery coordinator fences the catalogue
+// snapshot and collection against every durable mutation and checkpoint
+// publication. The fallback keeps standalone daemon tests usable when no
+// coordinator is installed.
+func (d *Daemon) CollectStartupGarbage(ctx context.Context) error {
 	if d == nil {
-		return
+		return nil
 	}
-	d.snapshotWorkerMu.Lock()
-	if d.maintenanceWorkerCancel != nil {
-		d.snapshotWorkerMu.Unlock()
-		return
+	if d.recovery != nil {
+		incarnations, err := d.recovery.CollectGarbage(ctx)
+		if err != nil {
+			return fmt.Errorf("collect startup snapshots: %w", err)
+		}
+		d.log.Info("snapshot_garbage_collection_complete", "incarnations", incarnations)
+		return nil
 	}
-	ctx, cancel := context.WithCancel(d.serveCtx)
-	d.maintenanceWorkerCancel = cancel
-	d.maintenanceWorkerDone = make(chan struct{})
-	done := d.maintenanceWorkerDone
-	d.snapshotWorkerMu.Unlock()
 
-	go func() {
-		defer close(done)
-		d.runStartupGarbageCollection(ctx)
-	}()
-}
-
-// runStartupGarbageCollection waits for catalogue-driven restoration, then
-// takes a fresh catalogue snapshot and applies GC exactly once. A catalogue
-// read failure never produces a keep set, so destructive collection cannot run
-// without known-good catalogue state.
-func (d *Daemon) runStartupGarbageCollection(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-		return
-	case <-d.restoreDone:
-	}
-	deps := &d.maintenance
+	deps := d.maintenance
 	if deps.catalogue == nil || deps.repository == nil {
-		return
+		return nil
 	}
 	records, err := deps.catalogue.Records()
 	if err != nil {
-		d.log.Warn("snapshot_garbage_collection_skipped", "reason", "catalogue-read-failed", "err", err)
-		return
+		return fmt.Errorf("read startup catalogue: %w", err)
 	}
 	keep := make(map[domain.IncarnationID]domain.CheckpointRef, len(records))
 	for _, record := range records {
-		var committed domain.CheckpointRef
 		if record.Committed != nil {
-			committed = *record.Committed
+			keep[record.IncarnationID] = *record.Committed
+			continue
 		}
-		keep[record.IncarnationID] = committed
+		keep[record.IncarnationID] = domain.CheckpointRef{}
 	}
 	if err := deps.repository.CollectGarbage(ctx, keep); err != nil {
-		d.log.Warn("snapshot_garbage_collection_failed", "incarnations", len(keep), "err", err)
-		return
+		return fmt.Errorf("collect startup snapshots: %w", err)
 	}
 	d.log.Info("snapshot_garbage_collection_complete", "incarnations", len(keep))
+	return nil
 }

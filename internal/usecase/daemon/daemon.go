@@ -302,8 +302,8 @@ func WithNoticeStore(store ports.NoticeStore) Option {
 	return func(d *Daemon) { d.noticeStore = store }
 }
 
-// WithDurableMaintenance schedules one garbage-collection pass after
-// catalogue-driven restoration completes.
+// WithDurableMaintenance configures the one pre-publication garbage-collection
+// pass. The application invokes it before opening the daemon socket.
 func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository) Option {
 	return func(d *Daemon) {
 		d.maintenance = newMaintenanceDependencies(catalogue, repository)
@@ -524,10 +524,6 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	} else {
 		d.closeRestoreDone()
 	}
-	if d.maintenance.catalogue != nil && d.maintenance.repository != nil {
-		d.startDurableMaintenance()
-	}
-
 	// Break the accept loop when either the parent context is cancelled or the
 	// registry drains to empty: both close the listener, which fails Accept.
 	go func() {

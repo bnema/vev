@@ -24,6 +24,8 @@ func (c *Coordinator) Discard(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
 

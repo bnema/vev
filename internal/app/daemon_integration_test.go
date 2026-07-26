@@ -548,17 +548,11 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	releaseMaintenance := func() { releaseOnce.Do(func() { close(maintenanceRepository.release) }) }
 	t.Cleanup(releaseMaintenance)
 
-	listenerReady := make(chan struct{})
 	callbackReturned := make(chan struct{})
 	wrapperReturned := make(chan error, 1)
 	go func() {
 		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
 			defer close(callbackReturned)
-			listener, err := ipc.Listen(runtimeDir)
-			if err != nil {
-				return err
-			}
-			close(listenerReady)
 			d := daemon.New(
 				pty.NewFactory(),
 				shutdownClock,
@@ -567,14 +561,19 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 				daemon.WithDurableMaintenance(catalogue, maintenanceRepository),
 				daemon.WithCatalogue(catalogue, nil),
 			)
+			if err := d.CollectStartupGarbage(ctx); err != nil {
+				return err
+			}
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return err
+			}
 			return d.Serve(ctx, listener)
 		})
 	}()
 
-	awaitLifecycleStage(t, listenerReady, "daemon listener")
-	awaitLifecycleStage(t, maintenanceRepository.entered, "maintenance repository call")
+	awaitLifecycleStage(t, maintenanceRepository.entered, "pre-publication maintenance repository call")
 	cancel()
-	shutdownClock.nextTimer(t).fire()
 	select {
 	case <-callbackReturned:
 		t.Fatal("Serve callback returned after shutdown deadline while maintenance was blocked")

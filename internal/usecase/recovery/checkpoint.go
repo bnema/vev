@@ -22,6 +22,11 @@ func (c *Coordinator) PublishCheckpoint(ctx context.Context, name string, public
 	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
 		return domain.CatalogueRecord{}, errors.New("recovery: incomplete checkpoint coordinator dependencies")
 	}
+	if err := ctx.Err(); err != nil {
+		return domain.CatalogueRecord{}, err
+	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
 
