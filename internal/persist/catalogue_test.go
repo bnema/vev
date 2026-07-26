@@ -16,6 +16,7 @@ func TestCatalogue(t *testing.T) {
 	t.Run("duplicate-incarnations", testCatalogueDuplicateIncarnations)
 	t.Run("open-fails-closed", testCatalogueOpenFailsClosed)
 	t.Run("apply-rename-replace", testCatalogueApplyRenameReplace)
+	t.Run("metadata-update-preserves-authority", testCatalogueMetadataUpdatePreservesAuthority)
 	t.Run("read-only-malformed", testCatalogueLoadReadOnlyRejectsMalformedValue)
 }
 
@@ -85,6 +86,39 @@ func testCatalogueApplyRenameReplace(t *testing.T) {
 	got, err := p.LoadCatalogue()
 	require.NoError(t, err)
 	require.ElementsMatch(t, []domain.CatalogueRecord{renamed, two}, got)
+}
+
+func testCatalogueMetadataUpdatePreservesAuthority(t *testing.T) {
+	dir := privateDir(t)
+	p, _, err := openCurrentCatalogue(dir, true)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, p.Close()) }()
+
+	committed := &domain.CheckpointRef{Generation: 9, ManifestDigest: [32]byte{1}}
+	fallback1 := &domain.CheckpointRef{Generation: 8, ManifestDigest: [32]byte{2}}
+	fallback2 := &domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{3}}
+	original := domain.CatalogueRecord{
+		Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/old", CreatedAt: 11,
+		UpdatedAt: 12, LastUsedSeq: 13, TabNames: []string{"old"},
+		RecoveryState: domain.RecoveryDegraded, Committed: committed,
+		Fallbacks: [2]*domain.CheckpointRef{fallback1, fallback2}, DegradedReason: "repair pending",
+	}
+	require.NoError(t, p.Create(original))
+
+	update := domain.CatalogueRecord{Name: "work", IncarnationID: original.IncarnationID, Cwd: "/new", UpdatedAt: 22, LastUsedSeq: 23, TabNames: []string{"editor", "logs"}}
+	require.NoError(t, p.UpdateMetadata(update))
+	got, ok := p.Record("work")
+	require.True(t, ok)
+	expected := original
+	expected.Cwd, expected.UpdatedAt, expected.LastUsedSeq, expected.TabNames = update.Cwd, update.UpdatedAt, update.LastUsedSeq, update.TabNames
+	require.Equal(t, expected, got)
+
+	stale := update
+	stale.IncarnationID = domain.IncarnationID{2}
+	require.Error(t, p.UpdateMetadata(stale))
+	unchanged, ok := p.Record("work")
+	require.True(t, ok)
+	require.Equal(t, expected, unchanged)
 }
 
 func rawCorruptCatalogueWAL() []byte {

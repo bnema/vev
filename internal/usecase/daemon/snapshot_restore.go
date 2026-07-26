@@ -65,7 +65,7 @@ func validateRestoreSessionSnapshot(snap snapcodec.Session) error {
 
 // restoreSession owns the restored tabs until registration succeeds. Every
 // unsuccessful path closes their PTYs and cancels their shared session context.
-func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, repositoryGeneration uint64) error {
+func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, repositoryGeneration uint64, checkpoint domain.CheckpointRef) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -102,6 +102,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, rep
 	// The loaded manifest is the repository head for this name. Future dirty
 	// checkpoints must continue from it rather than reuse generation one.
 	sess.snapshotPublishedGeneration = repositoryGeneration
+	sess.snapshotPublishedCheckpoint = &checkpoint
 	registered, err := d.persistAndRegisterRestoredSession(ctx, sess)
 	if err != nil || !registered {
 		return err
@@ -269,8 +270,8 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	}
 	// The catalogue checkpoint already authorizes this runtime. Rewriting it
 	// during restoration would discard committed/fallback recovery metadata.
-	if d.catalogue == nil {
-		if err := d.persist.Save(sess.persistRecordLocked(sess.createdAt)); err != nil {
+	if d.catalogue == nil && d.persistEnabled {
+		if err := d.persist.Create(sess.persistRecordLocked(sess.createdAt)); err != nil {
 			return false, err
 		}
 	}

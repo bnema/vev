@@ -230,7 +230,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		d.log.Warn("checkpoint HEAD repair pending", "session", record.Name, "err", err)
 	}
 
-	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation); err != nil {
+	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {
 		return err
 	}
 	d.setStoppedRecovery(record, runtimeHealthy)

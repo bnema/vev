@@ -205,8 +205,35 @@ func (p *Persister) Replace(name string, next domain.CatalogueRecord) error {
 	return p.Apply(map[string]*domain.CatalogueRecord{name: &next})
 }
 
+// UpdateMetadata atomically updates ordinary session metadata on the existing
+// authoritative incarnation. Recovery and transaction fields are retained from
+// the stored record rather than accepted from a potentially stale runtime copy.
+func (p *Persister) UpdateMetadata(next domain.CatalogueRecord) error {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	value, ok := p.store.Get([]byte(next.Name))
+	if !ok {
+		return errors.New("persist: session not found")
+	}
+	current, err := decodeRecordValue(next.Name, value)
+	if err != nil {
+		return err
+	}
+	if next.IncarnationID == (domain.IncarnationID{}) || current.IncarnationID != next.IncarnationID {
+		return errors.New("persist: session incarnation changed")
+	}
+	current.Cwd = next.Cwd
+	current.UpdatedAt = next.UpdatedAt
+	current.LastUsedSeq = next.LastUsedSeq
+	current.TabNames = append([]string(nil), next.TabNames...)
+	return p.applyLocked(map[string]*domain.CatalogueRecord{current.Name: &current})
+}
+
 // Touch updates metadata while retaining the durable identity and recovery state.
-func (p *Persister) Touch(name, cwd string, at int64) error {
+func (p *Persister) Touch(name string, incarnation domain.IncarnationID, cwd string, at int64) error {
 	if p == nil || p.store == nil {
 		return nil
 	}
@@ -219,6 +246,9 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 	record, err := decodeRecordValue(name, value)
 	if err != nil {
 		return err
+	}
+	if incarnation == (domain.IncarnationID{}) || record.IncarnationID != incarnation {
+		return errors.New("persist: session incarnation changed")
 	}
 	record.Cwd, record.UpdatedAt = cwd, at
 	encoded, err := encodeRecordValue(record)
@@ -227,7 +257,7 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 	}
 	return p.store.Set([]byte(name), encoded)
 }
-func (p *Persister) TouchMRU(name string, sequence uint64) error {
+func (p *Persister) TouchMRU(name string, incarnation domain.IncarnationID, sequence uint64) error {
 	if p == nil || p.store == nil {
 		return nil
 	}
@@ -240,6 +270,9 @@ func (p *Persister) TouchMRU(name string, sequence uint64) error {
 	record, err := decodeRecordValue(name, value)
 	if err != nil {
 		return err
+	}
+	if incarnation == (domain.IncarnationID{}) || record.IncarnationID != incarnation {
+		return errors.New("persist: session incarnation changed")
 	}
 	record.LastUsedSeq = sequence
 	encoded, err := encodeRecordValue(record)

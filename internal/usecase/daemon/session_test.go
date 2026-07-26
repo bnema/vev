@@ -1185,6 +1185,7 @@ func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T)
 		store := portsmocks.NewMockStore(t)
 		var attempted map[string][]byte
 		store.EXPECT().Range(mock.Anything).Run(func(func([]byte, []byte) bool) {}).Twice()
+		store.EXPECT().Get([]byte("named")).Return(nil, false).Twice()
 		store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
 			attempted = make(map[string][]byte, len(changes))
 			for _, change := range changes {

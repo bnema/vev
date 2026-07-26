@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -255,6 +257,64 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	awaitSnapshotClean(t, restored)
 	require.Len(t, repository.publishes, 1)
 	require.Equal(t, uint64(10), repository.publishes[0].Generation, "a restored session must continue the concrete repository generation stream")
+}
+
+func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
+	snapshot := restoreAcceptanceSession(t, "restored")
+	generation := acceptanceGeneration(t, snapshot, 9)
+	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
+	store, _ := newMockStore(t)
+	catalogue := persist.New(store)
+	committed := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
+	fallback1 := domain.CheckpointRef{Generation: 8, ManifestDigest: [32]byte{8}}
+	fallback2 := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
+	record := domain.CatalogueRecord{
+		Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd",
+		CreatedAt: int64(snapshot.CreatedAt), UpdatedAt: 81, LastUsedSeq: 17,
+		TabNames: []string{"before"}, RecoveryState: domain.RecoveryHealthy,
+		Committed: &committed, Fallbacks: [2]*domain.CheckpointRef{&fallback1, &fallback2},
+	}
+	require.NoError(t, catalogue.Create(record))
+
+	pty, release := newBlockingPTY(t)
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
+	WithSnapshotRepository(repository, nil)(d)
+	WithCheckpointCoordinator(coordinator)(d)
+	t.Cleanup(func() { release(); d.sessWg.Wait() })
+
+	d.restoreIncrementalSnapshots(context.Background())
+	d.mu.Lock()
+	restored := d.findByNameLocked(snapshot.Name)
+	d.mu.Unlock()
+	require.NotNil(t, restored)
+	require.NoError(t, d.renameTab(restored, restored.tabs[0], "after"))
+
+	updated, ok := catalogue.Record(record.Name)
+	require.True(t, ok)
+	require.Equal(t, record.IncarnationID, updated.IncarnationID)
+	require.Equal(t, record.RecoveryState, updated.RecoveryState)
+	require.Equal(t, record.Committed, updated.Committed)
+	require.Equal(t, record.Fallbacks, updated.Fallbacks)
+	require.Equal(t, record.DegradedReason, updated.DegradedReason)
+	require.Equal(t, []string{"after"}, updated.TabNames)
+
+	startSnapshotEncodeWorker(t, d)
+	markSnapshotDirty(restored)
+	require.True(t, d.scheduleSnapshot(restored))
+	awaitSnapshotIdle(t, restored)
+	d.snapshotNoticeMu.Lock()
+	failure := d.snapshotActiveFailureSignature
+	d.snapshotNoticeMu.Unlock()
+	require.Empty(t, failure)
+	require.Len(t, repository.publishes, 1)
+	require.Equal(t, record.Committed, repository.publishes[0].ParentCheckpoint)
+	published, ok := catalogue.Record(record.Name)
+	require.True(t, ok)
+	require.Equal(t, uint64(10), published.Committed.Generation)
+	require.Equal(t, committed, *published.Fallbacks[0])
+	require.Equal(t, fallback1, *published.Fallbacks[1])
 }
 
 func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {

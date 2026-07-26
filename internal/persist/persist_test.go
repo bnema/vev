@@ -69,8 +69,8 @@ func TestCatalogueNilStoreIsNoOp(t *testing.T) {
 	for _, p := range persisters {
 		require.NoError(t, p.Save(validRecord("one", 1)))
 		require.NoError(t, p.Apply(map[string]*domain.CatalogueRecord{"one": nil}))
-		require.NoError(t, p.Touch("one", "/tmp", 1))
-		require.NoError(t, p.TouchMRU("one", 1))
+		require.NoError(t, p.Touch("one", domain.IncarnationID{1}, "/tmp", 1))
+		require.NoError(t, p.TouchMRU("one", domain.IncarnationID{1}, 1))
 		require.NoError(t, p.Delete("one"))
 		records, err := p.LoadAll()
 		require.NoError(t, err)
