@@ -198,8 +198,7 @@ func TestPaneRearrangeEdgeNoopHasExactSilentInvariants(t *testing.T) {
 	}
 
 	err := (daemonActions{d: h.daemon}).Run(request)
-	require.ErrorIs(t, err, errPaneRearrangeNoop, "the daemon action must retain an exact no-change sentinel")
-	require.NoError(t, (paletteExec{d: h.daemon, sess: h.session, ac: ac}).runAction(request), "palette normalizes the silent sentinel")
+	require.ErrorIs(t, err, errDaemonActionNoChange, "the daemon action must retain the package no-change sentinel")
 
 	require.Equal(t, before, h.snapshot(), "edge no-op changed tree, generations, snapshot state, pane identity, geometry, or VT size")
 	require.Zero(t, h.totalResizes())
@@ -213,12 +212,13 @@ func TestPaneRearrangeEdgeNoopHasExactSilentInvariants(t *testing.T) {
 
 func TestPaneRearrangeMapsUnsupportedAndTooSmallToUserNoticesAtomically(t *testing.T) {
 	tests := []struct {
-		name  string
-		size  domain.Size
-		tree  *layout.Tree
-		pane  layout.PaneID
-		dir   layout.Direction
-		cause error
+		name    string
+		size    domain.Size
+		tree    *layout.Tree
+		pane    layout.PaneID
+		dir     layout.Direction
+		cause   error
+		wantMsg string
 	}{
 		{
 			name: "unsupported layout",
@@ -228,6 +228,7 @@ func TestPaneRearrangeMapsUnsupportedAndTooSmallToUserNoticesAtomically(t *testi
 				{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-2"), layout.NewLeaf("pane-3")}},
 			}}, Focus: "pane-1"},
 			pane: "pane-1", dir: layout.Right, cause: layout.ErrUnsupportedColumnLayout,
+			wantMsg: "pane rearrangement requires a column layout",
 		},
 		{
 			name: "too small",
@@ -236,6 +237,7 @@ func TestPaneRearrangeMapsUnsupportedAndTooSmallToUserNoticesAtomically(t *testi
 				layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2"),
 			}}, Focus: "pane-1"},
 			pane: "pane-1", dir: layout.Right, cause: layout.ErrTooSmall,
+			wantMsg: "not enough space to rearrange pane",
 		},
 	}
 
@@ -253,6 +255,7 @@ func TestPaneRearrangeMapsUnsupportedAndTooSmallToUserNoticesAtomically(t *testi
 			require.ErrorAs(t, err, &userErr)
 			require.Equal(t, domain.NoticeLayoutTooSmall, userErr.Code)
 			require.Equal(t, domain.NoticeWarn, userErr.Severity)
+			require.Equal(t, tt.wantMsg, userErr.Msg)
 			require.Equal(t, before, h.snapshot(), "failed rearrange must be atomic")
 			require.Zero(t, h.totalResizes())
 			h.factory.AssertNotCalled(t, "Open")
@@ -291,40 +294,137 @@ func TestPaneRearrangeChangedActionPublishesOnce(t *testing.T) {
 	requireNoInvalidation(t, invalidations)
 }
 
-func TestDaemonActionAdaptersNormalizeOnlyPaneRearrangeNoop(t *testing.T) {
+func TestPaneRearrangeAdaptersOwnDirectionalRequestsAndNormalizeOnlyNoChange(t *testing.T) {
 	genuine := errors.New("genuine rearrange failure")
-	tests := []struct {
-		name    string
-		err     error
-		wantErr error
-		wantLog bool
+	directions := []struct {
+		name       string
+		direction  layout.Direction
+		keyAction  keys.Action
+		paletteRun func(paletteExec) error
+		controlRun func(controlExec) error
 	}{
-		{name: "silent no-op", err: errPaneRearrangeNoop},
-		{name: "genuine error", err: genuine, wantErr: genuine, wantLog: true},
+		{
+			name: "left", direction: layout.Left, keyAction: keys.ActionConsumeOrExpelPaneLeft,
+			paletteRun: func(e paletteExec) error { return e.ConsumeOrExpelPaneLeft() },
+			controlRun: func(e controlExec) error { return e.ConsumeOrExpelPaneLeft() },
+		},
+		{
+			name: "right", direction: layout.Right, keyAction: keys.ActionConsumeOrExpelPaneRight,
+			paletteRun: func(e paletteExec) error { return e.ConsumeOrExpelPaneRight() },
+			controlRun: func(e controlExec) error { return e.ConsumeOrExpelPaneRight() },
+		},
+	}
+	outcomes := []struct {
+		name       string
+		err        error
+		wantErr    error
+		wantNotice bool
+	}{
+		{name: "silent no-change", err: errDaemonActionNoChange},
+		{name: "genuine error", err: genuine, wantErr: genuine, wantNotice: true},
+	}
+
+	for _, direction := range directions {
+		t.Run(direction.name, func(t *testing.T) {
+			for _, outcome := range outcomes {
+				t.Run(outcome.name, func(t *testing.T) {
+					d := newTestDaemon(t, nil, stubClock{})
+					sess := addControlSession(d, "work", "t_work", "p_work")
+					ac := &attachedClient{}
+					ac.setSession(sess)
+					target := resolveDaemonActionTarget(sess)
+					paletteSpy := &actionRunnerSpy{err: outcome.err}
+					controlSpy := &actionRunnerSpy{err: outcome.err}
+					keySpy := &actionRunnerSpy{err: outcome.err}
+
+					paletteErr := direction.paletteRun(paletteExec{d: d, sess: sess, ac: ac, actions: paletteSpy})
+					controlErr := direction.controlRun(controlExec{d: d, sess: sess, target: target, actions: controlSpy})
+					daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(direction.keyAction)
+
+					if outcome.wantErr == nil {
+						require.NoError(t, paletteErr)
+						require.NoError(t, controlErr)
+					} else {
+						require.ErrorIs(t, paletteErr, outcome.wantErr)
+						require.ErrorIs(t, controlErr, outcome.wantErr)
+					}
+					if outcome.wantNotice {
+						require.Len(t, d.notices.history(), 1, "the key adapter owns reporting its genuine error")
+					} else {
+						require.Empty(t, d.notices.history(), "no-change is silent in the key adapter")
+					}
+
+					for adapter, spy := range map[string]*actionRunnerSpy{
+						"palette": paletteSpy,
+						"control": controlSpy,
+						"key":     keySpy,
+					} {
+						require.Len(t, spy.requests, 1, "%s adapter request count", adapter)
+						request := spy.requests[0]
+						require.Equal(t, daemonActionConsumeOrExpelPane, request.kind, "%s adapter action kind", adapter)
+						require.Equal(t, direction.direction, request.direction, "%s adapter direction", adapter)
+						require.Same(t, target.session, request.target.session, "%s adapter target session", adapter)
+						require.Same(t, target.tab, request.target.tab, "%s adapter target tab", adapter)
+						require.Same(t, target.pane, request.target.pane, "%s adapter target pane", adapter)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestPaneRearrangeNoChangeAdapterSideEffects(t *testing.T) {
+	tests := []struct {
+		name                    string
+		invoke                  func(*paneRearrangeHarness, *attachedClient) error
+		wantCleanupInvalidation bool
+	}{
+		{
+			name: "palette cleans up its closed overlay",
+			invoke: func(h *paneRearrangeHarness, ac *attachedClient) error {
+				return (paletteExec{d: h.daemon, sess: h.session, ac: ac, redrawClosedPalette: true}).ConsumeOrExpelPaneLeft()
+			},
+			wantCleanupInvalidation: true,
+		},
+		{
+			name: "control remains silent",
+			invoke: func(h *paneRearrangeHarness, _ *attachedClient) error {
+				return (controlExec{d: h.daemon, sess: h.session, target: h.target("pane-1")}).ConsumeOrExpelPaneLeft()
+			},
+		},
+		{
+			name: "key remains silent",
+			invoke: func(h *paneRearrangeHarness, ac *attachedClient) error {
+				daemonKeyHandler{d: h.daemon, ac: ac}.Action(keys.ActionConsumeOrExpelPaneLeft)
+				return nil
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
-			sess := addControlSession(d, "work", "t_work", "p_work")
+			h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
 			ac := &attachedClient{}
-			ac.setSession(sess)
-			target := resolveDaemonActionTarget(sess)
-			request := daemonActionRequest{kind: daemonActionConsumeOrExpelPane, target: target, direction: layout.Left}
+			ac.setSession(h.session)
+			h.session.mu.Lock()
+			h.session.client = ac
+			h.session.mu.Unlock()
+			invalidations := make(chan renderInvalidation, 2)
+			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+			rc.attach(ac)
+			h.session.installRenderCoordinator(rc)
+			before := h.snapshot()
 
-			paletteErr := (paletteExec{d: d, sess: sess, ac: ac, actions: &actionRunnerSpy{err: tt.err}}).runAction(request)
-			controlErr := (controlExec{d: d, sess: sess, target: target, actions: &actionRunnerSpy{err: tt.err}}).runAction(request)
-			require.ErrorIs(t, paletteErr, tt.wantErr)
-			require.ErrorIs(t, controlErr, tt.wantErr)
+			require.NoError(t, tt.invoke(h, ac))
 
-			beforeNotices := len(d.notices.history())
-			daemonKeyHandler{d: d, ac: ac, actions: &actionRunnerSpy{err: tt.err}}.Action(keys.ActionEqualizePanes)
-			afterNotices := len(d.notices.history())
-			if tt.wantLog {
-				require.Equal(t, beforeNotices+1, afterNotices, "key action must report a genuine error")
-			} else {
-				require.Equal(t, beforeNotices, afterNotices, "key action must silently normalize rearrange no-op")
+			require.Equal(t, before, h.snapshot(), "adapter no-change must not publish layout state")
+			require.Empty(t, h.daemon.notices.history())
+			if tt.wantCleanupInvalidation {
+				invalidation := awaitInvalidation(t, invalidations)
+				require.Equal(t, "palette.go", invalidation.producer)
+				require.True(t, invalidation.reset)
 			}
+			requireNoInvalidation(t, invalidations)
 		})
 	}
 }

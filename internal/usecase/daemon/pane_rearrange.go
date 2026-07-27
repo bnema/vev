@@ -9,10 +9,6 @@ import (
 
 var errDaemonActionNoChange = errors.New("daemon action made no change")
 
-// errPaneRearrangeNoop names the pane-rearrange outcome for package-level
-// callers while adapters normalize the shared daemon no-change sentinel.
-var errPaneRearrangeNoop = errDaemonActionNoChange
-
 func (d *Daemon) consumeOrExpelPane(target daemonActionTarget, direction layout.Direction) error {
 	changed, err := d.mutateTargetLayoutChanged(target, true, func(candidate *layout.Tree, area domain.Rect) (bool, error) {
 		return candidate.ConsumeOrExpelPane(target.pane.id, direction, area)
@@ -29,9 +25,9 @@ func (d *Daemon) consumeOrExpelPane(target daemonActionTarget, direction layout.
 func paneRearrangeUserError(err error) error {
 	switch {
 	case errors.Is(err, layout.ErrUnsupportedColumnLayout):
-		return domain.UserWarn(domain.NoticeLayoutTooSmall, "pane cannot be rearranged in this layout", err)
+		return domain.UserWarn(domain.NoticeLayoutTooSmall, "pane rearrangement requires a column layout", err)
 	case errors.Is(err, layout.ErrTooSmall):
-		return domain.UserWarn(domain.NoticeLayoutTooSmall, "pane cannot be rearranged at this size", err)
+		return domain.UserWarn(domain.NoticeLayoutTooSmall, "not enough space to rearrange pane", err)
 	default:
 		return err
 	}
