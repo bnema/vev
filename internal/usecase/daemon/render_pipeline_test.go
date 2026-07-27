@@ -320,10 +320,136 @@ func TestComposeCapturedOverlaysUsesCachedModalRoles(t *testing.T) {
 				styles:   themeui.Styles{PickerBase: interior, BorderMuted: muted, BorderActive: active},
 				overlays: capturedOverlayRenderState{prompt: capturedModal{active: true, title: modal.Title, presentation: presentation, inner: renderer.NewFrame(1, 1), focused: tt.focused}},
 			}
-			frame, _ := composeCapturedOverlays(state, renderer.NewFrame(10, 8), nil, domain.Rect{})
+			frame, _ := composeCapturedOverlays(state, renderer.NewFrame(10, 8), nil)
 			bounds := presentation.Bounds
 			require.True(t, frame.At(bounds.X, bounds.Y).Style.Equal(tt.border), "border uses cached focused role")
 			require.True(t, frame.At(bounds.X+2, bounds.Y+2).Style.Equal(interior), "unrendered modal interior uses cached chrome role")
+		})
+	}
+}
+
+func TestComposeFrameModalBackdropDimsCompleteFrameIncludingToasts(t *testing.T) {
+	const (
+		width       = 100
+		contentRows = 6
+	)
+	styles := resolveStyles(nil)
+	theme := backdropTheme()
+	leftPlacement := layout.Placement{
+		ID:       "left",
+		TitleBar: domain.Rect{Width: 49, Height: 1},
+		Content:  domain.Rect{Y: 1, Width: 49, Height: 5},
+	}
+	rightPlacement := layout.Placement{
+		ID:       "right",
+		TitleBar: domain.Rect{X: 50, Width: 50, Height: 1},
+		Content:  domain.Rect{X: 50, Y: 1, Width: 50, Height: 5},
+	}
+	state := capturedRenderState{
+		reset: true,
+		layout: capturedTabLayout{
+			area:        domain.Rect{Width: width, Height: contentRows},
+			focus:       "left",
+			placements:  []layout.Placement{leftPlacement, rightPlacement},
+			dividers:    []layout.Divider{{Rect: domain.Rect{X: 49, Width: 1, Height: contentRows}, Dir: layout.Horizontal}},
+			fingerprint: "modal-backdrop",
+			valid:       true,
+		},
+		panes: []capturedPaneRenderState{
+			{id: "left", title: "left", frame: cachePaneFrame(49, 5, 'L'), placement: leftPlacement, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}},
+			{id: "right", title: "right", frame: cachePaneFrame(50, 5, 'R'), placement: rightPlacement, damage: []renderer.Damage{renderer.FullRedraw()}},
+		},
+		overlays: capturedOverlayRenderState{notices: []domain.Notification{{Code: domain.NoticeClipboard, Severity: domain.NoticeInfo, Message: "copied", Count: 1}}},
+		styles:   styles,
+		theme:    theme,
+	}
+	base := composeFrame(state, composeCacheInput{})
+	require.NotEmpty(t, base.cache.toastFootprints)
+
+	state.reset = false
+	state.panes[0].damage = nil
+	state.panes[1].damage = nil
+	state.overlays.promptActive = true
+	state.overlays.prompt = capturedModal{
+		active: true,
+		title:  "Prompt",
+		presentation: ui.Presentation{
+			Bounds:  domain.Rect{X: 80, Y: 5, Width: 10, Height: 2},
+			Inner:   domain.Rect{X: 81, Y: 6, Width: 8, Height: 1},
+			Borders: ui.BorderAll,
+		},
+		inner:   renderer.NewFrame(8, 1),
+		focused: true,
+	}
+	composed := composeFrame(state, base.cache)
+	dimmer := themeui.NewDimmer(theme)
+	toast := base.cache.toastFootprints[0]
+
+	for name, point := range map[string][2]int{
+		"top bar":      {0, 0},
+		"pane chrome":  {0, 1},
+		"pane content": {0, 2},
+		"divider":      {49, 2},
+		"bottom bar":   {0, contentRows + 1},
+		"toast":        {toast.X, toast.Y},
+	} {
+		t.Run(name, func(t *testing.T) {
+			x, y := point[0], point[1]
+			require.Equal(t, dimmer.Dim(base.frame.At(x, y).Style), composed.frame.At(x, y).Style)
+		})
+	}
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, composed.damage)
+	require.False(t, composed.cache.valid)
+	require.Equal(t, base.cache.frame.Cells, composed.cache.frame.Cells, "the reusable cache remains toast-free and unadorned")
+}
+
+func TestComposeCapturedOverlaysMatchesKeyboardPriority(t *testing.T) {
+	theme := backdropTheme()
+	lowerStyle := renderer.Style{Foreground: 1, Background: 2}
+	higherStyle := renderer.Style{Foreground: 3, Background: 4}
+	modalAt := func(x int, r rune, style renderer.Style) capturedModal {
+		inner := renderer.NewFrame(1, 1)
+		inner.Set(0, 0, renderer.Cell{Rune: r, Style: style})
+		bounds := domain.Rect{X: x, Y: 1, Width: 1, Height: 1}
+		return capturedModal{active: true, presentation: ui.Presentation{Bounds: bounds, Inner: bounds}, inner: inner}
+	}
+
+	for _, tt := range []struct {
+		name   string
+		lower  string
+		higher string
+	}{
+		{name: "notices above copy search", lower: "copy search", higher: "notices"},
+		{name: "picker above notices", lower: "notices", higher: "picker"},
+		{name: "palette above picker", lower: "picker", higher: "palette"},
+		{name: "prompt above palette", lower: "palette", higher: "prompt"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := capturedRenderState{theme: theme, styles: themeui.Styles{PickerBase: renderer.DefaultStyle()}}
+			setModal := func(name string, modal capturedModal) {
+				switch name {
+				case "copy search":
+					state.overlays.copySearch = modal
+				case "notices":
+					state.overlays.noticesOverlay = modal
+				case "picker":
+					state.overlays.picker = modal
+				case "palette":
+					state.overlays.palette = modal
+				case "prompt":
+					state.overlays.prompt = modal
+				}
+			}
+			setModal(tt.lower, modalAt(1, 'L', lowerStyle))
+			setModal(tt.higher, modalAt(3, 'H', higherStyle))
+
+			frame, damage := composeCapturedOverlays(state, renderer.NewFrame(5, 3), nil)
+
+			require.Equal(t, 'L', frame.At(1, 1).Rune)
+			require.Equal(t, themeui.NewDimmer(theme).Dim(lowerStyle), frame.At(1, 1).Style, "the lower-priority modal is part of the higher modal backdrop")
+			require.Equal(t, 'H', frame.At(3, 1).Rune)
+			require.Equal(t, higherStyle, frame.At(3, 1).Style, "the keyboard owner remains visually topmost")
+			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 		})
 	}
 }
@@ -387,7 +513,7 @@ func TestComposeCapturedOverlaysKeepsZeroHeightModalActive(t *testing.T) {
 		},
 	}
 
-	_, damage := composeCapturedOverlays(state, renderer.NewFrame(79, 4), nil, domain.Rect{})
+	_, damage := composeCapturedOverlays(state, renderer.NewFrame(79, 4), nil)
 
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 }

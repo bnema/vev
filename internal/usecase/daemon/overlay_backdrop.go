@@ -35,6 +35,13 @@ func (b overlayBackdrop) apply(frame renderer.Frame, contentArea domain.Rect, la
 	}
 }
 
+// applyOverlayBackdrop dims every cell already composed into the complete
+// renderer frame. Modal composition calls it immediately before painting each
+// active layer so bars, panes, toasts, and lower overlays share one backdrop.
+func applyOverlayBackdrop(frame renderer.Frame, theme themeui.Theme) {
+	dimFrameRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, theme)
+}
+
 func dimFrameRect(frame renderer.Frame, rect domain.Rect, theme themeui.Theme) {
 	dimmer := themeui.NewDimmer(theme)
 	x0 := max(rect.X, 0)

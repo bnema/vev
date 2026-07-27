@@ -48,7 +48,10 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 	dimmed := client.Frame.At(0, 1)
 	require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
 	require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style), dimmed.Style, "palette backdrop must dim the composed copy frame")
-	require.Equal(t, copyBar, client.Frame.Row(client.Frame.Height-1), "copy status bar must remain crisp")
+	for x, cell := range copyBar {
+		cell.Style = themeui.NewDimmer(theme).Dim(cell.Style)
+		require.Equal(t, cell, client.Frame.At(x, client.Frame.Height-1), "copy status bar must be part of the complete backdrop")
+	}
 	paletteVisible := false
 	for y := range client.Frame.Height {
 		paletteVisible = paletteVisible || strings.Contains(rowText(client.Frame.Row(y)), "Commands")
@@ -93,7 +96,7 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 	}
 }
 
-func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
+func TestPaletteBackdropDimsSimultaneousPicker(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -110,7 +113,9 @@ func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
 
 	d.enterPalette(sess, ac)
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
-	require.Equal(t, pickerTitle, client.Frame.At(36, 2), "picker composed with palette must remain crisp")
+	dimmedPickerTitle := pickerTitle
+	dimmedPickerTitle.Style = themeui.NewDimmer(backdropTheme()).Dim(pickerTitle.Style)
+	require.Equal(t, dimmedPickerTitle, client.Frame.At(36, 2), "the lower-priority picker must be part of the palette backdrop")
 	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmedPane.Style), client.Frame.At(0, 1).Style, "pane content outside overlays must use the theme dim style")
 }
 
@@ -133,8 +138,12 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	dimmed := client.Frame.At(0, 1)
 	require.Equal(t, 'X', dimmed.Rune)
 	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style), dimmed.Style, "open palette must use the theme dim style")
-	require.Equal(t, topBar, client.Frame.At(0, 0), "top chrome remains crisp")
-	require.Equal(t, bottomBar, client.Frame.At(0, 24), "bottom chrome remains crisp")
+	dimmedTopBar := topBar
+	dimmedTopBar.Style = themeui.NewDimmer(backdropTheme()).Dim(topBar.Style)
+	dimmedBottomBar := bottomBar
+	dimmedBottomBar.Style = themeui.NewDimmer(backdropTheme()).Dim(bottomBar.Style)
+	require.Equal(t, dimmedTopBar, client.Frame.At(0, 0), "top chrome is part of the complete backdrop")
+	require.Equal(t, dimmedBottomBar, client.Frame.At(0, 24), "bottom chrome is part of the complete backdrop")
 
 	d.handleInput(sess, ac, []byte("\x1b"))
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))

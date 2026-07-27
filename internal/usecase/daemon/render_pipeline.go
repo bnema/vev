@@ -159,15 +159,17 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	// any underlying pane update without promoting either case to a full frame.
 	overlaysActive := state.overlays.active()
 	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
+	var toastFootprints []domain.Rect
 	if overlaysActive || toastsVisible {
 		// Without a floating frame, overlay composition would otherwise mutate
 		// the base cache in place. Floating composition already owns a clone.
 		if !state.floating.visible {
 			baseFrame = frame.Clone()
 		}
-		frame, damage = composeCapturedOverlays(state, frame, damage, content)
+		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
+		toastFootprints = composeCapturedNotices(state.overlays, frame, state.styles)
+		frame, damage = composeCapturedOverlays(state, frame, damage)
 	}
-	toastFootprints := composeCapturedNotices(state.overlays, frame, state.styles)
 	if full || overlaysActive {
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	} else {
@@ -258,44 +260,40 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	state.cursor.hiddenByOverlay = o.active()
 }
 
-func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage, content domain.Rect) (renderer.Frame, []renderer.Damage) {
+func composeCapturedCopyMode(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage, content domain.Rect) (renderer.Frame, []renderer.Damage) {
 	o := state.overlays
-	if o.copyActive {
-		target := domain.Rect{}
-		if state.floating.visible && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
-			target = state.floating.geometry.translate(content.X, content.Y).Inner
-		}
-		if target.Width == 0 {
-			id := o.copyPaneID
-			if id == "" {
-				id = state.layout.focus
-			}
-			for _, p := range state.panes {
-				if p.id == id && !p.placement.Collapsed {
-					target = p.placement.Content
-					target.Y += content.Y
-					break
-				}
-			}
-		}
-		frame, damage = composeCopyClientFrame(o.copyMode, target, frame, state.styles)
+	if !o.copyActive {
+		return frame, damage
 	}
-	layoutSnapshot := tabLayoutSnapshot{placements: state.layout.placements, area: state.layout.area, focus: state.layout.focus, ok: state.layout.valid}
-	if o.paletteActive && !state.floating.visible {
-		(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, state.theme)
+	target := domain.Rect{}
+	if state.floating.visible && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
+		target = state.floating.geometry.translate(content.X, content.Y).Inner
 	}
-	// This paint order intentionally differs from HandleInput's keyboard
-	// priority (prompt > palette > picker > notices > copy, see
-	// overlay_runtime.go), which paints the picker under notices instead of
-	// over it. Currently unreachable: notices only opens via the palette, and
-	// HandleInput short-circuits to the first active overlay, so picker and
-	// notices are never simultaneously active. If that ever changes, this
-	// mismatch would let the picker own the keyboard while notices visually
-	// covers it.
-	for _, modal := range []capturedModal{o.copySearch, o.picker, o.noticesOverlay, o.palette, o.prompt} {
+	if target.Width == 0 {
+		id := o.copyPaneID
+		if id == "" {
+			id = state.layout.focus
+		}
+		for _, p := range state.panes {
+			if p.id == id && !p.placement.Collapsed {
+				target = p.placement.Content
+				target.Y += content.Y
+				break
+			}
+		}
+	}
+	return composeCopyClientFrame(o.copyMode, target, frame, state.styles)
+}
+
+func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage) (renderer.Frame, []renderer.Damage) {
+	o := state.overlays
+	// Paint in reverse keyboard priority so the same layer that owns input is
+	// visually topmost: prompt > palette > picker > notices > copy search.
+	for _, modal := range []capturedModal{o.copySearch, o.noticesOverlay, o.picker, o.palette, o.prompt} {
 		if !modal.active {
 			continue
 		}
+		applyOverlayBackdrop(frame, state.theme)
 		border := state.styles.BorderMuted
 		if modal.focused {
 			border = state.styles.BorderActive
