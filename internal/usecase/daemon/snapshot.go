@@ -71,10 +71,10 @@ type snapshotCapturePane struct {
 	// capture never rotates a live mutable tail merely to persist it.
 	sealed vt.HistorySnapshotView
 	tail   vt.HistoryView
-	// visible is an owned copy taken while pane.mu is held. It must be
+	// transcript is an owned copy taken while pane.mu is held. It must be
 	// marshaled only after that lock has been released.
-	visible vt.PrimaryVisibleSnapshot
-	process *snapcodec.Process
+	transcript vt.RecoveryTranscriptSnapshot
+	process    *snapcodec.Process
 }
 
 // snapshotFailureSignature classifies a persistence failure without retaining

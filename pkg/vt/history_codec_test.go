@@ -82,7 +82,7 @@ func TestHistoryCodecRejectsMalformedAndV1Payloads(t *testing.T) {
 
 	// This is a genuine v1-layout payload: version 1 and no trailing bound
 	// bytes. It is not a v2 payload with only its version byte changed.
-	v1 := append([]byte(nil), v2[:len(v2)-visibleBoundaryBytes]...)
+	v1 := append([]byte(nil), v2[:len(v2)-historyBoundBytes]...)
 	v1[4] = 1
 	if _, err := UnmarshalHistory(v1); err == nil {
 		t.Fatal("accepted a genuine v1 history payload")

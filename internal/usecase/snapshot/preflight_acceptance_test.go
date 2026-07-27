@@ -10,7 +10,7 @@ import (
 
 func TestPreflightRejectsDanglingTreeAndFocusReferencesBeforeDecode(t *testing.T) {
 	sealed, tail := historyBlobs(t, nil)
-	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	transcript := transcriptBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
 	for _, tt := range []struct {
 		name string
 		tab  Tab
@@ -20,7 +20,7 @@ func TestPreflightRejectsDanglingTreeAndFocusReferencesBeforeDecode(t *testing.T
 			tab: Tab{
 				Focus: "pane",
 				Tree:  layout.NewTree("missing"),
-				Panes: []Pane{{ID: "pane", SealedChunks: sealed, Tail: tail, Visible: visible}},
+				Panes: []Pane{{ID: "pane", SealedChunks: sealed, Tail: tail, Transcript: transcript}},
 			},
 		},
 		{
@@ -28,7 +28,7 @@ func TestPreflightRejectsDanglingTreeAndFocusReferencesBeforeDecode(t *testing.T
 			tab: Tab{
 				Focus: "missing",
 				Tree:  layout.NewTree("pane"),
-				Panes: []Pane{{ID: "pane", SealedChunks: sealed, Tail: tail, Visible: visible}},
+				Panes: []Pane{{ID: "pane", SealedChunks: sealed, Tail: tail, Transcript: transcript}},
 			},
 		},
 	} {

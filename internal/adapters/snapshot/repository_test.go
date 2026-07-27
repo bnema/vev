@@ -69,19 +69,19 @@ func publicationWithCurrentParent(t *testing.T, repo *Repository, publication po
 func repositoryPublication(t *testing.T, name string, generation uint64, payload []byte) ports.SnapshotPublication {
 	t.Helper()
 	id := testIncarnationID(name)
-	tail, err := codec.MarshalObject(codec.HistoryTail, payload)
+	tail, err := codec.MarshalObject(codec.HistoryTail, canonicalHistoryBlob(t, string(payload)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	visible, err := codec.MarshalObject(codec.Visible, []byte("visible"))
+	transcript, err := codec.MarshalObject(codec.RecoveryTranscript, canonicalHistoryBlob(t, "transcript"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, IncarnationID: id, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}})
+	manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, IncarnationID: id, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Transcript: codec.ObjectRef{Kind: codec.RecoveryTranscript, Digest: transcript.Digest, Size: uint32(len(transcript.Data))}}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, Manifest: manifest, Objects: []ports.SnapshotObject{tail, visible}}
+	return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, Manifest: manifest, Objects: []ports.SnapshotObject{tail, transcript}}
 }
 
 func testIncarnationID(name string) domain.IncarnationID {

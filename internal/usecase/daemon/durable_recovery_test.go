@@ -29,6 +29,7 @@ type durableRecoveryCatalogue struct {
 	mu              sync.Mutex
 	records         map[string]domain.CatalogueRecord
 	metadataUpdates []domain.CatalogueMetadataUpdate
+	replaceErr      error
 }
 
 type recordErrorCatalogue struct {
@@ -75,6 +76,9 @@ func mustDurableRecords(t *testing.T, c *durableRecoveryCatalogue) []domain.Cata
 func (c *durableRecoveryCatalogue) Replace(name string, record domain.CatalogueRecord) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.replaceErr != nil {
+		return c.replaceErr
+	}
 	if name != record.Name {
 		return errors.New("catalogue key mismatch")
 	}
@@ -125,7 +129,10 @@ type durableRecoveryRepository struct {
 	errors      map[string]error
 	loads       map[string]int
 	repairs     map[string]domain.CheckpointRef
+	deleted     []domain.IncarnationID
+	onLoad      func()
 	repairErr   error
+	deleteErr   error
 	repairCalls int
 }
 
@@ -136,6 +143,9 @@ func (r *durableRecoveryRepository) LoadCheckpoint(_ context.Context, id domain.
 		r.loads = make(map[string]int)
 	}
 	r.loads[name]++
+	if r.onLoad != nil {
+		r.onLoad()
+	}
 	if err := r.errors[name]; err != nil {
 		return ports.SnapshotGeneration{}, err
 	}
@@ -158,6 +168,13 @@ func (r *durableRecoveryRepository) ReconcileCheckpoint(_ context.Context, id do
 	}
 	r.repairs[id.String()] = ref
 	return nil
+}
+
+func (r *durableRecoveryRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted = append(r.deleted, id)
+	return r.deleteErr
 }
 
 func durableRecoveryRecord(index int) domain.CatalogueRecord {
@@ -194,7 +211,7 @@ func validGeneration(t testing.TB, record domain.CatalogueRecord) ports.Snapshot
 func newDurableRecoveryDaemon(t testing.TB, records []domain.CatalogueRecord, repository ports.SnapshotRepository) (*Daemon, *durableRecoveryCatalogue) {
 	t.Helper()
 	catalogue := newDurableRecoveryCatalogue(records)
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{0xa5}, 16)))
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	t.Cleanup(d.serveCancel)
@@ -287,6 +304,141 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 		require.Empty(t, d.sessions, "a corrupt record must never open a replacement runtime")
 	})
 
+}
+
+func TestCatalogueRestoreResetsOnlyIncompatibleCheckpoint(t *testing.T) {
+	incompatible := durableRecoveryRecord(0)
+	healthy := durableRecoveryRecord(1)
+	repository := &durableRecoveryRepository{
+		generations: map[string]ports.SnapshotGeneration{healthy.Name: validGeneration(t, healthy)},
+		errors:      map[string]error{incompatible.Name: fmt.Errorf("load envelope: %w", snapcodec.ErrBadVersion)},
+		loads:       make(map[string]int),
+		repairs:     make(map[string]domain.CheckpointRef),
+	}
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{incompatible, healthy}, repository)
+
+	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+
+	fresh, ok, err := catalogue.Record(incompatible.Name)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, domain.IncarnationID(bytes.Repeat([]byte{0xa5}, 16)), fresh.IncarnationID)
+	require.Nil(t, fresh.Committed)
+	require.Empty(t, fresh.DegradedReason)
+	require.Empty(t, fresh.TabNames)
+	require.Equal(t, []domain.IncarnationID{incompatible.IncarnationID}, repository.deleted)
+	require.Equal(t, ports.SessionStopped, d.stopped[incompatible.Name].state)
+	require.Equal(t, fresh, d.stopped[incompatible.Name].record)
+
+	restoredSibling, ok, err := catalogue.Record(healthy.Name)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, healthy, restoredSibling)
+	require.Equal(t, ports.SessionStopped, d.stopped[healthy.Name].state)
+	require.Equal(t, 1, repository.loads[healthy.Name])
+}
+
+func TestIncompatibleCheckpointDeleteFailurePublishesFreshStoppedAuthority(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	deleteErr := errors.New("delete old incarnation")
+	repository := &durableRecoveryRepository{
+		errors:    map[string]error{record.Name: snapcodec.ErrBadVersion},
+		loads:     make(map[string]int),
+		repairs:   make(map[string]domain.CheckpointRef),
+		deleteErr: deleteErr,
+	}
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	d.mu.Lock()
+	restoreDone := d.stopped[record.Name].restoreDone
+	d.mu.Unlock()
+
+	restoreErr := d.restoreRecord(context.Background(), record)
+	require.NoError(t, restoreErr, "post-commit cleanup failure must not fail the authority transition")
+
+	fresh, ok, err := catalogue.Record(record.Name)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEqual(t, record.IncarnationID, fresh.IncarnationID)
+	require.Nil(t, fresh.Committed)
+	require.Empty(t, fresh.DegradedReason)
+	d.mu.Lock()
+	entry := d.stopped[record.Name]
+	d.mu.Unlock()
+	require.Equal(t, ports.SessionStopped, entry.state)
+	require.Equal(t, fresh, entry.record)
+	require.Equal(t, restoreDone, entry.restoreDone)
+	select {
+	case <-entry.restoreDone:
+		t.Fatal("direct restore closed its coordinator-owned completion barrier")
+	default:
+	}
+
+	d.finishRecordRestore(record, restoreErr, restoreDone)
+	d.mu.Lock()
+	entry = d.stopped[record.Name]
+	d.mu.Unlock()
+	require.Equal(t, ports.SessionStopped, entry.state)
+	require.Equal(t, fresh, entry.record)
+	select {
+	case <-entry.restoreDone:
+	default:
+		t.Fatal("restore completion was not signaled")
+	}
+	require.Equal(t, []domain.IncarnationID{record.IncarnationID}, repository.deleted)
+}
+
+func TestIncompatibleCheckpointPreCommitFailureReturnsError(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	cause := errors.New("catalogue replace failed")
+	repository := &durableRecoveryRepository{
+		errors:  map[string]error{record.Name: snapcodec.ErrBadVersion},
+		loads:   make(map[string]int),
+		repairs: make(map[string]domain.CheckpointRef),
+	}
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	catalogue.replaceErr = cause
+
+	err := d.restoreRecord(context.Background(), record)
+
+	require.ErrorIs(t, err, cause)
+	persisted, ok, recordErr := catalogue.Record(record.Name)
+	require.NoError(t, recordErr)
+	require.True(t, ok)
+	require.Equal(t, record, persisted)
+	require.Empty(t, repository.deleted)
+}
+
+func TestRestoreLoadFailuresRetainCheckpointWithoutDeletion(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "corruption", err: errors.New("corrupt checkpoint")},
+		{name: "generic", err: errors.New("load failed")},
+		{name: "io", err: &os.PathError{Op: "open", Path: "/snapshot", Err: syscall.EACCES}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := durableRecoveryRecord(0)
+			repository := &durableRecoveryRepository{
+				errors:  map[string]error{record.Name: tt.err},
+				loads:   make(map[string]int),
+				repairs: make(map[string]domain.CheckpointRef),
+			}
+			d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+
+			d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+
+			persisted, ok, err := catalogue.Record(record.Name)
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Equal(t, record.IncarnationID, persisted.IncarnationID)
+			require.Equal(t, record.Committed, persisted.Committed)
+			require.Equal(t, "checkpoint validation failed", persisted.DegradedReason)
+			require.Equal(t, ports.SessionBroken, d.stopped[record.Name].state)
+			require.Empty(t, repository.deleted)
+		})
+	}
 }
 
 func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
@@ -385,6 +537,41 @@ type temporaryRestoreError struct{}
 
 func (temporaryRestoreError) Error() string   { return "temporary restore failure" }
 func (temporaryRestoreError) Temporary() bool { return true }
+
+type badVersionLookalikeError struct{}
+
+func (badVersionLookalikeError) Error() string        { return "bad version lookalike" }
+func (badVersionLookalikeError) Is(target error) bool { return target == snapcodec.ErrBadVersion }
+
+type cyclicUnwrapError struct{}
+
+func (*cyclicUnwrapError) Error() string { return "cyclic unwrap" }
+func (e *cyclicUnwrapError) Unwrap() error {
+	return e
+}
+
+func TestUnambiguousBadVersionErrorClassification(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		incompatible bool
+	}{
+		{name: "nil"},
+		{name: "exact sentinel", err: snapcodec.ErrBadVersion, incompatible: true},
+		{name: "single cause chain", err: fmt.Errorf("load checkpoint: %w", fmt.Errorf("decode manifest: %w", snapcodec.ErrBadVersion)), incompatible: true},
+		{name: "single entry multi cause", err: errors.Join(snapcodec.ErrBadVersion)},
+		{name: "joined retryable branch", err: errors.Join(snapcodec.ErrBadVersion, syscall.ENOSPC)},
+		{name: "custom Is lookalike", err: badVersionLookalikeError{}},
+		{name: "wrapped custom Is lookalike", err: fmt.Errorf("load checkpoint: %w", badVersionLookalikeError{})},
+		{name: "chain ending elsewhere", err: fmt.Errorf("load checkpoint: %w", errors.New("corrupt checkpoint"))},
+		{name: "cyclic custom chain", err: &cyclicUnwrapError{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.incompatible, isUnambiguousBadVersionError(tt.err))
+		})
+	}
+}
 
 func TestRetryableRestoreLoadErrorClassification(t *testing.T) {
 	tests := []struct {

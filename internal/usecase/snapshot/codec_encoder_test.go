@@ -9,8 +9,8 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
-// marshalTest is a test-only v3 encoder. Production retains only the decoder
-// required by the one-time legacy import.
+// marshalTest is a test-only v4 encoder. Production retains only the decoder
+// required by the one-time import.
 func marshalTest(s Session) ([]byte, error) {
 	var w payloadWriter
 	if err := writeSession(&w, s); err != nil {
@@ -104,10 +104,10 @@ func writePane(w *payloadWriter, p Pane) error {
 	}
 	w.putUint32(uint32(len(p.Tail)))
 	w.b = append(w.b, p.Tail...)
-	if len(p.Visible) == 0 || len(p.Visible) > math.MaxUint32 {
-		return fmt.Errorf("%w: visible length", ErrInvalidData)
+	if len(p.Transcript) == 0 || len(p.Transcript) > math.MaxUint32 {
+		return fmt.Errorf("%w: transcript length", ErrInvalidData)
 	}
-	w.putUint32(uint32(len(p.Visible)))
-	w.b = append(w.b, p.Visible...)
+	w.putUint32(uint32(len(p.Transcript)))
+	w.b = append(w.b, p.Transcript...)
 	return writeProcess(w, p.Process)
 }

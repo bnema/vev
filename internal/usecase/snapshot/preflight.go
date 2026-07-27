@@ -202,7 +202,7 @@ func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uin
 		return fmt.Errorf("%w: sealed chunks", ErrInvalidData)
 	}
 	for range n {
-		stats, err := preflightBlob(r, totals, blobs, true, budget)
+		stats, err := preflightBlob(r, totals, blobs, budget)
 		if err != nil {
 			return err
 		}
@@ -210,7 +210,7 @@ func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uin
 			return fmt.Errorf("%w: sealed blob role", ErrInvalidData)
 		}
 	}
-	tail, err := preflightBlob(r, totals, blobs, true, budget)
+	tail, err := preflightBlob(r, totals, blobs, budget)
 	if err != nil {
 		return err
 	}
@@ -220,17 +220,17 @@ func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uin
 	if tail.Chunks > 1 {
 		return fmt.Errorf("%w: tail blob role", ErrInvalidData)
 	}
-	visible, err := preflightBlob(r, totals, blobs, false, budget)
+	transcript, err := preflightBlob(r, totals, blobs, budget)
 	if err != nil {
 		return err
 	}
-	if visible.Rows == 0 || visible.Cells == 0 {
-		return fmt.Errorf("%w: visible geometry", ErrInvalidData)
-	}
+	// Transcripts are canonical history; they may contain multiple chunks or be
+	// empty, so no blob-role assertion applies.
+	_ = transcript
 	return preflightProcess(r)
 }
 
-func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, history bool, budget *preflightBudget) (vt.DecodeStats, error) {
+func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budget *preflightBudget) (vt.DecodeStats, error) {
 	n, err := r.getUint32()
 	if err != nil {
 		return vt.DecodeStats{}, err
@@ -243,12 +243,7 @@ func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, hist
 	}
 	blob := r.b[:n]
 	r.b = r.b[n:]
-	var stats vt.DecodeStats
-	if history {
-		stats, err = vt.PreflightHistoryBlob(blob)
-	} else {
-		stats, err = vt.PreflightVisibleBlob(blob)
-	}
+	stats, err := vt.PreflightHistoryBlob(blob)
 	if err != nil {
 		return vt.DecodeStats{}, fmt.Errorf("%w: VT blob", ErrInvalidData)
 	}

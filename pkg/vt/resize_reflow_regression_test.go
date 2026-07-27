@@ -1,11 +1,6 @@
 package vt
 
-import (
-	"encoding/binary"
-	"testing"
-
-	"github.com/bnema/vev/pkg/renderer"
-)
+import "testing"
 
 func TestCollapsedResizeUpdatesSavedPrimaryAndClearsEscape(t *testing.T) {
 	s := NewScreen(5, 3)
@@ -56,27 +51,4 @@ func TestInsertModeRetainsShiftedTailInReflowExtent(t *testing.T) {
 	for x, r := range []rune("aXbcd") {
 		assertCell(t, s, x, 0, r)
 	}
-}
-
-func TestVisibleBoundaryMetadataBudget(t *testing.T) {
-	const height = maxHistoryRows + 1
-	if _, err := MarshalVisible(renderer.NewFrame(0, height)); err == nil {
-		t.Fatal("marshal accepted boundary metadata beyond its allocation budget")
-	}
-	s := NewScreen(0, height)
-	if _, err := s.MarshalPrimaryVisible(); err == nil {
-		t.Fatal("marshal accepted boundary metadata beyond its allocation budget")
-	}
-
-	data := make([]byte, 13+height*visibleBoundaryBytes)
-	copy(data[:4], visibleMagic)
-	data[4] = historyVersion
-	binary.BigEndian.PutUint32(data[9:13], height)
-	if _, err := PreflightVisibleBlob(data); err == nil {
-		t.Fatal("preflight accepted boundary metadata beyond its allocation budget")
-	}
-	if _, err := UnmarshalVisible(data); err == nil {
-		t.Fatal("unmarshal accepted boundary metadata beyond its allocation budget")
-	}
-
 }

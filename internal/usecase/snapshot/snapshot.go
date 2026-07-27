@@ -27,9 +27,9 @@ type Pane struct {
 	ID           layout.PaneID
 	StableID     string
 	Cwd          string
-	SealedChunks [][]byte // oldest-first, each a self-contained VT blob
-	Tail         []byte   // mandatory nonempty canonical VT blob
-	Visible      []byte   // mandatory nonempty canonical VT blob
+	SealedChunks [][]byte // oldest-first, each a self-contained canonical history blob
+	Tail         []byte   // mandatory nonempty canonical history blob
+	Transcript   []byte   // mandatory nonempty canonical history blob
 	Process      *Process
 }
 

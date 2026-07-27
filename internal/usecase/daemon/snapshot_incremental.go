@@ -104,9 +104,9 @@ func copySnapshotObject(object ports.SnapshotObject) ports.SnapshotObject {
 
 // incrementalPublication converts one immutable capture into complete VEVO
 // objects plus its VEVM manifest. Encoding runs after pane locks are released.
-// Sealed history uses this capture's named-session pointer identity cache;
-// tails and visible frames are intentionally not cached because they are copied
-// mutable state.
+// Sealed history uses this capture's named-session pointer identity cache.
+// Tails and recovery transcripts are generation-specific copied mutable state
+// and are intentionally never admitted to that cache.
 func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.SnapshotPublication, error) {
 	if capture == nil || capture.session == nil || capture.name == "" {
 		return ports.SnapshotPublication{}, fmt.Errorf("snapshot: empty capture")
@@ -120,11 +120,11 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	for _, tab := range capture.tabs {
 		outTab := snapcodec.ManifestTab{StableID: tab.stableID, Cols: tab.cols, Rows: tab.rows, NextPaneID: tab.nextPaneID, Focus: tab.focus, Tree: tab.tree, Panes: make([]snapcodec.ManifestPane, 0, len(tab.panes))}
 		for _, pane := range tab.panes {
-			// visible was copied under pane.mu. Marshal it here in the worker,
+			// transcript was copied under pane.mu. Marshal it here in the worker,
 			// after all pane and session locks have been released.
-			visible, err := pane.visible.Marshal()
+			transcript, err := pane.transcript.Marshal()
 			if err != nil {
-				return ports.SnapshotPublication{}, fmt.Errorf("snapshot visible: %w", err)
+				return ports.SnapshotPublication{}, fmt.Errorf("snapshot recovery transcript: %w", err)
 			}
 			outPane := snapcodec.ManifestPane{ID: pane.id, StableID: pane.stableID, Cwd: pane.cwd, Process: pane.process}
 			for i := 0; i < pane.sealed.ChunkCount(); i++ {
@@ -146,13 +146,13 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 			if err != nil {
 				return ports.SnapshotPublication{}, err
 			}
-			visibleObject, err := snapcodec.MarshalObject(snapcodec.Visible, visible)
+			transcriptObject, err := snapcodec.MarshalObject(snapcodec.RecoveryTranscript, transcript)
 			if err != nil {
 				return ports.SnapshotPublication{}, err
 			}
 			outPane.Tail = objectRef(snapcodec.HistoryTail, tailObject)
-			outPane.Visible = objectRef(snapcodec.Visible, visibleObject)
-			objects = append(objects, tailObject, visibleObject)
+			outPane.Transcript = objectRef(snapcodec.RecoveryTranscript, transcriptObject)
+			objects = append(objects, tailObject, transcriptObject)
 			outTab.Panes = append(outTab.Panes, outPane)
 		}
 		manifest.Tabs = append(manifest.Tabs, outTab)
@@ -211,8 +211,16 @@ func markSnapshotCaptureObjectsPublished(capture *snapshotCapture) {
 		return
 	}
 	for chunk, ref := range capture.sealedRefs {
-		if chunk != nil {
-			cache.persisted[chunk] = ref
+		if chunk == nil {
+			continue
+		}
+		cache.persisted[chunk] = ref
+		if entry, ok := cache.byPtr[chunk]; ok {
+			delete(cache.byPtr, chunk)
+			cache.used -= len(entry.object.Data)
+			if cache.used < 0 {
+				cache.used = 0
+			}
 		}
 	}
 }

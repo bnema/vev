@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 
@@ -156,7 +157,7 @@ func restoreAcceptanceSession(t *testing.T, name string) snapcodec.Session {
 	screen.Write([]byte("primary-visible"))
 	screen.Write([]byte("\x1b[?1049h"))
 	screen.Write([]byte("alternate-active"))
-	visible, err := screen.PrimaryVisibleSnapshot().Marshal()
+	transcript, err := screen.RecoveryTranscriptSnapshot().Marshal()
 	require.NoError(t, err)
 
 	paneID := layout.PaneID("pane-7")
@@ -166,7 +167,7 @@ func restoreAcceptanceSession(t *testing.T, name string) snapcodec.Session {
 			StableID: "tab-stable", Cols: 293, Rows: 4, NextPaneID: 8, Focus: paneID,
 			Tree: &layout.Tree{Root: layout.NewLeaf(paneID), Focus: paneID},
 			Panes: []snapcodec.Pane{{
-				ID: paneID, StableID: "pane-stable", Cwd: "/snapshot/cwd", SealedChunks: sealed, Tail: tail, Visible: visible,
+				ID: paneID, StableID: "pane-stable", Cwd: "/snapshot/cwd", SealedChunks: sealed, Tail: tail, Transcript: transcript,
 				Process: &snapcodec.Process{Argv: []string{"sleep", "99"}, Strategy: "argv"},
 			}},
 		}},
@@ -242,11 +243,20 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-7"), tab.tree.Focus)
 	pane := tab.panes[layout.PaneID("pane-7")]
 	pane.mu.Lock()
-	require.Equal(t, "primary-visible", string([]rune{pane.screen.Frame.Row(0)[0].Rune, pane.screen.Frame.Row(0)[1].Rune, pane.screen.Frame.Row(0)[2].Rune, pane.screen.Frame.Row(0)[3].Rune, pane.screen.Frame.Row(0)[4].Rune, pane.screen.Frame.Row(0)[5].Rune, pane.screen.Frame.Row(0)[6].Rune, pane.screen.Frame.Row(0)[7].Rune, pane.screen.Frame.Row(0)[8].Rune, pane.screen.Frame.Row(0)[9].Rune, pane.screen.Frame.Row(0)[10].Rune, pane.screen.Frame.Row(0)[11].Rune, pane.screen.Frame.Row(0)[12].Rune, pane.screen.Frame.Row(0)[13].Rune, pane.screen.Frame.Row(0)[14].Rune}))
-	require.Equal(t, 5, pane.history.Len())
-	require.Equal(t, 5*293, pane.history.Cells())
+	wantHistory := []string{strings.Repeat("a", 293), strings.Repeat("b", 293), strings.Repeat("c", 293), strings.Repeat("d", 293), strings.Repeat("e", 293), "primary-visible", "alternate-active"}
+	require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "bounded history must precede primary and active alternate transcript rows")
+	for y := range pane.screen.Frame.Height {
+		for x := range pane.screen.Frame.Width {
+			require.Truef(t, pane.screen.Frame.At(x, y).Equal(renderer.BlankCell()), "restored frame cell (%d,%d) must be blank", x, y)
+		}
+	}
+	require.Equal(t, 7, pane.history.Len())
+	require.Equal(t, 7*293, pane.history.Cells())
 	require.Equal(t, defaultScrollbackRows, pane.history.Cap())
 	require.Equal(t, defaultScrollbackCells, pane.history.CellCap())
+	pane.screen.Write([]byte("new-output"))
+	pane.screen.Write([]byte("\x1b[?1049h\x1b[?1049l"))
+	require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "new output and redraw must not remove recovered history")
 	pane.mu.Unlock()
 
 	startSnapshotEncodeWorker(t, d)
@@ -311,6 +321,43 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	require.Equal(t, uint64(10), published.Committed.Generation)
 }
 
+func TestRestorePaneTerminalRequiresCompleteRecoveryAndInstallsAtomically(t *testing.T) {
+	base := restoreAcceptanceSession(t, "restored").Tabs[0].Panes[0]
+	for _, tt := range []struct {
+		name   string
+		mutate func(*snapcodec.Pane)
+	}{
+		{name: "missing tail", mutate: func(snap *snapcodec.Pane) { snap.Tail = nil }},
+		{name: "missing transcript", mutate: func(snap *snapcodec.Pane) { snap.Transcript = nil }},
+		{name: "invalid transcript", mutate: func(snap *snapcodec.Pane) { snap.Transcript = []byte("invalid") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := base
+			tt.mutate(&snap)
+			p := newPane("pane", nil, domain.Size{Cols: 293, Rows: 4})
+			p.screen.Write([]byte("old-frame"))
+			require.NoError(t, p.history.Append(testRow("old-history"), vt.LineBound{End: len("old-history")}))
+			oldScreen, oldHistory := p.screen, p.history
+
+			err := restorePaneTerminal(p, snap)
+
+			require.Error(t, err)
+			require.Same(t, oldScreen, p.screen)
+			require.Same(t, oldHistory, p.history)
+			require.Equal(t, 'o', p.screen.Frame.At(0, 0).Rune, "a failed restore must never install a partial or old persisted frame")
+			require.Equal(t, "old-history", cellsString(p.history.View().Row(0)))
+		})
+	}
+}
+
+func snapshotHistoryTexts(view vt.HistoryView) []string {
+	rows := make([]string, view.Len())
+	for i := range rows {
+		rows[i] = strings.TrimRight(cellsString(view.Row(i)), " ")
+	}
+	return rows
+}
+
 func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "fallback")
 	valid := acceptanceGeneration(t, snapshot, 3)
@@ -325,18 +372,20 @@ func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {
 				break
 			}
 		}},
-		{"wrong kind", func(g *ports.SnapshotGeneration) {
-			for digest, data := range g.Objects {
-				kind, payload, err := snapcodec.UnmarshalObject(data)
-				require.NoError(t, err)
-				if kind == snapcodec.HistoryTail {
-					replacement, err := snapcodec.MarshalObject(snapcodec.Visible, payload)
-					require.NoError(t, err)
-					delete(g.Objects, digest)
-					g.Objects[digest] = replacement.Data
-					break
-				}
-			}
+		{"wrong role after digest verification", func(g *ports.SnapshotGeneration) {
+			manifest, err := snapcodec.UnmarshalManifest(g.Manifest)
+			require.NoError(t, err)
+			tailRef := manifest.Tabs[0].Panes[0].Tail
+			_, payload, err := snapcodec.UnmarshalObject(g.Objects[tailRef.Digest])
+			require.NoError(t, err)
+			replacement, err := snapcodec.MarshalObject(snapcodec.RecoveryTranscript, payload)
+			require.NoError(t, err)
+			manifest.Tabs[0].Panes[0].Tail.Digest = replacement.Digest
+			manifest.Tabs[0].Panes[0].Tail.Size = uint32(len(replacement.Data))
+			g.Manifest, err = snapcodec.MarshalManifest(manifest)
+			require.NoError(t, err)
+			delete(g.Objects, tailRef.Digest)
+			g.Objects[replacement.Digest] = replacement.Data
 		}},
 		{"wrong digest", func(g *ports.SnapshotGeneration) {
 			for digest, data := range g.Objects {

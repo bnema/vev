@@ -6,7 +6,7 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-func TestSnapshotCodecsPreserveEveryTerminalCellAcrossSealedTailAndVisible(t *testing.T) {
+func TestSnapshotCodecsPreserveEveryTerminalCellAcrossHistoryAndRecoveryTranscript(t *testing.T) {
 	indexed := renderer.Style{
 		Bold:              true,
 		Italic:            true,
@@ -79,26 +79,24 @@ func TestSnapshotCodecsPreserveEveryTerminalCellAcrossSealedTailAndVisible(t *te
 			},
 		},
 		{
-			name: "visible frame retains blanks wide heads continuations and styles",
+			name: "recovery transcript retains blanks wide heads continuations and styles",
 			run: func(t *testing.T) {
-				want := renderer.NewFrame(4, 2)
-				copy(want.Row(0), makeRow('D', rgb))
-				copy(want.Row(1), makeRow('E', indexed))
-				encoded, err := MarshalVisible(want)
+				screen := NewScreen(4, 2)
+				want := [][]renderer.Cell{makeRow('D', rgb), makeRow('E', indexed)}
+				for y, row := range want {
+					copy(screen.Frame.Row(y), row)
+					screen.buffer.boundaries[y] = LineBound{End: len(row)}
+				}
+
+				encoded, err := screen.RecoveryTranscriptSnapshot().Marshal()
 				if err != nil {
-					t.Fatalf("MarshalVisible: %v", err)
+					t.Fatalf("marshal recovery transcript: %v", err)
 				}
-				got, err := UnmarshalVisible(encoded)
+				got, err := UnmarshalHistory(encoded)
 				if err != nil {
-					t.Fatalf("UnmarshalVisible: %v", err)
+					t.Fatalf("unmarshal recovery transcript: %v", err)
 				}
-				for y := range want.Height {
-					for x, cell := range want.Row(y) {
-						if !got.At(x, y).Equal(cell) {
-							t.Fatalf("cell (%d,%d) = %#v, want %#v", x, y, got.At(x, y), cell)
-						}
-					}
-				}
+				assertHistoryRowsEqual(t, got, want)
 			},
 		},
 	}

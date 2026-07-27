@@ -61,32 +61,32 @@ func largeIncrementalPublications(t testing.TB, name string, count int) (ports.S
 	sealed := make([]codec.ObjectRef, 0, count)
 	objects := make([]ports.SnapshotObject, 0, count+2)
 	for i := range count {
-		object, err := codec.MarshalObject(codec.HistoryChunk, fmt.Appendf(nil, "history-%d", i))
+		object, err := codec.MarshalObject(codec.HistoryChunk, canonicalHistoryBlob(t, fmt.Sprintf("history-%d", i)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		sealed = append(sealed, codec.ObjectRef{Kind: codec.HistoryChunk, Digest: object.Digest, Size: uint32(len(object.Data))})
 		objects = append(objects, object)
 	}
-	makePublication := func(generation uint64, parent *domain.CheckpointRef, tailPayload, visiblePayload string) ports.SnapshotPublication {
+	makePublication := func(generation uint64, parent *domain.CheckpointRef, tailPayload, transcriptPayload string) ports.SnapshotPublication {
 		t.Helper()
-		tail, err := codec.MarshalObject(codec.HistoryTail, []byte(tailPayload))
+		tail, err := codec.MarshalObject(codec.HistoryTail, canonicalHistoryBlob(t, tailPayload))
 		if err != nil {
 			t.Fatal(err)
 		}
-		visible, err := codec.MarshalObject(codec.Visible, []byte(visiblePayload))
+		transcript, err := codec.MarshalObject(codec.RecoveryTranscript, canonicalHistoryBlob(t, transcriptPayload))
 		if err != nil {
 			t.Fatal(err)
 		}
-		manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, IncarnationID: id, ParentCheckpoint: parent, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: sealed, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}})
+		manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, IncarnationID: id, ParentCheckpoint: parent, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: sealed, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Transcript: codec.ObjectRef{Kind: codec.RecoveryTranscript, Digest: transcript.Digest, Size: uint32(len(transcript.Data))}}}}}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, ParentCheckpoint: parent, Manifest: manifest, Objects: append(append([]ports.SnapshotObject(nil), objects...), tail, visible)}
+		return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, ParentCheckpoint: parent, Manifest: manifest, Objects: append(append([]ports.SnapshotObject(nil), objects...), tail, transcript)}
 	}
-	first := makePublication(1, nil, "tail-1", "visible-1")
+	first := makePublication(1, nil, "tail-1", "transcript-1")
 	parent := &domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(first.Manifest)}
-	return first, makePublication(2, parent, "tail-2", "visible-2")
+	return first, makePublication(2, parent, "tail-2", "transcript-2")
 }
 
 func seedCompletePublication(t testing.TB, repo *Repository, publication ports.SnapshotPublication) {

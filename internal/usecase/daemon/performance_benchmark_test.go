@@ -78,7 +78,7 @@ func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testin
 	fixture.snapshots.reset()
 	fixture.activePane.mu.Lock()
 	fixture.activePane.screen.Write([]byte("\x1b[1;1Hchanged"))
-	frame := fixture.activePane.screen.PrimaryVisibleFrame()
+	frame := fixture.activePane.screen.Frame.Clone()
 	fixture.activePane.mu.Unlock()
 	for i, r := range "changed" {
 		require.Equalf(t, r, frame.At(i, 0).Rune, "fixture must overwrite at column %d", i)
@@ -91,7 +91,7 @@ func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testin
 	require.Equal(t, uint64(1), metrics.writes)
 	require.Zero(t, metrics.suppliedHistoryBytes, "retained sealed history must not be resupplied")
 	require.Zero(t, copies.Load(), "retained sealed history must not be deep-copied")
-	require.Positive(t, metrics.suppliedObjectBytes, "changed tail and visible state must still be supplied")
+	require.Positive(t, metrics.suppliedObjectBytes, "changed tail and recovery transcript must still be supplied")
 	requireCompleteSnapshotManifest(t, fixture.snapshots, fixture.sess.name)
 }
 
@@ -105,7 +105,7 @@ func requireCompleteSnapshotManifest(t *testing.T, repository *countingSnapshotR
 	require.NoError(t, err)
 	for _, tab := range manifest.Tabs {
 		for _, pane := range tab.Panes {
-			for _, ref := range append(append([]snapcodec.ObjectRef(nil), pane.Sealed...), pane.Tail, pane.Visible) {
+			for _, ref := range append(append([]snapcodec.ObjectRef(nil), pane.Sealed...), pane.Tail, pane.Transcript) {
 				_, ok := objects[ref.Digest]
 				require.True(t, ok, "manifest reference %x is not retained", ref.Digest)
 			}
@@ -523,7 +523,7 @@ type snapshotBenchmarkScenario struct {
 var snapshotBenchmarkScenarios = []snapshotBenchmarkScenario{
 	{name: "initial-10k-x-120", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000},
 	{name: "unchanged", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, unchanged: true},
-	{name: "visible-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, mutate: mutateBenchmarkVisible},
+	{name: "transcript-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, mutate: mutateBenchmarkTranscript},
 	// Leave one row below the retention cap so the mutation changes only the
 	// mutable tail and cannot evict a sealed chunk.
 	{name: "tail-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 9_999, baseline: true, mutate: mutateBenchmarkTail},
@@ -636,9 +636,9 @@ func publishBenchmarkSnapshot(b testing.TB, fixture *performanceFixture, generat
 	markSnapshotCaptureObjectsPublished(capture)
 }
 
-func mutateBenchmarkVisible(fixture *performanceFixture, operation int) {
+func mutateBenchmarkTranscript(fixture *performanceFixture, operation int) {
 	fixture.activePane.mu.Lock()
-	fixture.activePane.screen.Write(fmt.Appendf(nil, "\x1b[1;1Hvisible-%08d", operation))
+	fixture.activePane.screen.Write(fmt.Appendf(nil, "\x1b[1;1Htranscript-%08d", operation))
 	fixture.activePane.mu.Unlock()
 }
 
@@ -822,7 +822,7 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 }
 
 // Root-cause hypothesis (verified by this guard before the fix): S2 allocates
-// one visible VT-frame copy during capture plus a new composed frame and its
+// one pane-frame copy during capture plus a new composed frame and its
 // base-frame clone for every live paint. Those client-sized copies, rather
 // than history, account for the ~1 MiB/op regression in the pinned benchmark.
 func TestLivePaintAllocationBudget(t *testing.T) {
