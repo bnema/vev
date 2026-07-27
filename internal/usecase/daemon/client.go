@@ -74,8 +74,15 @@ type attachedClient struct {
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]
-	linkMu          sync.Mutex
-	sendMu          sync.Mutex
+	// snatchedInputMu serializes the restricted input parser with its delayed
+	// standalone-ESC callback. It is independent of routing and transport locks;
+	// role activation and terminal close clear it only after releasing those locks.
+	snatchedInputMu      sync.Mutex
+	snatchedInputPending []byte
+	snatchedInputDrain   bool
+	snatchedInputESC     pendingByteTimer
+	linkMu               sync.Mutex
+	sendMu               sync.Mutex
 }
 
 type cursorOut struct {
@@ -215,12 +222,14 @@ func (ac *attachedClient) revokeTransport(tr ports.Transport) ports.Transport {
 		return nil
 	}
 	ac.linkMu.Lock()
-	defer ac.linkMu.Unlock()
 	if ac.tr != tr {
+		ac.linkMu.Unlock()
 		return nil
 	}
 	ac.tr = nil
 	ac.transportIncarnation++
+	ac.linkMu.Unlock()
+	ac.clearSnatchedInput()
 	return tr
 }
 
@@ -819,8 +828,8 @@ func (d *Daemon) handleSnatchedClientFrame(token attachmentRoleToken, f ports.Fr
 	}
 	switch f.Type {
 	case ports.MsgInput:
-		if in, err := ports.UnmarshalInput(f.Payload); err == nil {
-			d.handleSnatchedInput(token, in)
+		if in, err := ports.UnmarshalInput(f.Payload); err == nil && d.handleSnatchedInput(token, in) {
+			return true
 		}
 	case ports.MsgResize:
 		if resize, err := ports.UnmarshalResize(f.Payload); err == nil && resize.Size.Valid() {
@@ -873,13 +882,6 @@ func (d *Daemon) handleSnatchedClientFrame(token attachmentRoleToken, f ports.Fr
 		return true
 	}
 	return false
-}
-
-// handleSnatchedInput is the narrow seam for the future strict snatched-action
-// parser. Ordinary terminal input is deliberately ignored and never enters the
-// key router or PTY path.
-func (d *Daemon) handleSnatchedInput(token attachmentRoleToken, _ ports.Input) {
-	_ = token
 }
 
 // clientGone detaches ac if it is still the session's current client. The

@@ -12,6 +12,14 @@ func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme
 	return d.applyHostThemeLocked(sess, ac, t, clearUnknownScheme)
 }
 
+// applyHostThemeSendLocked applies a theme when the caller already owns
+// ac.sendMu, preserving the usual sendMu -> themeMu lock order.
+func (d *Daemon) applyHostThemeSendLocked(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
+	sess.themeMu.Lock()
+	defer sess.themeMu.Unlock()
+	return d.applyHostThemeLocked(sess, ac, t, clearUnknownScheme)
+}
+
 func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
 	// Resolve while applying, never while composing. The theme mutex only
 	// publishes the completed value and is not held across session/tab/pane

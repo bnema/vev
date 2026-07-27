@@ -76,6 +76,10 @@ type attachmentTransitionRequest struct {
 	preflighted                        bool
 	roleEffectsFrozen                  bool
 	expectedTargetTransportInterrupted bool
+	// activationBarrier is used when promoting an already connected snatched
+	// attachment. Its role gate is deadline-drained before sendMu is acquired,
+	// preserving the gate -> sendMu -> daemon/routing/session publication order.
+	activationBarrier bool
 }
 
 func transitionSourceTokenMatchesRequest(token attachmentRoleToken, source *session, req attachmentTransitionRequest) bool {
@@ -235,7 +239,9 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 		source = req.target
 	}
 	if source == nil || (req.target == nil && req.createTargetLocked == nil) || req.next == nil || d.closing ||
-		d.sessions[source.id] != source || req.target != nil && d.sessions[req.target.id] != req.target {
+		d.sessions[source.id] != source || req.target != nil && d.sessions[req.target.id] != req.target ||
+		req.activationBarrier && (req.sourceToken == nil || source != req.target ||
+			req.expectedRole != attachmentSnatched || req.targetRole != attachmentActive) {
 		d.mu.Unlock()
 		return attachmentTransitionResult{}, errAttachmentTransition
 	}
@@ -265,15 +271,45 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	interrupts := []roleTransportInterrupt{{
 		ac: req.expectedTargetCurrent, transport: req.expectedTargetTransport,
 	}}
-	frozen := freezeRoleEffectGatesInterruptingObserved(interrupts, func(ac *attachedClient) {
+	var drainDeadline *roleEffectDrainDeadline
+	var drainDone func() <-chan struct{}
+	if req.activationBarrier {
+		drainDeadline = newRoleEffectDrainDeadline(d.clock)
+		drainDone = drainDeadline.Done
+	}
+	frozen := freezeRoleEffectGatesInterruptingObservedUntil(interrupts, drainDone, func(ac *attachedClient) {
 		if d.afterRoleEffectGateFrozen != nil {
 			d.afterRoleEffectGateFrozen(req.action, ac)
 		}
 	}, participants...)
+	if drainDeadline != nil {
+		drainDeadline.stop()
+	}
 	defer frozen.unfreeze()
+	if !frozen.acquired || !frozen.drained {
+		if req.activationBarrier {
+			_ = req.next.closeCapturedTransport(req.expectedTransport.transport)
+			return attachmentTransitionResult{}, errSendTimedOut
+		}
+		return attachmentTransitionResult{}, errAttachmentTransition
+	}
 	req.expectedTargetTransportInterrupted = frozen.interrupted(req.expectedTargetCurrent, req.expectedTargetTransport)
 	if d.afterRoleEffectsFrozen != nil {
 		d.afterRoleEffectsFrozen()
+	}
+
+	var releaseActivation func()
+	if req.activationBarrier {
+		var err error
+		releaseActivation, err = d.acquireActivationBarrier(*req.sourceToken)
+		if err != nil {
+			return attachmentTransitionResult{}, err
+		}
+		defer func() {
+			if releaseActivation != nil {
+				releaseActivation()
+			}
+		}()
 	}
 
 	d.mu.Lock()
@@ -293,6 +329,24 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	}
 	result, err := d.transitionAttachmentLocked(req)
 	d.mu.Unlock()
+	if err == nil && req.activationBarrier && result.published.role == attachmentActive {
+		ac := result.published.ac
+		if ac.output != nil {
+			ac.output.rebase()
+		}
+		ac.captureFrames = nil
+		d.applyHostThemeSendLocked(result.published.sess, ac, ac.getClientTheme(), false)
+		// The first paint still requests a reset, but the old panel dependency
+		// chain has already been rebased atomically under the activation barrier.
+		result.published.rebase = false
+	}
+	if releaseActivation != nil {
+		releaseActivation()
+		releaseActivation = nil
+	}
+	if err == nil && result.published.role == attachmentActive {
+		result.published.ac.clearSnatchedInput()
+	}
 	return result, err
 }
 
@@ -543,6 +597,22 @@ func (d *Daemon) sendSnatchedControl(token attachmentRoleToken, frame ports.Fram
 	return err
 }
 
+// boundedSendSnatchedControl keeps a best-effort control acknowledgement bound
+// to the exact admitted role and link incarnation. On deadline it closes only
+// that captured link, releasing either the transport Send or a wait on sendMu.
+func (d *Daemon) boundedSendSnatchedControl(token attachmentRoleToken, frame ports.Frame) error {
+	if token.ac == nil || token.effect == nil || token.transport.transport == nil {
+		return errAttachmentTransition
+	}
+	_, err := d.boundedSendWith(token.transport.transport, func() error {
+		return d.sendSnatchedControl(token, frame)
+	})
+	if errors.Is(err, errSendTimedOut) {
+		_ = token.ac.closeCapturedTransport(token.transport.transport)
+	}
+	return err
+}
+
 // removeSnatchedAttachment removes exactly one role generation and transport
 // from session routing. It never touches the active attachment or closes a
 // transport, allowing callers that already interrupted a blocked send to avoid
@@ -569,6 +639,7 @@ func (d *Daemon) removeSnatchedAttachment(token attachmentRoleToken) bool {
 		return false
 	}
 
+	token.ac.clearSnatchedInput()
 	d.unregisterPreview(token.ac)
 	token.ac.clearPreviousSession()
 	token.ac.setSession(nil)
@@ -620,6 +691,7 @@ func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken)
 	}
 
 	_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+	token.ac.clearSnatchedInput()
 	d.unregisterPreview(token.ac)
 	token.ac.clearPreviousSession()
 	token.ac.setSession(nil)

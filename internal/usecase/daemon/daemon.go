@@ -115,6 +115,12 @@ type Daemon struct {
 	// afterSnatchOverlayFamily is a deterministic structural lock seam. It runs
 	// after one overlay-family mutex is released and before the next is taken.
 	afterSnatchOverlayFamily func(string)
+	// afterSnatchedEscapeAccepted observes a standalone ESC after parser state
+	// is consumed and before its captured role and transport are revalidated.
+	afterSnatchedEscapeAccepted func()
+	// afterSnatchedEscapeAttempt reports whether that callback acquired its exact
+	// role capability after revalidation.
+	afterSnatchedEscapeAttempt func(bool)
 	// afterActiveFrameDispatch is a deterministic test seam after the connection
 	// loop's first role check and before a decoded active frame takes effect.
 	afterActiveFrameDispatch func(attachmentRoleToken)
@@ -134,6 +140,9 @@ type Daemon struct {
 	// afterDisplacedCleanupStarted observes deferred displaced cleanup before it
 	// synchronizes with the attachment gate.
 	afterDisplacedCleanupStarted func()
+	// beforeReclaimFirstPaint observes a committed reclaim after displaced cleanup
+	// is queued and before its generation-bound reset first paint is admitted.
+	beforeReclaimFirstPaint func(attachmentRoleToken)
 	// afterRoleEffectAdmitted is a deterministic test seam after a frame/paint
 	// reserves its exact capability and before its first observable mutation.
 	afterRoleEffectAdmitted func(attachmentRoleToken)
