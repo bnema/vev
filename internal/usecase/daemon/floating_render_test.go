@@ -278,6 +278,138 @@ func TestComposeCapturedFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testi
 	require.Equal(t, 1, damage[0].Height)
 }
 
+func TestComposeCapturedFloatingFrameClipsRetainedGeometryAfterFailedShrink(t *testing.T) {
+	base := renderer.NewFrame(15, 7)
+	for y := range base.Height {
+		for x := range base.Width {
+			base.Set(x, y, renderer.Cell{Rune: '·'})
+		}
+	}
+	content := domain.Rect{Y: 1, Width: 15, Height: 5}
+	retained := calculateContentFloatingGeometry(
+		domain.Size{Cols: 100, Rows: 30},
+		domain.FloatingConfig{Width: 80, Height: 80},
+	)
+	pty := &resizePTY{err: errors.New("resize failed")}
+	floatingPane := newPane("floating", pty, rectSize(retained.Inner))
+	floatingPane.rect = retained.Inner
+	floatingPane.popupGeometry = retained
+	for y := range floatingPane.screen.Frame.Height {
+		for x := range floatingPane.screen.Frame.Width {
+			floatingPane.screen.Frame.Set(x, y, renderer.Cell{Rune: rune('a' + y*10 + x)})
+		}
+	}
+	requested := calculateContentFloatingGeometry(rectSize(content), domain.FloatingConfig{Width: 80, Height: 80})
+	d := newTestDaemon(t, nil, stubClock{})
+	require.False(t, applyFloatingResizePlanForTest(d, floatingPane, requested))
+	require.Equal(t, retained, floatingPane.popupGeometry, "failed resize must retain the committed geometry")
+	floatingPane.mu.Lock()
+	captured := capturePaneRenderStateLocked(floatingPane, retained.Inner)
+	floatingPane.mu.Unlock()
+
+	var frame renderer.Frame
+	require.NotPanics(t, func() {
+		frame, _ = composeCapturedFloatingFrame(floatingComposeInput{
+			baseFrame: base,
+			floating: capturedFloatingRenderState{
+				visible:    true,
+				pane:       captured,
+				geometry:   retained,
+				generation: 1,
+			},
+			content: content,
+			full:    true,
+		})
+	})
+
+	for y := range 4 {
+		require.Equal(t, "···············", rowText(frame.Row(y)), "preserved frame row %d must remain outside the retained popup", y)
+	}
+	require.Equal(t, "··········┌────", rowText(frame.Row(4)), "only the visible top-border intersection is painted")
+	require.Equal(t, "··········│abcd", rowText(frame.Row(5)), "visible pane cells retain their source coordinates")
+	require.Equal(t, "··········│klmn", rowText(frame.Row(6)), "bottom clipping must not shift the retained source")
+}
+
+func TestComposeCapturedFloatingFrameOffsetsSourceForClippedTopLeft(t *testing.T) {
+	base := renderer.NewFrame(4, 4)
+	pane := renderer.NewFrame(5, 5)
+	for y, text := range []string{"ABCDE", "FGHIJ", "KLMNO", "PQRST", "UVWXY"} {
+		for x, r := range text {
+			pane.Set(x, y, renderer.Cell{Rune: r})
+		}
+	}
+	geometry := floatingGeometry{
+		Mode:   ui.PresentationFloating,
+		Bounds: domain.Rect{X: -2, Y: -2, Width: 7, Height: 7},
+		Inner:  domain.Rect{X: -1, Y: -1, Width: 5, Height: 5},
+	}
+
+	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible:    true,
+			pane:       capturedPaneRenderState{frame: pane},
+			geometry:   geometry,
+			generation: 1,
+		},
+		full: true,
+	})
+
+	require.Equal(t, []string{"GHIJ", "LMNO", "QRST", "VWXY"}, []string{
+		rowText(frame.Row(0)), rowText(frame.Row(1)), rowText(frame.Row(2)), rowText(frame.Row(3)),
+	})
+}
+
+func TestDrawFloatingBorderClipsEveryEdge(t *testing.T) {
+	tests := []struct {
+		name     string
+		geometry floatingGeometry
+		want     []string
+	}{
+		{
+			name: "negative top and left retain bottom and right edges",
+			geometry: floatingGeometry{
+				Mode:   ui.PresentationFloating,
+				Bounds: domain.Rect{X: -2, Y: -1, Width: 6, Height: 5},
+			},
+			want: []string{"···│", "···│", "···│", "───┘"},
+		},
+		{
+			name: "overflowing bottom and right retain top and left edges",
+			geometry: floatingGeometry{
+				Mode:   ui.PresentationFloating,
+				Bounds: domain.Rect{X: 2, Y: 2, Width: 5, Height: 4},
+			},
+			want: []string{"····", "····", "··┌─", "··│·"},
+		},
+		{
+			name: "drawer clips its separator",
+			geometry: floatingGeometry{
+				Mode:   ui.PresentationDrawer,
+				Bounds: domain.Rect{X: -2, Y: 2, Width: 6, Height: 3},
+			},
+			want: []string{"····", "····", "xy──", "····"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := renderer.NewFrame(4, 4)
+			for y := range frame.Height {
+				for x := range frame.Width {
+					frame.Set(x, y, renderer.Cell{Rune: '·'})
+				}
+			}
+
+			require.NotPanics(t, func() {
+				drawFloatingBorder(frame, tt.geometry, "xy", renderer.Style{})
+			})
+			for y, want := range tt.want {
+				require.Equal(t, want, rowText(frame.Row(y)), "row %d", y)
+			}
+		})
+	}
+}
+
 func TestComposeCapturedFloatingFrameUsesSemanticBorderWithoutTintingPaneCells(t *testing.T) {
 	base := renderer.NewFrame(20, 9)
 	content := domain.Rect{Y: 1, Width: 20, Height: 7}

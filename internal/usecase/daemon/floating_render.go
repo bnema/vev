@@ -149,7 +149,7 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	frame := base.Clone()
 	applyOverlayBackdrop(frame, theme)
 	geometry := floating.geometry.translate(content.X, content.Y)
-	blitPaneFrame(frame, geometry.Inner, floating.pane.frame, false, themeui.NewDimmer(theme))
+	blitClippedFloatingPane(frame, geometry.Inner, floating.pane.frame)
 	damage := append([]renderer.Damage(nil), baseDamage...)
 	for _, d := range floating.pane.damage {
 		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)
@@ -169,9 +169,68 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 		hasTitleBorder = geometry.Bounds.Height > 0
 	}
 	if titleChanged && hasTitleBorder {
-		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: geometry.Bounds.X, Y: geometry.Bounds.Y, Width: geometry.Bounds.Width, Height: 1})
+		if titleDamage, ok := clippedFloatingTitleDamage(frame, geometry.Bounds); ok {
+			damage = append(damage, titleDamage)
+		}
 	}
 	return frame, damage
+}
+
+type floatingSpan struct {
+	source, destination, length int
+}
+
+// clippedFloatingSpan intersects a source span placed at origin with the
+// destination interval [0, limit). The source offset preserves pane cell
+// mapping when the retained committed geometry starts above or left of frame.
+func clippedFloatingSpan(origin, length, limit int) (floatingSpan, bool) {
+	if length <= 0 || limit <= 0 {
+		return floatingSpan{}, false
+	}
+	if origin < 0 {
+		if origin <= -length {
+			return floatingSpan{}, false
+		}
+		trim := -origin
+		length -= trim
+		origin = 0
+		if length <= 0 {
+			return floatingSpan{}, false
+		}
+		return floatingSpan{source: trim, destination: origin, length: min(length, limit)}, true
+	}
+	if origin >= limit {
+		return floatingSpan{}, false
+	}
+	length = min(length, limit-origin)
+	return floatingSpan{destination: origin, length: length}, length > 0
+}
+
+func blitClippedFloatingPane(dst renderer.Frame, rect domain.Rect, src renderer.Frame) {
+	x, ok := clippedFloatingSpan(rect.X, min(rect.Width, src.Width), dst.Width)
+	if !ok {
+		return
+	}
+	y, ok := clippedFloatingSpan(rect.Y, min(rect.Height, src.Height), dst.Height)
+	if !ok {
+		return
+	}
+	for dy := range y.length {
+		for dx := range x.length {
+			dst.Set(x.destination+dx, y.destination+dy, src.At(x.source+dx, y.source+dy))
+		}
+	}
+}
+
+func clippedFloatingTitleDamage(frame renderer.Frame, bounds domain.Rect) (renderer.Damage, bool) {
+	if bounds.Y < 0 || bounds.Y >= frame.Height {
+		return renderer.Damage{}, false
+	}
+	x, ok := clippedFloatingSpan(bounds.X, bounds.Width, frame.Width)
+	if !ok {
+		return renderer.Damage{}, false
+	}
+	return renderer.Damage{Kind: renderer.DamageText, X: x.destination, Y: bounds.Y, Width: x.length, Height: 1}, true
 }
 
 func drawFloatingBorder(frame renderer.Frame, geometry floatingGeometry, title string, style renderer.Style) {
@@ -180,31 +239,89 @@ func drawFloatingBorder(frame renderer.Frame, geometry floatingGeometry, title s
 		return
 	}
 	if geometry.Mode == ui.PresentationDrawer {
-		for x := bounds.X; x < bounds.X+bounds.Width; x++ {
-			frame.Set(x, bounds.Y, renderer.Cell{Rune: '─', Style: style})
-		}
-		ui.DrawText(frame, bounds.X+2, bounds.Y, bounds.X+bounds.Width-2, title, style)
+		drawFloatingHorizontalEdge(frame, bounds.X, bounds.Width, bounds.Y, '─', style)
+		drawFloatingTitle(frame, bounds, title, style)
 		return
 	}
 	// Each axis omits its borders independently for tiny popups, matching
 	// floatingInnerSize and leaving every cell available to the terminal.
+	right, hasRight := floatingLastCoordinate(bounds.X, bounds.Width)
+	bottom, hasBottom := floatingLastCoordinate(bounds.Y, bounds.Height)
 	if bounds.Height >= 3 {
-		for x := bounds.X; x < bounds.X+bounds.Width; x++ {
-			frame.Set(x, bounds.Y, renderer.Cell{Rune: '─', Style: style})
-			frame.Set(x, bounds.Y+bounds.Height-1, renderer.Cell{Rune: '─', Style: style})
+		drawFloatingHorizontalEdge(frame, bounds.X, bounds.Width, bounds.Y, '─', style)
+		if hasBottom {
+			drawFloatingHorizontalEdge(frame, bounds.X, bounds.Width, bottom, '─', style)
 		}
 	}
 	if bounds.Width >= 3 {
-		for y := bounds.Y; y < bounds.Y+bounds.Height; y++ {
-			frame.Set(bounds.X, y, renderer.Cell{Rune: '│', Style: style})
-			frame.Set(bounds.X+bounds.Width-1, y, renderer.Cell{Rune: '│', Style: style})
+		drawFloatingVerticalEdge(frame, bounds.X, bounds.Y, bounds.Height, '│', style)
+		if hasRight {
+			drawFloatingVerticalEdge(frame, right, bounds.Y, bounds.Height, '│', style)
 		}
 	}
-	if bounds.Width >= 3 && bounds.Height >= 3 {
-		frame.Set(bounds.X, bounds.Y, renderer.Cell{Rune: '┌', Style: style})
-		frame.Set(bounds.X+bounds.Width-1, bounds.Y, renderer.Cell{Rune: '┐', Style: style})
-		frame.Set(bounds.X, bounds.Y+bounds.Height-1, renderer.Cell{Rune: '└', Style: style})
-		frame.Set(bounds.X+bounds.Width-1, bounds.Y+bounds.Height-1, renderer.Cell{Rune: '┘', Style: style})
-		ui.DrawText(frame, bounds.X+2, bounds.Y, bounds.X+bounds.Width-2, title, style)
+	if bounds.Width >= 3 && bounds.Height >= 3 && hasRight && hasBottom {
+		setFloatingCell(frame, bounds.X, bounds.Y, '┌', style)
+		setFloatingCell(frame, right, bounds.Y, '┐', style)
+		setFloatingCell(frame, bounds.X, bottom, '└', style)
+		setFloatingCell(frame, right, bottom, '┘', style)
+		drawFloatingTitle(frame, bounds, title, style)
 	}
+}
+
+func drawFloatingHorizontalEdge(frame renderer.Frame, x, width, y int, glyph rune, style renderer.Style) {
+	if y < 0 || y >= frame.Height {
+		return
+	}
+	span, ok := clippedFloatingSpan(x, width, frame.Width)
+	if !ok {
+		return
+	}
+	for dx := range span.length {
+		frame.Set(span.destination+dx, y, renderer.Cell{Rune: glyph, Style: style})
+	}
+}
+
+func drawFloatingVerticalEdge(frame renderer.Frame, x, y, height int, glyph rune, style renderer.Style) {
+	if x < 0 || x >= frame.Width {
+		return
+	}
+	span, ok := clippedFloatingSpan(y, height, frame.Height)
+	if !ok {
+		return
+	}
+	for dy := range span.length {
+		frame.Set(x, span.destination+dy, renderer.Cell{Rune: glyph, Style: style})
+	}
+}
+
+func setFloatingCell(frame renderer.Frame, x, y int, glyph rune, style renderer.Style) {
+	if x < 0 || x >= frame.Width || y < 0 || y >= frame.Height {
+		return
+	}
+	frame.Set(x, y, renderer.Cell{Rune: glyph, Style: style})
+}
+
+func floatingLastCoordinate(origin, size int) (int, bool) {
+	if size <= 0 {
+		return 0, false
+	}
+	last := origin + size - 1
+	if last < origin {
+		return 0, false
+	}
+	return last, true
+}
+
+func drawFloatingTitle(frame renderer.Frame, bounds domain.Rect, title string, style renderer.Style) {
+	const inset = 2
+	titleWidth := bounds.Width - 2*inset
+	if titleWidth <= 0 || bounds.X > int(^uint(0)>>1)-inset {
+		return
+	}
+	titleX := bounds.X + inset
+	span, ok := clippedFloatingSpan(titleX, titleWidth, frame.Width)
+	if !ok {
+		return
+	}
+	ui.DrawText(frame, titleX, bounds.Y, span.destination+span.length, title, style)
 }
