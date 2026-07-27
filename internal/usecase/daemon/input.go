@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
@@ -298,6 +299,9 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			runner = daemonActions{d: h.d}
 		}
 		if err := runner.Run(request); err != nil {
+			if errors.Is(err, errDaemonActionNoChange) {
+				return
+			}
 			h.d.reportError(sess, resizeUserError(err))
 			return
 		}

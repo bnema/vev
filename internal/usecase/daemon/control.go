@@ -206,6 +206,7 @@ const (
 	daemonActionRenameTab
 	daemonActionResizePane
 	daemonActionEqualizePanes
+	daemonActionConsumeOrExpelPane
 )
 
 type daemonActionTarget struct {
@@ -289,6 +290,8 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		return a.d.resizePane(target, request.axis, request.delta)
 	case daemonActionEqualizePanes:
 		return a.d.equalizePanes(target)
+	case daemonActionConsumeOrExpelPane:
+		return a.d.consumeOrExpelPane(target, request.direction)
 	default:
 		return errors.New("daemon: unknown action")
 	}
@@ -345,13 +348,19 @@ func (e controlExec) runAction(request daemonActionRequest) error {
 		runner = daemonActions{d: e.d}
 	}
 	err := runner.Run(request)
-	if err == nil && e.actions == nil {
+	if errors.Is(err, errDaemonActionNoChange) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if e.actions == nil {
 		e.sess.mu.Lock()
 		ac := e.sess.client
 		e.sess.mu.Unlock()
 		finishDaemonActionForClient(e.d, request, ac, "control.go")
 	}
-	return err
+	return nil
 }
 
 func finishDaemonActionForClient(d *Daemon, request daemonActionRequest, ac *attachedClient, producer string) {

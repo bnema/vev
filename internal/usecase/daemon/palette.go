@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sort"
 	"time"
 
@@ -304,7 +305,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		return
 	}
 	sess.dispatchMu.Lock()
-	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args)
+	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, redrawClosedPalette: true}, args)
 	sess.dispatchMu.Unlock()
 	if err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
@@ -351,11 +352,12 @@ func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery strin
 }
 
 type paletteExec struct {
-	d       *Daemon
-	sess    *session
-	ac      *attachedClient
-	recent  []recentSession
-	actions daemonActionRunner
+	d                   *Daemon
+	sess                *session
+	ac                  *attachedClient
+	recent              []recentSession
+	actions             daemonActionRunner
+	redrawClosedPalette bool
 }
 
 func (e paletteExec) runAction(request daemonActionRequest) error {
@@ -367,10 +369,19 @@ func (e paletteExec) runAction(request daemonActionRequest) error {
 		runner = daemonActions{d: e.d}
 	}
 	err := runner.Run(request)
-	if err == nil && e.actions == nil {
+	if errors.Is(err, errDaemonActionNoChange) {
+		if e.redrawClosedPalette {
+			e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if e.actions == nil {
 		finishDaemonActionForClient(e.d, request, e.ac, "palette.go")
 	}
-	return err
+	return nil
 }
 
 func (e paletteExec) CreateTab() error {
