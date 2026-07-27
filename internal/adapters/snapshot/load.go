@@ -41,7 +41,10 @@ func (r *Repository) loadCheckpointLocked(ctx context.Context, id domain.Incarna
 		return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("manifest digest mismatch")
 	}
 	manifest, err := codec.UnmarshalManifest(data)
-	if err != nil || manifest.IncarnationID != id || manifest.Generation != ref.Generation {
+	if err != nil {
+		return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("invalid manifest: %w", err)
+	}
+	if manifest.IncarnationID != id || manifest.Generation != ref.Generation {
 		return ports.SnapshotGeneration{}, codec.Manifest{}, fmt.Errorf("invalid manifest")
 	}
 	refs := manifestRefs(manifest)

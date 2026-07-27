@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -58,6 +59,101 @@ func TestDirectCheckpointLoad(t *testing.T) {
 	}
 	if got.Generation != 1 || got.IncarnationID != id {
 		t.Fatalf("generation = %#v", got)
+	}
+}
+
+func TestLoadCheckpointPreservesManifestVersionError(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		version uint16
+	}{
+		{name: "old", version: codec.ManifestVersion - 1},
+		{name: "future", version: codec.ManifestVersion + 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			id := domain.IncarnationID{1}
+			pub := incarnationPublication(t, id, "work", 1, nil)
+			require.NoError(t, repo.Publish(t.Context(), pub))
+
+			manifest := append([]byte(nil), pub.Manifest...)
+			binary.BigEndian.PutUint16(manifest[4:6], tt.version)
+			require.NoError(t, os.WriteFile(repo.manifestPath(id, 1), manifest, 0o600))
+			ref := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(manifest)}
+
+			_, err := repo.LoadCheckpoint(t.Context(), id, "work", ref)
+			require.ErrorIs(t, err, codec.ErrBadVersion)
+		})
+	}
+}
+
+func TestLoadCheckpointDoesNotClassifyCorruptionAsManifestVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*testing.T, *Repository, ports.SnapshotPublication, *domain.CheckpointRef)
+	}{
+		{
+			name: "digest mismatch precedes version decode",
+			mutate: func(t *testing.T, repo *Repository, pub ports.SnapshotPublication, _ *domain.CheckpointRef) {
+				t.Helper()
+				manifest := append([]byte(nil), pub.Manifest...)
+				binary.BigEndian.PutUint16(manifest[4:6], codec.ManifestVersion-1)
+				require.NoError(t, os.WriteFile(repo.manifestPath(pub.IncarnationID, pub.Generation), manifest, 0o600))
+			},
+		},
+		{
+			name: "bad magic",
+			mutate: func(t *testing.T, repo *Repository, pub ports.SnapshotPublication, ref *domain.CheckpointRef) {
+				t.Helper()
+				manifest := append([]byte(nil), pub.Manifest...)
+				manifest[0] ^= 1
+				ref.ManifestDigest = sha256.Sum256(manifest)
+				require.NoError(t, os.WriteFile(repo.manifestPath(pub.IncarnationID, pub.Generation), manifest, 0o600))
+			},
+		},
+		{
+			name: "bad crc",
+			mutate: func(t *testing.T, repo *Repository, pub ports.SnapshotPublication, ref *domain.CheckpointRef) {
+				t.Helper()
+				manifest := append([]byte(nil), pub.Manifest...)
+				manifest[12] ^= 1
+				ref.ManifestDigest = sha256.Sum256(manifest)
+				require.NoError(t, os.WriteFile(repo.manifestPath(pub.IncarnationID, pub.Generation), manifest, 0o600))
+			},
+		},
+		{
+			name: "wrong identity",
+			mutate: func(t *testing.T, repo *Repository, pub ports.SnapshotPublication, ref *domain.CheckpointRef) {
+				t.Helper()
+				manifest, err := codec.UnmarshalManifest(pub.Manifest)
+				require.NoError(t, err)
+				manifest.IncarnationID = domain.IncarnationID{2}
+				encoded, err := codec.MarshalManifest(manifest)
+				require.NoError(t, err)
+				ref.ManifestDigest = sha256.Sum256(encoded)
+				require.NoError(t, os.WriteFile(repo.manifestPath(pub.IncarnationID, pub.Generation), encoded, 0o600))
+			},
+		},
+		{
+			name: "invalid object",
+			mutate: func(t *testing.T, repo *Repository, pub ports.SnapshotPublication, _ *domain.CheckpointRef) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(repo.objectPath(pub.IncarnationID, pub.Objects[0].Digest), []byte("corrupt"), 0o600))
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			id := domain.IncarnationID{1}
+			pub := incarnationPublication(t, id, "work", 1, nil)
+			require.NoError(t, repo.Publish(t.Context(), pub))
+			ref := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(pub.Manifest)}
+			tt.mutate(t, repo, pub, &ref)
+
+			_, err := repo.LoadCheckpoint(t.Context(), id, "work", ref)
+			require.Error(t, err)
+			require.NotErrorIs(t, err, codec.ErrBadVersion)
+		})
 	}
 }
 
