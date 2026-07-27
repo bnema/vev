@@ -187,7 +187,7 @@ func TestResponsiveFloatingZeroContentDrawerRemainsCommittedAndTargeted(t *testi
 	require.Equal(t, geometry, gotGeometry)
 }
 
-func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithPTYFallback(t *testing.T) {
+func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithoutPhysicalResize(t *testing.T) {
 	cfg := domain.FloatingConfig{Width: 100, Height: 100}
 	initial := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
 	requested := calculateContentFloatingGeometry(domain.Size{Cols: 79, Rows: 2}, cfg)
@@ -203,11 +203,11 @@ func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithPTYFallback(t *test
 	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
 	require.True(t, ok)
 	require.Empty(t, failed)
-	require.Equal(t, []domain.Size{{Cols: 1, Rows: 1}}, pty.sizes())
+	require.Empty(t, pty.sizes(), "a zero-inner drawer must not issue a synthetic PTY resize")
 	require.Equal(t, requested, floating.popupGeometry)
-	require.Equal(t, domain.Rect{Width: 1, Height: 1}, floating.rect)
-	require.Equal(t, 1, floating.screen.Frame.Width)
-	require.Equal(t, 1, floating.screen.Frame.Height)
+	require.Equal(t, initial.Inner, floating.rect, "physical geometry remains at the last usable size")
+	require.Equal(t, initial.Inner.Width, floating.screen.Frame.Width)
+	require.Equal(t, initial.Inner.Height, floating.screen.Frame.Height)
 }
 
 func TestFloatingAxisGeometryEndpointsAndTinyBorders(t *testing.T) {

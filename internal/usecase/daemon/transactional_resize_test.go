@@ -484,11 +484,65 @@ func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
 	tb.mu.Unlock()
 }
 
+func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	for _, tc := range []struct {
+		name     string
+		from     domain.Size
+		to       domain.Size
+		wantMode ui.PresentationMode
+	}{
+		{name: "80 to 79", from: domain.Size{Cols: 80, Rows: 25}, to: domain.Size{Cols: 79, Rows: 25}, wantMode: ui.PresentationDrawer},
+		{name: "79 to 80", from: domain.Size{Cols: 79, Rows: 25}, to: domain.Size{Cols: 80, Rows: 25}, wantMode: ui.PresentationFloating},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, _, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+			d.ApplyConfig(domain.Config{Floating: cfg})
+			require.True(t, d.requestTransactionalResize(sess, nil, tc.from, true))
+
+			tb := sess.activeTab()
+			fromGeometry := calculateContentFloatingGeometry(tabSize(tc.from), cfg)
+			toGeometry := calculateContentFloatingGeometry(tabSize(tc.to), cfg)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			popupPTY := &transactionalResizePTY{onResize: func() {
+				once.Do(func() { close(entered) })
+				<-release
+			}}
+			popup := newPane("floating", popupPTY, rectSize(fromGeometry.Inner))
+			popup.rect = fromGeometry.Inner
+			popup.popupGeometry = fromGeometry
+			installTestFloating(tb, popup, true)
+
+			done := make(chan bool, 1)
+			go func() { done <- d.requestTransactionalResize(sess, nil, tc.to, true) }()
+			<-entered
+			popup.mu.Lock()
+			require.Equal(t, fromGeometry, popup.popupGeometry, "in-flight resize exposed an uncommitted mode")
+			require.Equal(t, fromGeometry.Inner, popup.rect)
+			require.Equal(t, rectSize(fromGeometry.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+			popup.mu.Unlock()
+			close(release)
+			require.True(t, <-done)
+
+			require.Equal(t, []domain.Size{rectSize(toGeometry.Inner)}, popupPTY.requested())
+			popup.mu.Lock()
+			require.Equal(t, tc.wantMode, popup.popupGeometry.Mode)
+			require.Equal(t, toGeometry, popup.popupGeometry)
+			require.Equal(t, toGeometry.Inner, popup.rect)
+			require.Equal(t, rectSize(toGeometry.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+			popup.mu.Unlock()
+		})
+	}
+}
+
 func TestApplyVisibleFloatingLayoutPreservesCommittedGeometryOnPTYResizeFailure(t *testing.T) {
 	cfg := domain.FloatingConfig{Width: 50, Height: 50}
 	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 24}, cfg)
-	requestedSize := domain.Size{Cols: 100, Rows: 40}
+	requestedSize := domain.Size{Cols: 79, Rows: 40}
 	requested := calculateContentFloatingGeometry(requestedSize, cfg)
+	require.Equal(t, ui.PresentationFloating, committed.Mode)
+	require.Equal(t, ui.PresentationDrawer, requested.Mode)
 	resizeErr := errors.New("floating resize failed")
 	pty := &transactionalResizePTY{errs: []error{resizeErr}}
 	popup := newPane("floating", pty, rectSize(committed.Inner))
@@ -560,6 +614,30 @@ func TestApplyVisibleFloatingLayoutPublishesSameSizeGeometryWithoutPTYResize(t *
 	require.Equal(t, requested, popup.popupGeometry)
 	require.Equal(t, rectSize(requested.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
 	require.False(t, popup.resizeRetry)
+	popup.mu.Unlock()
+}
+
+func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
+	pty := &transactionalResizePTY{}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, func() bool { return false })
+
+	require.False(t, ok)
+	require.Empty(t, failed)
+	require.Empty(t, pty.requested())
+	popup.mu.Lock()
+	require.Equal(t, committed, popup.popupGeometry)
+	require.Equal(t, committed.Inner, popup.rect)
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
 	popup.mu.Unlock()
 }
 

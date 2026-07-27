@@ -369,6 +369,27 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	if !geometry.committable() {
 		return nil, true
 	}
+	if geometry.Inner.Width <= 0 || geometry.Inner.Height <= 0 {
+		// A drawer can validly reserve only its separator row. Publish that
+		// presentation without inventing a physical PTY size; the last usable
+		// rectangle and screen remain committed until a later resize has content.
+		tb.mu.Lock()
+		currentSlot := tb.floating.state == floatingVisible && tb.floating.generation == generation &&
+			tb.floating.pane == p && tb.size == size
+		if current != nil && !current() {
+			currentSlot = false
+		}
+		if currentSlot {
+			p.mu.Lock()
+			p.popupGeometry = geometry
+			p.mu.Unlock()
+		}
+		tb.mu.Unlock()
+		if current != nil && !current() {
+			return nil, false
+		}
+		return nil, true
+	}
 
 	// This keeps successful PTY resizes gated until the
 	// floating slot and tab size are revalidated. A newer client resize may

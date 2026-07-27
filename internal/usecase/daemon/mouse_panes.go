@@ -187,7 +187,7 @@ func setExpandedLocked(n *layout.Node, id layout.PaneID) bool {
 func translateMouseEvent(ev mouse.Event, colOffset, contentYOffset int) mouse.Event {
 	ev.Col -= colOffset
 	ev.Row -= contentYOffset
-	ev.Raw = sgrOffset(ev.Raw, -colOffset, -contentYOffset-1)
+	ev.Raw = sgrOffset(ev.Raw, -colOffset, -contentYOffset-clientTopBarRows)
 	return ev
 }
 
