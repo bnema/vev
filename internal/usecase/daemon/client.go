@@ -39,10 +39,14 @@ type attachedClient struct {
 	overlays             *overlayRuntime
 	overlayOnce          sync.Once
 	clientID             [16]byte
-	resumeCapable        bool
-	resumeToken          uint64
-	parked               bool
-	echoAck              atomic.Uint64
+	// roleGeneration invalidates role-bound sends. A transition promoting a
+	// panel-sending client must serialize through sendMu/the activation barrier
+	// before publishing its generation.
+	roleGeneration atomic.Uint64
+	resumeCapable  bool
+	resumeToken    uint64
+	parked         bool
+	echoAck        atomic.Uint64
 	// prepareFailureFallback prevents a direct fallback paint from recursively
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.
