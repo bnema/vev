@@ -14,6 +14,7 @@ const (
 	historyMagic        = "VTH1"
 	historyVersion      = 2
 	historyCellBytes    = 41
+	historyBoundBytes   = 5
 	maxHistoryChunkRows = 256
 
 	// The daemon retains 10,000 history rows. Support a 20% row margin and
@@ -24,9 +25,8 @@ const (
 	maxHistoryRowCells = 160
 	maxHistoryCells    = maxHistoryRows * maxHistoryRowCells
 
-	maxHistoryDecodeStyles  = maxHistoryCells
-	maxHistoryDecodedBytes  = maxHistoryCells * historyCellBytes
-	maxVisibleBoundaryBytes = maxHistoryRows * visibleBoundaryBytes
+	maxHistoryDecodeStyles = maxHistoryCells
+	maxHistoryDecodedBytes = maxHistoryCells * historyCellBytes
 )
 
 var errInvalidHistory = errors.New("invalid history payload")
@@ -206,7 +206,7 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 	for range chunkCount {
 		rowCount, ok := p.uint32()
 		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows ||
-			uint64(rowCount) > uint64(len(p.data))/(4+visibleBoundaryBytes) ||
+			uint64(rowCount) > uint64(len(p.data))/(4+historyBoundBytes) ||
 			!addHistoryDecodeBudget(&stats.rows, uint64(rowCount), maxHistoryRows) {
 			return HistoryView{}, historyDecodeStats{}, false
 		}
@@ -329,12 +329,12 @@ func (p *historyParser) cell() (renderer.Cell, bool) {
 }
 
 func (p *historyParser) bound() (LineBound, bool) {
-	if len(p.data) < visibleBoundaryBytes {
+	if len(p.data) < historyBoundBytes {
 		return LineBound{}, false
 	}
 	end := binary.BigEndian.Uint32(p.data[:4])
 	flag := p.data[4]
-	p.data = p.data[visibleBoundaryBytes:]
+	p.data = p.data[historyBoundBytes:]
 	if flag > 1 || uint64(end) > math.MaxInt32 {
 		return LineBound{}, false
 	}

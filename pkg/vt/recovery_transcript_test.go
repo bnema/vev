@@ -25,6 +25,17 @@ func TestRecoveryTranscriptSnapshotOwnsPrimaryCellsAndBounds(t *testing.T) {
 	require.Equal(t, LineBound{End: 4}, view.Bound(0))
 }
 
+func TestRecoveryTranscriptSnapshotRetainsReflowBounds(t *testing.T) {
+	s := NewScreen(5, 3)
+	s.Write([]byte("abcdefgh"))
+
+	view := decodeRecoveryTranscript(t, s.RecoveryTranscriptSnapshot())
+
+	require.Equal(t, []string{"abcde", "fgh  "}, historyViewTexts(view))
+	require.Equal(t, LineBound{End: 5, Soft: true}, view.Bound(0))
+	require.Equal(t, LineBound{End: 3}, view.Bound(1))
+}
+
 func TestRecoveryTranscriptSnapshotAllocationsDoNotScaleWithRetainedRows(t *testing.T) {
 	const (
 		shortHeight = 8
@@ -286,6 +297,46 @@ func TestNewScreenWithRecoveryTranscriptRejectsOversizedTranscriptRow(t *testing
 
 	require.ErrorIs(t, err, ErrHistoryRowTooWide)
 	require.Nil(t, screen)
+}
+
+func BenchmarkRecoveryTranscriptSnapshot(b *testing.B) {
+	for _, tt := range []struct {
+		name      string
+		alternate bool
+		wantRows  int
+	}{
+		{name: "primary", wantRows: 40},
+		{name: "primary-and-active-alternate", alternate: true, wantRows: 80},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			screen := NewScreen(120, 40)
+			fillRecoveryTranscriptBenchmarkFrame(screen)
+			if tt.alternate {
+				screen.Write([]byte("\x1b[?1049h"))
+				fillRecoveryTranscriptBenchmarkFrame(screen)
+			}
+
+			b.ReportAllocs()
+			b.ReportMetric(float64(tt.wantRows), "rows/snapshot")
+			b.ResetTimer()
+			for b.Loop() {
+				recoveryTranscriptSnapshotSink = screen.RecoveryTranscriptSnapshot()
+			}
+			b.StopTimer()
+			if got := decodeRecoveryTranscript(b, recoveryTranscriptSnapshotSink).Len(); got != tt.wantRows {
+				b.Fatalf("captured rows = %d, want %d", got, tt.wantRows)
+			}
+		})
+	}
+}
+
+func fillRecoveryTranscriptBenchmarkFrame(screen *Screen) {
+	for y := range screen.Frame.Height {
+		for x := range screen.Frame.Width {
+			screen.Frame.Set(x, y, renderer.Cell{Rune: rune('a' + (x+y)%26), Style: renderer.DefaultStyle()})
+		}
+		screen.buffer.boundaries[y] = LineBound{End: screen.Frame.Width}
+	}
 }
 
 func BenchmarkNewScreenWithRecoveryTranscriptManyChunks(b *testing.B) {
