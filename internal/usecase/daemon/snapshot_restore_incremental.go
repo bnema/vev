@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"syscall"
 
@@ -178,7 +179,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if errors.Is(err, snapcodec.ErrBadVersion) {
+		if isUnambiguousBadVersionError(err) {
 			return d.resetIncompatibleCheckpoint(ctx, record, selected)
 		}
 		if isRetryableRestoreLoadError(err) {
@@ -255,6 +256,31 @@ func (d *Daemon) resetIncompatibleCheckpoint(ctx context.Context, record domain.
 		"generation", selected.Generation,
 	)
 	return nil
+}
+
+func isUnambiguousBadVersionError(err error) bool {
+	seen := make(map[error]struct{})
+	for err != nil {
+		if !reflect.TypeOf(err).Comparable() {
+			return false
+		}
+		if _, duplicate := seen[err]; duplicate {
+			return false
+		}
+		seen[err] = struct{}{}
+		if err == snapcodec.ErrBadVersion {
+			return true
+		}
+		if _, ambiguous := err.(interface{ Unwrap() []error }); ambiguous {
+			return false
+		}
+		unwrapper, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = unwrapper.Unwrap()
+	}
+	return false
 }
 
 func isRetryableRestoreLoadError(err error) bool {

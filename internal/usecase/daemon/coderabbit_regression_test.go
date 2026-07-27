@@ -17,6 +17,31 @@ import (
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
+func TestRestoreAmbiguousBadVersionLoadFailurePreservesCheckpoint(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	repository := &durableRecoveryRepository{
+		errors:  map[string]error{record.Name: errors.Join(snapcodec.ErrBadVersion, syscall.ENOSPC)},
+		loads:   make(map[string]int),
+		repairs: make(map[string]domain.CheckpointRef),
+	}
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+
+	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+
+	persisted, ok, err := catalogue.Record(record.Name)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, record.IncarnationID, persisted.IncarnationID)
+	require.Equal(t, record.Committed, persisted.Committed)
+	require.Equal(t, "checkpoint load failed", persisted.DegradedReason)
+	require.Empty(t, repository.deleted)
+	d.mu.Lock()
+	entry := d.stopped[record.Name]
+	d.mu.Unlock()
+	require.Equal(t, ports.SessionBroken, entry.state)
+	require.Equal(t, persisted, entry.record)
+}
+
 func TestRestoreTransientLoadFailureBecomesDiscardable(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	repository := &durableRecoveryRepository{

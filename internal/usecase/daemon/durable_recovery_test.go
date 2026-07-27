@@ -538,6 +538,41 @@ type temporaryRestoreError struct{}
 func (temporaryRestoreError) Error() string   { return "temporary restore failure" }
 func (temporaryRestoreError) Temporary() bool { return true }
 
+type badVersionLookalikeError struct{}
+
+func (badVersionLookalikeError) Error() string        { return "bad version lookalike" }
+func (badVersionLookalikeError) Is(target error) bool { return target == snapcodec.ErrBadVersion }
+
+type cyclicUnwrapError struct{}
+
+func (*cyclicUnwrapError) Error() string { return "cyclic unwrap" }
+func (e *cyclicUnwrapError) Unwrap() error {
+	return e
+}
+
+func TestUnambiguousBadVersionErrorClassification(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		incompatible bool
+	}{
+		{name: "nil"},
+		{name: "exact sentinel", err: snapcodec.ErrBadVersion, incompatible: true},
+		{name: "single cause chain", err: fmt.Errorf("load checkpoint: %w", fmt.Errorf("decode manifest: %w", snapcodec.ErrBadVersion)), incompatible: true},
+		{name: "single entry multi cause", err: errors.Join(snapcodec.ErrBadVersion)},
+		{name: "joined retryable branch", err: errors.Join(snapcodec.ErrBadVersion, syscall.ENOSPC)},
+		{name: "custom Is lookalike", err: badVersionLookalikeError{}},
+		{name: "wrapped custom Is lookalike", err: fmt.Errorf("load checkpoint: %w", badVersionLookalikeError{})},
+		{name: "chain ending elsewhere", err: fmt.Errorf("load checkpoint: %w", errors.New("corrupt checkpoint"))},
+		{name: "cyclic custom chain", err: &cyclicUnwrapError{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.incompatible, isUnambiguousBadVersionError(tt.err))
+		})
+	}
+}
+
 func TestRetryableRestoreLoadErrorClassification(t *testing.T) {
 	tests := []struct {
 		name      string
