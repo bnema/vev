@@ -96,6 +96,38 @@ func TestConfiguredConsumeOrExpelEdgeActionIsSilent(t *testing.T) {
 	requireNoInvalidation(t, invalidations)
 }
 
+func TestConsumeOrExpelKeyActionPreservesRearrangementWarning(t *testing.T) {
+	tests := []struct {
+		name   string
+		action keys.Action
+	}{
+		{name: "left", action: keys.ActionConsumeOrExpelPaneLeft},
+		{name: "right", action: keys.ActionConsumeOrExpelPaneRight},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "t_work", "p_work")
+			ac := &attachedClient{}
+			ac.setSession(sess)
+			runner := &actionRunnerSpy{err: domain.UserWarn(
+				domain.NoticeLayoutTooSmall,
+				"not enough space to rearrange pane",
+				layout.ErrTooSmall,
+			)}
+
+			daemonKeyHandler{d: d, ac: ac, actions: runner}.Action(tt.action)
+
+			history := d.notices.history()
+			require.Len(t, history, 1)
+			require.Equal(t, domain.NoticeLayoutTooSmall, history[0].Code)
+			require.Equal(t, domain.NoticeWarn, history[0].Severity)
+			require.Equal(t, "not enough space to rearrange pane", history[0].Message)
+		})
+	}
+}
+
 func TestResizeActionAdaptersSubmitEquivalentRequests(t *testing.T) {
 	tests := []struct {
 		name    string

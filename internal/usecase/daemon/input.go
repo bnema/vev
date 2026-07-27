@@ -302,7 +302,11 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			if errors.Is(err, errDaemonActionNoChange) {
 				return
 			}
-			h.d.reportError(sess, resizeUserError(err))
+			var userErr *domain.UserError
+			if !errors.As(err, &userErr) {
+				err = resizeUserError(err)
+			}
+			h.d.reportError(sess, err)
 			return
 		}
 		if h.actions == nil {
