@@ -200,6 +200,85 @@ func TestModalResolve(t *testing.T) {
 	}
 }
 
+func TestCompositePresentationDrawsFloatingChrome(t *testing.T) {
+	modal := Modal{WidthPct: 50, FixedHeight: 4, Title: " Rename "}
+	presentation := modal.Resolve(domain.Size{Cols: 80, Rows: 10})
+	frame := renderer.NewFrame(80, 10)
+	exterior := renderer.Cell{Rune: 'x', Style: renderer.Style{Foreground: 7, Background: 8}}
+	FillRect(frame, domain.Rect{Width: 80, Height: 10}, exterior)
+	border := renderer.Style{Bold: true, Foreground: 2, Background: -1}
+	interior := renderer.Style{Foreground: 3, Background: 4}
+
+	inner := modal.CompositePresentation(frame, presentation, border, interior)
+	require.Equal(t, presentation.Inner, inner)
+	require.Equal(t, '┌', frame.At(presentation.Bounds.X, presentation.Bounds.Y).Rune)
+	require.Equal(t, '┐', frame.At(presentation.Bounds.X+presentation.Bounds.Width-1, presentation.Bounds.Y).Rune)
+	require.Equal(t, '└', frame.At(presentation.Bounds.X, presentation.Bounds.Y+presentation.Bounds.Height-1).Rune)
+	require.Equal(t, '┘', frame.At(presentation.Bounds.X+presentation.Bounds.Width-1, presentation.Bounds.Y+presentation.Bounds.Height-1).Rune)
+	require.Equal(t, 'R', frame.At(37, presentation.Bounds.Y).Rune)
+	require.True(t, frame.At(inner.X, inner.Y).Style.Equal(interior))
+	assertCell(t, frame, presentation.Bounds.X-1, presentation.Bounds.Y, exterior)
+}
+
+func TestCompositePresentationUsesBordersRatherThanMode(t *testing.T) {
+	border := renderer.Style{Bold: true, Foreground: 2, Background: -1}
+	exterior := renderer.Cell{Rune: 'x', Style: renderer.Style{Foreground: 7, Background: 8}}
+	bounds := domain.Rect{X: 1, Y: 1, Width: 8, Height: 4}
+	inner := domain.Rect{X: 2, Y: 2, Width: 6, Height: 2}
+
+	tests := []struct {
+		name         string
+		presentation Presentation
+		assert       func(*testing.T, renderer.Frame)
+	}{
+		{
+			name: "all edges render for drawer mode",
+			presentation: Presentation{
+				Mode: PresentationDrawer, Bounds: bounds, Inner: inner, Borders: BorderAll,
+			},
+			assert: func(t *testing.T, frame renderer.Frame) {
+				require.Equal(t, '┌', frame.At(1, 1).Rune)
+				require.Equal(t, '│', frame.At(1, 2).Rune)
+				require.Equal(t, '┘', frame.At(8, 4).Rune)
+				require.Equal(t, 'T', frame.At(2, 1).Rune)
+			},
+		},
+		{
+			name: "top edge alone renders for floating mode",
+			presentation: Presentation{
+				Mode: PresentationFloating, Bounds: bounds, Inner: inner, Borders: BorderTop,
+			},
+			assert: func(t *testing.T, frame renderer.Frame) {
+				require.Equal(t, '─', frame.At(1, 1).Rune)
+				require.Equal(t, 'T', frame.At(2, 1).Rune)
+				assertCell(t, frame, 1, 2, exterior)
+				assertCell(t, frame, 8, 4, exterior)
+			},
+		},
+		{
+			name: "title is hidden without top edge",
+			presentation: Presentation{
+				Mode: PresentationFloating, Bounds: bounds, Inner: inner, Borders: BorderLeft,
+			},
+			assert: func(t *testing.T, frame renderer.Frame) {
+				require.Equal(t, '│', frame.At(1, 1).Rune)
+				require.Equal(t, '│', frame.At(1, 4).Rune)
+				assertCell(t, frame, 4, 1, exterior)
+				assertCell(t, frame, 8, 4, exterior)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := renderer.NewFrame(10, 6)
+			FillRect(frame, domain.Rect{Width: 10, Height: 6}, exterior)
+			(Modal{Title: "Title"}).CompositePresentation(frame, tt.presentation, border, renderer.DefaultStyle())
+			tt.assert(t, frame)
+		})
+	}
+}
+
 func TestCompositeDrawerChromeAndPreservesExterior(t *testing.T) {
 	modal := Modal{FixedHeight: 4, Title: " Rename "}
 	presentation := modal.Resolve(domain.Size{Cols: 20, Rows: 10})

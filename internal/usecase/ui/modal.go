@@ -39,26 +39,14 @@ func (m Modal) Bounds(base domain.Size) domain.Rect {
 
 // Inner returns the modal content rectangle after removing a one-cell border.
 func (m Modal) Inner(base domain.Size) domain.Rect {
-	bounds := m.Bounds(base)
-	return domain.Rect{
-		X:      bounds.X + 1,
-		Y:      bounds.Y + 1,
-		Width:  max(0, bounds.Width-2),
-		Height: max(0, bounds.Height-2),
-	}
+	return modalInner(m.Bounds(base))
 }
 
 // Resolve computes the modal's responsive presentation from one preferred
 // bounds and inner pair.
 func (m Modal) Resolve(base domain.Size) Presentation {
 	bounds := m.Bounds(base)
-	inner := domain.Rect{
-		X:      bounds.X + 1,
-		Y:      bounds.Y + 1,
-		Width:  max(0, bounds.Width-2),
-		Height: max(0, bounds.Height-2),
-	}
-	return ResolvePresentation(base, bounds, inner)
+	return ResolvePresentation(base, bounds, modalInner(bounds))
 }
 
 // Composite draws the modal border and title, fills its interior, and returns
@@ -67,12 +55,7 @@ func (m Modal) Resolve(base domain.Size) Presentation {
 // Cells outside the modal bounds are not changed.
 func (m Modal) Composite(f renderer.Frame, border, interior renderer.Style) domain.Rect {
 	bounds := m.Bounds(domain.Size{Cols: f.Width, Rows: f.Height})
-	inner := domain.Rect{
-		X:      bounds.X + 1,
-		Y:      bounds.Y + 1,
-		Width:  max(0, bounds.Width-2),
-		Height: max(0, bounds.Height-2),
-	}
+	inner := modalInner(bounds)
 	DrawBox(f, bounds, border)
 	FillRect(f, inner, renderer.Cell{Rune: ' ', Style: interior})
 	m.drawTitle(f, bounds, border)
@@ -80,19 +63,13 @@ func (m Modal) Composite(f renderer.Frame, border, interior renderer.Style) doma
 }
 
 // CompositePresentation draws an already-resolved modal presentation and
-// returns its inner content rectangle. Drawers use only top chrome.
+// returns its inner content rectangle.
 func (m Modal) CompositePresentation(f renderer.Frame, p Presentation, border, interior renderer.Style) domain.Rect {
 	FillRect(f, p.Inner, renderer.Cell{Rune: ' ', Style: interior})
-	if p.Mode == PresentationDrawer {
-		if p.Bounds.Width > 0 && p.Bounds.Height > 0 {
-			for x := p.Bounds.X; x < p.Bounds.X+p.Bounds.Width; x++ {
-				setCell(f, x, p.Bounds.Y, '─', border)
-			}
-		}
-	} else {
-		DrawBox(f, p.Bounds, border)
+	drawBorderEdges(f, p.Bounds, p.Borders, border)
+	if p.Borders&BorderTop != 0 {
+		m.drawTitle(f, p.Bounds, border)
 	}
-	m.drawTitle(f, p.Bounds, border)
 	return p.Inner
 }
 
@@ -104,6 +81,15 @@ func (m Modal) drawTitle(f renderer.Frame, bounds domain.Rect, style renderer.St
 	right := bounds.X + bounds.Width - 1
 	start := max(left, bounds.X+(bounds.Width-textWidth(m.Title))/2)
 	DrawText(f, start, bounds.Y, right, m.Title, style)
+}
+
+func modalInner(bounds domain.Rect) domain.Rect {
+	return domain.Rect{
+		X:      bounds.X + 1,
+		Y:      bounds.Y + 1,
+		Width:  max(0, bounds.Width-2),
+		Height: max(0, bounds.Height-2),
+	}
 }
 
 // FillRect fills rect with cell, clipped to the frame bounds.
@@ -121,7 +107,11 @@ func FillRect(f renderer.Frame, rect domain.Rect, cell renderer.Cell) {
 
 // DrawBox draws a single-cell box clipped to the frame bounds.
 func DrawBox(f renderer.Frame, rect domain.Rect, style renderer.Style) {
-	if rect.Width <= 0 || rect.Height <= 0 {
+	drawBorderEdges(f, rect, BorderAll, style)
+}
+
+func drawBorderEdges(f renderer.Frame, rect domain.Rect, edges BorderEdges, style renderer.Style) {
+	if rect.Width <= 0 || rect.Height <= 0 || edges == 0 {
 		return
 	}
 	left := rect.X
@@ -129,18 +119,38 @@ func DrawBox(f renderer.Frame, rect domain.Rect, style renderer.Style) {
 	right := rect.X + rect.Width - 1
 	bottom := rect.Y + rect.Height - 1
 
-	for x := left; x <= right; x++ {
-		setCell(f, x, top, '─', style)
-		setCell(f, x, bottom, '─', style)
+	if edges&BorderTop != 0 {
+		for x := left; x <= right; x++ {
+			setCell(f, x, top, '─', style)
+		}
 	}
-	for y := top; y <= bottom; y++ {
-		setCell(f, left, y, '│', style)
-		setCell(f, right, y, '│', style)
+	if edges&BorderBottom != 0 {
+		for x := left; x <= right; x++ {
+			setCell(f, x, bottom, '─', style)
+		}
 	}
-	setCell(f, left, top, '┌', style)
-	setCell(f, right, top, '┐', style)
-	setCell(f, left, bottom, '└', style)
-	setCell(f, right, bottom, '┘', style)
+	if edges&BorderLeft != 0 {
+		for y := top; y <= bottom; y++ {
+			setCell(f, left, y, '│', style)
+		}
+	}
+	if edges&BorderRight != 0 {
+		for y := top; y <= bottom; y++ {
+			setCell(f, right, y, '│', style)
+		}
+	}
+	if edges&(BorderTop|BorderLeft) == BorderTop|BorderLeft {
+		setCell(f, left, top, '┌', style)
+	}
+	if edges&(BorderTop|BorderRight) == BorderTop|BorderRight {
+		setCell(f, right, top, '┐', style)
+	}
+	if edges&(BorderBottom|BorderLeft) == BorderBottom|BorderLeft {
+		setCell(f, left, bottom, '└', style)
+	}
+	if edges&(BorderBottom|BorderRight) == BorderBottom|BorderRight {
+		setCell(f, right, bottom, '┘', style)
+	}
 }
 
 // DrawText draws text starting at x,y before exclusive clipX and returns the
