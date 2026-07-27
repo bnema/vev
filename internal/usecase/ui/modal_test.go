@@ -164,6 +164,82 @@ func TestCompositeDrawsModalAndPreservesExterior(t *testing.T) {
 	assertCell(t, f, 9, 5, exterior)
 }
 
+func TestModalResolve(t *testing.T) {
+	tests := []struct {
+		name string
+		base domain.Size
+		want Presentation
+	}{
+		{
+			name: "narrow modal resolves to drawer",
+			base: domain.Size{Cols: 20, Rows: 10},
+			want: Presentation{
+				Mode:    PresentationDrawer,
+				Bounds:  domain.Rect{X: 0, Y: 5, Width: 20, Height: 4},
+				Inner:   domain.Rect{X: 0, Y: 6, Width: 20, Height: 3},
+				Borders: BorderTop,
+			},
+		},
+		{
+			name: "complete frame preserves floating modal geometry",
+			base: domain.Size{Cols: 80, Rows: 10},
+			want: Presentation{
+				Mode:    PresentationFloating,
+				Bounds:  domain.Rect{X: 20, Y: 3, Width: 40, Height: 4},
+				Inner:   domain.Rect{X: 21, Y: 4, Width: 38, Height: 2},
+				Borders: BorderAll,
+			},
+		},
+	}
+
+	modal := Modal{WidthPct: 50, FixedHeight: 4, Title: " Rename "}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, modal.Resolve(tt.base))
+		})
+	}
+}
+
+func TestCompositeDrawerChromeAndPreservesExterior(t *testing.T) {
+	modal := Modal{FixedHeight: 4, Title: " Rename "}
+	presentation := modal.Resolve(domain.Size{Cols: 20, Rows: 10})
+	frame := renderer.NewFrame(20, 10)
+	exterior := renderer.Cell{Rune: 'x', Style: renderer.Style{Foreground: 7, Background: 8}}
+	FillRect(frame, domain.Rect{Width: 20, Height: 10}, exterior)
+	border := renderer.Style{Bold: true, Foreground: 2, Background: -1}
+	interior := renderer.Style{Foreground: 3, Background: 4}
+
+	inner := modal.CompositePresentation(frame, presentation, border, interior)
+	require.Equal(t, presentation.Inner, inner)
+	require.Equal(t, '─', frame.At(0, 5).Rune)
+	require.True(t, frame.At(0, 5).Style.Equal(border))
+	require.Equal(t, 'R', frame.At(7, 5).Rune)
+	require.NotEqual(t, '│', frame.At(0, 6).Rune)
+	require.Equal(t, ' ', frame.At(0, 6).Rune)
+	require.NotEqual(t, '─', frame.At(0, 8).Rune)
+	require.Equal(t, ' ', frame.At(0, 8).Rune)
+
+	for _, y := range []int{0, 1, 2, 3, 4, 9} {
+		for x := range frame.Width {
+			assertCell(t, frame, x, y, exterior)
+		}
+	}
+}
+
+func TestCompositeDrawerClipsDoubleWidthTitle(t *testing.T) {
+	modal := Modal{FixedHeight: 4, Title: "你你"}
+	presentation := modal.Resolve(domain.Size{Cols: 4, Rows: 10})
+	frame := renderer.NewFrame(4, 10)
+	border := renderer.Style{Foreground: 2, Background: -1}
+
+	modal.CompositePresentation(frame, presentation, border, renderer.DefaultStyle())
+
+	require.Equal(t, '你', frame.At(1, presentation.Bounds.Y).Rune)
+	require.True(t, frame.At(2, presentation.Bounds.Y).Continuation)
+	require.Equal(t, '─', frame.At(3, presentation.Bounds.Y).Rune)
+	require.False(t, frame.At(3, presentation.Bounds.Y).Continuation, "wide title must not leave an orphan continuation at the right clip")
+}
+
 func TestFillRectClips(t *testing.T) {
 	f := renderer.NewFrame(3, 2)
 	cell := renderer.Cell{Rune: 'z', Style: renderer.DefaultStyle()}

@@ -48,6 +48,19 @@ func (m Modal) Inner(base domain.Size) domain.Rect {
 	}
 }
 
+// Resolve computes the modal's responsive presentation from one preferred
+// bounds and inner pair.
+func (m Modal) Resolve(base domain.Size) Presentation {
+	bounds := m.Bounds(base)
+	inner := domain.Rect{
+		X:      bounds.X + 1,
+		Y:      bounds.Y + 1,
+		Width:  max(0, bounds.Width-2),
+		Height: max(0, bounds.Height-2),
+	}
+	return ResolvePresentation(base, bounds, inner)
+}
+
 // Composite draws the modal border and title, fills its interior, and returns
 // the inner content rectangle. Border and interior styles are deliberately
 // independent so unfocused structure and chrome surfaces retain their roles.
@@ -62,13 +75,35 @@ func (m Modal) Composite(f renderer.Frame, border, interior renderer.Style) doma
 	}
 	DrawBox(f, bounds, border)
 	FillRect(f, inner, renderer.Cell{Rune: ' ', Style: interior})
-	if bounds.Width > 2 && bounds.Height > 0 && m.Title != "" {
-		left := bounds.X + 1
-		right := bounds.X + bounds.Width - 1
-		start := max(left, bounds.X+(bounds.Width-textWidth(m.Title))/2)
-		DrawText(f, start, bounds.Y, right, m.Title, border)
-	}
+	m.drawTitle(f, bounds, border)
 	return inner
+}
+
+// CompositePresentation draws an already-resolved modal presentation and
+// returns its inner content rectangle. Drawers use only top chrome.
+func (m Modal) CompositePresentation(f renderer.Frame, p Presentation, border, interior renderer.Style) domain.Rect {
+	FillRect(f, p.Inner, renderer.Cell{Rune: ' ', Style: interior})
+	if p.Mode == PresentationDrawer {
+		if p.Bounds.Width > 0 && p.Bounds.Height > 0 {
+			for x := p.Bounds.X; x < p.Bounds.X+p.Bounds.Width; x++ {
+				setCell(f, x, p.Bounds.Y, '─', border)
+			}
+		}
+	} else {
+		DrawBox(f, p.Bounds, border)
+	}
+	m.drawTitle(f, p.Bounds, border)
+	return p.Inner
+}
+
+func (m Modal) drawTitle(f renderer.Frame, bounds domain.Rect, style renderer.Style) {
+	if bounds.Width <= 2 || bounds.Height <= 0 || m.Title == "" {
+		return
+	}
+	left := bounds.X + 1
+	right := bounds.X + bounds.Width - 1
+	start := max(left, bounds.X+(bounds.Width-textWidth(m.Title))/2)
+	DrawText(f, start, bounds.Y, right, m.Title, style)
 }
 
 // FillRect fills rect with cell, clipped to the frame bounds.
