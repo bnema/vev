@@ -23,7 +23,7 @@ func (t *Tree) ConsumeOrExpelPane(target PaneID, dir Direction, area domain.Rect
 	}
 
 	columns := canonicalColumns(t.Root)
-	columnIndex, memberIndex, found := findColumnMember(columns, target)
+	columnIndex, _, found := findColumnMember(columns, target)
 	if !found {
 		return false, ErrNotFound
 	}
@@ -44,7 +44,7 @@ func (t *Tree) ConsumeOrExpelPane(target PaneID, dir Direction, area domain.Rect
 	}
 
 	columns = canonicalColumns(candidate.Root)
-	columnIndex, memberIndex, _ = findColumnMember(columns, target)
+	columnIndex, memberIndex, _ := findColumnMember(columns, target)
 	if candidate.Root.Kind == Split && candidate.Root.Dir == Horizontal {
 		normalizeChildWeightsFromArea(candidate.Root, area)
 	}
