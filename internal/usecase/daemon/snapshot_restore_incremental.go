@@ -178,6 +178,9 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		if errors.Is(err, snapcodec.ErrBadVersion) {
+			return d.resetIncompatibleCheckpoint(ctx, record, selected)
+		}
 		if isRetryableRestoreLoadError(err) {
 			return fmt.Errorf("%w: %w", errRetryableRestoreLoad, err)
 		}
@@ -212,6 +215,45 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	}
 	d.setStoppedRecovery(record, ports.SessionStopped)
 	d.logSessionRestoreComplete(record, selected.Generation, false)
+	return nil
+}
+
+func (d *Daemon) resetIncompatibleCheckpoint(ctx context.Context, record domain.CatalogueRecord, selected domain.CheckpointRef) error {
+	fresh, committed, err := d.recovery.ResetIncompatible(ctx, record.Name, record.IncarnationID, selected)
+	if !committed {
+		if err != nil {
+			return fmt.Errorf("snapshot: reset incompatible checkpoint: %w", err)
+		}
+		d.log.Info("snapshot_incompatible_reset_superseded",
+			"session", record.Name,
+			"incarnation", record.IncarnationID.String(),
+			"generation", selected.Generation,
+		)
+		return nil
+	}
+
+	d.mu.Lock()
+	if entry, ok := d.stopped[record.Name]; ok {
+		d.stopped[record.Name] = stoppedSessionFromRecord(fresh, ports.SessionStopped, entry.restoreDone)
+	}
+	d.mu.Unlock()
+
+	if err != nil {
+		d.log.Warn("snapshot_incompatible_reset_cleanup_pending",
+			"session", fresh.Name,
+			"incarnation", fresh.IncarnationID.String(),
+			"replaced_incarnation", record.IncarnationID.String(),
+			"generation", selected.Generation,
+			"err", err,
+		)
+		return nil
+	}
+	d.log.Info("snapshot_incompatible_reset_complete",
+		"session", fresh.Name,
+		"incarnation", fresh.IncarnationID.String(),
+		"replaced_incarnation", record.IncarnationID.String(),
+		"generation", selected.Generation,
+	)
 	return nil
 }
 
