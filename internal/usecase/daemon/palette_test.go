@@ -409,14 +409,22 @@ func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 	}
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	go d.handleInput(sess, ac, []byte("JRS 1\r"))
-	<-validated
+	inputHandled := make(chan struct{})
+	go func() {
+		d.handleInput(sess, ac, []byte("JRS 1\r"))
+		close(inputHandled)
+	}()
+	awaitTestCompletion(t, validated, "JRS did not validate its captured target")
 	d.mu.Lock()
 	delete(d.sessions, target.id)
 	d.mu.Unlock()
 	close(releaseHandoff)
 
-	awaitFrame(t, sends, ports.MsgOutput)
+	// switchToTarget repaints its failed hand-off before handlePaletteInput
+	// records the generation-safe feedback and schedules the feedback repaint.
+	// Wait for the input transaction, rather than mistaking that intermediate
+	// repaint for publication of the final palette state.
+	awaitTestCompletion(t, inputHandled, "JRS displaced-target input did not complete")
 	require.True(t, ac.overlays.paletteActive())
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, "JRS 1", ac.overlays.palette.Query())
@@ -617,7 +625,7 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {

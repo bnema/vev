@@ -323,6 +323,172 @@ func TestWeightSplitStackWrapperTransfersShare(t *testing.T) {
 	}
 }
 
+func TestWeightConsumeOrExpelPaneSemantics(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		tree   *Tree
+		target PaneID
+		dir    Direction
+		area   domain.Rect
+		check  func(*testing.T, *Tree, []Placement, []Placement)
+	}{
+		{
+			name: "horizontal insertion preserves normalized sibling shares and gives expelled column default weight",
+			tree: &Tree{Root: weightedNode(horizontal(
+				weightedNode(vertical("a", "b"), 3),
+				weightedLeaf("c", 1),
+			), 11), Focus: "b"},
+			target: "b",
+			dir:    Right,
+			area:   domain.Rect{Width: 202, Height: 5},
+			check: func(t *testing.T, tree *Tree, before, after []Placement) {
+				require.Equal(t, map[PaneID]int{"a": 151, "b": 151, "c": 50}, placementWidths(before))
+				require.Equal(t, 11.0, tree.Root.Weight)
+				require.Equal(t, []float64{151, 0, 50}, childWeights(tree.Root))
+				require.Equal(t, []PaneID{"a", "b", "c"}, LeafIDs(tree.Root))
+				require.Equal(t, map[PaneID]int{"a": 135, "b": 20, "c": 45}, placementWidths(after))
+			},
+		},
+		{
+			name: "vertical consume preserves solved member shares and gives moved pane default weight",
+			tree: &Tree{Root: weightedNode(horizontal(
+				weightedNode(verticalNodes(weightedLeaf("a", 3), weightedLeaf("b", 1)), 2),
+				weightedLeaf("c", 1),
+			), 9), Focus: "c"},
+			target: "c",
+			dir:    Left,
+			area:   domain.Rect{Width: 101, Height: 20},
+			check: func(t *testing.T, tree *Tree, before, after []Placement) {
+				require.Equal(t, map[PaneID]int{"a": 14, "b": 5, "c": 20}, placementHeights(before))
+				require.Equal(t, Vertical, tree.Root.Dir)
+				require.Equal(t, 9.0, tree.Root.Weight, "root promotion retains the removed horizontal wrapper share")
+				require.Equal(t, []float64{14, 5, 0}, childWeights(tree.Root))
+				require.Equal(t, map[PaneID]int{"a": 12, "b": 4, "c": 2}, placementHeights(after))
+			},
+		},
+		{
+			name: "stack consume clears member weights and preserves normalized outer column share",
+			tree: &Tree{Root: horizontal(
+				weightedLeaf("x", 1),
+				weightedNode(&Node{Kind: Stack, Children: []*Node{weightedLeaf("a", 8), weightedLeaf("b", 4)}, Expanded: "a"}, 3),
+				weightedLeaf("c", 1),
+			), Focus: "c"},
+			target: "c",
+			dir:    Left,
+			area:   domain.Rect{Width: 103, Height: 4},
+			check: func(t *testing.T, tree *Tree, before, after []Placement) {
+				require.Equal(t, map[PaneID]int{"x": 20, "a": 61, "b": 0, "c": 20}, placementWidths(before))
+				require.Len(t, tree.Root.Children, 2)
+				stackColumn := tree.Root.Children[1]
+				require.Equal(t, Stack, stackColumn.Kind)
+				require.Equal(t, 61.0, stackColumn.Weight)
+				require.Equal(t, PaneID("c"), stackColumn.Expanded)
+				require.Equal(t, []float64{0, 0, 0}, childWeights(stackColumn))
+				require.Equal(t, 77, placementSpanWidth(after, "a"))
+				require.Equal(t, 77, placementSpanWidth(after, "b"))
+				require.Equal(t, 77, placementSpanWidth(after, "c"))
+			},
+		},
+		{
+			name: "stack expel clears remaining weights and repairs expanded member",
+			tree: &Tree{Root: weightedNode(&Node{Kind: Stack, Children: []*Node{
+				weightedLeaf("a", 5), weightedLeaf("b", 4), weightedLeaf("c", 3),
+			}, Expanded: "b"}, 7), Focus: "b"},
+			target: "b",
+			dir:    Right,
+			area:   domain.Rect{Width: 101, Height: 4},
+			check: func(t *testing.T, tree *Tree, _, after []Placement) {
+				require.Equal(t, Horizontal, tree.Root.Dir)
+				require.Equal(t, 7.0, tree.Root.Weight)
+				require.Equal(t, []float64{0, 0}, childWeights(tree.Root))
+				stackColumn := tree.Root.Children[0]
+				require.Equal(t, PaneID("a"), stackColumn.Expanded)
+				require.Equal(t, []float64{0, 0}, childWeights(stackColumn))
+				require.Equal(t, 50, placementSpanWidth(after, "a"))
+				require.Equal(t, 50, placementSpanWidth(after, "c"))
+				require.Equal(t, 50, placementSpanWidth(after, "b"))
+			},
+		},
+		{
+			name: "column collapse copies normalized container weight to promoted leaf",
+			tree: &Tree{Root: horizontal(
+				weightedLeaf("x", 1),
+				weightedNode(vertical("a", "b"), 3),
+				weightedLeaf("y", 1),
+			), Focus: "a"},
+			target: "a",
+			dir:    Left,
+			area:   domain.Rect{Width: 103, Height: 5},
+			check: func(t *testing.T, tree *Tree, _, after []Placement) {
+				require.Equal(t, []PaneID{"x", "a", "b", "y"}, LeafIDs(tree.Root))
+				require.Equal(t, Leaf, tree.Root.Children[2].Kind)
+				require.Equal(t, PaneID("b"), tree.Root.Children[2].Leaf)
+				require.Equal(t, 61.0, tree.Root.Children[2].Weight)
+				require.Equal(t, []float64{20, 0, 61, 20}, childWeights(tree.Root))
+				require.Equal(t, map[PaneID]int{"x": 20, "a": 20, "b": 40, "y": 20}, placementWidths(after))
+			},
+		},
+		{
+			name:   "sole-column expel creates equal default horizontal children and retains wrapper weight",
+			tree:   &Tree{Root: weightedNode(verticalNodes(weightedLeaf("a", 3), weightedLeaf("b", 1)), 9), Focus: "a"},
+			target: "a",
+			dir:    Left,
+			area:   domain.Rect{Width: 101, Height: 5},
+			check: func(t *testing.T, tree *Tree, _, after []Placement) {
+				require.Equal(t, Horizontal, tree.Root.Dir)
+				require.Equal(t, 9.0, tree.Root.Weight)
+				require.Equal(t, []float64{0, 0}, childWeights(tree.Root))
+				require.Equal(t, map[PaneID]int{"a": 50, "b": 50}, placementWidths(after))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beforeIDs := LeafIDs(tt.tree.Root)
+			requireUniquePaneIDs(t, beforeIDs)
+			before, solved := Solve(tt.tree.Root, tt.area)
+			require.True(t, solved, "weight fixture must solve before surgery")
+
+			changed, err := tt.tree.ConsumeOrExpelPane(tt.target, tt.dir, tt.area)
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.Equal(t, tt.target, tt.tree.Focus)
+
+			afterIDs := LeafIDs(tt.tree.Root)
+			require.ElementsMatch(t, beforeIDs, afterIDs)
+			require.Len(t, afterIDs, len(beforeIDs))
+			requireUniquePaneIDs(t, afterIDs)
+			after, solved := Solve(tt.tree.Root, tt.area)
+			require.True(t, solved, "weighted result must solve")
+			tt.check(t, tt.tree, before, after)
+		})
+	}
+}
+
+func childWeights(node *Node) []float64 {
+	weights := make([]float64, len(node.Children))
+	for i, child := range node.Children {
+		weights[i] = child.Weight
+	}
+	return weights
+}
+
+func placementSpanWidth(placements []Placement, id PaneID) int {
+	for _, placement := range placements {
+		if placement.ID != id {
+			continue
+		}
+		if placement.Content.Width > 0 {
+			return placement.Content.Width
+		}
+		return placement.TitleBar.Width
+	}
+	return 0
+}
+
 func TestWeightCloneCopiesWeightIndependently(t *testing.T) {
 	t.Parallel()
 

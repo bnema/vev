@@ -44,6 +44,8 @@ type Context interface {
 	SplitLeft() error
 	SplitUp() error
 	SplitDown() error
+	ConsumeOrExpelPaneLeft() error
+	ConsumeOrExpelPaneRight() error
 	StackPane() error
 	ToggleStack() error
 	ToggleFloatingPane() error
@@ -117,6 +119,8 @@ type ControlContext interface {
 	SplitLeft() error
 	SplitUp() error
 	SplitDown() error
+	ConsumeOrExpelPaneLeft() error
+	ConsumeOrExpelPaneRight() error
 	StackPane() error
 	ToggleStack() error
 	GrowPaneWidth() error

@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
@@ -291,14 +292,21 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	if sess == nil {
 		return
 	}
-	runResizeAction := func(request daemonActionRequest) {
+	runAction := func(request daemonActionRequest) {
 		request.target = resolveDaemonActionTarget(sess)
 		runner := h.actions
 		if runner == nil {
 			runner = daemonActions{d: h.d}
 		}
 		if err := runner.Run(request); err != nil {
-			h.d.reportError(sess, resizeUserError(err))
+			if errors.Is(err, errDaemonActionNoChange) {
+				return
+			}
+			var userErr *domain.UserError
+			if !errors.As(err, &userErr) {
+				err = resizeUserError(err)
+			}
+			h.d.reportError(sess, err)
 			return
 		}
 		if h.actions == nil {
@@ -334,15 +342,19 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionGrowPaneWidth:
-		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: resizeStepCols})
+		runAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: resizeStepCols})
 	case keys.ActionShrinkPaneWidth:
-		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: -resizeStepCols})
+		runAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: -resizeStepCols})
 	case keys.ActionGrowPaneHeight:
-		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: resizeStepRows})
+		runAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: resizeStepRows})
 	case keys.ActionShrinkPaneHeight:
-		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: -resizeStepRows})
+		runAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: -resizeStepRows})
 	case keys.ActionEqualizePanes:
-		runResizeAction(daemonActionRequest{kind: daemonActionEqualizePanes})
+		runAction(daemonActionRequest{kind: daemonActionEqualizePanes})
+	case keys.ActionConsumeOrExpelPaneLeft:
+		runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: layout.Left})
+	case keys.ActionConsumeOrExpelPaneRight:
+		runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: layout.Right})
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

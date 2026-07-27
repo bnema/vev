@@ -43,6 +43,8 @@ const (
 	ActionGrowPaneHeight
 	ActionShrinkPaneHeight
 	ActionEqualizePanes
+	ActionConsumeOrExpelPaneLeft
+	ActionConsumeOrExpelPaneRight
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should

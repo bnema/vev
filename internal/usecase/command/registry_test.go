@@ -9,7 +9,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := PaletteRegistry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -45,6 +45,8 @@ func TestBySlugExactMatch(t *testing.T) {
 		ok   bool
 	}{
 		{slug: "split-right", ok: true},
+		{slug: "consume-or-expel-pane-left", ok: true},
+		{slug: "consume-or-expel-pane-right", ok: true},
 		{slug: "SPLIT-RIGHT", ok: false},
 		{slug: "toast", ok: true},
 		{slug: "list-panes", ok: true},
@@ -62,7 +64,8 @@ func TestBySlugExactMatch(t *testing.T) {
 func TestRegistryControlMetadata(t *testing.T) {
 	scriptable := map[string]TargetKind{
 		"split-right": TargetPane, "split-left": TargetPane, "split-up": TargetPane,
-		"split-down": TargetPane, "stack-pane": TargetPane, "toggle-stack": TargetPane,
+		"split-down": TargetPane, "consume-or-expel-pane-left": TargetPane,
+		"consume-or-expel-pane-right": TargetPane, "stack-pane": TargetPane, "toggle-stack": TargetPane,
 		"close-pane": TargetPane, "focus-pane-left": TargetPane, "focus-pane-right": TargetPane,
 		"focus-pane-up": TargetPane, "focus-pane-down": TargetPane,
 		"new-tab": TargetSession, "close-tab": TargetTab, "next-tab": TargetSession,
@@ -146,6 +149,8 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 	}{
 		{name: "zero argument mutation delegates", slug: "split-right", wantCall: "split-right"},
 		{name: "zero argument mutation rejects args", slug: "split-right", args: []string{"extra"}, wantErr: ErrInvalidArguments},
+		{name: "consume or expel left delegates", slug: "consume-or-expel-pane-left", wantCall: "consume-or-expel-pane-left"},
+		{name: "consume or expel right delegates", slug: "consume-or-expel-pane-right", wantCall: "consume-or-expel-pane-right"},
 		{name: "grow width delegates", slug: "grow-pane-width", wantCall: "grow-pane-width"},
 		{name: "shrink width delegates", slug: "shrink-pane-width", wantCall: "shrink-pane-width"},
 		{name: "grow height delegates", slug: "grow-pane-height", wantCall: "grow-pane-height"},
@@ -192,6 +197,8 @@ func (s *controlSpy) SplitRight() error                 { return s.record("split
 func (s *controlSpy) SplitLeft() error                  { return s.record("split-left") }
 func (s *controlSpy) SplitUp() error                    { return s.record("split-up") }
 func (s *controlSpy) SplitDown() error                  { return s.record("split-down") }
+func (s *controlSpy) ConsumeOrExpelPaneLeft() error     { return s.record("consume-or-expel-pane-left") }
+func (s *controlSpy) ConsumeOrExpelPaneRight() error    { return s.record("consume-or-expel-pane-right") }
 func (s *controlSpy) StackPane() error                  { return s.record("stack-pane") }
 func (s *controlSpy) ToggleStack() error                { return s.record("toggle-stack") }
 func (s *controlSpy) GrowPaneWidth() error              { return s.record("grow-pane-width") }
@@ -285,6 +292,8 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "SPL", expect: func(ctx *MockContext) { ctx.EXPECT().SplitLeft().Return(nil).Once() }},
 		{code: "SPU", expect: func(ctx *MockContext) { ctx.EXPECT().SplitUp().Return(nil).Once() }},
 		{code: "SPD", expect: func(ctx *MockContext) { ctx.EXPECT().SplitDown().Return(nil).Once() }},
+		{code: "CEL", expect: func(ctx *MockContext) { ctx.EXPECT().ConsumeOrExpelPaneLeft().Return(nil).Once() }},
+		{code: "CER", expect: func(ctx *MockContext) { ctx.EXPECT().ConsumeOrExpelPaneRight().Return(nil).Once() }},
 		{code: "STP", expect: func(ctx *MockContext) { ctx.EXPECT().StackPane().Return(nil).Once() }},
 		{code: "TST", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleStack().Return(nil).Once() }},
 		{code: "FLT", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleFloatingPane().Return(nil).Once() }},

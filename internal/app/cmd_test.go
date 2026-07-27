@@ -25,6 +25,8 @@ func TestParseCmdArgs(t *testing.T) {
 		{"slug help", []string{"cmd", "split-right", "--help"}, cmdInvocation{slug: "split-right", help: true}, false},
 		{"simple", []string{"cmd", "split-right"}, cmdInvocation{slug: "split-right"}, false},
 		{"resize one-shot", []string{"cmd", "grow-pane-width"}, cmdInvocation{slug: "grow-pane-width"}, false},
+		{"consume or expel pane left", []string{"cmd", "consume-or-expel-pane-left"}, cmdInvocation{slug: "consume-or-expel-pane-left"}, false},
+		{"consume or expel pane right", []string{"cmd", "consume-or-expel-pane-right"}, cmdInvocation{slug: "consume-or-expel-pane-right"}, false},
 		{"resize modal is not scriptable", []string{"cmd", "resize-pane"}, cmdInvocation{}, true},
 		{"session flag", []string{"cmd", "-s", "dev", "new-tab"}, cmdInvocation{slug: "new-tab", session: "dev"}, false},
 		{"json flag", []string{"cmd", "list-panes", "--json"}, cmdInvocation{slug: "list-panes", jsonOut: true}, false},
@@ -93,7 +95,7 @@ func TestCmdHelpUsesRegistryWithoutDialing(t *testing.T) {
 	if called {
 		t.Fatal("help dialed daemon")
 	}
-	for _, want := range []string{"usage: vev cmd", "split-right", "grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes", "list-panes"} {
+	for _, want := range []string{"usage: vev cmd", "split-right", "consume-or-expel-pane-left", "consume-or-expel-pane-right", "grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes", "list-panes"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("help %q missing %q", out.String(), want)
 		}
@@ -105,8 +107,16 @@ func TestCmdHelpUsesRegistryWithoutDialing(t *testing.T) {
 	}
 }
 
-func TestResizeOneShotCmdsParseAndUseSelfTarget(t *testing.T) {
-	for _, slug := range []string{"grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes"} {
+func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
+	for _, slug := range []string{
+		"grow-pane-width",
+		"shrink-pane-width",
+		"grow-pane-height",
+		"shrink-pane-height",
+		"equalize-panes",
+		"consume-or-expel-pane-left",
+		"consume-or-expel-pane-right",
+	} {
 		t.Run(slug, func(t *testing.T) {
 			invocation, err := parseArgs([]string{"cmd", "--self", slug})
 			require.NoError(t, err)

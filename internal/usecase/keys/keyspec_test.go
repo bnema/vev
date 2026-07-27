@@ -84,6 +84,8 @@ func TestActionNamesAreCanonical(t *testing.T) {
 		{ActionGrowPaneHeight, "grow-pane-height"},
 		{ActionShrinkPaneHeight, "shrink-pane-height"},
 		{ActionEqualizePanes, "equalize-panes"},
+		{ActionConsumeOrExpelPaneLeft, "consume-or-expel-pane-left"},
+		{ActionConsumeOrExpelPaneRight, "consume-or-expel-pane-right"},
 	}
 
 	for _, tc := range cases {
