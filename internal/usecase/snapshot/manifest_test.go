@@ -88,6 +88,10 @@ func TestManifestCodecUsesGenerationAndOrderedTypedReferences(t *testing.T) {
 	if got.Generation != manifest.Generation || got.Tabs[0].Panes[0].Tail != manifest.Tabs[0].Panes[0].Tail {
 		t.Fatalf("round trip = %#v", got)
 	}
+	gotTranscript := got.Tabs[0].Panes[0].Transcript
+	if gotTranscript.Kind != RecoveryTranscript || gotTranscript.Digest != transcript.Digest || gotTranscript.Size != uint32(len(transcript.Data)) {
+		t.Fatalf("transcript round trip = %#v", gotTranscript)
+	}
 	for n := range len(encoded) {
 		if _, err := UnmarshalManifest(encoded[:n]); err == nil {
 			t.Fatalf("prefix %d accepted", n)

@@ -2,7 +2,7 @@ package daemon
 
 import snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 
-// captureSession copies history tails and recovery transcripts while holding
+// captureSnapshotState copies history tails and recovery transcripts while holding
 // each pane lock. The returned capture contains only immutable state; encoding
 // and persistence are deliberately deferred to snapshotEncodeWorker.
 func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapshotCapture, bool) {

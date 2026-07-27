@@ -220,9 +220,13 @@ func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uin
 	if tail.Chunks > 1 {
 		return fmt.Errorf("%w: tail blob role", ErrInvalidData)
 	}
-	if _, err := preflightBlob(r, totals, blobs, budget); err != nil {
+	transcript, err := preflightBlob(r, totals, blobs, budget)
+	if err != nil {
 		return err
 	}
+	// Transcripts are canonical history; they may contain multiple chunks or be
+	// empty, so no blob-role assertion applies.
+	_ = transcript
 	return preflightProcess(r)
 }
 
