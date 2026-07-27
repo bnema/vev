@@ -18,8 +18,7 @@ type Modal struct {
 	FixedHeight int
 }
 
-// Bounds returns the modal rectangle positioned within base and clamped to base.
-func (m Modal) Bounds(base domain.Size) domain.Rect {
+func (m Modal) preferredBounds(base domain.Size) domain.Rect {
 	width := percentOf(base.Cols, m.WidthPct)
 	height := percentOf(base.Rows, m.HeightPct)
 	if m.FixedWidth > 0 {
@@ -37,29 +36,11 @@ func (m Modal) Bounds(base domain.Size) domain.Rect {
 	return Place(base, domain.Size{Cols: width, Rows: height}, m.Anchor, m.Margins)
 }
 
-// Inner returns the modal content rectangle after removing a one-cell border.
-func (m Modal) Inner(base domain.Size) domain.Rect {
-	return modalInner(m.Bounds(base))
-}
-
 // Resolve computes the modal's responsive presentation from one preferred
 // bounds and inner pair.
 func (m Modal) Resolve(base domain.Size) Presentation {
-	bounds := m.Bounds(base)
+	bounds := m.preferredBounds(base)
 	return ResolvePresentation(base, bounds, modalInner(bounds))
-}
-
-// Composite draws the modal border and title, fills its interior, and returns
-// the inner content rectangle. Border and interior styles are deliberately
-// independent so unfocused structure and chrome surfaces retain their roles.
-// Cells outside the modal bounds are not changed.
-func (m Modal) Composite(f renderer.Frame, border, interior renderer.Style) domain.Rect {
-	bounds := m.Bounds(domain.Size{Cols: f.Width, Rows: f.Height})
-	inner := modalInner(bounds)
-	DrawBox(f, bounds, border)
-	FillRect(f, inner, renderer.Cell{Rune: ' ', Style: interior})
-	m.drawTitle(f, bounds, border)
-	return inner
 }
 
 // CompositePresentation draws an already-resolved modal presentation and

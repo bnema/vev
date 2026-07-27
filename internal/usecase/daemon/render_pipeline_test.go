@@ -9,13 +9,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/testutil/replaytest"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/notices"
+	"github.com/bnema/vev/internal/usecase/palette"
+	"github.com/bnema/vev/internal/usecase/picker"
+	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/internal/usecase/visualsearch"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
@@ -222,19 +229,19 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 		panes:    []capturedPaneRenderState{{id: "p", frame: paneFrame, placement: layout.Placement{ID: "p", Content: domain.Rect{Width: 12, Height: 5}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
 		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{id: "f", frame: floatingFrame}, geometry: floatingGeometry{Bounds: domain.Rect{X: 3, Y: 1, Width: 6, Height: 3}, Inner: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}}, title: "float", generation: 1},
 		bars:     barState{status: statusSnapshot{session: "sess", tabs: []statusTab{{name: "tab", active: true}}}, topRight: "R", bottomRight: "B"},
-		overlays: capturedOverlayRenderState{promptActive: true, prompt: capturedModal{modal: ui.Modal{FixedWidth: 8, FixedHeight: 3, Title: "Prompt"}, inner: modalInner}},
+		overlays: capturedOverlayRenderState{promptActive: true, prompt: capturedModal{active: true, title: "Prompt", presentation: (ui.Modal{FixedWidth: 8, FixedHeight: 3, Title: "Prompt"}).Resolve(domain.Size{Cols: 12, Rows: 7}), inner: modalInner}},
 		cursor:   capturedCursorInputs{row: 1, col: 2, visible: true, renderable: true, content: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}},
 		styles:   resolveStyles(nil),
 	}
 	composed := composeFrame(state, composeCacheInput{})
-	require.Equal(t, []string{" tab       R", "AAAAAAAAAAAA", "BB┌Prompt┐BB", "CC│PROMPT│CC", "DD└──────┘DD", "EEEEEEEEEEEE", " sess      B"}, frameRows(composed.frame))
+	require.Equal(t, []string{" tab       R", "AAAAAAAAAAAA", "BBB┌─fl─┐BBB", "───Prompt───", "PROMPT      ", "            ", " sess      B"}, frameRows(composed.frame))
 	require.True(t, composed.cursor.hidden, "overlay owns cursor visibility")
 
 	stream := newOutputStateStream()
 	prepared, err := stream.prepare(composed.frame, composed.damage, composed.reset)
 	require.NoError(t, err)
 	terminalBytes := append(append([]byte(nil), prepared.data...), (&attachedClient{}).encodeCursorTail(composed.cursor, true)...)
-	require.Equal(t, "\x1b[1;1H\x1b[0;7m tab \x1b[0m      R\x1b[2;1HAAAAAAAAAAAA\x1b[3;1HBB┌Prompt┐BB\x1b[4;1HCC│PROMPT│CC\x1b[5;1HDD└──────┘DD\x1b[6;1HEEEEEEEEEEEE\x1b[7;1H\x1b[0;7m sess \x1b[0m     B\x1b[0m\x1b[?25l", string(terminalBytes))
+	require.Equal(t, "\x1b[1;1H\x1b[0;7m tab \x1b[0m      R\x1b[2;1HAAAAAAAAAAAA\x1b[3;1HBBB┌─fl─┐BBB\x1b[4;1H───Prompt───\x1b[5;1HPROMPT\x1b[K\x1b[B\x1b[2K\x1b[7;1H\x1b[0;7m sess \x1b[0m     B\x1b[0m\x1b[?25l", string(terminalBytes))
 	client := vt.NewScreen(composed.frame.Width, composed.frame.Height)
 	client.Write(terminalBytes)
 	require.Equal(t, frameRows(composed.frame), frameRows(client.Frame))
@@ -298,6 +305,7 @@ func TestComposeCapturedOverlaysUsesCachedModalRoles(t *testing.T) {
 	active := renderer.Style{Foreground: 3, Background: 4}
 	interior := renderer.Style{Foreground: 5, Background: 6}
 	modal := ui.Modal{FixedWidth: 6, FixedHeight: 4, Title: "x"}
+	presentation := modal.Resolve(domain.Size{Cols: 10, Rows: 8})
 
 	for _, tt := range []struct {
 		name    string
@@ -310,14 +318,78 @@ func TestComposeCapturedOverlaysUsesCachedModalRoles(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			state := capturedRenderState{
 				styles:   themeui.Styles{PickerBase: interior, BorderMuted: muted, BorderActive: active},
-				overlays: capturedOverlayRenderState{prompt: capturedModal{modal: modal, inner: renderer.NewFrame(1, 1), focused: tt.focused}},
+				overlays: capturedOverlayRenderState{prompt: capturedModal{active: true, title: modal.Title, presentation: presentation, inner: renderer.NewFrame(1, 1), focused: tt.focused}},
 			}
 			frame, _ := composeCapturedOverlays(state, renderer.NewFrame(10, 8), nil, domain.Rect{})
-			bounds := modal.Bounds(domain.Size{Cols: 10, Rows: 8})
+			bounds := presentation.Bounds
 			require.True(t, frame.At(bounds.X, bounds.Y).Style.Equal(tt.border), "border uses cached focused role")
 			require.True(t, frame.At(bounds.X+2, bounds.Y+2).Style.Equal(interior), "unrendered modal interior uses cached chrome role")
 		})
 	}
+}
+
+func TestCaptureOverlayLayersRendersEveryModelToResolvedInner(t *testing.T) {
+	state := capturedRenderState{
+		layout: capturedTabLayout{area: domain.Rect{Width: 79, Height: 38}},
+		styles: fallbackChromeStyles,
+	}
+	snapshot := scopy.NewSnapshotFromRows(nil, 79, 38)
+	snap := &overlayRenderSnapshot{
+		copySearchModel:      visualsearch.New(snapshot),
+		pickerActive:         true,
+		pickerModel:          picker.New(nil, "", 0),
+		noticesOverlayActive: true,
+		noticesOverlayModel:  notices.New(nil, time.Time{}),
+		paletteActive:        true,
+		paletteModel:         palette.New(nil),
+		promptActive:         true,
+		promptModel:          promptui.New(" Prompt ", ""),
+	}
+
+	captureOverlayLayers(&state, snap, domain.PaletteConfig{})
+
+	for name, modal := range map[string]capturedModal{
+		"copy search": state.overlays.copySearch,
+		"picker":      state.overlays.picker,
+		"notices":     state.overlays.noticesOverlay,
+		"palette":     state.overlays.palette,
+		"prompt":      state.overlays.prompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.True(t, modal.active)
+			require.Equal(t, ui.PresentationDrawer, modal.presentation.Mode)
+			require.Equal(t, rectSize(modal.presentation.Inner), domain.Size{Cols: modal.inner.Width, Rows: modal.inner.Height})
+		})
+	}
+}
+
+func TestCopyModalInnerClipsDestinationAndSource(t *testing.T) {
+	base := renderer.NewFrame(4, 3)
+	inner := renderer.NewFrame(4, 2)
+	for y, text := range []string{"ABCD", "EFGH"} {
+		for x, r := range text {
+			inner.Set(x, y, renderer.Cell{Rune: r})
+		}
+	}
+
+	copyModalInner(base, domain.Rect{X: -1, Y: 2, Width: 5, Height: 2}, inner)
+
+	require.Equal(t, "BCD ", rowText(base.Row(2)))
+}
+
+func TestComposeCapturedOverlaysKeepsZeroHeightModalActive(t *testing.T) {
+	presentation := (ui.Modal{FixedHeight: 11, Title: "Search"}).Resolve(domain.Size{Cols: 79, Rows: 4})
+	require.Zero(t, presentation.Bounds.Height)
+	state := capturedRenderState{
+		styles: themeui.Styles{PickerBase: renderer.DefaultStyle()},
+		overlays: capturedOverlayRenderState{
+			copySearch: capturedModal{active: true, title: "Search", presentation: presentation},
+		},
+	}
+
+	_, damage := composeCapturedOverlays(state, renderer.NewFrame(79, 4), nil, domain.Rect{})
+
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 }
 
 func TestNoticeStylesFromMapsWarnToDedicatedRoleDistinctFromInfo(t *testing.T) {
