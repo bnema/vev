@@ -269,7 +269,7 @@ func preflightManifestPane(r *payloadReader, budget *manifestPreflightBudget) (l
 	if err := preflightObjectRef(r, HistoryTail); err != nil {
 		return "", err
 	}
-	if err := preflightObjectRef(r, Visible); err != nil {
+	if err := preflightObjectRef(r, RecoveryTranscript); err != nil {
 		return "", err
 	}
 	if err := preflightManifestProcess(r, budget); err != nil {

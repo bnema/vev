@@ -185,20 +185,20 @@ func (c *forwardOrphanCatalogue) Replace(name string, record domain.CatalogueRec
 
 func incarnationPublication(t *testing.T, id domain.IncarnationID, name string, generation uint64, parent *domain.CheckpointRef) ports.SnapshotPublication {
 	t.Helper()
-	tail, err := codec.MarshalObject(codec.HistoryTail, []byte("tail"))
+	tail, err := codec.MarshalObject(codec.HistoryTail, canonicalHistoryBlob(t, "tail"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	visible, err := codec.MarshalObject(codec.Visible, []byte("visible"))
+	transcript, err := codec.MarshalObject(codec.RecoveryTranscript, canonicalHistoryBlob(t, "transcript"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	manifest, err := codec.MarshalManifest(codec.Manifest{
 		Generation: generation, IncarnationID: id, ParentCheckpoint: parent, Name: name,
-		Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}},
+		Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Transcript: codec.ObjectRef{Kind: codec.RecoveryTranscript, Digest: transcript.Digest, Size: uint32(len(transcript.Data))}}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, ParentCheckpoint: parent, Manifest: manifest, Objects: []ports.SnapshotObject{tail, visible}}
+	return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, ParentCheckpoint: parent, Manifest: manifest, Objects: []ports.SnapshotObject{tail, transcript}}
 }

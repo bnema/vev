@@ -22,7 +22,7 @@ var (
 
 const (
 	magic                = "VEVS"
-	version              = uint16(3)
+	version              = uint16(4)
 	maxDecodedBodySize   = 256 << 20
 	maxSnapshotObjects   = 1 << 16
 	maxSnapshotBytes     = 256 << 20
@@ -428,7 +428,7 @@ func readPane(r *payloadReader) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
-	visible, err := r.getBlob()
+	transcript, err := r.getBlob()
 	if err != nil {
 		return Pane{}, err
 	}
@@ -436,7 +436,7 @@ func readPane(r *payloadReader) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
-	return Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, SealedChunks: sealed, Tail: tail, Visible: visible, Process: proc}, nil
+	return Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, SealedChunks: sealed, Tail: tail, Transcript: transcript, Process: proc}, nil
 }
 
 func readProcess(r *payloadReader) (*Process, error) {

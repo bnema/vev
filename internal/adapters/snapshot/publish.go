@@ -320,7 +320,7 @@ func manifestRefs(manifest codec.Manifest) map[ports.SnapshotDigest]codec.Object
 					return nil
 				}
 			}
-			if !add(pane.Tail) || !add(pane.Visible) {
+			if !add(pane.Tail) || !add(pane.Transcript) {
 				return nil
 			}
 		}

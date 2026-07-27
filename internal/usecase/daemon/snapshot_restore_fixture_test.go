@@ -29,12 +29,12 @@ func acceptancePublication(snapshot snapcodec.Session) (ports.SnapshotPublicatio
 			if err != nil {
 				return ports.SnapshotPublication{}, fmt.Errorf("snapshot fixture conversion: tab %q pane %q tail: marshal object: %w", tab.StableID, pane.ID, err)
 			}
-			visible, err := snapcodec.MarshalObject(snapcodec.Visible, pane.Visible)
+			transcript, err := snapcodec.MarshalObject(snapcodec.RecoveryTranscript, pane.Transcript)
 			if err != nil {
-				return ports.SnapshotPublication{}, fmt.Errorf("snapshot fixture conversion: tab %q pane %q visible: marshal object: %w", tab.StableID, pane.ID, err)
+				return ports.SnapshotPublication{}, fmt.Errorf("snapshot fixture conversion: tab %q pane %q recovery transcript: marshal object: %w", tab.StableID, pane.ID, err)
 			}
-			outPane.Tail, outPane.Visible = objectRef(snapcodec.HistoryTail, tail), objectRef(snapcodec.Visible, visible)
-			objects = append(objects, tail, visible)
+			outPane.Tail, outPane.Transcript = objectRef(snapcodec.HistoryTail, tail), objectRef(snapcodec.RecoveryTranscript, transcript)
+			objects = append(objects, tail, transcript)
 			outTab.Panes = append(outTab.Panes, outPane)
 		}
 		manifest.Tabs = append(manifest.Tabs, outTab)

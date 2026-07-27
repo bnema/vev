@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -64,9 +65,29 @@ func TestIncrementalPublicationEncodesAfterPaneUnlock(t *testing.T) {
 		}
 	case <-time.After(testWaitTimeout):
 		pane.mu.Unlock()
-		t.Fatal("visible encoding waited for pane lock")
+		t.Fatal("recovery transcript encoding waited for pane lock")
 	}
 	pane.mu.Unlock()
+}
+
+func TestSnapshotCaptureOwnsRecoveryTranscriptAcrossLiveMutations(t *testing.T) {
+	d := New(nil, nil, nil)
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	capture, ok := d.captureSnapshotState(sess, 1)
+	require.True(t, ok)
+
+	pane := sess.tabs[0].panes["pane-1"]
+	pane.mu.Lock()
+	pane.screen.Write([]byte("\x1b[1;1Hchanged"))
+	pane.mu.Unlock()
+
+	publication, err := d.incrementalPublication(capture)
+	require.NoError(t, err)
+	restored, err := sessionFromGeneration(snapshotGeneration(publication))
+	require.NoError(t, err)
+	view, err := vt.UnmarshalHistory(restored.Tabs[0].Panes[0].Transcript)
+	require.NoError(t, err)
+	require.Equal(t, "hello", strings.TrimRight(cellsString(view.Row(0)), " "))
 }
 
 func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
@@ -122,15 +143,17 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
 	appendHistoryRow(t, history, []renderer.Cell{renderer.BlankCell()})
 	view := history.SnapshotView()
-	visible := vt.NewScreen(1, 1).PrimaryVisibleSnapshot()
+	transcript := vt.NewScreen(1, 1).RecoveryTranscriptSnapshot()
 	d := New(nil, nil, nil)
 	sess := newSnapshotTestSession(t, "work", false, "/work")
-	capture := &snapshotCapture{session: sess, name: "work", incarnation: domain.IncarnationID{1}, generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", sealed: view, tail: view.Tail(), visible: visible}}}}}
+	capture := &snapshotCapture{session: sess, name: "work", incarnation: domain.IncarnationID{1}, generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", sealed: view, tail: view.Tail(), transcript: transcript}}}}}
 	first, err := d.incrementalPublication(capture)
 	if err != nil {
 		t.Fatal(err)
 	}
 	firstRef := domain.CheckpointRef{Generation: first.Generation, ManifestDigest: snapcodec.ManifestDigest(first.Manifest)}
+	capture.checkpoint = firstRef
+	markSnapshotCaptureObjectsPublished(capture)
 	capture.generation = 2
 	capture.parentCheckpoint = &firstRef
 	second, err := d.incrementalPublication(capture)
@@ -140,6 +163,14 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	if len(first.Objects) == 0 || len(second.Objects) == 0 {
 		t.Fatal("publication omitted required objects")
 	}
+	require.Len(t, second.Objects, 2, "a generation must supply its tail and transcript once without resupplying persisted sealed chunks")
+	kinds := make(map[snapcodec.ObjectKind]int)
+	for _, object := range second.Objects {
+		kind, _, err := snapcodec.PreflightObject(object.Data)
+		require.NoError(t, err)
+		kinds[kind]++
+	}
+	require.Equal(t, map[snapcodec.ObjectKind]int{snapcodec.HistoryTail: 1, snapcodec.RecoveryTranscript: 1}, kinds)
 	require.Equal(t, &firstRef, second.ParentCheckpoint)
 	manifest, err := snapcodec.UnmarshalManifest(second.Manifest)
 	require.NoError(t, err)

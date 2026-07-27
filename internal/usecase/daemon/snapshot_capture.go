@@ -2,7 +2,7 @@ package daemon
 
 import snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 
-// captureSession rotates history tails and clones visible frames while holding
+// captureSession copies history tails and recovery transcripts while holding
 // each pane lock. The returned capture contains only immutable state; encoding
 // and persistence are deliberately deferred to snapshotEncodeWorker.
 func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapshotCapture, bool) {
@@ -51,9 +51,9 @@ func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapsh
 				pid = pty.Pid()
 			}
 			paneCapture := snapshotCapturePane{
-				id:       p.id,
-				stableID: p.stableID,
-				visible:  p.screen.PrimaryVisibleSnapshot(),
+				id:         p.id,
+				stableID:   p.stableID,
+				transcript: p.screen.RecoveryTranscriptSnapshot(),
 			}
 			paneCapture.sealed = p.history.SnapshotView()
 			paneCapture.tail = paneCapture.sealed.Tail()

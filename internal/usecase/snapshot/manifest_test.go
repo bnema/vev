@@ -65,16 +65,16 @@ func TestManifestCodecUsesGenerationAndOrderedTypedReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	visible, err := MarshalObject(Visible, []byte("visible"))
+	transcript, err := MarshalObject(RecoveryTranscript, []byte("transcript"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	manifest := Manifest{Generation: 7, IncarnationID: domain.IncarnationID{1}, Name: "named", CreatedAt: 9, Active: 0, Tabs: []ManifestTab{{
 		StableID: "tab", Cols: 80, Rows: 24, NextPaneID: 2, Focus: "pane", Tree: layout.NewTree("pane"),
 		Panes: []ManifestPane{{ID: "pane", StableID: "pane-stable", Cwd: "/tmp",
-			Sealed:  []ObjectRef{{Kind: HistoryChunk, Digest: chunk.Digest, Size: uint32(len(chunk.Data))}},
-			Tail:    ObjectRef{Kind: HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))},
-			Visible: ObjectRef{Kind: Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))},
+			Sealed:     []ObjectRef{{Kind: HistoryChunk, Digest: chunk.Digest, Size: uint32(len(chunk.Data))}},
+			Tail:       ObjectRef{Kind: HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))},
+			Transcript: ObjectRef{Kind: RecoveryTranscript, Digest: transcript.Digest, Size: uint32(len(transcript.Data))},
 		}},
 	}}}
 	encoded, err := MarshalManifest(manifest)
@@ -104,7 +104,7 @@ func TestManifestCodecUsesGenerationAndOrderedTypedReferences(t *testing.T) {
 }
 
 func TestObjectCodecReturnsContentAddressedObjectAndPayload(t *testing.T) {
-	object, err := MarshalObject(Visible, []byte("canonical-vt"))
+	object, err := MarshalObject(RecoveryTranscript, []byte("canonical-vt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +112,11 @@ func TestObjectCodecReturnsContentAddressedObjectAndPayload(t *testing.T) {
 		t.Fatalf("digest does not address VEVO bytes")
 	}
 	kind, payload, err := UnmarshalObject(object.Data)
-	if err != nil || kind != Visible || !bytes.Equal(payload, []byte("canonical-vt")) {
+	if err != nil || kind != RecoveryTranscript || !bytes.Equal(payload, []byte("canonical-vt")) {
 		t.Fatalf("round trip = %v %q %v", kind, payload, err)
 	}
 	kind, payload, err = PreflightObject(object.Data)
-	if err != nil || kind != Visible || !bytes.Equal(payload, []byte("canonical-vt")) {
+	if err != nil || kind != RecoveryTranscript || !bytes.Equal(payload, []byte("canonical-vt")) {
 		t.Fatalf("preflight = %v %q %v", kind, payload, err)
 	}
 	for n := range len(object.Data) {
@@ -131,7 +131,7 @@ func TestObjectCodecReturnsContentAddressedObjectAndPayload(t *testing.T) {
 
 func TestManifestDimensionBoundaries(t *testing.T) {
 	ref := ObjectRef{Kind: HistoryTail, Digest: ports.SnapshotDigest{1}, Size: minObjectEnvelopeSize}
-	visible := ObjectRef{Kind: Visible, Digest: ports.SnapshotDigest{2}, Size: minObjectEnvelopeSize}
+	transcript := ObjectRef{Kind: RecoveryTranscript, Digest: ports.SnapshotDigest{2}, Size: minObjectEnvelopeSize}
 	for _, tc := range []struct {
 		name       string
 		cols, rows uint16
@@ -142,7 +142,7 @@ func TestManifestDimensionBoundaries(t *testing.T) {
 		{"hostile product", math.MaxUint16, math.MaxUint16, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "safe", Tabs: []ManifestTab{{Cols: tc.cols, Rows: tc.rows, Panes: []ManifestPane{{ID: "p", Tail: ref, Visible: visible}}}}}
+			m := Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "safe", Tabs: []ManifestTab{{Cols: tc.cols, Rows: tc.rows, Panes: []ManifestPane{{ID: "p", Tail: ref, Transcript: transcript}}}}}
 			_, err := MarshalManifest(m)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MarshalManifest() error = %v, want error=%v", err, tc.wantErr)
@@ -153,9 +153,9 @@ func TestManifestDimensionBoundaries(t *testing.T) {
 
 func TestManifestRejectsImpossibleObjectEnvelopeSize(t *testing.T) {
 	manifest := Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "named", Tabs: []ManifestTab{{Cols: 1, Rows: 1, Panes: []ManifestPane{{
-		ID:      "pane",
-		Tail:    ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: 1},
-		Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize},
+		ID:         "pane",
+		Tail:       ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: 1},
+		Transcript: ObjectRef{Kind: RecoveryTranscript, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize},
 	}}}}}
 	if _, err := MarshalManifest(manifest); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("MarshalManifest() error = %v, want invalid data", err)
@@ -220,9 +220,9 @@ func manifestWithTailSize(size uint32) Manifest {
 		Cols: 1,
 		Rows: 1,
 		Panes: []ManifestPane{{
-			ID:      "pane",
-			Tail:    ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: size},
-			Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize},
+			ID:         "pane",
+			Tail:       ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: size},
+			Transcript: ObjectRef{Kind: RecoveryTranscript, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize},
 		}},
 	}}}
 }

@@ -69,7 +69,7 @@ func TestValidatePublicationRejectsUnloadableAggregate(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifest.Tabs[0].Panes[0].Tail.Size = uint32(maxRepositoryRead)
-	manifest.Tabs[0].Panes[0].Visible.Size = uint32(maxRepositoryRead)
+	manifest.Tabs[0].Panes[0].Transcript.Size = uint32(maxRepositoryRead)
 	pub.Manifest, err = codec.MarshalManifest(manifest)
 	if err != nil {
 		t.Fatal(err)

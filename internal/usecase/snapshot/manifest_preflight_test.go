@@ -140,9 +140,9 @@ func TestManifestObjectRefKinds(t *testing.T) {
 	}{
 		{"chunk", HistoryChunk, HistoryChunk, true},
 		{"tail", HistoryTail, HistoryTail, true},
-		{"visible", Visible, Visible, true},
-		{"invalid", ObjectKind(99), Visible, false},
-		{"wrong role", HistoryTail, Visible, false},
+		{"transcript", RecoveryTranscript, RecoveryTranscript, true},
+		{"invalid", ObjectKind(99), RecoveryTranscript, false},
+		{"wrong role", HistoryTail, RecoveryTranscript, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var w payloadWriter
@@ -230,8 +230,8 @@ func testManifest(tree *layout.Tree, process *Process) Manifest {
 	return Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "named", Tabs: []ManifestTab{{
 		StableID: "tab", Cols: 80, Rows: 24, Focus: "one", Tree: tree,
 		Panes: []ManifestPane{
-			{ID: "one", StableID: "one", Cwd: "/one", Sealed: []ObjectRef{{Kind: HistoryChunk, Digest: SnapshotDigest{1}, Size: minObjectEnvelopeSize}}, Tail: ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize}, Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{3}, Size: minObjectEnvelopeSize}, Process: process},
-			{ID: "two", StableID: "two", Cwd: "/two", Tail: ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{4}, Size: minObjectEnvelopeSize}, Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{5}, Size: minObjectEnvelopeSize}},
+			{ID: "one", StableID: "one", Cwd: "/one", Sealed: []ObjectRef{{Kind: HistoryChunk, Digest: SnapshotDigest{1}, Size: minObjectEnvelopeSize}}, Tail: ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize}, Transcript: ObjectRef{Kind: RecoveryTranscript, Digest: SnapshotDigest{3}, Size: minObjectEnvelopeSize}, Process: process},
+			{ID: "two", StableID: "two", Cwd: "/two", Tail: ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{4}, Size: minObjectEnvelopeSize}, Transcript: ObjectRef{Kind: RecoveryTranscript, Digest: SnapshotDigest{5}, Size: minObjectEnvelopeSize}},
 		},
 	}}}
 }

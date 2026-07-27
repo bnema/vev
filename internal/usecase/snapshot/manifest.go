@@ -16,7 +16,7 @@ const (
 	manifestMagic                = "VEVM"
 	headMagic                    = "VEVH"
 	objectMagic                  = "VEVO"
-	ManifestVersion              = uint16(2)
+	ManifestVersion              = uint16(3)
 	manifestHeaderSize           = 16
 	objectEnvelopeBodyPrefixSize = 1 + 4 // object kind and payload length
 	minObjectEnvelopeSize        = manifestHeaderSize + objectEnvelopeBodyPrefixSize + 1
@@ -48,7 +48,7 @@ type ObjectKind uint8
 const (
 	HistoryChunk ObjectKind = iota + 1
 	HistoryTail
-	Visible
+	RecoveryTranscript
 )
 
 type ObjectRef struct {
@@ -117,13 +117,13 @@ type ManifestTab struct {
 }
 
 type ManifestPane struct {
-	ID       layout.PaneID
-	StableID string
-	Cwd      string
-	Sealed   []ObjectRef
-	Tail     ObjectRef
-	Visible  ObjectRef
-	Process  *Process
+	ID         layout.PaneID
+	StableID   string
+	Cwd        string
+	Sealed     []ObjectRef
+	Tail       ObjectRef
+	Transcript ObjectRef
+	Process    *Process
 }
 
 func MarshalManifest(m Manifest) ([]byte, error) {
@@ -479,7 +479,7 @@ func writeManifestPane(w *payloadWriter, pane ManifestPane) error {
 		writeObjectRef(w, ref)
 	}
 	writeObjectRef(w, pane.Tail)
-	writeObjectRef(w, pane.Visible)
+	writeObjectRef(w, pane.Transcript)
 	return writeProcess(w, pane.Process)
 }
 func writeObjectRef(w *payloadWriter, ref ObjectRef) {
@@ -551,7 +551,7 @@ func readManifestPane(r *payloadReader) (ManifestPane, error) {
 	if pane.Tail, err = readObjectRef(r); err != nil {
 		return ManifestPane{}, err
 	}
-	if pane.Visible, err = readObjectRef(r); err != nil {
+	if pane.Transcript, err = readObjectRef(r); err != nil {
 		return ManifestPane{}, err
 	}
 	pane.Process, err = readProcess(r)
@@ -647,7 +647,7 @@ func validatePaneRefs(p ManifestPane) error {
 	if err := validateObjectRef(p.Tail, HistoryTail); err != nil {
 		return err
 	}
-	return validateObjectRef(p.Visible, Visible)
+	return validateObjectRef(p.Transcript, RecoveryTranscript)
 }
 func validateObjectRef(ref ObjectRef, want ObjectKind) error {
 	return validateObjectRefFields(ref.Kind, ref.Digest[:], ref.Size, want)
@@ -664,7 +664,7 @@ func validObjectEnvelopeSize(size uint32) bool {
 }
 
 func validObjectKind(kind ObjectKind) bool {
-	return kind == HistoryChunk || kind == HistoryTail || kind == Visible
+	return kind == HistoryChunk || kind == HistoryTail || kind == RecoveryTranscript
 }
 func isZeroDigestBytes(d []byte) bool {
 	for _, b := range d {

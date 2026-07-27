@@ -347,17 +347,14 @@ func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
 	if len(snap.Tail) == 0 {
 		return fmt.Errorf("snapshot history: missing tail blob")
 	}
-	if len(snap.Visible) == 0 {
-		return fmt.Errorf("snapshot visible: missing visible blob")
+	if len(snap.Transcript) == 0 {
+		return fmt.Errorf("snapshot recovery transcript: missing transcript blob")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	screen, err := vt.NewScreenWithRestoredHistory(p.screen.Frame.Width, p.screen.Frame.Height, vt.HistoryConfig{MaxRows: defaultScrollbackRows, MaxCells: defaultScrollbackCells}, snap.SealedChunks, snap.Tail)
+	screen, err := vt.NewScreenWithRecoveryTranscript(p.screen.Frame.Width, p.screen.Frame.Height, vt.HistoryConfig{MaxRows: defaultScrollbackRows, MaxCells: defaultScrollbackCells}, snap.SealedChunks, snap.Tail, snap.Transcript)
 	if err != nil {
-		return fmt.Errorf("snapshot history: %w", err)
-	}
-	if err := screen.RestorePrimaryVisible(snap.Visible); err != nil {
-		return fmt.Errorf("snapshot visible: %w", err)
+		return fmt.Errorf("snapshot recovery: %w", err)
 	}
 	p.screen = screen
 	p.history = screen.History()

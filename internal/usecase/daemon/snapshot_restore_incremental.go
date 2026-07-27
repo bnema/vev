@@ -274,7 +274,7 @@ func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Sessi
 			if outPane.Tail, err = generationObject(generation, pane.Tail, snapcodec.HistoryTail); err != nil {
 				return snapcodec.Session{}, err
 			}
-			if outPane.Visible, err = generationObject(generation, pane.Visible, snapcodec.Visible); err != nil {
+			if outPane.Transcript, err = generationObject(generation, pane.Transcript, snapcodec.RecoveryTranscript); err != nil {
 				return snapcodec.Session{}, err
 			}
 			outTab.Panes = append(outTab.Panes, outPane)

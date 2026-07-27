@@ -72,11 +72,11 @@ func snapshotCacheCapture(sess *session, history vt.HistorySnapshotView, generat
 			cols:     1,
 			rows:     1,
 			panes: []snapshotCapturePane{{
-				id:       "pane",
-				stableID: "pane",
-				sealed:   history,
-				tail:     history.Tail(),
-				visible:  vt.NewScreen(1, 1).PrimaryVisibleSnapshot(),
+				id:         "pane",
+				stableID:   "pane",
+				sealed:     history,
+				tail:       history.Tail(),
+				transcript: vt.NewScreen(1, 1).RecoveryTranscriptSnapshot(),
 			}},
 		}},
 	}
