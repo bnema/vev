@@ -617,6 +617,36 @@ func TestApplyVisibleFloatingLayoutPublishesSameSizeGeometryWithoutPTYResize(t *
 	popup.mu.Unlock()
 }
 
+func TestZeroInnerFloatingDrawerPublicationDoesNotRecheckCurrent(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
+	pty := &transactionalResizePTY{}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+	calls := 0
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, func() bool {
+		calls++
+		return calls == 1
+	})
+
+	require.True(t, ok, "a publication accepted while current must not later report stale")
+	require.Equal(t, 1, calls, "current must not be rechecked after publication")
+	require.Empty(t, failed)
+	require.Empty(t, pty.requested())
+	requested := calculateContentFloatingGeometry(tb.size, cfg)
+	popup.mu.Lock()
+	require.Equal(t, requested, popup.popupGeometry)
+	require.Equal(t, committed.Inner, popup.rect)
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	popup.mu.Unlock()
+}
+
 func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t *testing.T) {
 	cfg := domain.FloatingConfig{Width: 100, Height: 100}
 	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
