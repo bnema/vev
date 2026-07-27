@@ -3,10 +3,12 @@ package daemon
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -200,6 +202,13 @@ func chunkReadPTY(t *testing.T, chunks ...[]byte) *portsmocks.MockPTY {
 	return p
 }
 
+func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClient, tr ports.Transport) {
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	token := sess.attachmentToken(ac, tr)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishRoleCapability(token)
+}
+
 func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	p := chunkReadPTY(t, []byte("\x1b]52;c;aGVsbG8=\x07"))
@@ -213,14 +222,22 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	sess := &session{id: "clip", name: "clip", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
+	publishActiveClipboardCapability(d, sess, ac, tr)
 
 	d.sessWg.Add(1)
 	d.ptyReader(sess, win, win.focusedPane())
 
-	f := awaitFrame(t, sends, ports.MsgOutput)
-	out, err := ports.UnmarshalOutput(f.Payload)
-	require.NoError(t, err)
-	require.Contains(t, string(out.Data), "\x1b]52;c;aGVsbG8=\x07")
+	var clipboardOutput string
+	for range 3 {
+		f := awaitFrame(t, sends, ports.MsgOutput)
+		out, err := ports.UnmarshalOutput(f.Payload)
+		require.NoError(t, err)
+		clipboardOutput = string(out.Data)
+		if strings.Contains(clipboardOutput, "\x1b]52;c;aGVsbG8=\x07") {
+			break
+		}
+	}
+	require.Contains(t, clipboardOutput, "\x1b]52;c;aGVsbG8=\x07")
 }
 
 func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
@@ -289,6 +306,57 @@ func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
 	})
 }
 
+type staleClipboardErrorTransport struct {
+	mu    sync.Mutex
+	sends int
+}
+
+func (t *staleClipboardErrorTransport) Send(ports.Frame) error {
+	t.mu.Lock()
+	t.sends++
+	t.mu.Unlock()
+	return errors.New("stale clipboard send")
+}
+
+func (*staleClipboardErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*staleClipboardErrorTransport) Close() error               { return nil }
+
+func (t *staleClipboardErrorTransport) sendCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.sends
+}
+
+func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
+	d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	oldTransport := &staleClipboardErrorTransport{}
+	old.replaceTransport(oldTransport)
+	rc := d.attachCoordinator(sess, nil, old, true)
+	token := sess.attachmentToken(old, oldTransport)
+	token.lease = rc.attachmentLease(old)
+	old.publishRoleCapability(token)
+
+	sess.mu.Lock()
+	sess.clipboardWorkerRunning = true
+	sess.mu.Unlock()
+	d.forwardClipboardAsync(sess, base64.StdEncoding.EncodeToString([]byte("queued")))
+
+	newTransport := &closeTrackingTransport{}
+	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), size: old.size}
+	next.initOverlays()
+	_, err := d.transitionAttachment(attachmentTransitionRequest{
+		target: sess, next: next, expectedRole: attachmentDetached, targetRole: attachmentActive,
+		expectedTransport: next.transportSnapshot(), ready: true,
+	})
+	require.NoError(t, err)
+
+	d.clipboardWorker(sess)
+	require.Zero(t, oldTransport.sendCount(), "stale queued work reached its captured failing transport")
+	require.Empty(t, newTransport.Sends(), "stale queued work was redirected to the replacement")
+	require.Same(t, next, sess.client, "stale clipboard send handling detached the current client")
+	require.False(t, newTransport.Closed())
+}
+
 func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr := newBlockingClipboardTransport()
@@ -298,6 +366,8 @@ func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
 	defer cancel()
 	sess := &session{id: "clip-order", name: "clip-order", ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
+	d.sessions[sess.id] = sess
+	publishActiveClipboardCapability(d, sess, ac, tr)
 
 	first := base64.StdEncoding.EncodeToString([]byte("first"))
 	second := base64.StdEncoding.EncodeToString([]byte("second"))

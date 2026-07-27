@@ -283,7 +283,7 @@ func TestEphemeralNumberingReuse(t *testing.T) {
 
 // --- attach replace ---------------------------------------------------------
 
-func TestAttachReplaceDetachesOld(t *testing.T) {
+func TestAttachReplaceKeepsOldClientSnatched(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 
@@ -295,21 +295,23 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 	awaitFrame(t, sendsA, ports.MsgOutput)
 	sess := firstSession(d)
 	require.NotNil(t, sess)
+	sess.mu.Lock()
+	acA := sess.client
+	sess.mu.Unlock()
+	require.NotNil(t, acA)
 
 	// Client B attaches to the same session, displacing A.
 	trB, sendsB, releaseB := newConn(t, mustHello(ports.IntentAttach, "0", domain.Size{Cols: 80, Rows: 24}))
 	hg.Go(func() { d.handleConn(trB) })
 	awaitFrame(t, sendsB, ports.MsgWelcome)
 
-	// A is notified it was detached.
-	dA := awaitFrame(t, sendsA, ports.MsgDetached)
-	det, _ := ports.UnmarshalDetached(dA.Payload)
-	require.Equal(t, ports.ReasonReplaced, det.Reason)
-
-	// B is now the current client.
+	// B is now the sole active client while A remains a live snatched member.
 	sess.mu.Lock()
 	require.NotNil(t, sess.client)
+	require.NotSame(t, acA, sess.client)
+	require.Contains(t, sess.snatched, acA)
 	sess.mu.Unlock()
+	require.Same(t, sess, acA.currentSession())
 
 	releaseA()
 	releaseB()

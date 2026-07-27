@@ -242,8 +242,17 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 // notifyAck reports that the client acknowledged an output state, releasing
 // at most one deadline/watchdog-deferred wake. It never bypasses an unexpired
 // normal or urgent deadline.
-func (c *renderCoordinator) notifyAck() {
+func (c *renderCoordinator) notifyAck() { c.notifyAckForLease(nil) }
+
+// notifyAckForLease prevents an acknowledgement captured by an obsolete active
+// frame from flushing the replacement attachment's render queue. A nil lease is
+// reserved for coordinator-owned/direct test callers.
+func (c *renderCoordinator) notifyAckForLease(lease *attachmentLease) {
 	c.mu.Lock()
+	if lease != nil && !c.leaseCurrentLocked(lease, true) {
+		c.mu.Unlock()
+		return
+	}
 	if (!c.ackDeferred && !c.deadlineDue) || !c.pending {
 		c.mu.Unlock()
 		return
@@ -558,29 +567,41 @@ func (cleanup renderLifecycleCleanup) finish() {
 // beginDetach invalidates pending work. It never waits for detached workers.
 func (c *renderCoordinator) beginDetach(ac *attachedClient) renderLifecycleCleanup {
 	c.mu.Lock()
+	cleanup := c.beginDetachLocked(ac)
+	c.mu.Unlock()
+	return cleanup
+}
+
+// beginDetachLocked is the prelocked lifecycle seam used when registry,
+// current-session, and lease publication must share one commit boundary.
+func (c *renderCoordinator) beginDetachLocked(ac *attachedClient) renderLifecycleCleanup {
 	var cleanup renderLifecycleCleanup
 	if c.lease != nil && c.lease.active && c.lease.attachment == ac {
 		c.lease.active = false
-		c.pending = false
-		c.pendingReset = false
-		c.pendingUrgent = false
-		c.ackDeferred = false
-		c.pendingPreview = false
-		c.coalesced = 0
-		_, timer := c.normalLane.replaceLocked()
-		c.armed = false
-		_, resizeTimer := c.resizeLane.replaceLocked()
-		_, retryTimer := c.retryLane.replaceLocked()
-		cleanup = renderLifecycleCleanup{
-			tokens:           []*timerToken{timer, resizeTimer, retryTimer},
-			observer:         c.opts.observer,
-			queueCorrelation: c.queueCorrelation,
-			queueMarked:      c.queueMarked,
-			ackBlocked:       c.ackBlocked,
-		}
-		c.queueMarked, c.ackBlocked = false, nil
+		cleanup = c.resetAttachmentLifecycleLocked()
 	}
-	c.mu.Unlock()
+	return cleanup
+}
+
+func (c *renderCoordinator) resetAttachmentLifecycleLocked() renderLifecycleCleanup {
+	c.pending = false
+	c.pendingReset = false
+	c.pendingUrgent = false
+	c.ackDeferred = false
+	c.pendingPreview = false
+	c.coalesced = 0
+	_, timer := c.normalLane.replaceLocked()
+	c.armed = false
+	_, resizeTimer := c.resizeLane.replaceLocked()
+	_, retryTimer := c.retryLane.replaceLocked()
+	cleanup := renderLifecycleCleanup{
+		tokens:           []*timerToken{timer, resizeTimer, retryTimer},
+		observer:         c.opts.observer,
+		queueCorrelation: c.queueCorrelation,
+		queueMarked:      c.queueMarked,
+		ackBlocked:       c.ackBlocked,
+	}
+	c.queueMarked, c.ackBlocked = false, nil
 	return cleanup
 }
 
@@ -593,34 +614,27 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 // for detached workers.
 func (c *renderCoordinator) beginReplace(old, replacement *attachedClient, ready bool) renderLifecycleCleanup {
 	c.mu.Lock()
-	var cleanup renderLifecycleCleanup
-	// A coordinator may be installed while replacing a legacy attachment
-	// which predated coordinator ownership. In that case nil has no pending
-	// identity to invalidate, and the replacement becomes the first bound
-	// attachment atomically with this lifecycle transition.
-	if c.lease == nil || c.lease.attachment == old {
-		c.installLeaseLocked(replacement, ready)
-		c.pending = false
-		c.pendingReset = false
-		c.pendingUrgent = false
-		c.ackDeferred = false
-		c.pendingPreview = false
-		c.coalesced = 0
-		_, timer := c.normalLane.replaceLocked()
-		c.armed = false
-		_, resizeTimer := c.resizeLane.replaceLocked()
-		_, retryTimer := c.retryLane.replaceLocked()
-		cleanup = renderLifecycleCleanup{
-			tokens:           []*timerToken{timer, resizeTimer, retryTimer},
-			observer:         c.opts.observer,
-			queueCorrelation: c.queueCorrelation,
-			queueMarked:      c.queueMarked,
-			ackBlocked:       c.ackBlocked,
-		}
-		c.queueMarked, c.ackBlocked = false, nil
-	}
+	cleanup, _ := c.beginReplaceLocked(old, replacement, ready)
 	c.mu.Unlock()
 	return cleanup
+}
+
+// beginReplaceLocked requires c.mu. Callers validate canReplaceLocked before
+// their ownership commit, making lease installation non-failing afterward.
+func (c *renderCoordinator) beginReplaceLocked(old, replacement *attachedClient, ready bool) (renderLifecycleCleanup, *attachmentLease) {
+	if !c.canReplaceLocked(old, replacement) {
+		return renderLifecycleCleanup{}, nil
+	}
+	lease := c.installLeaseLocked(replacement, ready)
+	return c.resetAttachmentLifecycleLocked(), lease
+}
+
+func (c *renderCoordinator) canReplaceLocked(old, replacement *attachedClient) bool {
+	// A coordinator may be installed while replacing a legacy attachment which
+	// predated coordinator ownership. Any inactive lease is detached historical
+	// state; a resume may also replace the same client object because registry and
+	// transport validation proved a new role incarnation.
+	return !c.torndown && (c.lease == nil || !c.lease.active || c.lease.attachment == old || c.lease.attachment == replacement)
 }
 
 // noteReplace is for callers that hold no outer lifecycle locks.

@@ -4,6 +4,18 @@ import "github.com/bnema/vev/internal/usecase/picker"
 
 // backSession toggles this attachment between its current session and the
 // immediately preceding successfully activated session.
+func (d *Daemon) backSessionForRole(token attachmentRoleToken) error {
+	if d == nil || token.sess == nil || token.ac == nil {
+		return nil
+	}
+	target := token.ac.previousSession.Get()
+	if target == nil || target == token.sess || d.sessionByID(target.id) != target {
+		token.ac.clearPreviousSessionIf(target)
+		return nil
+	}
+	return d.switchToTargetForRole(token, picker.Target{Session: target.id, TabIndex: -1}, sessionHandoffGuard{}, "back-session")
+}
+
 func (d *Daemon) backSession(current *session, ac *attachedClient) {
 	if d == nil || current == nil || ac == nil {
 		return

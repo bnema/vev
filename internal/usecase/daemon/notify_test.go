@@ -71,23 +71,23 @@ func TestHandleClientNoticeSerializesReplacement(t *testing.T) {
 	tr, _ := newCapturingTransport(t)
 	replaced := make(chan *attachedClient, 1)
 	go func() {
-		current, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+		current, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 		replaced <- current
 	}()
 
 	// Releasing the mutation lets the already-validated notice publish before
-	// replacement can own the session. Thus no stale attachment can mutate a
-	// toast stack after sess.client changes.
+	// replacement can own the session. Snatch cleanup then clears the displaced
+	// attachment's presentation state without moving the notice to the new one.
 	close(releaseMutation)
 	<-noticeDone
 	current := <-replaced
+	d.attachmentCleanupWg.Wait()
 
 	history := d.notices.history()
 	require.Len(t, history, 1)
 	require.Equal(t, domain.NoticeClipboard, history[0].Code)
 	oldToasts, _ := visibleToasts(old)
-	require.Len(t, oldToasts, 1)
-	require.Equal(t, domain.NoticeClipboard, oldToasts[0].Code)
+	require.Empty(t, oldToasts)
 	newToasts, _ := visibleToasts(current)
 	require.Empty(t, newToasts)
 	sess.mu.Lock()
@@ -97,10 +97,9 @@ func TestHandleClientNoticeSerializesReplacement(t *testing.T) {
 
 func TestHandleClientNoticeRejectsReplacedClient(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		setup     func(*Daemon, *attachedClient, domain.SessionID)
-		notice    ports.ClientNotice
-		wantToast domain.NoticeCode
+		name   string
+		setup  func(*Daemon, *attachedClient, domain.SessionID)
+		notice ports.ClientNotice
 	}{
 		{
 			name:   "record",
@@ -111,28 +110,23 @@ func TestHandleClientNoticeRejectsReplacedClient(t *testing.T) {
 			setup: func(d *Daemon, ac *attachedClient, sid domain.SessionID) {
 				d.showToast(ac, notice(domain.NoticeConnection, "connection degraded", sid))
 			},
-			notice:    ports.ClientNotice{Action: ports.ClientNoticeLinkConnected},
-			wantToast: domain.NoticeConnection,
+			notice: ports.ClientNotice{Action: ports.ClientNoticeLinkConnected},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, old, _ := newNoticeFixture(t, newNoticeClock())
-			tr, _ := newCapturingTransport(t)
-			current, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 			if tt.setup != nil {
 				tt.setup(d, old, sess.id)
 			}
+			tr, _ := newCapturingTransport(t)
+			current, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+			d.attachmentCleanupWg.Wait()
 
 			d.handleClientNotice(sess, old, tt.notice)
 
 			require.Empty(t, d.notices.history(), "a replaced client must not record notices")
 			oldToasts, _ := visibleToasts(old)
-			if tt.setup == nil {
-				require.Empty(t, oldToasts)
-			} else {
-				require.Len(t, oldToasts, 1)
-				require.Equal(t, tt.wantToast, oldToasts[0].Code, "a replaced client must not dismiss toasts")
-			}
+			require.Empty(t, oldToasts, "snatch cleanup must remove displaced notice presentation")
 			currentToasts, _ := visibleToasts(current)
 			require.Empty(t, currentToasts)
 		})
@@ -140,7 +134,8 @@ func TestHandleClientNoticeRejectsReplacedClient(t *testing.T) {
 }
 
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
-	d, _, ac, _ := newNoticeFixture(t, &noticeClock{})
+	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
+	d.attachCoordinator(sess, nil, ac, true)
 	tr, ok := ac.tr.(*portsmocks.MockTransport)
 	require.True(t, ok, "attached client transport must be a MockTransport")
 	frames := []ports.Frame{
@@ -757,17 +752,18 @@ func TestNotifyGlobalSerializesReplacementWithDelivery(t *testing.T) {
 	tr, _ := newCapturingTransport(t)
 	replaced := make(chan *attachedClient, 1)
 	go func() {
-		ac, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+		ac, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 		replaced <- ac
 	}()
 	close(releaseRoute)
 	<-globalDone
 	current := <-replaced
+	d.attachmentCleanupWg.Wait()
 
-	// Replacement cannot make old a stale delivery target: it publishes only
-	// after the selected attachment has received the global toast.
+	// Replacement publishes only after delivery, then snatch cleanup removes
+	// the displaced attachment's presentation state.
 	oldToasts, _ := visibleToasts(old)
-	require.Len(t, oldToasts, 1)
+	require.Empty(t, oldToasts)
 	newToasts, _ := visibleToasts(current)
 	require.Empty(t, newToasts)
 	sess.mu.Lock()

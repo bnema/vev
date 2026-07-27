@@ -183,15 +183,31 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.size = sz
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
-	ac.setSession(sess)
 	// The resumed session's snapshot is the sole source for future PTY children.
 	// Existing PTYs retain the environment they were started with.
 	sess.mu.Lock()
 	sess.env = copyEnvironment(h.Env)
 	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
-	sess.client = ac
 	sess.mu.Unlock()
-	d.attachCoordinator(sess, nil, ac, false)
+	// Resume preparation used sendMu -> d.mu, but freeze/drain must run with
+	// neither held. Reacquire them before returning to preserve this helper's
+	// locked-caller contract.
+	d.mu.Unlock()
+	ac.sendMu.Unlock()
+	transition, err := d.transitionAttachment(attachmentTransitionRequest{
+		target:            sess,
+		next:              ac,
+		expectedRole:      attachmentDetached,
+		targetRole:        attachmentActive,
+		expectedTransport: ac.transportSnapshot(),
+		ready:             false,
+	})
+	ac.sendMu.Lock()
+	d.mu.Lock()
+	if err != nil {
+		return nil, nil, false, &protoErr{ports.ErrInternal, "resume attachment transition failed"}
+	}
+	d.deferAttachmentTransitionCleanups(transition)
 	d.touchMRU(sess)
 	d.log.Info("client resumed", "session", sess.name)
 	return sess, ac, true, nil

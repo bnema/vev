@@ -505,7 +505,7 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	require.Contains(t, frame, "TARGET", "first target reset must immediately show clean target VT state")
 }
 
-func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
+func TestPickerCrossSessionSwitchSnatchesExistingClient(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	defer releasePTY1()
@@ -540,11 +540,24 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	require.Same(t, ac1, sess2.client)
 	require.Nil(t, sess1.client)
 	require.Equal(t, 2, sessionCount(d), "old ephemeral session remains alive after picker switch")
-	det := awaitFrame(t, sends2, ports.MsgDetached)
-	dm, err := ports.UnmarshalDetached(det.Payload)
+
+	d.attachmentCleanupWg.Wait()
+	var displacedFrames []ports.Frame
+	for len(sends2) > 0 {
+		displacedFrames = append(displacedFrames, <-sends2)
+	}
+	require.Len(t, displacedFrames, 1, "healthy displaced client receives only its snatched panel")
+	require.Equal(t, ports.MsgOutput, displacedFrames[0].Type)
+	displacedOutput, err := ports.UnmarshalOutput(displacedFrames[0].Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ReasonReplaced, dm.Reason)
-	awaitFrame(t, sends1, ports.MsgOutput)
+	require.Contains(t, string(displacedOutput.Data), "Session snatched")
+	require.Same(t, sess2, ac2.currentSession())
+	require.Equal(t, attachmentSnatched, sess2.attachmentRole(ac2))
+
+	movingFrame := awaitFrame(t, sends1, ports.MsgOutput)
+	movingOutput, err := ports.UnmarshalOutput(movingFrame.Payload)
+	require.NoError(t, err)
+	require.Zero(t, movingOutput.BaseStateNum, "moving client must reset before painting the destination")
 }
 
 func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
@@ -623,7 +636,7 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	require.NotEmpty(t, oldPane.screen.Damage(), "stale paint from old session consumed damage")
 }
 
-func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
+func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	defer releasePTY1()
@@ -662,25 +675,41 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 	}()
 	<-enteredSend
 
-	switchDone := make(chan struct{})
+	switchDone := make(chan attachmentTransitionResult, 1)
+	switchErr := make(chan error, 1)
 	go func() {
-		cleanups := d.handoffCoordinator(sess1, sess2, nil, ac)
-		finishRenderLifecycleCleanups(cleanups)
-		close(switchDone)
+		result, err := d.transitionAttachment(attachmentTransitionRequest{
+			source:            sess1,
+			target:            sess2,
+			next:              ac,
+			expectedRole:      attachmentActive,
+			targetRole:        attachmentActive,
+			expectedTransport: ac.transportSnapshot(),
+			ready:             true,
+		})
+		switchDone <- result
+		switchErr <- err
 	}()
-	awaitTestCompletion(t, handoffAtSendMu, "session switch did not reach the handoff sendMu boundary")
 
-	// The handoff is immediately about to acquire sendMu, which paint still owns
-	// through its blocked transport send.
+	var result attachmentTransitionResult
 	select {
-	case <-switchDone:
-		t.Fatal("session switch completed while paint owned sendMu")
+	case result = <-switchDone:
+		require.NoError(t, <-switchErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("session switch waited for in-flight transport send")
+	}
+	require.True(t, result.published.activeCurrent())
+	select {
+	case <-handoffAtSendMu:
+		t.Fatal("output rebase ran during architecture publication")
 	default:
 	}
 
 	close(releaseSend)
 	awaitTestCompletion(t, paintDone, "paint did not finish after Send was released")
-	awaitTestCompletion(t, switchDone, "session handoff did not complete after paint finished")
+	for _, cleanup := range result.cleanups {
+		cleanup.finish()
+	}
 }
 
 func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {

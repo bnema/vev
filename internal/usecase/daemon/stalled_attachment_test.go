@@ -1,8 +1,6 @@
 package daemon
 
 import (
-	"io"
-	"sync"
 	"testing"
 	"time"
 
@@ -14,10 +12,10 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
-// TestFinishAttachDoesNotWaitForBlockedOldRenderWorker verifies the replacement
-// boundary rather than relying on a scheduler delay: an old coordinator worker
-// is already blocked in Send when finishAttach publishes its replacement.
-func TestFinishAttachDoesNotWaitForBlockedOldRenderWorker(t *testing.T) {
+// TestFinishAttachWaitsForAdmittedOldRender verifies role-effect
+// linearization: an old render already admitted and blocked in Send completes
+// before replacement publication can change its capability.
+func TestFinishAttachWaitsForAdmittedOldRender(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	clock := newCoordinatorMockClock(t, 4)
@@ -25,17 +23,14 @@ func TestFinishAttachDoesNotWaitForBlockedOldRenderWorker(t *testing.T) {
 
 	oldTransport := portsmocks.NewMockTransport(t)
 	oldSendEntered := make(chan struct{})
-	oldClosed := make(chan struct{})
-	var closeOnce sync.Once
+	releaseOldSend := make(chan struct{})
 	oldTransport.EXPECT().Send(mock.Anything).RunAndReturn(func(ports.Frame) error {
 		close(oldSendEntered)
-		<-oldClosed
-		return io.EOF
-	}).Once()
-	oldTransport.EXPECT().Close().RunAndReturn(func() error {
-		closeOnce.Do(func() { close(oldClosed) })
+		<-releaseOldSend
 		return nil
 	}).Once()
+	oldTransport.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	oldTransport.EXPECT().Close().Return(nil).Maybe()
 
 	hello := ports.Hello{
 		Version: ports.ProtocolVersion,
@@ -60,19 +55,31 @@ func TestFinishAttachDoesNotWaitForBlockedOldRenderWorker(t *testing.T) {
 	attached := make(chan *attachedClient, 1)
 	go func() {
 		d.mu.Lock()
-		attached <- d.finishAttach(sess, replacement, hello.Size, terminalEnv{}, hello)
+		ac, err := d.finishAttach(sess, replacement, hello.Size, terminalEnv{}, hello)
+		require.NoError(t, err)
+		attached <- ac
 	}()
 
+	select {
+	case <-attached:
+		t.Fatal("replacement published before the admitted old render completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseOldSend)
 	select {
 	case ac := <-attached:
 		require.Same(t, replacement, ac.transport())
 	case <-time.After(time.Second):
-		t.Fatal("replacement attach waited for the blocked old render worker")
+		t.Fatal("replacement did not publish after the admitted render completed")
 	}
 
-	// The exact old link is revoked and closed; it cannot be mistaken for the
-	// replacement even after the retired worker finally leaves Send.
 	d.attachmentCleanupWg.Wait()
-	require.Nil(t, old.transport())
+	require.Same(t, oldTransport, old.transport(), "the displaced attachment remains snatched")
 	replacement.AssertNotCalled(t, "Close")
+
+	// Retire the session before mock cleanup so asynchronous terminal Detached
+	// notification cannot race the clock's C expectation after the test returns.
+	releasePTY()
+	awaitTestCompletion(t, d.done, "session did not retire after its final PTY closed")
+	d.waitNotifies()
 }

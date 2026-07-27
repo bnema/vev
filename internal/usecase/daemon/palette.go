@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sort"
 	"time"
 
@@ -147,7 +148,7 @@ func (d *Daemon) recordPaletteUse(code string) {
 	d.paletteRecent = recent
 }
 
-func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
+func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*roleEffectTicket) {
 	sess := ac.currentSession()
 	if sess == nil {
 		return
@@ -160,6 +161,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	var generation uint64
 	var rawQuery string
 	changed, cancel, execute := false, false, false
+	var effect *roleEffectTicket
+	if len(effects) != 0 {
+		effect = effects[0]
+	}
 
 	ac.overlays.paletteMu.Lock()
 	if ac.overlays.palette == nil {
@@ -270,7 +275,16 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		} else {
 			target.Stopped = true
 		}
-		if err := d.switchToTarget(sess, ac, target); err != nil {
+		var err error
+		if effect != nil {
+			err = d.switchToTargetForRole(effect.roleToken(), target, sessionHandoffGuard{}, "palette-session")
+		} else {
+			err = d.switchToTarget(sess, ac, target)
+		}
+		if effect != nil && errors.Is(err, errAttachmentTransition) {
+			return
+		}
+		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "requested session is unavailable")
 			d.invalidateRender(sess, ac, true, "palette.go")
 			return
@@ -288,8 +302,11 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			d.invalidateRender(sess, ac, true, "palette.go")
 			return
 		}
-		exec := paletteExec{d: d, sess: sess, ac: ac, recent: recent}
+		exec := paletteExec{d: d, sess: sess, ac: ac, recent: recent, effect: effect}
 		if err := exec.JumpRecentSession(rank); err != nil {
+			if errors.Is(err, errAttachmentTransition) {
+				return
+			}
 			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
 			d.invalidateRender(sess, ac, true, "palette.go")
 			return
@@ -300,12 +317,30 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		}
 		return
 	}
-	if !ac.closeExecutedPalette(generation, rawQuery) {
+	roleHandoff := cmd.Slug == "back-session" || cmd.Slug == "detach"
+	if !roleHandoff && !ac.closeExecutedPalette(generation, rawQuery) {
 		return
 	}
 	sess.dispatchMu.Lock()
-	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args)
+	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect}, args)
 	sess.dispatchMu.Unlock()
+	if errors.Is(err, errAttachmentTransition) {
+		return
+	}
+	if err == nil && roleHandoff {
+		if current := ac.currentSession(); current != nil {
+			currentToken := current.attachmentToken(ac, ac.transport())
+			fresh, admitted := ac.beginRoleEffect(currentToken)
+			if admitted {
+				if ac.closeExecutedPalette(generation, rawQuery) {
+					d.invalidateRender(current, ac, true, "palette.go")
+				}
+				fresh.End()
+			}
+		} else {
+			ac.closeExecutedPalette(generation, rawQuery)
+		}
+	}
 	if err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
 		d.reportError(sess, err)
@@ -356,6 +391,7 @@ type paletteExec struct {
 	ac      *attachedClient
 	recent  []recentSession
 	actions daemonActionRunner
+	effect  *roleEffectTicket
 }
 
 func (e paletteExec) runAction(request daemonActionRequest) error {
@@ -378,8 +414,11 @@ func (e paletteExec) CreateTab() error {
 }
 
 func (e paletteExec) CreateSession() error {
-	e.d.enterPrompt(e.sess, e.ac, " Create session ", "", func(name string) error {
-		return e.d.createSessionAndSwitch(e.sess, e.ac, name)
+	e.d.enterTransitionPrompt(e.sess, e.ac, " Create session ", "", func(name string, token attachmentRoleToken) error {
+		if token.ac == nil {
+			return e.d.createSessionAndSwitch(e.sess, e.ac, name)
+		}
+		return e.d.createSessionAndSwitchForRole(token, name)
 	})
 	return nil
 }
@@ -443,11 +482,20 @@ func (e paletteExec) ToggleFloatingPane() error {
 }
 
 func (e paletteExec) BackSession() error {
+	if e.effect != nil {
+		return e.d.backSessionForRole(e.effect.roleToken())
+	}
 	e.d.backSession(e.sess, e.ac)
 	return nil
 }
 
 func (e paletteExec) Detach() error {
+	if e.effect != nil {
+		if !e.d.clientGoneForRole(e.effect.roleToken(), true) {
+			return errAttachmentTransition
+		}
+		return nil
+	}
 	e.d.clientGone(e.sess, e.ac, e.ac.transport(), true)
 	return nil
 }
@@ -515,7 +563,16 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	if e.d.beforeRecentSessionHandoff != nil {
 		e.d.beforeRecentSessionHandoff()
 	}
-	if err := e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1}); err != nil {
+	var err error
+	if e.effect != nil {
+		err = e.d.switchToTargetForRole(e.effect.roleToken(), picker.Target{Session: target.id, TabIndex: -1}, sessionHandoffGuard{}, "palette-recent-session")
+	} else {
+		err = e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})
+	}
+	if e.effect != nil && errors.Is(err, errAttachmentTransition) {
+		return err
+	}
+	if err != nil {
 		return command.ErrInvalidArguments
 	}
 	return nil

@@ -528,7 +528,7 @@ func TestAttachClientAppliesForcedThemeBeforeMsgTheme(t *testing.T) {
 			}
 			tr, _ := newCapturingTransport(t)
 
-			ac, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+			ac, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 
 			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
 			assertSessionDefaultColors(t, sess, tc.want.Foreground, tc.want.Background)
@@ -717,7 +717,7 @@ func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
 	require.True(t, sess.detachIfCurrent(ac))
 
 	tr, _ := newCapturingTransport(t)
-	newAC, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	newAC, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	d.applyTheme(sess, newAC, ports.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 20, G: 21, B: 22},
 		HasBackground: true, Background: renderer.RGB{R: 23, G: 24, B: 25},

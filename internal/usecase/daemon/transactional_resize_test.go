@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,11 +19,12 @@ import (
 // transactionalResizePTY is deliberately channel-scripted: a test can stop a
 // transaction at PTY.Resize without relying on scheduler timing.
 type transactionalResizePTY struct {
-	mu       sync.Mutex
-	sizes    []domain.Size
-	errs     []error
-	onResize func()
-	onWrite  func([]byte)
+	mu        sync.Mutex
+	sizes     []domain.Size
+	writeData [][]byte
+	errs      []error
+	onResize  func()
+	onWrite   func([]byte)
 }
 
 func (p *transactionalResizePTY) Resize(size domain.Size) error {
@@ -43,10 +45,12 @@ func (p *transactionalResizePTY) Resize(size domain.Size) error {
 func (*transactionalResizePTY) Read([]byte) (int, error) { return 0, io.EOF }
 func (p *transactionalResizePTY) Write(b []byte) (int, error) {
 	p.mu.Lock()
+	copied := append([]byte(nil), b...)
+	p.writeData = append(p.writeData, copied)
 	hook := p.onWrite
 	p.mu.Unlock()
 	if hook != nil {
-		hook(append([]byte(nil), b...))
+		hook(copied)
 	}
 	return len(b), nil
 }
@@ -57,6 +61,16 @@ func (p *transactionalResizePTY) requested() []domain.Size {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]domain.Size(nil), p.sizes...)
+}
+
+func (p *transactionalResizePTY) writes() [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	writes := make([][]byte, len(p.writeData))
+	for i := range p.writeData {
+		writes[i] = append([]byte(nil), p.writeData[i]...)
+	}
+	return writes
 }
 
 // resizeReaderPTY is a deterministic child: Resize releases its redraw only
@@ -154,7 +168,8 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 	responses := make(chan []byte, 1)
 	pty := &transactionalResizePTY{onWrite: func(b []byte) { responses <- b }}
-	d, sess, _, sends := newManualSessionWithPTYs(t, pty)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+	publishActiveClipboardCapability(d, sess, ac, ac.transport())
 	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
 	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
 	p.screen.OnBell = func() { p.ptyAttention = true }
@@ -171,10 +186,17 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 	require.NotEmpty(t, <-responses, "DSR response must be flushed back to the child")
 	// DSR is flushed back to the child and OSC 52 is forwarded through the
 	// normal asynchronous client path, proving replay uses processPTYData.
-	frame := awaitFrame(t, sends, ports.MsgOutput)
-	out, err := ports.UnmarshalOutput(frame.Payload)
-	require.NoError(t, err)
-	require.Contains(t, string(out.Data), "\x1b]52;c;YQ==\a")
+	var clipboardOutput string
+	for range 3 {
+		frame := awaitFrame(t, sends, ports.MsgOutput)
+		out, err := ports.UnmarshalOutput(frame.Payload)
+		require.NoError(t, err)
+		clipboardOutput = string(out.Data)
+		if strings.Contains(clipboardOutput, "\x1b]52;c;YQ==\a") {
+			break
+		}
+	}
+	require.Contains(t, clipboardOutput, "\x1b]52;c;YQ==\a")
 }
 
 // S3 acceptance: prepare may inspect layout under its locks, but apply must

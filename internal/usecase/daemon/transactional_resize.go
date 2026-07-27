@@ -553,6 +553,11 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 }
 
 func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64) bool {
+	ticket, admitted := beginActiveLeaseEffect(sess, ac, lease)
+	if !admitted {
+		return false
+	}
+	defer ticket.End()
 	rc := sess.renderCoordinator()
 	if rc == nil {
 		return false
@@ -593,6 +598,11 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 // only: their rectangles must never cross this delayed boundary, because any
 // later layout mutation may have changed their geometry or removed them.
 func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, members []resizeMember) {
+	ticket, admitted := beginActiveLeaseEffect(sess, ac, lease)
+	if !admitted {
+		return
+	}
+	defer ticket.End()
 	rc := sess.renderCoordinator()
 	if rc == nil || !rc.retryCurrentForLease(epoch, ac, lease) {
 		return

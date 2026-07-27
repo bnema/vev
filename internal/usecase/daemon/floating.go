@@ -160,15 +160,29 @@ func (d *Daemon) activateTab(sess *session, tb *tab) bool {
 // activateTabAfterResize retains tab activation's warmup work while avoiding a
 // second resize when a synchronous outer resize request was already accepted.
 func (d *Daemon) activateTabAfterResize(sess *session, tb *tab, outerResizeAccepted bool) bool {
+	return d.activateTabAfterResizeForLease(sess, tb, outerResizeAccepted, nil, nil)
+}
+
+// activateTabAfterResizeForLease keeps transition-owned resize effects bound to
+// the exact coordinator incarnation. A nil lease preserves direct/headless
+// activation behavior.
+func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerResizeAccepted bool, ac *attachedClient, lease *attachmentLease) bool {
 	if d == nil || sess == nil || tb == nil {
 		return false
 	}
 	// A headless session has no actual terminal destination. Deferring warmup
 	// until firstPaint keeps restored tabs cold and avoids launching children
 	// merely because a tab was manipulated during teardown.
-	sess.mu.Lock()
-	ac := sess.client
-	sess.mu.Unlock()
+	if ac == nil {
+		sess.mu.Lock()
+		ac = sess.client
+		sess.mu.Unlock()
+	} else {
+		rc := sess.renderCoordinator()
+		if rc == nil || !rc.leaseCurrent(lease, true) {
+			return false
+		}
+	}
 	d.exitCopyMode(ac)
 	if ac == nil {
 		return false
@@ -182,6 +196,9 @@ func (d *Daemon) activateTabAfterResize(sess *session, tb *tab, outerResizeAccep
 	size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 	tb.mu.Unlock()
 	if hasFloating {
+		if lease != nil {
+			return d.requestTransactionalResizeForLease(sess, ac, lease, size, true)
+		}
 		return d.requestTransactionalResize(sess, ac, size, true)
 	}
 	return false

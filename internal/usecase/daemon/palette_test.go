@@ -287,12 +287,19 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
+	generation := ac.roleGeneration.Load()
 	d.handleInput(current, ac, []byte("stopped\r"))
 
-	require.Equal(t, "stopped", ac.currentSession().name)
-	require.Equal(t, int64(42), ac.currentSession().createdAt)
+	resumed := ac.currentSession()
+	require.Equal(t, "stopped", resumed.name)
+	require.Equal(t, int64(42), resumed.createdAt)
+	require.Equal(t, attachmentActive, resumed.attachmentRole(ac))
+	require.Greater(t, ac.roleGeneration.Load(), generation, "stopped-session handoff must publish through the attachment transition")
 	require.False(t, ac.overlays.paletteActive())
-	awaitFrame(t, sends, ports.MsgOutput)
+	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
+	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
+	require.NoError(t, err)
+	require.Zero(t, firstOutput.BaseStateNum, "stopped-session first paint must reset moving output state")
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -530,11 +537,15 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.True(t, ac.overlays.promptActive())
 	require.Contains(t, string(promptOutput.Data), "Create session")
 
+	generation := ac.roleGeneration.Load()
 	d.handleInput(sess, ac, []byte("scratch\r"))
 	// The submit first paints the newly attached session while the prompt is
 	// still open, then handlePromptInput closes the prompt and repaints the
 	// client's current session. The final frame must be for the new session.
-	awaitFrame(t, sends, ports.MsgOutput)
+	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
+	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
+	require.NoError(t, err)
+	require.Zero(t, firstOutput.BaseStateNum, "new-session first paint must reset moving output state")
 	finalRepaint := awaitFrame(t, sends, ports.MsgOutput)
 	finalOutput, err := ports.UnmarshalOutput(finalRepaint.Payload)
 	require.NoError(t, err)
@@ -547,6 +558,8 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.Equal(t, "scratch", newSess.name)
 	require.False(t, newSess.ephemeral)
 	require.Same(t, ac, newSess.client)
+	require.Equal(t, attachmentActive, newSess.attachmentRole(ac))
+	require.Greater(t, ac.roleGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
 	require.Contains(t, string(finalOutput.Data), "scratch")
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }

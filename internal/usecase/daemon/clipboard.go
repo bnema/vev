@@ -4,6 +4,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 
 	"github.com/bnema/vev/internal/ports"
@@ -25,12 +26,27 @@ var (
 	clipPasteCloseMarker = []byte("\x1b[201~")
 )
 
-// handleSequencedImagePush routes an ImagePush through the same input-sequence
-// surface as ordinary keystrokes. Echo prediction is still conservative; the
-// sequence is carried so resume/dedup plumbing can order image pushes with
-// surrounding input when that state reader grows beyond ordinary input.
-func (d *Daemon) handleSequencedImagePush(sess *session, _ *attachedClient, _ uint64, ip ports.ImagePush) {
-	d.handleImagePush(sess, ip)
+func (d *Daemon) handleSequencedImagePushForRole(token attachmentRoleToken, _ uint64, ip ports.ImagePush) {
+	if !token.activeEffect() {
+		return
+	}
+	d.handleImagePushForRole(token, ip)
+}
+
+func (d *Daemon) handleImagePushForRole(token attachmentRoleToken, ip ports.ImagePush) {
+	if len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !token.activeEffect() {
+		return
+	}
+	path, err := d.writeClipboardImageForRole(token, ip)
+	if err != nil {
+		d.log.Error("writing clipboard image failed", "err", err)
+		return
+	}
+	if !token.activeEffect() {
+		_ = os.Remove(path)
+		return
+	}
+	d.injectClipboardPathForRole(token, path)
 }
 
 // handleImagePush writes an ImagePush's bytes to a temp file and injects the
@@ -58,6 +74,33 @@ func (d *Daemon) handleImagePush(sess *session, ip ports.ImagePush) {
 // writeClipboardImage writes ip's bytes to a new 0600 temp file and records
 // the path on sess for best-effort cleanup at session end (killSession).
 func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string, error) {
+	path, err := d.createClipboardImage(ip)
+	if err != nil {
+		return "", err
+	}
+	sess.mu.Lock()
+	sess.clipFiles = append(sess.clipFiles, path)
+	sess.mu.Unlock()
+	return path, nil
+}
+
+func (d *Daemon) writeClipboardImageForRole(token attachmentRoleToken, ip ports.ImagePush) (string, error) {
+	path, err := d.createClipboardImage(ip)
+	if err != nil {
+		return "", err
+	}
+	token.sess.mu.Lock()
+	if !token.activeEffectSessionLocked() {
+		token.sess.mu.Unlock()
+		_ = os.Remove(path)
+		return "", errAttachmentTransition
+	}
+	token.sess.clipFiles = append(token.sess.clipFiles, path)
+	token.sess.mu.Unlock()
+	return path, nil
+}
+
+func (d *Daemon) createClipboardImage(ip ports.ImagePush) (string, error) {
 	dir := d.tempDir
 	if dir == "" {
 		dir = os.TempDir()
@@ -76,9 +119,6 @@ func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string,
 		_ = os.Remove(path)
 		return "", err
 	}
-	sess.mu.Lock()
-	sess.clipFiles = append(sess.clipFiles, path)
-	sess.mu.Unlock()
 	return path, nil
 }
 
@@ -86,6 +126,17 @@ func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string,
 // the same PTY write path as ordinary input, wrapped in bracketed-paste
 // markers iff the pane's Screen reports bracketed-paste mode enabled.
 func (d *Daemon) injectClipboardPath(sess *session, path string) {
+	d.injectClipboardPathToTarget(sess, path, nil)
+}
+
+func (d *Daemon) injectClipboardPathForRole(token attachmentRoleToken, path string) {
+	if !token.activeEffect() {
+		return
+	}
+	d.injectClipboardPathToTarget(token.sess, path, &token)
+}
+
+func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, token *attachmentRoleToken) {
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -108,6 +159,9 @@ func (d *Daemon) injectClipboardPath(sess *session, path string) {
 		wrapped = append(wrapped, data...)
 		wrapped = append(wrapped, clipPasteCloseMarker...)
 		data = wrapped
+	}
+	if token != nil && !token.activeEffect() {
+		return
 	}
 	d.writeToPane(sess, p, data)
 }
@@ -132,8 +186,8 @@ func clipboardExt(mime string) string {
 }
 
 type clipboardForward struct {
-	ac  *attachedClient
-	seq []byte
+	token attachmentRoleToken
+	seq   []byte
 }
 
 // forwardClipboardAsync re-emits an app-originated OSC 52 clipboard set
@@ -161,11 +215,31 @@ func (d *Daemon) forwardClipboardAsync(sess *session, b64 string) {
 		}
 	}
 	ac := sess.client
+	sess.mu.Unlock()
 	if ac == nil {
+		return
+	}
+	transport := ac.transport()
+	token := sess.attachmentToken(ac, transport)
+	if !token.activeCurrent() {
+		return
+	}
+
+	sess.mu.Lock()
+	if sess.ctx != nil {
+		select {
+		case <-sess.ctx.Done():
+			sess.mu.Unlock()
+			return
+		default:
+		}
+	}
+	if sess.client != ac || ac.roleGeneration.Load() != token.generation ||
+		!ac.transportSnapshotCurrent(token.transport) || ac.currentSession() != sess {
 		sess.mu.Unlock()
 		return
 	}
-	sess.clipboardQueue = append(sess.clipboardQueue, clipboardForward{ac: ac, seq: seq})
+	sess.clipboardQueue = append(sess.clipboardQueue, clipboardForward{token: token, seq: seq})
 	if !sess.clipboardWorkerRunning {
 		sess.clipboardWorkerRunning = true
 		go d.clipboardWorker(sess)
@@ -179,9 +253,17 @@ func (d *Daemon) clipboardWorker(sess *session) {
 		if !ok {
 			return
 		}
-		failed, err := d.boundedSendOutputErrTransport(item.ac, item.seq)
+		ticket, admitted := item.token.ac.beginRoleEffect(item.token)
+		if !admitted {
+			continue
+		}
+		failed, err := d.boundedSendOutputErrTransportForRole(item.token, ticket, item.seq)
+		if errors.Is(err, errSendTimedOut) {
+			_ = item.token.ac.closeCapturedTransport(failed)
+		}
+		ticket.End()
 		if err != nil {
-			d.detachOnSendError(sess, item.ac, failed)
+			d.detachOnRoleSendError(item.token, failed)
 		}
 	}
 }

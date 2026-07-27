@@ -443,24 +443,23 @@ func (rt *overlayRuntime) indexOfToastLocked(code domain.NoticeCode, sid domain.
 
 // dismissToast removes only the specified visible toast. In particular, a
 // link-connected event must not clear clipboard or other notice state.
-func (d *Daemon) dismissToast(ac *attachedClient, code domain.NoticeCode, sid domain.SessionID) {
+func (d *Daemon) dismissToastWithoutRepaint(ac *attachedClient, code domain.NoticeCode, sid domain.SessionID) bool {
 	if ac == nil || ac.overlays == nil {
-		return
+		return false
 	}
 	rt := ac.overlays
 	rt.noticeMu.Lock()
+	defer rt.noticeMu.Unlock()
 	i := rt.indexOfToastLocked(code, sid)
 	if i < 0 {
-		rt.noticeMu.Unlock()
-		return
+		return false
 	}
 	rt.noticeToasts[i].timer.stop()
 	rt.noticeToasts = append(rt.noticeToasts[:i], rt.noticeToasts[i+1:]...)
 	if len(rt.noticeToasts) == 0 {
 		rt.noticeOverflow = 0
 	}
-	rt.noticeMu.Unlock()
-	d.repaintForNotice(ac)
+	return true
 }
 
 // retainToastTimerLocked arms the toast's TTL. Callers must hold noticeMu; the

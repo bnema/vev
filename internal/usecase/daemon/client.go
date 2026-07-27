@@ -39,10 +39,12 @@ type attachedClient struct {
 	overlays             *overlayRuntime
 	overlayOnce          sync.Once
 	clientID             [16]byte
-	// roleGeneration invalidates role-bound sends. A transition promoting a
-	// panel-sending client must serialize through sendMu/the activation barrier
-	// before publishing its generation.
+	// roleGeneration is the wire-facing capability generation. roleEffects is
+	// the linearization gate for every role-bound observable operation. A role
+	// transition freezes and drains this gate before changing either generation
+	// or the session/coordinator registries.
 	roleGeneration atomic.Uint64
+	roleEffects    roleEffectGate
 	resumeCapable  bool
 	resumeToken    uint64
 	parked         bool
@@ -236,14 +238,6 @@ func (ac *attachedClient) transportSnapshotCurrent(expected transportSnapshot) b
 	return ac.tr == expected.transport && ac.transportIncarnation == expected.incarnation
 }
 
-func (ac *attachedClient) closeTransport() error {
-	tr := ac.transport()
-	if tr == nil {
-		return nil
-	}
-	return tr.Close()
-}
-
 func (ac *attachedClient) closeCapturedTransport(tr ports.Transport) error {
 	if tr == nil {
 		return nil
@@ -267,22 +261,6 @@ func (ac *attachedClient) ackOutputState(state uint64) {
 	ac.output.ack(state)
 }
 
-// send serialises a frame onto the client's transport.
-func (ac *attachedClient) send(f ports.Frame) error {
-	_, err := ac.sendTransport(f)
-	return err
-}
-
-func (ac *attachedClient) sendTransport(f ports.Frame) (ports.Transport, error) {
-	ac.sendMu.Lock()
-	defer ac.sendMu.Unlock()
-	tr := ac.transport()
-	if tr == nil {
-		return nil, errors.New("client transport is nil")
-	}
-	return tr, tr.Send(f)
-}
-
 var errTransportReplaced = errors.New("client transport was replaced")
 
 // sendExpectedTransport writes only when expected is still the attachment's
@@ -297,6 +275,21 @@ func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f po
 		return errors.New("client transport is nil")
 	}
 	return expected.transport.Send(f)
+}
+
+func (ac *attachedClient) sendExpectedTransportForRole(expected transportSnapshot, f ports.Frame, ticket *roleEffectTicket) error {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	if ticket == nil || ticket.ended.Load() || !ac.transportSnapshotCurrent(expected) ||
+		expected.transport == nil || !ticket.beginTransportSend(expected) {
+		return errAttachmentTransition
+	}
+	err := expected.transport.Send(f)
+	if err != nil {
+		ticket.reportTransportFailure(expected)
+	}
+	ticket.endTransportSend()
+	return err
 }
 
 // boundedSend sends f to ac with a deadline watchdog: if the send (including
@@ -349,6 +342,45 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 	})
 }
 
+// boundedSendOutputErrTransportForRole sends a queued side effect only through
+// the exact active attachment capability captured when the work was queued.
+// The fresh ticket keeps role publication behind an admitted send; only the
+// external Send interval is marked interruptible for replacement liveness.
+func (d *Daemon) boundedSendOutputErrTransportForRole(token attachmentRoleToken, ticket *roleEffectTicket, b []byte) (ports.Transport, error) {
+	if token.ac == nil || ticket == nil || ticket.ended.Load() || token.transport.transport == nil {
+		return token.transport.transport, errAttachmentTransition
+	}
+	frame := token.ac.output.sideEffect(b, token.ac.echoAck.Load())
+	expected := token.transport
+	send := func(owned bool) error {
+		ac := token.ac
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		if ticket.ended.Load() || !ac.transportSnapshotCurrent(expected) {
+			return errAttachmentTransition
+		}
+		interruptible := ticket.beginTransportSend(expected)
+		if !interruptible {
+			return errAttachmentTransition
+		}
+		var err error
+		if owned {
+			err = expected.transport.(ports.OwnedSynchronousTransport).SendSynchronous(frame)
+		} else {
+			err = expected.transport.Send(frame)
+		}
+		if err != nil {
+			ticket.reportTransportFailure(expected)
+		}
+		ticket.endTransportSend()
+		return err
+	}
+	if _, owned := expected.transport.(ports.OwnedSynchronousTransport); owned {
+		return expected.transport, send(true)
+	}
+	return d.boundedSendWith(expected.transport, func() error { return send(false) })
+}
+
 var errSendTimedOut = errors.New("send timed out")
 
 func (d *Daemon) boundedSendWith(tr ports.Transport, send func() error) (ports.Transport, error) {
@@ -376,12 +408,18 @@ func (d *Daemon) boundedSendWithTimeout(timeout time.Duration, tr ports.Transpor
 	}
 }
 
-// notifyDetachedAsync delivers a best-effort Detached notice off the caller's
-// goroutine and then closes the transport. Session teardown (killSession) must
-// complete regardless of client state, so the notice is both asynchronous and
-// deadline-bounded; Serve waits for pending notices before force-closing
-// connections so a graceful notice is not raced by the hard close.
-func (d *Daemon) notifyDetachedAsync(ac *attachedClient, reason uint8) {
+type detachedAttachmentSnapshot struct {
+	ac        *attachedClient
+	transport transportSnapshot
+}
+
+// notifyDetachedSnapshotAsync sends and closes only the transport incarnation
+// captured by atomic session teardown. It cannot touch a later link installed
+// on the same attachedClient object.
+func (d *Daemon) notifyDetachedSnapshotAsync(snapshot detachedAttachmentSnapshot, reason uint8) {
+	if snapshot.ac == nil || snapshot.transport.transport == nil {
+		return
+	}
 	done := make(chan struct{})
 	d.mu.Lock()
 	// Prune completed entries so the slice stays bounded by the number of
@@ -399,8 +437,17 @@ func (d *Daemon) notifyDetachedAsync(ac *attachedClient, reason uint8) {
 
 	go func() {
 		defer close(done)
-		d.boundedSend(ac, frameDetached(reason))
-		_ = ac.closeTransport()
+		_, err := d.boundedSendWith(snapshot.transport.transport, func() error {
+			return snapshot.ac.sendExpectedTransport(snapshot.transport, frameDetached(reason))
+		})
+		if errors.Is(err, errSendTimedOut) {
+			_ = snapshot.ac.closeCapturedTransport(snapshot.transport.transport)
+		}
+		revoked := snapshot.ac.revokeTransport(snapshot.transport.transport)
+		if revoked == nil {
+			revoked = snapshot.transport.transport
+		}
+		_ = snapshot.ac.closeCapturedTransport(revoked)
 		d.log.Info("client detached", "reason", reason)
 	}()
 }
@@ -428,13 +475,39 @@ type attachClientOptions struct {
 	maxOutputInFlight uint8
 }
 
-func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
-	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, opts)
-	cleanup.finish()
-	return ac, old
+func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient, error) {
+	d.mu.Lock()
+	ac := d.prepareAttachedClientLocked(tr, sz, opts)
+	d.mu.Unlock()
+	result, err := d.transitionAttachment(attachmentTransitionRequest{
+		target:            sess,
+		next:              ac,
+		expectedRole:      attachmentDetached,
+		targetRole:        attachmentActive,
+		expectedTransport: ac.transportSnapshot(),
+		ready:             false,
+	})
+	if err != nil {
+		if tr != nil {
+			_ = tr.Close()
+		}
+		return nil, nil, err
+	}
+	d.finishAttachedClient(sess, ac, opts)
+	d.deferAttachmentTransitionCleanups(result)
+	return ac, result.displaced.ac, nil
 }
 
-func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient, renderLifecycleCleanup) {
+func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
+	d.touchMRU(sess)
+	d.log.Info("client attached", "session", sess.name, "resume", opts.resumeCapable)
+	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
+}
+
+// prepareAttachedClientLocked allocates one detached attachment. Caller holds
+// d.mu only to allocate its resume token; role publication happens later after
+// the caller releases every architecture lock.
+func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size, opts attachClientOptions) *attachedClient {
 	resumeToken := uint64(0)
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
@@ -448,54 +521,8 @@ func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz doma
 		resumeToken:   resumeToken,
 	}
 	ac.initOverlays()
-	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
-	// Daemon attachment callers hold d.mu, serialising this preparation with
-	// other publications. routingMu makes the whole replacement atomic with
-	// global notice selection: a selected old client cannot become stale before
-	// its toast is published, and a new client is never missed after publication.
-	d.notices.routingMu.Lock()
-	sess.mu.Lock()
-	old := sess.client
-	name := sess.name
-	sess.mu.Unlock()
-	_, cleanup := d.attachCoordinatorDeferred(sess, old, ac, false)
-	sess.mu.Lock()
-	sess.client = ac
-	sess.mu.Unlock()
-	d.notices.routingMu.Unlock()
-	d.touchMRU(sess)
-	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
-	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
-	return ac, old, cleanup
-}
-
-// handoffCoordinator prepares a cross-session ownership transfer before the
-// destination publishes sess.client. Callers may hold d.mu, but this function
-// acquires no daemon or session locks while it holds sendMu.
-func (d *Daemon) handoffCoordinator(from, target *session, old, current *attachedClient) []renderLifecycleCleanup {
-	cleanups := make([]renderLifecycleCleanup, 0, 2)
-	if rc := from.renderCoordinator(); rc != nil {
-		cleanups = append(cleanups, rc.beginDetach(current))
-	}
-	if current.renderStages.handoffRebase != nil {
-		current.renderStages.handoffRebase()
-	}
-	current.sendMu.Lock()
-	current.output.rebase()
-	// Capture snapshots are attachment-owned. Discard them while the attachment
-	// is exclusively held so the transfer releases panes no longer reachable
-	// from the target session.
-	current.captureFrames = nil
-	current.sendMu.Unlock()
-	_, cleanup := d.attachCoordinatorDeferred(target, old, current, true)
-	return append(cleanups, cleanup)
-}
-
-func finishRenderLifecycleCleanups(cleanups []renderLifecycleCleanup) {
-	for _, cleanup := range cleanups {
-		cleanup.finish()
-	}
+	return ac
 }
 
 // attachCoordinator is the sole direct attachment handoff. It creates at
@@ -508,37 +535,7 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, 
 }
 
 func (d *Daemon) attachCoordinatorDeferred(sess *session, old, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
-	sess.mu.Lock()
-	rc := sess.renderCoordinator()
-	if rc == nil {
-		rc = newRenderCoordinator(renderCoordinatorOptions{
-			clock:    d.clock,
-			observer: d.runtimeObserver,
-			wake: func(w renderWake) {
-				// Never reread sess.client here: a wake is bound to both its
-				// attachment and its coordinator incarnation. The second check in
-				// paint occurs under sendMu, closing a park/resume race after this
-				// unlocked coordinator validation.
-				if w.lease != nil && rc.wakeCurrent(w) {
-					d.paint(sess, w.lease.attachment, w.reset, w.lease)
-				}
-			},
-			ackReady: func() bool {
-				sess.mu.Lock()
-				attached := sess.client
-				sess.mu.Unlock()
-				if attached == nil {
-					return false
-				}
-				attached.sendMu.Lock()
-				ready := !attached.output.atCapacity()
-				attached.sendMu.Unlock()
-				return ready
-			},
-		})
-		sess.installRenderCoordinator(rc)
-	}
-	sess.mu.Unlock()
+	rc := d.ensureRenderCoordinator(sess)
 	var cleanup renderLifecycleCleanup
 	if old != nil {
 		cleanup = rc.beginReplace(old, current, ready)
@@ -546,6 +543,45 @@ func (d *Daemon) attachCoordinatorDeferred(sess *session, old, current *attached
 		rc.attachWithReadiness(current, ready)
 	}
 	return rc, cleanup
+}
+
+// ensureRenderCoordinator publishes the session's single coordinator without
+// binding an attachment lease. Centralized attachment transitions bind the
+// lease later while their ordered session locks are still held.
+func (d *Daemon) ensureRenderCoordinator(sess *session) *renderCoordinator {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if rc := sess.renderCoordinator(); rc != nil {
+		return rc
+	}
+	var rc *renderCoordinator
+	rc = newRenderCoordinator(renderCoordinatorOptions{
+		clock:    d.clock,
+		observer: d.runtimeObserver,
+		wake: func(w renderWake) {
+			// Never reread sess.client here: a wake is bound to both its
+			// attachment and its coordinator incarnation. The second check in
+			// paint occurs under sendMu, closing a park/resume race after this
+			// unlocked coordinator validation.
+			if w.lease != nil && rc.wakeCurrent(w) {
+				d.paint(sess, w.lease.attachment, w.reset, w.lease)
+			}
+		},
+		ackReady: func() bool {
+			sess.mu.Lock()
+			attached := sess.client
+			sess.mu.Unlock()
+			if attached == nil {
+				return false
+			}
+			attached.sendMu.Lock()
+			ready := attached.output == nil || !attached.output.atCapacity()
+			attached.sendMu.Unlock()
+			return ready
+		},
+	})
+	sess.installRenderCoordinator(rc)
+	return rc
 }
 
 // resetScreenDefaultColors clears the known default foreground/background
@@ -563,43 +599,48 @@ func (d *Daemon) resetScreenDefaultColors(sess *session) {
 	d.applyHostTheme(sess, nil, themeui.Theme{}, true)
 }
 
-// retireReplacedClient owns old-link retirement and obsolete render-worker
-// joins outside the replacement handshake. If a render already owns sendMu,
-// close immediately interrupts it; no Detached frame can safely overtake that
-// render. Otherwise the old link gets its bounded protocol notice first.
-func (d *Daemon) retireReplacedClient(old *attachedClient, cleanup renderLifecycleCleanup) {
-	if old == nil {
-		d.attachmentCleanupWg.Go(cleanup.finish)
-		return
+// firstPaintForTransition is the only active post-transition paint entry
+// point. It rejects a stale role capability before rebasing output and carries
+// the exact coordinator lease through every resize and render effect.
+func (d *Daemon) firstPaintForTransition(token attachmentRoleToken) bool {
+	if !token.activeCurrent() {
+		return false
 	}
-	oldTransport := old.transportSnapshot().transport
-	blockedRender := !old.sendMu.TryLock()
-	if !blockedRender {
-		old.sendMu.Unlock()
+	ticket, admitted := token.ac.beginRoleEffect(token)
+	if !admitted {
+		return false
 	}
-
-	d.attachmentCleanupWg.Go(func() {
-		if !blockedRender {
-			// A healthy idle client observes the required replacement notice. Its
-			// watchdog still bounds a peer that stops draining after this check.
-			d.boundedSend(old, frameDetached(ports.ReasonReplaced))
+	token.effect = ticket
+	defer token.endRoleEffect()
+	if d.afterRoleEffectAdmitted != nil {
+		d.afterRoleEffectAdmitted(token)
+	}
+	if token.rebase {
+		token.ac.sendMu.Lock()
+		if token.ac.renderStages.handoffRebase != nil {
+			token.ac.renderStages.handoffRebase()
 		}
-		_ = old.closeCapturedTransport(old.revokeTransport(oldTransport))
-		d.unregisterPreview(old)
-		old.clearPreviousSession()
-		old.setSession(nil)
-		d.log.Info("client displaced")
-	})
-	// Join independently: the close above releases a blocked render while the
-	// new attachment is already fully published.
-	d.attachmentCleanupWg.Go(cleanup.finish)
+		if token.ac.output != nil {
+			token.ac.output.rebase()
+		}
+		// Captures belong to the old session even when pane-local IDs happen
+		// to be reused by the destination.
+		token.ac.captureFrames = nil
+		token.ac.sendMu.Unlock()
+	}
+	d.firstPaintWithLease(token.sess, token.ac, token.ac.size, token.lease)
+	return true
 }
 
 // firstPaint guarantees the freshly attached client sees the full screen: if
 // the tab size differs from the client's it resizes first, then immediately
-// emits a full redraw. Attach must not wait for the resize-idle fallback
-// timer.
+// emits a full redraw. It is retained for direct test/headless setup; active
+// role transitions use firstPaintForTransition with their exact lease.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
+	d.firstPaintWithLease(sess, ac, clientSize, nil)
+}
+
+func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSize domain.Size, lease *attachmentLease) {
 	// Global notices raised while nothing was attached surface on this client.
 	// Drained before the early return below so a session without an active tab
 	// cannot swallow the queue.
@@ -614,20 +655,30 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 
 	outerResizeAccepted := false
 	if clientSize.Valid() && wsz != tabSize(clientSize) {
-		outerResizeAccepted = d.resizeForFirstPaint(sess, ac, clientSize)
+		if lease == nil {
+			outerResizeAccepted = d.resizeForFirstPaint(sess, ac, clientSize)
+		} else {
+			outerResizeAccepted = d.requestTransactionalResizeForLease(sess, ac, lease, clientSize, true)
+		}
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	// Activation can synchronously resize a retained floating pane. An accepted
 	// synchronous outer request already includes that pane and emits the reset,
 	// but activation still performs its warmup work.
-	activationResized := d.activateTabAfterResize(sess, tb, outerResizeAccepted)
+	activationResized := d.activateTabAfterResizeForLease(sess, tb, outerResizeAccepted, ac, lease)
 	if !outerResizeAccepted && !activationResized {
-		d.invalidateRenderNow(sess, ac, true, "client.go")
+		if lease == nil {
+			d.invalidateRenderNow(sess, ac, true, "client.go")
+		} else if rc := sess.renderCoordinator(); rc != nil && rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"}) {
+			rc.fireCurrent(false)
+		}
 	}
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
-// until detach, EOF, or a transport error.
+// until detach, EOF, or a transport error. Role is resolved after every Recv so
+// a transport displaced while blocked in Recv immediately adopts its restricted
+// snatched routing rather than executing one stale active frame.
 func (d *Daemon) runConnLoop(ac *attachedClient) {
 	tr := ac.transport()
 	if tr == nil {
@@ -643,7 +694,12 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		}
 		f, err := tr.Recv()
 		if err != nil {
-			d.clientGone(sess, ac, tr, false)
+			token := sess.attachmentToken(ac, tr)
+			if token.role == attachmentSnatched {
+				d.dropSnatchedAttachment(token)
+			} else {
+				d.clientGone(sess, ac, tr, false)
+			}
 			return
 		}
 		if !ac.currentTransportIs(tr) {
@@ -653,46 +709,177 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		if sess == nil {
 			return
 		}
-		switch f.Type {
-		case ports.MsgInput:
-			if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
-				d.handleSequencedInput(sess, ac, in.InputSeq, in.Data)
+		token := sess.attachmentToken(ac, tr)
+		switch token.role {
+		case attachmentActive:
+			if d.handleActiveClientFrame(token, f) {
+				return
 			}
-		case ports.MsgResize:
-			if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil {
-				d.resize(sess, ac, rz.Size)
+		case attachmentSnatched:
+			if d.handleSnatchedClientFrame(token, f) {
+				return
 			}
-		case ports.MsgTheme:
-			if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
-				d.applyTheme(sess, ac, th)
-			}
-		case ports.MsgImagePush:
-			if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
-				d.handleSequencedImagePush(sess, ac, ip.InputSeq, ip)
-			}
-		case ports.MsgClientNotice:
-			if notice, derr := ports.UnmarshalClientNotice(f.Payload); derr == nil {
-				d.handleClientNotice(sess, ac, notice)
-			} else {
-				d.log.Warn("malformed client notice", "err", derr)
-			}
-		case ports.MsgDetach:
-			d.clientGone(sess, ac, tr, true)
-			return
-		case ports.MsgAck:
-			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
-				ac.ackOutputState(ack.AckedStateNum)
-				if rc := sess.renderCoordinator(); rc != nil {
-					rc.notifyAck()
-				}
-			}
-		case ports.MsgPing:
-			_ = ac.send(framePong())
 		default:
-			// Unknown/out-of-band client messages are ignored so a newer
-			// client can add message types without breaking an older daemon.
+			return
 		}
 	}
+}
+
+// handleActiveClientFrame owns the ordinary attached-client protocol. Keeping
+// it separate makes the restricted snatched protocol an explicit allow-list.
+func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Frame) bool {
+	if !token.activeEffect() {
+		return false
+	}
+	if d.afterActiveFrameDispatch != nil {
+		d.afterActiveFrameDispatch(token)
+	}
+	ticket, admitted := token.ac.beginRoleEffect(token)
+	if !admitted {
+		return false
+	}
+	token.effect = ticket
+	defer token.endRoleEffect()
+	if d.afterRoleEffectAdmitted != nil {
+		d.afterRoleEffectAdmitted(token)
+	}
+	switch f.Type {
+	case ports.MsgInput:
+		if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
+			d.handleSequencedInputForRole(token, in.InputSeq, in.Data)
+		}
+	case ports.MsgResize:
+		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.activeEffect() {
+			d.requestTransactionalResizeForLease(token.sess, token.ac, token.lease, rz.Size, false)
+		}
+	case ports.MsgTheme:
+		if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
+			d.applyThemeForRole(token, th)
+		}
+	case ports.MsgImagePush:
+		if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
+			d.handleSequencedImagePushForRole(token, ip.InputSeq, ip)
+		}
+	case ports.MsgClientNotice:
+		if notice, derr := ports.UnmarshalClientNotice(f.Payload); derr == nil {
+			d.handleClientNoticeForRole(token, notice)
+		} else {
+			d.log.Warn("malformed client notice", "err", derr)
+		}
+	case ports.MsgDetach:
+		if token.activeEffect() {
+			d.clientGoneForRole(token, true)
+			return true
+		}
+	case ports.MsgAck:
+		if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
+			d.ackActiveOutput(token, ack.AckedStateNum)
+		}
+	case ports.MsgPing:
+		if err := token.sendActiveControl(framePong()); err != nil {
+			token.endRoleEffect()
+			d.detachOnSendError(token.sess, token.ac, token.transport.transport)
+			return true
+		}
+	default:
+		// Unknown/out-of-band client messages are ignored so a newer
+		// client can add message types without breaking an older daemon.
+	}
+	return false
+}
+
+func (d *Daemon) ackActiveOutput(token attachmentRoleToken, state uint64) bool {
+	ac := token.ac
+	if token.effect == nil || token.effect.ended.Load() {
+		return false
+	}
+	ac.sendMu.Lock()
+	ac.output.ack(state)
+	ac.sendMu.Unlock()
+	if rc := token.sess.renderCoordinator(); rc != nil {
+		rc.notifyAckForLease(token.lease)
+	}
+	return true
+}
+
+// handleSnatchedClientFrame is intentionally an allow-list. Strict resume and
+// quit actions are introduced separately; until then ordinary input is ignored.
+func (d *Daemon) handleSnatchedClientFrame(token attachmentRoleToken, f ports.Frame) bool {
+	if !token.current() {
+		return false
+	}
+	ticket, admitted := token.ac.beginRoleEffect(token)
+	if !admitted {
+		return false
+	}
+	token.effect = ticket
+	defer token.endRoleEffect()
+	if d.afterRoleEffectAdmitted != nil {
+		d.afterRoleEffectAdmitted(token)
+	}
+	switch f.Type {
+	case ports.MsgInput:
+		if in, err := ports.UnmarshalInput(f.Payload); err == nil {
+			d.handleSnatchedInput(token, in)
+		}
+	case ports.MsgResize:
+		if resize, err := ports.UnmarshalResize(f.Payload); err == nil && resize.Size.Valid() {
+			ac := token.ac
+			ac.sendMu.Lock()
+			if ac.roleGeneration.Load() != token.generation || !ac.transportSnapshotCurrent(token.transport) {
+				ac.sendMu.Unlock()
+				return false
+			}
+			ac.size = resize.Size
+			ac.sendMu.Unlock()
+			if err := d.sendSnatchedPanel(ac, token.transport, token.generation, "", token.effect); err != nil {
+				token.endRoleEffect()
+				d.dropSnatchedAttachment(token)
+				return true
+			}
+		}
+	case ports.MsgTheme:
+		if theme, err := ports.UnmarshalTheme(f.Payload); err == nil {
+			ac := token.ac
+			ac.sendMu.Lock()
+			if ac.roleGeneration.Load() != token.generation || !ac.transportSnapshotCurrent(token.transport) {
+				ac.sendMu.Unlock()
+				return false
+			}
+			clientTheme := themeFromMessage(theme)
+			ac.setClientTheme(clientTheme)
+			ac.setAppliedTheme(d.resolveAppliedTheme(clientTheme))
+			ac.sendMu.Unlock()
+			if err := d.sendSnatchedPanel(ac, token.transport, token.generation, "", token.effect); err != nil {
+				token.endRoleEffect()
+				d.dropSnatchedAttachment(token)
+				return true
+			}
+		}
+	case ports.MsgAck:
+		if ack, err := ports.UnmarshalAck(f.Payload); err == nil {
+			token.ac.ackOutputState(ack.AckedStateNum)
+		}
+	case ports.MsgPing:
+		if err := d.sendSnatchedControl(token, framePong()); err != nil {
+			token.endRoleEffect()
+			d.dropSnatchedAttachment(token)
+			return true
+		}
+	case ports.MsgDetach:
+		_ = d.sendSnatchedControl(token, frameDetached(ports.ReasonDetach))
+		token.endRoleEffect()
+		d.dropSnatchedAttachment(token)
+		return true
+	}
+	return false
+}
+
+// handleSnatchedInput is the narrow seam for the future strict snatched-action
+// parser. Ordinary terminal input is deliberately ignored and never enters the
+// key router or PTY path.
+func (d *Daemon) handleSnatchedInput(token attachmentRoleToken, _ ports.Input) {
+	_ = token
 }
 
 // clientGone detaches ac if it is still the session's current client. The
@@ -704,6 +891,23 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 	if !d.detachIfCurrent(sess, ac) {
 		return // already displaced by a newer client; nothing to do
 	}
+	d.finishClientGone(sess, ac, failed, explicit)
+}
+
+func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) bool {
+	if token.effect == nil {
+		return false
+	}
+	token.effect.bindActionEnd(d, "detach")
+	token.effect.End()
+	if !d.detachIfRoleCurrent(token) {
+		return false
+	}
+	d.finishClientGone(token.sess, token.ac, token.transport.transport, explicit)
+	return true
+}
+
+func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
@@ -740,8 +944,8 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 
 // detachIfCurrent clears the client iff ac is the current one, reporting
 
-func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) {
-	clientTheme := themeui.Theme{
+func themeFromMessage(msg ports.Theme) themeui.Theme {
+	return themeui.Theme{
 		Foreground:   msg.Foreground,
 		Background:   msg.Background,
 		Palette:      msg.Palette,
@@ -753,12 +957,34 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 		SchemeKnown:  msg.SchemeKnown,
 		Light:        msg.Light,
 	}
+}
+
+func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) {
+	clientTheme := themeFromMessage(msg)
 	ac.setClientTheme(clientTheme)
 
 	if !d.applyHostTheme(sess, ac, clientTheme, false) {
 		return
 	}
 	d.invalidateRender(sess, ac, true, "client.go")
+}
+
+func (d *Daemon) applyThemeForRole(token attachmentRoleToken, msg ports.Theme) bool {
+	if !token.activeEffect() {
+		return false
+	}
+	clientTheme := themeFromMessage(msg)
+	token.ac.setClientTheme(clientTheme)
+	if !token.activeEffect() || !d.applyHostTheme(token.sess, token.ac, clientTheme, false) {
+		return false
+	}
+	if !token.activeEffect() {
+		return false
+	}
+	if rc := token.sess.renderCoordinator(); rc != nil {
+		return rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
+	}
+	return false
 }
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
@@ -771,32 +997,78 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 // publishing sess.client. Never retain sess.mu while touching notice or overlay
 // state, and retain the routingMu -> sess.mu order used by attachment paths.
 func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) {
-	d.notices.routingMu.Lock()
-	defer d.notices.routingMu.Unlock()
+	if sess == nil || ac == nil {
+		return
+	}
+	tr := ac.transport()
+	token := sess.attachmentToken(ac, tr)
+	if token.lease == nil {
+		// Direct test/headless callers retain pointer-based routing. Production
+		// client frames always carry the exact lease through the role path below.
+		d.handleClientNoticeDirect(sess, ac, notice)
+		return
+	}
+	d.handleClientNoticeForRole(token, notice)
+}
 
-	sess.mu.Lock()
-	current := sess.client == ac
-	sess.mu.Unlock()
-	if !current {
+func (d *Daemon) handleClientNoticeForRole(token attachmentRoleToken, notice ports.ClientNotice) {
+	d.notices.routingMu.Lock()
+	if !token.activeEffect() {
+		d.notices.routingMu.Unlock()
 		return
 	}
 	if d.notices.beforeClientNoticeMutation != nil {
 		d.notices.beforeClientNoticeMutation()
 	}
-
-	switch notice.Action {
-	case ports.ClientNoticeClipboardFallback:
-		d.recordClientNotice(sess, ac, domain.NoticeError, domain.NoticeClipboard, "image paste failed; sent Ctrl+V")
-	case ports.ClientNoticeClipboardTooLarge:
-		d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeClipboardTooLarge, "image too large to paste")
-	case ports.ClientNoticeLinkDegraded:
-		d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeConnection, "connection degraded")
-	case ports.ClientNoticeLinkConnected:
-		d.dismissToast(ac, domain.NoticeConnection, sess.id)
+	if !token.activeEffect() {
+		d.notices.routingMu.Unlock()
+		return
+	}
+	repaint := d.mutateClientNotice(token.sess, token.ac, notice)
+	d.notices.routingMu.Unlock()
+	if repaint && token.activeEffect() {
+		d.repaintForNotice(token.ac)
 	}
 }
 
-func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domain.NoticeSeverity, code domain.NoticeCode, message string) {
+func (d *Daemon) handleClientNoticeDirect(sess *session, ac *attachedClient, notice ports.ClientNotice) {
+	d.notices.routingMu.Lock()
+	sess.mu.Lock()
+	current := sess.client == ac
+	sess.mu.Unlock()
+	if !current {
+		d.notices.routingMu.Unlock()
+		return
+	}
+	if d.notices.beforeClientNoticeMutation != nil {
+		d.notices.beforeClientNoticeMutation()
+	}
+	repaint := d.mutateClientNotice(sess, ac, notice)
+	d.notices.routingMu.Unlock()
+	if repaint {
+		d.repaintForNotice(ac)
+	}
+}
+
+func (d *Daemon) mutateClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) bool {
+	switch notice.Action {
+	case ports.ClientNoticeClipboardFallback:
+		return d.recordClientNotice(sess, ac, domain.NoticeError, domain.NoticeClipboard, "image paste failed; sent Ctrl+V")
+	case ports.ClientNoticeClipboardTooLarge:
+		return d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeClipboardTooLarge, "image too large to paste")
+	case ports.ClientNoticeLinkDegraded:
+		return d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeConnection, "connection degraded")
+	case ports.ClientNoticeLinkConnected:
+		return d.dismissToastWithoutRepaint(ac, domain.NoticeConnection, sess.id)
+	default:
+		return false
+	}
+}
+
+// recordClientNotice mutates notice history and the selected attachment while
+// routingMu keeps replacement from changing that selection. Rendering is left
+// to the caller after it releases routingMu.
+func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domain.NoticeSeverity, code domain.NoticeCode, message string) bool {
 	n := d.notices.record(domain.Notification{
 		Code:      code,
 		Severity:  sev,
@@ -804,7 +1076,7 @@ func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domai
 		Time:      d.clock.Now(),
 		SessionID: sess.id,
 	})
-	d.showToast(ac, n)
+	return d.publishToast(ac, n)
 }
 
 // resizeForFirstPaint retains attach's synchronous geometry guarantee. The
@@ -820,20 +1092,58 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 		return
 	}
 	if d.detachIfCurrent(sess, ac) {
-		if rc := sess.renderCoordinator(); rc != nil {
-			rc.noteDetach(ac)
-		}
-		d.unregisterPreview(ac)
-		if d.parkAttachment(sess, ac) {
-			_ = ac.closeCapturedTransport(failed)
-			d.log.Warn("parked client after send error", "session", sess.name)
-			return
-		}
-		d.resetScreenDefaultColors(sess)
-		ac.clearPreviousSession()
-		_ = ac.closeCapturedTransport(failed)
-		d.log.Warn("detached client after send error", "session", sess.name)
+		d.finishSendErrorDetach(sess, ac, failed)
 	}
+}
+
+func (d *Daemon) detachOnRoleSendError(token attachmentRoleToken, failed ports.Transport) {
+	d.detachOnRoleSendErrorUntil(token, failed, nil)
+}
+
+func (d *Daemon) detachOnRoleSendErrorUntil(token attachmentRoleToken, failed ports.Transport, done func() <-chan struct{}) {
+	if failed != token.transport.transport {
+		return
+	}
+	if d.detachIfRoleCurrentUntil(token, done) {
+		d.finishSendErrorDetach(token.sess, token.ac, failed)
+	}
+}
+
+// reserveRoleSendErrorCleanup accounts for cleanup before End releases the
+// role gate. This closes the WaitGroup Add/Wait race with terminal teardown;
+// the returned launch function must be invoked immediately after ticket End.
+func (d *Daemon) reserveRoleSendErrorCleanup(token attachmentRoleToken, failed ports.Transport) func() {
+	d.attachmentCleanupWg.Add(1)
+	return func() {
+		go func() {
+			defer d.attachmentCleanupWg.Done()
+			if d.afterRoleSendErrorCleanup != nil {
+				defer d.afterRoleSendErrorCleanup()
+			}
+			if d.beforeRoleSendErrorCleanup != nil {
+				d.beforeRoleSendErrorCleanup(token)
+			}
+			deadline := newRoleEffectDrainDeadline(d.clock)
+			defer deadline.stop()
+			d.detachOnRoleSendErrorUntil(token, failed, deadline.Done)
+		}()
+	}
+}
+
+func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed ports.Transport) {
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteDetach(ac)
+	}
+	d.unregisterPreview(ac)
+	if d.parkAttachment(sess, ac) {
+		_ = ac.closeCapturedTransport(failed)
+		d.log.Warn("parked client after send error", "session", sess.name)
+		return
+	}
+	d.resetScreenDefaultColors(sess)
+	ac.clearPreviousSession()
+	_ = ac.closeCapturedTransport(failed)
+	d.log.Warn("detached client after send error", "session", sess.name)
 }
 
 // killSession removes a session and tears down its resources. It is

@@ -59,9 +59,13 @@ var errSnatchedOutputStale = errors.New("snatched output role changed")
 // sendSnatchedPanel serializes a dependency-free panel reset onto one exact
 // attachment role and transport lifetime. It does not inspect session state or
 // capture pane content.
-func (d *Daemon) sendSnatchedPanel(ac *attachedClient, expected transportSnapshot, generation uint64, feedback string) error {
+func (d *Daemon) sendSnatchedPanel(ac *attachedClient, expected transportSnapshot, generation uint64, feedback string, effects ...*roleEffectTicket) error {
 	if expected.transport == nil {
 		return errors.New("snatched client transport is nil")
+	}
+	var effect *roleEffectTicket
+	if len(effects) != 0 {
+		effect = effects[0]
 	}
 	tr, err := d.boundedSendWith(expected.transport, func() error {
 		ac.sendMu.Lock()
@@ -81,7 +85,17 @@ func (d *Daemon) sendSnatchedPanel(ac *attachedClient, expected transportSnapsho
 			return err
 		}
 		data := append(append([]byte(nil), prepared.data...), ac.encodeCursorTail(cursorOut{hidden: true}, true)...)
-		return prepared.send(data, ac.echoAck.Load(), expected.transport.Send)
+		if effect != nil && !effect.beginTransportSend(expected) {
+			return errAttachmentTransition
+		}
+		err = prepared.send(data, ac.echoAck.Load(), expected.transport.Send)
+		if effect != nil {
+			if err != nil {
+				effect.reportTransportFailure(expected)
+			}
+			effect.endTransportSend()
+		}
+		return err
 	})
 	if errors.Is(err, errSendTimedOut) {
 		_ = ac.closeCapturedTransport(tr)
