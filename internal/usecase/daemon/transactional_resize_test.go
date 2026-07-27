@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
 )
 
@@ -481,6 +482,85 @@ func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 100, Rows: 28}, tb.size)
 	tb.mu.Unlock()
+}
+
+func TestApplyVisibleFloatingLayoutPreservesCommittedGeometryOnPTYResizeFailure(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 50, Height: 50}
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 24}, cfg)
+	requestedSize := domain.Size{Cols: 100, Rows: 40}
+	requested := calculateContentFloatingGeometry(requestedSize, cfg)
+	resizeErr := errors.New("floating resize failed")
+	pty := &transactionalResizePTY{errs: []error{resizeErr}}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, requestedSize)
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+	var tabUnlocked, paneUnlocked bool
+	pty.onResize = func() {
+		tabUnlocked = tb.mu.TryLock()
+		if tabUnlocked {
+			tb.mu.Unlock()
+		}
+		paneUnlocked = popup.mu.TryLock()
+		if paneUnlocked {
+			popup.mu.Unlock()
+		}
+	}
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+
+	require.True(t, ok)
+	require.Len(t, failed, 1)
+	require.ErrorIs(t, failed[0].err, resizeErr)
+	require.Equal(t, []domain.Size{rectSize(requested.Inner)}, pty.requested())
+	require.True(t, tabUnlocked, "PTY.Resize must run outside tab.mu")
+	require.True(t, paneUnlocked, "PTY.Resize must run outside pane.mu")
+	popup.mu.Lock()
+	require.Equal(t, committed.Inner, popup.rect, "failed PTY resize published a speculative rectangle")
+	require.Equal(t, committed, popup.popupGeometry, "failed PTY resize published speculative popup geometry")
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.True(t, popup.resizeRetry, "failed PTY resize must remain retryable")
+	require.False(t, popup.resizeApplying, "failed PTY resize must reopen the parser gate")
+	popup.mu.Unlock()
+	tb.mu.Lock()
+	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
+	tb.mu.Unlock()
+	require.True(t, visible)
+	require.Equal(t, committed, inputGeometry, "input mapping must retain committed geometry")
+}
+
+func TestApplyVisibleFloatingLayoutPublishesSameSizeGeometryWithoutPTYResize(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 50, Height: 50}
+	size := domain.Size{Cols: 79, Rows: 20}
+	requested := calculateContentFloatingGeometry(size, cfg)
+	require.Equal(t, ui.PresentationDrawer, requested.Mode)
+	committed := requested
+	committed.Mode = ui.PresentationFloating
+	committed.Bounds.X++
+	committed.Inner.X++
+	pty := &transactionalResizePTY{}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, size)
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+
+	require.True(t, ok)
+	require.Empty(t, failed)
+	require.Empty(t, pty.requested(), "same-size geometry publication must not resize the PTY")
+	popup.mu.Lock()
+	require.Equal(t, requested.Inner, popup.rect)
+	require.Equal(t, requested, popup.popupGeometry)
+	require.Equal(t, rectSize(requested.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.False(t, popup.resizeRetry)
+	popup.mu.Unlock()
 }
 
 func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) {

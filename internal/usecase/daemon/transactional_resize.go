@@ -385,14 +385,12 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	if current != nil && !current() {
 		currentSlot = false
 	}
-	if currentSlot {
+	if currentSlot && plan.members[0].ok {
 		p.mu.Lock()
 		p.rect = plan.members[0].rect
 		p.popupGeometry = geometry
-		if plan.members[0].ok {
-			p.resizeRetry = false
-			p.screen.Resize(plan.members[0].rect.Width, plan.members[0].rect.Height)
-		}
+		p.resizeRetry = false
+		p.screen.Resize(plan.members[0].rect.Width, plan.members[0].rect.Height)
 		p.mu.Unlock()
 	}
 	tb.mu.Unlock()
