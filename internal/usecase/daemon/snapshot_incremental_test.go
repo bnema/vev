@@ -139,6 +139,39 @@ func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
 	require.Equal(t, 1, isolatedEncodes, "a session cache must not share encoded history with another session")
 }
 
+func TestMarkSnapshotCaptureObjectsPublishedReleasesCachedEncoding(t *testing.T) {
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	appendHistoryRow(t, history, []renderer.Cell{{Rune: 'x'}})
+	view := history.SnapshotView()
+	chunk := view.Chunk(0)
+	transcript := vt.NewScreen(1, 1).RecoveryTranscriptSnapshot()
+	d := New(nil, nil, nil)
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	capture := &snapshotCapture{session: sess, name: "work", incarnation: domain.IncarnationID{1}, generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", sealed: view, tail: view.Tail(), transcript: transcript}}}}}
+
+	_, err := d.incrementalPublication(capture)
+	require.NoError(t, err)
+	entry, ok := sess.snapshotChunkCache.byPtr[chunk]
+	require.True(t, ok)
+	usedBefore := sess.snapshotChunkCache.used
+	ref := capture.sealedRefs[chunk]
+
+	markSnapshotCaptureObjectsPublished(capture)
+
+	require.NotContains(t, sess.snapshotChunkCache.byPtr, chunk)
+	require.Equal(t, usedBefore-len(entry.object.Data), sess.snapshotChunkCache.used)
+	require.Equal(t, ref, sess.snapshotChunkCache.persisted[chunk])
+	gotRef, object, err := sess.snapshotChunkCache.objectLocked(chunk)
+	require.NoError(t, err)
+	require.Equal(t, ref, gotRef)
+	require.Nil(t, object)
+
+	// Repeated acknowledgement must not release the same bytes twice.
+	markSnapshotCaptureObjectsPublished(capture)
+	require.Equal(t, usedBefore-len(entry.object.Data), sess.snapshotChunkCache.used)
+	require.Equal(t, ref, sess.snapshotChunkCache.persisted[chunk])
+}
+
 func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
 	appendHistoryRow(t, history, []renderer.Cell{renderer.BlankCell()})

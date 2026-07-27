@@ -211,8 +211,16 @@ func markSnapshotCaptureObjectsPublished(capture *snapshotCapture) {
 		return
 	}
 	for chunk, ref := range capture.sealedRefs {
-		if chunk != nil {
-			cache.persisted[chunk] = ref
+		if chunk == nil {
+			continue
+		}
+		cache.persisted[chunk] = ref
+		if entry, ok := cache.byPtr[chunk]; ok {
+			delete(cache.byPtr, chunk)
+			cache.used -= len(entry.object.Data)
+			if cache.used < 0 {
+				cache.used = 0
+			}
 		}
 	}
 }
