@@ -319,6 +319,11 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 			}
 			sess.incarnation = record.IncarnationID
+			if resuming && authoritativeExists && authoritative.Committed != nil && authoritative.IncarnationID == sess.incarnation {
+				checkpoint := *authoritative.Committed
+				sess.snapshotPublishedGeneration = checkpoint.Generation
+				sess.snapshotPublishedCheckpoint = &checkpoint
+			}
 		}
 		delete(d.stopped, name)
 	}
