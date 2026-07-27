@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
-	"github.com/bnema/vev/internal/domain"
 )
 
 var (
@@ -43,20 +41,6 @@ func (c *Coordinator) Discard(ctx context.Context, name string) error {
 		return ErrSessionNotBroken
 	}
 
-	old := record.IncarnationID
-	next, err := domain.NewIncarnationID(c.random)
-	if err != nil {
-		return fmt.Errorf("recovery: generate replacement incarnation: %w", err)
-	}
-	fresh := record
-	fresh.IncarnationID = next
-	fresh.Committed = nil
-	fresh.DegradedReason = ""
-	if err := fresh.Validate(); err != nil {
-		return fmt.Errorf("recovery: invalid discard replacement: %w", err)
-	}
-	if err := c.catalogue.Replace(name, fresh); err != nil {
-		return err
-	}
-	return c.repository.DeleteIncarnation(ctx, old)
+	_, _, err = c.replaceIncarnationLocked(ctx, record, false, "discard")
+	return err
 }

@@ -107,6 +107,7 @@ type transactionRepository struct {
 	ports.SnapshotRepository
 	mu            sync.Mutex
 	deleteErrOnce error
+	deleteCalls   []domain.IncarnationID
 	deletedIDs    []domain.IncarnationID
 	deleteEntered chan struct{}
 	releaseDelete chan struct{}
@@ -204,6 +205,7 @@ func (r *transactionRepository) DeleteIncarnation(_ context.Context, id domain.I
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.deleteCalls = append(r.deleteCalls, id)
 	if r.deleteErrOnce != nil {
 		err := r.deleteErrOnce
 		r.deleteErrOnce = nil
@@ -217,6 +219,137 @@ func degradedTransactionRecord() domain.CatalogueRecord {
 	return domain.CatalogueRecord{
 		Name: "broken", IncarnationID: domain.IncarnationID{1}, Committed: &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
 		DegradedReason: "checkpoint unreadable",
+	}
+}
+
+func healthyTransactionRecord() domain.CatalogueRecord {
+	return domain.CatalogueRecord{
+		Name:          "work",
+		IncarnationID: domain.IncarnationID{1},
+		Cwd:           "/workspace",
+		CreatedAt:     11,
+		UpdatedAt:     22,
+		LastUsedSeq:   33,
+		TabNames:      []string{"shell", "logs"},
+		Committed:     &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
+	}
+}
+
+func TestResetIncompatibleReplacesExactHealthyCheckpoint(t *testing.T) {
+	t.Parallel()
+	old := healthyTransactionRecord()
+	catalogue := newTransactionCatalogue(old)
+	repository := &transactionRepository{}
+	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+
+	fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
+
+	require.NoError(t, err)
+	require.True(t, committed)
+	require.NotZero(t, fresh.IncarnationID)
+	require.NotEqual(t, old.IncarnationID, fresh.IncarnationID)
+	require.Equal(t, old.Name, fresh.Name)
+	require.Equal(t, old.Cwd, fresh.Cwd)
+	require.Equal(t, old.CreatedAt, fresh.CreatedAt)
+	require.Equal(t, old.UpdatedAt, fresh.UpdatedAt)
+	require.Equal(t, old.LastUsedSeq, fresh.LastUsedSeq)
+	require.Empty(t, fresh.TabNames)
+	require.Nil(t, fresh.Committed)
+	require.Empty(t, fresh.DegradedReason)
+	stored, ok, recordErr := catalogue.Record(old.Name)
+	require.NoError(t, recordErr)
+	require.True(t, ok)
+	require.True(t, fresh.Equal(stored))
+	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deleteCalls)
+	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deletedIDs)
+}
+
+func TestResetIncompatibleDeleteFailureReturnsCommittedFreshAuthority(t *testing.T) {
+	t.Parallel()
+	old := healthyTransactionRecord()
+	cause := errors.New("repository delete failed")
+	catalogue := newTransactionCatalogue(old)
+	repository := &transactionRepository{deleteErrOnce: cause}
+	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+
+	fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
+
+	require.ErrorIs(t, err, cause)
+	require.True(t, committed)
+	require.NotEqual(t, old.IncarnationID, fresh.IncarnationID)
+	stored, ok, recordErr := catalogue.Record(old.Name)
+	require.NoError(t, recordErr)
+	require.True(t, ok)
+	require.True(t, fresh.Equal(stored))
+	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deleteCalls)
+	require.Empty(t, repository.deletedIDs)
+}
+
+func TestResetIncompatibleReplaceFailurePreservesOldAuthorityAndRepository(t *testing.T) {
+	t.Parallel()
+	old := healthyTransactionRecord()
+	cause := errors.New("catalogue replace failed")
+	catalogue := newTransactionCatalogue(old)
+	catalogue.replaceErrOnce = cause
+	repository := &transactionRepository{}
+	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+
+	fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, old.IncarnationID, *old.Committed)
+
+	require.ErrorIs(t, err, cause)
+	require.False(t, committed)
+	require.Equal(t, domain.CatalogueRecord{}, fresh)
+	stored, ok, recordErr := catalogue.Record(old.Name)
+	require.NoError(t, recordErr)
+	require.True(t, ok)
+	require.True(t, old.Equal(stored))
+	require.Empty(t, repository.deleteCalls)
+}
+
+func TestResetIncompatibleStaleAuthorityIsNoOp(t *testing.T) {
+	t.Parallel()
+	old := healthyTransactionRecord()
+	otherGeneration := *old.Committed
+	otherGeneration.Generation++
+	otherDigest := *old.Committed
+	otherDigest.ManifestDigest[0]++
+	uncommitted := old
+	uncommitted.Committed = nil
+	tests := []struct {
+		name     string
+		record   *domain.CatalogueRecord
+		expected domain.IncarnationID
+		ref      domain.CheckpointRef
+	}{
+		{name: "missing record", expected: old.IncarnationID, ref: *old.Committed},
+		{name: "different incarnation", record: &old, expected: domain.IncarnationID{9}, ref: *old.Committed},
+		{name: "missing checkpoint", record: &uncommitted, expected: old.IncarnationID, ref: *old.Committed},
+		{name: "different checkpoint generation", record: &old, expected: old.IncarnationID, ref: otherGeneration},
+		{name: "different checkpoint digest", record: &old, expected: old.IncarnationID, ref: otherDigest},
+		{name: "degraded record", record: func() *domain.CatalogueRecord {
+			degraded := old
+			degraded.DegradedReason = "restore failed"
+			return &degraded
+		}(), expected: old.IncarnationID, ref: *old.Committed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			catalogue := newTransactionCatalogue()
+			if tt.record != nil {
+				catalogue.records[tt.record.Name] = *tt.record
+			}
+			repository := &transactionRepository{}
+			coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+
+			fresh, committed, err := coordinator.ResetIncompatible(context.Background(), old.Name, tt.expected, tt.ref)
+
+			require.NoError(t, err)
+			require.False(t, committed)
+			require.Equal(t, domain.CatalogueRecord{}, fresh)
+			require.Empty(t, catalogue.events)
+			require.Empty(t, repository.deleteCalls)
+		})
 	}
 }
 
@@ -338,6 +471,66 @@ func TestMarkBrokenCannotOverwriteDiscardReplacement(t *testing.T) {
 	require.Empty(t, got.DegradedReason)
 }
 
+func TestDiscardPublicPreconditions(t *testing.T) {
+	t.Parallel()
+	uncommitted := degradedTransactionRecord()
+	uncommitted.Name = "work"
+	uncommitted.Committed = nil
+	uncommitted.DegradedReason = ""
+	healthy := healthyTransactionRecord()
+	tests := []struct {
+		name       string
+		record     *domain.CatalogueRecord
+		incomplete bool
+		cancelled  bool
+		wantErr    error
+	}{
+		{name: "incomplete dependencies", incomplete: true, wantErr: errors.New("recovery: incomplete discard dependencies")},
+		{name: "cancelled context", record: &healthy, cancelled: true, wantErr: context.Canceled},
+		{name: "missing record", wantErr: ErrRecoveryRecordNotFound},
+		{name: "already fresh incarnation", record: &uncommitted},
+		{name: "healthy checkpoint", record: &healthy, wantErr: ErrSessionNotBroken},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			if tt.cancelled {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+			var coordinator *Coordinator
+			var catalogue *transactionCatalogue
+			var repository *transactionRepository
+			if tt.incomplete {
+				coordinator = &Coordinator{}
+			} else {
+				catalogue = newTransactionCatalogue()
+				if tt.record != nil {
+					catalogue.records[tt.record.Name] = *tt.record
+				}
+				repository = &transactionRepository{}
+				coordinator = NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+			}
+
+			err := coordinator.Discard(ctx, "work")
+
+			if tt.wantErr == nil {
+				require.NoError(t, err)
+			} else if tt.incomplete {
+				require.EqualError(t, err, tt.wantErr.Error())
+			} else {
+				require.ErrorIs(t, err, tt.wantErr)
+			}
+			if !tt.incomplete {
+				require.Empty(t, catalogue.events)
+				require.Empty(t, repository.deleteCalls)
+			}
+		})
+	}
+}
+
 func TestDiscardIsRetryIdempotent(t *testing.T) {
 	t.Parallel()
 	failure := errors.New("injected discard failure")
@@ -352,6 +545,7 @@ func TestDiscardIsRetryIdempotent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			old := degradedTransactionRecord()
+			old.TabNames = []string{"shell"}
 			catalogue := newTransactionCatalogue(old)
 			repository := &transactionRepository{}
 			if tt.failBefore {
@@ -371,6 +565,7 @@ func TestDiscardIsRetryIdempotent(t *testing.T) {
 			require.True(t, ok)
 			require.Nil(t, got.Committed)
 			require.NotEqual(t, old.IncarnationID, got.IncarnationID)
+			require.Equal(t, old.TabNames, got.TabNames)
 			if tt.failBefore {
 				require.Contains(t, repository.deletedIDs, old.IncarnationID)
 			} else {
