@@ -187,6 +187,115 @@ func TestRecoveryTranscriptSnapshotPreservesWideCells(t *testing.T) {
 	require.True(t, view.Row(0)[1].Continuation)
 }
 
+func TestNewScreenWithRecoveryTranscriptRestoresHistoryThenTranscriptAndStartsBlank(t *testing.T) {
+	sealed, tail := recoveryHistoryBlobs(t, []string{"sealed-a", "sealed-b", "tail"})
+	transcript := recoveryTranscriptBlob(t,
+		[]string{"primary", "alternate"},
+		[]LineBound{{End: 7, Soft: true}, {End: 9, Soft: true}},
+	)
+
+	screen, err := NewScreenWithRecoveryTranscript(5, 2, HistoryConfig{MaxRows: 8, MaxCells: 128, ChunkRows: 2}, sealed, tail, transcript)
+	require.NoError(t, err)
+
+	view := screen.History().View()
+	require.Equal(t, []string{"sealed-a", "sealed-b", "tail", "primary", "alternate"}, historyViewTexts(view))
+	require.Equal(t, LineBound{End: 7, Soft: true}, view.Bound(3))
+	require.Equal(t, LineBound{End: 9}, view.Bound(4), "the restored transcript must end at a hard seam")
+	for y := range screen.Frame.Height {
+		for x := range screen.Frame.Width {
+			require.True(t, screen.Frame.At(x, y).Equal(renderer.BlankCell()), "cell (%d,%d) must start blank", x, y)
+		}
+	}
+	require.Equal(t, []LineBound{{}, {}}, screen.LineBounds())
+}
+
+func TestNewScreenWithRecoveryTranscriptEvictsOldestRowsWithinBounds(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     HistoryConfig
+		history    []string
+		transcript []string
+		want       []string
+	}{
+		{
+			name:       "row budget",
+			config:     HistoryConfig{MaxRows: 3, MaxCells: 128, ChunkRows: 2},
+			history:    []string{"old-1", "old-2", "old-3"},
+			transcript: []string{"new-1", "new-2"},
+			want:       []string{"old-3", "new-1", "new-2"},
+		},
+		{
+			name:       "cell budget",
+			config:     HistoryConfig{MaxRows: 10, MaxCells: 4, ChunkRows: 4},
+			history:    []string{"aa", "b", "ccc"},
+			transcript: []string{"d", "ee"},
+			want:       []string{"d", "ee"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sealed, tail := recoveryHistoryBlobs(t, tt.history)
+			transcript := recoveryTranscriptBlob(t, tt.transcript, nil)
+
+			screen, err := NewScreenWithRecoveryTranscript(4, 2, tt.config, sealed, tail, transcript)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, historyViewTexts(screen.History().View()))
+		})
+	}
+}
+
+func TestNewScreenWithRecoveryTranscriptRejectsOversizedTranscriptRow(t *testing.T) {
+	sealed, tail := recoveryHistoryBlobs(t, []string{"ok"})
+	transcript := recoveryTranscriptBlob(t, []string{"wide"}, nil)
+
+	screen, err := NewScreenWithRecoveryTranscript(4, 2, HistoryConfig{MaxRows: 4, MaxCells: 3}, sealed, tail, transcript)
+
+	require.ErrorIs(t, err, ErrHistoryRowTooWide)
+	require.Nil(t, screen)
+}
+
+func recoveryHistoryBlobs(t testing.TB, texts []string) ([][]byte, []byte) {
+	t.Helper()
+	history := NewHistory(HistoryConfig{MaxRows: len(texts) + 1, MaxCells: 1024, ChunkRows: 2})
+	for _, text := range texts {
+		require.NoError(t, history.Append(historyRow(text), LineBound{End: len(text)}))
+	}
+	view := history.SnapshotView()
+	sealed := make([][]byte, view.ChunkCount())
+	for i := range sealed {
+		var err error
+		sealed[i], err = MarshalHistoryChunk(view.Chunk(i))
+		require.NoError(t, err)
+	}
+	tail, err := MarshalHistoryTail(view)
+	require.NoError(t, err)
+	return sealed, tail
+}
+
+func recoveryTranscriptBlob(t testing.TB, texts []string, bounds []LineBound) []byte {
+	t.Helper()
+	rows := make([][]renderer.Cell, len(texts))
+	cells := 0
+	for i, text := range texts {
+		rows[i] = historyRow(text)
+		cells += len(rows[i])
+	}
+	if bounds == nil {
+		bounds = make([]LineBound, len(rows))
+		for i, row := range rows {
+			bounds[i].End = len(row)
+		}
+	}
+	view := HistoryView{rows: len(rows), cells: cells}
+	if len(rows) > 0 {
+		view.chunks = []*HistoryChunk{{rows: rows, bounds: bounds}}
+	}
+	blob, err := MarshalHistory(view)
+	require.NoError(t, err)
+	return blob
+}
+
 func decodeRecoveryTranscript(t testing.TB, snapshot RecoveryTranscriptSnapshot) HistoryView {
 	t.Helper()
 	blob, err := snapshot.Marshal()

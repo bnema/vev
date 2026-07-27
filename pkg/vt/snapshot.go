@@ -111,6 +111,34 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 	return h, nil
 }
 
+// NewScreenWithRecoveryTranscript constructs a fresh blank screen whose
+// history contains the restored bounded history followed by the recovery
+// transcript. The transcript is decoded in full before history is restored.
+func NewScreenWithRecoveryTranscript(width, height int, config HistoryConfig, sealed [][]byte, tail, transcript []byte) (*Screen, error) {
+	transcriptView, err := UnmarshalHistory(transcript)
+	if err != nil {
+		return nil, fmt.Errorf("restore recovery transcript: %w", err)
+	}
+
+	history, err := HistoryFromBlobs(config, sealed, tail)
+	if err != nil {
+		return nil, err
+	}
+	for i := range transcriptView.Len() {
+		bound := transcriptView.Bound(i)
+		if i == transcriptView.Len()-1 {
+			bound.Soft = false
+		}
+		if err := history.Append(transcriptView.BorrowedRow(i), bound); err != nil {
+			return nil, fmt.Errorf("restore recovery transcript: %w", err)
+		}
+	}
+
+	screen := NewScreenWithHistory(width, height, config)
+	screen.history = history
+	return screen, nil
+}
+
 // NewScreenWithRestoredHistory constructs a screen that owns history restored
 // directly from canonical blobs. Call RestorePrimaryVisible to install a
 // persisted primary frame before making the screen live.
