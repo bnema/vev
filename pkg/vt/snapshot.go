@@ -124,13 +124,17 @@ func NewScreenWithRecoveryTranscript(width, height int, config HistoryConfig, se
 	if err != nil {
 		return nil, err
 	}
-	for i := range transcriptView.Len() {
-		bound := transcriptView.Bound(i)
-		if i == transcriptView.Len()-1 {
-			bound.Soft = false
-		}
-		if err := history.Append(transcriptView.BorrowedRow(i), bound); err != nil {
-			return nil, fmt.Errorf("restore recovery transcript: %w", err)
+	remainingRows := transcriptView.rows
+	for _, chunk := range transcriptView.chunks {
+		for i, row := range chunk.rows {
+			remainingRows--
+			bound := chunk.bounds[i]
+			if remainingRows == 0 {
+				bound.Soft = false
+			}
+			if err := history.Append(row, bound); err != nil {
+				return nil, fmt.Errorf("restore recovery transcript: %w", err)
+			}
 		}
 	}
 

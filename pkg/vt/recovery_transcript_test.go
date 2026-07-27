@@ -7,6 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var (
+	recoveryTranscriptSnapshotSink RecoveryTranscriptSnapshot
+	recoveryTranscriptScreenSink   *Screen
+)
+
 func TestRecoveryTranscriptSnapshotOwnsPrimaryCellsAndBounds(t *testing.T) {
 	s := NewScreen(4, 2)
 	s.Write([]byte("keep"))
@@ -18,6 +23,34 @@ func TestRecoveryTranscriptSnapshotOwnsPrimaryCellsAndBounds(t *testing.T) {
 	view := decodeRecoveryTranscript(t, snapshot)
 	require.Equal(t, []string{"keep"}, historyViewTexts(view))
 	require.Equal(t, LineBound{End: 4}, view.Bound(0))
+}
+
+func TestRecoveryTranscriptSnapshotAllocationsDoNotScaleWithRetainedRows(t *testing.T) {
+	const (
+		shortHeight = 8
+		tallHeight  = 512
+	)
+	newRetainedScreen := func(height int) *Screen {
+		screen := NewScreen(4, height)
+		for y := range height {
+			screen.Frame.Set(0, y, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
+			screen.buffer.boundaries[y] = LineBound{End: 1}
+		}
+		return screen
+	}
+	short, tall := newRetainedScreen(shortHeight), newRetainedScreen(tallHeight)
+
+	shortAllocs := testing.AllocsPerRun(20, func() {
+		recoveryTranscriptSnapshotSink = short.RecoveryTranscriptSnapshot()
+	})
+	tallAllocs := testing.AllocsPerRun(20, func() {
+		recoveryTranscriptSnapshotSink = tall.RecoveryTranscriptSnapshot()
+	})
+
+	// Allow a small fixed variance while rejecting the former allocation per row.
+	if tallAllocs > shortAllocs+4 {
+		t.Fatalf("snapshot allocations scale with retained rows: height %d = %.0f, height %d = %.0f", shortHeight, shortAllocs, tallHeight, tallAllocs)
+	}
 }
 
 func TestRecoveryTranscriptSnapshotOrdersPrimaryThenActiveAlternateAndHardensSeams(t *testing.T) {
@@ -253,6 +286,31 @@ func TestNewScreenWithRecoveryTranscriptRejectsOversizedTranscriptRow(t *testing
 
 	require.ErrorIs(t, err, ErrHistoryRowTooWide)
 	require.Nil(t, screen)
+}
+
+func BenchmarkNewScreenWithRecoveryTranscriptManyChunks(b *testing.B) {
+	const rows = maxHistoryRows
+	source := NewScreen(1, rows)
+	for y := range rows {
+		source.Frame.Set(0, y, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
+		source.buffer.boundaries[y] = LineBound{End: 1}
+	}
+	transcript, err := source.RecoveryTranscriptSnapshot().Marshal()
+	require.NoError(b, err)
+	tail, err := MarshalEmptyHistoryTail()
+	require.NoError(b, err)
+	config := HistoryConfig{MaxRows: rows, MaxCells: rows, ChunkRows: maxHistoryChunkRows}
+
+	b.ReportAllocs()
+	b.ReportMetric(float64(rows), "rows/restore")
+	b.ReportMetric(float64((rows+maxHistoryChunkRows-1)/maxHistoryChunkRows), "chunks/restore")
+	b.ResetTimer()
+	for b.Loop() {
+		recoveryTranscriptScreenSink, err = NewScreenWithRecoveryTranscript(1, 1, config, nil, tail, transcript)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func recoveryHistoryBlobs(t testing.TB, texts []string) ([][]byte, []byte) {

@@ -52,8 +52,12 @@ func captureRecoveryTranscriptSegment(b *buffer) recoveryTranscriptSegment {
 		rows:   make([][]renderer.Cell, rowCount),
 		bounds: append([]LineBound(nil), b.boundaries[:rowCount]...),
 	}
+	cells := make([]renderer.Cell, rowCount*b.frame.Width)
 	for y := range rowCount {
-		segment.rows[y] = append([]renderer.Cell(nil), b.frame.Row(y)...)
+		start := y * b.frame.Width
+		end := start + b.frame.Width
+		segment.rows[y] = cells[start:end:end]
+		copy(segment.rows[y], b.frame.Row(y))
 	}
 	segment.bounds[rowCount-1].Soft = false
 	return segment
