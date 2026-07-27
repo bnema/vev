@@ -281,8 +281,8 @@ func TestSnapshotRuntimeRestorePreservesConsumedAndExpelledPaneLayout(t *testing
 	restoreDaemon := newTestDaemon(t, newFactory(t, &paneRearrangePTY{}), stubClock{})
 	restoredTabs, err := restoreDaemon.restoreSnapshotTabs(context.Background(), restoreDaemon.serveCtx, fixture.snapshot)
 	require.NoError(t, err)
-	require.Len(t, restoredTabs, 1)
 	defer closeRestoredTabs(restoredTabs)
+	require.Len(t, restoredTabs, 1)
 
 	restored := captureRestoredPaneLayout(restoredTabs[0])
 	require.Equal(t, fixture.tabStableID, restored.tabStableID)
