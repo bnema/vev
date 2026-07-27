@@ -12,9 +12,15 @@ vev opens named-session state only while holding `$XDG_RUNTIME_DIR/vev/lifecycle
 
 Discard creates a new incarnation and retains the old record and snapshots under `snapshots/quarantine/` until an explicit later purge.
 
-## Migration and retention
+## Incompatible checkpoints
 
-The v0.x migration is resumable, retains legacy sources, and validates each referenced HEAD. Healthy sessions retain the committed checkpoint and up to two direct fallbacks; degraded, deleting, migrating, and unresolved transactions remain pinned.
+After verifying a VEVM manifest's digest, vev treats any VEVM version mismatch as an incompatible healthy checkpoint. It atomically replaces only that named session's exact healthy checkpoint with a fresh incarnation. The replacement retains the session name and working directory, but has no checkpoint, tabs, terminal history, or recovery transcript.
+
+Digest mismatches, corruption, validation failures, I/O errors, and ambiguous failures are never reset or purged. The session remains degraded for explicit recovery.
+
+## Retention
+
+Healthy sessions retain the committed checkpoint and up to two direct fallbacks. Degraded and unresolved state remains pinned.
 
 ## Fail-closed startup
 
