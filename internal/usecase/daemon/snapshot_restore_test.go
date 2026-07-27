@@ -257,6 +257,124 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	require.Equal(t, uint64(10), repository.publishes[0].Generation, "a restored session must continue the concrete repository generation stream")
 }
 
+func TestSnapshotCaptureRestorePreservesConsumedAndExpelledPaneLayout(t *testing.T) {
+	initial := &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Weight: 9, Children: []*layout.Node{
+		{Kind: layout.Leaf, Leaf: "pane-1", Weight: 40},
+		{Kind: layout.Split, Dir: layout.Vertical, Weight: 80, Children: []*layout.Node{
+			{Kind: layout.Leaf, Leaf: "pane-2", Weight: 10},
+			{Kind: layout.Leaf, Leaf: "pane-3", Weight: 20},
+		}},
+		{Kind: layout.Stack, Weight: 40, Expanded: "pane-5", Children: []*layout.Node{
+			{Kind: layout.Leaf, Leaf: "pane-4", Weight: 7},
+			{Kind: layout.Leaf, Leaf: "pane-5", Weight: 3},
+		}},
+	}}, Focus: "pane-4"}
+	h := newPaneRearrangeHarness(t, domain.Size{Cols: 200, Rows: 30}, initial)
+	h.session.createdAt = 77
+	h.session.incarnation = domain.IncarnationID{7}
+	h.tab.mu.Lock()
+	h.tab.stableID = "tab-stable-rearranged"
+	h.tab.nextPaneID = 6
+	paneStableIDs := map[layout.PaneID]string{
+		"pane-1": "pane-stable-1",
+		"pane-2": "pane-stable-2",
+		"pane-3": "pane-stable-3",
+		"pane-4": "pane-stable-4",
+		"pane-5": "pane-stable-5",
+	}
+	for id, stableID := range paneStableIDs {
+		h.tab.panes[id].mu.Lock()
+		h.tab.panes[id].stableID = stableID
+		h.tab.panes[id].mu.Unlock()
+	}
+	h.tab.mu.Unlock()
+
+	operations := []struct {
+		name      string
+		pane      layout.PaneID
+		direction layout.Direction
+	}{
+		{name: "consume singleton into vertical column", pane: "pane-1", direction: layout.Right},
+		{name: "expel vertical member as singleton column", pane: "pane-3", direction: layout.Right},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			err := (daemonActions{d: h.daemon}).Run(daemonActionRequest{
+				kind: daemonActionConsumeOrExpelPane, target: h.target(operation.pane), direction: operation.direction,
+			})
+			require.NoError(t, err)
+		})
+	}
+
+	h.tab.mu.Lock()
+	wantTree := h.tab.tree.Clone()
+	h.tab.mu.Unlock()
+	require.Equal(t, layout.Horizontal, wantTree.Root.Dir)
+	require.Len(t, wantTree.Root.Children, 3)
+	require.Equal(t, layout.Vertical, wantTree.Root.Children[0].Dir)
+	require.Equal(t, layout.Leaf, wantTree.Root.Children[1].Kind)
+	require.Equal(t, layout.Stack, wantTree.Root.Children[2].Kind)
+	require.Equal(t, layout.PaneID("pane-5"), wantTree.Root.Children[2].Expanded)
+	require.Equal(t, layout.PaneID("pane-3"), wantTree.Focus)
+
+	capture, ok := h.daemon.captureSnapshotState(h.session, 7)
+	require.True(t, ok)
+	publication, err := h.daemon.incrementalPublication(capture)
+	require.NoError(t, err)
+	objects := make(map[ports.SnapshotDigest][]byte, len(publication.Objects))
+	for _, object := range publication.Objects {
+		objects[object.Digest] = append([]byte(nil), object.Data...)
+	}
+	generation := ports.SnapshotGeneration{
+		IncarnationID: publication.IncarnationID,
+		Name:          publication.Name,
+		Generation:    publication.Generation,
+		Manifest:      append([]byte(nil), publication.Manifest...),
+		Objects:       objects,
+	}
+	decoded, err := sessionFromGeneration(generation)
+	require.NoError(t, err)
+	require.Len(t, decoded.Tabs, 1)
+	decodedTab := decoded.Tabs[0]
+	require.Equal(t, "tab-stable-rearranged", decodedTab.StableID)
+	require.Equal(t, layout.PaneID("pane-3"), decodedTab.Focus)
+	require.Equal(t, wantTree, decodedTab.Tree, "manifest codec must preserve the complete rearranged tree")
+	require.Equal(t, snapshotLayoutWeights(wantTree.Root), snapshotLayoutWeights(decodedTab.Tree.Root))
+	require.Equal(t, layout.PaneID("pane-5"), decodedTab.Tree.Root.Children[2].Expanded)
+	decodedStableIDs := make(map[layout.PaneID]string, len(decodedTab.Panes))
+	for _, restoredPane := range decodedTab.Panes {
+		decodedStableIDs[restoredPane.ID] = restoredPane.StableID
+	}
+	require.Equal(t, paneStableIDs, decodedStableIDs)
+
+	restorePTY := &paneRearrangePTY{}
+	restoreDaemon := newTestDaemon(t, newFactory(t, restorePTY), stubClock{})
+	restoredTabs, err := restoreDaemon.restoreSnapshotTabs(context.Background(), restoreDaemon.serveCtx, decoded)
+	require.NoError(t, err)
+	require.Len(t, restoredTabs, 1)
+	defer closeRestoredTabs(restoredTabs)
+	restoredTab := restoredTabs[0]
+	require.Equal(t, "tab-stable-rearranged", restoredTab.stableID)
+	require.Equal(t, wantTree, restoredTab.tree, "runtime restore must preserve the complete rearranged tree")
+	require.Equal(t, snapshotLayoutWeights(wantTree.Root), snapshotLayoutWeights(restoredTab.tree.Root))
+	require.Equal(t, layout.PaneID("pane-3"), restoredTab.tree.Focus)
+	require.Equal(t, layout.PaneID("pane-5"), restoredTab.tree.Root.Children[2].Expanded)
+	for id, stableID := range paneStableIDs {
+		require.Equal(t, stableID, restoredTab.panes[id].stableID, "pane %s stable ID", id)
+	}
+}
+
+func snapshotLayoutWeights(node *layout.Node) []float64 {
+	if node == nil {
+		return nil
+	}
+	weights := []float64{node.Weight}
+	for _, child := range node.Children {
+		weights = append(weights, snapshotLayoutWeights(child)...)
+	}
+	return weights
+}
+
 func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "restored")
 	generation := acceptanceGeneration(t, snapshot, 9)

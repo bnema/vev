@@ -34,6 +34,9 @@ focus-pane-left = alt+h
 focus-pane-right = alt+l
 focus-pane-up = alt+k
 focus-pane-down = alt+j
+# Optional pane rearrangement actions are unbound by default.
+# consume-or-expel-pane-left = alt+H
+# consume-or-expel-pane-right = alt+L
 switch-tab-1 = alt+1
 # ... through switch-tab-9 = alt+9
 
@@ -53,6 +56,8 @@ code.split-right = SPR
 code.split-left = SPL
 code.split-up = SPU
 code.split-down = SPD
+code.consume-or-expel-pane-left = CEL
+code.consume-or-expel-pane-right = CER
 code.stack-pane = STP
 code.toggle-stack = TST
 code.close-pane = CLP
@@ -95,6 +100,14 @@ Slots `0`, `7`, `8`, and `15` are valid explicit selections, but log a warning b
 ## Bindings
 
 Key specs: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` through `alt+9`. Configuring an action replaces all of its built-in aliases (set `focus-pane-left` and the Alt+Arrow alias is gone). Tab switching also accepts the top-row symbols of non-QWERTY layouts, so AZERTY works without extra config.
+
+`alt+[` is unsupported because terminals frame it as the CSI prefix `ESC [`, which vev passes through as terminal input. Cmd/Super is not a vev key-spec modifier; map a physical Cmd/Super chord in the terminal emulator to an unused, safe `ESC` + character sequence (not `ESC [`), then configure the matching `alt+<char>` in vev.
+
+## Pane consume or expel
+
+The `consume-or-expel-pane-left` and `consume-or-expel-pane-right` actions are unbound by default; the commented Alt+H/Alt+L bindings above are optional examples. Use palette codes `CEL` and `CER`, or script them as `vev cmd consume-or-expel-pane-left` and `vev cmd consume-or-expel-pane-right`.
+
+A singleton pane moves into the immediate column on the requested side; at the outer edge, nothing changes. A pane in a multi-member vertical or stack column moves out as an adjacent singleton column. This works only with canonical column layouts: one column, or a top-level horizontal split of columns, where each column is a singleton pane, a vertical split of panes, or a pane stack. Nested mixed splits are unsupported.
 
 ## Navigation overflow
 
