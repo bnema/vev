@@ -26,6 +26,76 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+func TestConfiguredConsumeOrExpelActionsRouteThroughDaemonInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		binding    string
+		key        byte
+		focus      layout.PaneID
+		wantTarget layout.PaneID
+	}{
+		{name: "left", binding: "consume-or-expel-pane-left", key: 'H', focus: "pane-3", wantTarget: "pane-3"},
+		{name: "right", binding: "consume-or-expel-pane-right", key: 'L', focus: "pane-1", wantTarget: "pane-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+			h.tab.mu.Lock()
+			h.tab.tree.Focus = tt.focus
+			beforeGeneration := h.tab.layoutGeneration
+			h.tab.mu.Unlock()
+			bindings, warnings := keys.BuildBindings(map[string]string{tt.binding: "alt+" + string(tt.key)})
+			require.Empty(t, warnings)
+			h.daemon.bindings.Store(bindings)
+			ac := &attachedClient{}
+			ac.setSession(h.session)
+			ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
+			h.session.mu.Lock()
+			h.session.client = ac
+			h.session.mu.Unlock()
+			invalidations := make(chan renderInvalidation, 1)
+			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+			rc.attach(ac)
+			h.session.installRenderCoordinator(rc)
+
+			h.daemon.handleInput(h.session, ac, []byte{keys.ESC, tt.key})
+
+			h.tab.mu.Lock()
+			require.Equal(t, tt.wantTarget, h.tab.tree.Focus)
+			require.Equal(t, beforeGeneration+1, h.tab.layoutGeneration)
+			require.Len(t, h.tab.tree.Root.Children, 2)
+			h.tab.mu.Unlock()
+			awaitInvalidation(t, invalidations)
+			requireNoInvalidation(t, invalidations)
+		})
+	}
+}
+
+func TestConfiguredConsumeOrExpelEdgeActionIsSilent(t *testing.T) {
+	h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+	bindings, warnings := keys.BuildBindings(map[string]string{"consume-or-expel-pane-left": "alt+H"})
+	require.Empty(t, warnings)
+	h.daemon.bindings.Store(bindings)
+	ac := &attachedClient{}
+	ac.setSession(h.session)
+	ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
+	h.session.mu.Lock()
+	h.session.client = ac
+	h.session.mu.Unlock()
+	invalidations := make(chan renderInvalidation, 1)
+	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+	rc.attach(ac)
+	h.session.installRenderCoordinator(rc)
+	before := h.snapshot()
+
+	h.daemon.handleInput(h.session, ac, []byte{keys.ESC, 'H'})
+
+	require.Equal(t, before, h.snapshot())
+	require.Empty(t, h.daemon.notices.history())
+	requireNoInvalidation(t, invalidations)
+}
+
 func TestResizeActionAdaptersSubmitEquivalentRequests(t *testing.T) {
 	tests := []struct {
 		name    string

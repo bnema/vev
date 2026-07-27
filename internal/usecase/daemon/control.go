@@ -409,6 +409,15 @@ func (e controlExec) SplitRight() error { return e.split(layout.Right) }
 func (e controlExec) SplitLeft() error  { return e.split(layout.Left) }
 func (e controlExec) SplitUp() error    { return e.split(layout.Up) }
 func (e controlExec) SplitDown() error  { return e.split(layout.Down) }
+func (e controlExec) consumeOrExpelPane(direction layout.Direction) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: direction})
+}
+func (e controlExec) ConsumeOrExpelPaneLeft() error {
+	return e.consumeOrExpelPane(layout.Left)
+}
+func (e controlExec) ConsumeOrExpelPaneRight() error {
+	return e.consumeOrExpelPane(layout.Right)
+}
 func (e controlExec) StackPane() error {
 	return e.runAction(daemonActionRequest{kind: daemonActionStackPane})
 }

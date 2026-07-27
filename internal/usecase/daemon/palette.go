@@ -407,6 +407,15 @@ func (e paletteExec) SplitRight() error { return e.split(layout.Right) }
 func (e paletteExec) SplitLeft() error  { return e.split(layout.Left) }
 func (e paletteExec) SplitUp() error    { return e.split(layout.Up) }
 func (e paletteExec) SplitDown() error  { return e.split(layout.Down) }
+func (e paletteExec) consumeOrExpelPane(direction layout.Direction) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: direction})
+}
+func (e paletteExec) ConsumeOrExpelPaneLeft() error {
+	return e.consumeOrExpelPane(layout.Left)
+}
+func (e paletteExec) ConsumeOrExpelPaneRight() error {
+	return e.consumeOrExpelPane(layout.Right)
+}
 
 func (e paletteExec) StackPane() error {
 	return e.runAction(daemonActionRequest{kind: daemonActionStackPane})

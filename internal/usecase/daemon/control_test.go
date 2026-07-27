@@ -16,28 +16,99 @@ import (
 )
 
 func TestPaletteAndControlShareExplicitDaemonActionTarget(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "t_work", "p_work")
-	tb := sess.activeTab()
-	tb.mu.Lock()
-	pane := tb.focusedPane()
-	tb.mu.Unlock()
-	spy := &actionRunnerSpy{}
-
-	require.NoError(t, (paletteExec{d: d, sess: sess, actions: spy}).SplitRight())
-	require.NoError(t, (controlExec{
-		d: d, sess: sess, tab: tb, actions: spy,
-		target: daemonActionTarget{session: sess, tab: tb, pane: pane},
-	}).SplitRight())
-
-	require.Len(t, spy.requests, 2)
-	for _, request := range spy.requests {
-		require.Equal(t, daemonActionSplitPane, request.kind)
-		require.Same(t, sess, request.target.session)
-		require.Same(t, tb, request.target.tab)
-		require.Same(t, pane, request.target.pane)
-		require.Equal(t, layout.Right, request.direction)
+	tests := []struct {
+		name      string
+		palette   func(paletteExec) error
+		control   func(controlExec) error
+		kind      daemonActionKind
+		direction layout.Direction
+	}{
+		{name: "split right", palette: func(e paletteExec) error { return e.SplitRight() }, control: func(e controlExec) error { return e.SplitRight() }, kind: daemonActionSplitPane, direction: layout.Right},
+		{name: "consume or expel left", palette: func(e paletteExec) error { return e.ConsumeOrExpelPaneLeft() }, control: func(e controlExec) error { return e.ConsumeOrExpelPaneLeft() }, kind: daemonActionConsumeOrExpelPane, direction: layout.Left},
+		{name: "consume or expel right", palette: func(e paletteExec) error { return e.ConsumeOrExpelPaneRight() }, control: func(e controlExec) error { return e.ConsumeOrExpelPaneRight() }, kind: daemonActionConsumeOrExpelPane, direction: layout.Right},
 	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "t_work", "p_work")
+			tb := sess.activeTab()
+			tb.mu.Lock()
+			pane := tb.focusedPane()
+			tb.mu.Unlock()
+			spy := &actionRunnerSpy{}
+			target := daemonActionTarget{session: sess, tab: tb, pane: pane}
+
+			require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, actions: spy}))
+			require.NoError(t, tt.control(controlExec{d: d, sess: sess, tab: tb, actions: spy, target: target}))
+
+			require.Len(t, spy.requests, 2)
+			for _, request := range spy.requests {
+				require.Equal(t, tt.kind, request.kind)
+				require.Same(t, sess, request.target.session)
+				require.Same(t, tb, request.target.tab)
+				require.Same(t, pane, request.target.pane)
+				require.Equal(t, tt.direction, request.direction)
+			}
+		})
+	}
+}
+
+func TestConsumeOrExpelControlSelfTargetsNonFocusedPane(t *testing.T) {
+	h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+	h.tab.mu.Lock()
+	h.tab.tree.Focus = "pane-1"
+	beforeGeneration := h.tab.layoutGeneration
+	tabStableID := h.tab.stableID
+	targetStableID := h.panes["pane-3"].stableID
+	h.tab.mu.Unlock()
+
+	result := sendCommand(t, h.daemon, ports.CommandRequest{
+		Slug:          "consume-or-expel-pane-left",
+		Self:          true,
+		TargetSession: "work",
+		TargetTab:     tabStableID,
+		TargetPane:    targetStableID,
+	})
+
+	require.True(t, result.OK, result.Text)
+	require.Empty(t, result.Output)
+	h.session.mu.Lock()
+	require.Zero(t, h.session.active, "--self must not change the active tab")
+	h.session.mu.Unlock()
+	h.tab.mu.Lock()
+	require.Equal(t, layout.PaneID("pane-3"), h.tab.tree.Focus, "a moved explicit target becomes focused")
+	require.Equal(t, beforeGeneration+1, h.tab.layoutGeneration)
+	require.Len(t, h.tab.tree.Root.Children, 2)
+	h.tab.mu.Unlock()
+}
+
+func TestConsumeOrExpelControlEdgeNoopReturnsOKAndPreservesFocus(t *testing.T) {
+	h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+	ac := &attachedClient{}
+	ac.setSession(h.session)
+	h.session.mu.Lock()
+	h.session.client = ac
+	h.session.mu.Unlock()
+	invalidations := make(chan renderInvalidation, 1)
+	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+	rc.attach(ac)
+	h.session.installRenderCoordinator(rc)
+	before := h.snapshot()
+
+	result := sendCommand(t, h.daemon, ports.CommandRequest{
+		Slug:          "consume-or-expel-pane-left",
+		Self:          true,
+		TargetSession: "work",
+		TargetTab:     h.tab.stableID,
+		TargetPane:    h.panes["pane-1"].stableID,
+	})
+
+	require.True(t, result.OK, result.Text)
+	require.Empty(t, result.Output)
+	require.Equal(t, before, h.snapshot())
+	require.Empty(t, h.daemon.notices.history())
+	requireNoInvalidation(t, invalidations)
 }
 
 type actionRunnerSpy struct {
