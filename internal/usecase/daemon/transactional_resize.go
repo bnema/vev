@@ -366,7 +366,7 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	size := tb.size
 	geometry := calculateContentFloatingGeometry(size, d.currentFloatingConfig())
 	tb.mu.Unlock()
-	if !geometry.valid() {
+	if !geometry.committable() {
 		return nil, true
 	}
 
@@ -374,7 +374,7 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	// floating slot and tab size are revalidated. A newer client resize may
 	// otherwise publish this obsolete popup geometry after its PTY call returns.
 	plan := preparedTabLayout{members: []resizeMember{{
-		session: sess, tab: tb, pane: p, rect: geometry.Inner, floating: geometry, isFloating: true, floatingGeneration: generation,
+		session: sess, tab: tb, pane: p, rect: geometry.ptyRect(), floating: geometry, isFloating: true, floatingGeneration: generation,
 	}}}
 	d.applyPreparedTabMembers(&plan)
 
@@ -387,11 +387,11 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	}
 	if currentSlot {
 		p.mu.Lock()
-		p.rect = geometry.Inner
+		p.rect = plan.members[0].rect
 		p.popupGeometry = geometry
 		if plan.members[0].ok {
 			p.resizeRetry = false
-			p.screen.Resize(geometry.Inner.Width, geometry.Inner.Height)
+			p.screen.Resize(plan.members[0].rect.Width, plan.members[0].rect.Height)
 		}
 		p.mu.Unlock()
 	}

@@ -227,7 +227,7 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 		reset:    true,
 		layout:   capturedTabLayout{area: domain.Rect{Width: 12, Height: 5}, valid: true, focus: "p", placements: []layout.Placement{{ID: "p", Content: domain.Rect{Width: 12, Height: 5}}}},
 		panes:    []capturedPaneRenderState{{id: "p", frame: paneFrame, placement: layout.Placement{ID: "p", Content: domain.Rect{Width: 12, Height: 5}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
-		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{id: "f", frame: floatingFrame}, geometry: floatingGeometry{Bounds: domain.Rect{X: 3, Y: 1, Width: 6, Height: 3}, Inner: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}}, title: "float", generation: 1},
+		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{id: "f", frame: floatingFrame}, geometry: floatingGeometry{Mode: ui.PresentationFloating, Bounds: domain.Rect{X: 3, Y: 1, Width: 6, Height: 3}, Inner: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}}, title: "float", generation: 1},
 		bars:     barState{status: statusSnapshot{session: "sess", tabs: []statusTab{{name: "tab", active: true}}}, topRight: "R", bottomRight: "B"},
 		overlays: capturedOverlayRenderState{promptActive: true, prompt: capturedModal{active: true, title: "Prompt", presentation: (ui.Modal{FixedWidth: 8, FixedHeight: 3, Title: "Prompt"}).Resolve(domain.Size{Cols: 12, Rows: 7}), inner: modalInner}},
 		cursor:   capturedCursorInputs{row: 1, col: 2, visible: true, renderable: true, content: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}},
@@ -401,6 +401,54 @@ func TestComposeFrameModalBackdropDimsCompleteFrameIncludingToasts(t *testing.T)
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, composed.damage)
 	require.False(t, composed.cache.valid)
 	require.Equal(t, base.cache.frame.Cells, composed.cache.frame.Cells, "the reusable cache remains toast-free and unadorned")
+}
+
+func TestComposeFrameFloatingBackdropDimsCompleteFrameIncludingToasts(t *testing.T) {
+	const (
+		width       = 100
+		contentRows = 6
+	)
+	placement := layout.Placement{ID: "pane", Content: domain.Rect{Width: width, Height: contentRows}}
+	theme := backdropTheme()
+	state := capturedRenderState{
+		reset:  true,
+		layout: capturedTabLayout{area: domain.Rect{Width: width, Height: contentRows}, focus: "pane", placements: []layout.Placement{placement}, fingerprint: "floating-toast-backdrop", valid: true},
+		panes: []capturedPaneRenderState{{
+			id: "pane", frame: cachePaneFrame(width, contentRows, 'P'), placement: placement, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
+		}},
+		overlays: capturedOverlayRenderState{notices: []domain.Notification{{Code: domain.NoticeClipboard, Severity: domain.NoticeInfo, Message: "copied", Count: 1}}},
+		styles:   resolveStyles(nil),
+		theme:    theme,
+	}
+	toastOnly := composeFrame(state, composeCacheInput{})
+	require.NotEmpty(t, toastOnly.cache.toastFootprints)
+	toast := toastOnly.cache.toastFootprints[0]
+
+	state.floating = capturedFloatingRenderState{
+		visible: true,
+		focused: true,
+		pane:    capturedPaneRenderState{id: "floating", frame: renderer.NewFrame(8, 1)},
+		geometry: floatingGeometry{
+			Mode:   ui.PresentationFloating,
+			Bounds: domain.Rect{X: 40, Y: 2, Width: 10, Height: 3},
+			Inner:  domain.Rect{X: 41, Y: 3, Width: 8, Height: 1},
+		},
+		generation: 1,
+	}
+	composed := composeFrame(state, composeCacheInput{})
+	dimmer := themeui.NewDimmer(theme)
+
+	for name, point := range map[string][2]int{
+		"top bar":    {0, 0},
+		"bottom bar": {0, contentRows + 1},
+		"toast":      {toast.X, toast.Y},
+	} {
+		t.Run(name, func(t *testing.T) {
+			x, y := point[0], point[1]
+			require.Equal(t, dimmer.Dim(toastOnly.frame.At(x, y).Style), composed.frame.At(x, y).Style)
+		})
+	}
+	require.Equal(t, toastOnly.cache.frame.Cells, composed.cache.frame.Cells, "floating decoration must not enter the reusable base cache")
 }
 
 func TestComposeCapturedOverlaysMatchesKeyboardPriority(t *testing.T) {

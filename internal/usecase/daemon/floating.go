@@ -136,7 +136,7 @@ func (tb *tab) visibleFloatingSnapshotLocked(cfg domain.FloatingConfig) (*pane, 
 	p.mu.Lock()
 	geometry := p.committedFloatingGeometryLocked(desired)
 	p.mu.Unlock()
-	if geometry.Inner.Width <= 0 || geometry.Inner.Height <= 0 {
+	if !geometry.committable() {
 		return nil, floatingGeometry{}, false
 	}
 	return p, geometry, true
@@ -316,11 +316,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 	sess.mu.Unlock()
 	tb.mu.Lock()
 	geometry := calculateContentFloatingGeometry(domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows}, cfg)
-	size := rectSize(geometry.Inner)
-	if !size.Valid() {
-		geometry = floatingGeometry{Bounds: domain.Rect{Width: 1, Height: 1}, Inner: domain.Rect{Width: 1, Height: 1}}
-		size = rectSize(geometry.Inner)
-	}
+	size := rectSize(geometry.ptyRect())
 	focused := tb.focusedPane()
 	tabStableID, tabCtx := tb.stableID, tb.ctx
 	tb.mu.Unlock()
@@ -385,7 +381,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		return
 	}
 	p := newPaneWithStableID(layout.PaneID("floating"), spec.paneStableID, pty, spec.size)
-	p.rect = spec.geometry.Inner
+	p.rect = spec.geometry.ptyRect()
 	p.popupGeometry = spec.geometry
 	p.title.displayFallback = spec.fallback
 	// CommandContext owns the child through openCtx, so retain both this context

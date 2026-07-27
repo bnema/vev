@@ -126,30 +126,43 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			damage = append(damage, d)
 		}
 	}
-	// Keep the committed cache unadorned: floating composition clones this
-	// base, so closing or moving a popup cannot retain dimmed/bordered cells.
+	// Keep the committed cache unadorned. Toasts are composed first so floating
+	// terminals and scoped modals dim them with the rest of the complete frame.
 	baseFrame := frame
+	overlaysActive := state.overlays.active()
+	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
+	var toastFootprints []domain.Rect
+	if toastsVisible {
+		frame = baseFrame.Clone()
+		toastFootprints = composeCapturedNotices(state.overlays, frame, state.styles)
+	}
 	if state.floating.visible {
 		var floatingDamage []renderer.Damage
 		frame, floatingDamage = composeCapturedFloatingFrame(floatingComposeInput{
-			baseFrame:    baseFrame,
+			baseFrame:    frame,
 			baseDamage:   damage,
 			floating:     state.floating,
 			content:      content,
-			layout:       state.layout,
 			theme:        state.theme,
 			borderMuted:  styles.BorderMuted,
 			borderActive: styles.BorderActive,
 			cache:        in,
-			full:         full || state.overlays.active(),
+			full:         full || overlaysActive,
 		})
 		damage = floatingDamage
 	}
+	if overlaysActive {
+		if !toastsVisible && !state.floating.visible {
+			frame = baseFrame.Clone()
+		}
+		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
+		frame, damage = composeCapturedOverlays(state, frame, damage)
+	}
 	if !full {
-		if !sameCells(in.bars.top, frame.Row(0)) {
+		if !sameCells(in.bars.top, baseFrame.Row(0)) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
 		}
-		if !sameCells(in.bars.bottom, frame.Row(rows+1)) {
+		if !sameCells(in.bars.bottom, baseFrame.Row(rows+1)) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
@@ -157,19 +170,6 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	// toasts, so every render damages both the last and current toast coverage.
 	// This restores cells exposed by dismissal and redraws a stable toast over
 	// any underlying pane update without promoting either case to a full frame.
-	overlaysActive := state.overlays.active()
-	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
-	var toastFootprints []domain.Rect
-	if overlaysActive || toastsVisible {
-		// Without a floating frame, overlay composition would otherwise mutate
-		// the base cache in place. Floating composition already owns a clone.
-		if !state.floating.visible {
-			baseFrame = frame.Clone()
-		}
-		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
-		toastFootprints = composeCapturedNotices(state.overlays, frame, state.styles)
-		frame, damage = composeCapturedOverlays(state, frame, damage)
-	}
 	if full || overlaysActive {
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	} else {

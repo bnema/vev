@@ -10,6 +10,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
@@ -326,7 +327,7 @@ func cacheState(title string, generation uint64) capturedRenderState {
 		reset:    false,
 		layout:   capturedTabLayout{area: domain.Rect{Width: 6, Height: 3}, valid: true, fingerprint: "layout"},
 		panes:    []capturedPaneRenderState{{id: "pane", frame: pane, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 6, Height: 1}, TitleBar: domain.Rect{Width: 6, Height: 1}}, title: title, titleGeneration: generation, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
-		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: floating, damage: []renderer.Damage{renderer.FullRedraw()}}, geometry: floatingGeometry{Bounds: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, Inner: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}}, generation: generation, titleGeneration: generation},
+		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: floating, damage: []renderer.Damage{renderer.FullRedraw()}}, geometry: floatingGeometry{Mode: ui.PresentationFloating, Bounds: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, Inner: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}}, generation: generation, titleGeneration: generation},
 		bars:     barState{topRight: title, bottomRight: title},
 		styles:   resolveStyles(nil),
 	}

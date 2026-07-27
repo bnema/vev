@@ -13,12 +13,29 @@ import (
 // translates both fields and returns/caches frame-absolute geometry. Callers
 // must not translate a composed or cached value again.
 type floatingGeometry struct {
+	Mode   ui.PresentationMode
 	Bounds domain.Rect
 	Inner  domain.Rect
 }
 
 func (g floatingGeometry) valid() bool {
 	return g.Bounds.Width > 0 && g.Bounds.Height > 0 && g.Inner.Width > 0 && g.Inner.Height > 0
+}
+
+// committable accepts a drawer with no terminal content. Its presentation must
+// remain canonical even though the PTY and VT screen use a 1x1 fallback.
+func (g floatingGeometry) committable() bool {
+	if g.Mode == ui.PresentationDrawer {
+		return g.Bounds.Width > 0 && g.Bounds.Height >= 0 && g.Inner.Width > 0 && g.Inner.Height >= 0
+	}
+	return g.valid()
+}
+
+func (g floatingGeometry) ptyRect() domain.Rect {
+	if g.Inner.Width > 0 && g.Inner.Height > 0 {
+		return g.Inner
+	}
+	return domain.Rect{Width: 1, Height: 1}
 }
 
 func (g floatingGeometry) translate(dx, dy int) floatingGeometry {
@@ -33,7 +50,7 @@ func (g floatingGeometry) translate(dx, dy int) floatingGeometry {
 // last committed. Newly constructed test panes fall back to the requested
 // geometry until their first resize. The caller holds p.mu.
 func (p *pane) committedFloatingGeometryLocked(fallback floatingGeometry) floatingGeometry {
-	if p.popupGeometry.valid() {
+	if p.popupGeometry.committable() {
 		return p.popupGeometry
 	}
 	return fallback
@@ -58,11 +75,9 @@ func calculateFloatingAxisGeometry(available, percent int) floatingAxisGeometry 
 	return axis
 }
 
-// calculateContentFloatingGeometry returns origin-zero, tab-content-relative
-// coordinates for a percentage-sized popup. Launch sizing derives from Inner
-// too, so rendering and PTY geometry share the same per-axis percentage and
-// tiny-border rules.
-func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingConfig) floatingGeometry {
+// calculatePreferredFloatingGeometry retains the canonical percentage and
+// tiny-axis rules used by wide floating terminals.
+func calculatePreferredFloatingGeometry(content domain.Size, cfg domain.FloatingConfig) floatingGeometry {
 	if !content.Valid() {
 		return floatingGeometry{}
 	}
@@ -75,6 +90,7 @@ func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingCo
 		Height: y.BoundsSize,
 	}
 	return floatingGeometry{
+		Mode:   ui.PresentationFloating,
 		Bounds: bounds,
 		Inner: domain.Rect{
 			X:      bounds.X + x.BorderOffset,
@@ -85,12 +101,33 @@ func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingCo
 	}
 }
 
+// calculateContentFloatingGeometry returns canonical tab-content-relative
+// coordinates. Presentation resolution consumes complete-frame coordinates,
+// so the preferred geometry crosses the top-bar boundary exactly once in each
+// direction.
+func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingConfig) floatingGeometry {
+	preferred := calculatePreferredFloatingGeometry(content, cfg)
+	if !preferred.valid() {
+		return floatingGeometry{}
+	}
+	framePreferred := preferred.translate(0, 1)
+	presentation := ui.ResolvePresentation(
+		domain.Size{Cols: content.Cols, Rows: content.Rows + 2},
+		framePreferred.Bounds,
+		framePreferred.Inner,
+	)
+	return floatingGeometry{
+		Mode:   presentation.Mode,
+		Bounds: presentation.Bounds,
+		Inner:  presentation.Inner,
+	}.translate(0, -1)
+}
+
 type floatingComposeInput struct {
 	baseFrame    renderer.Frame
 	baseDamage   []renderer.Damage
 	floating     capturedFloatingRenderState
 	content      domain.Rect
-	layout       capturedTabLayout
 	theme        themeui.Theme
 	borderMuted  renderer.Style
 	borderActive renderer.Style
@@ -103,7 +140,6 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	baseDamage := input.baseDamage
 	floating := input.floating
 	content := input.content
-	layoutSnap := input.layout
 	theme := input.theme
 	borderMuted := input.borderMuted
 	borderActive := input.borderActive
@@ -111,8 +147,7 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	full := input.full
 
 	frame := base.Clone()
-	layoutSnapshot := tabLayoutSnapshot{placements: layoutSnap.placements, area: layoutSnap.area, focus: layoutSnap.focus, ok: layoutSnap.valid}
-	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, theme)
+	applyOverlayBackdrop(frame, theme)
 	geometry := floating.geometry.translate(content.X, content.Y)
 	blitPaneFrame(frame, geometry.Inner, floating.pane.frame, false, themeui.NewDimmer(theme))
 	damage := append([]renderer.Damage(nil), baseDamage...)
@@ -125,18 +160,30 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	if floating.focused {
 		border = borderActive
 	}
-	drawFloatingBorder(frame, geometry.Bounds, floating.title, border)
+	drawFloatingBorder(frame, geometry, floating.title, border)
 	if full || popupChanged {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}
-	if titleChanged && geometry.Bounds.Height >= 3 {
+	hasTitleBorder := geometry.Bounds.Height >= 3
+	if geometry.Mode == ui.PresentationDrawer {
+		hasTitleBorder = geometry.Bounds.Height > 0
+	}
+	if titleChanged && hasTitleBorder {
 		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: geometry.Bounds.X, Y: geometry.Bounds.Y, Width: geometry.Bounds.Width, Height: 1})
 	}
 	return frame, damage
 }
 
-func drawFloatingBorder(frame renderer.Frame, bounds domain.Rect, title string, style renderer.Style) {
+func drawFloatingBorder(frame renderer.Frame, geometry floatingGeometry, title string, style renderer.Style) {
+	bounds := geometry.Bounds
 	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+	if geometry.Mode == ui.PresentationDrawer {
+		for x := bounds.X; x < bounds.X+bounds.Width; x++ {
+			frame.Set(x, bounds.Y, renderer.Cell{Rune: '─', Style: style})
+		}
+		ui.DrawText(frame, bounds.X+2, bounds.Y, bounds.X+bounds.Width-2, title, style)
 		return
 	}
 	// Each axis omits its borders independently for tiny popups, matching
