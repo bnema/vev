@@ -5,7 +5,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
 )
 
@@ -272,10 +272,10 @@ func TestApplySessionLayoutReportsResizeFailuresOnce(t *testing.T) {
 			}
 			d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
 
-			result, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
+			failed, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
 
 			require.Equal(t, tc.wantOK, ok)
-			require.Len(t, result.failed, tc.wantFailed)
+			require.Len(t, failed, tc.wantFailed)
 			count := 0
 			for _, notification := range d.notices.history() {
 				if notification.Code == domain.NoticeResizeFailed {
@@ -407,402 +407,6 @@ func TestTransactionalResizeEpochLifecycleAndRetryContract(t *testing.T) {
 // stopped.  Only the newest prepared epoch may apply, commit, and emit one full
 // frame. coordinatorMockClock is a generated MockClock/MockTimer harness; its
 // channels make callback order explicit and do not use wall-clock waits.
-func publishResizeOwnerMoveUnderFence(t *testing.T, source, destination *session, tb *tab, p *pane) {
-	t.Helper()
-	fences := newMovePaneResizeFences(source, destination, tb, tb, p)
-	require.True(t, fences.acquire(func() bool {
-		p.mu.Lock()
-		p.publishOwnerLocked(destination, tb, 0)
-		p.mu.Unlock()
-		return true
-	}))
-	fences.Release()
-}
-
-func pauseResizeOwnerPostEffect(d *Daemon, effect resizeOwnerPostEffect) (<-chan struct{}, func()) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var once sync.Once
-	d.beforeResizeOwnerPostEffect = func(got resizeOwnerPostEffect) {
-		if got != effect {
-			return
-		}
-		once.Do(func() { close(entered) })
-		<-release
-	}
-	return entered, func() { close(release) }
-}
-
-func TestResizeOwnerMoveImmediatelyBeforeSnapshotDirtyDropsStaleSource(t *testing.T) {
-	d, source, _, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	source.snapEligible.Store(true)
-	tb := source.activeTab()
-	p := tb.focusedPane()
-	tb.mu.Lock()
-	tb.size = domain.Size{Cols: 100, Rows: 20}
-	tb.bumpLayoutGenerationLocked()
-	tb.mu.Unlock()
-	destination := &session{id: "destination", name: "destination", ctx: source.ctx, tabs: []*tab{tb}}
-	entered, release := pauseResizeOwnerPostEffect(d, resizeOwnerPostSnapshotDirty)
-
-	result := make(chan bool, 1)
-	go func() { result <- d.applyTabLayout(source, tb) }()
-	awaitTestCompletion(t, entered, "resize did not pause before snapshot dirtiness")
-	publishResizeOwnerMoveUnderFence(t, source, destination, tb, p)
-	release()
-
-	require.False(t, awaitTestValue(t, result, "stale source layout did not return"))
-	require.False(t, source.snapDirty.Load(), "stale source dirtied its snapshot after the move won the fence")
-}
-
-func TestRetryOwnerMoveImmediatelyBeforeScheduleContinuesAtDestination(t *testing.T) {
-	resizeErr := errors.New("scripted resize failure")
-	pty := &transactionalResizePTY{errs: []error{resizeErr, resizeErr}}
-	d, source, _, _ := newManualSessionWithPTYs(t, pty)
-	clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 8)}
-	d.clock = clock
-	tb := source.activeTab()
-	p := tb.focusedPane()
-	tb.mu.Lock()
-	tb.size = domain.Size{Cols: 100, Rows: 20}
-	tb.bumpLayoutGenerationLocked()
-	tb.mu.Unlock()
-	destination := &session{id: "destination", name: "destination", ctx: source.ctx, tabs: []*tab{tb}}
-	entered, release := pauseResizeOwnerPostEffect(d, resizeOwnerPostRetrySchedule)
-
-	result := make(chan bool, 1)
-	go func() { result <- d.applyTabLayout(source, tb) }()
-	awaitTestCompletion(t, entered, "resize did not pause before retry scheduling")
-	publishResizeOwnerMoveUnderFence(t, source, destination, tb, p)
-	release()
-
-	require.False(t, awaitTestValue(t, result, "stale source retry publication did not return"))
-	tb.layoutRetryMu.Lock()
-	require.False(t, tb.layoutRetryRunning, "stale source published a retry worker")
-	tb.layoutRetryMu.Unlock()
-	for {
-		select {
-		case timer := <-clock.timers:
-			require.NotEqual(t, minOutputRenderDeadline, timer.delay, "stale source armed a retry timer")
-		default:
-			goto timersDrained
-		}
-	}
-
-timersDrained:
-	d.beforeResizeOwnerPostEffect = nil
-	require.True(t, d.applyTabLayout(destination, tb), "destination must recreate retry from pane metadata")
-	for {
-		timer := awaitTestValue(t, clock.timers, "destination did not continue the moved retry")
-		if timer.delay == minOutputRenderDeadline {
-			break
-		}
-	}
-}
-
-type resizeFenceCheckingClock struct {
-	locks     []*sync.Mutex
-	calls     atomic.Int32
-	locksFree atomic.Bool
-}
-
-func (c *resizeFenceCheckingClock) check() {
-	c.calls.Add(1)
-	locked := make([]*sync.Mutex, 0, len(c.locks))
-	for _, lock := range c.locks {
-		if !lock.TryLock() {
-			for i := len(locked) - 1; i >= 0; i-- {
-				locked[i].Unlock()
-			}
-			c.locksFree.Store(false)
-			return
-		}
-		locked = append(locked, lock)
-	}
-	for i := len(locked) - 1; i >= 0; i-- {
-		locked[i].Unlock()
-	}
-}
-
-func (c *resizeFenceCheckingClock) Now() time.Time {
-	c.check()
-	return time.Time{}
-}
-
-func (c *resizeFenceCheckingClock) NewTimer(time.Duration) ports.Timer {
-	c.check()
-	return stubTimer{}
-}
-
-type blockingResizeCommitObserver struct {
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (o *blockingResizeCommitObserver) ObserveRuntime(mark ports.RuntimeMark) {
-	if mark.Kind != ports.RuntimeResizeCommitted {
-		return
-	}
-	o.once.Do(func() { close(o.entered) })
-	<-o.release
-}
-
-func TestResizeCommitObserverBlocksWithoutHoldingOwnerOrAttachmentFences(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	observer := &blockingResizeCommitObserver{entered: make(chan struct{}), release: make(chan struct{})}
-	d.runtimeObserver = observer
-	rc := d.attachCoordinator(sess, nil, ac, true)
-	lease := rc.attachmentLease(ac)
-	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease)
-	tb := sess.activeTab()
-	p := tb.focusedPane()
-
-	result := make(chan bool, 1)
-	go func() { result <- d.runResizeTransaction(sess, ac, lease, epoch) }()
-	awaitTestCompletion(t, observer.entered, "resize commit observer did not block")
-	for _, lock := range []struct {
-		name string
-		mu   *sync.Mutex
-	}{
-		{name: "attachment send", mu: &ac.sendMu},
-		{name: "session resize", mu: &sess.layoutApplyMu},
-		{name: "tab resize", mu: &tb.layoutApplyMu},
-		{name: "pane resize", mu: &p.resizeMu},
-	} {
-		require.True(t, lock.mu.TryLock(), "%s fence remained held across observer callback", lock.name)
-		lock.mu.Unlock()
-	}
-	close(observer.release)
-	require.True(t, awaitTestValue(t, result, "resize did not finish after observer release"))
-}
-
-func TestResizeOwnerPostEffectsReleaseFencesBeforeTimerAndRenderCallbacks(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	tb := sess.activeTab()
-	p := tb.focusedPane()
-	clock := &resizeFenceCheckingClock{locks: []*sync.Mutex{&sess.layoutApplyMu, &tb.layoutApplyMu, &p.resizeMu}}
-	clock.locksFree.Store(true)
-	d.clock = clock
-	rc := d.attachCoordinator(sess, nil, ac, true)
-	callbackLocksFree := atomic.Bool{}
-	callbackLocksFree.Store(true)
-	rc.opts.onInvalidate = func(renderInvalidation) {
-		clock.check()
-		callbackLocksFree.Store(clock.locksFree.Load())
-	}
-	lease := rc.attachmentLease(ac)
-	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease)
-
-	require.True(t, d.runResizeTransaction(sess, ac, lease, epoch))
-	require.Positive(t, clock.calls.Load(), "clock boundary was not exercised")
-	require.True(t, clock.locksFree.Load(), "timer or clock work ran under a resize ownership fence")
-	require.True(t, callbackLocksFree.Load(), "render callback ran under a resize ownership fence")
-}
-
-func TestResizeOwnerMoveBeforeClientGeometryAndCommitTelemetryDropsStaleSource(t *testing.T) {
-	first := &transactionalResizePTY{}
-	second := &transactionalResizePTY{}
-	d, source, ac, _ := newManualSessionWithPTYs(t, first, second)
-	observer := &daemonRuntimeObserver{}
-	d.runtimeObserver = observer
-	rc := d.attachCoordinator(source, nil, ac, true)
-	lease := rc.attachmentLease(ac)
-	target := domain.Size{Cols: 100, Rows: 30}
-	epoch := rc.recordResizeRequestForLease(target, ac, lease)
-	require.NotZero(t, epoch)
-	movedTab := source.tabs[1]
-	movedPane := movedTab.focusedPane()
-	destination := &session{id: "destination", name: "destination", ctx: source.ctx, tabs: []*tab{movedTab}}
-
-	entered, release := pauseResizeOwnerPostEffect(d, resizeOwnerPostCommitPublication)
-	result := make(chan bool, 1)
-	go func() { result <- d.runResizeTransaction(source, ac, lease, epoch) }()
-	select {
-	case <-entered:
-		publishResizeOwnerMoveUnderFence(t, source, destination, movedTab, movedPane)
-		release()
-	case accepted := <-result:
-		ac.sendMu.Lock()
-		publishedSize := ac.size
-		ac.sendMu.Unlock()
-		t.Fatalf("resize completed before geometry/telemetry owner fence: accepted=%v size=%+v marks=%+v", accepted, publishedSize, observer.marks)
-	case <-time.After(time.Second):
-		t.Fatal("resize neither reached geometry/telemetry publication nor completed")
-	}
-
-	require.False(t, awaitTestValue(t, result, "stale source geometry publication did not return"))
-	ac.sendMu.Lock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, ac.size, "stale source published attachment geometry after ownership commit")
-	ac.sendMu.Unlock()
-	for _, mark := range observer.marks {
-		require.NotEqual(t, ports.RuntimeResizeCommitted, mark.Kind, "stale source published resize-commit telemetry after ownership commit")
-	}
-
-	// The destination's finalizer is the only accepted geometry/telemetry owner.
-	d.beforeResizeOwnerPostEffect = nil
-	destinationSize := domain.Size{Cols: 90, Rows: 28}
-	require.True(t, d.requestTransactionalResizeForLease(destination, nil, nil, destinationSize, true))
-	movedPane.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 90, Rows: 26}, domain.Size{Cols: movedPane.screen.Frame.Width, Rows: movedPane.screen.Frame.Height})
-	movedPane.mu.Unlock()
-	commits := 0
-	for _, mark := range observer.marks {
-		if mark.Kind == ports.RuntimeResizeCommitted {
-			commits++
-		}
-	}
-	require.Equal(t, 1, commits, "only the destination finalizer may publish resize-commit telemetry")
-}
-
-func TestSameOwnerResizePublishesClientGeometryAndCommitTelemetryOnce(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{}, &transactionalResizePTY{})
-	observer := &daemonRuntimeObserver{}
-	d.runtimeObserver = observer
-	rc := d.attachCoordinator(sess, nil, ac, true)
-	lease := rc.attachmentLease(ac)
-	target := domain.Size{Cols: 100, Rows: 30}
-	epoch := rc.recordResizeRequestForLease(target, ac, lease)
-
-	require.True(t, d.runResizeTransaction(sess, ac, lease, epoch))
-	ac.sendMu.Lock()
-	require.Equal(t, target, ac.size)
-	ac.sendMu.Unlock()
-	commits := 0
-	for _, mark := range observer.marks {
-		if mark.Kind == ports.RuntimeResizeCommitted {
-			commits++
-		}
-	}
-	require.Equal(t, 1, commits)
-}
-
-func TestResizeOwnerMoveImmediatelyBeforeRenderInvalidationDropsStaleSource(t *testing.T) {
-	d, source, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	rc := d.attachCoordinator(source, nil, ac, true)
-	lease := rc.attachmentLease(ac)
-	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease)
-	var invalidations atomic.Int32
-	rc.opts.onInvalidate = func(renderInvalidation) { invalidations.Add(1) }
-	tb := source.activeTab()
-	p := tb.focusedPane()
-	destination := &session{id: "destination", name: "destination", ctx: source.ctx, tabs: []*tab{tb}}
-	entered, release := pauseResizeOwnerPostEffect(d, resizeOwnerPostRenderInvalidation)
-
-	result := make(chan bool, 1)
-	go func() { result <- d.runResizeTransaction(source, ac, lease, epoch) }()
-	awaitTestCompletion(t, entered, "resize did not pause before render invalidation")
-	publishResizeOwnerMoveUnderFence(t, source, destination, tb, p)
-	release()
-
-	require.False(t, awaitTestValue(t, result, "stale source invalidation did not return"))
-	require.Zero(t, invalidations.Load(), "stale source invalidated its renderer after the move won the fence")
-}
-
-func TestRetryOwnerAcceptedTabStopsWhenFailedPaneMoves(t *testing.T) {
-	resizeErr := errors.New("scripted resize failure")
-	pty := &transactionalResizePTY{errs: []error{resizeErr}}
-	d, source, _, _ := newManualSessionWithPTYs(t, pty)
-	clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 8)}
-	d.clock = clock
-	tb := source.activeTab()
-	p := tb.focusedPane()
-	tb.mu.Lock()
-	tb.size = domain.Size{Cols: 100, Rows: 20}
-	tb.bumpLayoutGenerationLocked()
-	tb.mu.Unlock()
-
-	require.True(t, d.applyTabLayout(source, tb))
-	var timer *layoutRetryTimer
-	for timer == nil {
-		candidate := awaitTestValue(t, clock.timers, "accepted failure did not schedule its retry")
-		if candidate.delay == minOutputRenderDeadline {
-			timer = candidate
-		}
-	}
-	source.snapshotMu.Lock()
-	sourceGeneration := source.snapshotGeneration
-	source.snapshotMu.Unlock()
-	notices := len(d.notices.history())
-
-	destination := &session{id: "destination", name: "destination", ctx: source.ctx, tabs: []*tab{tb}}
-	publishPaneOwner(p, destination, tb, 0)
-	timer.fire()
-
-	require.Eventually(t, func() bool {
-		tb.layoutRetryMu.Lock()
-		defer tb.layoutRetryMu.Unlock()
-		return !tb.layoutRetryRunning
-	}, time.Second, time.Millisecond, "stale source retry did not retire")
-	require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}}, pty.requested(), "stale source retry reached the moved pane PTY")
-	source.snapshotMu.Lock()
-	require.Equal(t, sourceGeneration, source.snapshotGeneration, "stale source retry dirtied its former session")
-	source.snapshotMu.Unlock()
-	require.Len(t, d.notices.history(), notices, "stale source retry published a notice")
-}
-
-func TestTransactionalResizeOwnerMoveAfterExternalApplyPublishesOnlyDestinationGeometry(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	pty := &transactionalResizePTY{}
-	pty.onResize = func() {
-		if len(pty.requested()) != 1 {
-			return
-		}
-		close(entered)
-		<-release
-	}
-	d, source, ac, _ := newManualSessionWithPTYs(t, pty)
-	observer := &daemonRuntimeObserver{}
-	d.runtimeObserver = observer
-	rc := d.attachCoordinator(source, nil, ac, true)
-	var invalidations atomic.Int32
-	rc.opts.onInvalidate = func(renderInvalidation) { invalidations.Add(1) }
-	lease := rc.attachmentLease(ac)
-	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease)
-	require.NotZero(t, epoch)
-	tb := source.activeTab()
-	p := tb.focusedPane()
-	destination := &session{id: "destination", name: "destination", ctx: source.ctx, tabs: []*tab{tb}}
-
-	result := make(chan bool, 1)
-	go func() {
-		result <- d.runResizeTransaction(source, ac, lease, epoch)
-	}()
-	awaitTestCompletion(t, entered, "source resize did not reach the external PTY")
-
-	source.mu.Lock()
-	source.tabs = nil
-	source.active = -1
-	source.mu.Unlock()
-	publishPaneOwner(p, destination, tb, 0)
-	close(release)
-
-	require.False(t, awaitTestValue(t, result, "source resize did not finish after the owner move"))
-	require.False(t, source.snapDirty.Load(), "retired source owner dirtied its snapshot")
-	require.Zero(t, invalidations.Load(), "retired source owner invalidated its renderer")
-	require.Empty(t, d.notices.history(), "retired source owner published a resize notice")
-	for _, mark := range observer.marks {
-		require.NotEqual(t, ports.RuntimeResizeCommitted, mark.Kind, "retired source owner published resize telemetry")
-	}
-	ac.sendMu.Lock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, ac.size, "retired source owner published client geometry")
-	ac.sendMu.Unlock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size, "retired source owner published the moved tab size")
-	p.mu.Lock()
-	require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect, "retired source owner published pane geometry")
-	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "retired source owner published VT geometry")
-	require.True(t, p.resizeRetry, "the destination owner needs metadata for the externally applied stale size")
-	p.mu.Unlock()
-
-	require.True(t, d.applyTabLayout(destination, tb))
-	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 80, Rows: 23}}, pty.requested(), "destination layout must restore its owned geometry")
-	p.mu.Lock()
-	require.False(t, p.resizeRetry)
-	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
-	p.mu.Unlock()
-}
-
 func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing.T) {
 	first, second := &transactionalResizePTY{}, &transactionalResizePTY{}
 	d, sess, ac, _ := newManualSessionWithPTYs(t, first, second)
@@ -939,6 +543,193 @@ func TestRetryOwnerCannotPublishFloatingGeometryAfterMove(t *testing.T) {
 	source.snapshotMu.Lock()
 	require.Equal(t, sourceGeneration, source.snapshotGeneration, "stale floating retry dirtied its former session")
 	source.snapshotMu.Unlock()
+}
+
+func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	for _, tc := range []struct {
+		name     string
+		from     domain.Size
+		to       domain.Size
+		wantMode ui.PresentationMode
+	}{
+		{name: "80 to 79", from: domain.Size{Cols: 80, Rows: 25}, to: domain.Size{Cols: 79, Rows: 25}, wantMode: ui.PresentationDrawer},
+		{name: "79 to 80", from: domain.Size{Cols: 79, Rows: 25}, to: domain.Size{Cols: 80, Rows: 25}, wantMode: ui.PresentationFloating},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, _, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+			d.ApplyConfig(domain.Config{Floating: cfg})
+			require.True(t, d.requestTransactionalResize(sess, nil, tc.from, true))
+
+			tb := sess.activeTab()
+			fromGeometry := calculateContentFloatingGeometry(tabSize(tc.from), cfg)
+			toGeometry := calculateContentFloatingGeometry(tabSize(tc.to), cfg)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			popupPTY := &transactionalResizePTY{onResize: func() {
+				once.Do(func() { close(entered) })
+				<-release
+			}}
+			popup := newPane("floating", popupPTY, rectSize(fromGeometry.Inner))
+			popup.rect = fromGeometry.Inner
+			popup.popupGeometry = fromGeometry
+			installTestFloating(tb, popup, true)
+
+			done := make(chan bool, 1)
+			go func() { done <- d.requestTransactionalResize(sess, nil, tc.to, true) }()
+			<-entered
+			popup.mu.Lock()
+			require.Equal(t, fromGeometry, popup.popupGeometry, "in-flight resize exposed an uncommitted mode")
+			require.Equal(t, fromGeometry.Inner, popup.rect)
+			require.Equal(t, rectSize(fromGeometry.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+			popup.mu.Unlock()
+			close(release)
+			require.True(t, <-done)
+
+			require.Equal(t, []domain.Size{rectSize(toGeometry.Inner)}, popupPTY.requested())
+			popup.mu.Lock()
+			require.Equal(t, tc.wantMode, popup.popupGeometry.Mode)
+			require.Equal(t, toGeometry, popup.popupGeometry)
+			require.Equal(t, toGeometry.Inner, popup.rect)
+			require.Equal(t, rectSize(toGeometry.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+			popup.mu.Unlock()
+		})
+	}
+}
+
+func TestApplyVisibleFloatingLayoutPreservesCommittedGeometryOnPTYResizeFailure(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 50, Height: 50}
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 24}, cfg)
+	requestedSize := domain.Size{Cols: 79, Rows: 40}
+	requested := calculateContentFloatingGeometry(requestedSize, cfg)
+	require.Equal(t, ui.PresentationFloating, committed.Mode)
+	require.Equal(t, ui.PresentationDrawer, requested.Mode)
+	resizeErr := errors.New("floating resize failed")
+	pty := &transactionalResizePTY{errs: []error{resizeErr}}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, requestedSize)
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+	var tabUnlocked, paneUnlocked bool
+	pty.onResize = func() {
+		tabUnlocked = tb.mu.TryLock()
+		if tabUnlocked {
+			tb.mu.Unlock()
+		}
+		paneUnlocked = popup.mu.TryLock()
+		if paneUnlocked {
+			popup.mu.Unlock()
+		}
+	}
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+
+	require.True(t, ok)
+	require.Len(t, failed, 1)
+	require.ErrorIs(t, failed[0].err, resizeErr)
+	require.Equal(t, []domain.Size{rectSize(requested.Inner)}, pty.requested())
+	require.True(t, tabUnlocked, "PTY.Resize must run outside tab.mu")
+	require.True(t, paneUnlocked, "PTY.Resize must run outside pane.mu")
+	popup.mu.Lock()
+	require.Equal(t, committed.Inner, popup.rect, "failed PTY resize published a speculative rectangle")
+	require.Equal(t, committed, popup.popupGeometry, "failed PTY resize published speculative popup geometry")
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.True(t, popup.resizeRetry, "failed PTY resize must remain retryable")
+	require.False(t, popup.resizeApplying, "failed PTY resize must reopen the parser gate")
+	popup.mu.Unlock()
+	tb.mu.Lock()
+	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
+	tb.mu.Unlock()
+	require.True(t, visible)
+	require.Equal(t, committed, inputGeometry, "input mapping must retain committed geometry")
+}
+
+func TestApplyVisibleFloatingLayoutPublishesSameSizeGeometryWithoutPTYResize(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 50, Height: 50}
+	size := domain.Size{Cols: 79, Rows: 20}
+	requested := calculateContentFloatingGeometry(size, cfg)
+	require.Equal(t, ui.PresentationDrawer, requested.Mode)
+	committed := requested
+	committed.Mode = ui.PresentationFloating
+	committed.Bounds.X++
+	committed.Inner.X++
+	pty := &transactionalResizePTY{}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, size)
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+
+	require.True(t, ok)
+	require.Empty(t, failed)
+	require.Empty(t, pty.requested(), "same-size geometry publication must not resize the PTY")
+	popup.mu.Lock()
+	require.Equal(t, requested.Inner, popup.rect)
+	require.Equal(t, requested, popup.popupGeometry)
+	require.Equal(t, rectSize(requested.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.False(t, popup.resizeRetry)
+	popup.mu.Unlock()
+}
+
+func TestZeroInnerFloatingDrawerPublicationDoesNotRecheckCurrent(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
+	pty := &transactionalResizePTY{}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+	calls := 0
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, func() bool {
+		calls++
+		return calls == 1
+	})
+
+	require.True(t, ok, "a publication accepted while current must not later report stale")
+	require.Equal(t, 1, calls, "current must not be rechecked after publication")
+	require.Empty(t, failed)
+	require.Empty(t, pty.requested())
+	requested := calculateContentFloatingGeometry(tb.size, cfg)
+	popup.mu.Lock()
+	require.Equal(t, requested, popup.popupGeometry)
+	require.Equal(t, committed.Inner, popup.rect)
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	popup.mu.Unlock()
+}
+
+func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 22}, cfg)
+	pty := &transactionalResizePTY{}
+	popup := newPane("floating", pty, rectSize(committed.Inner))
+	popup.rect = committed.Inner
+	popup.popupGeometry = committed
+	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
+	installTestFloating(tb, popup, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+
+	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, func() bool { return false })
+
+	require.False(t, ok)
+	require.Empty(t, failed)
+	require.Empty(t, pty.requested())
+	popup.mu.Lock()
+	require.Equal(t, committed, popup.popupGeometry)
+	require.Equal(t, committed.Inner, popup.rect)
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	popup.mu.Unlock()
 }
 
 func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) {

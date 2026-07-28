@@ -100,7 +100,7 @@ func (t *ownedSwapErrorTransport) Close() error               { return nil }
 func TestCopySearchModalGeometry(t *testing.T) {
 	base := domain.Size{Cols: 100, Rows: 40}
 
-	require.Equal(t, domain.Rect{X: 0, Y: 28, Width: 100, Height: 11}, copySearchModal.Bounds(base))
+	require.Equal(t, domain.Rect{X: 0, Y: 28, Width: 100, Height: 11}, copySearchModal.Resolve(base).Bounds)
 	require.Equal(t, domain.AnchorBottom, copySearchModal.Anchor)
 	require.Equal(t, ui.Margins{Bottom: 1}, copySearchModal.Margins)
 }

@@ -34,6 +34,9 @@ focus-pane-left = alt+h
 focus-pane-right = alt+l
 focus-pane-up = alt+k
 focus-pane-down = alt+j
+# Optional pane rearrangement actions are unbound by default.
+# consume-or-expel-pane-left = alt+H
+# consume-or-expel-pane-right = alt+L
 switch-tab-1 = alt+1
 # ... through switch-tab-9 = alt+9
 
@@ -53,6 +56,8 @@ code.split-right = SPR
 code.split-left = SPL
 code.split-up = SPU
 code.split-down = SPD
+code.consume-or-expel-pane-left = CEL
+code.consume-or-expel-pane-right = CER
 code.stack-pane = STP
 code.toggle-stack = TST
 code.close-pane = CLP
@@ -96,6 +101,14 @@ Slots `0`, `7`, `8`, and `15` are valid explicit selections, but log a warning b
 
 Key specs: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` through `alt+9`. Configuring an action replaces all of its built-in aliases (set `focus-pane-left` and the Alt+Arrow alias is gone). Tab switching also accepts the top-row symbols of non-QWERTY layouts, so AZERTY works without extra config.
 
+`alt+[` is unsupported because terminals frame it as the CSI prefix `ESC [`, which vev passes through as terminal input. Cmd/Super is not a vev key-spec modifier; map a physical Cmd/Super chord in the terminal emulator to an unused, safe `ESC` + character sequence (not `ESC [`), then configure the matching `alt+<char>` in vev.
+
+## Pane consume or expel
+
+The `consume-or-expel-pane-left` and `consume-or-expel-pane-right` actions are unbound by default; the commented Alt+H/Alt+L bindings above are optional examples. Use palette codes `CEL` and `CER`, or script them as `vev cmd consume-or-expel-pane-left` and `vev cmd consume-or-expel-pane-right`.
+
+A singleton pane moves into the immediate column on the requested side; at the outer edge, nothing changes. A pane in a multi-member vertical or stack column moves out as an adjacent singleton column. This works only with canonical column layouts: one column, or a top-level horizontal split of columns, where each column is a singleton pane, a vertical split of panes, or a pane stack. Nested mixed splits are unsupported.
+
 ## Navigation overflow
 
 Both settings are independent and default to `off`. With `nav.overflow-tabs = on`, left/right keyboard focus (`Alt+H`/`Alt+L` by default) continues from a pane edge to the adjacent tab. With `nav.overflow-sessions = on`, up/down keyboard focus (`Alt+K`/`Alt+J` by default) continues to the adjacent live session in alphabetical order. Neither setting wraps at the first or last destination.
@@ -116,13 +129,19 @@ copy.word-separators = " -_@"
 
 Set `copy.word-separators = ""` to use only Unicode whitespace as a separator.
 
+## Responsive overlays
+
+On complete frames below 80 columns, interactive overlays use full-width bottom drawers immediately above the bottom bar. This applies to the floating terminal, command palette, session picker, notification history, prompts, and copy search. A drawer keeps its overlay's preferred outer height, capped at the frame height minus four rows, so frame rows 0–2 remain visible. Drawers use only a top border.
+
+Opening an interactive overlay dims the complete underlying frame, including panes, both bars, notices, and any lower-priority overlay. Notice toasts remain compact rather than becoming drawers. Copy mode remains full-screen; only its search prompt uses the responsive drawer.
+
 ## Palette anchor
 
-The command palette is centered by default. Set `palette.anchor` to another anchor to reposition it, or use `auto` for a bottom shelf on narrow terminals and a bottom-right rail from 96 columns up. Reload moves an open palette without losing your query.
+The command palette is centered by default. With `palette.anchor = auto`, it uses a full-width bottom shelf from 80 through 95 columns and a 64-column bottom-right rail from 96 columns up. Set an explicit anchor to position the shelf or rail. Below 80 columns, the palette is always a bottom drawer, so an explicit anchor does not override the responsive layout. Reload moves an open palette without losing your query.
 
 ## Floating terminal
 
-The command runs through your shell. A changed command applies on the next launch; changed dimensions on the next show or resize. Floating state is not restored across daemon restarts.
+The command runs through your shell. A changed command applies on the next launch; changed dimensions on the next show or resize. Below 80 columns, `floating.height` continues to determine the drawer's outer height, capped to preserve the first three frame rows and the bottom bar; `floating.width` is replaced by the full frame width. Floating state is not restored across daemon restarts.
 
 ## Bar anchors
 

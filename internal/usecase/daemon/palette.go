@@ -322,7 +322,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		return
 	}
 	sess.dispatchMu.Lock()
-	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect}, args)
+	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect, redrawClosedPalette: true}, args)
 	sess.dispatchMu.Unlock()
 	if roleHandoff {
 		if current := ac.currentSession(); current != nil {
@@ -393,12 +393,13 @@ func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery strin
 }
 
 type paletteExec struct {
-	d       *Daemon
-	sess    *session
-	ac      *attachedClient
-	recent  []recentSession
-	actions daemonActionRunner
-	effect  *roleEffectTicket
+	d                   *Daemon
+	sess                *session
+	ac                  *attachedClient
+	recent              []recentSession
+	actions             daemonActionRunner
+	effect              *roleEffectTicket
+	redrawClosedPalette bool
 }
 
 func (e paletteExec) runAction(request daemonActionRequest) error {
@@ -410,10 +411,19 @@ func (e paletteExec) runAction(request daemonActionRequest) error {
 		runner = daemonActions{d: e.d}
 	}
 	err := runner.Run(request)
-	if err == nil && e.actions == nil {
+	if errors.Is(err, errDaemonActionNoChange) {
+		if e.redrawClosedPalette {
+			e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if e.actions == nil {
 		finishDaemonActionForClient(e.d, request, e.ac, "palette.go")
 	}
-	return err
+	return nil
 }
 
 func (e paletteExec) CreateTab() error {
@@ -442,6 +452,15 @@ func (e paletteExec) SplitRight() error { return e.split(layout.Right) }
 func (e paletteExec) SplitLeft() error  { return e.split(layout.Left) }
 func (e paletteExec) SplitUp() error    { return e.split(layout.Up) }
 func (e paletteExec) SplitDown() error  { return e.split(layout.Down) }
+func (e paletteExec) consumeOrExpelPane(direction layout.Direction) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: direction})
+}
+func (e paletteExec) ConsumeOrExpelPaneLeft() error {
+	return e.consumeOrExpelPane(layout.Left)
+}
+func (e paletteExec) ConsumeOrExpelPaneRight() error {
+	return e.consumeOrExpelPane(layout.Right)
+}
 
 func (e paletteExec) StackPane() error {
 	return e.runAction(daemonActionRequest{kind: daemonActionStackPane})

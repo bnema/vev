@@ -64,9 +64,9 @@ func TestIncrementalSnapshotMetricsWriteNoUnchangedHistoryBlobsAndBoundCache(t *
 func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: 10_000})
 
-	markSnapshotDirty(fixture.sess)
-	require.True(t, fixture.d.scheduleSnapshot(fixture.sess))
-	awaitSnapshotClean(t, fixture.sess)
+	// This contract concerns capture and publication bytes, not queue latency.
+	// Publish synchronously so the 10k-row setup cannot race the test deadline.
+	publishBenchmarkSnapshot(t, fixture, 1)
 
 	var copies atomic.Uint64
 	fixture.sess.snapshotMu.Lock()
@@ -83,9 +83,7 @@ func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testin
 	for i, r := range "changed" {
 		require.Equalf(t, r, frame.At(i, 0).Rune, "fixture must overwrite at column %d", i)
 	}
-	markSnapshotDirty(fixture.sess)
-	require.True(t, fixture.d.scheduleFinalSnapshot(fixture.sess))
-	awaitSnapshotClean(t, fixture.sess)
+	publishBenchmarkSnapshot(t, fixture, 2)
 
 	metrics := fixture.snapshots.metrics()
 	require.Equal(t, uint64(1), metrics.writes)

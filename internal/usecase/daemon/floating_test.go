@@ -208,6 +208,71 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	d.sessWg.Wait()
 }
 
+func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
+	initial := domain.Size{Cols: 80, Rows: 25}
+	latest := domain.Size{Cols: 79, Rows: 25}
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+	latestGeometry := calculateContentFloatingGeometry(tabSize(latest), cfg)
+
+	readerRelease := make(chan struct{})
+	readerStarted := make(chan struct{})
+	resized := make(chan struct{})
+	floatingPTY := portsmocks.NewMockPTY(t)
+	floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+		close(readerStarted)
+		<-readerRelease
+		return 0, io.EOF
+	}).Once()
+	floatingPTY.EXPECT().Resize(rectSize(latestGeometry.Inner)).Run(func(domain.Size) { close(resized) }).Return(nil).Once()
+	floatingPTY.EXPECT().Close().RunAndReturn(func() error {
+		select {
+		case <-readerRelease:
+		default:
+			close(readerRelease)
+		}
+		return nil
+	}).Once()
+	factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
+	d := newTestDaemon(t, factory, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+	tabCtx, cancelTab := context.WithCancel(t.Context())
+	t.Cleanup(cancelTab)
+	tb := newTab(&transactionalResizePTY{}, tabSize(initial))
+	tb.ctx, tb.cancel = tabCtx, cancelTab
+	sess := &session{id: "responsive-open", name: "work", tabs: []*tab{tb}, ctx: t.Context()}
+
+	d.startFloating(sess, tb, true)
+	openCall := <-opened
+	require.Equal(t, rectSize(calculateContentFloatingGeometry(tabSize(initial), cfg).Inner), openCall.size)
+	require.True(t, d.requestTransactionalResize(sess, nil, latest, true))
+	allowOpen()
+	select {
+	case <-resized:
+	case <-time.After(time.Second):
+		t.Fatal("floating install did not reconcile the resize committed while Open was blocked")
+	}
+	select {
+	case <-readerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("floating reader did not start")
+	}
+
+	require.Eventually(t, func() bool {
+		tb.mu.Lock()
+		p := tb.floating.pane
+		visible := tb.floating.state == floatingVisible
+		tb.mu.Unlock()
+		if !visible || p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.popupGeometry == latestGeometry && p.rect == latestGeometry.Inner
+	}, time.Second, time.Millisecond, "floating install retained the stale Open geometry")
+	d.teardownFloating(tb, nil)
+	d.sessWg.Wait()
+}
+
 func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
 	floatingPTY := portsmocks.NewMockPTY(t)
 	readerStarted := make(chan struct{})

@@ -92,7 +92,7 @@ func TestSnatchedPanelFrame(t *testing.T) {
 				return
 			}
 
-			require.Equal(t, tt.wantBounds, snatchedModal.Bounds(tt.wantSize))
+			require.Equal(t, tt.wantBounds, snatchedModal.Resolve(tt.wantSize).Bounds)
 			topLeft := frame.At(tt.wantBounds.X, tt.wantBounds.Y)
 			bottomRight := frame.At(tt.wantBounds.X+tt.wantBounds.Width-1, tt.wantBounds.Y+tt.wantBounds.Height-1)
 			require.Equal(t, '┌', topLeft.Rune)

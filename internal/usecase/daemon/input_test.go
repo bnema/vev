@@ -21,10 +21,113 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
+
+func TestConfiguredConsumeOrExpelActionsRouteThroughDaemonInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		binding    string
+		key        byte
+		focus      layout.PaneID
+		wantTarget layout.PaneID
+	}{
+		{name: "left", binding: "consume-or-expel-pane-left", key: 'H', focus: "pane-3", wantTarget: "pane-3"},
+		{name: "right", binding: "consume-or-expel-pane-right", key: 'L', focus: "pane-1", wantTarget: "pane-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+			h.tab.mu.Lock()
+			h.tab.tree.Focus = tt.focus
+			beforeGeneration := h.tab.layoutGeneration
+			h.tab.mu.Unlock()
+			bindings, warnings := keys.BuildBindings(map[string]string{tt.binding: "alt+" + string(tt.key)})
+			require.Empty(t, warnings)
+			h.daemon.bindings.Store(bindings)
+			ac := &attachedClient{}
+			ac.setSession(h.session)
+			ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
+			h.session.mu.Lock()
+			h.session.client = ac
+			h.session.mu.Unlock()
+			invalidations := make(chan renderInvalidation, 1)
+			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+			rc.attach(ac)
+			h.session.installRenderCoordinator(rc)
+
+			h.daemon.handleInput(h.session, ac, []byte{keys.ESC, tt.key})
+
+			h.tab.mu.Lock()
+			require.Equal(t, tt.wantTarget, h.tab.tree.Focus)
+			require.Equal(t, beforeGeneration+1, h.tab.layoutGeneration)
+			require.Len(t, h.tab.tree.Root.Children, 2)
+			h.tab.mu.Unlock()
+			awaitInvalidation(t, invalidations)
+			requireNoInvalidation(t, invalidations)
+		})
+	}
+}
+
+func TestConfiguredConsumeOrExpelEdgeActionIsSilent(t *testing.T) {
+	h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
+	bindings, warnings := keys.BuildBindings(map[string]string{"consume-or-expel-pane-left": "alt+H"})
+	require.Empty(t, warnings)
+	h.daemon.bindings.Store(bindings)
+	ac := &attachedClient{}
+	ac.setSession(h.session)
+	ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
+	h.session.mu.Lock()
+	h.session.client = ac
+	h.session.mu.Unlock()
+	invalidations := make(chan renderInvalidation, 1)
+	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+	rc.attach(ac)
+	h.session.installRenderCoordinator(rc)
+	before := h.snapshot()
+
+	h.daemon.handleInput(h.session, ac, []byte{keys.ESC, 'H'})
+
+	require.Equal(t, before, h.snapshot())
+	require.Empty(t, h.daemon.notices.history())
+	requireNoInvalidation(t, invalidations)
+}
+
+func TestConsumeOrExpelKeyActionPreservesRearrangementWarning(t *testing.T) {
+	tests := []struct {
+		name   string
+		action keys.Action
+	}{
+		{name: "left", action: keys.ActionConsumeOrExpelPaneLeft},
+		{name: "right", action: keys.ActionConsumeOrExpelPaneRight},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "t_work", "p_work")
+			ac := &attachedClient{}
+			ac.setSession(sess)
+			runner := &actionRunnerSpy{err: domain.UserWarn(
+				domain.NoticeLayoutTooSmall,
+				"not enough space to rearrange pane",
+				layout.ErrTooSmall,
+			)}
+
+			daemonKeyHandler{d: d, ac: ac, actions: runner}.Action(tt.action)
+
+			history := d.notices.history()
+			require.Len(t, history, 1)
+			require.Equal(t, domain.NoticeLayoutTooSmall, history[0].Code)
+			require.Equal(t, domain.NoticeWarn, history[0].Severity)
+			require.Equal(t, "not enough space to rearrange pane", history[0].Message)
+		})
+	}
+}
 
 func TestResizeActionAdaptersSubmitEquivalentRequests(t *testing.T) {
 	tests := []struct {
@@ -602,7 +705,7 @@ func TestFloatingMouseTranslatesSGRToInnerCoordinates(t *testing.T) {
 	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 	installTestFloating(tb, floating, true)
 	geometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 20}, d.currentFloatingConfig())
-	raw := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2))
+	raw := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+clientTopBarRows+1)
 
 	d.handleInput(sess, ac, raw)
 }
@@ -620,10 +723,82 @@ func TestFloatingMouseIgnoresBorderAndOutside(t *testing.T) {
 	installTestFloating(tb, floating, true)
 	geometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 20}, d.currentFloatingConfig())
 
-	border := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Bounds.X+1, geometry.Bounds.Y+2))
+	border := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Bounds.X+1, geometry.Bounds.Y+clientTopBarRows+1)
 	outside := []byte("\x1b[<0;1;2M")
 	d.handleInput(sess, ac, border)
 	d.handleInput(sess, ac, outside)
+}
+
+func TestResponsiveDrawerFloatingMouseRoutesOnlyInnerClientCells(t *testing.T) {
+	normal := portsmocks.NewMockPTY(t)
+	floatingPTY := portsmocks.NewMockPTY(t)
+	floatingPTY.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
+	tb := sess.activeTab()
+	complete := domain.Size{Cols: 79, Rows: 25}
+	content := tabSize(complete)
+	geometry := calculateContentFloatingGeometry(content, d.currentFloatingConfig())
+	require.Equal(t, ui.PresentationDrawer, geometry.Mode)
+	tb.mu.Lock()
+	tb.size = content
+	tb.mu.Unlock()
+	floating := newPane("floating", floatingPTY, rectSize(geometry.Inner))
+	floating.popupGeometry = geometry
+	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	installTestFloating(tb, floating, true)
+
+	firstInner := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+clientTopBarRows+1)
+	d.handleInput(sess, ac, firstInner)
+	for _, frameRow := range []int{0, 1, 2, geometry.Bounds.Y + clientTopBarRows, complete.Rows - 1} {
+		d.handleInput(sess, ac, fmt.Appendf(nil, "\x1b[<0;1;%dM", frameRow+1))
+	}
+}
+
+func TestResponsiveDrawerCopyMouseMapsInnerAndPinsDragAwayFromChrome(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	complete := domain.Size{Cols: 79, Rows: 25}
+	content := tabSize(complete)
+	geometry := calculateContentFloatingGeometry(content, d.currentFloatingConfig())
+	tb.mu.Lock()
+	tb.size = content
+	tb.mu.Unlock()
+	floating := newPane("floating", nil, rectSize(geometry.Inner))
+	floating.popupGeometry = geometry
+	floating.screen.Write([]byte("drawer row zero\r\nsecond row"))
+	installTestFloating(tb, floating, true)
+
+	for _, frameRow := range []int{0, 1, 2, geometry.Bounds.Y + clientTopBarRows, complete.Rows - 1} {
+		d.handleInput(sess, ac, fmt.Appendf(nil, "\x1b[<0;1;%dM", frameRow+1))
+		ac.overlays.copyMu.Lock()
+		require.False(t, ac.overlays.copyPointer.valid, "frame row %d is drawer chrome, not copy content", frameRow)
+		ac.overlays.copyMu.Unlock()
+	}
+
+	firstInner := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+clientTopBarRows+1)
+	d.handleInput(sess, ac, firstInner)
+	ac.overlays.copyMu.Lock()
+	pointer := ac.overlays.copyPointer
+	ac.overlays.copyMu.Unlock()
+	require.True(t, pointer.valid)
+	require.Same(t, floating, pointer.pane)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 0}, pointer.press)
+	require.Equal(t, copyContentToClientRect(geometry.Inner), pointer.geometry.content)
+
+	// Motion onto the protected top row clamps against the press-owned drawer
+	// geometry instead of retargeting the underlying tiled terminal.
+	d.handleInput(sess, ac, []byte("\x1b[<32;79;1M"))
+	ac.overlays.copyMu.Lock()
+	require.NotNil(t, ac.overlays.copyMode)
+	require.Same(t, floating, ac.overlays.copyPane)
+	require.Same(t, floating, ac.overlays.copyPointer.pane)
+	require.Equal(t, pointer.geometry, ac.overlays.copyPointer.geometry)
+	selection := ac.overlays.copyMode.Selection()
+	ac.overlays.copyMu.Unlock()
+	require.Equal(t, scopy.Pos{Row: 0, Col: 0}, selection.Anchor)
+	require.Equal(t, 0, selection.Active.Row, "drag above the drawer must stay pinned to its first document row")
 }
 
 func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {

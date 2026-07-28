@@ -167,6 +167,94 @@ func (_c *MockContext_CloseTab_Call) RunAndReturn(run func() error) *MockContext
 	return _c
 }
 
+// ConsumeOrExpelPaneLeft provides a mock function for the type MockContext
+func (_mock *MockContext) ConsumeOrExpelPaneLeft() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ConsumeOrExpelPaneLeft")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_ConsumeOrExpelPaneLeft_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ConsumeOrExpelPaneLeft'
+type MockContext_ConsumeOrExpelPaneLeft_Call struct {
+	*mock.Call
+}
+
+// ConsumeOrExpelPaneLeft is a helper method to define mock.On call
+func (_e *MockContext_Expecter) ConsumeOrExpelPaneLeft() *MockContext_ConsumeOrExpelPaneLeft_Call {
+	return &MockContext_ConsumeOrExpelPaneLeft_Call{Call: _e.mock.On("ConsumeOrExpelPaneLeft")}
+}
+
+func (_c *MockContext_ConsumeOrExpelPaneLeft_Call) Run(run func()) *MockContext_ConsumeOrExpelPaneLeft_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_ConsumeOrExpelPaneLeft_Call) Return(err error) *MockContext_ConsumeOrExpelPaneLeft_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_ConsumeOrExpelPaneLeft_Call) RunAndReturn(run func() error) *MockContext_ConsumeOrExpelPaneLeft_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ConsumeOrExpelPaneRight provides a mock function for the type MockContext
+func (_mock *MockContext) ConsumeOrExpelPaneRight() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ConsumeOrExpelPaneRight")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_ConsumeOrExpelPaneRight_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ConsumeOrExpelPaneRight'
+type MockContext_ConsumeOrExpelPaneRight_Call struct {
+	*mock.Call
+}
+
+// ConsumeOrExpelPaneRight is a helper method to define mock.On call
+func (_e *MockContext_Expecter) ConsumeOrExpelPaneRight() *MockContext_ConsumeOrExpelPaneRight_Call {
+	return &MockContext_ConsumeOrExpelPaneRight_Call{Call: _e.mock.On("ConsumeOrExpelPaneRight")}
+}
+
+func (_c *MockContext_ConsumeOrExpelPaneRight_Call) Run(run func()) *MockContext_ConsumeOrExpelPaneRight_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_ConsumeOrExpelPaneRight_Call) Return(err error) *MockContext_ConsumeOrExpelPaneRight_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_ConsumeOrExpelPaneRight_Call) RunAndReturn(run func() error) *MockContext_ConsumeOrExpelPaneRight_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateSession provides a mock function for the type MockContext
 func (_mock *MockContext) CreateSession() error {
 	ret := _mock.Called()

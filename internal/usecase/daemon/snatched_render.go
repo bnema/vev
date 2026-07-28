@@ -23,7 +23,8 @@ func snatchedPanelFrame(size domain.Size, styles themeui.Styles, feedback string
 		return frame
 	}
 
-	inner := snatchedModal.Composite(frame, styles.BorderMuted, styles.PickerBase)
+	presentation := snatchedModal.Resolve(domain.Size{Cols: width, Rows: height})
+	inner := snatchedModal.CompositePresentation(frame, presentation, styles.BorderMuted, styles.PickerBase)
 	message := "This session is now active elsewhere."
 	if feedback != "" {
 		message = feedback

@@ -520,14 +520,22 @@ func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 	}
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	go d.handleInput(sess, ac, []byte("JRS 1\r"))
-	<-validated
+	inputHandled := make(chan struct{})
+	go func() {
+		d.handleInput(sess, ac, []byte("JRS 1\r"))
+		close(inputHandled)
+	}()
+	awaitTestCompletion(t, validated, "JRS did not validate its captured target")
 	d.mu.Lock()
 	delete(d.sessions, target.id)
 	d.mu.Unlock()
 	close(releaseHandoff)
 
-	awaitFrame(t, sends, ports.MsgOutput)
+	// switchToTarget repaints its failed hand-off before handlePaletteInput
+	// records the generation-safe feedback and schedules the feedback repaint.
+	// Wait for the input transaction, rather than mistaking that intermediate
+	// repaint for publication of the final palette state.
+	awaitTestCompletion(t, inputHandled, "JRS displaced-target input did not complete")
 	require.True(t, ac.overlays.paletteActive())
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, "JRS 1", ac.overlays.palette.Query())
@@ -734,7 +742,7 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
@@ -852,10 +860,12 @@ func TestPaletteModalGeometry(t *testing.T) {
 
 	auto := domain.PaletteConfig{}
 	tests := []testCase{
+		{name: "auto 79 column drawer", size: domain.Size{Cols: 79, Rows: 40}, cfg: auto, want: domain.Rect{X: 0, Y: 28, Width: 79, Height: 11}},
+		{name: "auto 80 column shelf", size: domain.Size{Cols: 80, Rows: 40}, cfg: auto, want: domain.Rect{X: 0, Y: 28, Width: 80, Height: 11}},
 		{name: "auto 95 column shelf", size: domain.Size{Cols: 95, Rows: 40}, cfg: auto, want: domain.Rect{X: 0, Y: 28, Width: 95, Height: 11}},
 		{name: "auto 96 column rail", size: domain.Size{Cols: 96, Rows: 40}, cfg: auto, want: domain.Rect{X: 31, Y: 28, Width: 64, Height: 11}},
 		{name: "auto 120 column rail", size: domain.Size{Cols: 120, Rows: 40}, cfg: auto, want: domain.Rect{X: 55, Y: 28, Width: 64, Height: 11}},
-		{name: "auto tiny terminal clamps", size: domain.Size{Cols: 20, Rows: 6}, cfg: auto, want: domain.Rect{X: 0, Y: 0, Width: 20, Height: 6}},
+		{name: "auto tiny terminal clamps", size: domain.Size{Cols: 20, Rows: 6}, cfg: auto, want: domain.Rect{X: 0, Y: 3, Width: 20, Height: 2}},
 	}
 	for _, anchor := range []domain.Anchor{domain.AnchorTopLeft, domain.AnchorTop, domain.AnchorTopRight, domain.AnchorLeft, domain.AnchorCenter, domain.AnchorRight, domain.AnchorBottomLeft, domain.AnchorBottom, domain.AnchorBottomRight} {
 		wantX := map[domain.Anchor]int{domain.AnchorTopLeft: 1, domain.AnchorTop: 28, domain.AnchorTopRight: 55, domain.AnchorLeft: 1, domain.AnchorCenter: 28, domain.AnchorRight: 55, domain.AnchorBottomLeft: 1, domain.AnchorBottom: 28, domain.AnchorBottomRight: 55}[anchor]
@@ -869,10 +879,38 @@ func TestPaletteModalGeometry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			modal := paletteModalFor(tt.size, tt.cfg)
-			require.Equal(t, tt.want, modal.Bounds(tt.size))
+			presentation := modal.Resolve(tt.size)
+			require.Equal(t, tt.want, presentation.Bounds)
+			if tt.size.Cols < ui.ResponsiveDrawerBreakpoint {
+				require.Equal(t, ui.PresentationDrawer, presentation.Mode)
+				require.Equal(t, ui.BorderTop, presentation.Borders)
+			} else {
+				require.Equal(t, ui.PresentationFloating, presentation.Mode)
+				require.Equal(t, ui.BorderAll, presentation.Borders)
+			}
 			require.Equal(t, " Commands ", modal.Title)
 			require.Equal(t, 11, modal.FixedHeight)
 			require.Equal(t, ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}, modal.Margins)
+		})
+	}
+}
+
+func TestComposePaletteClientFrameUsesResponsivePresentation(t *testing.T) {
+	model := palette.New(nil)
+	for _, tt := range []struct {
+		name      string
+		width     int
+		topLeft   rune
+		innerLeft rune
+	}{
+		{name: "79 column drawer", width: 79, topLeft: '─', innerLeft: '>'},
+		{name: "80 column shelf", width: 80, topLeft: '┌', innerLeft: '│'},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			frame, _ := composePaletteClientFrame(model, renderer.NewFrame(tt.width, 40), domain.PaletteConfig{}, "")
+
+			require.Equal(t, tt.topLeft, frame.At(0, 28).Rune)
+			require.Equal(t, tt.innerLeft, frame.At(0, 29).Rune)
 		})
 	}
 }
@@ -902,7 +940,7 @@ func TestComposePaletteClientFrameUsesSelectedDescriptionTheme(t *testing.T) {
 	styles := themeui.Resolve(themeui.BuiltinDark, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
 
 	frame, _ := composePaletteClientFrame(model, base, domain.PaletteConfig{}, "", styles)
-	inner := paletteModalFor(size, domain.PaletteConfig{}).Inner(size)
+	inner := paletteModalFor(size, domain.PaletteConfig{}).Resolve(size).Inner
 
 	require.True(t, frame.At(inner.X+4, inner.Y+1).Style.Equal(styles.PickerSelectionMuted))
 }
