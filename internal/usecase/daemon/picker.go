@@ -14,56 +14,7 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
-	if d == nil || source.Session.ID == "" || source.TabID == "" {
-		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source session is no longer available.", errMovePaneInvalid)
-	}
-	sess := d.sessionByID(source.Session.ID)
-	if sess == nil || sess.incarnation != source.Session.Incarnation {
-		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source session is no longer available.", errMovePaneInvalid)
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	if source.Client != nil && sess.client != source.Client {
-		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source client is no longer active.", errMovePaneInvalid)
-	}
-	tb := findMoveTabLocked(sess, source.TabID)
-	if tb == nil {
-		return domain.UserWarn(domain.NoticeSessionUnavailable, "Tab no longer exists.", errMovePaneInvalid)
-	}
-	if source.PaneID == "" {
-		return nil
-	}
-	tb.mu.Lock()
-	defer tb.mu.Unlock()
-	if paneByStableIDLocked(tb, string(source.PaneID)) == nil {
-		return domain.UserWarn(domain.NoticeSessionUnavailable, "Pane no longer exists.", errMovePaneInvalid)
-	}
-	return nil
-}
-
 var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
-
-type pickerIntent uint8
-
-const (
-	pickerNavigate pickerIntent = iota
-	pickerMovePane
-	pickerMoveTab
-)
-
-type moveSessionLocator struct {
-	ID          domain.SessionID
-	Incarnation domain.IncarnationID
-	Name        string
-}
-
-type moveSourceLocator struct {
-	Session moveSessionLocator
-	TabID   domain.TabStableID
-	PaneID  domain.PaneStableID
-	Client  *attachedClient
-}
 
 // enterPicker preserves the existing navigation entry point. Navigation always
 // publishes its model, including an empty one; only move entry can fail for a
@@ -71,19 +22,6 @@ type moveSourceLocator struct {
 func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
-}
-
-// enterPickerForIntent returns errNoMoveDestination only for move intents.
-func (d *Daemon) enterPickerForIntent(sess *session, ac *attachedClient, intent pickerIntent, source moveSourceLocator) error {
-	model := d.newPickerModel(sess, intent, source, picker.SourceFilter{})
-	if intent != pickerNavigate {
-		if _, ok := model.Selected(); !ok {
-			return errNoMoveDestination
-		}
-	}
-
-	d.publishPicker(sess, ac, model, intent, source)
-	return nil
 }
 
 func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {
@@ -186,17 +124,6 @@ func (d *Daemon) newPickerModel(cur *session, intent pickerIntent, source moveSo
 			Session: source.Session.ID, Incarnation: source.Session.Incarnation, TabID: source.TabID,
 		},
 	})
-}
-
-func pickerSelectionMode(intent pickerIntent) picker.SelectionMode {
-	switch intent {
-	case pickerMovePane:
-		return picker.SelectMovePaneTab
-	case pickerMoveTab:
-		return picker.SelectMoveTabSession
-	default:
-		return picker.SelectNavigationTab
-	}
 }
 
 func attentionSuffix(label string) string {
@@ -466,31 +393,6 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 	}
 }
 
-func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourceLocator, target picker.Target) error {
-	destination := moveSessionLocator{ID: target.Session, Incarnation: target.Incarnation, Name: target.Name}
-	switch intent {
-	case pickerMovePane:
-		if target.TabID == "" {
-			return errMovePaneInvalid
-		}
-		return d.movePane(movePaneRequest{
-			Source:           source.Session,
-			SourceTabID:      source.TabID,
-			SourcePaneID:     source.PaneID,
-			Destination:      destination,
-			DestinationTabID: target.TabID,
-		})
-	case pickerMoveTab:
-		return d.moveTab(moveTabRequest{
-			Source:      source.Session,
-			SourceTabID: source.TabID,
-			Destination: destination,
-		})
-	default:
-		return errMovePaneInvalid
-	}
-}
-
 func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = nil
@@ -501,39 +403,6 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 	generation := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
 	d.clearPreviewGeneration(ac, generation)
-}
-
-func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*session, *tab) {
-	d.mu.Lock()
-	sess := d.sessions[target.Session]
-	if sess == nil {
-		d.mu.Unlock()
-		return nil, nil
-	}
-	sess.mu.Lock()
-	d.mu.Unlock()
-	defer sess.mu.Unlock()
-	if sess.incarnation != target.Incarnation || !targetMatchesLifecycle(target, sess.name, sess.createdAt) {
-		return nil, nil
-	}
-	if intent == pickerMoveTab {
-		if sess.active < 0 || sess.active >= len(sess.tabs) {
-			return nil, nil
-		}
-		return sess, sess.tabs[sess.active]
-	}
-	if target.TabID != "" {
-		for _, tb := range sess.tabs {
-			if domain.TabStableID(tb.stableID) == target.TabID {
-				return sess, tb
-			}
-		}
-		return nil, nil
-	}
-	if target.TabIndex < 0 || target.TabIndex >= len(sess.tabs) {
-		return nil, nil
-	}
-	return sess, sess.tabs[target.TabIndex]
 }
 
 func pickerTargetsEqual(left, right picker.Target) bool {
@@ -949,42 +818,6 @@ func (d *Daemon) killPickerTarget(target picker.Target) error {
 		return d.killSession(targetSess, ports.ReasonSessionKilled, true)
 	}
 	return nil
-}
-
-func (d *Daemon) refreshPicker(ac *attachedClient) {
-	sess := ac.currentSession()
-	if sess == nil {
-		return
-	}
-	rt := ac.overlays
-	rt.pickerMu.Lock()
-	if rt.picker == nil {
-		rt.pickerMu.Unlock()
-		return
-	}
-	intent, source := rt.pickerIntent, rt.pickerSource
-	current := picker.SourceFilter{}
-	if intent != pickerNavigate {
-		selected, _ := rt.picker.Selected()
-		current = picker.SourceFilter{Session: selected.Session, Incarnation: selected.Incarnation, TabID: selected.TabID}
-	}
-	rt.pickerMu.Unlock()
-	model := d.newPickerModel(sess, intent, source, current)
-	if intent != pickerNavigate {
-		if _, ok := model.Selected(); !ok {
-			d.closePicker(ac)
-			return
-		}
-	}
-	rt.pickerMu.Lock()
-	updated := rt.picker != nil && rt.pickerIntent == intent && rt.pickerSource == source
-	if updated {
-		rt.picker = model
-	}
-	rt.pickerMu.Unlock()
-	if updated {
-		d.registerPreviewForSelection(ac)
-	}
 }
 
 func snapshotPickerPreview(tb *tab) picker.Preview {
