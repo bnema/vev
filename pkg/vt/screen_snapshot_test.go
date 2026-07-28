@@ -3,6 +3,7 @@ package vt
 import (
 	"testing"
 
+	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
 
@@ -164,6 +165,138 @@ func TestScreenSnapshotTitle(t *testing.T) {
 			screen := NewScreen(8, 2)
 			screen.Write([]byte(test.feed))
 			require.Equal(t, test.want, screen.Snapshot().Title())
+		})
+	}
+}
+
+func TestScreenSnapshotFidelity(t *testing.T) {
+	tests := []struct {
+		name      string
+		make      func() (*Screen, []renderer.Cell, []LineBound)
+		wantModes ModeSnapshot
+	}{
+		{
+			name: "styles wide continuation and bounds are exact",
+			make: func() (*Screen, []renderer.Cell, []LineBound) {
+				screen := NewScreen(4, 2)
+				style := renderer.Style{
+					Bold: true, Italic: true, Inverse: true,
+					Attrs:            renderer.AttrDim | renderer.AttrUnderline | renderer.AttrBlink | renderer.AttrStrikethrough,
+					HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 1, G: 2, B: 3},
+					Background:           17,
+					UnderlineStyle:       renderer.UnderlineCurly,
+					HasUnderlineColorRGB: true, UnderlineColorRGB: renderer.RGB{R: 4, G: 5, B: 6},
+				}
+				cells := []renderer.Cell{
+					{Rune: '界', Style: style},
+					{Continuation: true, Style: style},
+					{Rune: 'x', Style: renderer.DefaultStyle()},
+					renderer.BlankCell(),
+				}
+				copy(screen.Frame.Row(0), cells)
+				screen.buffer.boundaries[0] = LineBound{End: 3, Soft: true}
+				return screen, cells, []LineBound{LineBound{End: 3, Soft: true}, LineBound{}}
+			},
+		},
+		{
+			name: "active alternate screen is captured",
+			make: func() (*Screen, []renderer.Cell, []LineBound) {
+				screen := NewScreen(3, 1)
+				screen.Write([]byte("primary\x1b[?1049halt"))
+				cells := append([]renderer.Cell(nil), screen.Frame.Row(0)...)
+				return screen, cells, screen.LineBounds()
+			},
+			wantModes: ModeSnapshot{AlternateScreen: true},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen, wantCells, wantBounds := test.make()
+			snapshot := screen.Snapshot()
+			require.Equal(t, screen.Frame.Width, snapshot.Columns())
+			require.Equal(t, screen.Frame.Height, snapshot.Rows())
+			require.Equal(t, wantCells, snapshot.Row(0))
+			require.Equal(t, test.wantModes, snapshot.Modes())
+			for row, want := range wantBounds {
+				require.Equal(t, want, snapshot.Bound(row))
+			}
+		})
+	}
+}
+
+func TestScreenSnapshotOwnership(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Screen)
+	}{
+		{name: "later write", mutate: func(screen *Screen) { screen.Write([]byte("later")) }},
+		{name: "later scroll", mutate: func(screen *Screen) { screen.Write([]byte("1111222233334444")) }},
+		{name: "later resize", mutate: func(screen *Screen) { screen.Resize(2, 4) }},
+		{name: "later alternate entry", mutate: func(screen *Screen) { screen.Write([]byte("\x1b[?1049halt")) }},
+		{name: "later alternate entry and exit", mutate: func(screen *Screen) { screen.Write([]byte("\x1b[?1049halt\x1b[?1049l")) }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := NewScreen(4, 2)
+			screen.Write([]byte("abcdEF"))
+			screen.buffer.boundaries[0] = LineBound{End: 4, Soft: true}
+			snapshot := screen.Snapshot()
+			wantRows := [][]renderer.Cell{snapshot.Row(0), snapshot.Row(1)}
+			wantBounds := []LineBound{snapshot.Bound(0), snapshot.Bound(1)}
+
+			test.mutate(screen)
+
+			require.Equal(t, wantRows[0], snapshot.Row(0))
+			require.Equal(t, wantRows[1], snapshot.Row(1))
+			require.Equal(t, wantBounds[0], snapshot.Bound(0))
+			require.Equal(t, wantBounds[1], snapshot.Bound(1))
+
+			liveBeforeCallerMutation := append([]renderer.Cell(nil), screen.Frame.Row(0)...)
+			secondSnapshot := screen.Snapshot()
+			secondSnapshotBefore := secondSnapshot.Row(0)
+
+			callerCopy := snapshot.Row(0)
+			callerCopy[0] = renderer.Cell{Rune: 'z'}
+
+			require.Equal(t, wantRows[0], snapshot.BorrowedRow(0))
+			require.Equal(t, liveBeforeCallerMutation, screen.Frame.Row(0), "mutating Row copy must not change live Screen")
+			require.Equal(t, secondSnapshotBefore, secondSnapshot.Row(0), "mutating Row copy must not change another snapshot")
+		})
+	}
+}
+
+func TestScreenSnapshotBoundsAreIndependent(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Screen)
+	}{
+		{
+			name: "mutating a single boundary entry after the snapshot",
+			mutate: func(screen *Screen) {
+				screen.buffer.boundaries[0] = LineBound{End: 1, Soft: false}
+			},
+		},
+		{
+			name: "replacing the whole boundaries slice after the snapshot",
+			mutate: func(screen *Screen) {
+				screen.buffer.boundaries = []LineBound{{End: 1, Soft: false}, {End: 1, Soft: false}}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := NewScreen(4, 2)
+			screen.Write([]byte("abcdEF"))
+			screen.buffer.boundaries[0] = LineBound{End: 4, Soft: true}
+			snapshot := screen.Snapshot()
+			want := snapshot.Bound(0)
+
+			test.mutate(screen)
+
+			require.Equal(t, want, snapshot.Bound(0), "snapshot bounds must not alias Screen.buffer.boundaries")
 		})
 	}
 }
