@@ -89,7 +89,7 @@ func TestMoveRejectionPresentationParity(t *testing.T) {
 			require.False(t, result.OK)
 			require.Equal(t, descriptor.CommandCode, result.Code)
 			require.Equal(t, descriptor.CommandText, result.Text)
-			require.Equal(t, uint16(ports.ErrNoSuchTarget), result.Code)
+			require.Equal(t, ports.ErrNoSuchTarget, result.Code)
 			require.Equal(t, tt.commandText, result.Text)
 		})
 	}

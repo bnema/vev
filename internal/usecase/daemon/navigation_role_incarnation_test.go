@@ -66,10 +66,10 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 			go func() {
 				done <- d.switchToTargetForRole(effect.roleToken(), picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "test-handoff")
 			}()
-			<-ended
+			awaitTestCompletion(t, ended, "test handoff did not release its role ticket")
 			tt.rebind(t, d, source, ac)
 			close(release)
-			require.ErrorIs(t, <-done, errAttachmentTransition)
+			require.ErrorIs(t, awaitTestValue(t, done, "test handoff did not finish"), errAttachmentTransition)
 
 			require.Same(t, source, ac.currentSession())
 			target.mu.Lock()

@@ -186,6 +186,9 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 		ac = sess.client
 		sess.mu.Unlock()
 	}
+	if rc := sess.renderCoordinator(); rc != nil && rc.opts.onActivateTabAfterResize != nil {
+		rc.opts.onActivateTabAfterResize(lease != nil)
+	}
 	if lease != nil {
 		rc := sess.renderCoordinator()
 		if rc == nil || !rc.leaseCurrent(lease, true) {

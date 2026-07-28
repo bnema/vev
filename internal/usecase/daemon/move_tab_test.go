@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -79,7 +78,7 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			require.Same(t, tiledScreen, tiled.screen)
 			require.Same(t, floating, moved.floating.pane)
 			require.Same(t, floatingPTY, floating.pty)
-			require.Equal(t, floatingState(floatingHidden), moved.floating.state)
+			require.Equal(t, floatingHidden, moved.floating.state)
 			require.Equal(t, uint64(7), moved.floating.generation)
 			require.Equal(t, tiledOwnerGeneration+1, tiled.ownerGeneration)
 			require.Equal(t, floatingOwnerGeneration+1, floating.ownerGeneration)
@@ -413,10 +412,19 @@ func TestMoveTabOppositeDirectionsDoNotDeadlock(t *testing.T) {
 }
 
 type moveTabPurgeCatalogue struct {
-	ports.Catalogue
 	mu      sync.Mutex
 	records map[string]domain.CatalogueRecord
 	events  []string
+}
+
+func (c *moveTabPurgeCatalogue) Records() ([]domain.CatalogueRecord, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	records := make([]domain.CatalogueRecord, 0, len(c.records))
+	for _, record := range c.records {
+		records = append(records, record)
+	}
+	return records, nil
 }
 
 func (c *moveTabPurgeCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
@@ -424,6 +432,18 @@ func (c *moveTabPurgeCatalogue) Record(name string) (domain.CatalogueRecord, boo
 	defer c.mu.Unlock()
 	record, ok := c.records[name]
 	return record, ok, nil
+}
+
+func (c *moveTabPurgeCatalogue) Create(domain.CatalogueRecord) error {
+	return errors.New("move tab purge catalogue: Create is unsupported")
+}
+
+func (c *moveTabPurgeCatalogue) Replace(string, domain.CatalogueRecord) error {
+	return errors.New("move tab purge catalogue: Replace is unsupported")
+}
+
+func (c *moveTabPurgeCatalogue) Rename(string, domain.CatalogueRecord) error {
+	return errors.New("move tab purge catalogue: Rename is unsupported")
 }
 
 func (c *moveTabPurgeCatalogue) Delete(name string) error {
@@ -440,6 +460,9 @@ func (c *moveTabPurgeCatalogue) UpdateMetadata(update domain.CatalogueMetadataUp
 	c.events = append(c.events, "metadata:"+update.Name)
 	return nil
 }
+
+func (c *moveTabPurgeCatalogue) Sync() error  { return nil }
+func (c *moveTabPurgeCatalogue) Close() error { return nil }
 
 type moveTabPurgeRepository struct {
 	noOpSnapshotRepository

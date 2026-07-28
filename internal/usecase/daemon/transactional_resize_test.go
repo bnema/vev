@@ -188,7 +188,7 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 	// DSR is flushed back to the child and OSC 52 is forwarded through the
 	// normal asynchronous client path, proving replay uses processPTYData.
 	var clipboardOutput string
-	for range 3 {
+	for {
 		frame := awaitFrame(t, sends, ports.MsgOutput)
 		out, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)

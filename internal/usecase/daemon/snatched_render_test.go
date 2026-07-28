@@ -146,7 +146,7 @@ func TestSendSnatchedPanelTimeoutClosesCapturedTransportOnly(t *testing.T) {
 	timer.ch <- time.Time{}
 
 	require.ErrorIs(t, awaitTestValue(t, result, "snatched send did not time out"), errSendTimedOut)
-	defer old.Close() // Release the blocked worker if the assertion below fails.
+	defer func() { _ = old.Close() }() // Release the blocked worker if the assertion below fails.
 	require.True(t, old.Closed(), "timed-out captured transport was not closed")
 	require.False(t, fresh.Closed(), "replacement transport must remain open")
 

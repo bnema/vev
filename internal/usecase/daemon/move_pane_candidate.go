@@ -93,11 +93,14 @@ func allocateMovePaneID(destination *tab, sourceID layout.PaneID) (layout.PaneID
 		id := layout.PaneID(fmt.Sprintf("pane-%d", next))
 		_, mapped := destination.panes[id]
 		available := id != sourceID && !mapped && !layout.ContainsLeaf(destination.tree.Root, id)
+		if available {
+			if next == math.MaxInt {
+				return id, next, nil
+			}
+			return id, next + 1, nil
+		}
 		if next == math.MaxInt {
 			return "", 0, errMovePaneIDExhausted
-		}
-		if available {
-			return id, next + 1, nil
 		}
 		next++
 	}

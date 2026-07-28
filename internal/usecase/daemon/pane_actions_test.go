@@ -625,7 +625,7 @@ func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	ac.initOverlays()
 	ac.overlays.copyMode = &scopy.Mode{}
 
-	require.NoError(t, d.focusDir(sess, ac, layout.Right))
+	require.NoError(t, d.focusDir(sess, ac, layout.Right, nil))
 
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	require.Nil(t, ac.overlays.copyMode)
@@ -726,7 +726,7 @@ func TestStackFocusWalkExpandsAndOverflowRefuses(t *testing.T) {
 	require.NoError(t, d.stackPane(sess, nil))
 	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
 
-	require.NoError(t, d.focusDir(sess, nil, layout.Up))
+	require.NoError(t, d.focusDir(sess, nil, layout.Up, nil))
 
 	tb := sess.activeTab()
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)

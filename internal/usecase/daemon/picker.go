@@ -231,6 +231,9 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
 			}
+			if len(effects) != 0 && effects[0] != nil {
+				effects[0].End()
+			}
 			d.closePicker(ac)
 			err := d.commitMovePickerSelection(intent, source, target)
 			if err != nil {

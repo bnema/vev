@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -45,6 +44,27 @@ type moveTabCommit struct {
 	destMetadata        domain.CatalogueMetadataUpdate
 	destMetadataValid   bool
 	err                 error
+}
+
+func (d *Daemon) snapshotSnatchedRoleParticipants(sess *session, admitted []*attachedClient) ([]*attachedClient, []roleTransportInterrupt) {
+	if sess == nil || len(admitted) == 0 {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	clients := append([]*attachedClient(nil), admitted...)
+	interrupts := make([]roleTransportInterrupt, 0, len(clients))
+	for _, ac := range clients {
+		if ac == nil {
+			continue
+		}
+		if transport := ac.transportSnapshot(); transport.transport != nil {
+			interrupts = append(interrupts, roleTransportInterrupt{ac: ac, transport: transport})
+		}
+	}
+	return clients, interrupts
 }
 
 func (d *Daemon) moveTab(req moveTabRequest) (result error) {
@@ -109,21 +129,14 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		if err != nil {
 			return err
 		}
-		d.mu.Lock()
-		source.mu.Lock()
-		for _, ac := range admission.sourceSnatched {
-			participants.clients = append(participants.clients, ac)
-			if tr := ac.transportSnapshot(); tr.transport != nil {
-				participants.interrupts = append(participants.interrupts, roleTransportInterrupt{ac: ac, transport: tr})
-			}
-		}
-		source.mu.Unlock()
-		d.mu.Unlock()
-		frozen = tryFreezeRoleEffectGatesInterruptingObserved(participants.interrupts, func(ac *attachedClient) {
+		snatchedClients, snatchedInterrupts := d.snapshotSnatchedRoleParticipants(source, admission.sourceSnatched)
+		participants.clients = append(participants.clients, snatchedClients...)
+		participants.interrupts = append(participants.interrupts, snatchedInterrupts...)
+		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
 			if d.afterRoleEffectGateFrozen != nil {
 				d.afterRoleEffectGateFrozen("move-tab", ac)
 			}
-		}, participants.clients...)
+		}}, participants.clients...)
 		if !frozen.acquired || !frozen.drained {
 			frozen.unfreeze()
 			return errMovePaneInvalid
@@ -132,18 +145,8 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		commit.sourceRolesFrozen = true
 		commit.handoffReq.roleEffectsFrozen = true
 	} else if admission.finalSource && len(admission.sourceSnatched) > 0 {
-		d.mu.Lock()
-		source.mu.Lock()
-		clients := append([]*attachedClient(nil), admission.sourceSnatched...)
-		interrupts := make([]roleTransportInterrupt, 0, len(admission.sourceSnatched))
-		for _, ac := range admission.sourceSnatched {
-			if tr := ac.transportSnapshot(); tr.transport != nil {
-				interrupts = append(interrupts, roleTransportInterrupt{ac: ac, transport: tr})
-			}
-		}
-		source.mu.Unlock()
-		d.mu.Unlock()
-		frozen = tryFreezeRoleEffectGatesInterruptingObserved(interrupts, nil, clients...)
+		clients, interrupts := d.snapshotSnatchedRoleParticipants(source, admission.sourceSnatched)
+		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: interrupts, nonblocking: true}, clients...)
 		if !frozen.acquired || !frozen.drained {
 			frozen.unfreeze()
 			return errMovePaneInvalid
@@ -167,72 +170,35 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		return errMoveStaleTarget
 	}
 	fences.Release()
-	if commit.oldTabCancel != nil {
-		commit.oldTabCancel()
+	postcommit := movePanePostcommitPlan{
+		source:                   source,
+		destination:              destination,
+		sourceTab:                admission.tab,
+		destinationTab:           admission.tab,
+		movedPane:                firstMovePane(admission.panes),
+		movedPanes:               admission.panes,
+		sourceCleanupToken:       commit.sourceCleanupToken,
+		handoffResult:            commit.handoffResult,
+		syncCleanup:              commit.syncCleanup,
+		frozenRoles:              frozen,
+		rolesFrozen:              rolesFrozen,
+		unlockDispatch:           unlockDispatch,
+		reservation:              reservation,
+		oldTabCancel:             commit.oldTabCancel,
+		sourceTabWasActive:       !commit.sourceEmpty,
+		sourceTabRemoved:         true,
+		sourceEmpty:              commit.sourceEmpty,
+		retiredParked:            commit.retiredParked,
+		retiredAttachments:       commit.retiredAttachments,
+		sourceMetadata:           commit.sourceMetadata,
+		sourceMetadataValid:      commit.sourceMetadataValid,
+		destinationMetadata:      commit.destMetadata,
+		destinationMetadataValid: commit.destMetadataValid,
 	}
-	for _, p := range admission.panes {
-		if commit.sourceCleanupToken.current() {
-			commit.sourceCleanupToken.ac.overlays.clearCopyModeForPane(p)
-			commit.sourceCleanupToken.ac.pruneCaptureFrames(p)
-		}
-	}
-	markSnapshotDirty(destination)
-	if !commit.sourceEmpty {
-		markSnapshotDirty(source)
-	}
-	commit.syncCleanup.finish()
-	if rolesFrozen {
-		frozen.unfreeze()
-		rolesFrozen = false
-	}
-	unlockDispatch()
+	rolesFrozen = false
 	dispatchHeld = false
-	reservation.Release()
 	reservationHeld = false
-
-	if !commit.sourceEmpty {
-		if sourceTab := source.activeTab(); sourceTab != nil {
-			d.activateTab(source, sourceTab)
-			d.applyTabLayout(source, sourceTab)
-		}
-	}
-	d.applyTabLayout(destination, admission.tab)
-	if commit.sourceMetadataValid && !commit.sourceEmpty {
-		d.markCatalogueDirty(commit.sourceMetadata)
-	}
-	if commit.destMetadataValid {
-		d.markCatalogueDirty(commit.destMetadata)
-	}
-	if commit.handoffResult.published.ac != nil {
-		follower := commit.handoffResult.published.ac
-		d.applyHostTheme(destination, follower, follower.getClientTheme(), false)
-		follower.recordPreviousSession(source)
-		d.deferAttachmentTransitionCleanups(commit.handoffResult)
-		d.firstPaintForTransition(commit.handoffResult.published)
-	}
-	if commit.sourceEmpty {
-		retireEmptySessionAfterMove(d, source)
-	}
-	for _, attachment := range commit.retiredAttachments {
-		d.unregisterPreview(attachment.ac)
-		attachment.ac.clearPreviousSession()
-		attachment.ac.clearCaptureFrames()
-		d.notifyDetachedSnapshotAsync(attachment, ports.ReasonSessionKilled)
-	}
-	for _, retirement := range commit.retiredParked {
-		if retirement.parked != nil && retirement.parked.ac != nil {
-			d.unregisterPreview(retirement.parked.ac)
-			retirement.parked.ac.clearCaptureFrames()
-		}
-	}
-	finishParkedAttachmentRetirements(commit.retiredParked)
-	if commit.sourceEmpty && commit.sourceMetadataValid && d.persistEnabled {
-		if err := d.beginSnapshotPurge(source.name, source.incarnation); err == nil {
-			if err := d.finishSnapshotPurge(d.serveCtx, source.name, source.incarnation); err != nil {
-				d.log.Warn("moving final tab source purge failed", "err", err, "session", source.name)
-			}
-		}
-	}
+	postcommit.execute(d)
 	return nil
 }
 
@@ -259,6 +225,9 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 	defer moved.mu.Unlock()
 	if !moved.floatingTransferableLocked() {
 		return nil, errMoveFloatingWarming
+	}
+	if moved.tree == nil || moved.tree.Root == nil {
+		return nil, errMovePaneInvalid
 	}
 	if _, ok := layout.Solve(moved.tree.Root, domain.Rect{Width: destinationSize.Cols, Height: destinationSize.Rows}); !ok {
 		return nil, errMoveTooSmall

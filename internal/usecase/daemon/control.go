@@ -53,6 +53,11 @@ func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandReque
 		return commandFailure(code, text)
 	}
 	if cmd.Scope == command.CommandScopeCrossSession {
+		// Cross-session moves intentionally skip sess.dispatchMu: movePane and
+		// moveTab acquire both session dispatch locks through lockMoveDispatch in
+		// global order. Pre-locking the source here could recreate the
+		// opposite-direction deadlock covered by
+		// TestHandleCommandOppositeMoveCommandsDoNotDeadlock.
 		tb, pane, code, text := resolveControlTarget(sess, cmd.Target, request)
 		if code != 0 {
 			return commandFailure(code, text)

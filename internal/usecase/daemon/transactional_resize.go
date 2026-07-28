@@ -88,7 +88,7 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 		p := member.pane
 		p.resizeMu.Lock()
 		p.mu.Lock()
-		if !resizeMemberOwnerCurrentLocked(member) {
+		if !resizeMemberOwnerCurrent(member) {
 			member.retry = p.owner.Load() != nil
 			p.resizeRetry = member.retry
 			p.mu.Unlock()
@@ -111,7 +111,7 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 		} else if err := pty.Resize(rectSize(member.rect)); err != nil {
 			d.log.Warn("pty resize failed", "err", err)
 			p.mu.Lock()
-			current := resizeMemberOwnerCurrentLocked(member)
+			current := resizeMemberOwnerCurrent(member)
 			p.resizeRetry = true
 			p.mu.Unlock()
 			d.replayResizePending(member.session, member.tab, p, false, member.rect)
@@ -121,7 +121,7 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 			}
 		} else {
 			p.mu.Lock()
-			current := resizeMemberOwnerCurrentLocked(member)
+			current := resizeMemberOwnerCurrent(member)
 			if !current && p.owner.Load() != nil {
 				p.resizeRetry = true
 				member.retry = true
@@ -134,7 +134,7 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 	}
 }
 
-func resizeMemberOwnerCurrentLocked(member *resizeMember) bool {
+func resizeMemberOwnerCurrent(member *resizeMember) bool {
 	if member == nil || member.pane == nil {
 		return false
 	}
@@ -154,7 +154,7 @@ func validatePreparedTabLayoutLocked(tb *tab, plan *preparedTabLayout) bool {
 	}
 	for i := range plan.members {
 		member := &plan.members[i]
-		if tb.panes[member.pane.id] != member.pane || !resizeMemberOwnerCurrentLocked(member) {
+		if tb.panes[member.pane.id] != member.pane || !resizeMemberOwnerCurrent(member) {
 			return false
 		}
 	}
@@ -163,7 +163,7 @@ func validatePreparedTabLayoutLocked(tb *tab, plan *preparedTabLayout) bool {
 
 func resizeMembersOwnerCurrent(members []resizeMember) bool {
 	for i := range members {
-		if !resizeMemberOwnerCurrentLocked(&members[i]) {
+		if !resizeMemberOwnerCurrent(&members[i]) {
 			return false
 		}
 	}
@@ -201,12 +201,19 @@ func commitPreparedTabLayoutLocked(plan *preparedTabLayout) bool {
 	for i := range plan.members {
 		member := &plan.members[i]
 		member.pane.mu.Lock()
-		if !resizeMemberOwnerCurrentLocked(member) {
+		current := resizeMemberOwnerCurrent(member)
+		if !current {
 			member.pane.resizeRetry = member.pane.owner.Load() != nil
 			member.retry = member.pane.resizeRetry
-			member.pane.mu.Unlock()
+		}
+		member.pane.mu.Unlock()
+		if !current {
 			return false
 		}
+	}
+	for i := range plan.members {
+		member := &plan.members[i]
+		member.pane.mu.Lock()
 		member.pane.rect = member.rect
 		if member.ok {
 			member.pane.resizeRetry = false
@@ -424,13 +431,13 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	// relaunched, or resized slot must never receive this attempt's geometry.
 	tb.mu.Lock()
 	currentSlot := tb.floating.state == floatingVisible && tb.floating.generation == generation && tb.floating.pane == p && tb.size == size &&
-		resizeMemberOwnerCurrentLocked(&plan.members[0])
+		resizeMemberOwnerCurrent(&plan.members[0])
 	if current != nil && !current() {
 		currentSlot = false
 	}
 	if currentSlot {
 		p.mu.Lock()
-		currentSlot = resizeMemberOwnerCurrentLocked(&plan.members[0])
+		currentSlot = resizeMemberOwnerCurrent(&plan.members[0])
 		if currentSlot {
 			p.rect = geometry.Inner
 			p.popupGeometry = geometry
@@ -443,7 +450,7 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	}
 	tb.mu.Unlock()
 	if !currentSlot {
-		ownerCurrent := resizeMemberOwnerCurrentLocked(&plan.members[0])
+		ownerCurrent := resizeMemberOwnerCurrent(&plan.members[0])
 		// This attempt has no tiled transaction loop to retain the gate for, so
 		// discard its buffered bytes at the old screen size before returning.
 		for i := range plan.members {
@@ -605,11 +612,12 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 			members = append(members, floatingResult.members...)
 			failed = append(failed, floatingResult.failed...)
 		}
-		if len(failed) != 0 && resizeMembersOwnerCurrent(failed) {
+		failedCurrent := len(failed) == 0 || resizeMembersOwnerCurrent(failed)
+		if len(failed) != 0 && failedCurrent {
 			d.notify(sess, domain.NoticeWarn, domain.NoticeResizeFailed,
 				"pane resize failed; retrying in background", failed[len(failed)-1].err)
 		}
-		if len(failed) != 0 && !resizeMembersOwnerCurrent(failed) {
+		if len(failed) != 0 && !failedCurrent {
 			return resizeApplyResult{}, false
 		}
 		return resizeApplyResult{members: members, failed: failed}, true

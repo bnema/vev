@@ -294,7 +294,7 @@ func captureMoveTabHandoffState(d *Daemon, source, destination *session, moved *
 }
 
 func TestMoveTabFinalSourceHandoffValidationFailureIsAtomic(t *testing.T) {
-	d, source, follower, destination, _, moved := setupMoveTabFinalSourceHandoff(t)
+	d, source, follower, destination, _, _, moved := setupMoveTabFinalSourceHandoff(t)
 	floating := newPaneWithStableID("floating", "floating-stable", newQuietPTY(), domain.Size{Cols: 20, Rows: 8})
 	floating.ctx, floating.cancel = context.WithCancel(d.paneProcessCtx)
 	t.Cleanup(floating.cancel)

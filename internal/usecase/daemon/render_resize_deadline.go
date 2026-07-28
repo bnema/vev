@@ -5,6 +5,8 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+const maxResizeRetryAttempts = 3
+
 // Resize deadlines and retries retain coordinator-owned attachment, epoch, and
 // token validation at every callback effect boundary.
 func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
@@ -20,6 +22,7 @@ func (c *renderCoordinator) recordResizeRequestForLease(size domain.Size, source
 	_, retry := c.retryLane.replaceLocked()
 	c.resize.epoch++
 	c.resize.size, c.resize.source, c.resize.lease = size, source, lease
+	c.resize.retryAttempts = 0
 	epoch := c.resize.epoch
 	c.mu.Unlock()
 	stopDetachedTimer(retry)
@@ -109,9 +112,10 @@ type resizeRetryReservation struct {
 func (c *renderCoordinator) reserveResizeRetryForLease(epoch uint64, source *attachedClient, lease *attachmentLease, run func()) (*resizeRetryReservation, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.leaseCurrentLocked(lease, false) || lease.attachment != source || c.resize.lease != lease || c.resize.source != source || c.resize.epoch != epoch || c.resize.committed != epoch {
+	if !c.leaseCurrentLocked(lease, false) || lease.attachment != source || c.resize.lease != lease || c.resize.source != source || c.resize.epoch != epoch || c.resize.committed != epoch || c.resize.retryAttempts >= maxResizeRetryAttempts {
 		return nil, false
 	}
+	c.resize.retryAttempts++
 	gen, old := c.retryLane.replaceLocked()
 	return &resizeRetryReservation{coordinator: c, epoch: epoch, source: source, lease: lease, run: run, generation: gen, old: old, clock: c.opts.clock}, true
 }
@@ -123,6 +127,7 @@ func (r *resizeRetryReservation) finish() {
 	c := r.coordinator
 	stopDetachedTimer(r.old)
 	if r.clock == nil {
+		r.run()
 		return
 	}
 	timer := r.clock.NewTimer(minOutputRenderDeadline)
@@ -162,6 +167,12 @@ func (c *renderCoordinator) scheduleResizeRetryForLease(epoch uint64, source *at
 		return
 	}
 	reservation.finish()
+}
+
+func (c *renderCoordinator) resizeRetryAvailableForLease(epoch uint64, source *attachedClient, lease *attachmentLease) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.torndown && c.leaseCurrentLocked(lease, false) && lease.attachment == source && c.resize.lease == lease && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch && c.resize.retryAttempts < maxResizeRetryAttempts
 }
 
 func (c *renderCoordinator) retryCurrentForLease(epoch uint64, source *attachedClient, lease *attachmentLease) bool {

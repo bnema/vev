@@ -18,6 +18,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	defer releaseDestination()
 
 	d, source, client, _ := newManualSessionWithPTYs(t, movedPTY, remainingPTY)
+	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
@@ -40,6 +41,13 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	owner := moved.effectLeaseLocked()
 	moved.mu.Unlock()
 	members := []resizeMember{{session: source, tab: sourceTab, pane: moved, owner: owner}}
+	rc := source.renderCoordinator()
+	require.NotNil(t, rc)
+	lease := rc.attachmentLease(client)
+	epoch := rc.recordResizeRequestForLease(client.size, client, lease)
+	ticket, admitted := beginActiveLeaseEffect(source, client, lease)
+	require.True(t, admitted)
+	defer ticket.End()
 
 	sendLocked := make(chan struct{})
 	allowResizeFence := make(chan struct{})
@@ -50,7 +58,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	defer func() { d.afterResizeCommitSendLocked = nil }()
 	resizeDone := make(chan bool, 1)
 	go func() {
-		resizeDone <- d.publishResizeCommit(members, source, client, nil, 0, nil, client.size)
+		resizeDone <- d.publishResizeCommit(members, source, client, lease, epoch, ticket, client.size)
 	}()
 	awaitTestCompletion(t, sendLocked, "resize commit did not acquire sendMu")
 

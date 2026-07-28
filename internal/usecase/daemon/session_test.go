@@ -304,6 +304,7 @@ func TestAttachReplaceKeepsOldClientSnatched(t *testing.T) {
 	trB, sendsB, releaseB := newConn(t, mustHello(ports.IntentAttach, "0", domain.Size{Cols: 80, Rows: 24}))
 	hg.Go(func() { d.handleConn(trB) })
 	awaitFrame(t, sendsB, ports.MsgWelcome)
+	d.attachmentCleanupWg.Wait()
 
 	// B is now the sole active client while A remains a live snatched member.
 	sess.mu.Lock()

@@ -79,18 +79,51 @@ type movePersistenceRepository struct {
 func (r *movePersistenceRepository) Publish(context.Context, ports.SnapshotPublication) error {
 	outsideLocks := true
 	unlocks := make([]func(), 0, 7)
-	for _, candidate := range []struct {
+	candidates := make([]struct {
 		tryLock func() bool
 		unlock  func()
-	}{
-		{r.daemon.mu.TryLock, r.daemon.mu.Unlock},
-		{r.source.mu.TryLock, r.source.mu.Unlock},
-		{r.destination.mu.TryLock, r.destination.mu.Unlock},
-		{r.moved.mu.TryLock, r.moved.mu.Unlock},
-		{r.pane.mu.TryLock, r.pane.mu.Unlock},
-		{r.source.layoutApplyMu.TryLock, r.source.layoutApplyMu.Unlock},
-		{r.destination.layoutApplyMu.TryLock, r.destination.layoutApplyMu.Unlock},
-	} {
+	}, 0, 7)
+	if r.daemon != nil {
+		candidates = append(candidates, struct {
+			tryLock func() bool
+			unlock  func()
+		}{r.daemon.mu.TryLock, r.daemon.mu.Unlock})
+	}
+	if r.source != nil {
+		candidates = append(candidates,
+			struct {
+				tryLock func() bool
+				unlock  func()
+			}{r.source.mu.TryLock, r.source.mu.Unlock},
+			struct {
+				tryLock func() bool
+				unlock  func()
+			}{r.source.layoutApplyMu.TryLock, r.source.layoutApplyMu.Unlock})
+	}
+	if r.destination != nil {
+		candidates = append(candidates,
+			struct {
+				tryLock func() bool
+				unlock  func()
+			}{r.destination.mu.TryLock, r.destination.mu.Unlock},
+			struct {
+				tryLock func() bool
+				unlock  func()
+			}{r.destination.layoutApplyMu.TryLock, r.destination.layoutApplyMu.Unlock})
+	}
+	if r.moved != nil {
+		candidates = append(candidates, struct {
+			tryLock func() bool
+			unlock  func()
+		}{r.moved.mu.TryLock, r.moved.mu.Unlock})
+	}
+	if r.pane != nil {
+		candidates = append(candidates, struct {
+			tryLock func() bool
+			unlock  func()
+		}{r.pane.mu.TryLock, r.pane.mu.Unlock})
+	}
+	for _, candidate := range candidates {
 		if candidate.tryLock() {
 			unlocks = append(unlocks, candidate.unlock)
 		} else {

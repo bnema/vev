@@ -160,11 +160,12 @@ type Daemon struct {
 	// attachment snapshot respectively. beforeMovePaneCommit runs inside the
 	// non-failing publication section. None is set in production, and none may
 	// perform external work while locks are held.
-	afterMoveLifecycleReserved  func()
-	afterMovePaneSourceSnapshot func()
-	afterMoveTabSourceSnapshot  func()
-	beforeMovePaneCommit        func()
-	beforeMoveTabCommit         func()
+	afterMoveLifecycleReserved                func()
+	afterMoveLifecycleGateBeforeTeardownLocks func()
+	afterMovePaneSourceSnapshot               func()
+	afterMoveTabSourceSnapshot                func()
+	beforeMovePaneCommit                      func()
+	beforeMoveTabCommit                       func()
 	// afterDetachRoleEffectsFrozen observes terminal detach after it wins the
 	// attachment gate but before it checks session ownership.
 	afterDetachRoleEffectsFrozen func()
@@ -1070,9 +1071,11 @@ type protoErr struct {
 
 func (e *protoErr) Error() string { return e.text }
 
-// finishAttach completes an attachment prepared while d.mu is held. It
-// publishes terminal and role state before releasing d.mu, then defers
-// coordinator cleanup so obsolete workers never delay the new handshake.
+// finishAttach completes an attachment prepared while d.mu is held. Every
+// caller must hold d.mu on entry; finishAttach transfers ownership by
+// unlocking d.mu before returning, including every error path. It publishes
+// terminal and role state before releasing d.mu, then defers coordinator
+// cleanup so obsolete workers never delay the new handshake.
 func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) (*attachedClient, error) {
 	// Session state is the sole source for future PTY children. Update it before
 	// publishing the attachment; existing PTYs keep their original environment.
@@ -1166,10 +1169,25 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	// expired, or raced with lifecycle teardown, fail closed instead of routing
 	// the Hello as an ordinary attach that could create or replace ownership.
 	if h.ResumeToken != 0 {
-		if sess, ac, ok, err := d.resumeParked(h, tr, sz); ok || err != nil {
-			return sess, ac, err
+		d.mu.Lock()
+		parkedAtStart := d.parked[h.ResumeToken]
+		d.mu.Unlock()
+		if parkedAtStart == nil {
+			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 		}
-		return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		if sess, ac, ok, err := d.resumeParked(h, tr, sz); err == nil {
+			if ok {
+				return sess, ac, nil
+			}
+			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		} else if errors.Is(err, errResumeTokenLifecycleRace) {
+			// The parked entry was replaced while this handshake waited for
+			// its send lock. The ordinary attach path can reclaim the still-live
+			// named session instead of turning this grace-period race into a
+			// terminal no-such-session error.
+		} else {
+			return nil, nil, err
+		}
 	}
 	if h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach {
 		ctx := d.serveCtx

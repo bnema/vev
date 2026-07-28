@@ -174,12 +174,18 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 				}
 				tb.mu.Lock()
 				floating := tb.floating.pane
+				var floatingPTY ports.PTY
+				if floating != nil {
+					floating.mu.Lock()
+					floatingPTY = floating.pty
+					floating.mu.Unlock()
+				}
 				publishedFailedPTY := false
 				for _, published := range tb.panes {
 					publishedFailedPTY = publishedFailedPTY || published.pty == pty
 				}
 				tb.mu.Unlock()
-				require.NotSame(t, pty, floating)
+				require.NotEqual(t, pty, floatingPTY)
 				require.False(t, publishedFailedPTY, "failed Open must not publish a pane or owner")
 			}
 			require.Zero(t, pty.readerStarts.Load(), "failed Open must not start a reader")
@@ -206,176 +212,124 @@ func (f *paneErrorFactory) Open(ctx context.Context, _ string, _ []string, _ []s
 	return f.pty, f.err
 }
 
-func TestInitialPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
-	factory := &lifetimePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	sess, err := createSessionForTest(d, "work", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
-	require.NoError(t, err)
-
-	p := sess.activeTab().focusedPane()
-	pty, openCtx := factory.opened(0)
-	require.NotNil(t, p.ctx)
-	require.Equal(t, openCtx, p.ctx)
-	require.NotNil(t, p.cancel)
-
-	sess.cancel()
-	select {
-	case <-openCtx.Done():
-		t.Fatal("session cancellation killed a published pane process")
-	default:
+func TestPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
+	type setupFunc func(*testing.T, *Daemon) (*pane, func(), func())
+	tests := []struct {
+		name  string
+		setup setupFunc
+	}{
+		{
+			name: "initial pane",
+			setup: func(t *testing.T, d *Daemon) (*pane, func(), func()) {
+				sess, err := createSessionForTest(d, "work", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+				require.NoError(t, err)
+				return sess.activeTab().focusedPane(), sess.cancel, func() {
+					_ = d.killSession(sess, ports.ReasonSessionKilled, false)
+				}
+			},
+		},
+		{
+			name: "created tab",
+			setup: func(t *testing.T, d *Daemon) (*pane, func(), func()) {
+				sessCtx, cancelSession := context.WithCancel(t.Context())
+				base := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+				base.ctx, base.cancel = context.WithCancel(sessCtx)
+				sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{base}}
+				d.mu.Lock()
+				d.sessions[sess.id] = sess
+				d.mu.Unlock()
+				require.NoError(t, d.createTab(sess, domain.Size{Cols: 80, Rows: 24}))
+				created := sess.activeTab()
+				return created.focusedPane(), cancelSession, created.closeAllPanes
+			},
+		},
+		{
+			name: "split pane",
+			setup: func(t *testing.T, d *Daemon) (*pane, func(), func()) {
+				sessCtx, cancelSession := context.WithCancel(t.Context())
+				tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+				tb.ctx, tb.cancel = context.WithCancel(sessCtx)
+				sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
+				target := tb.focusedPane()
+				require.NoError(t, d.splitPaneAt(sess, tb, target, layout.Right))
+				tb.mu.Lock()
+				p := tb.panes["pane-2"]
+				tb.mu.Unlock()
+				require.NotNil(t, p)
+				return p, cancelSession, tb.closeAllPanes
+			},
+		},
+		{
+			name: "floating pane",
+			setup: func(t *testing.T, d *Daemon) (*pane, func(), func()) {
+				sessCtx, cancelSession := context.WithCancel(t.Context())
+				tb := newFloatingTestTab(t)
+				tb.ctx, tb.cancel = context.WithCancel(sessCtx)
+				sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
+				tb.mu.Lock()
+				generation := tb.beginFloatingWarmLocked(true)
+				tb.mu.Unlock()
+				d.openAndInstallFloating(sess, tb, floatingLaunchSpec{
+					sessionName: "work", size: domain.Size{Cols: 20, Rows: 8},
+					geometry:     floatingGeometry{Inner: domain.Rect{Width: 20, Height: 8}},
+					paneStableID: "p_floating", parentCtx: tb.ctx,
+				}, generation)
+				tb.mu.Lock()
+				p := tb.floating.pane
+				tb.mu.Unlock()
+				require.NotNil(t, p)
+				return p, cancelSession, func() { d.teardownFloating(tb, nil) }
+			},
+		},
+		{
+			name: "restored pane",
+			setup: func(t *testing.T, d *Daemon) (*pane, func(), func()) {
+				restoreCtx, cancelRestore := context.WithCancel(t.Context())
+				sessCtx, cancelSession := context.WithCancel(t.Context())
+				tabs, err := d.restoreSnapshotTabs(restoreCtx, sessCtx, restoreAcceptanceSession(t, "work"))
+				require.NoError(t, err)
+				require.Len(t, tabs, 1)
+				return tabs[0].focusedPane(), cancelSession, func() {
+					cancelRestore()
+					closeRestoredTabs(tabs)
+				}
+			},
+		},
 	}
 
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
-	select {
-	case <-openCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("session teardown did not cancel the pane process")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := &lifetimePTYFactory{}
+			d := newTestDaemon(t, factory, stubClock{})
+			p, cancelSession, teardown := tt.setup(t, d)
+			defer func() {
+				if teardown != nil {
+					teardown()
+				}
+			}()
+
+			require.NotNil(t, p)
+			pty, openCtx := factory.opened(0)
+			require.NotNil(t, p.ctx)
+			require.Equal(t, openCtx, p.ctx)
+			require.NotNil(t, p.cancel)
+
+			cancelSession()
+			select {
+			case <-openCtx.Done():
+				t.Fatal("session cancellation killed a published pane process")
+			default:
+			}
+
+			teardown()
+			teardown = nil
+			select {
+			case <-openCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("teardown did not cancel the pane process")
+			}
+			d.sessWg.Wait()
+			require.Equal(t, int32(1), pty.closes.Load())
+		})
 	}
-	d.sessWg.Wait()
-	require.Equal(t, int32(1), pty.closes.Load())
-}
-
-func TestCreatedTabPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
-	factory := &lifetimePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	sessCtx, cancelSession := context.WithCancel(t.Context())
-	sess := &session{
-		id:     "work",
-		name:   "work",
-		ctx:    sessCtx,
-		cancel: cancelSession,
-		tabs:   []*tab{newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})},
-	}
-	d.mu.Lock()
-	d.sessions[sess.id] = sess
-	d.mu.Unlock()
-
-	require.NoError(t, d.createTab(sess, domain.Size{Cols: 80, Rows: 24}))
-	created := sess.activeTab()
-	p := created.focusedPane()
-	pty, openCtx := factory.opened(0)
-	require.Equal(t, openCtx, p.ctx)
-	require.NotNil(t, p.cancel)
-
-	cancelSession()
-	select {
-	case <-openCtx.Done():
-		t.Fatal("session cancellation killed a published tab pane process")
-	default:
-	}
-
-	created.closeAllPanes()
-	select {
-	case <-openCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("tab teardown did not cancel the pane process")
-	}
-	d.sessWg.Wait()
-	require.Equal(t, int32(1), pty.closes.Load())
-}
-
-func TestSplitPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
-	factory := &lifetimePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	sessCtx, cancelSession := context.WithCancel(t.Context())
-	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
-	tb.ctx, tb.cancel = context.WithCancel(sessCtx)
-	sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
-	target := tb.focusedPane()
-
-	require.NoError(t, d.splitPaneAt(sess, tb, target, layout.Right))
-	tb.mu.Lock()
-	p := tb.panes["pane-2"]
-	tb.mu.Unlock()
-	require.NotNil(t, p)
-	pty, openCtx := factory.opened(0)
-	require.Equal(t, openCtx, p.ctx)
-	require.NotNil(t, p.cancel)
-
-	cancelSession()
-	select {
-	case <-openCtx.Done():
-		t.Fatal("session cancellation killed a published split pane process")
-	default:
-	}
-
-	tb.closeAllPanes()
-	select {
-	case <-openCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("tab teardown did not cancel the split pane process")
-	}
-	d.sessWg.Wait()
-	require.Equal(t, int32(1), pty.closes.Load())
-}
-
-func TestFloatingPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
-	factory := &lifetimePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	sessCtx, cancelSession := context.WithCancel(t.Context())
-	tb := newFloatingTestTab(t)
-	tb.ctx, tb.cancel = context.WithCancel(sessCtx)
-	sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
-	tb.mu.Lock()
-	generation := tb.beginFloatingWarmLocked(true)
-	tb.mu.Unlock()
-
-	d.openAndInstallFloating(sess, tb, floatingLaunchSpec{
-		sessionName:  "work",
-		size:         domain.Size{Cols: 20, Rows: 8},
-		geometry:     floatingGeometry{Inner: domain.Rect{Width: 20, Height: 8}},
-		paneStableID: "p_floating",
-		parentCtx:    tb.ctx,
-	}, generation)
-	tb.mu.Lock()
-	p := tb.floating.pane
-	tb.mu.Unlock()
-	require.NotNil(t, p)
-	pty, openCtx := factory.opened(0)
-	require.Equal(t, openCtx, p.ctx)
-	require.NotNil(t, p.cancel)
-
-	cancelSession()
-	select {
-	case <-openCtx.Done():
-		t.Fatal("session cancellation killed a published floating pane process")
-	default:
-	}
-
-	d.teardownFloating(tb, nil)
-	select {
-	case <-openCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("floating teardown did not cancel the pane process")
-	}
-	d.sessWg.Wait()
-	require.Equal(t, int32(1), pty.closes.Load())
-}
-
-func TestRestoredPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
-	factory := &lifetimePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	sessCtx, cancelSession := context.WithCancel(t.Context())
-	tabs, err := d.restoreSnapshotTabs(t.Context(), sessCtx, restoreAcceptanceSession(t, "work"))
-	require.NoError(t, err)
-	require.Len(t, tabs, 1)
-	p := tabs[0].focusedPane()
-	pty, openCtx := factory.opened(0)
-	require.Equal(t, openCtx, p.ctx)
-	require.NotNil(t, p.cancel)
-
-	cancelSession()
-	select {
-	case <-openCtx.Done():
-		t.Fatal("session cancellation killed a restored pane process")
-	default:
-	}
-
-	closeRestoredTabs(tabs)
-	select {
-	case <-openCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("restore teardown did not cancel the pane process")
-	}
-	require.Equal(t, int32(1), pty.closes.Load())
 }

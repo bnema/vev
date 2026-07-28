@@ -10,7 +10,7 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
-func setupMoveTabFinalSourceHandoff(t *testing.T) (*Daemon, *session, *attachedClient, *session, *attachedClient, *tab) {
+func setupMoveTabFinalSourceHandoff(t *testing.T) (*Daemon, *session, *attachedClient, *session, *attachedClient, *closeTrackingTransport, *tab) {
 	t.Helper()
 	d, source, follower, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	follower.replaceTransport(&closeTrackingTransport{})
@@ -30,7 +30,7 @@ func setupMoveTabFinalSourceHandoff(t *testing.T) (*Daemon, *session, *attachedC
 	destination.mu.Unlock()
 	require.NotNil(t, d.attachCoordinator(destination, nil, displaced, true))
 
-	return d, source, follower, destination, displaced, moved
+	return d, source, follower, destination, displaced, displacedTransport, moved
 }
 
 func moveTabFinalSource(t *testing.T, d *Daemon, source, destination *session, moved *tab) {
@@ -56,8 +56,7 @@ func detachedWithReason(frames []ports.Frame, reason uint8) bool {
 }
 
 func TestMoveTabFinalSourceSnatchesDestinationActiveClient(t *testing.T) {
-	d, source, follower, destination, displaced, moved := setupMoveTabFinalSourceHandoff(t)
-	displacedTransport := displaced.tr.(*closeTrackingTransport)
+	d, source, follower, destination, displaced, displacedTransport, moved := setupMoveTabFinalSourceHandoff(t)
 
 	moveTabFinalSource(t, d, source, destination, moved)
 	d.attachmentCleanupWg.Wait()
@@ -82,7 +81,7 @@ func TestMoveTabFinalSourceSnatchesDestinationActiveClient(t *testing.T) {
 }
 
 func TestMoveTabFinalSourcePreservesDestinationSnatchedWaiters(t *testing.T) {
-	d, source, follower, destination, displaced, moved := setupMoveTabFinalSourceHandoff(t)
+	d, source, follower, destination, displaced, _, moved := setupMoveTabFinalSourceHandoff(t)
 
 	waitingTransport := &closeTrackingTransport{}
 	waiting := &attachedClient{tr: waitingTransport, output: newOutputStateStream(), size: follower.size}
@@ -104,7 +103,7 @@ func TestMoveTabFinalSourcePreservesDestinationSnatchedWaiters(t *testing.T) {
 }
 
 func TestMoveTabFinalSourceRetiresSourceParkedAndSnatchedClients(t *testing.T) {
-	d, source, follower, destination, _, moved := setupMoveTabFinalSourceHandoff(t)
+	d, source, follower, destination, _, _, moved := setupMoveTabFinalSourceHandoff(t)
 
 	parkedTransport := &closeTrackingTransport{}
 	parked := &attachedClient{tr: parkedTransport, output: newOutputStateStream(), size: follower.size, resumeCapable: true}
@@ -132,7 +131,7 @@ func TestMoveTabFinalSourceRetiresSourceParkedAndSnatchedClients(t *testing.T) {
 }
 
 func TestMoveTabFinalSourceClearsFollowerCopyCapturePreservesDestinationWaiterOverlays(t *testing.T) {
-	d, source, follower, destination, _, moved := setupMoveTabFinalSourceHandoff(t)
+	d, source, follower, destination, _, _, moved := setupMoveTabFinalSourceHandoff(t)
 	movedPane := moved.focusedPane()
 
 	follower.overlays.copyMu.Lock()
@@ -182,7 +181,7 @@ func TestMoveTabFinalSourceClearsFollowerCopyCapturePreservesDestinationWaiterOv
 }
 
 func TestMoveTabFinalSourceFirstPaintNotBlockedByDisplacedPanelCleanup(t *testing.T) {
-	d, source, follower, destination, displaced, moved := setupMoveTabFinalSourceHandoff(t)
+	d, source, follower, destination, displaced, _, moved := setupMoveTabFinalSourceHandoff(t)
 	followerRebased := make(chan struct{})
 	follower.renderStages.handoffRebase = func() { close(followerRebased) }
 
@@ -206,7 +205,7 @@ func TestMoveTabFinalSourceFirstPaintNotBlockedByDisplacedPanelCleanup(t *testin
 }
 
 func TestMoveTabFinalSourceConcurrentReclaimKeepsNewestOwnerAndLease(t *testing.T) {
-	d, source, follower, destination, displaced, moved := setupMoveTabFinalSourceHandoff(t)
+	d, source, follower, destination, displaced, _, moved := setupMoveTabFinalSourceHandoff(t)
 
 	paintAdmitted := make(chan struct{})
 	releasePaint := make(chan struct{})
@@ -252,7 +251,7 @@ func TestMoveTabFinalSourceConcurrentReclaimKeepsNewestOwnerAndLease(t *testing.
 }
 
 func TestMoveTabFinalSourcePostCommitPaintFailureDoesNotRollback(t *testing.T) {
-	d, source, follower, destination, _, moved := setupMoveTabFinalSourceHandoff(t)
+	d, source, follower, destination, _, _, moved := setupMoveTabFinalSourceHandoff(t)
 
 	d.afterRoleEffectAdmitted = func(token attachmentRoleToken) {
 		if token.ac == follower {
@@ -272,8 +271,7 @@ func TestMoveTabFinalSourcePostCommitPaintFailureDoesNotRollback(t *testing.T) {
 }
 
 func TestMoveTabFinalSourceHandoffCommitHidesPartialPublication(t *testing.T) {
-	d, source, follower, destination, displaced, moved := setupMoveTabFinalSourceHandoff(t)
-	_ = displaced
+	d, source, follower, destination, displaced, _, moved := setupMoveTabFinalSourceHandoff(t)
 
 	commitEntered := make(chan struct{})
 	releaseCommit := make(chan struct{})

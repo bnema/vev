@@ -55,32 +55,37 @@ func TestCopyModeLifecycleActivateTabClearsRuntime(t *testing.T) {
 	ac.overlays.copyMu.Unlock()
 }
 
-func TestActivateTabAfterResizeWithClientAndNoLeaseUsesDirectPath(t *testing.T) {
-	d, sess, ac, _, releases := newManualTabSession(t, 2)
-	defer releaseAll(releases)
-	d.enterCopyMode(sess, ac)
-	require.True(t, ac.overlays.copyActive())
+func TestActivateTabAfterResizePathAndCopyModeLifecycle(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		leaseBacked bool
+	}{
+		{name: "direct", leaseBacked: false},
+		{name: "lease-backed", leaseBacked: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, ac, _, releases := newManualTabSession(t, 2)
+			defer releaseAll(releases)
+			rc := newRenderCoordinator(renderCoordinatorOptions{clock: d.clock})
+			rc.attach(ac)
+			sess.installRenderCoordinator(rc)
+			defer func() { rc.beginSessionTeardown().finish() }()
+			path := make(chan bool, 1)
+			rc.opts.onActivateTabAfterResize = func(leaseBacked bool) { path <- leaseBacked }
+			var lease *attachmentLease
+			if tt.leaseBacked {
+				lease = rc.attachmentLease(ac)
+				require.NotNil(t, lease)
+			}
 
-	d.activateTabAfterResizeForLease(sess, sess.activeTab(), true, ac, nil)
+			d.enterCopyMode(sess, ac)
+			require.True(t, ac.overlays.copyActive())
+			d.activateTabAfterResizeForLease(sess, sess.activeTab(), true, ac, lease)
 
-	require.False(t, ac.overlays.copyActive())
-}
-
-func TestActivateTabAfterResizeWithCurrentLeaseUsesLeaseBackedPath(t *testing.T) {
-	d, sess, ac, _, releases := newManualTabSession(t, 2)
-	defer releaseAll(releases)
-	d.enterCopyMode(sess, ac)
-	require.True(t, ac.overlays.copyActive())
-	rc := newRenderCoordinator(renderCoordinatorOptions{clock: d.clock})
-	rc.attach(ac)
-	sess.installRenderCoordinator(rc)
-	defer func() { rc.beginSessionTeardown().finish() }()
-	lease := rc.attachmentLease(ac)
-	require.NotNil(t, lease)
-
-	d.activateTabAfterResizeForLease(sess, sess.activeTab(), true, ac, lease)
-
-	require.False(t, ac.overlays.copyActive())
+			require.False(t, ac.overlays.copyActive())
+			require.Equal(t, tt.leaseBacked, <-path)
+		})
+	}
 }
 
 func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {

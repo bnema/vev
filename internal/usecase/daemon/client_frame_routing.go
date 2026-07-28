@@ -105,7 +105,7 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 	case ports.MsgPing:
 		if err := token.sendActiveControl(framePong()); err != nil {
 			token.endRoleEffect()
-			d.detachOnSendError(token.sess, token.ac, token.transport.transport)
+			d.detachOnRoleSendError(token, token.transport.transport)
 			return true
 		}
 	default:

@@ -41,6 +41,9 @@ func (d *Daemon) reserveMoveLifecycles(source, destination *session) (*moveLifec
 	d.moveLifecycleActive++
 	d.signalMoveLifecycleChangedLocked()
 	d.moveLifecycleMu.Unlock()
+	if d.afterMoveLifecycleGateBeforeTeardownLocks != nil {
+		d.afterMoveLifecycleGateBeforeTeardownLocks()
+	}
 
 	sessions := uniqueMoveSessions(source, destination)
 	for _, sess := range sessions {

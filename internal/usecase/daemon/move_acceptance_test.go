@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"sync"
 	"testing"
 
@@ -10,8 +9,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
-
-var errMoveCatalogueLocked = errors.New("move catalogue called while architecture locks were held")
 
 func catalogueUpdateNames(updates []domain.CatalogueMetadataUpdate) []string {
 	names := make([]string, 0, len(updates))
@@ -22,11 +19,12 @@ func catalogueUpdateNames(updates []domain.CatalogueMetadataUpdate) []string {
 }
 
 type moveCatalogueRecorder struct {
-	daemon      *Daemon
-	source      *session
-	destination *session
-	mu          sync.Mutex
-	updates     []domain.CatalogueMetadataUpdate
+	daemon        *Daemon
+	source        *session
+	destination   *session
+	mu            sync.Mutex
+	updates       []domain.CatalogueMetadataUpdate
+	lockViolation bool
 }
 
 func (c *moveCatalogueRecorder) Records() ([]domain.CatalogueRecord, error) { return nil, nil }
@@ -40,23 +38,25 @@ func (c *moveCatalogueRecorder) Delete(string) error                          { 
 func (c *moveCatalogueRecorder) Sync() error                                  { return nil }
 func (c *moveCatalogueRecorder) Close() error                                 { return nil }
 func (c *moveCatalogueRecorder) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
+	violated := false
 	if c.daemon.mu.TryLock() {
 		c.daemon.mu.Unlock()
 	} else {
-		return errMoveCatalogueLocked
+		violated = true
 	}
 	if c.source.mu.TryLock() {
 		c.source.mu.Unlock()
 	} else {
-		return errMoveCatalogueLocked
+		violated = true
 	}
 	if c.destination.mu.TryLock() {
 		c.destination.mu.Unlock()
 	} else {
-		return errMoveCatalogueLocked
+		violated = true
 	}
 	c.mu.Lock()
 	c.updates = append(c.updates, update)
+	c.lockViolation = c.lockViolation || violated
 	c.mu.Unlock()
 	return nil
 }
@@ -169,7 +169,9 @@ func TestMovePaneAcceptanceRetainsSourceFocusAndDestinationActivity(t *testing.T
 	destination.snapshotMu.Unlock()
 	catalogue.mu.Lock()
 	updates := append([]domain.CatalogueMetadataUpdate(nil), catalogue.updates...)
+	lockViolation := catalogue.lockViolation
 	catalogue.mu.Unlock()
+	require.False(t, lockViolation, "catalogue publication ran under an architecture lock")
 	require.ElementsMatch(t, []string{source.name, destination.name}, catalogueUpdateNames(updates))
 }
 

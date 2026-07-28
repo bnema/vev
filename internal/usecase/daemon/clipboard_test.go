@@ -209,11 +209,15 @@ func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClie
 	ac.publishRoleCapability(token)
 }
 
-func clipboardOwnerLease(sess *session) paneEffectLease {
+func clipboardOwnerLease(t *testing.T, sess *session) paneEffectLease {
+	t.Helper()
 	tb := sess.activeTab()
 	tb.mu.Lock()
 	p := tb.terminalTargetLocked()
 	tb.mu.Unlock()
+	if p == nil {
+		t.Fatal("clipboard owner has no terminal target")
+	}
 	return p.effectLease()
 }
 
@@ -348,7 +352,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 	sess.mu.Lock()
 	sess.clipboardWorkerRunning = true
 	sess.mu.Unlock()
-	d.forwardClipboardAsync(clipboardOwnerLease(sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
 
 	sourceTab := sess.activeTab()
 	p := sourceTab.focusedPane()
@@ -363,10 +367,11 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 }
 
 type movingClipboardErrorTransport struct {
-	started   chan struct{}
-	release   chan struct{}
-	closed    chan struct{}
-	closeOnce sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	closed      chan struct{}
+	startedOnce sync.Once
+	closeOnce   sync.Once
 }
 
 func newMovingClipboardErrorTransport() *movingClipboardErrorTransport {
@@ -378,7 +383,7 @@ func newMovingClipboardErrorTransport() *movingClipboardErrorTransport {
 }
 
 func (t *movingClipboardErrorTransport) Send(ports.Frame) error {
-	close(t.started)
+	t.startedOnce.Do(func() { close(t.started) })
 	<-t.release
 	return errors.New("clipboard send failed after pane move")
 }
@@ -399,7 +404,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 	sess.mu.Lock()
 	sess.clipboardWorkerRunning = true
 	sess.mu.Unlock()
-	d.forwardClipboardAsync(clipboardOwnerLease(sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
 
 	ac.sendMu.Lock()
 	sendMuLocked := true
@@ -414,9 +419,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 		close(workerDone)
 	}()
 	require.Eventually(t, func() bool {
-		ac.roleEffects.mu.Lock()
-		defer ac.roleEffects.mu.Unlock()
-		return ac.roleEffects.inFlight == 1
+		return ac.roleEffects.inFlightCount() == 1
 	}, time.Second, time.Millisecond, "clipboard send was not admitted before waiting on sendMu")
 
 	sourceTab := sess.activeTab()
@@ -441,7 +444,7 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	sess.mu.Lock()
 	sess.clipboardWorkerRunning = true
 	sess.mu.Unlock()
-	d.forwardClipboardAsync(clipboardOwnerLease(sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
 
 	workerDone := make(chan struct{})
 	go func() {
@@ -478,7 +481,7 @@ func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
 	sess.mu.Lock()
 	sess.clipboardWorkerRunning = true
 	sess.mu.Unlock()
-	d.forwardClipboardAsync(clipboardOwnerLease(sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
 
 	newTransport := &closeTrackingTransport{}
 	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), size: old.size}
@@ -501,7 +504,7 @@ func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
 	tr := newBlockingClipboardTransport()
 	ac.replaceTransport(tr)
 	publishActiveClipboardCapability(d, sess, ac, tr)
-	owner := clipboardOwnerLease(sess)
+	owner := clipboardOwnerLease(t, sess)
 
 	first := base64.StdEncoding.EncodeToString([]byte("first"))
 	second := base64.StdEncoding.EncodeToString([]byte("second"))

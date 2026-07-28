@@ -86,55 +86,39 @@ type roleTransportInterrupt struct {
 	transport transportSnapshot
 }
 
+// roleEffectFreezeOptions controls one role-gate freeze operation. A freeze
+// must be called without daemon, routing, session, coordinator, send, overlay,
+// router, or pane locks held.
+type roleEffectFreezeOptions struct {
+	interrupts  []roleTransportInterrupt
+	done        func() <-chan struct{}
+	afterFrozen func(*attachedClient)
+	nonblocking bool
+}
+
 // freezeRoleEffectGates establishes transition priority in immutable attachment
-// order, then drains earlier admissions. It must be called without daemon,
-// routing, session, coordinator, send, overlay, router, or pane locks held.
+// order, then drains earlier admissions.
 func freezeRoleEffectGates(clients ...*attachedClient) frozenRoleEffectGates {
-	return freezeRoleEffectGatesInterrupting(nil, clients...)
+	return freezeRoleEffectGatesWith(roleEffectFreezeOptions{}, clients...)
 }
 
-// freezeRoleEffectGatesInterrupting may close an exact captured transport only
-// while an earlier admitted effect is inside that transport's Send. Closing and
-// all drain waits happen without the gate mutex or an architecture lock held.
-func freezeRoleEffectGatesInterrupting(interrupts []roleTransportInterrupt, clients ...*attachedClient) frozenRoleEffectGates {
-	return freezeRoleEffectGatesInterruptingObserved(interrupts, nil, clients...)
-}
-
-func freezeRoleEffectGatesInterruptingObserved(interrupts []roleTransportInterrupt, afterFrozen func(*attachedClient), clients ...*attachedClient) frozenRoleEffectGates {
-	return freezeRoleEffectGatesInterruptingObservedUntil(interrupts, nil, afterFrozen, clients...)
-}
-
-// tryFreezeRoleEffectGatesInterruptingObserved establishes transition priority
-// without waiting behind a gate already owned by another lifecycle operation.
-// Move reservations use this form: killSession freezes role gates before it
-// waits for the reservation, so waiting here would invert the two protocols.
-func tryFreezeRoleEffectGatesInterruptingObserved(interrupts []roleTransportInterrupt, afterFrozen func(*attachedClient), clients ...*attachedClient) frozenRoleEffectGates {
-	return freezeRoleEffectGatesInterruptingObservedMode(interrupts, nil, afterFrozen, true, clients...)
-}
-
-// freezeRoleEffectGatesInterruptingObservedUntil uses done as one overall bound
-// for ordered acquisition and drain. Acquisition is all-or-nothing: if the
-// bound expires behind another owner, only gates acquired by this call are
-// rolled back, in reverse order. Once the complete set is owned, a terminal
-// teardown may proceed when done closes during drain; late tickets then retire
-// against an invalidated capability without pinning the session owner
-// indefinitely.
-func freezeRoleEffectGatesInterruptingObservedUntil(interrupts []roleTransportInterrupt, done func() <-chan struct{}, afterFrozen func(*attachedClient), clients ...*attachedClient) frozenRoleEffectGates {
-	return freezeRoleEffectGatesInterruptingObservedMode(interrupts, done, afterFrozen, false, clients...)
-}
-
-func freezeRoleEffectGatesInterruptingObservedMode(interrupts []roleTransportInterrupt, done func() <-chan struct{}, afterFrozen func(*attachedClient), nonblocking bool, clients ...*attachedClient) frozenRoleEffectGates {
+// freezeRoleEffectGatesWith uses done as one overall bound for ordered
+// acquisition and drain. Acquisition is all-or-nothing: if the bound expires
+// behind another owner, only gates acquired by this call are rolled back, in
+// reverse order. nonblocking is used by move reservations to avoid inverting
+// the move/teardown protocols.
+func freezeRoleEffectGatesWith(options roleEffectFreezeOptions, clients ...*attachedClient) frozenRoleEffectGates {
 	ordered := orderedRoleEffectClients(clients)
-	frozen, acquired := acquireRoleEffectGates(ordered, done, afterFrozen, nonblocking)
+	frozen, acquired := acquireRoleEffectGates(ordered, options.done, options.afterFrozen, options.nonblocking)
 	if !acquired {
 		return frozenRoleEffectGates{}
 	}
 
-	interruptByClient := roleTransportInterruptsByClient(interrupts)
+	interruptByClient := roleTransportInterruptsByClient(options.interrupts)
 	frozen.interruptions = make(map[*attachedClient]transportSnapshot, len(interruptByClient))
 	interruptFrozenRoleTransports(ordered, interruptByClient)
 	frozen.acquired = true
-	frozen.drained = drainFrozenRoleEffects(ordered, interruptByClient, frozen.interruptions, done)
+	frozen.drained = drainFrozenRoleEffects(ordered, interruptByClient, frozen.interruptions, options.done)
 	return frozen
 }
 

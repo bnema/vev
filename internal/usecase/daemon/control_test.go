@@ -958,24 +958,31 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 	right.active = 1
 	right.mu.Unlock()
 
+	leftFrame := commandFrame(t, ports.CommandRequest{
+		Slug: "move-tab", Args: []string{"right"}, TargetSession: "left",
+	})
+	rightFrame := commandFrame(t, ports.CommandRequest{
+		Slug: "move-tab", Args: []string{"left"}, TargetSession: "right",
+	})
+	leftTransport, leftSends, _ := newConn(t, leftFrame)
+	rightTransport, rightSends, _ := newConn(t, rightFrame)
 	start := make(chan struct{})
-	done := make(chan ports.CommandResult, 2)
+	done := make(chan struct{}, 2)
 	go func() {
 		<-start
-		done <- sendCommand(t, d, ports.CommandRequest{
-			Slug: "move-tab", Args: []string{"right"}, TargetSession: "left",
-		})
+		d.handleCommand(leftTransport, leftFrame)
+		done <- struct{}{}
 	}()
 	go func() {
 		<-start
-		done <- sendCommand(t, d, ports.CommandRequest{
-			Slug: "move-tab", Args: []string{"left"}, TargetSession: "right",
-		})
+		d.handleCommand(rightTransport, rightFrame)
+		done <- struct{}{}
 	}()
 	close(start)
-	for range 2 {
+	for _, sends := range []chan ports.Frame{leftSends, rightSends} {
 		select {
-		case result := <-done:
+		case <-done:
+			result := awaitCommandResult(t, sends)
 			require.True(t, result.OK, result.Text)
 		case <-time.After(5 * time.Second):
 			t.Fatal("opposite-direction move commands deadlocked")

@@ -82,6 +82,15 @@ func (g *roleEffectGate) immutableOrder() uint64 {
 	return g.order.Load()
 }
 
+func (g *roleEffectGate) inFlightCount() uint64 {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.inFlight
+}
+
 // roleEffectTicket reserves the exact published capability until End. End is
 // idempotent so error paths can safely defer it before doing any observable I/O.
 type roleEffectTicket struct {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -156,7 +157,7 @@ func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
 		{slug: "move-tab"},
 		{slug: "move-tab", args: []string{"work", "extra"}},
 	} {
-		t.Run(invocation.slug+"/"+string(rune(len(invocation.args)+'0')), func(t *testing.T) {
+		t.Run(invocation.slug+"/"+strconv.Itoa(len(invocation.args)), func(t *testing.T) {
 			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{
 				Code: ports.ErrInvalidCommandArgs, Text: "invalid command arguments",
 			})}}

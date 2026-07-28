@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -105,9 +106,10 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 
 			admissionEnded := make(chan struct{})
 			releaseAction := make(chan struct{})
+			var admissionEndedOnce sync.Once
 			d.afterActionRoleEffectEnded = func(action string) {
 				if action == tt.action {
-					close(admissionEnded)
+					admissionEndedOnce.Do(func() { close(admissionEnded) })
 					<-releaseAction
 				}
 			}
@@ -159,9 +161,10 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 
 	ended := make(chan struct{})
 	release := make(chan struct{})
+	var endedOnce sync.Once
 	d.afterActionRoleEffectEnded = func(action string) {
 		if action == "picker-stopped" {
-			close(ended)
+			endedOnce.Do(func() { close(ended) })
 			<-release
 		}
 	}
@@ -170,7 +173,11 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 	go func() {
 		done <- d.switchToTargetForRole(effect.roleToken(), picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "picker-stopped")
 	}()
-	<-ended
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("stopped-session handoff did not release its role ticket")
+	}
 
 	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
 	next.initOverlays()

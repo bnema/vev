@@ -136,6 +136,7 @@ type panePTYEffects struct {
 	attention         bool
 	responses         []byte
 	clipboards        []string
+	syncCleanup       syncTimerCleanup
 }
 
 // processPTYData retains the old call shape for resize replay and focused tests,
@@ -159,7 +160,7 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 	}
 	effects := panePTYEffects{lease: p.effectLeaseLocked()}
 	owner := effects.lease.owner
-	if owner != nil {
+	if owner != nil && owner.session != nil {
 		effects.renderCoordinator = owner.session.renderCoordinator()
 	}
 	effects.wasSyncing = p.screen.SyncUpdateActive()
@@ -167,13 +168,13 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 	p.refreshTerminalTitleLocked()
 	effects.isSyncing = p.screen.SyncUpdateActive()
 	effects.completeSyncRead = !effects.wasSyncing && !effects.isSyncing && completedSynchronizedUpdate(data)
-	if effects.wasSyncing != effects.isSyncing && owner != nil {
+	if effects.wasSyncing != effects.isSyncing && owner != nil && owner.session != nil {
 		if effects.isSyncing {
 			syncGen := owner.session.syncGen.Add(1)
 			p.syncGen = syncGen
 			if effects.renderCoordinator != nil {
 				lease := effects.lease
-				effects.renderCoordinator.noteSyncBeginWithRenderability(p, syncGen, func() bool {
+				effects.syncCleanup = effects.renderCoordinator.beginSyncBatchWithRenderability(p, syncGen, func() bool {
 					return lease.Current() && d.paneRenderable(owner.session, owner.tab, p)
 				}, func() {
 					p.mu.Lock()
@@ -194,6 +195,7 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 	effects.clipboards = append([]string(nil), p.ptyClipboards...)
 	p.ptyClipboards = p.ptyClipboards[:0]
 	p.mu.Unlock()
+	effects.syncCleanup.finish()
 	d.applyPanePTYEffects(p, effects)
 }
 
@@ -203,7 +205,7 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 // bytes that belonged to the old owner.
 func (d *Daemon) applyPanePTYEffects(p *pane, effects panePTYEffects) {
 	owner := effects.lease.owner
-	if owner == nil {
+	if owner == nil || owner.session == nil || owner.tab == nil {
 		return
 	}
 	if effects.lease.Current() {

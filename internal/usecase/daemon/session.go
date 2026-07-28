@@ -265,6 +265,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		}
 		tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 		if !lifetime.publish(tb.focusedPane()) {
+			lifetime.abort()
 			_ = pty.Close()
 			closeTabs(tabs)
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", lifetime.ctx.Err())
@@ -406,7 +407,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	})
 	if err != nil {
 		_ = d.killSession(newSess, ports.ReasonSessionKilled, true)
-		return errors.New("client detached")
+		return err
 	}
 
 	d.touchMRU(newSess)
@@ -517,6 +518,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	if !lifetime.publish(p) {
 		sess.mu.Unlock()
 		d.mu.Unlock()
+		lifetime.abort()
 		_ = pty.Close()
 		return errors.New("daemon: session closed")
 	}
@@ -706,7 +708,7 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 	if token.sess == nil || token.ac == nil || token.role != attachmentActive || token.transport.transport == nil {
 		return false
 	}
-	frozen := freezeRoleEffectGatesInterruptingObservedUntil(nil, done, nil, token.ac)
+	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{done: done}, token.ac)
 	defer frozen.unfreeze()
 	if !frozen.acquired || !frozen.drained {
 		return false
@@ -1331,11 +1333,11 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		drainDone = drainDeadline.Done
 		defer drainDeadline.stop()
 	}
-	frozen := freezeRoleEffectGatesInterruptingObservedUntil(participants.interrupts, drainDone, func(ac *attachedClient) {
+	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, done: drainDone, afterFrozen: func(ac *attachedClient) {
 		if d.afterRoleEffectGateFrozen != nil {
 			d.afterRoleEffectGateFrozen(action, ac)
 		}
-	}, participants.roleGates...)
+	}}, participants.roleGates...)
 	defer func() { frozen.unfreeze() }()
 	if !frozen.acquired {
 		// The acquisition helper has already rolled back exactly the gates it
@@ -1490,7 +1492,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	stoppedName := sess.name
 	stoppedCwd := sess.cwd
 	createdAt := sess.createdAt
-	tabNames := sess.persistRecordLocked(time.Now().UnixNano()).TabNames
+	tabNames := sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).TabNames
 	ephemeral := sess.ephemeral
 	unlockCoordinators()
 	unlockSessions()

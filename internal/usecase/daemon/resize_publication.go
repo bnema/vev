@@ -24,7 +24,11 @@ func (p resizeCommitPublication) current() bool {
 	if p.attachment == nil {
 		return true
 	}
-	if p.role.effect == nil || p.role.effect.ended.Load() || p.role.sess != p.session ||
+	// Attached resize publication is admitted only through a live role ticket.
+	if p.role.effect == nil {
+		return false
+	}
+	if p.role.effect.ended.Load() || p.role.sess != p.session ||
 		p.role.ac != p.attachment || p.role.role != attachmentActive || p.role.lease != p.lease ||
 		p.role.generation != p.attachment.roleGeneration.Load() ||
 		!p.attachment.transportSnapshotCurrent(p.role.transport) ||
@@ -56,6 +60,9 @@ func (p resizeCommitPublication) emit() bool {
 // the canonical rule never acquires an attachment lock while a pane fence is
 // held. Observer callbacks run only after both lock families are released.
 func (d *Daemon) publishResizeCommit(members []resizeMember, sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, ticket *roleEffectTicket, size domain.Size) bool {
+	if ac != nil && ticket == nil {
+		return false
+	}
 	d.observeBeforeResizeOwnerPostEffect(resizeOwnerPostCommitPublication)
 	if ac != nil {
 		ac.sendMu.Lock()
@@ -130,7 +137,7 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 	if !d.publishResizeCommit(result.members, sess, ac, lease, epoch, ticket, snap.size) {
 		return false
 	}
-	if len(result.failed) != 0 {
+	if len(result.failed) != 0 && rc.resizeRetryAvailableForLease(epoch, ac, lease) {
 		var retry *resizeRetryReservation
 		if !d.publishResizeOwnerPostEffect(result.failed, resizeOwnerPostRetrySchedule, func() {
 			retry, _ = rc.reserveResizeRetryForLease(epoch, ac, lease, func() {
@@ -173,7 +180,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 	tabs := make([]*tab, 0, len(members))
 	seen := make(map[*tab]struct{}, len(members))
 	for _, member := range members {
-		if member.tab == nil || member.isFloating || !resizeMemberOwnerCurrentLocked(&member) {
+		if member.tab == nil || member.isFloating || !resizeMemberOwnerCurrent(&member) {
 			continue
 		}
 		if _, ok := seen[member.tab]; ok {
@@ -233,7 +240,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 		tb.mu.Unlock()
 	}
 	for _, member := range members {
-		if !member.isFloating || member.tab == nil || member.pane == nil || !resizeMemberOwnerCurrentLocked(&member) {
+		if !member.isFloating || member.tab == nil || member.pane == nil || !resizeMemberOwnerCurrent(&member) {
 			continue
 		}
 		if !rc.retryCurrentForLease(epoch, ac, lease) {
@@ -246,7 +253,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 		currentSlot := member.tab.floating.state == floatingVisible &&
 			member.tab.floating.generation == member.floatingGeneration &&
 			member.tab.floating.pane == member.pane &&
-			resizeMemberOwnerCurrentLocked(&member)
+			resizeMemberOwnerCurrent(&member)
 		retryPending := false
 		if currentSlot {
 			member.pane.mu.Lock()
@@ -268,7 +275,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 		stillCurrent := member.tab.floating.state == floatingVisible &&
 			member.tab.floating.generation == member.floatingGeneration &&
 			member.tab.floating.pane == member.pane &&
-			resizeMemberOwnerCurrentLocked(&member)
+			resizeMemberOwnerCurrent(&member)
 		member.tab.mu.Unlock()
 		if stillCurrent && len(result.failed) == 0 {
 			member.pane.mu.Lock()
@@ -276,7 +283,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 			member.pane.mu.Unlock()
 		}
 	}
-	if len(failed) != 0 {
+	if len(failed) != 0 && rc.resizeRetryAvailableForLease(epoch, ac, lease) {
 		var retry *resizeRetryReservation
 		if !d.publishResizeOwnerPostEffect(failed, resizeOwnerPostRetrySchedule, func() {
 			retry, _ = rc.reserveResizeRetryForLease(epoch, ac, lease, func() {

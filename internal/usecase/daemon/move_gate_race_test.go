@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -76,11 +77,12 @@ func TestMovePaneGateReservationRaceKillWinsWithoutDeadlock(t *testing.T) {
 	}
 	killFrozen := make(chan struct{})
 	releaseKill := make(chan struct{})
+	var killFrozenOnce sync.Once
 	d.afterRoleEffectGateFrozen = func(action string, _ *attachedClient) {
 		if action != "" {
 			return
 		}
-		close(killFrozen)
+		killFrozenOnce.Do(func() { close(killFrozen) })
 		<-releaseKill
 	}
 	defer func() {
@@ -119,17 +121,19 @@ func TestMovePaneGateReservationRaceMoveWinsWithoutDeadlock(t *testing.T) {
 
 	moveGateFrozen := make(chan struct{})
 	releaseMove := make(chan struct{})
+	var moveGateFrozenOnce sync.Once
 	d.afterRoleEffectGateFrozen = func(action string, _ *attachedClient) {
 		if action != "move-pane" {
 			return
 		}
-		close(moveGateFrozen)
+		moveGateFrozenOnce.Do(func() { close(moveGateFrozen) })
 		<-releaseMove
 	}
 	killSnapshotted := make(chan struct{})
+	var killSnapshottedOnce sync.Once
 	d.afterRoleEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
 		if action == "" {
-			close(killSnapshotted)
+			killSnapshottedOnce.Do(func() { close(killSnapshotted) })
 		}
 	}
 	defer func() {

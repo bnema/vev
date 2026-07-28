@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -94,8 +95,8 @@ func TestMovePaneFinalSourceClientFollowsDestination(t *testing.T) {
 
 	rc := d.attachCoordinator(source, nil, client, true)
 	require.NotNil(t, rc)
-	rebased := false
-	client.renderStages.handoffRebase = func() { rebased = true }
+	var rebased atomic.Bool
+	client.renderStages.handoffRebase = func() { rebased.Store(true) }
 	destination := &session{id: "destination", name: "destination", tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}, active: 0}
 	destinationTab := destination.tabs[0]
 	destinationTab.stableID = "destination-tab"
@@ -117,8 +118,8 @@ func TestMovePaneFinalSourceClientFollowsDestination(t *testing.T) {
 	require.Same(t, client, destination.client)
 	require.Equal(t, attachmentActive, destination.attachmentRole(client))
 	require.Same(t, destinationTab, destination.tabs[destination.active])
-	require.True(t, rebased, "final-source follower must rebase output before its first paint")
-	require.True(t, moved.ctx.Err() == nil)
+	require.True(t, rebased.Load(), "final-source follower must rebase output before its first paint")
+	require.NoError(t, moved.ctx.Err(), "transferred pane process must remain alive")
 }
 
 func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing.T) {

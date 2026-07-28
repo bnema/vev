@@ -16,6 +16,14 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+func releaseTestGate(t *testing.T, ch chan struct{}) func() {
+	t.Helper()
+	var once sync.Once
+	release := func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(release)
+	return release
+}
+
 type blockedRenderReplacementTransport struct {
 	sendEntered chan struct{}
 	closed      chan struct{}
@@ -824,11 +832,13 @@ func TestJumpAttentionDoesNotMutateSourceAfterInitiatorReplacement(t *testing.T)
 
 	admissionEnded := make(chan struct{})
 	releaseAction := make(chan struct{})
+	release := releaseTestGate(t, releaseAction)
+	var admissionEndedOnce sync.Once
 	d.afterActionRoleEffectEnded = func(action string) {
 		if action != "jump-attention" {
 			return
 		}
-		close(admissionEnded)
+		admissionEndedOnce.Do(func() { close(admissionEnded) })
 		<-releaseAction
 	}
 	actionDone := make(chan struct{})
@@ -848,7 +858,7 @@ func TestJumpAttentionDoesNotMutateSourceAfterInitiatorReplacement(t *testing.T)
 	sess.mu.Lock()
 	sess.active = 0
 	sess.mu.Unlock()
-	close(releaseAction)
+	release()
 	<-actionDone
 
 	require.Equal(t, 0, activeTabIndex(sess), "the replaced initiator mutated source focus after losing its role")
@@ -906,9 +916,11 @@ func TestJumpAttentionHandoffRevalidatesInitiatorAfterAdmissionEnds(t *testing.T
 
 	admissionEnded := make(chan struct{})
 	releaseAction := make(chan struct{})
+	release := releaseTestGate(t, releaseAction)
+	var admissionEndedOnce sync.Once
 	d.afterActionRoleEffectEnded = func(action string) {
 		if action == "jump-attention" {
-			close(admissionEnded)
+			admissionEndedOnce.Do(func() { close(admissionEnded) })
 			<-releaseAction
 		}
 	}
@@ -926,7 +938,7 @@ func TestJumpAttentionHandoffRevalidatesInitiatorAfterAdmissionEnds(t *testing.T
 		expectedTransport: next.transportSnapshot(), ready: true,
 	})
 	require.NoError(t, err)
-	close(releaseAction)
+	release()
 	<-actionDone
 
 	require.Equal(t, 0, activeTabIndex(target), "stale handoff changed target focus")
@@ -951,11 +963,13 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 
 	admissionEnded := make(chan struct{})
 	releaseAction := make(chan struct{})
+	release := releaseTestGate(t, releaseAction)
+	var admissionEndedOnce sync.Once
 	d.afterActionRoleEffectEnded = func(action string) {
 		if action != "picker-delete" {
 			return
 		}
-		close(admissionEnded)
+		admissionEndedOnce.Do(func() { close(admissionEnded) })
 		<-releaseAction
 	}
 	actionDone := make(chan struct{})
@@ -972,7 +986,7 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 		expectedTransport: next.transportSnapshot(), ready: true,
 	})
 	require.NoError(t, err)
-	close(releaseAction)
+	release()
 	<-actionDone
 
 	d.mu.Lock()
@@ -1010,9 +1024,11 @@ func TestPickerDeleteOtherSessionRevalidatesInitiatorAfterAdmissionEnds(t *testi
 
 	admissionEnded := make(chan struct{})
 	releaseAction := make(chan struct{})
+	release := releaseTestGate(t, releaseAction)
+	var admissionEndedOnce sync.Once
 	d.afterActionRoleEffectEnded = func(action string) {
 		if action == "picker-delete" {
-			close(admissionEnded)
+			admissionEndedOnce.Do(func() { close(admissionEnded) })
 			<-releaseAction
 		}
 	}
@@ -1035,7 +1051,7 @@ func TestPickerDeleteOtherSessionRevalidatesInitiatorAfterAdmissionEnds(t *testi
 		expectedTransport: next.transportSnapshot(), ready: true,
 	})
 	require.NoError(t, err)
-	close(releaseAction)
+	release()
 	<-actionDone
 	d.mu.Lock()
 	_, targetStillRegistered = d.sessions[target.id]
@@ -1191,7 +1207,10 @@ func TestRoleEffectGateAdmittedSnatchedPanelFinishesBeforePromotion(t *testing.T
 	close(release)
 	<-effectDone
 	require.NoError(t, <-transitionDone)
-	require.Equal(t, wantSize, old.size)
+	old.sendMu.Lock()
+	gotSize := old.size
+	old.sendMu.Unlock()
+	require.Equal(t, wantSize, gotSize)
 }
 
 func TestRoleEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *testing.T) {

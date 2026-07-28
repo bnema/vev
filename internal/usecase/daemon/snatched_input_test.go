@@ -215,7 +215,7 @@ func TestSnatchedInputStrictActions(t *testing.T) {
 func TestBlockedSnatchedQuitDeadlineRetiresOnlyExactWaiter(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 2)}
 	waitingTransport := newBlockedSnatchedQuitTransport()
-	defer waitingTransport.Close()
+	defer func() { _ = waitingTransport.Close() }()
 	activeTransport := &closeTrackingTransport{}
 	d, sess, waiting, active := newAtomicReclaimFixture(t, clock, waitingTransport, activeTransport)
 
@@ -275,7 +275,7 @@ func TestBlockedSnatchedQuitDeadlineRetiresOnlyExactWaiter(t *testing.T) {
 func TestBlockedSnatchedQuitCleanupRejectsReclaimedTransportGeneration(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 2)}
 	staleTransport := newBlockedSnatchedQuitTransport()
-	defer staleTransport.Close()
+	defer func() { _ = staleTransport.Close() }()
 	ownerTransport := &closeTrackingTransport{}
 	d, sess, waiting, owner := newAtomicReclaimFixture(t, clock, staleTransport, ownerTransport)
 

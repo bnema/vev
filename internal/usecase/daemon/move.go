@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"reflect"
+
 	"github.com/bnema/vev/internal/domain"
 )
 
@@ -126,11 +128,11 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		}
 		source.mu.Unlock()
 		d.mu.Unlock()
-		frozen = tryFreezeRoleEffectGatesInterruptingObserved(handoffParticipants.interrupts, func(ac *attachedClient) {
+		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: handoffParticipants.interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
 			if d.afterRoleEffectGateFrozen != nil {
 				d.afterRoleEffectGateFrozen("move-pane", ac)
 			}
-		}, handoffParticipants.clients...)
+		}}, handoffParticipants.clients...)
 		if !frozen.acquired || !frozen.drained {
 			frozen.unfreeze()
 			return errMovePaneInvalid
@@ -152,7 +154,7 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		}
 		source.mu.Unlock()
 		d.mu.Unlock()
-		frozen = tryFreezeRoleEffectGatesInterruptingObserved(interrupts, nil, participants...)
+		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: interrupts, nonblocking: true}, participants...)
 		if !frozen.acquired || !frozen.drained {
 			frozen.unfreeze()
 			return errMovePaneInvalid
@@ -278,12 +280,24 @@ func moveTabMemberLocked(sess *session, target *tab) bool {
 }
 
 func lockMoveTabs(a, b *tab) func() {
+	if a == nil && b == nil {
+		return func() {}
+	}
+	if a == nil {
+		b.mu.Lock()
+		return b.mu.Unlock
+	}
+	if b == nil {
+		a.mu.Lock()
+		return a.mu.Unlock
+	}
 	if a == b {
 		a.mu.Lock()
 		return a.mu.Unlock
 	}
 	first, second := a, b
-	if first.stableID > second.stableID {
+	if first.stableID > second.stableID ||
+		(first.stableID == second.stableID && reflect.ValueOf(first).Pointer() > reflect.ValueOf(second).Pointer()) {
 		first, second = second, first
 	}
 	first.mu.Lock()

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 
@@ -11,12 +12,20 @@ import (
 // movePanePostcommitPlan is captured while the move's architecture and owner
 // fences still protect publication. It contains only immutable pointers,
 // generations, and exact attachment tokens needed by fallible follow-up work.
+func firstMovePane(panes []*pane) *pane {
+	if len(panes) == 0 {
+		return nil
+	}
+	return panes[0]
+}
+
 type movePanePostcommitPlan struct {
 	source             *session
 	destination        *session
 	sourceTab          *tab
 	destinationTab     *tab
 	movedPane          *pane
+	movedPanes         []*pane
 	destinationClient  *attachedClient
 	sourceCleanupToken attachmentRoleToken
 	handoffResult      attachmentTransitionResult
@@ -25,6 +34,7 @@ type movePanePostcommitPlan struct {
 	rolesFrozen        bool
 	unlockDispatch     func()
 	reservation        *moveLifecycleReservation
+	oldTabCancel       context.CancelFunc
 
 	sourceTabWasActive bool
 	sourceTabRemoved   bool
@@ -42,15 +52,23 @@ type movePanePostcommitPlan struct {
 // released. Generation-bound tokens make stale effects drop rather than route
 // back to the retired source.
 func (p movePanePostcommitPlan) execute(d *Daemon) {
-	if p.sourceTabRemoved && p.sourceTab.cancel != nil {
+	if p.oldTabCancel != nil {
+		p.oldTabCancel()
+	} else if p.sourceTabRemoved && p.sourceTab != nil && p.sourceTab.cancel != nil {
 		p.sourceTab.cancel()
 	}
 	if p.sourceCleanupToken.current() {
 		cleanupClient := p.sourceCleanupToken.ac
-		if cleanupClient.overlays != nil {
-			cleanupClient.overlays.clearCopyModeForPane(p.movedPane)
+		panes := p.movedPanes
+		if len(panes) == 0 && p.movedPane != nil {
+			panes = []*pane{p.movedPane}
 		}
-		cleanupClient.pruneCaptureFrames(p.movedPane)
+		for _, movedPane := range panes {
+			if cleanupClient.overlays != nil {
+				cleanupClient.overlays.clearCopyModeForPane(movedPane)
+			}
+			cleanupClient.pruneCaptureFrames(movedPane)
+		}
 	}
 
 	// Snapshot dirtiness is admitted while lifecycle reservations still pin
@@ -66,10 +84,10 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	p.unlockDispatch()
 	p.reservation.Release()
 
-	if p.sourceTabWasActive && !moveSessionStillEmpty(d, p.source) {
+	if p.sourceTabWasActive && !moveSessionRetired(d, p.source) {
 		d.activateTab(p.source, p.source.activeTab())
 	}
-	if !moveSessionStillEmpty(d, p.source) {
+	if !moveSessionRetired(d, p.source) {
 		sourceLayoutTab := p.sourceTab
 		if p.sourceTabRemoved {
 			sourceLayoutTab = p.source.activeTab()
@@ -144,7 +162,7 @@ func retireEmptyMoveSessionLocked(sess *session, retirement frozenMoveAttachment
 	return retired
 }
 
-func moveSessionStillEmpty(d *Daemon, sess *session) bool {
+func moveSessionRetired(d *Daemon, sess *session) bool {
 	if d == nil || sess == nil {
 		return true
 	}

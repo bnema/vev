@@ -23,7 +23,7 @@ func (t acceptedTabLayoutRetryToken) current() bool {
 	}
 	for i := range t.members {
 		member := &t.members[i]
-		if member.session != t.session || member.tab != t.tab || !resizeMemberOwnerCurrentLocked(member) {
+		if member.session != t.session || member.tab != t.tab || !resizeMemberOwnerCurrent(member) {
 			return false
 		}
 	}

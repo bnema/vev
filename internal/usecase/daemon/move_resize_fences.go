@@ -177,6 +177,10 @@ func (d *Daemon) publishResizeOwnerPostEffect(members []resizeMember, effect res
 		return false
 	}
 	d.observeBeforeResizeOwnerPostEffect(effect)
+	if len(members) == 0 {
+		publish()
+		return true
+	}
 	fences := acquireResizeOwnerPostEffectFences(members)
 	if fences == nil {
 		return false

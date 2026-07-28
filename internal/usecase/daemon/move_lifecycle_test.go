@@ -94,6 +94,9 @@ func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 	// Both opposite-direction reservations must block on a before either takes
 	// b. This proves order from immutable IDs rather than argument direction.
 	first.teardownMu.Lock()
+	beforeTeardownLocks := make(chan struct{}, 2)
+	d.afterMoveLifecycleGateBeforeTeardownLocks = func() { beforeTeardownLocks <- struct{}{} }
+	defer func() { d.afterMoveLifecycleGateBeforeTeardownLocks = nil }()
 	results := make(chan *moveLifecycleReservation, 2)
 	errs := make(chan error, 2)
 	for _, pair := range [][2]*session{{first, second}, {second, first}} {
@@ -104,6 +107,9 @@ func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 		}()
 	}
 	awaitDaemonMoveActive(t, d, 2)
+	for range 2 {
+		awaitTestCompletion(t, beforeTeardownLocks, "move did not reach ordered teardown-lock admission")
+	}
 	require.True(t, second.teardownMu.TryLock(), "opposite move locked b before the shared lowest-ID session")
 	second.teardownMu.Unlock()
 	first.teardownMu.Unlock()

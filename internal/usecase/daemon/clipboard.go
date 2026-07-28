@@ -255,7 +255,8 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *role
 		return token.transport.transport, errAttachmentTransition
 	}
 	expected := token.transport
-	send := func(owned bool) error {
+	ownedTransport, owned := expected.transport.(ports.OwnedSynchronousTransport)
+	send := func() error {
 		ac := token.ac
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
@@ -268,7 +269,7 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *role
 		frame := ac.output.sideEffect(item.seq, ac.echoAck.Load())
 		var err error
 		if owned {
-			err = expected.transport.(ports.OwnedSynchronousTransport).SendSynchronous(frame)
+			err = ownedTransport.SendSynchronous(frame)
 		} else {
 			err = expected.transport.Send(frame)
 		}
@@ -278,10 +279,10 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *role
 		ticket.endTransportSend()
 		return err
 	}
-	if _, owned := expected.transport.(ports.OwnedSynchronousTransport); owned {
-		return expected.transport, send(true)
+	if owned {
+		return expected.transport, send()
 	}
-	return d.boundedSendWith(expected.transport, func() error { return send(false) })
+	return d.boundedSendWith(expected.transport, send)
 }
 
 // beginClipboardOwnerSend validates the source pane generation after sendMu

@@ -143,7 +143,9 @@ func TestReclaimSnatchedSwapsOwnerLeaseRebasesAndAppliesTheme(t *testing.T) {
 
 	d.attachmentCleanupWg.Wait()
 	require.Equal(t, attachmentSnatched, sess.attachmentRole(active))
-	require.False(t, active.transport().(*closeTrackingTransport).Closed())
+	activeTransport, ok := active.transport().(*closeTrackingTransport)
+	require.True(t, ok, "active transport has unexpected type")
+	require.False(t, activeTransport.Closed())
 	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, requester.size)
 }
 

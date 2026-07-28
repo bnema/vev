@@ -41,4 +41,5 @@ func TestSessionMoveLocatorSynchronizesMutableNameRead(t *testing.T) {
 	locator := sessionMoveLocator(sess)
 	require.Equal(t, sess.id, locator.ID)
 	require.Equal(t, sess.incarnation, locator.Incarnation)
+	require.Equal(t, "session-9999", locator.Name)
 }

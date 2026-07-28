@@ -89,14 +89,20 @@ func (r *Router) RouteWithHandler(data []byte, h Handler) {
 		h = r.h
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var pendingAlt []byte
 	if r.pending {
-		pendingAlt := r.pendingAlt
-		pendingHandler := r.pendingHandler
+		pendingAlt = append([]byte(nil), r.pendingAlt...)
+	}
+	pendingHandler := r.pendingHandler
+	wasPending := r.pending
+	if wasPending {
 		r.stopTimer()
 		r.pending = false
 		r.pendingAlt = nil
 		r.pendingHandler = nil
+	}
+	r.mu.Unlock()
+	if wasPending {
 		combined := append(append([]byte(nil), pendingAlt...), data...)
 		if consumed := r.routeAfterPendingESC(combined, len(pendingAlt), pendingHandler); consumed > len(pendingAlt) {
 			data = data[consumed-len(pendingAlt):]
@@ -209,6 +215,7 @@ func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler)
 }
 
 func (r *Router) retainESC(h Handler, altBytes ...[]byte) {
+	r.mu.Lock()
 	r.pending = true
 	r.pendingAlt = nil
 	r.pendingHandler = h
@@ -217,23 +224,33 @@ func (r *Router) retainESC(h Handler, altBytes ...[]byte) {
 	}
 	r.timer = r.clock.NewTimer(r.delay)
 	r.pendingDone = make(chan struct{})
+	timer, done := r.timer, r.pendingDone
+	r.mu.Unlock()
 	go func(timer ports.Timer, done <-chan struct{}) {
 		select {
 		case <-timer.C():
 		case <-done:
 			return
 		}
+		var (
+			data []byte
+			h    Handler
+		)
 		r.mu.Lock()
-		defer r.mu.Unlock()
 		if r.pending && r.timer == timer {
 			r.pending = false
-			data := append([]byte{ESC}, r.pendingAlt...)
-			h := r.pendingHandler
+			data = append([]byte{ESC}, r.pendingAlt...)
+			h = r.pendingHandler
 			r.pendingAlt = nil
 			r.pendingHandler = nil
+			r.timer = nil
+			r.pendingDone = nil
+		}
+		r.mu.Unlock()
+		if h != nil {
 			r.forward(data, h)
 		}
-	}(r.timer, r.pendingDone)
+	}(timer, done)
 }
 
 func (r *Router) stopTimer() {

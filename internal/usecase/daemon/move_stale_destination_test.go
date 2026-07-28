@@ -28,8 +28,12 @@ func TestMovePaneRejectsStaleDestinationIncarnationWithoutMutation(t *testing.T)
 	d.sessions[destination.id] = destination
 	d.mu.Unlock()
 
+	sourceTab.mu.Lock()
 	beforeSource := sourceTab.tree.Clone()
+	sourceTab.mu.Unlock()
+	destinationTab.mu.Lock()
 	beforeDestination := destinationTab.tree.Clone()
+	destinationTab.mu.Unlock()
 	beforeOwner := moved.ownerSnapshot()
 	staleIncarnation := destination.incarnation
 	staleIncarnation[0]++
@@ -41,8 +45,15 @@ func TestMovePaneRejectsStaleDestinationIncarnationWithoutMutation(t *testing.T)
 		DestinationTabID: domain.TabStableID(destinationTab.stableID),
 	})
 	require.ErrorIs(t, err, errMoveStaleTarget)
-	require.Equal(t, beforeSource, sourceTab.tree)
-	require.Equal(t, beforeDestination, destinationTab.tree)
+	sourceTab.mu.Lock()
+	sourceAfter := sourceTab.tree.Clone()
+	sourceMoved := sourceTab.panes[moved.id]
+	sourceTab.mu.Unlock()
+	destinationTab.mu.Lock()
+	destinationAfter := destinationTab.tree.Clone()
+	destinationTab.mu.Unlock()
+	require.Equal(t, beforeSource, sourceAfter)
+	require.Equal(t, beforeDestination, destinationAfter)
 	require.Same(t, beforeOwner, moved.ownerSnapshot())
-	require.Same(t, moved, sourceTab.panes[moved.id])
+	require.Same(t, moved, sourceMoved)
 }

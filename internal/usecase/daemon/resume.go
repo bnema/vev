@@ -3,10 +3,13 @@ package daemon
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
+
+var errResumeTokenLifecycleRace = errors.New("resume token lifecycle race")
 
 func newResumeToken() uint64 {
 	var b [8]byte
@@ -70,9 +73,17 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 		sess.mu.Unlock()
 	}
 	token := ac.resumeToken
+	var (
+		oldRetirement *parkedAttachmentRetirement
+		oldSame       *parkedAttachment
+	)
 	if old := d.parked[token]; old != nil {
-		old.timer.Stop()
-		old.closeDone()
+		retirement := d.retireParkedAttachmentLocked(token, old)
+		if old.ac == ac {
+			oldSame = old
+		} else {
+			oldRetirement = &retirement
+		}
 	}
 	grace := d.resumeParkGrace
 	timer := d.clock.NewTimer(grace)
@@ -80,6 +91,15 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 	ac.parked = true
 	d.parked[token] = parked
 	d.mu.Unlock()
+	if oldRetirement != nil {
+		finishParkedAttachmentRetirements([]parkedAttachmentRetirement{*oldRetirement})
+	}
+	if oldSame != nil {
+		if oldSame.timer != nil {
+			oldSame.timer.Stop()
+		}
+		oldSame.closeDone()
+	}
 	d.log.Info("client parked for resume", "session", sess.name, "grace", grace)
 
 	go func(token uint64, parked *parkedAttachment) {
@@ -206,7 +226,10 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 		return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 	}
 	if d.parked[h.ResumeToken] != parked {
-		return nil, nil, false, nil
+		if d.sessions[parked.sess.id] == parked.sess {
+			return nil, nil, false, errResumeTokenLifecycleRace
+		}
+		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	return d.resumeParkedLocked(h, tr, sz)
 }

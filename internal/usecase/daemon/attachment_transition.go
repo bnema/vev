@@ -123,11 +123,11 @@ func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, par
 		drainDeadline = newRoleEffectDrainDeadline(d.clock)
 		drainDone = drainDeadline.Done
 	}
-	frozen := freezeRoleEffectGatesInterruptingObservedUntil(participants.interrupts, drainDone, func(ac *attachedClient) {
+	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, done: drainDone, afterFrozen: func(ac *attachedClient) {
 		if d.afterRoleEffectGateFrozen != nil {
 			d.afterRoleEffectGateFrozen(req.action, ac)
 		}
-	}, participants.clients...)
+	}}, participants.clients...)
 	if drainDeadline != nil {
 		drainDeadline.stop()
 	}

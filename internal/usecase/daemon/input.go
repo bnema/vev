@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
@@ -388,19 +389,19 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneLeft:
-		if err := h.d.focusDir(sess, h.ac, layout.Left, effect); err != nil && err != errAttachmentTransition {
+		if err := h.d.focusDir(sess, h.ac, layout.Left, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneRight:
-		if err := h.d.focusDir(sess, h.ac, layout.Right, effect); err != nil && err != errAttachmentTransition {
+		if err := h.d.focusDir(sess, h.ac, layout.Right, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneUp:
-		if err := h.d.focusDir(sess, h.ac, layout.Up, effect); err != nil && err != errAttachmentTransition {
+		if err := h.d.focusDir(sess, h.ac, layout.Up, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneDown:
-		if err := h.d.focusDir(sess, h.ac, layout.Down, effect); err != nil && err != errAttachmentTransition {
+		if err := h.d.focusDir(sess, h.ac, layout.Down, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionGrowPaneWidth:
