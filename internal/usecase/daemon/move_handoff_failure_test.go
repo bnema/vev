@@ -251,3 +251,80 @@ func TestMovePaneFinalSourceHandoffValidationFailureIsAtomic(t *testing.T) {
 	after := captureMoveState(d, source, destination, sourceTab, destinationTab, movedPane, sourceClient)
 	require.Equal(t, before, after, "stale handoff validation must reject before any move publication")
 }
+
+type moveTabHandoffState struct {
+	closing     bool
+	registry    map[domain.SessionID]*session
+	source      moveSessionState
+	destination moveSessionState
+	movedTab    moveTabState
+	follower    moveClientState
+}
+
+func captureMoveTabHandoffState(d *Daemon, source, destination *session, moved *tab, follower *attachedClient) moveTabHandoffState {
+	d.mu.Lock()
+	d.notices.routingMu.Lock()
+	unlockSessions := lockAttachmentSessions(source, destination)
+	moved.mu.Lock()
+
+	registry := make(map[domain.SessionID]*session, len(d.sessions))
+	maps.Copy(registry, d.sessions)
+	state := moveTabHandoffState{
+		closing:     d.closing,
+		registry:    registry,
+		source:      captureMoveSessionStateLocked(source),
+		destination: captureMoveSessionStateLocked(destination),
+		movedTab:    captureMoveTabStateLocked(moved),
+		follower:    captureMoveClientStateLocked(source, destination, follower),
+	}
+
+	moved.mu.Unlock()
+	unlockSessions()
+	d.notices.routingMu.Unlock()
+	d.mu.Unlock()
+	return state
+}
+
+func TestMoveTabFinalSourceHandoffValidationFailureIsAtomic(t *testing.T) {
+	d, source, follower, destination, _, moved := setupMoveTabFinalSourceHandoff(t)
+	floating := newPaneWithStableID("floating", "floating-stable", newQuietPTY(), domain.Size{Cols: 20, Rows: 8})
+	floating.ctx, floating.cancel = context.WithCancel(d.paneProcessCtx)
+	t.Cleanup(floating.cancel)
+	moved.mu.Lock()
+	moved.floating = floatingSlot{state: floatingVisible, pane: floating, desiredVisible: true, generation: 9}
+	moved.mu.Unlock()
+	publishPaneOwner(floating, source, moved, 9)
+
+	before := captureMoveTabHandoffState(d, source, destination, moved, follower)
+	originalTransport := before.follower.transport
+	staleTransport := &closeTrackingTransport{}
+	staleInjected := make(chan struct{})
+	d.afterRoleEffectGateFrozen = func(action string, client *attachedClient) {
+		if action != "move-tab" || client != follower {
+			return
+		}
+		client.replaceTransport(staleTransport)
+		close(staleInjected)
+	}
+
+	moveDone := make(chan error, 1)
+	go func() {
+		moveDone <- d.moveTab(moveTabRequest{
+			Source:      moveSessionLocator{ID: source.id, Incarnation: source.incarnation},
+			SourceTabID: domain.TabStableID(moved.stableID),
+			Destination: moveSessionLocator{ID: destination.id, Incarnation: destination.incarnation},
+		})
+	}()
+	<-staleInjected
+	err := <-moveDone
+
+	follower.linkMu.Lock()
+	follower.tr = originalTransport.transport
+	follower.transportIncarnation = originalTransport.incarnation
+	follower.linkMu.Unlock()
+	d.afterRoleEffectGateFrozen = nil
+
+	require.ErrorIs(t, err, errAttachmentTransition)
+	after := captureMoveTabHandoffState(d, source, destination, moved, follower)
+	require.Equal(t, before, after, "stale move-tab handoff validation must reject before any move publication")
+}

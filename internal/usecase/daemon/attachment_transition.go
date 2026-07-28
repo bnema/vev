@@ -19,8 +19,12 @@ type attachmentTransitionRequest struct {
 	// preserveRole commits navigation state without replacing attachment
 	// ownership. It is used for same-session picker selections after the exact
 	// initiating capability has been frozen and revalidated.
-	preserveRole                       bool
-	expectedSourceTab                  *tab
+	preserveRole      bool
+	expectedSourceTab *tab
+	// transferExpectedSourceTab permits an installed visible floating pane only
+	// when the caller atomically transfers this exact tab under its own tab and
+	// floating-generation fences. Ordinary navigation still rejects visibility.
+	transferExpectedSourceTab          bool
 	createTargetLocked                 func() (*session, error)
 	ready                              bool
 	expectedTargetCurrent              *attachedClient

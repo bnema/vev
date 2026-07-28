@@ -163,6 +163,7 @@ type Daemon struct {
 	afterMoveLifecycleReserved  func()
 	afterMovePaneSourceSnapshot func()
 	beforeMovePaneCommit        func()
+	beforeMoveTabCommit         func()
 	// afterDetachRoleEffectsFrozen observes terminal detach after it wins the
 	// attachment gate but before it checks session ownership.
 	afterDetachRoleEffectsFrozen func()

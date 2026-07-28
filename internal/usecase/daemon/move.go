@@ -15,6 +15,12 @@ type movePaneRequest struct {
 	DestinationTabID domain.TabStableID
 }
 
+type moveTabRequest struct {
+	Source      moveSessionLocator
+	SourceTabID domain.TabStableID
+	Destination moveSessionLocator
+}
+
 // movePane resolves, reserves, validates, and commits one pane relocation. All
 // fallible work happens before the membership publication section. Once the
 // section starts, the caller holds the ordered architecture locks and only

@@ -50,6 +50,10 @@ func (d *Daemon) sourceRoleTokenCurrentFrozen(token attachmentRoleToken) bool {
 }
 
 func transitionSourceTabCurrentLocked(source *session, expected *tab) bool {
+	return transitionSourceTabCurrentForRequestLocked(source, expected, false)
+}
+
+func transitionSourceTabCurrentForRequestLocked(source *session, expected *tab, transferExpected bool) bool {
 	if expected == nil {
 		return true
 	}
@@ -58,7 +62,7 @@ func transitionSourceTabCurrentLocked(source *session, expected *tab) bool {
 	}
 	expected.mu.Lock()
 	defer expected.mu.Unlock()
-	return expected.floating.state != floatingVisible
+	return transferExpected || expected.floating.state != floatingVisible
 }
 
 // transitionAttachmentLocked is the publication half of transitionAttachment.
@@ -127,7 +131,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 		releaseCoordinators: lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator),
 	}
 	invalid := req.sourceToken != nil && (!transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) ||
-		!transitionSourceTabCurrentLocked(source, req.expectedSourceTab))
+		!transitionSourceTabCurrentForRequestLocked(source, req.expectedSourceTab, req.transferExpectedSourceTab))
 	invalid = invalid || targetCoordinator != nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next)
 	invalid = invalid || req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
 		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next)
