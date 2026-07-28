@@ -73,7 +73,7 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	movedPane := admission.movedPane
 	sourceClient := admission.sourceClient
 	destinationClient := admission.destinationClient
-	sourceSnatchedCount := admission.sourceSnatched
+	sourceSnatched := admission.sourceSnatched
 	sourceTabWasActive := admission.sourceTabWasActive
 	sourceTabInitialGeneration := admission.sourceGeneration
 	destinationTabInitialGeneration := admission.destinationGeneration
@@ -117,7 +117,7 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		// the follower. Their exact membership is checked again in the commit.
 		d.mu.Lock()
 		source.mu.Lock()
-		for ac := range source.snatched {
+		for _, ac := range sourceSnatched {
 			handoffParticipants.clients = append(handoffParticipants.clients, ac)
 			tr := ac.transportSnapshot()
 			if tr.transport != nil {
@@ -138,15 +138,14 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		handoffFrozen = true
 		sourceRolesFrozen = true
 		handoffReq.roleEffectsFrozen = true
-	} else if finalSourceTab && source != destination && sourceSnatchedCount > 0 {
+	} else if finalSourceTab && source != destination && len(sourceSnatched) > 0 {
 		// A headless source may still have persistent snatched clients. Freeze
 		// their exact role gates before retiring the source registry.
 		d.mu.Lock()
 		source.mu.Lock()
-		participants := make([]*attachedClient, 0, len(source.snatched))
-		interrupts := make([]roleTransportInterrupt, 0, len(source.snatched))
-		for ac := range source.snatched {
-			participants = append(participants, ac)
+		participants := append([]*attachedClient(nil), sourceSnatched...)
+		interrupts := make([]roleTransportInterrupt, 0, len(sourceSnatched))
+		for _, ac := range sourceSnatched {
 			if transport := ac.transportSnapshot(); transport.transport != nil {
 				interrupts = append(interrupts, roleTransportInterrupt{ac: ac, transport: transport})
 			}
@@ -176,11 +175,11 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		destinationTab:        destinationTab,
 		movedPane:             movedPane,
 		sourceClient:          sourceClient,
-		sourceSnatchedCount:   sourceSnatchedCount,
+		sourceSnatched:        sourceSnatched,
 		sourceGeneration:      sourceTabInitialGeneration,
 		destinationGeneration: destinationTabInitialGeneration,
 		handoffFrozen:         handoffFrozen,
-		sourceRolesFrozen:     sourceRolesFrozen,
+		frozenRoles:           frozen,
 		handoffReq:            handoffReq,
 	}
 	fences := newMovePaneResizeFences(source, destination, sourceTab, destinationTab, movedPane)

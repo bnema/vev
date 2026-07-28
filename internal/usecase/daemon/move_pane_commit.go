@@ -14,11 +14,11 @@ type movePaneCommit struct {
 	sourceTab, destinationTab *tab
 	movedPane                 *pane
 	sourceClient              *attachedClient
-	sourceSnatchedCount       int
+	sourceSnatched            []*attachedClient
 	sourceGeneration          uint64
 	destinationGeneration     uint64
 	handoffFrozen             bool
-	sourceRolesFrozen         bool
+	frozenRoles               frozenRoleEffectGates
 	handoffReq                attachmentTransitionRequest
 	handoffPublication        *attachmentPublication
 	err                       error
@@ -45,6 +45,7 @@ func (c *movePaneCommit) releasePublication() {
 
 func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	var candidate *movePaneCandidate
+	var retirement frozenMoveAttachmentRetirement
 	var err error
 	d.mu.Lock()
 	if d.closing || d.sessions[c.source.id] != c.source || d.sessions[c.destination.id] != c.destination {
@@ -61,7 +62,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 		return false
 	}
 	if c.handoffFrozen {
-		if c.source.client != c.sourceClient || len(c.source.snatched) != c.sourceSnatchedCount ||
+		if c.source.client != c.sourceClient || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
 			c.handoffReq.targetTabIndex < 0 || c.handoffReq.targetTabIndex >= len(c.destination.tabs) ||
 			c.destination.tabs[c.handoffReq.targetTabIndex] != c.destinationTab {
 			return false
@@ -100,12 +101,16 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	}
 
 	sourceWillEmpty := candidate.removeSourceTab && len(c.source.tabs) == 1
-	needsHandoff := sourceWillEmpty && c.source != c.destination && c.sourceClient != nil
-	if needsHandoff != c.handoffFrozen || sourceWillEmpty && c.source != c.destination && c.source.client != nil && !needsHandoff {
-		return false
-	}
-	if c.sourceRolesFrozen && len(c.source.snatched) != c.sourceSnatchedCount {
-		return false
+	if sourceWillEmpty && c.source != c.destination {
+		if c.source.client != c.sourceClient || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
+			(c.sourceClient != nil) != c.handoffFrozen {
+			return false
+		}
+		var retirementOK bool
+		retirement, retirementOK = prepareFrozenMoveAttachmentRetirementLocked(c.source, c.sourceSnatched, c.frozenRoles)
+		if !retirementOK {
+			return false
+		}
 	}
 
 	// Everything above is fallible. Topology, owner, lifecycle registry, and
@@ -152,7 +157,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 
 	if candidate.removeSourceTab && len(c.source.tabs) == 0 {
 		delete(d.sessions, c.source.id)
-		c.retiredAttachments = retireEmptyMoveSessionLocked(c.source)
+		c.retiredAttachments = retireEmptyMoveSessionLocked(c.source, retirement)
 		c.retiredParked = d.purgeParkedForSessionLocked(c.source)
 	}
 	c.sourceEmpty = len(c.source.tabs) == 0

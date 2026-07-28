@@ -72,6 +72,15 @@ func (f frozenRoleEffectGates) interrupted(ac *attachedClient, expected transpor
 	return ok && interrupted.transport == expected.transport && interrupted.incarnation == expected.incarnation
 }
 
+func (f frozenRoleEffectGates) contains(target *attachedClient) bool {
+	for _, ac := range f.clients {
+		if ac == target {
+			return true
+		}
+	}
+	return false
+}
+
 type roleTransportInterrupt struct {
 	ac        *attachedClient
 	transport transportSnapshot

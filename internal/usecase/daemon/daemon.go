@@ -162,6 +162,7 @@ type Daemon struct {
 	// perform external work while locks are held.
 	afterMoveLifecycleReserved  func()
 	afterMovePaneSourceSnapshot func()
+	afterMoveTabSourceSnapshot  func()
 	beforeMovePaneCommit        func()
 	beforeMoveTabCommit         func()
 	// afterDetachRoleEffectsFrozen observes terminal detach after it wins the

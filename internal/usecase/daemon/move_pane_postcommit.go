@@ -127,18 +127,18 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 // retireEmptyMoveSessionLocked removes all source-owned attachment roles that
 // were not transferred. It runs inside the move commit, after the moved pane
 // has already acquired its destination owner, and performs no external work.
-func retireEmptyMoveSessionLocked(sess *session) []detachedAttachmentSnapshot {
+func retireEmptyMoveSessionLocked(sess *session, retirement frozenMoveAttachmentRetirement) []detachedAttachmentSnapshot {
 	if sess == nil || sess.client != nil {
 		return nil
 	}
-	retired := make([]detachedAttachmentSnapshot, 0, len(sess.snatched))
-	for ac := range sess.snatched {
+	retired := make([]detachedAttachmentSnapshot, 0, len(retirement.clients))
+	for _, ac := range retirement.clients {
 		retired = append(retired, detachedAttachmentSnapshot{ac: ac, transport: ac.transportSnapshot()})
+		delete(sess.snatched, ac)
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenRoleCapability()
 	}
-	clear(sess.snatched)
 	sess.tabs = nil
 	sess.active = -1
 	return retired
