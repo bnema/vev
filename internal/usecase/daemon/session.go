@@ -653,7 +653,7 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	d.log.Info("pane created", "session", name, "pane", p.id)
 	// Scheduler ownership was removed; this launch creates exactly one reader.
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, tb, p)
+	go d.readPanePTY(p)
 }
 
 // attachClient makes ac the session's current client, displacing any prior one

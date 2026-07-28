@@ -82,7 +82,16 @@ func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
 	return false
 }
 
+// ptyReader is retained as a compatibility entry point for focused tests. The
+// production goroutine calls readPanePTY, whose closure owns only the pane.
 func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
+	if p != nil && p.ownerSnapshot() == nil && sess != nil && tb != nil {
+		publishPaneOwner(p, sess, tb, 0)
+	}
+	d.readPanePTY(p)
+}
+
+func (d *Daemon) readPanePTY(p *pane) {
 	defer d.sessWg.Done()
 	if p == nil {
 		return
@@ -98,102 +107,143 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 	for {
 		n, err := p.pty.Read(buf)
 		if n > 0 {
-			d.processPTYData(sess, tb, p, buf[:n], true)
+			d.processPanePTYData(p, buf[:n], true)
 		}
 		if err != nil {
-			sess.mu.Lock()
-			sessionName := sess.name
-			sess.mu.Unlock()
-			d.log.Info("pane pty closed", "err", err, "session", sessionName)
+			lease := p.effectLease()
+			if sessionName, current := paneEffectSessionName(lease); current {
+				d.log.Info("pane pty closed", "err", err, "session", sessionName)
+			} else {
+				d.log.Info("pane pty closed", "err", err)
+			}
 			if p.onExit != nil {
 				p.onExit()
 			} else {
-				d.reapPane(sess, tb, p)
+				d.reapPaneOwner(p)
 			}
 			return
 		}
 	}
 }
 
-// processPTYData is the sole VT parsing path. While a resize apply owns the
+type panePTYEffects struct {
+	lease             paneEffectLease
+	renderCoordinator *renderCoordinator
+	wasSyncing        bool
+	isSyncing         bool
+	completeSyncRead  bool
+	syncEnded         bool
+	attention         bool
+	responses         []byte
+	clipboards        []string
+}
+
+// processPTYData retains the old call shape for resize replay and focused tests,
+// but routing is always derived from the pane owner captured under pane.mu.
+func (d *Daemon) processPTYData(_ *session, _ *tab, p *pane, data []byte, bufferDuringApply bool) {
+	d.processPanePTYData(p, data, bufferDuringApply)
+}
+
+// processPanePTYData is the sole VT parsing path. While a resize apply owns the
 // pane, reader calls append exact bytes and returns immediately; it never waits
 // for PTY.Resize or loses a short read.
-func (d *Daemon) processPTYData(sess *session, tb *tab, p *pane, data []byte, bufferDuringApply bool) {
-	rc := sess.renderCoordinator()
+func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool) {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	if bufferDuringApply && p.resizeApplying {
 		p.resizePending = append(p.resizePending, data...)
 		p.mu.Unlock()
 		return
 	}
-	wasSyncing := p.screen.SyncUpdateActive()
+	effects := panePTYEffects{lease: p.effectLeaseLocked()}
+	owner := effects.lease.owner
+	if owner != nil {
+		effects.renderCoordinator = owner.session.renderCoordinator()
+	}
+	effects.wasSyncing = p.screen.SyncUpdateActive()
 	p.screen.Write(data)
 	p.refreshTerminalTitleLocked()
-	isSyncing := p.screen.SyncUpdateActive()
-	completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
-	var syncGen uint64
-	syncEnded := false
-	if wasSyncing != isSyncing {
-		if isSyncing {
-			syncGen = sess.syncGen.Add(1)
+	effects.isSyncing = p.screen.SyncUpdateActive()
+	effects.completeSyncRead = !effects.wasSyncing && !effects.isSyncing && completedSynchronizedUpdate(data)
+	if effects.wasSyncing != effects.isSyncing && owner != nil {
+		if effects.isSyncing {
+			syncGen := owner.session.syncGen.Add(1)
 			p.syncGen = syncGen
-			if rc != nil {
-				rc.noteSyncBeginWithRenderability(p, syncGen, func() bool { return d.paneRenderable(sess, tb, p) }, func() {
+			if effects.renderCoordinator != nil {
+				lease := effects.lease
+				effects.renderCoordinator.noteSyncBeginWithRenderability(p, syncGen, func() bool {
+					return lease.Current() && d.paneRenderable(owner.session, owner.tab, p)
+				}, func() {
 					p.mu.Lock()
-					if p.syncGen == syncGen && p.screen.SyncUpdateActive() {
+					if p.owner.Load() == lease.owner && p.syncGen == syncGen && p.screen.SyncUpdateActive() {
 						p.screen.ForceSyncEnd()
 					}
 					p.mu.Unlock()
 				})
 			}
 		} else {
-			syncGen = p.syncGen
-			syncEnded = rc != nil && rc.removeSyncEnd(p, syncGen, true)
+			effects.syncEnded = effects.renderCoordinator != nil && effects.renderCoordinator.removeSyncEnd(p, p.syncGen, true)
 		}
 	}
-	p.mu.Unlock()
-	renderable := d.paneRenderable(sess, tb, p)
-	markSnapshotDirty(sess)
-	d.flushPTYEffects(sess, tb, p)
-	if rc != nil {
-		if wasSyncing != isSyncing {
-			if isSyncing {
-				if renderable {
-					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-				}
-			} else if syncEnded && renderable {
-				rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
-			}
-		}
-		if completeSyncRead && renderable {
-			rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
-		} else if renderable && !isSyncing && wasSyncing == isSyncing {
-			rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-		}
-	}
-}
-
-// flushPTYEffects preserves the normal response/title/attention/clipboard
-// behavior for both direct reads and resize-buffer replay.
-func (d *Daemon) flushPTYEffects(sess *session, tb *tab, p *pane) {
-	p.mu.Lock()
-	attention := p.ptyAttention
+	effects.attention = p.ptyAttention
 	p.ptyAttention = false
-	responses := append([]byte(nil), p.ptyResponses...)
+	effects.responses = append([]byte(nil), p.ptyResponses...)
 	p.ptyResponses = p.ptyResponses[:0]
-	clipboards := append([]string(nil), p.ptyClipboards...)
+	effects.clipboards = append([]string(nil), p.ptyClipboards...)
 	p.ptyClipboards = p.ptyClipboards[:0]
 	p.mu.Unlock()
-	if attention {
-		d.noteAttention(sess, tb)
+	d.applyPanePTYEffects(p, effects)
+}
+
+// applyPanePTYEffects emits only effects still bound to the owner generation
+// that parsed them. Each owner-sensitive boundary revalidates independently so
+// ownership publication can retire the remaining effects without rerouting
+// bytes that belonged to the old owner.
+func (d *Daemon) applyPanePTYEffects(p *pane, effects panePTYEffects) {
+	owner := effects.lease.owner
+	if owner == nil {
+		return
 	}
-	for _, b64 := range clipboards {
-		d.forwardClipboardAsync(sess, b64)
+	if effects.lease.Current() {
+		markSnapshotDirty(owner.session)
 	}
-	if len(responses) > 0 {
-		if _, err := p.pty.Write(responses); err != nil {
-			d.log.Warn("pty response write failed", "err", err, "session", sess.name)
+	if effects.attention && effects.lease.Current() {
+		d.noteAttention(owner.session, owner.tab)
+	}
+	for _, b64 := range effects.clipboards {
+		if effects.lease.Current() {
+			d.forwardClipboardAsync(effects.lease, b64)
 		}
+	}
+	if len(effects.responses) > 0 && effects.lease.Current() {
+		if _, err := p.pty.Write(effects.responses); err != nil {
+			if sessionName, current := paneEffectSessionName(effects.lease); current {
+				d.log.Warn("pty response write failed", "err", err, "session", sessionName)
+			}
+		}
+	}
+	if effects.renderCoordinator == nil || !effects.lease.Current() {
+		return
+	}
+	renderable := d.paneRenderable(owner.session, owner.tab, p)
+	if !effects.lease.Current() {
+		return
+	}
+	if effects.wasSyncing != effects.isSyncing {
+		if effects.isSyncing {
+			if renderable {
+				effects.renderCoordinator.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+			}
+		} else if effects.syncEnded && renderable {
+			effects.renderCoordinator.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+		}
+	}
+	if effects.completeSyncRead && renderable {
+		effects.renderCoordinator.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+	} else if renderable && !effects.isSyncing && effects.wasSyncing == effects.isSyncing {
+		effects.renderCoordinator.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 	}
 }
 

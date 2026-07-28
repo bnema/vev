@@ -186,6 +186,7 @@ func clipboardExt(mime string) string {
 }
 
 type clipboardForward struct {
+	owner paneEffectLease
 	token attachmentRoleToken
 	seq   []byte
 }
@@ -199,11 +200,12 @@ type clipboardForward struct {
 //
 // Requests are queued on the session and drained by one worker so clipboard
 // writes keep arrival order without making the PTY reader wait on client I/O.
-func (d *Daemon) forwardClipboardAsync(sess *session, b64 string) {
+func (d *Daemon) forwardClipboardAsync(owner paneEffectLease, b64 string) {
 	seq := scopy.OSC52FromBase64(b64)
-	if seq == nil {
+	if seq == nil || !owner.Current() {
 		return
 	}
+	sess := owner.owner.session
 
 	sess.mu.Lock()
 	if sess.ctx != nil {
@@ -239,12 +241,73 @@ func (d *Daemon) forwardClipboardAsync(sess *session, b64 string) {
 		sess.mu.Unlock()
 		return
 	}
-	sess.clipboardQueue = append(sess.clipboardQueue, clipboardForward{token: token, seq: seq})
+	sess.clipboardQueue = append(sess.clipboardQueue, clipboardForward{owner: owner, token: token, seq: seq})
 	if !sess.clipboardWorkerRunning {
 		sess.clipboardWorkerRunning = true
 		go d.clipboardWorker(sess)
 	}
 	sess.mu.Unlock()
+}
+
+func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *roleEffectTicket) (ports.Transport, error) {
+	token := item.token
+	if token.ac == nil || ticket == nil || ticket.ended.Load() || token.transport.transport == nil {
+		return token.transport.transport, errAttachmentTransition
+	}
+	expected := token.transport
+	send := func(owned bool) error {
+		ac := token.ac
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		if ticket.ended.Load() || !ac.transportSnapshotCurrent(expected) {
+			return errAttachmentTransition
+		}
+		if !beginClipboardOwnerSend(item.owner, ticket, expected) {
+			return errAttachmentTransition
+		}
+		frame := ac.output.sideEffect(item.seq, ac.echoAck.Load())
+		var err error
+		if owned {
+			err = expected.transport.(ports.OwnedSynchronousTransport).SendSynchronous(frame)
+		} else {
+			err = expected.transport.Send(frame)
+		}
+		if err != nil {
+			ticket.reportTransportFailure(expected)
+		}
+		ticket.endTransportSend()
+		return err
+	}
+	if _, owned := expected.transport.(ports.OwnedSynchronousTransport); owned {
+		return expected.transport, send(true)
+	}
+	return d.boundedSendWith(expected.transport, func() error { return send(false) })
+}
+
+// beginClipboardOwnerSend validates the source pane generation after sendMu
+// admission and marks the transport interval while ownership publication is
+// excluded. Publication therefore orders either before this check (the send is
+// dropped) or after transport admission (the send belongs to the old owner).
+func beginClipboardOwnerSend(lease paneEffectLease, ticket *roleEffectTicket, expected transportSnapshot) bool {
+	if lease.pane == nil || lease.owner == nil || lease.owner.session == nil || lease.owner.tab == nil {
+		return false
+	}
+	owner := lease.owner
+	if owner.floatingSlotGeneration != 0 {
+		owner.tab.mu.Lock()
+		defer owner.tab.mu.Unlock()
+	}
+	lease.pane.mu.Lock()
+	defer lease.pane.mu.Unlock()
+	if lease.pane.owner.Load() != owner {
+		return false
+	}
+	if owner.floatingSlotGeneration != 0 &&
+		(owner.tab.floating.pane != lease.pane || owner.tab.floating.generation != owner.floatingSlotGeneration ||
+			(owner.tab.floating.state != floatingHidden && owner.tab.floating.state != floatingVisible)) {
+		return false
+	}
+	return ticket.beginTransportSend(expected)
 }
 
 func (d *Daemon) clipboardWorker(sess *session) {
@@ -253,16 +316,19 @@ func (d *Daemon) clipboardWorker(sess *session) {
 		if !ok {
 			return
 		}
+		if !item.owner.Current() {
+			continue
+		}
 		ticket, admitted := item.token.ac.beginRoleEffect(item.token)
 		if !admitted {
 			continue
 		}
-		failed, err := d.boundedSendOutputErrTransportForRole(item.token, ticket, item.seq)
+		failed, err := d.boundedSendClipboardForward(item, ticket)
 		if errors.Is(err, errSendTimedOut) {
 			_ = item.token.ac.closeCapturedTransport(failed)
 		}
 		ticket.End()
-		if err != nil {
+		if err != nil && item.owner.Current() {
 			d.detachOnRoleSendError(item.token, failed)
 		}
 	}

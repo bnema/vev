@@ -357,45 +357,6 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 	})
 }
 
-// boundedSendOutputErrTransportForRole sends a queued side effect only through
-// the exact active attachment capability captured when the work was queued.
-// The fresh ticket keeps role publication behind an admitted send; only the
-// external Send interval is marked interruptible for replacement liveness.
-func (d *Daemon) boundedSendOutputErrTransportForRole(token attachmentRoleToken, ticket *roleEffectTicket, b []byte) (ports.Transport, error) {
-	if token.ac == nil || ticket == nil || ticket.ended.Load() || token.transport.transport == nil {
-		return token.transport.transport, errAttachmentTransition
-	}
-	frame := token.ac.output.sideEffect(b, token.ac.echoAck.Load())
-	expected := token.transport
-	send := func(owned bool) error {
-		ac := token.ac
-		ac.sendMu.Lock()
-		defer ac.sendMu.Unlock()
-		if ticket.ended.Load() || !ac.transportSnapshotCurrent(expected) {
-			return errAttachmentTransition
-		}
-		interruptible := ticket.beginTransportSend(expected)
-		if !interruptible {
-			return errAttachmentTransition
-		}
-		var err error
-		if owned {
-			err = expected.transport.(ports.OwnedSynchronousTransport).SendSynchronous(frame)
-		} else {
-			err = expected.transport.Send(frame)
-		}
-		if err != nil {
-			ticket.reportTransportFailure(expected)
-		}
-		ticket.endTransportSend()
-		return err
-	}
-	if _, owned := expected.transport.(ports.OwnedSynchronousTransport); owned {
-		return expected.transport, send(true)
-	}
-	return d.boundedSendWith(expected.transport, func() error { return send(false) })
-}
-
 var errSendTimedOut = errors.New("send timed out")
 
 func (d *Daemon) boundedSendWith(tr ports.Transport, send func() error) (ports.Transport, error) {

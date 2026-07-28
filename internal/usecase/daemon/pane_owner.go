@@ -42,6 +42,32 @@ func (p *pane) effectLeaseLocked() paneEffectLease {
 	return paneEffectLease{pane: p, owner: p.owner.Load()}
 }
 
+// effectLease captures an owner generation outside an existing pane critical
+// section. Callers use effectLeaseLocked when parsing already owns pane.mu.
+func (p *pane) effectLease() paneEffectLease {
+	if p == nil {
+		return paneEffectLease{}
+	}
+	p.mu.Lock()
+	lease := p.effectLeaseLocked()
+	p.mu.Unlock()
+	return lease
+}
+
+// paneEffectSessionName snapshots log metadata only while the lease remains
+// current. Holding session.mu across the final pointer check linearizes the
+// snapshot with owner publication, whose move commit also owns the session.
+func paneEffectSessionName(lease paneEffectLease) (string, bool) {
+	if lease.pane == nil || lease.owner == nil || lease.owner.session == nil || !lease.Current() {
+		return "", false
+	}
+	lease.owner.session.mu.Lock()
+	current := lease.pane.owner.Load() == lease.owner
+	name := lease.owner.session.name
+	lease.owner.session.mu.Unlock()
+	return name, current
+}
+
 // publishOwnerLocked publishes a new immutable owner generation. The caller
 // must hold pane.mu, and must also hold tab.mu when publishing a floating owner.
 func (p *pane) publishOwnerLocked(sess *session, tb *tab, floatingSlotGeneration uint64) (paneEffectLease, paneEffectLease) {

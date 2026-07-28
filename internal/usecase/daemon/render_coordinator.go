@@ -287,20 +287,47 @@ func (c *renderCoordinator) noteSyncBegin(p *pane, gen uint64, force ...func()) 
 	c.noteSyncBeginWithRenderability(p, gen, renderable, force...)
 }
 
+// syncTimerCleanup carries detached timer work across an enclosing pane or
+// coordinator critical section. finish never waits for a worker.
+type syncTimerCleanup struct{ tokens []*timerToken }
+
+func (cleanup *syncTimerCleanup) add(token *timerToken) {
+	if token != nil {
+		cleanup.tokens = append(cleanup.tokens, token)
+	}
+}
+
+func (cleanup *syncTimerCleanup) append(other syncTimerCleanup) {
+	cleanup.tokens = append(cleanup.tokens, other.tokens...)
+}
+
+func (cleanup syncTimerCleanup) finish() {
+	for _, token := range cleanup.tokens {
+		stopDetachedTimer(token)
+	}
+}
+
 // noteSyncBeginWithRenderability records lifecycle unconditionally while the
 // supplied predicate decides dynamically whether this batch gates composition.
 func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, renderable func() bool, force ...func()) {
+	c.beginSyncBatchWithRenderability(p, gen, renderable, force...).finish()
+}
+
+// beginSyncBatchWithRenderability publishes a batch and returns every timer
+// detached while doing so. Callers that already own pane.mu defer finish until
+// after releasing the parsing fence.
+func (c *renderCoordinator) beginSyncBatchWithRenderability(p *pane, gen uint64, renderable func() bool, force ...func()) syncTimerCleanup {
+	var cleanup syncTimerCleanup
 	c.mu.Lock()
 	if c.torndown {
 		c.mu.Unlock()
-		return
+		return cleanup
 	}
 	if c.syncBatches == nil {
 		c.syncBatches = make(map[*pane]*syncBatch)
 	}
-	var old *timerToken
 	if previous := c.syncBatches[p]; previous != nil {
-		old = detachSyncBatchLocked(previous)
+		cleanup.add(detachSyncBatchLocked(previous))
 	}
 	batch := &syncBatch{generation: gen, renderable: renderable}
 	if len(force) != 0 {
@@ -310,9 +337,8 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	c.syncRegistryVersion++
 	clock := c.opts.clock
 	c.mu.Unlock()
-	stopDetachedTimer(old)
 	if clock == nil {
-		return
+		return cleanup
 	}
 
 	// Both timer operations are external. A reentrant callback may replace or
@@ -332,9 +358,25 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	}
 	c.mu.Unlock()
 	if !valid || timerC == nil {
-		stopDetachedTimer(&timerToken{timer: timer})
-		return
+		cleanup.add(&timerToken{timer: timer})
 	}
+	return cleanup
+}
+
+// detachSyncBatchGeneration removes only the exact pane generation. It returns
+// timer cleanup to the caller so no Timer method runs under an enclosing pane
+// or coordinator lock.
+func (c *renderCoordinator) detachSyncBatchGeneration(p *pane, gen uint64) syncTimerCleanup {
+	var cleanup syncTimerCleanup
+	c.mu.Lock()
+	batch := c.syncBatches[p]
+	if batch != nil && batch.generation == gen {
+		delete(c.syncBatches, p)
+		c.syncRegistryVersion++
+		cleanup.add(detachSyncBatchLocked(batch))
+	}
+	c.mu.Unlock()
+	return cleanup
 }
 
 func (c *renderCoordinator) runSyncWatchdog(p *pane, batch *syncBatch, token *timerToken) {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -203,11 +204,110 @@ func (d *Daemon) closeFocusedPane(sess *session, ac *attachedClient) error {
 	return d.closePane(sess, tb, id, ac, true)
 }
 
+// reapPane retains the explicit-owner entry point for focused close tests. PTY
+// readers use reapPaneOwner so an owner publication cannot redirect exit to a
+// replacement that reused the same tab-local pane ID.
 func (d *Daemon) reapPane(sess *session, tb *tab, p *pane) {
 	if p == nil {
 		return
 	}
-	_ = d.closePane(sess, tb, p.id, nil, true)
+	lease := p.effectLease()
+	if lease.owner == nil {
+		_ = d.closePane(sess, tb, p.id, nil, true)
+		return
+	}
+	if lease.owner.session != sess || lease.owner.tab != tb {
+		return
+	}
+	d.reapPaneOwner(p)
+}
+
+// reapPaneOwner resolves the owner afresh after EOF. A stale attempt retries
+// the immutable owner pointer; a successful attempt revokes owner publication
+// under pane.mu before releasing membership locks, so a competing close or
+// move can never reap the pane from a second owner.
+func (d *Daemon) reapPaneOwner(p *pane) {
+	for p != nil {
+		lease := p.effectLease()
+		if lease.owner == nil {
+			return
+		}
+		if d.reapTiledPaneLease(lease) {
+			return
+		}
+	}
+}
+
+func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
+	p, owner := lease.pane, lease.owner
+	if p == nil || owner == nil || owner.session == nil || owner.tab == nil || owner.floatingSlotGeneration != 0 {
+		return true
+	}
+	sess, tb := owner.session, owner.tab
+	sess.mu.Lock()
+	ownedTab := slices.Contains(sess.tabs, tb)
+	if p.owner.Load() != owner {
+		sess.mu.Unlock()
+		return false
+	}
+	if !ownedTab {
+		sess.mu.Unlock()
+		return true
+	}
+	ac := sess.client
+	sessionName := sess.name
+	tb.mu.Lock()
+	if p.owner.Load() != owner {
+		tb.mu.Unlock()
+		sess.mu.Unlock()
+		return false
+	}
+	if tb.panes[p.id] != p || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, p.id) {
+		tb.mu.Unlock()
+		sess.mu.Unlock()
+		return true
+	}
+	p.mu.Lock()
+	if p.owner.Load() != owner {
+		p.mu.Unlock()
+		tb.mu.Unlock()
+		sess.mu.Unlock()
+		return false
+	}
+	finalPane := len(layout.LeafIDs(tb.tree.Root)) <= 1
+	if !finalPane {
+		if err := tb.tree.Close(p.id); err != nil {
+			p.mu.Unlock()
+			tb.mu.Unlock()
+			sess.mu.Unlock()
+			return true
+		}
+		delete(tb.panes, p.id)
+		tb.bumpLayoutGenerationLocked()
+	}
+	p.clearOwnerLocked()
+	p.mu.Unlock()
+	tb.mu.Unlock()
+	sess.mu.Unlock()
+
+	if finalPane {
+		_ = d.closeTab(sess, tb, true)
+		return true
+	}
+	d.applyTabLayout(sess, tb)
+	if ac != nil {
+		ac.overlays.clearCopyModeForPane(p)
+		ac.pruneCaptureFrames(p)
+	}
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteSyncPaneRemoved(p)
+	}
+	closePaneProcess(p)
+	d.log.Info("pane closed", "session", sessionName, "pane", p.id)
+	if ac != nil {
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
+	}
+	return true
 }
 
 func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool) error {
