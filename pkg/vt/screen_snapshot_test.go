@@ -300,3 +300,102 @@ func TestScreenSnapshotBoundsAreIndependent(t *testing.T) {
 		})
 	}
 }
+
+func TestScreenSnapshotDoesNotMutateHistoryOrDamage(t *testing.T) {
+	tests := []struct {
+		name string
+		make func() *Screen
+	}{
+		{
+			name: "screen without history",
+			make: func() *Screen {
+				screen := NewScreen(4, 2)
+				screen.ClearDamage()
+				screen.Write([]byte("abcdef"))
+				return screen
+			},
+		},
+		{
+			name: "screen with sealed chunks and mutable tail",
+			make: func() *Screen {
+				screen := NewScreenWithHistory(4, 2, HistoryConfig{MaxRows: 16, MaxCells: 64, ChunkRows: 2})
+				screen.Write([]byte("111122223333444455"))
+				return screen
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := test.make()
+			beforeDamage := screen.CaptureDamage()
+			var beforeHistory HistorySnapshotView
+			beforeCap, beforeCellCap := 0, 0
+			if screen.History() != nil {
+				beforeHistory = screen.History().SnapshotView()
+				beforeCap = screen.History().Cap()
+				beforeCellCap = screen.History().CellCap()
+			}
+
+			_ = screen.Snapshot()
+
+			afterDamage := screen.CaptureDamage()
+			require.Equal(t, beforeDamage, afterDamage)
+			if screen.History() != nil {
+				require.Equal(t, beforeHistory, screen.History().SnapshotView())
+				require.Equal(t, beforeCap, screen.History().Cap())
+				require.Equal(t, beforeCellCap, screen.History().CellCap())
+			}
+		})
+	}
+}
+
+func TestScreenSnapshotPreservesStaleDamageAcknowledge(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Screen)
+	}{
+		{name: "write after capture", mutate: func(screen *Screen) { screen.Write([]byte("b")) }},
+		{name: "resize after capture", mutate: func(screen *Screen) { screen.Resize(6, 2) }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := NewScreen(4, 2)
+			screen.ClearDamage()
+			screen.Write([]byte("a"))
+			captured := screen.CaptureDamage()
+
+			_ = screen.Snapshot()
+			test.mutate(screen)
+
+			require.False(t, screen.AcknowledgeDamage(captured.Generation))
+			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, screen.Damage())
+
+			screen.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: 1, Height: 1, Count: 1})
+			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, screen.Damage(), "full redraw stays sticky until exact acknowledgement")
+		})
+	}
+}
+
+func TestScreenSnapshotPreservesExactDamageAcknowledge(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "snapshot does not stale an exact damage capture"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := NewScreen(4, 2)
+			screen.ClearDamage()
+			screen.Write([]byte("a"))
+			captured := screen.CaptureDamage()
+
+			_ = screen.Snapshot()
+
+			require.True(t, screen.AcknowledgeDamage(captured.Generation))
+			require.Empty(t, screen.Damage())
+		})
+	}
+}
