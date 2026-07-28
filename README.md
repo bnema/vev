@@ -52,7 +52,7 @@ No prefix key; everything is Alt.
 | Alt+h/j/k/l, Alt+Arrow | focus pane |
 | Alt+a | jump to a session needing attention |
 
-The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. Named active and stopped sessions are fuzzy-searchable, and selecting a stopped session resumes it. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
+The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. `MPN` (`Move pane to tab`) and `MTB` (`Move tab to session`) open live-destination pickers. Named active and stopped sessions are fuzzy-searchable for navigation, and selecting a stopped session resumes it. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
 
 ## Remote attach
 
@@ -79,6 +79,17 @@ vev cmd list-panes --json
 ```
 
 Target a session explicitly with `-s` (`vev cmd -s work new-tab`). Inside a pane, `--self` targets that pane; it cannot be combined with `-s`. Otherwise vev uses `$VEV` inside a pane, then the only live session; ambiguous targets fail. Run `vev cmd --help` for the scriptable command list and `vev cmd <command> --help` for command usage.
+
+Move the focused pane or active tab with these exact forms:
+
+```text
+vev cmd [-s <source-session>] [--self] move-pane <destination-session> <destination-tab-id>
+vev cmd [-s <source-session>] [--self] move-tab <destination-session>
+```
+
+Use `vev cmd -s <destination-session> list-tabs` to find stable destination tab IDs. Destinations must be live, but may be named or ephemeral; stopped sessions are not eligible. A moved pane is split to the right of the destination tab's focused pane and becomes that tab's internal focus without activating the tab. A moved tab is appended to the destination in the background. If the move empties the source session, its client follows the moved pane or tab, activates the destination, and snatches any active destination client.
+
+Moving the final tiled pane out of a tab is rejected while that tab has a floating pane slot; close the floating pane or move the whole tab instead. Named-session persistence is best-effort across a move, not crash-atomic across source and destination snapshots.
 
 ## Configuration
 
