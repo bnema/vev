@@ -23,6 +23,11 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
+var (
+	_ domain.TabStableID  = moveSourceLocator{}.TabID
+	_ domain.PaneStableID = moveSourceLocator{}.PaneID
+)
+
 // --- test doubles -----------------------------------------------------------
 
 type refusingSnapshotDeleteRepository struct {
@@ -74,16 +79,16 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	d.sessions[current.id] = current
 	d.sessions[ringing.id] = ringing
 
-	views, curTab := d.pickerViews(current)
+	views, currentSelection := d.pickerViews(current)
 
-	require.Equal(t, 0, curTab)
+	require.Equal(t, picker.SourceFilter{Session: current.id}, currentSelection)
 	require.Len(t, views, 2)
 	require.Equal(t, "alpha", views[0].Name)
 	require.Equal(t, []picker.TabEntry{{Name: "1"}, {Name: "2"}}, views[0].Tabs)
 	require.Equal(t, "beta ", views[1].Name)
 	require.Equal(t, []picker.TabEntry{{Name: "shell"}, {Name: "logs", Attention: true}}, views[1].Tabs)
 
-	model := picker.New(views, current.id, 0)
+	model := picker.New(views, picker.SelectionConfig{Mode: picker.SelectNavigationTab, Current: picker.SourceFilter{Session: current.id, TabID: views[0].Tabs[0].TabID}})
 	model.Down()
 	model.Down()
 	target, ok := model.Selected()
@@ -130,6 +135,294 @@ func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	require.Equal(t, int64(24), *views[1].ExpectedCreatedAt)
 }
 
+func TestPickerCanonicalViewsLeaveMoveFilteringToModel(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := &session{
+		id: "source", name: "source", incarnation: domain.IncarnationID{1}, active: 0,
+		tabs: []*tab{
+			{stableID: "source-tab", panes: map[layout.PaneID]*pane{}},
+			{stableID: "sibling-tab", panes: map[layout.PaneID]*pane{}},
+		},
+	}
+	destination := &session{
+		id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true,
+		tabs: []*tab{{stableID: "destination-tab", panes: map[layout.PaneID]*pane{}}},
+	}
+	d.sessions[source.id] = source
+	d.sessions[destination.id] = destination
+	d.stopped["stopped"] = stoppedSession{name: "stopped", createdAt: 9, incarnation: domain.IncarnationID{9}}
+	sourceLocator := moveSourceLocator{
+		Session: moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name},
+		TabID:   "source-tab",
+		PaneID:  "source-pane",
+	}
+
+	views, current := d.pickerViews(source)
+	require.Len(t, views, 3, "canonical capture includes active and stopped lifecycles")
+	require.Equal(t, picker.SourceFilter{Session: source.id, Incarnation: source.incarnation, TabID: "source-tab"}, current)
+	var sourceView picker.SessionView
+	for _, view := range views {
+		if view.ID == source.id {
+			sourceView = view
+		}
+	}
+	require.Equal(t, []picker.TabEntry{{TabID: "source-tab", Name: "1"}, {TabID: "sibling-tab", Name: "2"}}, sourceView.Tabs,
+		"daemon capture does not remove the move source")
+
+	paneModel := d.newPickerModel(source, pickerMovePane, sourceLocator, picker.SourceFilter{
+		Session: source.id, Incarnation: source.incarnation, TabID: "sibling-tab",
+	})
+	paneTarget, ok := paneModel.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("sibling-tab"), paneTarget.TabID)
+
+	tabModel := d.newPickerModel(source, pickerMoveTab, sourceLocator, picker.SourceFilter{})
+	tabTarget, ok := tabModel.Selected()
+	require.True(t, ok)
+	require.Equal(t, destination.id, tabTarget.Session)
+	require.Equal(t, destination.incarnation, tabTarget.Incarnation)
+	require.Equal(t, destination.name, tabTarget.Name)
+	require.Equal(t, -1, tabTarget.TabIndex)
+}
+
+func TestPickerMoveWithoutDestinationDoesNotPublishOverlay(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+	sess.mu.Lock()
+	sess.incarnation = domain.IncarnationID{1}
+	tb := sess.tabs[0]
+	sess.mu.Unlock()
+	tb.mu.Lock()
+	tabID := tb.stableID
+	paneID := tb.focusedPane().stableID
+	tb.mu.Unlock()
+	source := moveSourceLocator{
+		Session: moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation, Name: sess.name},
+		TabID:   domain.TabStableID(tabID), PaneID: domain.PaneStableID(paneID),
+	}
+
+	for _, intent := range []pickerIntent{pickerMovePane, pickerMoveTab} {
+		err := d.enterPickerForIntent(sess, ac, intent, source)
+
+		require.ErrorIs(t, err, errNoMoveDestination)
+		require.False(t, ac.overlays.pickerActive())
+		ac.overlays.pickerMu.Lock()
+		require.Nil(t, ac.overlays.pickerPreview)
+		require.Nil(t, ac.overlays.pickerPreviewSession)
+		require.Zero(t, ac.overlays.pickerPreviewGeneration, "failed entry must not publish or retire a picker generation")
+		ac.overlays.pickerMu.Unlock()
+	}
+}
+
+func TestPickerMovePaneStoresSourceAndCleansPreviewSubscription(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	d, sourceSession, ac, _ := newManualSessionWithPTYs(t, p1)
+	sourceSession.id, sourceSession.name, sourceSession.incarnation = "source", "z-source", domain.IncarnationID{1}
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[sourceSession.id] = sourceSession
+	targetTab := newTestTabWithContext(p2, sourceSession.ctx, sourceSession.cancel)
+	targetTab.stableID = "destination-tab"
+	targetSession := &session{
+		id: "destination", name: "a-destination", incarnation: domain.IncarnationID{2}, ephemeral: true,
+		ctx: sourceSession.ctx, cancel: func() {}, tabs: []*tab{targetTab},
+	}
+	d.sessions[targetSession.id] = targetSession
+	sourceTab := sourceSession.tabs[0]
+	sourceTab.mu.Lock()
+	sourceTab.stableID = "source-tab"
+	sourcePaneID := sourceTab.focusedPane().stableID
+	sourceTab.mu.Unlock()
+	source := moveSourceLocator{
+		Session: moveSessionLocator{ID: sourceSession.id, Incarnation: sourceSession.incarnation, Name: sourceSession.name},
+		TabID:   "source-tab", PaneID: domain.PaneStableID(sourcePaneID),
+	}
+
+	require.NoError(t, d.enterPickerForIntent(sourceSession, ac, pickerMovePane, source))
+	ac.overlays.pickerMu.Lock()
+	storedIntent, storedSource := ac.overlays.pickerIntent, ac.overlays.pickerSource
+	selected, ok := ac.overlays.picker.Selected()
+	generation := ac.overlays.pickerPreviewGeneration
+	require.Same(t, targetTab, ac.overlays.pickerPreview)
+	require.Same(t, targetSession, ac.overlays.pickerPreviewSession)
+	ac.overlays.pickerMu.Unlock()
+	require.Equal(t, pickerMovePane, storedIntent)
+	require.Equal(t, source, storedSource)
+	require.True(t, ok)
+	require.Equal(t, targetSession.id, selected.Session)
+	require.Equal(t, targetSession.incarnation, selected.Incarnation)
+	require.Equal(t, targetSession.name, selected.Name)
+	require.Equal(t, domain.TabStableID(targetTab.stableID), selected.TabID)
+	require.Equal(t, 0, selected.TabIndex)
+	require.Nil(t, selected.ExpectedCreatedAt)
+	rc := targetSession.renderCoordinator()
+	require.NotNil(t, rc)
+	rc.mu.Lock()
+	subscription, subscribed := rc.previewWakes[ac]
+	rc.mu.Unlock()
+	require.True(t, subscribed)
+	require.Equal(t, generation, subscription.generation)
+
+	d.enterPicker(sourceSession, ac)
+
+	rc.mu.Lock()
+	_, subscribed = rc.previewWakes[ac]
+	rc.mu.Unlock()
+	require.False(t, subscribed, "picker replacement must retire the prior cross-session preview subscription")
+	ac.overlays.pickerMu.Lock()
+	require.NotNil(t, ac.overlays.picker)
+	require.Equal(t, pickerNavigate, ac.overlays.pickerIntent)
+	require.Equal(t, moveSourceLocator{}, ac.overlays.pickerSource)
+	ac.overlays.pickerMu.Unlock()
+
+	d.closePicker(ac)
+	ac.overlays.pickerMu.Lock()
+	require.Nil(t, ac.overlays.picker)
+	require.Nil(t, ac.overlays.pickerPreview)
+	ac.overlays.pickerMu.Unlock()
+}
+
+func TestPickerMoveTabPreviewsDestinationActiveTabWithoutActivatingIt(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	p3, release3 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	defer release3()
+	d, sourceSession, ac, _ := newManualSessionWithPTYs(t, p1)
+	sourceSession.id, sourceSession.name, sourceSession.incarnation = "source", "source", domain.IncarnationID{1}
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[sourceSession.id] = sourceSession
+	target := &session{
+		id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true, active: 1,
+		ctx: sourceSession.ctx, cancel: func() {},
+		tabs: []*tab{
+			newTestTabWithContext(p2, sourceSession.ctx, sourceSession.cancel),
+			newTestTabWithContext(p3, sourceSession.ctx, sourceSession.cancel),
+		},
+	}
+	target.tabs[0].stableID, target.tabs[1].stableID = "first", "active"
+	d.sessions[target.id] = target
+	source := moveSourceLocator{
+		Session: moveSessionLocator{ID: sourceSession.id, Incarnation: sourceSession.incarnation, Name: sourceSession.name},
+		TabID:   domain.TabStableID(sourceSession.tabs[0].stableID),
+	}
+
+	require.NoError(t, d.enterPickerForIntent(sourceSession, ac, pickerMoveTab, source))
+
+	ac.overlays.pickerMu.Lock()
+	selected, ok := ac.overlays.picker.Selected()
+	require.Same(t, target.tabs[1], ac.overlays.pickerPreview)
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, target.id, selected.Session)
+	require.Equal(t, target.incarnation, selected.Incarnation)
+	require.Equal(t, target.name, selected.Name)
+	require.Equal(t, -1, selected.TabIndex)
+	require.Nil(t, selected.ExpectedCreatedAt)
+	require.Equal(t, 1, activeTabIndex(target), "preview must not mutate destination focus")
+	d.closePicker(ac)
+}
+
+func TestPickerMoveRefreshPreservesSelectedDestination(t *testing.T) {
+	t.Run("pane destination stable tab", func(t *testing.T) {
+		d, sourceSession, ac, _, sourceReleases := newManualTabSession(t, 1)
+		defer releaseAll(sourceReleases)
+		sourceSession.id, sourceSession.name, sourceSession.incarnation = "source", "source", domain.IncarnationID{1}
+		sourceSession.tabs[0].stableID = "source-tab"
+		delete(d.sessions, domain.SessionID("manual"))
+		d.sessions[sourceSession.id] = sourceSession
+
+		firstPTY, releaseFirst := newBlockingPTY(t)
+		defer releaseFirst()
+		secondPTY, releaseSecond := newBlockingPTY(t)
+		defer releaseSecond()
+		firstTab := newTestTabWithContext(firstPTY, sourceSession.ctx, sourceSession.cancel)
+		secondTab := newTestTabWithContext(secondPTY, sourceSession.ctx, sourceSession.cancel)
+		firstTab.stableID, secondTab.stableID = "first", "selected"
+		destination := &session{
+			id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true,
+			ctx: sourceSession.ctx, cancel: func() {}, tabs: []*tab{firstTab, secondTab},
+		}
+		d.sessions[destination.id] = destination
+		source := moveSourceLocator{
+			Session: moveSessionLocator{ID: sourceSession.id, Incarnation: sourceSession.incarnation, Name: sourceSession.name},
+			TabID:   domain.TabStableID(sourceSession.tabs[0].stableID),
+		}
+
+		require.NoError(t, d.enterPickerForIntent(sourceSession, ac, pickerMovePane, source))
+		ac.overlays.pickerMu.Lock()
+		ac.overlays.picker.Down()
+		before, ok := ac.overlays.picker.Selected()
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, ok)
+		require.Equal(t, domain.TabStableID("selected"), before.TabID)
+
+		destination.mu.Lock()
+		destination.tabs[0], destination.tabs[1] = destination.tabs[1], destination.tabs[0]
+		destination.mu.Unlock()
+		d.refreshPicker(ac)
+
+		ac.overlays.pickerMu.Lock()
+		after, ok := ac.overlays.picker.Selected()
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, ok)
+		require.Equal(t, before.Session, after.Session)
+		require.Equal(t, before.Incarnation, after.Incarnation)
+		require.Equal(t, before.TabID, after.TabID)
+		require.Equal(t, 0, after.TabIndex, "mutable index follows the preserved stable tab")
+		d.closePicker(ac)
+	})
+
+	t.Run("tab destination session", func(t *testing.T) {
+		d, sourceSession, ac, _, sourceReleases := newManualTabSession(t, 1)
+		defer releaseAll(sourceReleases)
+		sourceSession.id, sourceSession.name, sourceSession.incarnation = "source", "source", domain.IncarnationID{1}
+		sourceSession.tabs[0].stableID = "source-tab"
+		delete(d.sessions, domain.SessionID("manual"))
+		d.sessions[sourceSession.id] = sourceSession
+
+		releases := make([]func(), 0, 2)
+		for i, destination := range []struct {
+			id   domain.SessionID
+			name string
+		}{{id: "first", name: "0-first"}, {id: "selected", name: "1-selected"}} {
+			pty, release := newBlockingPTY(t)
+			releases = append(releases, release)
+			tb := newTestTabWithContext(pty, sourceSession.ctx, sourceSession.cancel)
+			tb.stableID = string(destination.id) + "-tab"
+			d.sessions[destination.id] = &session{
+				id: destination.id, name: destination.name, incarnation: domain.IncarnationID{byte(i + 2)}, ephemeral: true,
+				ctx: sourceSession.ctx, cancel: func() {}, tabs: []*tab{tb},
+			}
+		}
+		defer releaseAll(releases)
+		source := moveSourceLocator{
+			Session: moveSessionLocator{ID: sourceSession.id, Incarnation: sourceSession.incarnation, Name: sourceSession.name},
+			TabID:   domain.TabStableID(sourceSession.tabs[0].stableID),
+		}
+
+		require.NoError(t, d.enterPickerForIntent(sourceSession, ac, pickerMoveTab, source))
+		ac.overlays.pickerMu.Lock()
+		ac.overlays.picker.Down()
+		before, ok := ac.overlays.picker.Selected()
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, ok)
+		require.Equal(t, domain.SessionID("selected"), before.Session)
+
+		d.refreshPicker(ac)
+
+		ac.overlays.pickerMu.Lock()
+		after, ok := ac.overlays.picker.Selected()
+		ac.overlays.pickerMu.Unlock()
+		require.True(t, ok)
+		require.Equal(t, before, after)
+		d.closePicker(ac)
+	})
+}
+
 func TestPickerRejectsRecreatedEphemeralTargetFromStaleSelection(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -147,7 +440,7 @@ func TestPickerRejectsRecreatedEphemeralTargetFromStaleSelection(t *testing.T) {
 			break
 		}
 	}
-	model := picker.New([]picker.SessionView{originalView}, original.id, 0)
+	model := picker.New([]picker.SessionView{originalView}, picker.SelectionConfig{Mode: picker.SelectNavigationTab, Current: picker.SourceFilter{Session: original.id, TabID: originalView.Tabs[0].TabID}})
 	target, ok := model.Selected()
 	require.True(t, ok)
 
@@ -193,7 +486,10 @@ func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
 	views, _ := d.pickerViews(sess)
 
 	require.Len(t, views, 1)
-	require.Equal(t, []picker.TabEntry{{Name: "1", Detail: " (vim)"}, {Name: "logs", Detail: " (sh)", Attention: true}}, views[0].Tabs)
+	require.Equal(t, []picker.TabEntry{
+		{TabID: domain.TabStableID(sess.tabs[0].stableID), Name: "1", Detail: " (vim)"},
+		{TabID: domain.TabStableID(sess.tabs[1].stableID), Name: "logs", Detail: " (sh)", Attention: true},
+	}, views[0].Tabs)
 }
 
 func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
@@ -217,7 +513,10 @@ func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
 	views, _ := d.pickerViews(sess)
 
 	require.Len(t, views, 1)
-	require.Equal(t, []picker.TabEntry{{Name: "1", Detail: " (vim)"}, {Name: "logs", Detail: " (sh)"}}, views[0].Tabs)
+	require.Equal(t, []picker.TabEntry{
+		{TabID: domain.TabStableID(sess.tabs[0].stableID), Name: "1", Detail: " (vim)"},
+		{TabID: domain.TabStableID(sess.tabs[1].stableID), Name: "logs", Detail: " (sh)"},
+	}, views[0].Tabs)
 }
 
 func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
@@ -879,7 +1178,7 @@ func TestCaptureOverlayLayersPreservesPickerSemanticSurfacesAcrossFallbacks(t *t
 				pickerModel: picker.New([]picker.SessionView{
 					{ID: "selected", Name: "selected", Tabs: []picker.TabEntry{{Name: "one"}}, Active: 0},
 					{ID: "inactive", Name: "inactive", Tabs: []picker.TabEntry{{Name: "two", Detail: " (detail)"}}, Active: 0},
-				}, "selected", 0),
+				}, picker.SelectionConfig{Mode: picker.SelectNavigationTab}),
 			}
 
 			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
@@ -908,7 +1207,7 @@ func TestCaptureOverlayLayersPreservesPickerSemanticSurfacesAcrossFallbacks(t *t
 }
 
 func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testing.T) {
-	model := picker.New([]picker.SessionView{{ID: "s", Name: "session", Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0)
+	model := picker.New([]picker.SessionView{{ID: "s", Name: "session", Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
 	state := capturedRenderState{theme: themeui.BuiltinDark, styles: themeui.Resolve(themeui.BuiltinDark, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles}
 	cases := []struct {
 		name       string
@@ -1160,6 +1459,48 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	require.Same(t, from, ac.currentSession(), "a failed restore must leave the client on its origin session")
 }
 
+func TestPickerNavigationRefreshAfterSuccessfulDeleteSelectsAttachedActiveStableTab(t *testing.T) {
+	d, current, ac, _, currentReleases := newManualTabSession(t, 2)
+	defer releaseAll(currentReleases)
+	current.id, current.name, current.active = "current", "z-current", 1
+	current.tabs[0].stableID, current.tabs[1].stableID = "current-first", "current-active"
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[current.id] = current
+
+	otherPTY, releaseOther := newBlockingPTY(t)
+	defer releaseOther()
+	otherTab := newTestTabWithContext(otherPTY, current.ctx, current.cancel)
+	otherTab.stableID = "other-tab"
+	other := &session{id: "other", name: "a-other", ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{otherTab}}
+	d.sessions[other.id] = other
+
+	targetPTY, releaseTarget := newBlockingPTY(t)
+	defer releaseTarget()
+	targetTab := newTestTabWithContext(targetPTY, current.ctx, current.cancel)
+	targetTab.stableID = "target-tab"
+	target := &session{id: "target", name: "m-target", ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{targetTab}}
+	d.sessions[target.id] = target
+
+	d.enterPicker(current, ac)
+	d.handlePickerInput(ac, []byte("k"))
+	d.handlePickerInput(ac, []byte("k"))
+	ac.overlays.pickerMu.Lock()
+	selected, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, target.id, selected.Session, "test must delete the selected non-attached session")
+
+	d.handlePickerInput(ac, []byte("x"))
+
+	ac.overlays.pickerMu.Lock()
+	selected, ok = ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, current.id, selected.Session)
+	require.Equal(t, domain.TabStableID("current-active"), selected.TabID)
+	require.Equal(t, 1, selected.TabIndex)
+}
+
 func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t *testing.T) {
 	d, from, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
@@ -1206,6 +1547,12 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p)
+	otherPTY, releaseOther := newBlockingPTY(t)
+	defer releaseOther()
+	otherTab := newTestTabWithContext(otherPTY, from.ctx, from.cancel)
+	otherTab.stableID = "other-tab"
+	other := &session{id: "other", name: "a-other", ephemeral: true, ctx: from.ctx, cancel: func() {}, tabs: []*tab{otherTab}}
+	d.sessions[other.id] = other
 	cause := errors.New("delete failed")
 	store, state := newMockStore(t)
 	WithStore(t, store)(d)
@@ -1236,4 +1583,15 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	d.mu.Unlock()
 	require.True(t, retained, "failed deletion must retain the reserved name")
 	require.True(t, stopped.purging, "an uncertain deletion stays fenced from restore")
+
+	from.mu.Lock()
+	activeTab := from.tabs[from.active]
+	activeTabID := activeTab.stableID
+	from.mu.Unlock()
+	ac.overlays.pickerMu.Lock()
+	selected, selectedOK := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, selectedOK)
+	require.Equal(t, from.id, selected.Session, "failed x refresh resets navigation to the attached session")
+	require.Equal(t, domain.TabStableID(activeTabID), selected.TabID, "failed x refresh follows the attached session's stable active tab")
 }

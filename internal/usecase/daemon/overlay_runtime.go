@@ -18,6 +18,8 @@ type overlayRuntime struct {
 
 	pickerMu                sync.Mutex
 	picker                  *picker.Model
+	pickerIntent            pickerIntent
+	pickerSource            moveSourceLocator
 	pickerPreview           *tab
 	pickerPreviewSession    *session
 	pickerPreviewGeneration uint64
@@ -255,6 +257,8 @@ func (d *Daemon) clearForSnatch(token attachmentRoleToken) bool {
 	previewSession := rt.pickerPreviewSession
 	previewGeneration := rt.pickerPreviewGeneration
 	rt.picker = nil
+	rt.pickerIntent = pickerNavigate
+	rt.pickerSource = moveSourceLocator{}
 	rt.pickerPending = nil
 	rt.pickerESC.stop()
 	rt.pickerPreviewGeneration++

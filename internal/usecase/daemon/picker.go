@@ -14,20 +14,73 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
+var (
+	pickerModal          = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
+	errNoMoveDestination = errors.New("no eligible move destination")
+)
 
+type pickerIntent uint8
+
+const (
+	pickerNavigate pickerIntent = iota
+	pickerMovePane
+	pickerMoveTab
+)
+
+type moveSessionLocator struct {
+	ID          domain.SessionID
+	Incarnation domain.IncarnationID
+	Name        string
+}
+
+type moveSourceLocator struct {
+	Session moveSessionLocator
+	TabID   domain.TabStableID
+	PaneID  domain.PaneStableID
+}
+
+// enterPicker preserves the existing navigation entry point. Navigation always
+// publishes its model, including an empty one; only move entry can fail for a
+// missing destination.
 func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
-	views, curTab := d.pickerViews(sess)
-	ac.overlays.pickerMu.Lock()
-	ac.overlays.picker = picker.New(views, sess.id, curTab)
-	ac.overlays.pickerPending = nil
-	ac.overlays.pickerPreview = nil
-	ac.overlays.pickerMu.Unlock()
+	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
+}
+
+// enterPickerForIntent returns errNoMoveDestination only for move intents.
+func (d *Daemon) enterPickerForIntent(sess *session, ac *attachedClient, intent pickerIntent, source moveSourceLocator) error {
+	model := d.newPickerModel(sess, intent, source, picker.SourceFilter{})
+	if intent != pickerNavigate {
+		if _, ok := model.Selected(); !ok {
+			return errNoMoveDestination
+		}
+	}
+
+	d.publishPicker(sess, ac, model, intent, source)
+	return nil
+}
+
+func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {
+	rt := ac.overlays
+	rt.pickerMu.Lock()
+	previous, previousGeneration := rt.pickerPreviewSession, rt.pickerPreviewGeneration
+	rt.pickerPreviewGeneration++
+	rt.pickerPreviewSession = nil
+	rt.pickerPreview = nil
+	rt.picker = model
+	rt.pickerIntent = intent
+	rt.pickerSource = source
+	rt.pickerPending = nil
+	rt.pickerESC.stop()
+	rt.pickerMu.Unlock()
+	d.teardownPreviewSubscription(ac, previous, previousGeneration)
 	d.registerPreviewForSelection(ac)
 	d.invalidateRender(sess, ac, true, "picker.go")
 }
 
-func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
+// pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
+// knows nothing about picker intent; picker.New owns all destination policy.
+func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
 	stopped := make([]stoppedSession, 0, len(d.stopped))
@@ -46,32 +99,36 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 
 	includeTerminalTitle := d.currentTabsConfig().TerminalTitle
 	views := make([]picker.SessionView, 0, len(sessions)+len(stopped))
-	curTab := 0
+	var current picker.SourceFilter
 	for _, s := range sessions {
 		s.mu.Lock()
-		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]picker.TabEntry, len(s.tabs))}
+		view := picker.SessionView{
+			ID: s.id, Incarnation: s.incarnation, Name: s.name, TargetName: s.name, Active: s.active,
+			Tabs: make([]picker.TabEntry, 0, len(s.tabs)),
+		}
 		if !s.ephemeral {
 			createdAt := s.createdAt
-			view.TargetName = s.name
 			view.ExpectedCreatedAt = &createdAt
 		}
 		sessionAttention := false
 		for i, tb := range s.tabs {
 			name := tabDisplayName(tb, i)
-			view.Tabs[i] = picker.TabEntry{
+			tabID := domain.TabStableID(tb.stableID)
+			view.Tabs = append(view.Tabs, picker.TabEntry{
+				TabID:     tabID,
 				Name:      name,
 				Detail:    tabTitleDetail(name, tb.focusedPaneTitle(includeTerminalTitle)),
 				Attention: tb.attention,
-			}
+			})
 			if tb.attention {
 				sessionAttention = true
+			}
+			if s == cur && i == s.active {
+				current = picker.SourceFilter{Session: s.id, Incarnation: s.incarnation, TabID: tabID}
 			}
 		}
 		if sessionAttention {
 			view.Name = attentionSuffix(view.Name)
-		}
-		if s == cur {
-			curTab = s.active
 		}
 		s.mu.Unlock()
 		views = append(views, view)
@@ -80,6 +137,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		createdAt := s.createdAt
 		views = append(views, picker.SessionView{
 			ID:                domain.SessionID("stopped:" + s.name),
+			Incarnation:       s.incarnation,
 			Name:              s.name,
 			TargetName:        s.name,
 			Tabs:              []picker.TabEntry{{}},
@@ -87,7 +145,32 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 			ExpectedCreatedAt: &createdAt,
 		})
 	}
-	return views, curTab
+	return views, current
+}
+
+func (d *Daemon) newPickerModel(cur *session, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
+	views, attachedCurrent := d.pickerViews(cur)
+	if intent == pickerNavigate {
+		current = attachedCurrent
+	}
+	return picker.New(views, picker.SelectionConfig{
+		Mode:    pickerSelectionMode(intent),
+		Current: current,
+		Source: picker.SourceFilter{
+			Session: source.Session.ID, Incarnation: source.Session.Incarnation, TabID: source.TabID,
+		},
+	})
+}
+
+func pickerSelectionMode(intent pickerIntent) picker.SelectionMode {
+	switch intent {
+	case pickerMovePane:
+		return picker.SelectMovePaneTab
+	case pickerMoveTab:
+		return picker.SelectMoveTabSession
+	default:
+		return picker.SelectNavigationTab
+	}
 }
 
 func attentionSuffix(label string) string {
@@ -107,6 +190,8 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		active:   func() bool { return rt.picker != nil },
 		closeLocked: func() {
 			rt.picker = nil
+			rt.pickerIntent = pickerNavigate
+			rt.pickerSource = moveSourceLocator{}
 			generation = rt.pickerPreviewGeneration
 		},
 		afterClose: func() {
@@ -206,6 +291,7 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	var target picker.Target
 	var ok bool
+	intent := ac.overlays.pickerIntent
 	if ac.overlays.picker != nil {
 		target, ok = ac.overlays.picker.Selected()
 	}
@@ -219,15 +305,14 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if !ok {
 		return
 	}
-	next := d.tabByTarget(target)
-	targetSess := d.sessionByID(target.Session)
+	targetSess, next := d.previewTarget(target, intent)
 	if next == nil || targetSess == nil {
 		return
 	}
 	ac.overlays.pickerMu.Lock()
 	// Selection may have changed while the target was resolved.
 	selected, stillSelected := ac.overlays.picker.Selected()
-	valid := ac.overlays.pickerPreviewGeneration == generation && stillSelected && selected == target
+	valid := ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerIntent == intent && stillSelected && pickerTargetsEqual(selected, target)
 	if valid {
 		ac.overlays.pickerPreview = next
 		ac.overlays.pickerPreviewSession = targetSess
@@ -339,6 +424,8 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = nil
+	ac.overlays.pickerIntent = pickerNavigate
+	ac.overlays.pickerSource = moveSourceLocator{}
 	ac.overlays.pickerPending = nil
 	ac.overlays.pickerESC.stop()
 	generation := ac.overlays.pickerPreviewGeneration
@@ -346,19 +433,48 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 	d.clearPreviewGeneration(ac, generation)
 }
 
-func (d *Daemon) tabByTarget(target picker.Target) *tab {
+func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*session, *tab) {
 	d.mu.Lock()
 	sess := d.sessions[target.Session]
-	d.mu.Unlock()
 	if sess == nil {
-		return nil
+		d.mu.Unlock()
+		return nil, nil
 	}
 	sess.mu.Lock()
+	d.mu.Unlock()
 	defer sess.mu.Unlock()
-	if target.TabIndex < 0 || target.TabIndex >= len(sess.tabs) {
-		return nil
+	if sess.incarnation != target.Incarnation || !targetMatchesLifecycle(target, sess.name, sess.createdAt) {
+		return nil, nil
 	}
-	return sess.tabs[target.TabIndex]
+	if intent == pickerMoveTab {
+		if sess.active < 0 || sess.active >= len(sess.tabs) {
+			return nil, nil
+		}
+		return sess, sess.tabs[sess.active]
+	}
+	if target.TabID != "" {
+		for _, tb := range sess.tabs {
+			if domain.TabStableID(tb.stableID) == target.TabID {
+				return sess, tb
+			}
+		}
+		return nil, nil
+	}
+	if target.TabIndex < 0 || target.TabIndex >= len(sess.tabs) {
+		return nil, nil
+	}
+	return sess, sess.tabs[target.TabIndex]
+}
+
+func pickerTargetsEqual(left, right picker.Target) bool {
+	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name ||
+		left.TabID != right.TabID || left.TabIndex != right.TabIndex || left.Stopped != right.Stopped {
+		return false
+	}
+	if left.ExpectedCreatedAt == nil || right.ExpectedCreatedAt == nil {
+		return left.ExpectedCreatedAt == nil && right.ExpectedCreatedAt == nil
+	}
+	return *left.ExpectedCreatedAt == *right.ExpectedCreatedAt
 }
 
 func (d *Daemon) sessionByID(id domain.SessionID) *session {
@@ -770,13 +886,35 @@ func (d *Daemon) refreshPicker(ac *attachedClient) {
 	if sess == nil {
 		return
 	}
-	views, curTab := d.pickerViews(sess)
-	ac.overlays.pickerMu.Lock()
-	if ac.overlays.picker != nil {
-		ac.overlays.picker = picker.New(views, sess.id, curTab)
+	rt := ac.overlays
+	rt.pickerMu.Lock()
+	if rt.picker == nil {
+		rt.pickerMu.Unlock()
+		return
 	}
-	ac.overlays.pickerMu.Unlock()
-	d.registerPreviewForSelection(ac)
+	intent, source := rt.pickerIntent, rt.pickerSource
+	current := picker.SourceFilter{}
+	if intent != pickerNavigate {
+		selected, _ := rt.picker.Selected()
+		current = picker.SourceFilter{Session: selected.Session, Incarnation: selected.Incarnation, TabID: selected.TabID}
+	}
+	rt.pickerMu.Unlock()
+	model := d.newPickerModel(sess, intent, source, current)
+	if intent != pickerNavigate {
+		if _, ok := model.Selected(); !ok {
+			d.closePicker(ac)
+			return
+		}
+	}
+	rt.pickerMu.Lock()
+	updated := rt.picker != nil && rt.pickerIntent == intent && rt.pickerSource == source
+	if updated {
+		rt.picker = model
+	}
+	rt.pickerMu.Unlock()
+	if updated {
+		d.registerPreviewForSelection(ac)
+	}
 }
 
 func snapshotPickerPreview(tb *tab) picker.Preview {
