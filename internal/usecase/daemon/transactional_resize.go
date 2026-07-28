@@ -805,6 +805,9 @@ func (d *Daemon) publishResizeCommit(members []resizeMember, sess *session, ac *
 	d.observeBeforeResizeOwnerPostEffect(resizeOwnerPostCommitPublication)
 	if ac != nil {
 		ac.sendMu.Lock()
+		if d.afterResizeCommitSendLocked != nil {
+			d.afterResizeCommitSendLocked()
+		}
 	}
 	fences := acquireResizeOwnerPostEffectFences(members)
 	if fences == nil {

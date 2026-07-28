@@ -69,33 +69,31 @@ func (d *Daemon) transitionAttachmentLocked(req attachmentTransitionRequest) (at
 	return d.transitionAttachmentRoutedLocked(req)
 }
 
-// attachmentPublication owns the ordered session and coordinator locks and
-// accumulates the values needed to construct postcommit capabilities.
+// attachmentPublication is the validated, coordinator-locked input to the
+// non-failing ownership and lease publication step. Its caller continues to
+// own d.mu, notices.routingMu, and the ordered source/target session locks.
 type attachmentPublication struct {
 	req                 attachmentTransitionRequest
 	source              *session
 	old                 *attachedClient
 	sourceCoordinator   *renderCoordinator
 	targetCoordinator   *renderCoordinator
-	unlockSessions      func()
-	unlockCoordinators  func()
+	releaseCoordinators func()
 	displacedTransport  transportSnapshot
 	nextGeneration      uint64
 	displacedGeneration uint64
 }
 
-// unlock releases coordinator locks before the ordered session locks. The
-// caller still owns d.mu and notices.routingMu; no external I/O is permitted.
-func (p *attachmentPublication) unlock() {
-	p.unlockCoordinators()
-	p.unlockSessions()
+func (p *attachmentPublication) unlockCoordinators() {
+	p.releaseCoordinators()
 }
 
-// preflightAttachmentPublicationLocked revalidates source and target authority
-// and acquires every lock needed by publication. Caller holds d.mu and
-// notices.routingMu. On success, the returned guard owns ordered session and
-// coordinator locks until unlock is called.
-func (d *Daemon) preflightAttachmentPublicationLocked(req attachmentTransitionRequest) (*attachmentPublication, error) {
+// validateAttachmentTransitionPrelocked performs every fallible transition
+// check without acquiring d.mu, notices.routingMu, or either session lock.
+// The caller holds those locks in that order, with session locks ordered by ID.
+// On success the returned validation retains the ordered coordinator locks
+// through publishAttachmentTransitionPrelocked.
+func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionRequest) (*attachmentPublication, error) {
 	source := req.source
 	if source == nil {
 		source = req.target
@@ -104,51 +102,38 @@ func (d *Daemon) preflightAttachmentPublicationLocked(req attachmentTransitionRe
 		!validAttachmentTransitionRole(req.expectedRole, true) || !validAttachmentTransitionRole(req.targetRole, false) ||
 		source == nil || req.target == nil || req.next == nil || d.closing ||
 		d.sessions[source.id] != source || d.sessions[req.target.id] != req.target ||
-		req.expectedTransport.transport == nil || !req.next.transportSnapshotCurrent(req.expectedTransport) {
+		req.expectedTransport.transport == nil || !req.next.transportSnapshotCurrent(req.expectedTransport) ||
+		req.preserveRole && req.sourceToken == nil {
 		return nil, errAttachmentTransition
 	}
 
-	// Install the target coordinator before taking both session locks. Lease
-	// binding remains part of the atomic publication below.
 	var targetCoordinator *renderCoordinator
 	if req.targetRole == attachmentActive {
-		targetCoordinator = d.ensureRenderCoordinator(req.target)
+		targetCoordinator = d.ensureRenderCoordinatorPrelocked(req.target)
 	}
 	sourceCoordinator := source.renderCoordinator()
-	unlockSessions := lockAttachmentSessions(source, req.target)
 	if source.attachmentRoleLocked(req.next) != req.expectedRole ||
 		!req.next.transportSnapshotCurrent(req.expectedTransport) {
-		unlockSessions()
 		return nil, errAttachmentTransition
 	}
 
 	old := req.target.client
 	if old != req.expectedTargetCurrent || source != req.target && old == req.next {
-		unlockSessions()
 		return nil, errAttachmentTransition
 	}
 	publication := &attachmentPublication{
 		req: req, source: source, old: old,
 		sourceCoordinator: sourceCoordinator, targetCoordinator: targetCoordinator,
-		unlockSessions:     unlockSessions,
-		unlockCoordinators: lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator),
+		releaseCoordinators: lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator),
 	}
-	if req.sourceToken != nil && (!transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) ||
-		!transitionSourceTabCurrentLocked(source, req.expectedSourceTab)) {
-		publication.unlock()
-		return nil, errAttachmentTransition
-	}
-	if targetCoordinator != nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next) {
-		publication.unlock()
-		return nil, errAttachmentTransition
-	}
-	if req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
-		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next) {
-		publication.unlock()
-		return nil, errAttachmentTransition
-	}
-	if req.activateTargetTab && (req.targetTabIndex < 0 || req.targetTabIndex >= len(req.target.tabs)) {
-		publication.unlock()
+	invalid := req.sourceToken != nil && (!transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) ||
+		!transitionSourceTabCurrentLocked(source, req.expectedSourceTab))
+	invalid = invalid || targetCoordinator != nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next)
+	invalid = invalid || req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
+		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next)
+	invalid = invalid || req.activateTargetTab && (req.targetTabIndex < 0 || req.targetTabIndex >= len(req.target.tabs))
+	if invalid {
+		publication.unlockCoordinators()
 		return nil, errAttachmentTransition
 	}
 	return publication, nil
@@ -245,22 +230,37 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 	return result
 }
 
-// transitionAttachmentRoutedLocked performs the centralized role publication.
-// Caller holds d.mu and notices.routingMu. Every fallible lifecycle, role, and
-// transport check occurs before session.client is changed. Coordinator
-// finalization after that commit point cannot roll ownership back.
+// publishAttachmentTransitionPrelocked performs only non-failing metadata,
+// ownership, generation, and coordinator-lease publication. The caller retains
+// every lock required by validateAttachmentTransitionPrelocked.
+func (d *Daemon) publishAttachmentTransitionPrelocked(publication *attachmentPublication) attachmentTransitionResult {
+	if d.applyTargetStateLocked(publication) {
+		return attachmentTransitionResult{published: *publication.req.sourceToken}
+	}
+	publishAttachmentOwnershipLocked(publication)
+	return buildAttachmentPostcommitPlanLocked(publication)
+}
+
+// transitionAttachmentRoutedLocked is the ordinary lock-acquiring wrapper for
+// the composable prelocked validation/publication seam. Caller holds d.mu and
+// notices.routingMu; this function acquires ordered source/target session locks.
 func (d *Daemon) transitionAttachmentRoutedLocked(req attachmentTransitionRequest) (attachmentTransitionResult, error) {
-	publication, err := d.preflightAttachmentPublicationLocked(req)
+	source := req.source
+	if source == nil {
+		source = req.target
+	}
+	if source == nil || req.target == nil {
+		return attachmentTransitionResult{}, errAttachmentTransition
+	}
+	unlockSessions := lockAttachmentSessions(source, req.target)
+	defer unlockSessions()
+
+	publication, err := d.validateAttachmentTransitionPrelocked(req)
 	if err != nil {
 		return attachmentTransitionResult{}, err
 	}
-	defer publication.unlock()
-
-	if d.applyTargetStateLocked(publication) {
-		return attachmentTransitionResult{published: *req.sourceToken}, nil
-	}
-	publishAttachmentOwnershipLocked(publication)
-	return buildAttachmentPostcommitPlanLocked(publication), nil
+	defer publication.unlockCoordinators()
+	return d.publishAttachmentTransitionPrelocked(publication), nil
 }
 
 func validAttachmentTransitionRole(role attachmentRole, expected bool) bool {

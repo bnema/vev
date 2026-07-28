@@ -129,6 +129,10 @@ type Daemon struct {
 	// and immediately before a post-commit effect is published. Tests use it to
 	// move a pane through the ordered resize fences at the former TOCTOU window.
 	beforeResizeOwnerPostEffect func(resizeOwnerPostEffect)
+	// afterResizeCommitSendLocked is a deterministic lock-order seam. It runs
+	// after publishResizeCommit acquires attachment sendMu and before it acquires
+	// owner fences. Tests must not perform external work from this callback.
+	afterResizeCommitSendLocked func()
 	// afterSnatchOverlayFamily is a deterministic structural lock seam. It runs
 	// after one overlay-family mutex is released and before the next is taken.
 	afterSnatchOverlayFamily func(string)
@@ -151,6 +155,14 @@ type Daemon struct {
 	// afterRoleEffectsFrozen observes the lock-free boundary after all affected
 	// attachment gates are frozen and drained, before architecture publication.
 	afterRoleEffectsFrozen func()
+	// afterMoveLifecycleReserved and afterMovePaneSourceSnapshot are test-only
+	// seams. They run before role/fence work and after the pre-fence source
+	// attachment snapshot respectively. beforeMovePaneCommit runs inside the
+	// non-failing publication section. None is set in production, and none may
+	// perform external work while locks are held.
+	afterMoveLifecycleReserved  func()
+	afterMovePaneSourceSnapshot func()
+	beforeMovePaneCommit        func()
 	// afterDetachRoleEffectsFrozen observes terminal detach after it wins the
 	// attachment gate but before it checks session ownership.
 	afterDetachRoleEffectsFrozen func()

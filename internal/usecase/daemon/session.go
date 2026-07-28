@@ -1209,7 +1209,9 @@ func (s *session) stopInMemoryLifecycle() {
 	}
 	s.lifecycleStopOnce.Do(func() {
 		s.stopFloatingLaunches()
-		s.cancel()
+		if s.cancel != nil {
+			s.cancel()
+		}
 		s.mu.Lock()
 		tabs := append([]*tab(nil), s.tabs...)
 		s.mu.Unlock()

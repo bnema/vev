@@ -60,6 +60,33 @@ type attachmentRoleToken struct {
 	rebase bool
 }
 
+// attachmentTokenLocked captures the exact role, transport incarnation, and
+// active coordinator lease at an architecture commit point. The caller must
+// hold s.mu; coordinator acquisition follows the canonical session ->
+// coordinator order.
+func (s *session) attachmentTokenLocked(ac *attachedClient) attachmentRoleToken {
+	if s == nil || ac == nil {
+		return attachmentRoleToken{}
+	}
+	transport := ac.transportSnapshot()
+	if transport.transport == nil {
+		return attachmentRoleToken{}
+	}
+	token := attachmentRoleToken{
+		sess:       s,
+		ac:         ac,
+		role:       s.attachmentRoleLocked(ac),
+		generation: ac.roleGeneration.Load(),
+		transport:  transport,
+	}
+	if token.role == attachmentActive {
+		if rc := s.renderCoordinator(); rc != nil {
+			token.lease = rc.attachmentLease(ac)
+		}
+	}
+	return token
+}
+
 func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attachmentRoleToken {
 	if s == nil || ac == nil || tr == nil {
 		return attachmentRoleToken{}

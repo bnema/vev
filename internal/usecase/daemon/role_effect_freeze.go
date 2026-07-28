@@ -95,6 +95,14 @@ func freezeRoleEffectGatesInterruptingObserved(interrupts []roleTransportInterru
 	return freezeRoleEffectGatesInterruptingObservedUntil(interrupts, nil, afterFrozen, clients...)
 }
 
+// tryFreezeRoleEffectGatesInterruptingObserved establishes transition priority
+// without waiting behind a gate already owned by another lifecycle operation.
+// Move reservations use this form: killSession freezes role gates before it
+// waits for the reservation, so waiting here would invert the two protocols.
+func tryFreezeRoleEffectGatesInterruptingObserved(interrupts []roleTransportInterrupt, afterFrozen func(*attachedClient), clients ...*attachedClient) frozenRoleEffectGates {
+	return freezeRoleEffectGatesInterruptingObservedMode(interrupts, nil, afterFrozen, true, clients...)
+}
+
 // freezeRoleEffectGatesInterruptingObservedUntil uses done as one overall bound
 // for ordered acquisition and drain. Acquisition is all-or-nothing: if the
 // bound expires behind another owner, only gates acquired by this call are
@@ -103,8 +111,12 @@ func freezeRoleEffectGatesInterruptingObserved(interrupts []roleTransportInterru
 // against an invalidated capability without pinning the session owner
 // indefinitely.
 func freezeRoleEffectGatesInterruptingObservedUntil(interrupts []roleTransportInterrupt, done func() <-chan struct{}, afterFrozen func(*attachedClient), clients ...*attachedClient) frozenRoleEffectGates {
+	return freezeRoleEffectGatesInterruptingObservedMode(interrupts, done, afterFrozen, false, clients...)
+}
+
+func freezeRoleEffectGatesInterruptingObservedMode(interrupts []roleTransportInterrupt, done func() <-chan struct{}, afterFrozen func(*attachedClient), nonblocking bool, clients ...*attachedClient) frozenRoleEffectGates {
 	ordered := orderedRoleEffectClients(clients)
-	frozen, acquired := acquireRoleEffectGates(ordered, done, afterFrozen)
+	frozen, acquired := acquireRoleEffectGates(ordered, done, afterFrozen, nonblocking)
 	if !acquired {
 		return frozenRoleEffectGates{}
 	}
@@ -165,13 +177,18 @@ func waitForRoleEffectChangeLocked(g *roleEffectGate, done func() <-chan struct{
 // acquireRoleEffectGates establishes exclusive transition ownership in order.
 // It must run without architecture locks. Deadline rollback releases only this
 // call's partial acquisition and does so in reverse order.
-func acquireRoleEffectGates(ordered []*attachedClient, done func() <-chan struct{}, afterFrozen func(*attachedClient)) (frozenRoleEffectGates, bool) {
+func acquireRoleEffectGates(ordered []*attachedClient, done func() <-chan struct{}, afterFrozen func(*attachedClient), nonblocking bool) (frozenRoleEffectGates, bool) {
 	frozen := frozenRoleEffectGates{clients: make([]*attachedClient, 0, len(ordered))}
 	for _, ac := range ordered {
 		g := &ac.roleEffects
 		g.mu.Lock()
 		g.initLocked()
 		for g.phase == roleEffectsFrozen {
+			if nonblocking {
+				g.mu.Unlock()
+				frozen.unfreeze()
+				return frozenRoleEffectGates{}, false
+			}
 			if waitForRoleEffectChangeLocked(g, done) {
 				g.mu.Unlock()
 				frozen.unfreeze()

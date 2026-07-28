@@ -527,6 +527,12 @@ func (d *Daemon) attachCoordinatorDeferred(sess *session, old, current *attached
 func (d *Daemon) ensureRenderCoordinator(sess *session) *renderCoordinator {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	return d.ensureRenderCoordinatorPrelocked(sess)
+}
+
+// ensureRenderCoordinatorPrelocked is the non-reentrant coordinator setup seam
+// for transactions that already hold sess.mu.
+func (d *Daemon) ensureRenderCoordinatorPrelocked(sess *session) *renderCoordinator {
 	if rc := sess.renderCoordinator(); rc != nil {
 		return rc
 	}
