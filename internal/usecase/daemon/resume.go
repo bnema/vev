@@ -45,6 +45,10 @@ func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
 }
 
 func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
+	return d.parkAttachmentAs(sess, ac, attachmentActive)
+}
+
+func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attachmentRole) bool {
 	if !d.prepareParkAttachment(sess, ac) {
 		return false
 	}
@@ -54,9 +58,16 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	// remain outside d.mu: sendMu is ordered before the daemon lock.
 	ac.clearCaptureFrames()
 	d.mu.Lock()
-	if d.closing {
+	if d.closing || d.sessions[sess.id] != sess {
 		d.mu.Unlock()
 		return false
+	}
+	if role == attachmentActive {
+		sess.mu.Lock()
+		if sess.client != nil {
+			role = attachmentSnatched
+		}
+		sess.mu.Unlock()
 	}
 	token := ac.resumeToken
 	if old := d.parked[token]; old != nil {
@@ -65,7 +76,7 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	}
 	grace := d.resumeParkGrace
 	timer := d.clock.NewTimer(grace)
-	parked := &parkedAttachment{sess: sess, ac: ac, timer: timer, done: make(chan struct{})}
+	parked := &parkedAttachment{sess: sess, ac: ac, role: role, timer: timer, done: make(chan struct{})}
 	ac.parked = true
 	d.parked[token] = parked
 	d.mu.Unlock()
@@ -112,9 +123,18 @@ func (p *parkedAttachment) closeDone() {
 	p.doneOnce.Do(func() { close(p.done) })
 }
 
+// demoteParkedActiveForSessionLocked preserves resumable predecessors when a
+// new active owner is published. Caller holds d.mu.
+func (d *Daemon) demoteParkedActiveForSessionLocked(sess *session) {
+	for _, parked := range d.parked {
+		if parked.sess == sess && parked.role == attachmentActive {
+			parked.role = attachmentSnatched
+		}
+	}
+}
+
 // purgeParkedForSessionLocked invalidates every parked token for sess. Caller
-// holds d.mu. Use before killing or normally attaching to a session so stale
-// resume tokens cannot resurrect or replace an active attachment.
+// holds d.mu. It is reserved for terminal session kill and daemon shutdown.
 func (d *Daemon) purgeParkedForSessionLocked(sess *session) {
 	for token, parked := range d.parked {
 		if parked.sess == sess {
@@ -158,13 +178,16 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	}
 	sess := parked.sess
 	registered := d.sessions[sess.id] == sess
+	if !registered {
+		d.removeParkedLocked(h.ResumeToken, parked)
+		d.log.Warn("resume rejected", "session", sess.name, "registered", false)
+		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+	}
 	sess.mu.Lock()
 	active := sess.client != nil
 	sess.mu.Unlock()
-	if !registered || active {
-		d.removeParkedLocked(h.ResumeToken, parked)
-		d.log.Warn("resume rejected", "session", sess.name, "registered", registered, "active", active)
-		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+	if active && parked.role == attachmentActive {
+		parked.role = attachmentSnatched
 	}
 	ac := parked.ac
 	if ac.clientID != h.ClientID {
@@ -198,7 +221,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 		target:            sess,
 		next:              ac,
 		expectedRole:      attachmentDetached,
-		targetRole:        attachmentActive,
+		targetRole:        parked.role,
 		expectedTransport: ac.transportSnapshot(),
 		ready:             false,
 	})

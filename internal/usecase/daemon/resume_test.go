@@ -606,7 +606,7 @@ func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
 	require.False(t, ok, "killed session cannot be resumed")
 }
 
-func TestStaleParkedTokenCannotStealActiveAttachment(t *testing.T) {
+func TestParkedPredecessorResumesSnatchedWithoutStealingActiveAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
@@ -622,13 +622,15 @@ func TestStaleParkedTokenCannotStealActiveAttachment(t *testing.T) {
 	require.NotSame(t, oldAC, activeAC)
 
 	d.mu.Lock()
-	_, parked := d.parked[token]
+	parked := d.parked[token]
 	d.mu.Unlock()
+	require.NotNil(t, parked, "normal attach preserves the parked predecessor")
+	require.Equal(t, attachmentSnatched, parked.role)
 	_, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
-	require.False(t, parked, "normal attach invalidates stale parked token")
 	require.NoError(t, err)
-	require.False(t, ok)
-	require.Nil(t, resumedAC)
+	require.True(t, ok)
+	require.Same(t, oldAC, resumedAC)
+	require.Equal(t, attachmentSnatched, sess.attachmentRole(resumedAC))
 	require.Same(t, activeAC, sess.client)
 }
 

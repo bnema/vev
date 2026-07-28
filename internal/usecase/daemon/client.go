@@ -62,15 +62,21 @@ type attachedClient struct {
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
-	size          domain.Size
-	keys          *keys.Router
-	sess          Guarded[*session]
-	mouseScan     mouse.Scanner
-	themeMu       sync.Mutex
-	clientTheme   themeui.Theme
-	appliedTheme  appliedTheme
-	lastCursor    cursorOut
-	renderStages  renderStageHooks // optional render and handoff observability hooks
+	// initialSnatchedMu elects exactly one reset-panel sender per role generation.
+	// A Welcome handshake and displaced-client cleanup may both discover the
+	// same post-transition snatched role; the loser waits for the elected send.
+	initialSnatchedMu         sync.Mutex
+	initialSnatchedGeneration uint64
+	initialSnatchedAttempt    *initialSnatchedPanelAttempt
+	size                      domain.Size
+	keys                      *keys.Router
+	sess                      Guarded[*session]
+	mouseScan                 mouse.Scanner
+	themeMu                   sync.Mutex
+	clientTheme               themeui.Theme
+	appliedTheme              appliedTheme
+	lastCursor                cursorOut
+	renderStages              renderStageHooks // optional render and handoff observability hooks
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]
@@ -705,7 +711,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		if err != nil {
 			token := sess.attachmentToken(ac, tr)
 			if token.role == attachmentSnatched {
-				d.dropSnatchedAttachment(token)
+				d.parkOrDropSnatchedAttachment(token)
 			} else {
 				d.clientGone(sess, ac, tr, false)
 			}
@@ -843,7 +849,7 @@ func (d *Daemon) handleSnatchedClientFrame(token attachmentRoleToken, f ports.Fr
 			ac.sendMu.Unlock()
 			if err := d.sendSnatchedPanel(ac, token.transport, token.generation, "", token.effect); err != nil {
 				token.endRoleEffect()
-				d.dropSnatchedAttachment(token)
+				d.parkOrDropSnatchedAttachment(token)
 				return true
 			}
 		}
@@ -861,7 +867,7 @@ func (d *Daemon) handleSnatchedClientFrame(token attachmentRoleToken, f ports.Fr
 			ac.sendMu.Unlock()
 			if err := d.sendSnatchedPanel(ac, token.transport, token.generation, "", token.effect); err != nil {
 				token.endRoleEffect()
-				d.dropSnatchedAttachment(token)
+				d.parkOrDropSnatchedAttachment(token)
 				return true
 			}
 		}
@@ -872,7 +878,7 @@ func (d *Daemon) handleSnatchedClientFrame(token attachmentRoleToken, f ports.Fr
 	case ports.MsgPing:
 		if err := d.sendSnatchedControl(token, framePong()); err != nil {
 			token.endRoleEffect()
-			d.dropSnatchedAttachment(token)
+			d.parkOrDropSnatchedAttachment(token)
 			return true
 		}
 	case ports.MsgDetach:

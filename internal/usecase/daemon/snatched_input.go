@@ -213,7 +213,7 @@ func (d *Daemon) reclaimSnatchedAttachment(token attachmentRoleToken) bool {
 	})
 	if err != nil {
 		if errors.Is(err, errSendTimedOut) {
-			d.attachmentCleanupWg.Go(func() { d.dropSnatchedAttachment(token) })
+			d.attachmentCleanupWg.Go(func() { d.parkOrDropSnatchedAttachment(token) })
 		} else {
 			d.showSnatchedUnavailable(token)
 		}
@@ -244,7 +244,7 @@ func (d *Daemon) showSnatchedUnavailable(token attachmentRoleToken) {
 	defer fresh.endRoleEffect()
 	if err := d.sendSnatchedPanel(token.ac, token.transport, token.generation, "Session is no longer available.", ticket); err != nil {
 		fresh.endRoleEffect()
-		d.dropSnatchedAttachment(token)
+		d.parkOrDropSnatchedAttachment(token)
 	}
 }
 

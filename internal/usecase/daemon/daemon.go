@@ -256,6 +256,7 @@ type Daemon struct {
 type parkedAttachment struct {
 	sess     *session
 	ac       *attachedClient
+	role     attachmentRole
 	timer    ports.Timer
 	done     chan struct{}
 	doneOnce sync.Once
@@ -965,25 +966,57 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	welcomeToken := sess.attachmentToken(ac, tr)
 	welcomeToken.lease = lease
 	welcomeTicket, admitted := ac.beginRoleEffect(welcomeToken)
-	if lease == nil || expected.transport != tr || !admitted {
-		d.clientGone(sess, ac, tr, false)
+	validRole := welcomeToken.role == attachmentSnatched || welcomeToken.role == attachmentActive && lease != nil
+	if expected.transport != tr || !admitted || !validRole {
+		if admitted {
+			welcomeTicket.End()
+		}
+		if welcomeToken.role == attachmentSnatched {
+			d.parkOrDropSnatchedAttachment(welcomeToken)
+		} else {
+			d.clientGone(sess, ac, tr, false)
+		}
 		return
 	}
 	if err := ac.sendExpectedTransportForRole(expected, frameWelcome(sess, ac), welcomeTicket); err != nil {
 		welcomeTicket.End()
+		if welcomeToken.role == attachmentSnatched {
+			d.parkOrDropSnatchedAttachment(welcomeToken)
+		} else {
+			d.clientGone(sess, ac, tr, false)
+		}
+		return
+	}
+	// Welcome is the only effect allowed to retain the route-time role. Release
+	// it before discovering post-handshake authority so a replacement blocked
+	// behind the send can publish its generation and lease first.
+	welcomeTicket.End()
+	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentRoleEffect(sess, tr)
+	if !admitted {
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	if !rc.markAttachmentReady(lease) {
-		welcomeTicket.End()
+	if postWelcomeToken.role == attachmentSnatched {
+		if err := d.sendInitialSnatchedPanel(postWelcomeToken, postWelcomeTicket); err != nil {
+			postWelcomeTicket.End()
+			d.parkOrDropSnatchedAttachment(postWelcomeToken)
+			return
+		}
+		postWelcomeTicket.End()
+		d.runConnLoop(ac)
+		_ = tr.Close()
+		return
+	}
+	postWelcomeLease := postWelcomeToken.lease
+	if postWelcomeToken.role != attachmentActive || rc == nil || postWelcomeLease == nil || !rc.markAttachmentReady(postWelcomeLease) {
+		postWelcomeTicket.End()
 		// The attachment was displaced or detached while Welcome was in flight;
 		// never let this stale handshake emit an Output frame.
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	welcomeTicket.End()
+	postWelcomeTicket.End()
 	paintToken := sess.attachmentToken(ac, tr)
-	paintToken.lease = lease
 	if !d.firstPaintForTransition(paintToken) {
 		d.clientGone(sess, ac, tr, false)
 		return
@@ -1092,10 +1125,14 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	}
 	term := terminalEnv{TrueColor: h.TrueColor}
 
-	if h.Intent == ports.IntentResume {
+	// A non-zero token is an authoritative resume credential. If it is unknown,
+	// expired, or raced with lifecycle teardown, fail closed instead of routing
+	// the Hello as an ordinary attach that could create or replace ownership.
+	if h.ResumeToken != 0 {
 		if sess, ac, ok, err := d.resumeParked(h, tr, sz); ok || err != nil {
 			return sess, ac, err
 		}
+		return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	if h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach {
 		ctx := d.serveCtx
@@ -1134,7 +1171,6 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				return nil, nil, err
 			}
 		}
-		d.purgeParkedForSessionLocked(sess)
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
 		return sess, ac, err
 
@@ -1145,7 +1181,6 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		d.purgeParkedForSessionLocked(sess)
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
 		return sess, ac, err
 
@@ -1167,7 +1202,6 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		d.purgeParkedForSessionLocked(sess)
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
 		return sess, ac, err
 
@@ -1187,7 +1221,6 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				return nil, nil, err
 			}
 		}
-		d.purgeParkedForSessionLocked(sess)
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
 		return sess, ac, err
 

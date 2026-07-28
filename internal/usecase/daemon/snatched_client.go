@@ -14,6 +14,58 @@ const (
 	attachmentSnatched
 )
 
+type initialSnatchedPanelAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+func (ac *attachedClient) claimInitialSnatchedPanel(generation uint64) (*initialSnatchedPanelAttempt, bool) {
+	ac.initialSnatchedMu.Lock()
+	defer ac.initialSnatchedMu.Unlock()
+	if generation < ac.initialSnatchedGeneration {
+		return nil, false
+	}
+	if generation == ac.initialSnatchedGeneration && ac.initialSnatchedAttempt != nil {
+		return ac.initialSnatchedAttempt, false
+	}
+	attempt := &initialSnatchedPanelAttempt{done: make(chan struct{})}
+	ac.initialSnatchedGeneration = generation
+	ac.initialSnatchedAttempt = attempt
+	return attempt, true
+}
+
+func (ac *attachedClient) initialSnatchedPanelClaimed(generation uint64) bool {
+	ac.initialSnatchedMu.Lock()
+	defer ac.initialSnatchedMu.Unlock()
+	return ac.initialSnatchedGeneration == generation && ac.initialSnatchedAttempt != nil
+}
+
+func (ac *attachedClient) completeInitialSnatchedPanel(attempt *initialSnatchedPanelAttempt, err error) {
+	ac.initialSnatchedMu.Lock()
+	attempt.err = err
+	close(attempt.done)
+	ac.initialSnatchedMu.Unlock()
+}
+
+func (d *Daemon) sendInitialSnatchedPanel(token attachmentRoleToken, ticket *roleEffectTicket) error {
+	attempt, owner := token.ac.claimInitialSnatchedPanel(token.generation)
+	if attempt == nil {
+		return errSnatchedOutputStale
+	}
+	if !owner {
+		<-attempt.done
+		return attempt.err
+	}
+
+	if !token.current() || !d.clearForSnatch(token) || !d.clearCaptureFramesForSnatch(token) {
+		token.ac.completeInitialSnatchedPanel(attempt, errSnatchedOutputStale)
+		return errSnatchedOutputStale
+	}
+	err := d.sendSnatchedPanel(token.ac, token.transport, token.generation, "", ticket)
+	token.ac.completeInitialSnatchedPanel(attempt, err)
+	return err
+}
+
 // attachmentRole derives the attachment's role from the session-owned
 // registries. There is deliberately no second role field that could drift.
 func (s *session) attachmentRole(ac *attachedClient) attachmentRole {
@@ -483,6 +535,9 @@ func (d *Daemon) transitionAttachmentRoutedLocked(req attachmentTransitionReques
 		return attachmentTransitionResult{}, errAttachmentTransition
 	}
 
+	if req.targetRole == attachmentActive {
+		d.demoteParkedActiveForSessionLocked(req.target)
+	}
 	if req.copySourceEnvironment {
 		req.target.terminal = source.terminal
 		req.target.env = copyEnvironment(source.env)
@@ -618,6 +673,10 @@ func (d *Daemon) boundedSendSnatchedControl(token attachmentRoleToken, frame por
 // transport, allowing callers that already interrupted a blocked send to avoid
 // closing the same link twice.
 func (d *Daemon) removeSnatchedAttachment(token attachmentRoleToken) bool {
+	return d.unrouteSnatchedAttachment(token, true)
+}
+
+func (d *Daemon) unrouteSnatchedAttachment(token attachmentRoleToken, terminal bool) bool {
 	if token.sess == nil || token.ac == nil || token.transport.transport == nil {
 		return false
 	}
@@ -641,10 +700,34 @@ func (d *Daemon) removeSnatchedAttachment(token attachmentRoleToken) bool {
 
 	token.ac.clearSnatchedInput()
 	d.unregisterPreview(token.ac)
-	token.ac.clearPreviousSession()
+	if terminal {
+		token.ac.clearPreviousSession()
+	}
 	token.ac.setSession(nil)
 	token.ac.clearCaptureFrames()
 	return true
+}
+
+// parkSnatchedAttachment removes only the exact lost snatched incarnation and
+// retains its resume identity for a role-preserving reconnect.
+func (d *Daemon) parkSnatchedAttachment(token attachmentRoleToken) bool {
+	if token.ac == nil || !token.ac.resumeCapable || !d.unrouteSnatchedAttachment(token, false) {
+		return false
+	}
+	if d.parkAttachmentAs(token.sess, token.ac, attachmentSnatched) {
+		_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+		return true
+	}
+	token.ac.clearPreviousSession()
+	_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+	return false
+}
+
+func (d *Daemon) parkOrDropSnatchedAttachment(token attachmentRoleToken) bool {
+	if d.parkSnatchedAttachment(token) {
+		return true
+	}
+	return d.dropSnatchedAttachment(token)
 }
 
 // cleanupInterruptedSnatchedAttachment owns terminal cleanup for a displaced
@@ -690,11 +773,17 @@ func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken)
 		return false
 	}
 
+	token.ac.setSession(nil)
+	if token.ac.resumeCapable && d.parkAttachmentAs(token.sess, token.ac, attachmentSnatched) {
+		_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+		token.ac.clearSnatchedInput()
+		d.unregisterPreview(token.ac)
+		return true
+	}
 	_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
 	token.ac.clearSnatchedInput()
 	d.unregisterPreview(token.ac)
 	token.ac.clearPreviousSession()
-	token.ac.setSession(nil)
 	token.ac.clearCaptureFrames()
 	return true
 }
@@ -776,7 +865,7 @@ func lockAttachmentCoordinators(a *session, aCoordinator *renderCoordinator, b *
 func (d *Daemon) deferAttachmentTransitionCleanups(result attachmentTransitionResult) {
 	if token := result.displaced; token.ac != nil && token.transport.transport != nil {
 		blockedRender := result.displacedInterrupted
-		if !blockedRender {
+		if !blockedRender && !token.ac.initialSnatchedPanelClaimed(token.generation) {
 			blockedRender = !token.ac.sendMu.TryLock()
 			if !blockedRender {
 				token.ac.sendMu.Unlock()
@@ -798,12 +887,9 @@ func (d *Daemon) deferAttachmentTransitionCleanups(result attachmentTransitionRe
 				return
 			}
 			defer ticket.End()
-			if !token.current() || !d.clearForSnatch(token) || !d.clearCaptureFramesForSnatch(token) {
-				return
-			}
-			if err := d.sendSnatchedPanel(token.ac, token.transport, token.generation, "", ticket); err != nil {
+			if err := d.sendInitialSnatchedPanel(token, ticket); err != nil {
 				ticket.End()
-				d.dropSnatchedAttachment(token)
+				d.parkOrDropSnatchedAttachment(token)
 			}
 		})
 	}

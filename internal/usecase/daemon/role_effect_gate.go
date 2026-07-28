@@ -260,6 +260,39 @@ func (ac *attachedClient) beginRoleEffect(token attachmentRoleToken) (*roleEffec
 	return &roleEffectTicket{gate: g, token: captured}, true
 }
 
+// beginCurrentRoleEffect waits out a transition that already froze ac, then
+// admits the role capability derived from the session registries. Handshakes
+// use it after Welcome has completed so a replacement blocked behind that send
+// can publish before readiness, first paint, or the snatched reset panel.
+func (ac *attachedClient) beginCurrentRoleEffect(sess *session, tr ports.Transport) (attachmentRoleToken, *roleEffectTicket, bool) {
+	if ac == nil || sess == nil || tr == nil {
+		return attachmentRoleToken{}, nil, false
+	}
+	for {
+		token := sess.attachmentToken(ac, tr)
+		if token.role == attachmentDetached {
+			return token, nil, false
+		}
+		if ticket, admitted := ac.beginRoleEffect(token); admitted {
+			return token, ticket, true
+		}
+
+		g := &ac.roleEffects
+		g.mu.Lock()
+		g.initLocked()
+		if g.phase == roleEffectsFrozen {
+			changed := g.changed
+			g.mu.Unlock()
+			<-changed
+			continue
+		}
+		g.mu.Unlock()
+		// Publication may have completed between token capture and admission.
+		// Re-read the registry and exact generation instead of using stale role
+		// or lease authority.
+	}
+}
+
 // publishRoleCapability is used by direct/headless setup and by transition
 // publication while the gate is frozen. Production role changes publish only
 // through publishFrozenRoleCapability.
