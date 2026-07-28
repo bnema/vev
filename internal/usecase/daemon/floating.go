@@ -42,6 +42,14 @@ func (tb *tab) beginFloatingWarmLocked(desiredVisible bool) uint64 {
 	return tb.floating.generation
 }
 
+// floatingTransferableLocked reports whether a tab's floating lifecycle can
+// cross an ownership commit. A warming Open remains registered to its source
+// session until installation or failure, so moves must reject only that state.
+// The caller must hold tb.mu.
+func (tb *tab) floatingTransferableLocked() bool {
+	return tb != nil && tb.floating.state != floatingWarming
+}
+
 // toggleFloatingLocked applies the user action. Its result says whether a new
 // PTY launch is required and returns the generation associated with that launch
 // or current slot.
@@ -417,8 +425,10 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	}
 	ownedByPane = true
 	// The reader may run as soon as install returns; make its exit policy
-	// immutable before publishing the pane to the slot.
-	p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
+	// immutable before publishing the pane to the slot. Installed panes resolve
+	// their owner dynamically so a transferred tab never reaps through source
+	// session pointers captured by its launch.
+	p.onExit = func() { d.reapInstalledFloating(p) }
 	d.installFloating(sess, tb, p, generation)
 }
 
@@ -478,26 +488,44 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	}
 }
 
-// reapFloating ignores old readers and restores the background only when the
-// exiting popup was visible.
-func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64) {
-	tb.mu.Lock()
-	visible := tb.floating.state == floatingVisible && tb.floating.pane == p && tb.floating.generation == generation
-	cleared := tb.clearFloatingLocked(p, generation)
-	tb.mu.Unlock()
-	if !cleared {
+// reapInstalledFloating resolves the pane's current immutable owner on every
+// attempt. If ownership changes before the tab lock is acquired, retrying the
+// lookup routes exit through the destination. The owner pointer and floating
+// slot generation are then checked together under tb.mu so an old exit can
+// never clear a reused slot.
+func (d *Daemon) reapInstalledFloating(p *pane) {
+	if p == nil {
 		return
 	}
-	closeFloatingPane(p)
-	sess.mu.Lock()
-	ac := sess.client
-	sess.mu.Unlock()
-	if ac != nil {
-		ac.pruneCaptureFrames(p)
-	}
-	copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
-	if ac != nil && (visible || copyCleared) {
-		d.invalidateRender(sess, ac, true, "floating.go")
+	for {
+		owner := p.ownerSnapshot()
+		if owner == nil || owner.session == nil || owner.tab == nil || owner.floatingSlotGeneration == 0 {
+			return
+		}
+		sess, tb, generation := owner.session, owner.tab, owner.floatingSlotGeneration
+		tb.mu.Lock()
+		if p.ownerSnapshot() != owner {
+			tb.mu.Unlock()
+			continue
+		}
+		visible := tb.floating.state == floatingVisible && tb.floating.pane == p && tb.floating.generation == generation
+		cleared := tb.clearFloatingLocked(p, generation)
+		tb.mu.Unlock()
+		if !cleared {
+			return
+		}
+		closeFloatingPane(p)
+		sess.mu.Lock()
+		ac := sess.client
+		sess.mu.Unlock()
+		if ac != nil {
+			ac.pruneCaptureFrames(p)
+		}
+		copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
+		if ac != nil && (visible || copyCleared) {
+			d.invalidateRender(sess, ac, true, "floating.go")
+		}
+		return
 	}
 }
 

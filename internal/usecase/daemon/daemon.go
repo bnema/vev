@@ -125,6 +125,10 @@ type Daemon struct {
 	// and before coordinator epoch admission. It is a deterministic regression
 	// seam for stale resize publication.
 	beforeSessionResizePublication func()
+	// beforeResizeOwnerPostEffect pauses after a resize's optimistic owner check
+	// and immediately before a post-commit effect is published. Tests use it to
+	// move a pane through the ordered resize fences at the former TOCTOU window.
+	beforeResizeOwnerPostEffect func(resizeOwnerPostEffect)
 	// afterSnatchOverlayFamily is a deterministic structural lock seam. It runs
 	// after one overlay-family mutex is released and before the next is taken.
 	afterSnatchOverlayFamily func(string)

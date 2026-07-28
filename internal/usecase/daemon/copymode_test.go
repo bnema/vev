@@ -845,9 +845,10 @@ func TestFloatingExitClearsCopyModeBeforeRepaint(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	tb.mu.Lock()
 	generation := tb.floating.generation
+	publishPaneOwner(fp, sess, tb, generation)
 	tb.mu.Unlock()
 
-	d.reapFloating(sess, tb, fp, generation)
+	d.reapInstalledFloating(fp)
 
 	ac.overlays.copyMu.Lock()
 	require.Nil(t, ac.overlays.copyMode)

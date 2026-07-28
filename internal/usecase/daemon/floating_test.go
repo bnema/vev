@@ -131,6 +131,30 @@ func TestFloatingSlotTransitions(t *testing.T) {
 	}
 }
 
+func TestFloatingTransferabilityRejectsOnlyWarmingLaunch(t *testing.T) {
+	tests := []struct {
+		name  string
+		state floatingState
+		want  bool
+	}{
+		{name: "uninitialized", state: floatingUninitialized, want: true},
+		{name: "warming", state: floatingWarming, want: false},
+		{name: "hidden installed", state: floatingHidden, want: true},
+		{name: "visible installed", state: floatingVisible, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tb := &tab{floating: floatingSlot{state: tt.state, generation: 7}}
+			tb.mu.Lock()
+			got := tb.floatingTransferableLocked()
+			tb.mu.Unlock()
+			require.Equal(t, tt.want, got)
+			require.Equal(t, tt.state, tb.floating.state, "validation must not change launch state")
+			require.Equal(t, uint64(7), tb.floating.generation, "validation must preserve retry generation")
+		})
+	}
+}
+
 func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testing.T) {
 	pty := portsmocks.NewMockPTY(t)
 	readerStarted := make(chan struct{})
@@ -272,28 +296,83 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	second := &pane{}
 	tb.mu.Lock()
 	g1 := tb.beginFloatingWarmLocked(true)
+	publishPaneOwner(first, sess, tb, g1)
 	require.True(t, tb.installFloatingLocked(first, g1))
 	g2 := tb.clearFloatingLocked(first, g1)
 	require.True(t, g2)
 	generation := tb.beginFloatingWarmLocked(true)
 	require.True(t, tb.installFloatingLocked(second, generation))
 	tb.mu.Unlock()
-	d.reapFloating(sess, tb, first, g1)
+	d.reapInstalledFloating(first)
 	tb.mu.Lock()
 	require.Same(t, second, tb.floating.pane, "old EOF must not clear replacement")
 	tb.mu.Unlock()
+}
+
+func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
+	factory := &lifetimePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	tb := newFloatingTestTab(t)
+	source := &session{id: "source", name: "source", tabs: []*tab{tb}, ctx: t.Context()}
+	destination := &session{id: "destination", name: "destination", tabs: []*tab{tb}, ctx: t.Context()}
+
+	tb.mu.Lock()
+	generation := tb.beginFloatingWarmLocked(false)
+	tb.mu.Unlock()
+	d.openAndInstallFloating(source, tb, floatingLaunchSpec{
+		sessionName:  source.name,
+		size:         domain.Size{Cols: 20, Rows: 8},
+		geometry:     floatingGeometry{Inner: domain.Rect{Width: 20, Height: 8}},
+		paneStableID: "p_floating",
+		parentCtx:    tb.ctx,
+	}, generation)
+
+	tb.mu.Lock()
+	floating := tb.floating.pane
+	tb.mu.Unlock()
+	require.NotNil(t, floating)
+	tb.mu.Lock()
+	floating.mu.Lock()
+	floating.publishOwnerLocked(destination, tb, generation)
+	floating.mu.Unlock()
+	tb.mu.Unlock()
+
+	sourceClient := &attachedClient{captureFrames: map[*pane]capturedPaneRenderState{floating: {}}}
+	sourceClient.initOverlays()
+	destinationClient := &attachedClient{captureFrames: map[*pane]capturedPaneRenderState{floating: {}}}
+	destinationClient.initOverlays()
+	source.client = sourceClient
+	destination.client = destinationClient
+
+	floating.onExit()
+	d.sessWg.Wait()
+
+	tb.mu.Lock()
+	require.Equal(t, floatingUninitialized, tb.floating.state)
+	require.Nil(t, tb.floating.pane)
+	tb.mu.Unlock()
+	sourceClient.sendMu.Lock()
+	_, sourceRetained := sourceClient.captureFrames[floating]
+	sourceClient.sendMu.Unlock()
+	destinationClient.sendMu.Lock()
+	_, destinationRetained := destinationClient.captureFrames[floating]
+	destinationClient.sendMu.Unlock()
+	require.True(t, sourceRetained, "exit must not clean up the retired source owner")
+	require.False(t, destinationRetained, "exit must clean up the current destination owner")
 }
 
 func TestFloatingReapAndTeardownCloseMatchingPaneOnce(t *testing.T) {
 	pty, _ := newBlockingPTY(t)
 	tb := newFloatingTestTab(t)
 	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
+	sess := &session{}
 	tb.mu.Lock()
 	g := tb.beginFloatingWarmLocked(true)
+	publishPaneOwner(p, sess, tb, g)
 	require.True(t, tb.installFloatingLocked(p, g))
 	tb.mu.Unlock()
 	d := newTestDaemon(t, nil, stubClock{})
-	d.reapFloating(&session{}, tb, p, g)
+	d.reapInstalledFloating(p)
 	d.teardownFloating(tb, nil)
 	pty.AssertNumberOfCalls(t, "Close", 1)
 }
@@ -358,6 +437,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		}).Once()
 		floating := newPane(layout.PaneID("floating"), floatingPTY, domain.Size{Cols: 20, Rows: 8})
 		generation := tb.beginFloatingWarmLocked(state == floatingVisible)
+		publishPaneOwner(floating, sess, tb, generation)
 		require.True(t, tb.installFloatingLocked(floating, generation))
 		if state == floatingHidden {
 			require.Equal(t, floatingHidden, tb.floating.state)
@@ -374,7 +454,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 
 		reaped := make(chan struct{})
 		floating.onExit = func() {
-			d.reapFloating(sess, tb, floating, generation)
+			d.reapInstalledFloating(floating)
 			close(reaped)
 		}
 		d.sessWg.Add(1)

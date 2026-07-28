@@ -132,35 +132,46 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 	return c.invalidateForLeaseAtResizeEpoch(source, nil, epoch, inv)
 }
 
-// invalidateForLeaseAtResizeEpoch is the attachment-callback variant: it
-// rejects a same-object replacement whose source pointer still matches but
-// whose lifecycle lease has been revoked.
-func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) bool {
+// renderInvalidationReservation is the in-memory half of an invalidation.
+// finish performs observer, timer, and callback work after ownership fences are
+// released.
+type renderInvalidationReservation struct {
+	coordinator      *renderCoordinator
+	invalidation     renderInvalidation
+	onInvalidate     func(renderInvalidation)
+	queueStart       bool
+	queueCorrelation ports.RuntimeCorrelation
+	observer         ports.RuntimeObserver
+	old              *timerToken
+	arm              bool
+	generation       uint64
+	delay            time.Duration
+	clock            ports.Clock
+}
+
+// reserveInvalidationForLeaseAtResizeEpoch publishes only coordinator memory.
+// It is safe inside a short pane-owner fence and performs no timer or observer
+// calls.
+func (c *renderCoordinator) reserveInvalidationForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) (*renderInvalidationReservation, bool) {
 	c.mu.Lock()
-	// An unbound coordinator is the manual/headless harness state; there is no
-	// published production attachment to protect there. A parked target may
-	// still publish its own PTY/session mutations to picker observers, but no
-	// attachment-owned callback may revive that target's render path.
+	defer c.mu.Unlock()
 	detachedPreviewOnly := c.primaryDetachedLocked() && source == nil && (c.previewWake != nil || len(c.previewWakes) != 0)
 	if c.torndown || (lease != nil && (!c.leaseCurrentLocked(lease, true) || lease.attachment != source)) ||
 		(c.primaryDetachedLocked() && !detachedPreviewOnly) || (source != nil && c.lease != nil && c.lease.attachment != source) ||
 		(epoch != 0 && (c.resize.epoch != epoch || c.resize.source != source || (lease != nil && c.resize.lease != lease))) {
-		c.mu.Unlock()
-		return false
+		return nil, false
 	}
-	onInvalidate := c.opts.onInvalidate
+	reservation := &renderInvalidationReservation{coordinator: c, invalidation: inv, onInvalidate: c.opts.onInvalidate}
 	c.metrics.invalidations.Add(1)
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
-	queueStart := false
-	var queueCorrelation ports.RuntimeCorrelation
 	if !wasPending {
 		c.ackDeferred = false
 		c.deadlineDue = false
 		if c.opts.observer != nil {
 			c.queueMarked = true
 			c.queueCorrelation = ports.NewRuntimeCorrelation()
-			queueCorrelation = c.queueCorrelation
-			queueStart = true
+			reservation.queueCorrelation = c.queueCorrelation
+			reservation.queueStart = true
 		}
 	}
 	c.pending = true
@@ -168,43 +179,43 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
 	c.pendingPreview = c.pendingPreview || c.previewWake != nil || len(c.previewWakes) != 0
 	c.coalesced++
-	// A deadline may have expired while synchronized output still gated the
-	// pending work. Completion republishes urgently and must reserve a fresh
-	// deadline rather than leaving that already-fired timer as the only arm.
-	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
-	var old *timerToken
-	if arm {
-		_, old = c.normalLane.replaceLocked()
+	reservation.arm = !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
+	if reservation.arm {
+		_, reservation.old = c.normalLane.replaceLocked()
 	}
-	gen := c.normalLane.generation
-	delay := minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
+	reservation.generation = c.normalLane.generation
+	reservation.delay = minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
 	if c.pendingUrgent {
-		delay = urgentRenderDeadline
+		reservation.delay = urgentRenderDeadline
 	}
-	clock := c.opts.clock
-	c.armed = c.armed || arm
-	observer := c.opts.observer
-	c.mu.Unlock()
-	if queueStart && observer != nil {
-		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
-	}
-	stopDetachedTimer(old)
-	if !arm || clock == nil {
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		return true
-	}
+	reservation.clock = c.opts.clock
+	reservation.observer = c.opts.observer
+	c.armed = c.armed || reservation.arm
+	return reservation, true
+}
 
-	// NewTimer and C may re-enter the coordinator. Publish only if this
-	// generation is still the reserved deadline after those external calls.
-	timer := clock.NewTimer(delay)
+func (r *renderInvalidationReservation) finish() {
+	if r == nil || r.coordinator == nil {
+		return
+	}
+	c := r.coordinator
+	if r.queueStart && r.observer != nil {
+		r.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", r.queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
+	}
+	stopDetachedTimer(r.old)
+	if !r.arm || r.clock == nil {
+		if r.onInvalidate != nil {
+			r.onInvalidate(r.invalidation)
+		}
+		return
+	}
+	timer := r.clock.NewTimer(r.delay)
 	timerC := timer.C()
 	c.mu.Lock()
-	valid := !c.torndown && c.pending && c.normalLane.generation == gen
+	valid := !c.torndown && c.pending && c.normalLane.generation == r.generation
 	var token *timerToken
 	if valid && timerC != nil {
-		token = c.normalLane.publishLocked(gen, timer)
+		token = c.normalLane.publishLocked(r.generation, timer)
 		valid = token != nil
 		if valid {
 			c.supervisor.startLocked(token, timerC, func() {
@@ -216,26 +227,27 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	c.mu.Unlock()
 	if !valid {
 		timer.Stop()
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		return true
-	}
-	if timerC == nil {
+	} else if timerC == nil {
 		timer.Stop()
-		c.fire(gen, false, true)
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		return true
+		c.fire(r.generation, false, true)
 	}
-	// Test-visible observation follows deadline publication, so a producer
-	// callback cannot observe a successful invalidation before its timer owns
-	// a worker (and race tests cannot finish while a mock expectation remains).
-	if onInvalidate != nil {
-		onInvalidate(inv)
+	if r.onInvalidate != nil {
+		r.onInvalidate(r.invalidation)
 	}
-	runtime.Gosched()
+	if valid && timerC != nil {
+		runtime.Gosched()
+	}
+}
+
+// invalidateForLeaseAtResizeEpoch is the attachment-callback variant: it
+// rejects a same-object replacement whose source pointer still matches but
+// whose lifecycle lease has been revoked.
+func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) bool {
+	reservation, ok := c.reserveInvalidationForLeaseAtResizeEpoch(source, lease, epoch, inv)
+	if !ok {
+		return false
+	}
+	reservation.finish()
 	return true
 }
 

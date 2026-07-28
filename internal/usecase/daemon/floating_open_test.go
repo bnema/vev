@@ -73,23 +73,26 @@ func (f *contextAwareFloatingFactory) Open(ctx context.Context, _ string, _ []st
 
 func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 	teardowns := []struct {
-		name     string
-		teardown func(*Daemon, *session, *tab)
+		name           string
+		desiredVisible bool
+		teardown       func(*Daemon, *session, *tab)
 	}{
 		{
-			name: "floating pane",
+			name: "hidden floating pane",
 			teardown: func(d *Daemon, _ *session, tb *tab) {
 				d.teardownFloating(tb, nil)
 			},
 		},
 		{
-			name: "tab",
+			name:           "visible tab",
+			desiredVisible: true,
 			teardown: func(_ *Daemon, _ *session, tb *tab) {
 				tb.closeAllPanes()
 			},
 		},
 		{
-			name: "session",
+			name:           "visible session",
+			desiredVisible: true,
 			teardown: func(d *Daemon, sess *session, _ *tab) {
 				require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
 			},
@@ -109,7 +112,7 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 			d.sessions[sess.id] = sess
 			d.mu.Unlock()
 			tb.mu.Lock()
-			generation := tb.beginFloatingWarmLocked(true)
+			generation := tb.beginFloatingWarmLocked(tt.desiredVisible)
 			tb.mu.Unlock()
 
 			d.openAndInstallFloating(sess, tb, floatingLaunchSpec{
@@ -129,7 +132,7 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 			sess.mu.Lock()
 			sess.client = &attachedClient{}
 			sess.mu.Unlock()
-			require.True(t, d.paneRenderable(sess, tb, floating), "installed visible popup must remain renderable")
+			require.Equal(t, tt.desiredVisible, d.paneRenderable(sess, tb, floating), "installed popup renderability must follow its retained visibility")
 			sess.mu.Lock()
 			sess.client = nil
 			sess.mu.Unlock()
