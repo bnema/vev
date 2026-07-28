@@ -21,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/vt"
 )
 
@@ -704,7 +705,7 @@ func TestFloatingMouseTranslatesSGRToInnerCoordinates(t *testing.T) {
 	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 	installTestFloating(tb, floating, true)
 	geometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 20}, d.currentFloatingConfig())
-	raw := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2))
+	raw := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+clientTopBarRows+1)
 
 	d.handleInput(sess, ac, raw)
 }
@@ -722,10 +723,82 @@ func TestFloatingMouseIgnoresBorderAndOutside(t *testing.T) {
 	installTestFloating(tb, floating, true)
 	geometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 20}, d.currentFloatingConfig())
 
-	border := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Bounds.X+1, geometry.Bounds.Y+2))
+	border := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Bounds.X+1, geometry.Bounds.Y+clientTopBarRows+1)
 	outside := []byte("\x1b[<0;1;2M")
 	d.handleInput(sess, ac, border)
 	d.handleInput(sess, ac, outside)
+}
+
+func TestResponsiveDrawerFloatingMouseRoutesOnlyInnerClientCells(t *testing.T) {
+	normal := portsmocks.NewMockPTY(t)
+	floatingPTY := portsmocks.NewMockPTY(t)
+	floatingPTY.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
+	tb := sess.activeTab()
+	complete := domain.Size{Cols: 79, Rows: 25}
+	content := tabSize(complete)
+	geometry := calculateContentFloatingGeometry(content, d.currentFloatingConfig())
+	require.Equal(t, ui.PresentationDrawer, geometry.Mode)
+	tb.mu.Lock()
+	tb.size = content
+	tb.mu.Unlock()
+	floating := newPane("floating", floatingPTY, rectSize(geometry.Inner))
+	floating.popupGeometry = geometry
+	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	installTestFloating(tb, floating, true)
+
+	firstInner := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+clientTopBarRows+1)
+	d.handleInput(sess, ac, firstInner)
+	for _, frameRow := range []int{0, 1, 2, geometry.Bounds.Y + clientTopBarRows, complete.Rows - 1} {
+		d.handleInput(sess, ac, fmt.Appendf(nil, "\x1b[<0;1;%dM", frameRow+1))
+	}
+}
+
+func TestResponsiveDrawerCopyMouseMapsInnerAndPinsDragAwayFromChrome(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	complete := domain.Size{Cols: 79, Rows: 25}
+	content := tabSize(complete)
+	geometry := calculateContentFloatingGeometry(content, d.currentFloatingConfig())
+	tb.mu.Lock()
+	tb.size = content
+	tb.mu.Unlock()
+	floating := newPane("floating", nil, rectSize(geometry.Inner))
+	floating.popupGeometry = geometry
+	floating.screen.Write([]byte("drawer row zero\r\nsecond row"))
+	installTestFloating(tb, floating, true)
+
+	for _, frameRow := range []int{0, 1, 2, geometry.Bounds.Y + clientTopBarRows, complete.Rows - 1} {
+		d.handleInput(sess, ac, fmt.Appendf(nil, "\x1b[<0;1;%dM", frameRow+1))
+		ac.overlays.copyMu.Lock()
+		require.False(t, ac.overlays.copyPointer.valid, "frame row %d is drawer chrome, not copy content", frameRow)
+		ac.overlays.copyMu.Unlock()
+	}
+
+	firstInner := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+clientTopBarRows+1)
+	d.handleInput(sess, ac, firstInner)
+	ac.overlays.copyMu.Lock()
+	pointer := ac.overlays.copyPointer
+	ac.overlays.copyMu.Unlock()
+	require.True(t, pointer.valid)
+	require.Same(t, floating, pointer.pane)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 0}, pointer.press)
+	require.Equal(t, copyContentToClientRect(geometry.Inner), pointer.geometry.content)
+
+	// Motion onto the protected top row clamps against the press-owned drawer
+	// geometry instead of retargeting the underlying tiled terminal.
+	d.handleInput(sess, ac, []byte("\x1b[<32;79;1M"))
+	ac.overlays.copyMu.Lock()
+	require.NotNil(t, ac.overlays.copyMode)
+	require.Same(t, floating, ac.overlays.copyPane)
+	require.Same(t, floating, ac.overlays.copyPointer.pane)
+	require.Equal(t, pointer.geometry, ac.overlays.copyPointer.geometry)
+	selection := ac.overlays.copyMode.Selection()
+	ac.overlays.copyMu.Unlock()
+	require.Equal(t, scopy.Pos{Row: 0, Col: 0}, selection.Anchor)
+	require.Equal(t, 0, selection.Active.Row, "drag above the drawer must stay pinned to its first document row")
 }
 
 func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {

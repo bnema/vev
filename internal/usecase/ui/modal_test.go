@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestModalBounds(t *testing.T) {
+func TestModalResolveBounds(t *testing.T) {
 	tests := []struct {
 		name string
 		base domain.Size
@@ -22,22 +22,22 @@ func TestModalBounds(t *testing.T) {
 			want: domain.Rect{X: 10, Y: 4, Width: 80, Height: 32},
 		},
 		{
-			name: "minimum clamps to base",
+			name: "minimum clamps to drawer availability",
 			base: domain.Size{Cols: 20, Rows: 6},
 			m:    Modal{WidthPct: 50, HeightPct: 50, MinWidth: 40, MinHeight: 12},
-			want: domain.Rect{X: 0, Y: 0, Width: 20, Height: 6},
+			want: domain.Rect{X: 0, Y: 3, Width: 20, Height: 2},
 		},
 		{
-			name: "odd centering rounds down",
+			name: "narrow preferred height becomes drawer height",
 			base: domain.Size{Cols: 11, Rows: 7},
 			m:    Modal{WidthPct: 50, HeightPct: 50},
-			want: domain.Rect{X: 3, Y: 2, Width: 5, Height: 3},
+			want: domain.Rect{X: 0, Y: 3, Width: 11, Height: 3},
 		},
 		{
-			name: "zero value fills base centered",
+			name: "zero value fills available drawer area",
 			base: domain.Size{Cols: 12, Rows: 8},
 			m:    Modal{},
-			want: domain.Rect{X: 0, Y: 0, Width: 12, Height: 8},
+			want: domain.Rect{X: 0, Y: 3, Width: 12, Height: 4},
 		},
 		{
 			name: "bottom anchor honors bottom margin",
@@ -63,7 +63,7 @@ func TestModalBounds(t *testing.T) {
 			want: domain.Rect{X: 67, Y: 14, Width: 30, Height: 12},
 		},
 		{
-			name: "right margin clamps to screen",
+			name: "drawer ignores right margin",
 			base: domain.Size{Cols: 20, Rows: 10},
 			m: Modal{
 				FixedWidth:  8,
@@ -71,10 +71,10 @@ func TestModalBounds(t *testing.T) {
 				Anchor:      domain.AnchorRight,
 				Margins:     Margins{Right: 20},
 			},
-			want: domain.Rect{X: 0, Y: 3, Width: 8, Height: 4},
+			want: domain.Rect{X: 0, Y: 5, Width: 20, Height: 4},
 		},
 		{
-			name: "right anchored fixed dimensions clamp on small terminal",
+			name: "right anchored drawer can have zero height",
 			base: domain.Size{Cols: 10, Rows: 4},
 			m: Modal{
 				FixedWidth:  30,
@@ -82,19 +82,19 @@ func TestModalBounds(t *testing.T) {
 				Anchor:      domain.AnchorRight,
 				Margins:     Margins{Right: 3},
 			},
-			want: domain.Rect{X: 0, Y: 0, Width: 10, Height: 4},
+			want: domain.Rect{X: 0, Y: 3, Width: 10, Height: 0},
 		},
 		{
-			name: "fixed dimensions clamp on small terminal",
+			name: "fixed drawer dimensions clamp on small terminal",
 			base: domain.Size{Cols: 10, Rows: 4},
 			m:    Modal{FixedWidth: 30, FixedHeight: 12, Anchor: domain.AnchorBottom, Margins: Margins{Bottom: 2}},
-			want: domain.Rect{X: 0, Y: 0, Width: 10, Height: 4},
+			want: domain.Rect{X: 0, Y: 3, Width: 10, Height: 0},
 		},
 		{
-			name: "bottom margin clamps to screen",
+			name: "drawer ignores bottom margin",
 			base: domain.Size{Cols: 20, Rows: 10},
 			m:    Modal{FixedWidth: 8, FixedHeight: 4, Anchor: domain.AnchorBottom, Margins: Margins{Bottom: 20}},
-			want: domain.Rect{X: 6, Y: 0, Width: 8, Height: 4},
+			want: domain.Rect{X: 0, Y: 5, Width: 20, Height: 4},
 		},
 		{
 			name: "bottom right anchor honors combined margins",
@@ -110,58 +110,171 @@ func TestModalBounds(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.m.Bounds(tt.base); got != tt.want {
-				t.Fatalf("Bounds() = %+v, want %+v", got, tt.want)
+			if got := tt.m.Resolve(tt.base).Bounds; got != tt.want {
+				t.Fatalf("Resolve().Bounds = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestModalInnerDegenerate(t *testing.T) {
-	m := Modal{WidthPct: 100, HeightPct: 100}
-	got := m.Inner(domain.Size{Cols: 2, Rows: 2})
-	want := domain.Rect{X: 1, Y: 1, Width: 0, Height: 0}
-	if got != want {
-		t.Fatalf("Inner() = %+v, want %+v", got, want)
+func TestModalResolveInnerDegenerate(t *testing.T) {
+	got := (Modal{WidthPct: 100, HeightPct: 100}).Resolve(domain.Size{Cols: 2, Rows: 2}).Inner
+	require.Equal(t, domain.Rect{X: 0, Y: 1, Width: 2, Height: 0}, got)
+}
+
+func TestModalResolve(t *testing.T) {
+	tests := []struct {
+		name string
+		base domain.Size
+		want Presentation
+	}{
+		{
+			name: "narrow modal resolves to drawer",
+			base: domain.Size{Cols: 20, Rows: 10},
+			want: Presentation{
+				Mode:    PresentationDrawer,
+				Bounds:  domain.Rect{X: 0, Y: 5, Width: 20, Height: 4},
+				Inner:   domain.Rect{X: 0, Y: 6, Width: 20, Height: 3},
+				Borders: BorderTop,
+			},
+		},
+		{
+			name: "complete frame preserves floating modal geometry",
+			base: domain.Size{Cols: 80, Rows: 10},
+			want: Presentation{
+				Mode:    PresentationFloating,
+				Bounds:  domain.Rect{X: 20, Y: 3, Width: 40, Height: 4},
+				Inner:   domain.Rect{X: 21, Y: 4, Width: 38, Height: 2},
+				Borders: BorderAll,
+			},
+		},
+	}
+
+	modal := Modal{WidthPct: 50, FixedHeight: 4, Title: " Rename "}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, modal.Resolve(tt.base))
+		})
 	}
 }
 
-func TestCompositeDrawsModalAndPreservesExterior(t *testing.T) {
-	f := renderer.NewFrame(10, 6)
-	exterior := renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()}
-	FillRect(f, domain.Rect{X: 0, Y: 0, Width: 10, Height: 6}, exterior)
-
+func TestCompositePresentationDrawsFloatingChrome(t *testing.T) {
+	modal := Modal{WidthPct: 50, FixedHeight: 4, Title: " Rename "}
+	presentation := modal.Resolve(domain.Size{Cols: 80, Rows: 10})
+	frame := renderer.NewFrame(80, 10)
+	exterior := renderer.Cell{Rune: 'x', Style: renderer.Style{Foreground: 7, Background: 8}}
+	FillRect(frame, domain.Rect{Width: 80, Height: 10}, exterior)
 	border := renderer.Style{Bold: true, Foreground: 2, Background: -1}
 	interior := renderer.Style{Foreground: 3, Background: 4}
-	m := Modal{WidthPct: 60, HeightPct: 80, Title: "Hi"}
-	inner := m.Composite(f, border, interior)
-	wantInner := domain.Rect{X: 3, Y: 2, Width: 4, Height: 2}
-	if inner != wantInner {
-		t.Fatalf("Composite() inner = %+v, want %+v", inner, wantInner)
+
+	inner := modal.CompositePresentation(frame, presentation, border, interior)
+	require.Equal(t, presentation.Inner, inner)
+	require.Equal(t, '┌', frame.At(presentation.Bounds.X, presentation.Bounds.Y).Rune)
+	require.Equal(t, '┐', frame.At(presentation.Bounds.X+presentation.Bounds.Width-1, presentation.Bounds.Y).Rune)
+	require.Equal(t, '└', frame.At(presentation.Bounds.X, presentation.Bounds.Y+presentation.Bounds.Height-1).Rune)
+	require.Equal(t, '┘', frame.At(presentation.Bounds.X+presentation.Bounds.Width-1, presentation.Bounds.Y+presentation.Bounds.Height-1).Rune)
+	require.Equal(t, 'R', frame.At(37, presentation.Bounds.Y).Rune)
+	require.True(t, frame.At(inner.X, inner.Y).Style.Equal(interior))
+	assertCell(t, frame, presentation.Bounds.X-1, presentation.Bounds.Y, exterior)
+}
+
+func TestCompositePresentationUsesBordersRatherThanMode(t *testing.T) {
+	border := renderer.Style{Bold: true, Foreground: 2, Background: -1}
+	exterior := renderer.Cell{Rune: 'x', Style: renderer.Style{Foreground: 7, Background: 8}}
+	bounds := domain.Rect{X: 1, Y: 1, Width: 8, Height: 4}
+	inner := domain.Rect{X: 2, Y: 2, Width: 6, Height: 2}
+
+	tests := []struct {
+		name         string
+		presentation Presentation
+		assert       func(*testing.T, renderer.Frame)
+	}{
+		{
+			name: "all edges render for drawer mode",
+			presentation: Presentation{
+				Mode: PresentationDrawer, Bounds: bounds, Inner: inner, Borders: BorderAll,
+			},
+			assert: func(t *testing.T, frame renderer.Frame) {
+				require.Equal(t, '┌', frame.At(1, 1).Rune)
+				require.Equal(t, '│', frame.At(1, 2).Rune)
+				require.Equal(t, '┘', frame.At(8, 4).Rune)
+				require.Equal(t, 'T', frame.At(2, 1).Rune)
+			},
+		},
+		{
+			name: "top edge alone renders for floating mode",
+			presentation: Presentation{
+				Mode: PresentationFloating, Bounds: bounds, Inner: inner, Borders: BorderTop,
+			},
+			assert: func(t *testing.T, frame renderer.Frame) {
+				require.Equal(t, '─', frame.At(1, 1).Rune)
+				require.Equal(t, 'T', frame.At(2, 1).Rune)
+				assertCell(t, frame, 1, 2, exterior)
+				assertCell(t, frame, 8, 4, exterior)
+			},
+		},
+		{
+			name: "title is hidden without top edge",
+			presentation: Presentation{
+				Mode: PresentationFloating, Bounds: bounds, Inner: inner, Borders: BorderLeft,
+			},
+			assert: func(t *testing.T, frame renderer.Frame) {
+				require.Equal(t, '│', frame.At(1, 1).Rune)
+				require.Equal(t, '│', frame.At(1, 4).Rune)
+				assertCell(t, frame, 4, 1, exterior)
+				assertCell(t, frame, 8, 4, exterior)
+			},
+		},
 	}
 
-	assertRune(t, f, 2, 1, '┌')
-	assertRune(t, f, 7, 1, '┐')
-	assertRune(t, f, 2, 4, '└')
-	assertRune(t, f, 7, 4, '┘')
-	assertRune(t, f, 3, 1, '─')
-	assertRune(t, f, 2, 2, '│')
-	assertRune(t, f, 4, 1, 'H')
-	assertRune(t, f, 5, 1, 'i')
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := renderer.NewFrame(10, 6)
+			FillRect(frame, domain.Rect{Width: 10, Height: 6}, exterior)
+			(Modal{Title: "Title"}).CompositePresentation(frame, tt.presentation, border, renderer.DefaultStyle())
+			tt.assert(t, frame)
+		})
+	}
+}
 
-	for y := inner.Y; y < inner.Y+inner.Height; y++ {
-		for x := inner.X; x < inner.X+inner.Width; x++ {
-			want := renderer.Cell{Rune: ' ', Style: interior}
-			if got := f.At(x, y); !got.Equal(want) {
-				t.Fatalf("interior cell (%d,%d) = %+v, want %+v", x, y, got, want)
-			}
+func TestCompositeDrawerChromeAndPreservesExterior(t *testing.T) {
+	modal := Modal{FixedHeight: 4, Title: " Rename "}
+	presentation := modal.Resolve(domain.Size{Cols: 20, Rows: 10})
+	frame := renderer.NewFrame(20, 10)
+	exterior := renderer.Cell{Rune: 'x', Style: renderer.Style{Foreground: 7, Background: 8}}
+	FillRect(frame, domain.Rect{Width: 20, Height: 10}, exterior)
+	border := renderer.Style{Bold: true, Foreground: 2, Background: -1}
+	interior := renderer.Style{Foreground: 3, Background: 4}
+
+	inner := modal.CompositePresentation(frame, presentation, border, interior)
+	require.Equal(t, presentation.Inner, inner)
+	require.Equal(t, '─', frame.At(0, 5).Rune)
+	require.True(t, frame.At(0, 5).Style.Equal(border))
+	require.Equal(t, 'R', frame.At(7, 5).Rune)
+	require.NotEqual(t, '│', frame.At(0, 6).Rune)
+	require.Equal(t, ' ', frame.At(0, 6).Rune)
+	require.NotEqual(t, '─', frame.At(0, 8).Rune)
+	require.Equal(t, ' ', frame.At(0, 8).Rune)
+
+	for _, y := range []int{0, 1, 2, 3, 4, 9} {
+		for x := range frame.Width {
+			assertCell(t, frame, x, y, exterior)
 		}
 	}
-	if got := f.At(2, 1).Style; !got.Equal(border) {
-		t.Fatalf("border style = %+v, want %+v", got, border)
-	}
-	assertCell(t, f, 0, 0, exterior)
-	assertCell(t, f, 9, 5, exterior)
+}
+
+func TestCompositeDrawerClipsDoubleWidthTitle(t *testing.T) {
+	modal := Modal{FixedHeight: 4, Title: "你你"}
+	presentation := modal.Resolve(domain.Size{Cols: 4, Rows: 10})
+	frame := renderer.NewFrame(4, 10)
+	border := renderer.Style{Foreground: 2, Background: -1}
+
+	modal.CompositePresentation(frame, presentation, border, renderer.DefaultStyle())
+
+	require.Equal(t, '你', frame.At(1, presentation.Bounds.Y).Rune)
+	require.True(t, frame.At(2, presentation.Bounds.Y).Continuation)
+	require.Equal(t, '─', frame.At(3, presentation.Bounds.Y).Rune)
+	require.False(t, frame.At(3, presentation.Bounds.Y).Continuation, "wide title must not leave an orphan continuation at the right clip")
 }
 
 func TestFillRectClips(t *testing.T) {
@@ -221,26 +334,19 @@ func assertCell(t *testing.T, f renderer.Frame, x, y int, want renderer.Cell) {
 	}
 }
 
-func TestCompositePreservesTinyAndClippedGeometry(t *testing.T) {
+func TestCompositePresentationPreservesZeroHeightDrawer(t *testing.T) {
 	border := renderer.Style{Foreground: 1, Background: 2}
 	interior := renderer.Style{Foreground: 3, Background: 4}
-	for _, tt := range []struct {
-		name string
-		size domain.Size
-		want domain.Rect
-	}{
-		{name: "one cell", size: domain.Size{Cols: 1, Rows: 1}, want: domain.Rect{X: 1, Y: 1}},
-		{name: "two cells", size: domain.Size{Cols: 2, Rows: 2}, want: domain.Rect{X: 1, Y: 1}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			frame := renderer.NewFrame(tt.size.Cols, tt.size.Rows)
-			got := (Modal{WidthPct: 100, HeightPct: 100}).Composite(frame, border, interior)
-			require.Equal(t, tt.want, got)
-			for y := range frame.Height {
-				for x := range frame.Width {
-					require.True(t, frame.At(x, y).Style.Equal(border), "tiny border remains clipped in bounds")
-				}
-			}
-		})
+	frame := renderer.NewFrame(2, 2)
+	modal := Modal{WidthPct: 100, HeightPct: 100}
+	presentation := modal.Resolve(domain.Size{Cols: 2, Rows: 2})
+
+	got := modal.CompositePresentation(frame, presentation, border, interior)
+
+	require.Equal(t, presentation.Inner, got)
+	for y := range frame.Height {
+		for x := range frame.Width {
+			require.Equal(t, renderer.BlankCell(), frame.At(x, y))
+		}
 	}
 }

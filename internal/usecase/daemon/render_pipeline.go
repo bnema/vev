@@ -126,30 +126,43 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			damage = append(damage, d)
 		}
 	}
-	// Keep the committed cache unadorned: floating composition clones this
-	// base, so closing or moving a popup cannot retain dimmed/bordered cells.
+	// Keep the committed cache unadorned. Toasts are composed first so floating
+	// terminals and scoped modals dim them with the rest of the complete frame.
 	baseFrame := frame
+	overlaysActive := state.overlays.active()
+	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
+	var toastFootprints []domain.Rect
+	if toastsVisible {
+		frame = baseFrame.Clone()
+		toastFootprints = composeCapturedNotices(state.overlays, frame, state.styles)
+	}
 	if state.floating.visible {
 		var floatingDamage []renderer.Damage
 		frame, floatingDamage = composeCapturedFloatingFrame(floatingComposeInput{
-			baseFrame:    baseFrame,
+			baseFrame:    frame,
 			baseDamage:   damage,
 			floating:     state.floating,
 			content:      content,
-			layout:       state.layout,
 			theme:        state.theme,
 			borderMuted:  styles.BorderMuted,
 			borderActive: styles.BorderActive,
 			cache:        in,
-			full:         full || state.overlays.active(),
+			full:         full || overlaysActive,
 		})
 		damage = floatingDamage
 	}
+	if overlaysActive {
+		if !toastsVisible && !state.floating.visible {
+			frame = baseFrame.Clone()
+		}
+		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
+		frame, damage = composeCapturedOverlays(state, frame, damage)
+	}
 	if !full {
-		if !sameCells(in.bars.top, frame.Row(0)) {
+		if !sameCells(in.bars.top, baseFrame.Row(0)) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
 		}
-		if !sameCells(in.bars.bottom, frame.Row(rows+1)) {
+		if !sameCells(in.bars.bottom, baseFrame.Row(rows+1)) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
@@ -157,17 +170,6 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	// toasts, so every render damages both the last and current toast coverage.
 	// This restores cells exposed by dismissal and redraws a stable toast over
 	// any underlying pane update without promoting either case to a full frame.
-	overlaysActive := state.overlays.active()
-	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
-	if overlaysActive || toastsVisible {
-		// Without a floating frame, overlay composition would otherwise mutate
-		// the base cache in place. Floating composition already owns a clone.
-		if !state.floating.visible {
-			baseFrame = frame.Clone()
-		}
-		frame, damage = composeCapturedOverlays(state, frame, damage, content)
-	}
-	toastFootprints := composeCapturedNotices(state.overlays, frame, state.styles)
 	if full || overlaysActive {
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	} else {
@@ -222,89 +224,109 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	}
 	size := domain.Size{Cols: state.layout.area.Width, Rows: state.layout.area.Height + 2}
 	if snap.copySearchModel != nil {
-		o.copySearch.modal = copySearchModal
-		o.copySearch.focused = true
-		o.copySearch.inner = snap.copySearchModel.RenderStyled(rectSize(copySearchModal.Inner(size)), visualsearch.RenderStyles{Base: styles.PromptBase, Selection: styles.SearchSelection})
+		presentation := copySearchModal.Resolve(size)
+		o.copySearch = capturedModal{active: true, title: copySearchModal.Title, presentation: presentation, focused: true}
+		o.copySearch.inner = snap.copySearchModel.RenderStyled(rectSize(presentation.Inner), visualsearch.RenderStyles{Base: styles.PromptBase, Selection: styles.SearchSelection})
 	}
 	if snap.pickerActive && snap.pickerModel != nil {
-		o.picker.modal = pickerModal
-		o.picker.focused = true
+		presentation := pickerModal.Resolve(size)
+		o.picker = capturedModal{active: true, title: pickerModal.Title, presentation: presentation, focused: true}
 		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.PickerName, Detail: styles.PickerDescription, Base: styles.PickerBase, Separator: styles.PickerSeparator}
-		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
+		o.picker.inner = snap.pickerModel.Render(rectSize(presentation.Inner), state.preview, renderStyles)
 	}
 	if snap.noticesOverlayActive && snap.noticesOverlayModel != nil {
-		o.noticesOverlay.modal = noticesModal
-		o.noticesOverlay.focused = true
+		presentation := noticesModal.Resolve(size)
+		o.noticesOverlay = capturedModal{active: true, title: noticesModal.Title, presentation: presentation, focused: true}
 		renderStyles := notices.RenderStyles{Background: styles.PickerBase, Base: styles.PickerBase, Selection: styles.PickerSelection, Text: styles.PickerBase, SelectionText: styles.PickerSelectionName, Muted: styles.PickerDescription, SelectionMuted: styles.PickerSelectionMuted}
-		o.noticesOverlay.inner = snap.noticesOverlayModel.Render(rectSize(noticesModal.Inner(size)), renderStyles)
+		o.noticesOverlay.inner = snap.noticesOverlayModel.Render(rectSize(presentation.Inner), renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
-		o.palette.modal = paletteModalFor(size, paletteCfg)
-		o.palette.focused = true
+		modal := paletteModalFor(size, paletteCfg)
+		presentation := modal.Resolve(size)
+		o.palette = capturedModal{active: true, title: modal.Title, presentation: presentation, focused: true}
 		guidance := ""
 		if snap.paletteHints != nil {
 			guidance = snap.paletteHints.Feedback
 		}
 		o.paletteGuidance = snap.paletteFeedback
-		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.PickerBase, Selection: styles.PickerSelection, Description: styles.PickerDescription, SelectionDescription: styles.PickerSelectionMuted}, Guidance: guidance, Feedback: snap.paletteFeedback})
+		o.palette.inner = snap.paletteModel.Render(rectSize(presentation.Inner), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.PickerBase, Selection: styles.PickerSelection, Description: styles.PickerDescription, SelectionDescription: styles.PickerSelectionMuted}, Guidance: guidance, Feedback: snap.paletteFeedback})
 	}
 	if snap.promptActive && snap.promptModel != nil {
-		o.prompt.modal = promptModalFor(snap.promptModel.Title())
-		o.prompt.focused = true
-		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(o.prompt.modal.Inner(size)), prompt.RenderStyles{Base: styles.PromptBase, Selection: styles.SurfaceActive})
+		modal := promptModalFor(snap.promptModel.Title())
+		presentation := modal.Resolve(size)
+		o.prompt = capturedModal{active: true, title: modal.Title, presentation: presentation, focused: true}
+		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(presentation.Inner), prompt.RenderStyles{Base: styles.PromptBase, Selection: styles.SurfaceActive})
 	}
 	state.cursor.hiddenByOverlay = o.active()
 }
 
-func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage, content domain.Rect) (renderer.Frame, []renderer.Damage) {
+func composeCapturedCopyMode(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage, content domain.Rect) (renderer.Frame, []renderer.Damage) {
 	o := state.overlays
-	if o.copyActive {
-		target := domain.Rect{}
-		if state.floating.visible && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
-			target = state.floating.geometry.translate(content.X, content.Y).Inner
-		}
-		if target.Width == 0 {
-			id := o.copyPaneID
-			if id == "" {
-				id = state.layout.focus
-			}
-			for _, p := range state.panes {
-				if p.id == id && !p.placement.Collapsed {
-					target = p.placement.Content
-					target.Y += content.Y
-					break
-				}
-			}
-		}
-		frame, damage = composeCopyClientFrame(o.copyMode, target, frame, state.styles)
+	if !o.copyActive {
+		return frame, damage
 	}
-	layoutSnapshot := tabLayoutSnapshot{placements: state.layout.placements, area: state.layout.area, focus: state.layout.focus, ok: state.layout.valid}
-	if o.paletteActive && !state.floating.visible {
-		(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, state.theme)
+	target := domain.Rect{}
+	if state.floating.visible && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
+		target = state.floating.geometry.translate(content.X, content.Y).Inner
 	}
-	// This paint order intentionally differs from HandleInput's keyboard
-	// priority (prompt > palette > picker > notices > copy, see
-	// overlay_runtime.go), which paints the picker under notices instead of
-	// over it. Currently unreachable: notices only opens via the palette, and
-	// HandleInput short-circuits to the first active overlay, so picker and
-	// notices are never simultaneously active. If that ever changes, this
-	// mismatch would let the picker own the keyboard while notices visually
-	// covers it.
-	for _, modal := range []capturedModal{o.copySearch, o.picker, o.noticesOverlay, o.palette, o.prompt} {
-		if modal.inner.Width == 0 && modal.inner.Height == 0 {
+	if target.Width == 0 {
+		id := o.copyPaneID
+		if id == "" {
+			id = state.layout.focus
+		}
+		for _, p := range state.panes {
+			if p.id == id && !p.placement.Collapsed {
+				target = p.placement.Content
+				target.Y += content.Y
+				break
+			}
+		}
+	}
+	return composeCopyClientFrame(o.copyMode, target, frame, state.styles)
+}
+
+func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage) (renderer.Frame, []renderer.Damage) {
+	o := state.overlays
+	// Paint in reverse keyboard priority so the same layer that owns input is
+	// visually topmost: prompt > palette > picker > notices > copy search.
+	for _, modal := range []capturedModal{o.copySearch, o.noticesOverlay, o.picker, o.palette, o.prompt} {
+		if !modal.active {
 			continue
 		}
+		applyOverlayBackdrop(frame, state.theme)
 		border := state.styles.BorderMuted
 		if modal.focused {
 			border = state.styles.BorderActive
 		}
-		inner := modal.modal.Composite(frame, border, state.styles.PickerBase)
-		for y := range min(inner.Height, modal.inner.Height) {
-			copy(frame.Row(inner.Y + y)[inner.X:inner.X+min(inner.Width, modal.inner.Width)], modal.inner.Row(y)[:min(inner.Width, modal.inner.Width)])
-		}
+		(ui.Modal{Title: modal.title}).CompositePresentation(frame, modal.presentation, border, state.styles.PickerBase)
+		copyModalInner(frame, modal.presentation.Inner, modal.inner)
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	}
 	return frame, damage
+}
+
+// copyModalInner copies a captured model frame into its resolved destination.
+// Both source and destination are clipped so degenerate presentations remain
+// safe immutable composition inputs.
+func copyModalInner(dst renderer.Frame, target domain.Rect, src renderer.Frame) {
+	left := max(target.X, 0)
+	top := max(target.Y, 0)
+	right := min(target.X+target.Width, dst.Width)
+	bottom := min(target.Y+target.Height, dst.Height)
+	if left >= right || top >= bottom {
+		return
+	}
+
+	sourceX := left - target.X
+	sourceY := top - target.Y
+	width := min(right-left, src.Width-sourceX)
+	height := min(bottom-top, src.Height-sourceY)
+	if width <= 0 || height <= 0 {
+		return
+	}
+	for y := range height {
+		copy(dst.Row(top + y)[left:left+width], src.Row(sourceY + y)[sourceX:sourceX+width])
+	}
 }
 
 func composeCapturedNotices(overlays capturedOverlayRenderState, frame renderer.Frame, styles themeui.Styles) []domain.Rect {

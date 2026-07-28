@@ -61,7 +61,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 
 	tb.mu.Lock()
-	contentRow := ev.Row - 1
+	contentRow := ev.Row - clientTopBarRows
 	floating, floatingGeometry, floatingVisible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
 	if floatingVisible {
 		if !pointInRect(ev.Col, contentRow, floatingGeometry.Inner) {
@@ -170,7 +170,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 		if translated {
 			d.writeToPane(sess, p, ev.Raw)
 		} else {
-			d.writeToPane(sess, p, sgrRowOffset(ev.Raw, -1))
+			d.writeToPane(sess, p, sgrRowOffset(ev.Raw, -clientTopBarRows))
 		}
 		return
 	}

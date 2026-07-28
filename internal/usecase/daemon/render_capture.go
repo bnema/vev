@@ -102,9 +102,11 @@ type capturedOverlayRenderState struct {
 }
 
 type capturedModal struct {
-	modal   ui.Modal
-	inner   renderer.Frame
-	focused bool
+	active       bool
+	title        string
+	presentation ui.Presentation
+	inner        renderer.Frame
+	focused      bool
 }
 
 func (o capturedOverlayRenderState) active() bool {

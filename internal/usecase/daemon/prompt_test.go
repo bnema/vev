@@ -20,7 +20,7 @@ func (f failingPTYFactory) Open(context.Context, string, []string, []string, str
 func TestPromptModalGeometry(t *testing.T) {
 	base := domain.Size{Cols: 100, Rows: 40}
 
-	require.Equal(t, domain.Rect{X: 0, Y: 35, Width: 100, Height: 4}, promptModalFor(" Prompt ").Bounds(base))
+	require.Equal(t, domain.Rect{X: 0, Y: 35, Width: 100, Height: 4}, promptModalFor(" Prompt ").Resolve(base).Bounds)
 }
 
 func TestEnterPromptRendersTitleAndPrefill(t *testing.T) {

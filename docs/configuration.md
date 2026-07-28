@@ -129,13 +129,19 @@ copy.word-separators = " -_@"
 
 Set `copy.word-separators = ""` to use only Unicode whitespace as a separator.
 
+## Responsive overlays
+
+On complete frames below 80 columns, interactive overlays use full-width bottom drawers immediately above the bottom bar. This applies to the floating terminal, command palette, session picker, notification history, prompts, and copy search. A drawer keeps its overlay's preferred outer height, capped at the frame height minus four rows, so frame rows 0–2 remain visible. Drawers use only a top border.
+
+Opening an interactive overlay dims the complete underlying frame, including panes, both bars, notices, and any lower-priority overlay. Notice toasts remain compact rather than becoming drawers. Copy mode remains full-screen; only its search prompt uses the responsive drawer.
+
 ## Palette anchor
 
-The command palette is centered by default. Set `palette.anchor` to another anchor to reposition it, or use `auto` for a bottom shelf on narrow terminals and a bottom-right rail from 96 columns up. Reload moves an open palette without losing your query.
+The command palette is centered by default. With `palette.anchor = auto`, it uses a full-width bottom shelf from 80 through 95 columns and a 64-column bottom-right rail from 96 columns up. Set an explicit anchor to position the shelf or rail. Below 80 columns, the palette is always a bottom drawer, so an explicit anchor does not override the responsive layout. Reload moves an open palette without losing your query.
 
 ## Floating terminal
 
-The command runs through your shell. A changed command applies on the next launch; changed dimensions on the next show or resize. Floating state is not restored across daemon restarts.
+The command runs through your shell. A changed command applies on the next launch; changed dimensions on the next show or resize. Below 80 columns, `floating.height` continues to determine the drawer's outer height, capped to preserve the first three frame rows and the bottom bar; `floating.width` is replaced by the full frame width. Floating state is not restored across daemon restarts.
 
 ## Bar anchors
 
