@@ -13,11 +13,18 @@ import (
 
 func setupMovePickerSessions(t *testing.T, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
 	t.Helper()
+	return setupMovePickerSessionsWithClock(t, stubClock{}, extraDestinationTabs)
+}
+
+func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
+	t.Helper()
 	sourcePTY, releaseSource := newBlockingPTY(t)
-	d, source, ac, _ := newManualSessionWithPTYs(t, sourcePTY)
+	d, source, ac, _ := newManualSessionWithPTYsClock(t, clock, sourcePTY)
 	source.id, source.name, source.incarnation = "source", "source", domain.IncarnationID{1}
+	d.mu.Lock()
 	delete(d.sessions, domain.SessionID("manual"))
 	d.sessions[source.id] = source
+	d.mu.Unlock()
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	sourcePane := sourceTab.focusedPane()
@@ -171,7 +178,8 @@ func TestMovePickerEnterCommitsMoveTab(t *testing.T) {
 }
 
 func TestMovePickerEscapePerformsNoMutation(t *testing.T) {
-	d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
+	clk := &signalClock{timers: make(chan *signalTimer, 16)}
+	d, source, ac, _, _, releases := setupMovePickerSessionsWithClock(t, clk, 0)
 	defer releaseAll(releases)
 	before := len(source.tabs)
 
@@ -179,8 +187,9 @@ func TestMovePickerEscapePerformsNoMutation(t *testing.T) {
 		Session: moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name},
 		TabID:   "source-tab", PaneID: "source-pane",
 	}))
-	clk := &signalClock{timers: make(chan *signalTimer, 1)}
-	d.clock = clk
+	for len(clk.timers) > 0 {
+		<-clk.timers
+	}
 	d.handlePickerInput(ac, []byte("\x1b"))
 	timer := <-clk.timers
 	timer.ch <- time.Now()

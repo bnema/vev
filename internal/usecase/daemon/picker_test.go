@@ -1492,6 +1492,11 @@ func TestPickerNavigationRefreshAfterSuccessfulDeleteSelectsAttachedActiveStable
 
 	d.handlePickerInput(ac, []byte("x"))
 
+	d.mu.Lock()
+	_, targetStillLive := d.sessions[target.id]
+	d.mu.Unlock()
+	require.False(t, targetStillLive, "ordinary picker deletion must remove the selected session")
+
 	ac.overlays.pickerMu.Lock()
 	selected, ok = ac.overlays.picker.Selected()
 	ac.overlays.pickerMu.Unlock()
@@ -1499,6 +1504,45 @@ func TestPickerNavigationRefreshAfterSuccessfulDeleteSelectsAttachedActiveStable
 	require.Equal(t, current.id, selected.Session)
 	require.Equal(t, domain.TabStableID("current-active"), selected.TabID)
 	require.Equal(t, 1, selected.TabIndex)
+}
+
+func TestPickerRoleEffectDeleteRemovesSelectedSessionAndRefreshes(t *testing.T) {
+	d, current, ac, _, currentReleases := newManualTabSession(t, 1)
+	defer releaseAll(currentReleases)
+	current.id, current.name = "current", "z-current"
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[current.id] = current
+
+	targetPTY, releaseTarget := newBlockingPTY(t)
+	defer releaseTarget()
+	targetTab := newTestTabWithContext(targetPTY, current.ctx, current.cancel)
+	target := &session{id: "target", name: "a-target", ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{targetTab}}
+	d.sessions[target.id] = target
+	current.mu.Lock()
+	current.client = ac
+	current.mu.Unlock()
+	require.NotNil(t, d.attachCoordinator(current, nil, ac, true))
+
+	d.enterPicker(current, ac)
+	d.handlePickerInput(ac, []byte("k"))
+	ac.overlays.pickerMu.Lock()
+	selected, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, target.id, selected.Session)
+
+	token := current.attachmentToken(ac, ac.transport())
+	token.lease = current.renderCoordinator().attachmentLease(ac)
+	ac.publishRoleCapability(token)
+	effect, admitted := ac.beginRoleEffect(token)
+	require.True(t, admitted)
+	d.handlePickerInput(ac, []byte("x"), effect)
+
+	d.mu.Lock()
+	_, targetStillLive := d.sessions[target.id]
+	d.mu.Unlock()
+	require.False(t, targetStillLive, "effect-backed picker deletion must remove the selected session")
+	require.True(t, ac.overlays.pickerActive(), "successful deletion refreshes rather than closes the picker")
 }
 
 func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t *testing.T) {

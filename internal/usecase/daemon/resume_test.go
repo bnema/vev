@@ -51,6 +51,40 @@ func (t *closeTrackingTransport) Sends() []ports.Frame {
 	return append([]ports.Frame(nil), t.sends...)
 }
 
+type closeCountingBlockedTransport struct {
+	closeOnce sync.Once
+	closed    chan struct{}
+	count     int
+	mu        sync.Mutex
+}
+
+func newCloseCountingBlockedTransport() *closeCountingBlockedTransport {
+	return &closeCountingBlockedTransport{closed: make(chan struct{})}
+}
+
+func (t *closeCountingBlockedTransport) Send(ports.Frame) error {
+	<-t.closed
+	return errors.New("closed")
+}
+
+func (t *closeCountingBlockedTransport) Recv() (ports.Frame, error) {
+	return ports.Frame{}, errors.New("closed")
+}
+
+func (t *closeCountingBlockedTransport) Close() error {
+	t.mu.Lock()
+	t.count++
+	t.mu.Unlock()
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func (t *closeCountingBlockedTransport) CloseCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.count
+}
+
 func helloResumeCapable(intent uint8, name string, token uint64) ports.Hello {
 	return ports.Hello{
 		Version:     ports.ProtocolVersion,
@@ -137,6 +171,24 @@ func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
 	<-orphanDone
 	require.Empty(t, newTransport.Sends(), "orphaned send must not write to the resumed transport")
 	require.False(t, newTransport.Closed(), "orphaned send must not close the resumed transport")
+}
+
+func TestDetachedNotificationTimeoutClosesCapturedTransportOnce(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	tr := newCloseCountingBlockedTransport()
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
+
+	d.notifyDetachedSnapshotAsync(detachedAttachmentSnapshot{
+		ac:        ac,
+		transport: ac.transportSnapshot(),
+	}, ports.ReasonDetach)
+	timer := <-clock.timers
+	timer.ch <- time.Time{}
+	d.waitNotifies()
+
+	require.Equal(t, 1, tr.CloseCount(), "timeout revocation must close the captured transport at most once")
+	require.Nil(t, ac.transport(), "timeout cleanup must revoke the captured transport")
 }
 
 func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {

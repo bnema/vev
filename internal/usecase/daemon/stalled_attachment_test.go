@@ -52,12 +52,15 @@ func TestFinishAttachWaitsForAdmittedOldRender(t *testing.T) {
 	replacement := portsmocks.NewMockTransport(t)
 	replacement.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	replacement.EXPECT().Close().Return(nil).Maybe()
-	attached := make(chan *attachedClient, 1)
+	type attachResult struct {
+		client *attachedClient
+		err    error
+	}
+	attached := make(chan attachResult, 1)
 	go func() {
 		d.mu.Lock()
 		ac, err := d.finishAttach(sess, replacement, hello.Size, terminalEnv{}, hello)
-		require.NoError(t, err)
-		attached <- ac
+		attached <- attachResult{client: ac, err: err}
 	}()
 
 	select {
@@ -67,8 +70,9 @@ func TestFinishAttachWaitsForAdmittedOldRender(t *testing.T) {
 	}
 	close(releaseOldSend)
 	select {
-	case ac := <-attached:
-		require.Same(t, replacement, ac.transport())
+	case result := <-attached:
+		require.NoError(t, result.err)
+		require.Same(t, replacement, result.client.transport())
 	case <-time.After(time.Second):
 		t.Fatal("replacement did not publish after the admitted render completed")
 	}

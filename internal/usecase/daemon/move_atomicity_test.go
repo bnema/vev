@@ -10,21 +10,20 @@ import (
 )
 
 type moveCommitObservation struct {
-	sourceRegistered         bool
-	sourceTabMember          bool
-	sourcePaneMember         bool
-	destinationTabMember     bool
-	destinationPaneMember    bool
-	sourceActive             *tab
-	destinationActive        *tab
-	sourceFocus              layout.PaneID
-	destinationFocus         layout.PaneID
-	ownerSession             *session
-	ownerTab                 *tab
-	sourceRole               attachmentRole
-	destinationRole          attachmentRole
-	sourceClientSession      *session
-	destinationClientSession *session
+	sourceRegistered      bool
+	sourceTabMember       bool
+	sourcePaneMember      bool
+	destinationTabMember  bool
+	destinationPaneMember bool
+	sourceActive          *tab
+	destinationActive     *tab
+	sourceFocus           layout.PaneID
+	destinationFocus      layout.PaneID
+	ownerSession          *session
+	ownerTab              *tab
+	sourceRole            attachmentRole
+	destinationRole       attachmentRole
+	sourceClientSession   *session
 }
 
 // readMoveCommitObservation follows the same architecture lock order as the
@@ -40,21 +39,20 @@ func readMoveCommitObservation(d *Daemon, source, destination *session, sourceTa
 
 	owner := movedPane.ownerSnapshot()
 	observation := moveCommitObservation{
-		sourceRegistered:         d.sessions[source.id] == source,
-		sourceTabMember:          moveTabMemberLocked(source, sourceTab),
-		sourcePaneMember:         sourceTab.panes[movedPane.id] == movedPane,
-		destinationTabMember:     moveTabMemberLocked(destination, destinationTab),
-		destinationPaneMember:    destinationTab.panes[movedPane.id] == movedPane,
-		sourceActive:             activeMoveTabLocked(source),
-		destinationActive:        activeMoveTabLocked(destination),
-		sourceFocus:              sourceTab.tree.Focus,
-		destinationFocus:         destinationTab.tree.Focus,
-		ownerSession:             nil,
-		ownerTab:                 nil,
-		sourceRole:               source.attachmentRoleLocked(sourceClient),
-		destinationRole:          destination.attachmentRoleLocked(sourceClient),
-		sourceClientSession:      sourceClient.currentSession(),
-		destinationClientSession: sourceClient.currentSession(),
+		sourceRegistered:      d.sessions[source.id] == source,
+		sourceTabMember:       moveTabMemberLocked(source, sourceTab),
+		sourcePaneMember:      sourceTab.panes[movedPane.id] == movedPane,
+		destinationTabMember:  moveTabMemberLocked(destination, destinationTab),
+		destinationPaneMember: destinationTab.panes[movedPane.id] == movedPane,
+		sourceActive:          activeMoveTabLocked(source),
+		destinationActive:     activeMoveTabLocked(destination),
+		sourceFocus:           sourceTab.tree.Focus,
+		destinationFocus:      destinationTab.tree.Focus,
+		ownerSession:          nil,
+		ownerTab:              nil,
+		sourceRole:            source.attachmentRoleLocked(sourceClient),
+		destinationRole:       destination.attachmentRoleLocked(sourceClient),
+		sourceClientSession:   sourceClient.currentSession(),
 	}
 	if owner != nil {
 		observation.ownerSession = owner.session
@@ -133,7 +131,7 @@ func TestMovePaneCommitPointHidesPartialPublication(t *testing.T) {
 			return o.sourceActive == sourceTab || o.sourceFocus != layout.PaneID("pane-1") || o.destinationActive != destinationTab || o.destinationFocus != layout.PaneID("pane-2")
 		}},
 		{name: "attachment roles", read: func(o moveCommitObservation) bool {
-			return o.sourceRole == attachmentActive && o.destinationRole == attachmentDetached && o.sourceClientSession == source && o.destinationClientSession == source
+			return o.sourceRole == attachmentActive && o.destinationRole == attachmentDetached && o.sourceClientSession == source
 		}},
 	}
 	started := make(chan string, len(readers))

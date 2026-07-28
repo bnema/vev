@@ -413,12 +413,9 @@ func (d *Daemon) notifyDetachedSnapshotAsync(snapshot detachedAttachmentSnapshot
 
 	go func() {
 		defer close(done)
-		_, err := d.boundedSendWith(snapshot.transport.transport, func() error {
+		_, _ = d.boundedSendWith(snapshot.transport.transport, func() error {
 			return snapshot.ac.sendExpectedTransport(snapshot.transport, frameDetached(reason))
 		})
-		if errors.Is(err, errSendTimedOut) {
-			_ = snapshot.ac.closeCapturedTransport(snapshot.transport.transport)
-		}
 		revoked := snapshot.ac.revokeTransport(snapshot.transport.transport)
 		if revoked == nil {
 			revoked = snapshot.transport.transport
@@ -598,6 +595,9 @@ func (d *Daemon) firstPaintForTransition(token attachmentRoleToken) bool {
 		d.afterRoleEffectAdmitted(token)
 	}
 	if token.rebase {
+		if d.beforeFirstPaintSendWait != nil {
+			d.beforeFirstPaintSendWait(token)
+		}
 		token.ac.sendMu.Lock()
 		if token.ac.renderStages.handoffRebase != nil {
 			token.ac.renderStages.handoffRebase()

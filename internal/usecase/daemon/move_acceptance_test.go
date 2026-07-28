@@ -76,6 +76,7 @@ func TestMovePaneAcceptanceRetainsSourceFocusAndDestinationActivity(t *testing.T
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
 	remaining := newPaneWithStableID("pane-2", "remaining-pane", remainingPTY, domain.Size{Cols: 80, Rows: 23})
+	sourceTab.mu.Lock()
 	sourceTab.tree = &layout.Tree{
 		Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
 			layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2"),
@@ -83,6 +84,7 @@ func TestMovePaneAcceptanceRetainsSourceFocusAndDestinationActivity(t *testing.T
 		Focus: "pane-1",
 	}
 	sourceTab.panes[remaining.id] = remaining
+	sourceTab.mu.Unlock()
 	publishPaneOwner(remaining, source, sourceTab, 0)
 
 	destinationActive := newTabWithStableID("destination-active", "active-pane", activePTY, domain.Size{Cols: 80, Rows: 23})
@@ -110,9 +112,15 @@ func TestMovePaneAcceptanceRetainsSourceFocusAndDestinationActivity(t *testing.T
 	beforeDestinationSnapshot := destination.snapshotGeneration
 	destination.snapshotMu.Unlock()
 
+	sourceTab.mu.Lock()
 	beforeSourceGeneration := sourceTab.layoutGeneration
+	sourceTab.mu.Unlock()
+	destinationTab.mu.Lock()
 	beforeDestinationGeneration := destinationTab.layoutGeneration
+	destinationTab.mu.Unlock()
+	moved.mu.Lock()
 	beforeOwnerGeneration := moved.ownerGeneration
+	moved.mu.Unlock()
 
 	require.NoError(t, d.movePane(movePaneRequest{
 		Source:           moveSessionLocator{ID: source.id, Incarnation: source.incarnation},
@@ -122,16 +130,35 @@ func TestMovePaneAcceptanceRetainsSourceFocusAndDestinationActivity(t *testing.T
 		DestinationTabID: domain.TabStableID(destinationTab.stableID),
 	}))
 
-	require.Len(t, source.tabs, 1)
-	require.Same(t, sourceTab, source.tabs[0])
-	require.Same(t, remaining, sourceTab.panes[remaining.id])
-	require.Equal(t, layout.PaneID("pane-2"), sourceTab.tree.Focus, "source focus must use the valid fallback leaf")
-	require.Same(t, destinationActive, destination.tabs[destination.active], "destination active tab must remain unchanged")
-	require.Same(t, moved, destinationTab.panes[moved.id])
-	require.Equal(t, destinationTab.tree.Focus, moved.id)
-	require.Equal(t, beforeOwnerGeneration+1, moved.ownerGeneration, "move publishes exactly one new owner generation")
-	require.Equal(t, beforeSourceGeneration+1, sourceTab.layoutGeneration)
-	require.Equal(t, beforeDestinationGeneration+1, destinationTab.layoutGeneration)
+	source.mu.Lock()
+	sourceTabs := append([]*tab(nil), source.tabs...)
+	source.mu.Unlock()
+	require.Len(t, sourceTabs, 1)
+	require.Same(t, sourceTab, sourceTabs[0])
+	sourceTab.mu.Lock()
+	remainingPane := sourceTab.panes[remaining.id]
+	sourceFocus := sourceTab.tree.Focus
+	sourceGeneration := sourceTab.layoutGeneration
+	sourceTab.mu.Unlock()
+	require.Same(t, remaining, remainingPane)
+	require.Equal(t, layout.PaneID("pane-2"), sourceFocus, "source focus must use the valid fallback leaf")
+	destination.mu.Lock()
+	destinationActiveTab := destination.tabs[destination.active]
+	destination.mu.Unlock()
+	require.Same(t, destinationActive, destinationActiveTab, "destination active tab must remain unchanged")
+	destinationTab.mu.Lock()
+	destinationMovedPane := destinationTab.panes[moved.id]
+	destinationFocus := destinationTab.tree.Focus
+	destinationGeneration := destinationTab.layoutGeneration
+	destinationTab.mu.Unlock()
+	require.Same(t, moved, destinationMovedPane)
+	require.Equal(t, destinationFocus, moved.id)
+	moved.mu.Lock()
+	ownerGeneration := moved.ownerGeneration
+	moved.mu.Unlock()
+	require.Equal(t, beforeOwnerGeneration+1, ownerGeneration, "move publishes exactly one new owner generation")
+	require.Equal(t, beforeSourceGeneration+1, sourceGeneration)
+	require.Equal(t, beforeDestinationGeneration+1, destinationGeneration)
 	source.snapshotMu.Lock()
 	require.GreaterOrEqual(t, source.snapshotGeneration, beforeSourceSnapshot+1)
 	require.True(t, source.snapDirty.Load())
@@ -166,8 +193,12 @@ func TestMovePaneRejectsStaleIncarnationWithoutMutation(t *testing.T) {
 	d.sessions[destination.id] = destination
 	d.mu.Unlock()
 
+	sourceTab.mu.Lock()
 	beforeSource := sourceTab.tree.Clone()
+	sourceTab.mu.Unlock()
+	destinationTab.mu.Lock()
 	beforeDestination := destinationTab.tree.Clone()
+	destinationTab.mu.Unlock()
 	beforeOwner := moved.ownerSnapshot()
 	staleIncarnation := source.incarnation
 	staleIncarnation[0]++
@@ -179,11 +210,19 @@ func TestMovePaneRejectsStaleIncarnationWithoutMutation(t *testing.T) {
 		DestinationTabID: domain.TabStableID(destinationTab.stableID),
 	})
 	require.ErrorIs(t, err, errMovePaneInvalid)
-	require.Equal(t, beforeSource, sourceTab.tree)
-	require.Equal(t, beforeDestination, destinationTab.tree)
+	sourceTab.mu.Lock()
+	afterSource := sourceTab.tree.Clone()
+	sourceMovedPane := sourceTab.panes[moved.id]
+	sourceTab.mu.Unlock()
+	destinationTab.mu.Lock()
+	afterDestination := destinationTab.tree.Clone()
+	destinationMovedPane := destinationTab.panes[moved.id]
+	destinationTab.mu.Unlock()
+	require.Equal(t, beforeSource, afterSource)
+	require.Equal(t, beforeDestination, afterDestination)
 	require.Same(t, beforeOwner, moved.ownerSnapshot())
-	require.Same(t, moved, sourceTab.panes[moved.id])
-	require.NotSame(t, moved, destinationTab.panes[moved.id])
+	require.Same(t, moved, sourceMovedPane)
+	require.NotSame(t, moved, destinationMovedPane)
 }
 
 func TestMovePaneRejectsStaleLayoutGenerationBeforeMutation(t *testing.T) {
@@ -206,7 +245,9 @@ func TestMovePaneRejectsStaleLayoutGenerationBeforeMutation(t *testing.T) {
 	d.sessions[destination.id] = destination
 	d.mu.Unlock()
 
+	destinationTab.mu.Lock()
 	beforeDestination := destinationTab.tree.Clone()
+	destinationTab.mu.Unlock()
 	beforeOwner := moved.ownerSnapshot()
 	d.afterMovePaneSourceSnapshot = func() {
 		sourceTab.mu.Lock()
@@ -223,7 +264,13 @@ func TestMovePaneRejectsStaleLayoutGenerationBeforeMutation(t *testing.T) {
 		DestinationTabID: domain.TabStableID(destinationTab.stableID),
 	})
 	require.Error(t, err)
-	require.Equal(t, beforeDestination, destinationTab.tree)
+	destinationTab.mu.Lock()
+	afterDestination := destinationTab.tree.Clone()
+	destinationTab.mu.Unlock()
+	sourceTab.mu.Lock()
+	sourceMovedPane := sourceTab.panes[moved.id]
+	sourceTab.mu.Unlock()
+	require.Equal(t, beforeDestination, afterDestination)
 	require.Same(t, beforeOwner, moved.ownerSnapshot())
-	require.Same(t, moved, sourceTab.panes[moved.id])
+	require.Same(t, moved, sourceMovedPane)
 }

@@ -80,6 +80,7 @@ type moveState struct {
 }
 
 func captureMoveState(d *Daemon, source, destination *session, sourceTab, destinationTab *tab, movedPane *pane, client *attachedClient) moveState {
+	clientState := captureMoveClientState(source, destination, client)
 	d.mu.Lock()
 	d.notices.routingMu.Lock()
 	unlockSessions := lockAttachmentSessions(source, destination)
@@ -102,7 +103,7 @@ func captureMoveState(d *Daemon, source, destination *session, sourceTab, destin
 			ownerGeneration: movedPane.ownerGeneration,
 			ctxDone:         moveContextDone(movedPane.ctx),
 		},
-		client: captureMoveClientStateLocked(source, destination, client),
+		client: clientState,
 	}
 
 	movedPane.mu.Unlock()
@@ -152,16 +153,22 @@ func captureMoveTabStateLocked(tb *tab) moveTabState {
 	}
 }
 
-func captureMoveClientStateLocked(source, destination *session, client *attachedClient) moveClientState {
+// captureMoveClientState snapshots coordinator and role-effect state before
+// callers acquire daemon/session/tab move-state locks. This keeps coordinator
+// and role-gate locks above, never beneath, the outer move fixture locks.
+func captureMoveClientState(source, destination *session, client *attachedClient) moveClientState {
+	sourceLease := captureMoveLeaseState(source, client)
+	destinationLease := captureMoveLeaseState(destination, client)
+	roleEffectPhase := captureMoveRoleEffectPhase(client)
 	return moveClientState{
 		transport:        client.transportSnapshot(),
 		roleGeneration:   client.roleGeneration.Load(),
 		currentSession:   client.currentSession(),
-		sourceRole:       source.attachmentRoleLocked(client),
-		destinationRole:  destination.attachmentRoleLocked(client),
-		sourceLease:      captureMoveLeaseState(source, client),
-		destinationLease: captureMoveLeaseState(destination, client),
-		roleEffectPhase:  captureMoveRoleEffectPhase(client),
+		sourceRole:       source.attachmentRole(client),
+		destinationRole:  destination.attachmentRole(client),
+		sourceLease:      sourceLease,
+		destinationLease: destinationLease,
+		roleEffectPhase:  roleEffectPhase,
 	}
 }
 
@@ -262,6 +269,7 @@ type moveTabHandoffState struct {
 }
 
 func captureMoveTabHandoffState(d *Daemon, source, destination *session, moved *tab, follower *attachedClient) moveTabHandoffState {
+	followerState := captureMoveClientState(source, destination, follower)
 	d.mu.Lock()
 	d.notices.routingMu.Lock()
 	unlockSessions := lockAttachmentSessions(source, destination)
@@ -275,7 +283,7 @@ func captureMoveTabHandoffState(d *Daemon, source, destination *session, moved *
 		source:      captureMoveSessionStateLocked(source),
 		destination: captureMoveSessionStateLocked(destination),
 		movedTab:    captureMoveTabStateLocked(moved),
-		follower:    captureMoveClientStateLocked(source, destination, follower),
+		follower:    followerState,
 	}
 
 	moved.mu.Unlock()

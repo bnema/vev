@@ -453,6 +453,58 @@ func TestPaletteJRSThenBSKReversesJump(t *testing.T) {
 	require.Same(t, current, ac.currentSession())
 }
 
+func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	// Establish a valid back-session target, then remove that target immediately
+	// after the command releases its role admission.
+	target := d.sessions[domain.SessionID("recent")]
+	ac.previousSession.Set(target)
+	invalidations := installPaletteInvalidationObserver(current)
+	d.enterPalette(current, ac)
+	d.handlePaletteInput(ac, []byte("BSK"))
+	d.afterActionRoleEffectEnded = func(action string) {
+		if action == "back-session" {
+			d.mu.Lock()
+			delete(d.sessions, target.id)
+			d.mu.Unlock()
+		}
+	}
+
+	token := current.attachmentToken(ac, ac.transport())
+	effect, admitted := ac.beginRoleEffect(token)
+	require.True(t, admitted)
+	d.handlePaletteInput(ac, []byte("\r"), effect)
+
+	require.False(t, ac.overlays.paletteActive(), "a failed executed handoff must not leave a stale palette")
+	require.Same(t, current, ac.currentSession(), "failed handoff must preserve the source attachment")
+	invalidation := awaitTestValue(t, invalidations, "failed palette handoff did not invalidate rendering")
+	require.True(t, invalidation.reset)
+}
+
+func TestPaletteDeniedPostHandoffRoleEffectClosesAndInvalidates(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	invalidations := installPaletteInvalidationObserver(sess)
+
+	d.enterPalette(sess, ac)
+	d.handlePaletteInput(ac, []byte("BSK"))
+	// Make the attachment token detached while retaining currentSession. The
+	// no-op BSK command succeeds, but its post-execution beginRoleEffect is
+	// deterministically denied.
+	sess.mu.Lock()
+	sess.client = nil
+	sess.mu.Unlock()
+
+	d.handlePaletteInput(ac, []byte("\r"))
+
+	require.False(t, ac.overlays.paletteActive(), "denied cleanup admission must still close the executed palette")
+	invalidation := awaitTestValue(t, invalidations, "denied palette cleanup did not invalidate rendering")
+	require.True(t, invalidation.reset)
+}
+
 func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

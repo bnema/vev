@@ -324,22 +324,22 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	sess.dispatchMu.Lock()
 	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect}, args)
 	sess.dispatchMu.Unlock()
-	if errors.Is(err, errAttachmentTransition) {
-		return
-	}
-	if err == nil && roleHandoff {
+	if roleHandoff {
 		if current := ac.currentSession(); current != nil {
 			currentToken := current.attachmentToken(ac, ac.transport())
 			fresh, admitted := ac.beginRoleEffect(currentToken)
+			if ac.closeExecutedPalette(generation, rawQuery) {
+				d.invalidateRender(current, ac, true, "palette.go")
+			}
 			if admitted {
-				if ac.closeExecutedPalette(generation, rawQuery) {
-					d.invalidateRender(current, ac, true, "palette.go")
-				}
 				fresh.End()
 			}
 		} else {
 			ac.closeExecutedPalette(generation, rawQuery)
 		}
+	}
+	if errors.Is(err, errAttachmentTransition) {
+		return
 	}
 	if err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)

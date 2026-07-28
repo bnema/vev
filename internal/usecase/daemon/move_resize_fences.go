@@ -181,8 +181,8 @@ func (d *Daemon) publishResizeOwnerPostEffect(members []resizeMember, effect res
 	if fences == nil {
 		return false
 	}
+	defer fences.Release()
 	publish()
-	fences.Release()
 	return true
 }
 

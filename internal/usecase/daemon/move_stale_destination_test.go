@@ -40,7 +40,7 @@ func TestMovePaneRejectsStaleDestinationIncarnationWithoutMutation(t *testing.T)
 		Destination:      moveSessionLocator{ID: destination.id, Incarnation: staleIncarnation},
 		DestinationTabID: domain.TabStableID(destinationTab.stableID),
 	})
-	require.ErrorIs(t, err, errMovePaneInvalid)
+	require.ErrorIs(t, err, errMoveStaleTarget)
 	require.Equal(t, beforeSource, sourceTab.tree)
 	require.Equal(t, beforeDestination, destinationTab.tree)
 	require.Same(t, beforeOwner, moved.ownerSnapshot())

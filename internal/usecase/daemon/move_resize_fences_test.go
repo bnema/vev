@@ -185,6 +185,35 @@ func TestMoveResizeFencesCleanUpWhenPublicationPanics(t *testing.T) {
 	}
 }
 
+func TestPublishResizeOwnerPostEffectReleasesAllFencesWhenCallbackPanics(t *testing.T) {
+	d := &Daemon{}
+	sess := &session{id: "session"}
+	tb := &tab{stableID: "tab"}
+	p := &pane{stableID: "pane"}
+	members := []resizeMember{{session: sess, tab: tb, pane: p}}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		d.publishResizeOwnerPostEffect(members, resizeOwnerPostSnapshotDirty, func() {
+			panic("post effect failed")
+		})
+	}()
+	require.Equal(t, "post effect failed", recovered)
+
+	for _, fence := range []struct {
+		name string
+		mu   *sync.Mutex
+	}{
+		{name: "session", mu: &sess.layoutApplyMu},
+		{name: "tab", mu: &tb.layoutApplyMu},
+		{name: "pane", mu: &p.resizeMu},
+	} {
+		require.True(t, fence.mu.TryLock(), "%s fence leaked after panic recovery", fence.name)
+		fence.mu.Unlock()
+	}
+}
+
 func TestMoveResizeFencesWaitBeforeTakingArchitectureLocks(t *testing.T) {
 	d := &Daemon{}
 	sess := &session{id: "session"}

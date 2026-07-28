@@ -177,6 +177,9 @@ type Daemon struct {
 	// afterRoleEffectAdmitted is a deterministic test seam after a frame/paint
 	// reserves its exact capability and before its first observable mutation.
 	afterRoleEffectAdmitted func(attachmentRoleToken)
+	// beforeFirstPaintSendWait is a test-only seam immediately before a
+	// transition first paint waits for the attachment send lock.
+	beforeFirstPaintSendWait func(attachmentRoleToken)
 	// afterDelayedKeyEffectAttempt observes whether a timer callback acquired a
 	// fresh exact capability before producing PTY, action, or overlay effects.
 	afterDelayedKeyEffectAttempt func(bool)

@@ -55,6 +55,34 @@ func TestCopyModeLifecycleActivateTabClearsRuntime(t *testing.T) {
 	ac.overlays.copyMu.Unlock()
 }
 
+func TestActivateTabAfterResizeWithClientAndNoLeaseUsesDirectPath(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 2)
+	defer releaseAll(releases)
+	d.enterCopyMode(sess, ac)
+	require.True(t, ac.overlays.copyActive())
+
+	d.activateTabAfterResizeForLease(sess, sess.activeTab(), true, ac, nil)
+
+	require.False(t, ac.overlays.copyActive())
+}
+
+func TestActivateTabAfterResizeWithCurrentLeaseUsesLeaseBackedPath(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 2)
+	defer releaseAll(releases)
+	d.enterCopyMode(sess, ac)
+	require.True(t, ac.overlays.copyActive())
+	rc := newRenderCoordinator(renderCoordinatorOptions{clock: d.clock})
+	rc.attach(ac)
+	sess.installRenderCoordinator(rc)
+	defer func() { rc.beginSessionTeardown().finish() }()
+	lease := rc.attachmentLease(ac)
+	require.NotNil(t, lease)
+
+	d.activateTabAfterResizeForLease(sess, sess.activeTab(), true, ac, lease)
+
+	require.False(t, ac.overlays.copyActive())
+}
+
 func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	d, sess, _, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 	tb := sess.activeTab()

@@ -1047,13 +1047,17 @@ func TestCrossSessionTransitionPublishesCoherentOwnershipBeforeBlockedFirstPaint
 	targetCoordinator.mu.Unlock()
 	require.True(t, result.published.activeCurrent())
 
-	paintStarted := make(chan struct{})
+	beforeSendWait := make(chan struct{})
+	d.beforeFirstPaintSendWait = func(token attachmentRoleToken) {
+		if token.ac == moving {
+			close(beforeSendWait)
+		}
+	}
 	paintDone := make(chan bool, 1)
 	go func() {
-		close(paintStarted)
 		paintDone <- d.firstPaintForTransition(result.published)
 	}()
-	<-paintStarted
+	<-beforeSendWait
 	require.True(t, d.mu.TryLock(), "first paint retained daemon lock while waiting for sendMu")
 	d.mu.Unlock()
 	require.True(t, d.notices.routingMu.TryLock(), "first paint retained routing lock while waiting for sendMu")

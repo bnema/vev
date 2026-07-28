@@ -194,9 +194,15 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		if len(effects) != 0 {
 			effect = effects[0]
 		}
-		effect.bindActionEnd(d, "picker-delete")
 		if ok {
-			if err := d.killPickerTargetForRole(target, effect.roleToken()); err != nil {
+			var err error
+			if effect != nil {
+				effect.bindActionEnd(d, "picker-delete")
+				err = d.killPickerTargetForRole(target, effect.roleToken())
+			} else {
+				err = d.killPickerTarget(target)
+			}
+			if err != nil {
 				d.reportError(sess, err)
 			}
 		}

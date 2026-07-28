@@ -448,7 +448,10 @@ func (d *Daemon) liveSessionByName(name string) *session {
 }
 
 func sessionMoveLocator(sess *session) moveSessionLocator {
-	return moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation, Name: sess.name}
+	sess.mu.Lock()
+	name := sess.name
+	sess.mu.Unlock()
+	return moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation, Name: name}
 }
 func (e controlExec) split(direction layout.Direction) error {
 	return e.runAction(daemonActionRequest{kind: daemonActionSplitPane, direction: direction})

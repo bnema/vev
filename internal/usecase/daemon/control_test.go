@@ -657,7 +657,9 @@ func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.
 	require.Len(t, source.tabs, 1)
 	require.Equal(t, "t_inactive", source.tabs[0].stableID)
 	source.mu.Unlock()
+	destination.mu.Lock()
 	destTab := destination.tabs[0]
+	destination.mu.Unlock()
 	destTab.mu.Lock()
 	var moved *pane
 	for _, candidate := range destTab.panes {
@@ -692,7 +694,9 @@ func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 	require.Len(t, active.panes, 1)
 	require.Equal(t, "p_active", active.panes[layout.PaneID("pane-1")].stableID)
 	active.mu.Unlock()
+	destination.mu.Lock()
 	destTab := destination.tabs[0]
+	destination.mu.Unlock()
 	destTab.mu.Lock()
 	var moved *pane
 	for _, candidate := range destTab.panes {
@@ -893,7 +897,9 @@ func TestHandleCommandMovePaneRelocatedStableIDsOverrideAdvisorySessionName(t *t
 	advisory.mu.Lock()
 	require.Len(t, advisory.tabs, 1, "the advisory session-name match must remain untouched")
 	advisory.mu.Unlock()
+	destination.mu.Lock()
 	destTab := destination.tabs[0]
+	destination.mu.Unlock()
 	destTab.mu.Lock()
 	require.Len(t, destTab.panes, 2)
 	destTab.mu.Unlock()
@@ -921,7 +927,9 @@ func TestHandleCommandMovePaneStableIDsLocateSessionWithoutSelfRedirect(t *testi
 	require.Len(t, source.tabs, 1)
 	require.Equal(t, "t_active", source.tabs[0].stableID)
 	source.mu.Unlock()
+	destination.mu.Lock()
 	destTab := destination.tabs[0]
+	destination.mu.Unlock()
 	destTab.mu.Lock()
 	var moved *pane
 	for _, candidate := range destTab.panes {
