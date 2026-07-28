@@ -343,10 +343,17 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	}
 	if err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
-		d.reportError(sess, err)
+		d.reportError(sess, paletteCommandNoticeError(cmd, err))
 	} else {
 		d.recordPaletteUse(cmd.Code)
 	}
+}
+
+func paletteCommandNoticeError(cmd command.Command, err error) error {
+	if cmd.Scope == command.CommandScopeCrossSession {
+		return movePickerUserError(err)
+	}
+	return err
 }
 
 func paletteArgs(query string, cmd command.Command) []string {
@@ -446,6 +453,31 @@ func (e paletteExec) ToggleStack() error {
 
 func (e paletteExec) ClosePane() error {
 	return e.runAction(daemonActionRequest{kind: daemonActionClosePane})
+}
+
+func (e paletteExec) OpenMovePanePicker() error {
+	target := resolveDaemonActionTarget(e.sess)
+	if target.tab == nil || target.pane == nil {
+		return errMovePaneInvalid
+	}
+	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMovePane, moveSourceLocator{
+		Session: sessionMoveLocator(e.sess),
+		TabID:   domain.TabStableID(target.tab.stableID),
+		PaneID:  domain.PaneStableID(target.pane.stableID),
+		Client:  e.ac,
+	})
+}
+
+func (e paletteExec) OpenMoveTabPicker() error {
+	target := resolveDaemonActionTarget(e.sess)
+	if target.tab == nil {
+		return errMovePaneInvalid
+	}
+	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMoveTab, moveSourceLocator{
+		Session: sessionMoveLocator(e.sess),
+		TabID:   domain.TabStableID(target.tab.stableID),
+		Client:  e.ac,
+	})
 }
 
 func (e paletteExec) focus(direction layout.Direction) error {

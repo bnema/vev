@@ -9,12 +9,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
-var (
-	errMovePaneFloatingSibling = errors.New("cannot remove a source tab with a floating pane")
-	errMovePaneIDExhausted     = errors.New("destination pane IDs exhausted")
-	errMovePaneInvalid         = errors.New("move pane request is no longer valid")
-)
-
 // movePaneCandidate contains only unpublished topology and identity changes.
 // The caller must revalidate the live tabs before committing these values.
 type movePaneCandidate struct {
@@ -41,7 +35,7 @@ func prepareMovePaneCandidate(source, destination *tab, moved *pane) (*movePaneC
 		source.tree == nil || source.tree.Root == nil || source.panes[moved.id] != moved ||
 		!layout.ContainsLeaf(source.tree.Root, moved.id) || destination.tree == nil || destination.tree.Root == nil ||
 		destination.panes[destination.tree.Focus] == nil || !layout.ContainsLeaf(destination.tree.Root, destination.tree.Focus) {
-		return nil, layout.ErrNotFound
+		return nil, errMovePaneInvalid
 	}
 
 	candidate := &movePaneCandidate{
@@ -53,19 +47,22 @@ func prepareMovePaneCandidate(source, destination *tab, moved *pane) (*movePaneC
 
 	sourceLeaves := layout.LeafIDs(source.tree.Root)
 	if len(sourceLeaves) == 1 {
-		if source.floating.state != floatingUninitialized {
-			return nil, errMovePaneFloatingSibling
+		switch source.floating.state {
+		case floatingWarming:
+			return nil, errMoveFloatingWarming
+		case floatingHidden, floatingVisible:
+			return nil, errMoveFinalSourceFloating
 		}
 		candidate.removeSourceTab = true
 	} else {
 		candidate.sourceTree = source.tree.Clone()
 		if err := candidate.sourceTree.Close(moved.id); err != nil {
-			return nil, err
+			return nil, errMovePaneInvalid
 		}
 		var ok bool
 		candidate.sourcePlacements, ok = layout.Solve(candidate.sourceTree.Root, tabArea(source))
 		if !ok || candidate.sourceTree.Focus == "" || !layout.ContainsLeaf(candidate.sourceTree.Root, candidate.sourceTree.Focus) {
-			return nil, layout.ErrTooSmall
+			return nil, errMoveTooSmall
 		}
 	}
 
@@ -77,12 +74,15 @@ func prepareMovePaneCandidate(source, destination *tab, moved *pane) (*movePaneC
 	candidate.destinationTree = destination.tree.Clone()
 	area := tabArea(destination)
 	if err := candidate.destinationTree.Split(destination.tree.Focus, layout.Right, true, candidate.destinationID, area); err != nil {
-		return nil, err
+		if errors.Is(err, layout.ErrTooSmall) {
+			return nil, errMoveTooSmall
+		}
+		return nil, errMovePaneInvalid
 	}
 	var ok bool
 	candidate.destinationPlacements, ok = layout.Solve(candidate.destinationTree.Root, area)
 	if !ok {
-		return nil, layout.ErrTooSmall
+		return nil, errMoveTooSmall
 	}
 	return candidate, nil
 }

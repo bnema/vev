@@ -172,24 +172,25 @@ func TestMoveTabFinalSourceClientFollowsAndActivatesMovedTab(t *testing.T) {
 
 func TestMoveTabRejectsSameSessionStaleMembershipAndWarming(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(source, destination *session, moved *tab, req *moveTabRequest)
+		name    string
+		mutate  func(source, destination *session, moved *tab, req *moveTabRequest)
+		wantErr error
 	}{
-		{name: "same session", mutate: func(source, _ *session, _ *tab, req *moveTabRequest) {
+		{name: "same session", wantErr: errMovePaneInvalid, mutate: func(source, _ *session, _ *tab, req *moveTabRequest) {
 			req.Destination = req.Source
 		}},
-		{name: "stale incarnation", mutate: func(_, _ *session, _ *tab, req *moveTabRequest) {
+		{name: "stale incarnation", wantErr: errMoveStaleTarget, mutate: func(_, _ *session, _ *tab, req *moveTabRequest) {
 			req.Destination.Incarnation[0]++
 		}},
-		{name: "missing membership", mutate: func(source, _ *session, moved *tab, _ *moveTabRequest) {
+		{name: "missing membership", wantErr: errMoveStaleTarget, mutate: func(source, _ *session, moved *tab, _ *moveTabRequest) {
 			source.tabs = source.tabs[1:]
 			_ = moved
 		}},
-		{name: "warming floating", mutate: func(_, _ *session, moved *tab, _ *moveTabRequest) {
+		{name: "warming floating", wantErr: errMoveFloatingWarming, mutate: func(_, _ *session, moved *tab, _ *moveTabRequest) {
 			moved.floating.state = floatingWarming
 			moved.floating.generation = 3
 		}},
-		{name: "destination teardown", mutate: func(_, destination *session, _ *tab, _ *moveTabRequest) {
+		{name: "destination teardown", wantErr: errMoveStaleTarget, mutate: func(_, destination *session, _ *tab, _ *moveTabRequest) {
 			destination.teardownMu.Lock()
 			destination.teardownActive = true
 			destination.teardownMu.Unlock()
@@ -213,7 +214,9 @@ func TestMoveTabRejectsSameSessionStaleMembershipAndWarming(t *testing.T) {
 			destination.teardownMu.Lock()
 			destination.teardownActive = false
 			destination.teardownMu.Unlock()
-			require.Error(t, err)
+			require.ErrorIs(t, err, tt.wantErr)
+			var rejection *moveRejection
+			require.ErrorAs(t, err, &rejection)
 			require.Equal(t, beforeDestination, destination.tabs)
 			require.Same(t, beforeOwner, moved.focusedPane().ownerSnapshot())
 		})

@@ -48,6 +48,8 @@ type Context interface {
 	ToggleStack() error
 	ToggleFloatingPane() error
 	ClosePane() error
+	OpenMovePanePicker() error
+	OpenMoveTabPicker() error
 	FocusPaneLeft() error
 	FocusPaneRight() error
 	FocusPaneUp() error
@@ -97,6 +99,16 @@ const (
 	TargetPane
 )
 
+// CommandScope declares the serialization boundary needed by a command.
+type CommandScope uint8
+
+const (
+	CommandScopeSession CommandScope = iota
+	// CommandScopeCrossSession requires dispatch to defer locking to the
+	// mutation, which resolves and locks both source and destination sessions.
+	CommandScopeCrossSession
+)
+
 // ControlOptions carries per-invocation output preferences.
 type ControlOptions struct {
 	JSON bool
@@ -113,6 +125,8 @@ type ControlContext interface {
 	CreateSessionNamed(name string) error
 	CloseTab() error
 	ClosePane() error
+	MovePane(destinationSession, destinationTabID string) error
+	MoveTab(destinationSession string) error
 	SplitRight() error
 	SplitLeft() error
 	SplitUp() error
@@ -148,6 +162,7 @@ type Command struct {
 	Scriptable             bool
 	PaletteVisible         bool
 	Target                 TargetKind
+	Scope                  CommandScope
 	Run                    func(Context, []string) error
 	Control                func(ControlContext, []string, ControlOptions) (ControlResult, error)
 }

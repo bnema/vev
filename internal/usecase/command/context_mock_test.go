@@ -790,6 +790,94 @@ func (_c *MockContext_NextTab_Call) RunAndReturn(run func() error) *MockContext_
 	return _c
 }
 
+// OpenMovePanePicker provides a mock function for the type MockContext
+func (_mock *MockContext) OpenMovePanePicker() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for OpenMovePanePicker")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_OpenMovePanePicker_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OpenMovePanePicker'
+type MockContext_OpenMovePanePicker_Call struct {
+	*mock.Call
+}
+
+// OpenMovePanePicker is a helper method to define mock.On call
+func (_e *MockContext_Expecter) OpenMovePanePicker() *MockContext_OpenMovePanePicker_Call {
+	return &MockContext_OpenMovePanePicker_Call{Call: _e.mock.On("OpenMovePanePicker")}
+}
+
+func (_c *MockContext_OpenMovePanePicker_Call) Run(run func()) *MockContext_OpenMovePanePicker_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_OpenMovePanePicker_Call) Return(err error) *MockContext_OpenMovePanePicker_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_OpenMovePanePicker_Call) RunAndReturn(run func() error) *MockContext_OpenMovePanePicker_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// OpenMoveTabPicker provides a mock function for the type MockContext
+func (_mock *MockContext) OpenMoveTabPicker() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for OpenMoveTabPicker")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_OpenMoveTabPicker_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OpenMoveTabPicker'
+type MockContext_OpenMoveTabPicker_Call struct {
+	*mock.Call
+}
+
+// OpenMoveTabPicker is a helper method to define mock.On call
+func (_e *MockContext_Expecter) OpenMoveTabPicker() *MockContext_OpenMoveTabPicker_Call {
+	return &MockContext_OpenMoveTabPicker_Call{Call: _e.mock.On("OpenMoveTabPicker")}
+}
+
+func (_c *MockContext_OpenMoveTabPicker_Call) Run(run func()) *MockContext_OpenMoveTabPicker_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_OpenMoveTabPicker_Call) Return(err error) *MockContext_OpenMoveTabPicker_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_OpenMoveTabPicker_Call) RunAndReturn(run func() error) *MockContext_OpenMoveTabPicker_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // OpenNotifications provides a mock function for the type MockContext
 func (_mock *MockContext) OpenNotifications() error {
 	ret := _mock.Called()

@@ -14,10 +14,35 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-var (
-	pickerModal          = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
-	errNoMoveDestination = errors.New("no eligible move destination")
-)
+func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
+	if d == nil || source.Session.ID == "" || source.TabID == "" {
+		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source session is no longer available.", errMovePaneInvalid)
+	}
+	sess := d.sessionByID(source.Session.ID)
+	if sess == nil || sess.incarnation != source.Session.Incarnation {
+		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source session is no longer available.", errMovePaneInvalid)
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if source.Client != nil && sess.client != source.Client {
+		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source client is no longer active.", errMovePaneInvalid)
+	}
+	tb := findMoveTabLocked(sess, source.TabID)
+	if tb == nil {
+		return domain.UserWarn(domain.NoticeSessionUnavailable, "Tab no longer exists.", errMovePaneInvalid)
+	}
+	if source.PaneID == "" {
+		return nil
+	}
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if paneByStableIDLocked(tb, string(source.PaneID)) == nil {
+		return domain.UserWarn(domain.NoticeSessionUnavailable, "Pane no longer exists.", errMovePaneInvalid)
+	}
+	return nil
+}
+
+var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
 
 type pickerIntent uint8
 
@@ -37,6 +62,7 @@ type moveSourceLocator struct {
 	Session moveSessionLocator
 	TabID   domain.TabStableID
 	PaneID  domain.PaneStableID
+	Client  *attachedClient
 }
 
 // enterPicker preserves the existing navigation entry point. Navigation always
@@ -228,9 +254,12 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	})
 	var target picker.Target
 	var ok bool
+	var intent pickerIntent
+	var source moveSourceLocator
 	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
 		target, ok = rt.picker.Selected()
 	}
+	intent, source = rt.pickerIntent, rt.pickerSource
 	rt.pickerMu.Unlock()
 
 	if result.action == 'x' {
@@ -258,11 +287,27 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	if result.changed {
 		d.registerPreviewForSelection(ac)
 	}
-	navigating := (result.action == '\r' || result.action == '\n') && ok
-	if result.exit && !navigating {
+	committing := (result.action == '\r' || result.action == '\n') && ok
+	if result.exit && !committing {
 		d.closePicker(ac)
 	}
-	if navigating {
+	if committing {
+		if intent == pickerMovePane || intent == pickerMoveTab {
+			if err := d.movePickerSourceError(source); err != nil {
+				d.reportError(sess, err)
+				d.invalidateRender(sess, ac, true, "picker.go")
+				return
+			}
+			d.closePicker(ac)
+			err := d.commitMovePickerSelection(intent, source, target)
+			if err != nil {
+				d.reportError(sess, movePickerUserError(err))
+				d.invalidateRender(sess, ac, true, "picker.go")
+				return
+			}
+			d.invalidateRender(sess, ac, true, "picker.go")
+			return
+		}
 		var err error
 		if len(effects) != 0 && effects[0] != nil {
 			err = d.switchToTargetForRole(effects[0].roleToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
@@ -418,6 +463,31 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
 		}
+	}
+}
+
+func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourceLocator, target picker.Target) error {
+	destination := moveSessionLocator{ID: target.Session, Incarnation: target.Incarnation, Name: target.Name}
+	switch intent {
+	case pickerMovePane:
+		if target.TabID == "" {
+			return errMovePaneInvalid
+		}
+		return d.movePane(movePaneRequest{
+			Source:           source.Session,
+			SourceTabID:      source.TabID,
+			SourcePaneID:     source.PaneID,
+			Destination:      destination,
+			DestinationTabID: target.TabID,
+		})
+	case pickerMoveTab:
+		return d.moveTab(moveTabRequest{
+			Source:      source.Session,
+			SourceTabID: source.TabID,
+			Destination: destination,
+		})
+	default:
+		return errMovePaneInvalid
 	}
 }
 

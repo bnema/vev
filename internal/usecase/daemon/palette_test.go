@@ -143,6 +143,58 @@ func TestPaletteCommandFailureSurfacesAsNotice(t *testing.T) {
 	require.Equal(t, domain.NoticeTabSpawn, history[0].Code)
 }
 
+func TestPaletteCommandNoticeErrorPreservesTypedErrorsAndMapsMoveFailures(t *testing.T) {
+	typedTabSpawn := domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab", errors.New("open failed"))
+	tests := []struct {
+		name, slug, message string
+		err                 error
+		code                domain.NoticeCode
+		severity            domain.NoticeSeverity
+		wantSame            bool
+	}{
+		{name: "CNT typed command error", slug: "new-tab", err: typedTabSpawn, code: domain.NoticeTabSpawn, severity: domain.NoticeError, message: "couldn't open tab", wantSame: true},
+		{name: "MPN no destination", slug: "move-pane", err: errNoMoveDestination, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "No destination available."},
+		{name: "MTB warming floating", slug: "move-tab", err: errMoveFloatingWarming, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Wait for the floating pane to finish opening."},
+		{name: "MPN final pane with floating slot", slug: "move-pane", err: errMoveFinalSourceFloating, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Close the floating pane or move the whole tab."},
+		{name: "MPN destination too small", slug: "move-pane", err: errMoveTooSmall, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Not enough space in destination tab."},
+		{name: "MTB stale destination", slug: "move-tab", err: errMoveStaleTarget, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Destination is no longer available."},
+		{name: "MPN generic invalid", slug: "move-pane", err: errMovePaneInvalid, code: domain.NoticeInternal, severity: domain.NoticeError, message: "Move failed."},
+		{name: "MPN typed application error", slug: "move-pane", err: typedTabSpawn, code: domain.NoticeTabSpawn, severity: domain.NoticeError, message: "couldn't open tab", wantSame: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, ok := command.BySlug(tt.slug)
+			require.True(t, ok)
+			got := paletteCommandNoticeError(cmd, tt.err)
+			if tt.wantSame {
+				require.Same(t, tt.err, got)
+			}
+			var userErr *domain.UserError
+			require.ErrorAs(t, got, &userErr)
+			require.Equal(t, tt.code, userErr.Code)
+			require.Equal(t, tt.severity, userErr.Severity)
+			require.Equal(t, tt.message, userErr.Msg)
+		})
+	}
+}
+
+func TestPaletteCommandNoticeErrorUsesCommandScope(t *testing.T) {
+	t.Run("future cross-session command inherits move rejection presentation", func(t *testing.T) {
+		cmd := command.Command{Slug: "future-transfer", Scope: command.CommandScopeCrossSession}
+		got := paletteCommandNoticeError(cmd, errMoveStaleTarget)
+		var userErr *domain.UserError
+		require.ErrorAs(t, got, &userErr)
+		require.Equal(t, domain.NoticeSessionUnavailable, userErr.Code)
+		require.Equal(t, "Destination is no longer available.", userErr.Msg)
+	})
+
+	t.Run("move-like slug without metadata is unchanged", func(t *testing.T) {
+		err := errors.New("ordinary failure")
+		got := paletteCommandNoticeError(command.Command{Slug: "move-pane"}, err)
+		require.Same(t, err, got)
+	})
+}
+
 func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -630,12 +682,12 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	d := &Daemon{}
-	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	var wg sync.WaitGroup
 	for range 50 {

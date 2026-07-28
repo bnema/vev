@@ -46,7 +46,8 @@ type moveTabCommit struct {
 	err                 error
 }
 
-func (d *Daemon) moveTab(req moveTabRequest) error {
+func (d *Daemon) moveTab(req moveTabRequest) (result error) {
+	defer func() { result = normalizeMoveRejection(result) }()
 	if d == nil || req.Source.ID == "" || req.Destination.ID == "" || req.SourceTabID == "" || req.Source.ID == req.Destination.ID {
 		return errMovePaneInvalid
 	}
@@ -54,12 +55,15 @@ func (d *Daemon) moveTab(req moveTabRequest) error {
 	source := moveSessionForLocatorLocked(d, req.Source)
 	destination := moveSessionForLocatorLocked(d, req.Destination)
 	d.mu.Unlock()
-	if source == nil || destination == nil || source == destination {
+	if source == nil || destination == nil {
+		return errMoveStaleTarget
+	}
+	if source == destination {
 		return errMovePaneInvalid
 	}
 	reservation, err := d.reserveMoveLifecycles(source, destination)
 	if err != nil {
-		return err
+		return errMoveStaleTarget
 	}
 	reservationHeld := true
 	defer func() {
@@ -156,7 +160,7 @@ func (d *Daemon) moveTab(req moveTabRequest) error {
 		if commit.err != nil {
 			return commit.err
 		}
-		return errMovePaneInvalid
+		return errMoveStaleTarget
 	}
 	fences.Release()
 	if commit.oldTabCancel != nil {
@@ -232,16 +236,16 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closing || d.sessions[source.id] != source || d.sessions[destination.id] != destination {
-		return nil, errMovePaneInvalid
+		return nil, errMoveStaleTarget
 	}
 	unlockSessions := lockAttachmentSessions(source, destination)
 	defer unlockSessions()
 	if !moveSessionLocatorCurrentLocked(source, req.Source) || !moveSessionLocatorCurrentLocked(destination, req.Destination) {
-		return nil, errMovePaneInvalid
+		return nil, errMoveStaleTarget
 	}
 	moved := findMoveTabLocked(source, req.SourceTabID)
 	if moved == nil || destination.active < 0 || destination.active >= len(destination.tabs) {
-		return nil, errMovePaneInvalid
+		return nil, errMoveStaleTarget
 	}
 	destinationActive := destination.tabs[destination.active]
 	destinationActive.mu.Lock()
@@ -250,10 +254,10 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 	moved.mu.Lock()
 	defer moved.mu.Unlock()
 	if !moved.floatingTransferableLocked() {
-		return nil, errMovePaneInvalid
+		return nil, errMoveFloatingWarming
 	}
 	if _, ok := layout.Solve(moved.tree.Root, domain.Rect{Width: destinationSize.Cols, Height: destinationSize.Rows}); !ok {
-		return nil, errMovePaneInvalid
+		return nil, errMoveTooSmall
 	}
 	panes := make([]*pane, 0, len(moved.panes)+1)
 	for _, p := range moved.panes {

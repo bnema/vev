@@ -289,7 +289,7 @@ func TestPrepareMovePaneCandidateIsPure(t *testing.T) {
 			destinationTree: layout.NewTree("pane-1"),
 			destinationSize: domain.Size{Cols: 41, Rows: 2},
 			destinationNext: 2,
-			wantErr:         errMovePaneFloatingSibling,
+			wantErr:         errMoveFloatingWarming,
 		},
 		{
 			name:            "final tiled pane rejects hidden floating sibling",

@@ -16,6 +16,8 @@ func Registry() []Command {
 		paletteControl("toggle-stack", "TST", "Toggle stack", "Toggle the focused pane stack", TargetPane, func(ctx Context, _ []string) error { return ctx.ToggleStack() }, func(ctx ControlContext) error { return ctx.ToggleStack() }),
 		paletteOnly("toggle-floating-pane", "FLT", "Toggle floating pane", "Toggle the floating pane", func(ctx Context, _ []string) error { return ctx.ToggleFloatingPane() }),
 		paletteControl("close-pane", "CLP", "Close pane", "Close the focused pane", TargetPane, func(ctx Context, _ []string) error { return ctx.ClosePane() }, func(ctx ControlContext) error { return ctx.ClosePane() }),
+		movePaneCommand(),
+		moveTabCommand(),
 		paletteControl("focus-pane-left", "FPL", "Focus pane left", "Focus the pane to the left", TargetPane, func(ctx Context, _ []string) error { return ctx.FocusPaneLeft() }, func(ctx ControlContext) error { return ctx.FocusPaneLeft() }),
 		paletteControl("focus-pane-right", "FPR", "Focus pane right", "Focus the pane to the right", TargetPane, func(ctx Context, _ []string) error { return ctx.FocusPaneRight() }, func(ctx ControlContext) error { return ctx.FocusPaneRight() }),
 		paletteControl("focus-pane-up", "FPU", "Focus pane up", "Focus the pane above", TargetPane, func(ctx Context, _ []string) error { return ctx.FocusPaneUp() }, func(ctx ControlContext) error { return ctx.FocusPaneUp() }),
@@ -74,6 +76,36 @@ func paletteControlOne(slug, code, name, desc string, target TargetKind, run fun
 		return ControlResult{}, control(ctx, args[0])
 	}
 	return cmd
+}
+
+func movePaneCommand() Command {
+	return Command{
+		Slug: "move-pane", Code: "MPN", Name: "Move pane to tab",
+		Desc: "Move the focused pane to another live tab", Usage: "move-pane <destination-session> <destination-tab-id>",
+		PaletteVisible: true, Scriptable: true, Target: TargetPane, Scope: CommandScopeCrossSession,
+		Run: func(ctx Context, _ []string) error { return ctx.OpenMovePanePicker() },
+		Control: func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
+			if len(args) != 2 || args[0] == "" || args[1] == "" {
+				return ControlResult{}, ErrInvalidArguments
+			}
+			return ControlResult{}, ctx.MovePane(args[0], args[1])
+		},
+	}
+}
+
+func moveTabCommand() Command {
+	return Command{
+		Slug: "move-tab", Code: "MTB", Name: "Move tab to session",
+		Desc: "Move the active tab to another live session", Usage: "move-tab <destination-session>",
+		PaletteVisible: true, Scriptable: true, Target: TargetTab, Scope: CommandScopeCrossSession,
+		Run: func(ctx Context, _ []string) error { return ctx.OpenMoveTabPicker() },
+		Control: func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
+			if len(args) != 1 || args[0] == "" {
+				return ControlResult{}, ErrInvalidArguments
+			}
+			return ControlResult{}, ctx.MoveTab(args[0])
+		},
+	}
 }
 
 func toastCommand() Command {

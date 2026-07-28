@@ -98,10 +98,10 @@ func TestHandleCommandDispatchAndTargetErrors(t *testing.T) {
 		{name: "missing stable IDs", arrange: func(d *Daemon) {
 			addControlSession(d, "work", "t_work", "p_work")
 		}, request: ports.CommandRequest{Slug: "split-right", TargetTab: "t_nope", TargetPane: "p_nope"}, code: ports.ErrNoSuchTarget},
-		{name: "cross-session IDs rejected", arrange: func(d *Daemon) {
-			addControlSession(d, "one", "t_one", "p_one")
-			addControlSession(d, "two", "t_two", "p_two")
-		}, request: ports.CommandRequest{Slug: "split-right", TargetSession: "one", TargetTab: "t_two", TargetPane: "p_two"}, code: ports.ErrNoSuchTarget},
+		{name: "duplicate stable IDs are ambiguous", arrange: func(d *Daemon) {
+			addControlSession(d, "one", "t_shared", "p_shared")
+			addControlSession(d, "two", "t_shared", "p_shared")
+		}, request: ports.CommandRequest{Slug: "toast", Args: []string{"hello"}, TargetTab: "t_shared", TargetPane: "p_shared"}, code: ports.ErrAmbiguousTarget},
 		{name: "self requires both IDs", arrange: func(d *Daemon) {
 			addControlSession(d, "work", "t_work", "p_work")
 		}, request: ports.CommandRequest{Slug: "split-right", Self: true, TargetSession: "work", TargetTab: "t_work"}, code: ports.ErrNoSuchTarget},
@@ -634,6 +634,360 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	defer target.mu.Unlock()
 	require.Len(t, target.panes, 2)
 	require.NotEqual(t, original, target.tree.Focus, "second command must execute after the split creates its right neighbor")
+}
+
+func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := addControlSession(d, "work", "t_active", "p_active")
+	inactive := newTabWithStableID("t_inactive", "p_inactive", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	inactive.ctx, inactive.cancel = context.WithCancel(d.serveCtx)
+	publishTiledPaneOwners(source, inactive)
+	source.mu.Lock()
+	source.tabs = append(source.tabs, inactive)
+	source.active = 0
+	source.mu.Unlock()
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "work",
+	})
+	require.True(t, result.OK, result.Text)
+
+	source.mu.Lock()
+	require.Len(t, source.tabs, 1)
+	require.Equal(t, "t_inactive", source.tabs[0].stableID)
+	source.mu.Unlock()
+	destTab := destination.tabs[0]
+	destTab.mu.Lock()
+	var moved *pane
+	for _, candidate := range destTab.panes {
+		if candidate.stableID == "p_active" {
+			moved = candidate
+		}
+	}
+	require.NotNil(t, moved)
+	destTab.mu.Unlock()
+}
+
+func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := addControlSession(d, "work", "t_active", "p_active")
+	inactive := newTabWithStableID("t_inactive", "p_inactive", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	inactive.ctx, inactive.cancel = context.WithCancel(d.serveCtx)
+	publishTiledPaneOwners(source, inactive)
+	source.mu.Lock()
+	source.tabs = append(source.tabs, inactive)
+	source.active = 0
+	source.mu.Unlock()
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
+		TargetSession: "work", TargetTab: "t_inactive", TargetPane: "p_inactive",
+	})
+	require.True(t, result.OK, result.Text)
+
+	active := source.tabs[0]
+	active.mu.Lock()
+	require.Len(t, active.panes, 1)
+	require.Equal(t, "p_active", active.panes[layout.PaneID("pane-1")].stableID)
+	active.mu.Unlock()
+	destTab := destination.tabs[0]
+	destTab.mu.Lock()
+	var moved *pane
+	for _, candidate := range destTab.panes {
+		if candidate.stableID == "p_inactive" {
+			moved = candidate
+		}
+	}
+	require.NotNil(t, moved)
+	destTab.mu.Unlock()
+}
+
+func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := addControlSession(d, "work", "t_first", "p_first")
+	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
+	publishTiledPaneOwners(source, second)
+	source.mu.Lock()
+	source.tabs = append(source.tabs, second)
+	source.active = 1
+	source.mu.Unlock()
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work",
+	})
+	require.True(t, result.OK, result.Text)
+
+	source.mu.Lock()
+	require.Len(t, source.tabs, 1)
+	require.Equal(t, "t_first", source.tabs[0].stableID)
+	source.mu.Unlock()
+	destination.mu.Lock()
+	require.Len(t, destination.tabs, 2)
+	require.Equal(t, "t_second", destination.tabs[1].stableID)
+	destination.mu.Unlock()
+}
+
+func TestHandleCommandMoveTabSelfUsesStableTab(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := addControlSession(d, "work", "t_first", "p_first")
+	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
+	publishTiledPaneOwners(source, second)
+	source.mu.Lock()
+	source.tabs = append(source.tabs, second)
+	source.active = 0
+	source.mu.Unlock()
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "move-tab", Args: []string{"dest"}, Self: true,
+		TargetSession: "work", TargetTab: "t_second", TargetPane: "p_second",
+	})
+	require.True(t, result.OK, result.Text)
+
+	source.mu.Lock()
+	require.Len(t, source.tabs, 1)
+	require.Equal(t, "t_first", source.tabs[0].stableID)
+	source.mu.Unlock()
+	destination.mu.Lock()
+	require.Len(t, destination.tabs, 2)
+	require.Equal(t, "t_second", destination.tabs[1].stableID)
+	destination.mu.Unlock()
+}
+
+func TestHandleCommandMoveCommandsRejectInvalidArgsAndTargets(t *testing.T) {
+	tests := []struct {
+		name    string
+		arrange func(*Daemon) ports.CommandRequest
+		code    uint16
+		text    string
+	}{
+		{
+			name: "move-pane missing destination session",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				return ports.CommandRequest{Slug: "move-pane", Args: []string{"work", "t_work"}, TargetSession: "work"}
+			},
+			code: ports.ErrNoSuchTarget,
+			text: "move request is invalid",
+		},
+		{
+			name: "move-pane unknown destination session",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				return ports.CommandRequest{Slug: "move-pane", Args: []string{"missing", "t_dest"}, TargetSession: "work"}
+			},
+			code: ports.ErrNoSuchTarget,
+			text: "move target is no longer available",
+		},
+		{
+			name: "move-pane destination tab not in session",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_other"}, TargetSession: "work"}
+			},
+			code: ports.ErrNoSuchTarget,
+			text: "move target is no longer available",
+		},
+		{
+			name: "move-pane same source tab",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				return ports.CommandRequest{Slug: "move-pane", Args: []string{"work", "t_work"}, TargetSession: "work"}
+			},
+			code: ports.ErrNoSuchTarget,
+			text: "move request is invalid",
+		},
+		{
+			name: "move-tab same session",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				return ports.CommandRequest{Slug: "move-tab", Args: []string{"work"}, TargetSession: "work"}
+			},
+			code: ports.ErrNoSuchTarget,
+			text: "move request is invalid",
+		},
+		{
+			name: "move-tab stopping destination",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+				destination.teardownMu.Lock()
+				destination.teardownActive = true
+				destination.teardownMu.Unlock()
+				return ports.CommandRequest{Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work"}
+			},
+			code: ports.ErrNoSuchTarget,
+			text: "move target is no longer available",
+		},
+		{
+			name: "move-pane too few args",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest"}, TargetSession: "work"}
+			},
+			code: ports.ErrInvalidCommandArgs,
+		},
+		{
+			name: "move-pane too many args",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_dest", "extra"}, TargetSession: "work"}
+			},
+			code: ports.ErrInvalidCommandArgs,
+		},
+		{
+			name: "move-tab missing destination",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "work", "t_work", "p_work")
+				return ports.CommandRequest{Slug: "move-tab", TargetSession: "work"}
+			},
+			code: ports.ErrInvalidCommandArgs,
+		},
+		{
+			name: "explicit session name without IDs remains authoritative",
+			arrange: func(d *Daemon) ports.CommandRequest {
+				addControlSession(d, "renamed", "t_work", "p_work")
+				addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "old-name"}
+			},
+			code: ports.ErrNoSuchTarget,
+			text: "no such session: old-name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			request := tt.arrange(d)
+			result := sendCommand(t, d, request)
+			require.False(t, result.OK)
+			require.Equal(t, tt.code, result.Code)
+			if tt.text != "" {
+				require.Equal(t, tt.text, result.Text)
+			}
+		})
+	}
+}
+
+func TestHandleCommandMovePaneRelocatedStableIDsOverrideAdvisorySessionName(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	advisory := addControlSession(d, "old-name", "t_other", "p_other")
+	source := addControlSession(d, "renamed", "t_work", "p_work")
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
+		TargetSession: "old-name", TargetTab: "t_work", TargetPane: "p_work",
+	})
+	require.True(t, result.OK, result.Text)
+
+	source.mu.Lock()
+	require.Len(t, source.tabs, 0)
+	source.mu.Unlock()
+	advisory.mu.Lock()
+	require.Len(t, advisory.tabs, 1, "the advisory session-name match must remain untouched")
+	advisory.mu.Unlock()
+	destTab := destination.tabs[0]
+	destTab.mu.Lock()
+	require.Len(t, destTab.panes, 2)
+	destTab.mu.Unlock()
+}
+
+func TestHandleCommandMovePaneStableIDsLocateSessionWithoutSelfRedirect(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := addControlSession(d, "renamed", "t_active", "p_active")
+	inactive := newTabWithStableID("t_inactive", "p_inactive", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	inactive.ctx, inactive.cancel = context.WithCancel(d.serveCtx)
+	publishTiledPaneOwners(source, inactive)
+	source.mu.Lock()
+	source.tabs = append(source.tabs, inactive)
+	source.active = 1
+	source.mu.Unlock()
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "move-pane", Args: []string{"dest", "t_dest"},
+		TargetSession: "old-name", TargetTab: "t_inactive", TargetPane: "p_inactive",
+	})
+	require.True(t, result.OK, result.Text)
+
+	source.mu.Lock()
+	require.Len(t, source.tabs, 1)
+	require.Equal(t, "t_active", source.tabs[0].stableID)
+	source.mu.Unlock()
+	destTab := destination.tabs[0]
+	destTab.mu.Lock()
+	var moved *pane
+	for _, candidate := range destTab.panes {
+		if candidate.stableID == "p_inactive" {
+			moved = candidate
+		}
+	}
+	require.NotNil(t, moved)
+	destTab.mu.Unlock()
+}
+
+func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
+	d, left, _, _ := newManualSessionWithPTYs(t, newQuietPTY(), newQuietPTY())
+	left.mu.Lock()
+	left.name = "left"
+	left.tabs[0].stableID = "left-moved"
+	left.active = 0
+	left.mu.Unlock()
+
+	right := addMoveTabTestSession(d, "right", "right-stays")
+	rightMoved := newTabWithStableID("right-moved", "right-pane", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	rightMoved.ctx, rightMoved.cancel = context.WithCancel(right.ctx)
+	publishTiledPaneOwners(right, rightMoved)
+	right.mu.Lock()
+	right.tabs = append(right.tabs, rightMoved)
+	right.active = 1
+	right.mu.Unlock()
+
+	start := make(chan struct{})
+	done := make(chan ports.CommandResult, 2)
+	go func() {
+		<-start
+		done <- sendCommand(t, d, ports.CommandRequest{
+			Slug: "move-tab", Args: []string{"right"}, TargetSession: "left",
+		})
+	}()
+	go func() {
+		<-start
+		done <- sendCommand(t, d, ports.CommandRequest{
+			Slug: "move-tab", Args: []string{"left"}, TargetSession: "right",
+		})
+	}()
+	close(start)
+	for range 2 {
+		select {
+		case result := <-done:
+			require.True(t, result.OK, result.Text)
+		case <-time.After(5 * time.Second):
+			t.Fatal("opposite-direction move commands deadlocked")
+		}
+	}
+}
+
+func addNamedMoveDestination(d *Daemon, name, tabID, paneID string) *session {
+	ctx, cancel := context.WithCancel(d.serveCtx)
+	tb := newTabWithStableID(tabID, paneID, newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	tb.ctx, tb.cancel = context.WithCancel(ctx)
+	sess := &session{
+		id: domain.SessionID("sess-" + name), name: name, incarnation: domain.IncarnationID{5},
+		ephemeral: true, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0,
+	}
+	publishTiledPaneOwners(sess, tb)
+	d.mu.Lock()
+	d.sessions[sess.id] = sess
+	d.mu.Unlock()
+	return sess
 }
 
 func commandFrame(t *testing.T, request ports.CommandRequest) ports.Frame {

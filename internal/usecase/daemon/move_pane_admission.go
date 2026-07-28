@@ -26,17 +26,20 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closing || d.sessions[source.id] != source || d.sessions[destination.id] != destination {
-		return nil, errMovePaneInvalid
+		return nil, errMoveStaleTarget
 	}
 	unlockSessions := lockAttachmentSessions(source, destination)
 	defer unlockSessions()
 	if !moveSessionLocatorCurrentLocked(source, req.Source) || !moveSessionLocatorCurrentLocked(destination, req.Destination) {
-		return nil, errMovePaneInvalid
+		return nil, errMoveStaleTarget
 	}
 
 	sourceTab := findMoveTabLocked(source, req.SourceTabID)
 	destinationTab := findMoveTabLocked(destination, req.DestinationTabID)
-	if sourceTab == nil || destinationTab == nil || sourceTab == destinationTab {
+	if sourceTab == nil || destinationTab == nil {
+		return nil, errMoveStaleTarget
+	}
+	if sourceTab == destinationTab {
 		return nil, errMovePaneInvalid
 	}
 	unlockTabs := lockMoveTabs(sourceTab, destinationTab)
@@ -50,7 +53,7 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 		}
 	}
 	if movedPane == nil {
-		return nil, errMovePaneInvalid
+		return nil, errMoveStaleTarget
 	}
 
 	return &movePaneAdmission{

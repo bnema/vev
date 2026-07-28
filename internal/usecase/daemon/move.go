@@ -25,7 +25,8 @@ type moveTabRequest struct {
 // fallible work happens before the membership publication section. Once the
 // section starts, the caller holds the ordered architecture locks and only
 // non-failing in-memory writes are permitted.
-func (d *Daemon) movePane(req movePaneRequest) error {
+func (d *Daemon) movePane(req movePaneRequest) (result error) {
+	defer func() { result = normalizeMoveRejection(result) }()
 	if d == nil || req.Source.ID == "" || req.Destination.ID == "" ||
 		req.SourceTabID == "" || req.SourcePaneID == "" || req.DestinationTabID == "" {
 		return errMovePaneInvalid
@@ -36,12 +37,12 @@ func (d *Daemon) movePane(req movePaneRequest) error {
 	destination := moveSessionForLocatorLocked(d, req.Destination)
 	d.mu.Unlock()
 	if source == nil || destination == nil {
-		return errMovePaneInvalid
+		return errMoveStaleTarget
 	}
 
 	reservation, err := d.reserveMoveLifecycles(source, destination)
 	if err != nil {
-		return err
+		return errMoveStaleTarget
 	}
 	reservationHeld := true
 	defer func() {
@@ -188,7 +189,7 @@ func (d *Daemon) movePane(req movePaneRequest) error {
 		if commit.err != nil {
 			return commit.err
 		}
-		return errMovePaneInvalid
+		return errMoveStaleTarget
 	}
 	// Owner/layout fences end at the atomic publication boundary. The immutable
 	// postcommit plan owns every later cleanup and effect.
