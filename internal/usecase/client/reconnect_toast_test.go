@@ -1118,14 +1118,16 @@ func TestAttachAttemptReturnsWhileSenderSendIsBlockedAfterCancellation(t *testin
 	releaseSender()
 }
 
-func TestDetachedResultReplacementAndCleanDetach(t *testing.T) {
+func TestDetachedResultLegacyReplacementCompatibilityAndCleanDetach(t *testing.T) {
+	// Current daemons keep healthy displaced clients connected. Continue decoding
+	// ReasonReplaced from older peers so mixed-version detach handling stays clear.
 	for _, tt := range []struct {
 		name     string
 		reason   uint8
 		wantText string
 	}{
 		{name: "clean detach", reason: ports.ReasonDetach},
-		{name: "replacement", reason: ports.ReasonReplaced, wantText: "session taken over by another client"},
+		{name: "legacy replacement", reason: ports.ReasonReplaced, wantText: "session taken over by another client"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := detachedResult(tt.reason)

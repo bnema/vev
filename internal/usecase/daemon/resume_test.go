@@ -520,18 +520,19 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		discard func(*Daemon, uint64, *parkedAttachment)
+		discard func(*Daemon, uint64, *parkedAttachment) []parkedAttachmentRetirement
 	}{
 		{
 			name: "expiry",
-			discard: func(d *Daemon, token uint64, parked *parkedAttachment) {
+			discard: func(d *Daemon, token uint64, parked *parkedAttachment) []parkedAttachmentRetirement {
 				d.removeParkedLocked(token, parked)
+				return nil
 			},
 		},
 		{
 			name: "session purge",
-			discard: func(d *Daemon, _ uint64, parked *parkedAttachment) {
-				d.purgeParkedForSessionLocked(parked.sess)
+			discard: func(d *Daemon, _ uint64, parked *parkedAttachment) []parkedAttachmentRetirement {
+				return d.purgeParkedForSessionLocked(parked.sess)
 			},
 		},
 	} {
@@ -549,8 +550,9 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			d.mu.Lock()
 			parked := d.parked[ac.resumeToken]
 			require.NotNil(t, parked)
-			tc.discard(d, ac.resumeToken, parked)
+			retirements := tc.discard(d, ac.resumeToken, parked)
 			d.mu.Unlock()
+			finishParkedAttachmentRetirements(retirements)
 
 			require.Nil(t, ac.previousSession.Get())
 		})

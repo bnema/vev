@@ -682,12 +682,11 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
 	d.mu.Lock()
 	d.closing = true
-	for token, parked := range d.parked {
-		d.removeParkedLocked(token, parked)
-	}
+	parkedRetirements := d.purgeAllParkedLocked()
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
+	finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

@@ -248,7 +248,7 @@ func TestActiveFrameRevalidatesExactRoleBeforeEveryEffect(t *testing.T) {
 	}
 }
 
-func TestKillSessionRetiresEverySnatchedConnectionWithoutCrossSessionEffects(t *testing.T) {
+func TestKillSessionClosesActiveAndAllSnatchedClients(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, first, _ := newManualSessionWithPTYs(t, pty)
 	firstTransport := newDatagramTestTransport()
@@ -334,6 +334,8 @@ func TestKillSessionRetiresEverySnatchedConnectionWithoutCrossSessionEffects(t *
 		message, err := ports.UnmarshalDetached(detached.Payload)
 		require.NoError(t, err)
 		require.Equal(t, ports.ReasonSessionKilled, message.Reason)
+		_, recvErr := transport.Recv()
+		require.ErrorIs(t, recvErr, io.EOF)
 	}
 	require.Same(t, otherClient, other.client)
 	require.Same(t, other, otherClient.currentSession())
@@ -346,6 +348,146 @@ func TestKillSessionRetiresEverySnatchedConnectionWithoutCrossSessionEffects(t *
 		t.Fatal("killing another session retired the active client's connection")
 	default:
 	}
+}
+
+func TestKillSessionRetiresParkedSnatchedAttachment(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+	parkedTransport := &closeTrackingTransport{}
+	sess, parkedClient, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), parkedTransport)
+	require.NoError(t, err)
+	parkedToken := parkedClient.resumeToken
+	d.clientGone(sess, parkedClient, parkedTransport, false)
+
+	activeTransport := &closeTrackingTransport{}
+	_, active, err := d.route(helloResumeCapable(ports.IntentAttach, "work", 0), activeTransport)
+	require.NoError(t, err)
+	d.mu.Lock()
+	parked := d.parked[parkedToken]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+	require.Equal(t, attachmentSnatched, parked.role)
+	parkedGeneration := parkedClient.roleGeneration.Load()
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	d.waitNotifies()
+
+	require.Nil(t, parkedClient.transport(), "terminal teardown must revoke the parked link ownership")
+	require.Greater(t, parkedClient.roleGeneration.Load(), parkedGeneration, "terminal teardown must invalidate the parked role generation")
+	require.Zero(t, parkedClient.resumeToken)
+	require.False(t, parkedClient.parked)
+	select {
+	case <-parked.done:
+	default:
+		t.Fatal("terminal teardown left the parked expiry goroutine live")
+	}
+	require.True(t, parkedTransport.Closed())
+	require.Nil(t, parkedClient.currentSession())
+	require.Nil(t, active.currentSession())
+	require.True(t, activeTransport.Closed())
+}
+
+func TestDaemonShutdownClosesSnatchedClients(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+	parkedTransport := &closeTrackingTransport{}
+	sess, parkedClient, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), parkedTransport)
+	require.NoError(t, err)
+	parkedToken := parkedClient.resumeToken
+	d.clientGone(sess, parkedClient, parkedTransport, false)
+
+	waitingTransport := &closeTrackingTransport{}
+	_, waiting, err := d.route(helloResumeCapable(ports.IntentAttach, "work", 0), waitingTransport)
+	require.NoError(t, err)
+	activeTransport := &closeTrackingTransport{}
+	_, active, err := d.route(helloResumeCapable(ports.IntentAttach, "work", 0), activeTransport)
+	require.NoError(t, err)
+	d.attachmentCleanupWg.Wait()
+
+	d.mu.Lock()
+	parked := d.parked[parkedToken]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+	require.Equal(t, attachmentSnatched, parked.role)
+	parkedGeneration := parkedClient.roleGeneration.Load()
+	require.Equal(t, attachmentSnatched, sess.attachmentRole(waiting))
+	require.Equal(t, attachmentActive, sess.attachmentRole(active))
+
+	require.False(t, d.shutdownAll(ports.ReasonServerShutdown))
+	d.waitNotifies()
+	d.attachmentCleanupWg.Wait()
+
+	require.Nil(t, parkedClient.transport(), "shutdown must revoke parked attachment link ownership")
+	require.Greater(t, parkedClient.roleGeneration.Load(), parkedGeneration)
+	select {
+	case <-parked.done:
+	default:
+		t.Fatal("shutdown left the parked expiry goroutine live")
+	}
+	for _, client := range []*attachedClient{parkedClient, waiting, active} {
+		require.Nil(t, client.currentSession())
+	}
+	for _, transport := range []*closeTrackingTransport{parkedTransport, waitingTransport, activeTransport} {
+		require.True(t, transport.Closed())
+	}
+	for _, transport := range []*closeTrackingTransport{waitingTransport, activeTransport} {
+		frames := transport.Sends()
+		require.NotEmpty(t, frames)
+		detached, err := ports.UnmarshalDetached(frames[len(frames)-1].Payload)
+		require.NoError(t, err)
+		require.Equal(t, ports.ReasonServerShutdown, detached.Reason)
+	}
+}
+
+func TestSnatchedQuitDoesNotResetActivePaneThemeOrSize(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, waiting, _ := newManualSessionWithPTYs(t, pty)
+	waitingTransport := &closeTrackingTransport{}
+	waiting.replaceTransport(waitingTransport)
+
+	activeTransport := &closeTrackingTransport{}
+	active := &attachedClient{tr: activeTransport, output: newOutputStateStream(), size: waiting.size}
+	active.initOverlays()
+	transition, err := d.transitionAttachment(attachmentTransitionRequest{
+		target: sess, next: active, expectedRole: attachmentDetached, targetRole: attachmentActive,
+		expectedTransport: active.transportSnapshot(), ready: true,
+	})
+	require.NoError(t, err)
+	for _, cleanup := range transition.cleanups {
+		cleanup.finish()
+	}
+
+	activeTheme := ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 12, G: 34, B: 56},
+		HasBackground: true, Background: renderer.RGB{R: 65, G: 43, B: 21},
+		TrueColor: true,
+	}
+	d.applyTheme(sess, active, activeTheme)
+	activeSize := domain.Size{Cols: 101, Rows: 37}
+	d.resize(sess, active, activeSize)
+	require.Equal(t, activeSize, active.size)
+	assertSessionDefaultColors(t, sess, activeTheme.Foreground, activeTheme.Background)
+	requestedBeforeQuit := pty.requested()
+
+	token := sess.attachmentToken(waiting, waitingTransport)
+	require.True(t, d.handleSnatchedClientFrame(token, ports.Frame{
+		Type: ports.MsgInput,
+		Payload: ports.MarshalInput(ports.Input{
+			Data: []byte{'q'},
+		}),
+	}))
+
+	require.Equal(t, attachmentDetached, sess.attachmentRole(waiting))
+	require.Same(t, active, sess.client)
+	require.False(t, activeTransport.Closed())
+	require.True(t, waitingTransport.Closed())
+	require.Equal(t, activeSize, active.size)
+	require.Equal(t, requestedBeforeQuit, pty.requested(), "snatched quit must not resize active panes")
+	assertSessionDefaultColors(t, sess, activeTheme.Foreground, activeTheme.Background)
 }
 
 func TestSnatchedConnectionInputCannotReachPTY(t *testing.T) {
@@ -607,7 +749,7 @@ func (t *failingSnatchedTransport) Closed() bool {
 	return t.closed
 }
 
-func TestSnatchedPanelFailureRemovesOnlySnatchedAttachment(t *testing.T) {
+func TestSnatchedPanelSendFailureRemovesOnlyWaitingClient(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	oldTransport := &failingSnatchedTransport{}
 	old := &attachedClient{tr: oldTransport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
@@ -635,6 +777,45 @@ func TestSnatchedPanelFailureRemovesOnlySnatchedAttachment(t *testing.T) {
 	require.Equal(t, attachmentActive, sess.attachmentRole(next))
 	require.Same(t, next, sess.client)
 	require.False(t, activeTransport.Closed())
+}
+
+func TestSnatchedPanelFailurePreservesActivePaneThemeAndSize(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, waiting, _ := newManualSessionWithPTYs(t, pty)
+	failed := &failingSnatchedTransport{}
+	waiting.replaceTransport(failed)
+
+	activeTransport := &closeTrackingTransport{}
+	active := &attachedClient{tr: activeTransport, output: newOutputStateStream(), size: waiting.size}
+	active.initOverlays()
+	transition, err := d.transitionAttachment(attachmentTransitionRequest{
+		target: sess, next: active, expectedRole: attachmentDetached, targetRole: attachmentActive,
+		expectedTransport: active.transportSnapshot(), ready: true,
+	})
+	require.NoError(t, err)
+
+	activeTheme := ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 12, G: 34, B: 56},
+		HasBackground: true, Background: renderer.RGB{R: 65, G: 43, B: 21},
+		TrueColor: true,
+	}
+	d.applyTheme(sess, active, activeTheme)
+	activeSize := domain.Size{Cols: 103, Rows: 39}
+	d.resize(sess, active, activeSize)
+	require.Equal(t, activeSize, active.size)
+	assertSessionDefaultColors(t, sess, activeTheme.Foreground, activeTheme.Background)
+	requestedBeforeFailure := pty.requested()
+
+	d.deferAttachmentTransitionCleanups(transition)
+	d.attachmentCleanupWg.Wait()
+
+	require.True(t, failed.Closed())
+	require.Equal(t, attachmentDetached, sess.attachmentRole(waiting))
+	require.Same(t, active, sess.client)
+	require.False(t, activeTransport.Closed())
+	require.Equal(t, activeSize, active.size)
+	require.Equal(t, requestedBeforeFailure, pty.requested(), "snatched panel failure must not resize active panes")
+	assertSessionDefaultColors(t, sess, activeTheme.Foreground, activeTheme.Background)
 }
 
 func TestSnatchedThemePanelFailureRemovesOnlySnatchedAttachment(t *testing.T) {

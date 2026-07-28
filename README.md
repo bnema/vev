@@ -38,6 +38,8 @@ vev kill <name>                  kill a session (--all kills everything)
 
 The daemon starts on first use and exits with the last session. Ephemeral sessions are numbered, survive detach, and disappear with the daemon. Named sessions persist across daemon restarts and come back with their layout, recovered terminal transcript, and allowlisted processes.
 
+Each session has one active client. Attaching another client shows `Session snatched` on the prior client; press `r` to resume control, or `q`/Esc to quit that attachment. A remote snatched client that reconnects stays snatched and does not take control automatically.
+
 ## Keys
 
 No prefix key; everything is Alt.

@@ -133,13 +133,55 @@ func (d *Daemon) demoteParkedActiveForSessionLocked(sess *session) {
 	}
 }
 
-// purgeParkedForSessionLocked invalidates every parked token for sess. Caller
-// holds d.mu. It is reserved for terminal session kill and daemon shutdown.
-func (d *Daemon) purgeParkedForSessionLocked(sess *session) {
+type parkedAttachmentRetirement struct {
+	parked    *parkedAttachment
+	transport transportSnapshot
+}
+
+func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
+	delete(d.parked, token)
+	parked.ac.clearPreviousSession()
+	parked.ac.resumeToken = 0
+	parked.ac.parked = false
+	parked.ac.roleGeneration.Add(1)
+	parked.ac.setSession(nil)
+	return parkedAttachmentRetirement{
+		parked:    parked,
+		transport: parked.ac.transportSnapshot(),
+	}
+}
+
+// purgeParkedForSessionLocked invalidates every parked token for sess and
+// returns the external resources that must be retired after releasing d.mu.
+// It is reserved for terminal session kill and daemon shutdown.
+func (d *Daemon) purgeParkedForSessionLocked(sess *session) []parkedAttachmentRetirement {
+	var retirements []parkedAttachmentRetirement
 	for token, parked := range d.parked {
 		if parked.sess == sess {
-			d.removeParkedLocked(token, parked)
+			retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
 		}
+	}
+	return retirements
+}
+
+func (d *Daemon) purgeAllParkedLocked() []parkedAttachmentRetirement {
+	retirements := make([]parkedAttachmentRetirement, 0, len(d.parked))
+	for token, parked := range d.parked {
+		retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
+	}
+	return retirements
+}
+
+// finishParkedAttachmentRetirements stops timers and closes transports without
+// holding daemon, session, coordinator, or pane locks.
+func finishParkedAttachmentRetirements(retirements []parkedAttachmentRetirement) {
+	for _, retirement := range retirements {
+		if retirement.parked.timer != nil {
+			retirement.parked.timer.Stop()
+		}
+		retirement.parked.closeDone()
+		ac := retirement.parked.ac
+		_ = ac.closeCapturedTransport(ac.revokeTransport(retirement.transport.transport))
 	}
 }
 

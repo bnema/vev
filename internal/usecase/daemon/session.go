@@ -1436,7 +1436,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	// while the complete immutable gate set remains frozen.
 	delete(d.sessions, sess.id)
 	d.clearBarScriptsForSession(sess.id)
-	d.purgeParkedForSessionLocked(sess)
+	parkedRetirements := d.purgeParkedForSessionLocked(sess)
 	detachedActive := sess.client
 	attachments := make([]detachedAttachmentSnapshot, 0, len(participants.roleGates))
 	capture := func(attached *attachedClient) {
@@ -1474,6 +1474,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		d.closing = true
 	}
 	d.mu.Unlock()
+	finishParkedAttachmentRetirements(parkedRetirements)
 	frozen.unfreeze()
 	frozen = frozenRoleEffectGates{}
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
