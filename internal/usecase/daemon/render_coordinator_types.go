@@ -80,9 +80,10 @@ type resizeRequestMetadata struct {
 	source *attachedClient
 	// lease binds every delayed resize/retry callback to the exact attachment
 	// incarnation that published this request.
-	lease     *attachmentLease
-	epoch     uint64 // latest requested epoch
-	committed uint64 // latest published epoch
+	lease         *attachmentLease
+	epoch         uint64 // latest requested epoch
+	committed     uint64 // latest published epoch
+	retryAttempts uint8
 }
 
 // renderCoordinatorOptions wires one coordinator instance.
@@ -105,6 +106,9 @@ type renderCoordinatorOptions struct {
 	// afterSyncGateEvaluated is a package-private deterministic test seam. It
 	// runs unlocked after visibility predicates and before registry validation.
 	afterSyncGateEvaluated func()
+	// onActivateTabAfterResize observes whether activation used a lease-backed
+	// path; it is nil in production.
+	onActivateTabAfterResize func(bool)
 }
 
 // renderCoordinator fans in producer invalidations for one attached session.

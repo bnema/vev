@@ -9,7 +9,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := PaletteRegistry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -36,6 +36,76 @@ func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 			t.Errorf("Registry()[%d].Slug = %q, duplicate slug", i, cmd.Slug)
 		}
 		seenSlugs[cmd.Slug] = true
+	}
+}
+
+func TestMoveCommandsExposeExactRegistryContracts(t *testing.T) {
+	tests := []struct {
+		code, slug, name, desc, usage string
+		target                        TargetKind
+		args                          []string
+		wantCall                      string
+	}{
+		{
+			code: "MPN", slug: "move-pane", name: "Move pane to tab",
+			desc: "Move the focused pane to another live tab", usage: "move-pane <destination-session> <destination-tab-id>",
+			target: TargetPane, args: []string{"work", "t_dest"}, wantCall: "move-pane:work:t_dest",
+		},
+		{
+			code: "MTB", slug: "move-tab", name: "Move tab to session",
+			desc: "Move the active tab to another live session", usage: "move-tab <destination-session>",
+			target: TargetTab, args: []string{"work"}, wantCall: "move-tab:work",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.slug, func(t *testing.T) {
+			cmd, ok := BySlug(tt.slug)
+			if !ok {
+				t.Fatalf("BySlug(%q) missing", tt.slug)
+			}
+			if cmd.Code != tt.code || cmd.Name != tt.name || cmd.Desc != tt.desc || cmd.Usage != tt.usage {
+				t.Fatalf("command metadata = %#v", cmd)
+			}
+			if !cmd.PaletteVisible || !cmd.Scriptable || cmd.Target != tt.target || cmd.Scope != CommandScopeCrossSession {
+				t.Fatalf("command visibility/target/scope = palette:%v scriptable:%v target:%v scope:%v", cmd.PaletteVisible, cmd.Scriptable, cmd.Target, cmd.Scope)
+			}
+			ctx := &controlSpy{}
+			if _, err := cmd.Control(ctx, tt.args, ControlOptions{}); err != nil {
+				t.Fatalf("Control(%v): %v", tt.args, err)
+			}
+			if ctx.call != tt.wantCall {
+				t.Fatalf("Control(%v) call = %q, want %q", tt.args, ctx.call, tt.wantCall)
+			}
+		})
+	}
+}
+
+func TestMoveControlHandlersRequireExactArguments(t *testing.T) {
+	for _, tt := range []struct {
+		slug string
+		args []string
+	}{
+		{slug: "move-pane"},
+		{slug: "move-pane", args: []string{"work"}},
+		{slug: "move-pane", args: []string{"work", "t_dest", "extra"}},
+		{slug: "move-pane", args: []string{"", "t_dest"}},
+		{slug: "move-tab"},
+		{slug: "move-tab", args: []string{"work", "extra"}},
+		{slug: "move-tab", args: []string{""}},
+	} {
+		t.Run(tt.slug+"/"+strconv.Itoa(len(tt.args)), func(t *testing.T) {
+			cmd, ok := BySlug(tt.slug)
+			if !ok {
+				t.Fatalf("BySlug(%q) missing", tt.slug)
+			}
+			ctx := &controlSpy{}
+			if _, err := cmd.Control(ctx, tt.args, ControlOptions{}); !errors.Is(err, ErrInvalidArguments) {
+				t.Fatalf("Control(%v) error = %v, want ErrInvalidArguments", tt.args, err)
+			}
+			if ctx.call != "" {
+				t.Fatalf("invalid arguments delegated: %q", ctx.call)
+			}
+		})
 	}
 }
 
@@ -73,6 +143,7 @@ func TestRegistryControlMetadata(t *testing.T) {
 		"new-session": TargetSession, "toast": TargetSession,
 		"grow-pane-width": TargetPane, "shrink-pane-width": TargetPane,
 		"grow-pane-height": TargetPane, "shrink-pane-height": TargetPane, "equalize-panes": TargetTab,
+		"move-pane": TargetPane, "move-tab": TargetTab,
 		"list-sessions": TargetNone, "list-tabs": TargetSession, "list-panes": TargetTab,
 	}
 	notScriptable := []string{
@@ -193,27 +264,31 @@ func (s *controlSpy) CreateTab() error                  { return s.record("new-t
 func (s *controlSpy) CreateSessionNamed(v string) error { return s.record("new-session:" + v) }
 func (s *controlSpy) CloseTab() error                   { return s.record("close-tab") }
 func (s *controlSpy) ClosePane() error                  { return s.record("close-pane") }
-func (s *controlSpy) SplitRight() error                 { return s.record("split-right") }
-func (s *controlSpy) SplitLeft() error                  { return s.record("split-left") }
-func (s *controlSpy) SplitUp() error                    { return s.record("split-up") }
-func (s *controlSpy) SplitDown() error                  { return s.record("split-down") }
-func (s *controlSpy) ConsumeOrExpelPaneLeft() error     { return s.record("consume-or-expel-pane-left") }
-func (s *controlSpy) ConsumeOrExpelPaneRight() error    { return s.record("consume-or-expel-pane-right") }
-func (s *controlSpy) StackPane() error                  { return s.record("stack-pane") }
-func (s *controlSpy) ToggleStack() error                { return s.record("toggle-stack") }
-func (s *controlSpy) GrowPaneWidth() error              { return s.record("grow-pane-width") }
-func (s *controlSpy) ShrinkPaneWidth() error            { return s.record("shrink-pane-width") }
-func (s *controlSpy) GrowPaneHeight() error             { return s.record("grow-pane-height") }
-func (s *controlSpy) ShrinkPaneHeight() error           { return s.record("shrink-pane-height") }
-func (s *controlSpy) EqualizePanes() error              { return s.record("equalize-panes") }
-func (s *controlSpy) FocusPaneLeft() error              { return s.record("focus-pane-left") }
-func (s *controlSpy) FocusPaneRight() error             { return s.record("focus-pane-right") }
-func (s *controlSpy) FocusPaneUp() error                { return s.record("focus-pane-up") }
-func (s *controlSpy) FocusPaneDown() error              { return s.record("focus-pane-down") }
-func (s *controlSpy) NextTab() error                    { return s.record("next-tab") }
-func (s *controlSpy) PrevTab() error                    { return s.record("previous-tab") }
-func (s *controlSpy) RenameSessionTo(v string) error    { return s.record("rename-session:" + v) }
-func (s *controlSpy) RenameTabTo(v string) error        { return s.record("rename-tab:" + v) }
+func (s *controlSpy) MovePane(session, tab string) error {
+	return s.record("move-pane:" + session + ":" + tab)
+}
+func (s *controlSpy) MoveTab(session string) error   { return s.record("move-tab:" + session) }
+func (s *controlSpy) SplitRight() error              { return s.record("split-right") }
+func (s *controlSpy) SplitLeft() error               { return s.record("split-left") }
+func (s *controlSpy) SplitUp() error                 { return s.record("split-up") }
+func (s *controlSpy) SplitDown() error               { return s.record("split-down") }
+func (s *controlSpy) ConsumeOrExpelPaneLeft() error  { return s.record("consume-or-expel-pane-left") }
+func (s *controlSpy) ConsumeOrExpelPaneRight() error { return s.record("consume-or-expel-pane-right") }
+func (s *controlSpy) StackPane() error               { return s.record("stack-pane") }
+func (s *controlSpy) ToggleStack() error             { return s.record("toggle-stack") }
+func (s *controlSpy) GrowPaneWidth() error           { return s.record("grow-pane-width") }
+func (s *controlSpy) ShrinkPaneWidth() error         { return s.record("shrink-pane-width") }
+func (s *controlSpy) GrowPaneHeight() error          { return s.record("grow-pane-height") }
+func (s *controlSpy) ShrinkPaneHeight() error        { return s.record("shrink-pane-height") }
+func (s *controlSpy) EqualizePanes() error           { return s.record("equalize-panes") }
+func (s *controlSpy) FocusPaneLeft() error           { return s.record("focus-pane-left") }
+func (s *controlSpy) FocusPaneRight() error          { return s.record("focus-pane-right") }
+func (s *controlSpy) FocusPaneUp() error             { return s.record("focus-pane-up") }
+func (s *controlSpy) FocusPaneDown() error           { return s.record("focus-pane-down") }
+func (s *controlSpy) NextTab() error                 { return s.record("next-tab") }
+func (s *controlSpy) PrevTab() error                 { return s.record("previous-tab") }
+func (s *controlSpy) RenameSessionTo(v string) error { return s.record("rename-session:" + v) }
+func (s *controlSpy) RenameTabTo(v string) error     { return s.record("rename-tab:" + v) }
 func (s *controlSpy) Toast(level, message string) error {
 	return s.record("toast:" + level + ":" + message)
 }
@@ -298,6 +373,8 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "TST", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleStack().Return(nil).Once() }},
 		{code: "FLT", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleFloatingPane().Return(nil).Once() }},
 		{code: "CLP", expect: func(ctx *MockContext) { ctx.EXPECT().ClosePane().Return(nil).Once() }},
+		{code: "MPN", expect: func(ctx *MockContext) { ctx.EXPECT().OpenMovePanePicker().Return(nil).Once() }},
+		{code: "MTB", expect: func(ctx *MockContext) { ctx.EXPECT().OpenMoveTabPicker().Return(nil).Once() }},
 		{code: "FPL", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneLeft().Return(nil).Once() }},
 		{code: "FPR", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneRight().Return(nil).Once() }},
 		{code: "FPU", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneUp().Return(nil).Once() }},

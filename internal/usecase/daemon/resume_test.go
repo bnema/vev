@@ -51,6 +51,40 @@ func (t *closeTrackingTransport) Sends() []ports.Frame {
 	return append([]ports.Frame(nil), t.sends...)
 }
 
+type closeCountingBlockedTransport struct {
+	closeOnce sync.Once
+	closed    chan struct{}
+	count     int
+	mu        sync.Mutex
+}
+
+func newCloseCountingBlockedTransport() *closeCountingBlockedTransport {
+	return &closeCountingBlockedTransport{closed: make(chan struct{})}
+}
+
+func (t *closeCountingBlockedTransport) Send(ports.Frame) error {
+	<-t.closed
+	return errors.New("closed")
+}
+
+func (t *closeCountingBlockedTransport) Recv() (ports.Frame, error) {
+	return ports.Frame{}, errors.New("closed")
+}
+
+func (t *closeCountingBlockedTransport) Close() error {
+	t.mu.Lock()
+	t.count++
+	t.mu.Unlock()
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func (t *closeCountingBlockedTransport) CloseCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.count
+}
+
 func helloResumeCapable(intent uint8, name string, token uint64) ports.Hello {
 	return ports.Hello{
 		Version:     ports.ProtocolVersion,
@@ -137,6 +171,24 @@ func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
 	<-orphanDone
 	require.Empty(t, newTransport.Sends(), "orphaned send must not write to the resumed transport")
 	require.False(t, newTransport.Closed(), "orphaned send must not close the resumed transport")
+}
+
+func TestDetachedNotificationTimeoutClosesCapturedTransportOnce(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	tr := newCloseCountingBlockedTransport()
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
+
+	d.notifyDetachedSnapshotAsync(detachedAttachmentSnapshot{
+		ac:        ac,
+		transport: ac.transportSnapshot(),
+	}, ports.ReasonDetach)
+	timer := <-clock.timers
+	timer.ch <- time.Time{}
+	d.waitNotifies()
+
+	require.Equal(t, 1, tr.CloseCount(), "timeout revocation must close the captured transport at most once")
+	require.Nil(t, ac.transport(), "timeout cleanup must revoke the captured transport")
 }
 
 func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
@@ -308,6 +360,7 @@ func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.
 	token := ac.resumeToken
 	require.True(t, sess.detachIfCurrent(ac))
 	require.True(t, d.parkAttachment(sess, ac))
+	generation := ac.roleGeneration.Load()
 
 	newTr := &closeTrackingTransport{}
 	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), newTr, domain.Size{Cols: 80, Rows: 24})
@@ -315,6 +368,7 @@ func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.
 	require.True(t, ok)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
+	require.Greater(t, ac.roleGeneration.Load(), generation, "resume must publish active ownership through the attachment transition")
 
 	_ = ac.closeCapturedTransport(oldTr)
 	require.True(t, oldTr.Closed(), "old transport is closed")
@@ -518,18 +572,19 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		discard func(*Daemon, uint64, *parkedAttachment)
+		discard func(*Daemon, uint64, *parkedAttachment) []parkedAttachmentRetirement
 	}{
 		{
 			name: "expiry",
-			discard: func(d *Daemon, token uint64, parked *parkedAttachment) {
+			discard: func(d *Daemon, token uint64, parked *parkedAttachment) []parkedAttachmentRetirement {
 				d.removeParkedLocked(token, parked)
+				return nil
 			},
 		},
 		{
 			name: "session purge",
-			discard: func(d *Daemon, _ uint64, parked *parkedAttachment) {
-				d.purgeParkedForSessionLocked(parked.sess)
+			discard: func(d *Daemon, _ uint64, parked *parkedAttachment) []parkedAttachmentRetirement {
+				return d.purgeParkedForSessionLocked(parked.sess)
 			},
 		},
 	} {
@@ -547,8 +602,9 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			d.mu.Lock()
 			parked := d.parked[ac.resumeToken]
 			require.NotNil(t, parked)
-			tc.discard(d, ac.resumeToken, parked)
+			retirements := tc.discard(d, ac.resumeToken, parked)
 			d.mu.Unlock()
+			finishParkedAttachmentRetirements(retirements)
 
 			require.Nil(t, ac.previousSession.Get())
 		})
@@ -604,7 +660,7 @@ func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
 	require.False(t, ok, "killed session cannot be resumed")
 }
 
-func TestStaleParkedTokenCannotStealActiveAttachment(t *testing.T) {
+func TestParkedPredecessorResumesSnatchedWithoutStealingActiveAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
@@ -620,13 +676,15 @@ func TestStaleParkedTokenCannotStealActiveAttachment(t *testing.T) {
 	require.NotSame(t, oldAC, activeAC)
 
 	d.mu.Lock()
-	_, parked := d.parked[token]
+	parked := d.parked[token]
 	d.mu.Unlock()
+	require.NotNil(t, parked, "normal attach preserves the parked predecessor")
+	require.Equal(t, attachmentSnatched, parked.role)
 	_, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
-	require.False(t, parked, "normal attach invalidates stale parked token")
 	require.NoError(t, err)
-	require.False(t, ok)
-	require.Nil(t, resumedAC)
+	require.True(t, ok)
+	require.Same(t, oldAC, resumedAC)
+	require.Equal(t, attachmentSnatched, sess.attachmentRole(resumedAC))
 	require.Same(t, activeAC, sess.client)
 }
 

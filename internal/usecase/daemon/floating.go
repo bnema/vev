@@ -42,6 +42,14 @@ func (tb *tab) beginFloatingWarmLocked(desiredVisible bool) uint64 {
 	return tb.floating.generation
 }
 
+// floatingTransferableLocked reports whether a tab's floating lifecycle can
+// cross an ownership commit. A warming Open remains registered to its source
+// session until installation or failure, so moves must reject only that state.
+// The caller must hold tb.mu.
+func (tb *tab) floatingTransferableLocked() bool {
+	return tb != nil && tb.floating.state != floatingWarming
+}
+
 // toggleFloatingLocked applies the user action. Its result says whether a new
 // PTY launch is required and returns the generation associated with that launch
 // or current slot.
@@ -160,15 +168,33 @@ func (d *Daemon) activateTab(sess *session, tb *tab) bool {
 // activateTabAfterResize retains tab activation's warmup work while avoiding a
 // second resize when a synchronous outer resize request was already accepted.
 func (d *Daemon) activateTabAfterResize(sess *session, tb *tab, outerResizeAccepted bool) bool {
+	return d.activateTabAfterResizeForLease(sess, tb, outerResizeAccepted, nil, nil)
+}
+
+// activateTabAfterResizeForLease keeps transition-owned resize effects bound to
+// the exact coordinator incarnation. A nil lease preserves direct/headless
+// activation behavior.
+func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerResizeAccepted bool, ac *attachedClient, lease *attachmentLease) bool {
 	if d == nil || sess == nil || tb == nil {
 		return false
 	}
 	// A headless session has no actual terminal destination. Deferring warmup
 	// until firstPaint keeps restored tabs cold and avoids launching children
 	// merely because a tab was manipulated during teardown.
-	sess.mu.Lock()
-	ac := sess.client
-	sess.mu.Unlock()
+	if ac == nil {
+		sess.mu.Lock()
+		ac = sess.client
+		sess.mu.Unlock()
+	}
+	if rc := sess.renderCoordinator(); rc != nil && rc.opts.onActivateTabAfterResize != nil {
+		rc.opts.onActivateTabAfterResize(lease != nil)
+	}
+	if lease != nil {
+		rc := sess.renderCoordinator()
+		if rc == nil || !rc.leaseCurrent(lease, true) {
+			return false
+		}
+	}
 	d.exitCopyMode(ac)
 	if ac == nil {
 		return false
@@ -182,6 +208,9 @@ func (d *Daemon) activateTabAfterResize(sess *session, tb *tab, outerResizeAccep
 	size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 	tb.mu.Unlock()
 	if hasFloating {
+		if lease != nil {
+			return d.requestTransactionalResizeForLease(sess, ac, lease, size, true)
+		}
 		return d.requestTransactionalResize(sess, ac, size, true)
 	}
 	return false
@@ -366,17 +395,22 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	if err := spec.parentCtx.Err(); err != nil {
 		return
 	}
-	openCtx, cancelOpen := context.WithCancel(spec.parentCtx)
-	stopSessionCancel := context.AfterFunc(sess.ctx, cancelOpen)
+	lifetime := d.newPaneProcessLifetime(spec.parentCtx, sess.ctx)
 	ownedByPane := false
 	defer func() {
 		if !ownedByPane {
-			stopSessionCancel()
-			cancelOpen()
+			lifetime.abort()
 		}
 	}()
-	pty, err := d.ptys.Open(openCtx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
+	pty, err := d.ptys.Open(lifetime.ctx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	if err != nil {
+		// Open retains ownership of a nonnil PTY only on success. Some factory
+		// implementations can return a partially opened PTY with an error, so
+		// release both resources before publishing the launch failure.
+		lifetime.abort()
+		if pty != nil {
+			_ = pty.Close()
+		}
 		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, err)
 		return
 	}
@@ -384,17 +418,17 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	p.rect = spec.geometry.ptyRect()
 	p.popupGeometry = spec.geometry
 	p.title.displayFallback = spec.fallback
-	// CommandContext owns the child through openCtx, so retain both this context
-	// and its cancellation until the installed pane is reaped or torn down.
-	p.ctx = openCtx
-	p.cancel = func() {
-		stopSessionCancel()
-		cancelOpen()
+	if !lifetime.publish(p) {
+		_ = pty.Close()
+		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, lifetime.ctx.Err())
+		return
 	}
 	ownedByPane = true
 	// The reader may run as soon as install returns; make its exit policy
-	// immutable before publishing the pane to the slot.
-	p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
+	// immutable before publishing the pane to the slot. Installed panes resolve
+	// their owner dynamically so a transferred tab never reaps through source
+	// session pointers captured by its launch.
+	p.onExit = func() { d.reapInstalledFloating(p) }
 	d.installFloating(sess, tb, p, generation)
 }
 
@@ -423,8 +457,18 @@ func (d *Daemon) failFloatingLaunch(sess *session, tb *tab, generation uint64, u
 // installFloating installs only the current generation. A stale successful
 // launch is cancelled and closed outside the tab lock.
 func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uint64) {
+	if sess == nil || tb == nil || p == nil {
+		closeFloatingPane(p)
+		return
+	}
 	tb.mu.Lock()
-	installed := tb.installFloatingLocked(p, generation)
+	installable := tb.floating.state == floatingWarming && tb.floating.generation == generation
+	if installable {
+		// Publish under pane.mu before the slot becomes hidden or visible. The
+		// tab-to-pane lock order also linearizes owner and slot publication.
+		publishPaneOwner(p, sess, tb, generation)
+	}
+	installed := installable && tb.installFloatingLocked(p, generation)
 	visible := installed && tb.floating.state == floatingVisible
 	tb.mu.Unlock()
 	if !installed {
@@ -444,26 +488,44 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	}
 }
 
-// reapFloating ignores old readers and restores the background only when the
-// exiting popup was visible.
-func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64) {
-	tb.mu.Lock()
-	visible := tb.floating.state == floatingVisible && tb.floating.pane == p && tb.floating.generation == generation
-	cleared := tb.clearFloatingLocked(p, generation)
-	tb.mu.Unlock()
-	if !cleared {
+// reapInstalledFloating resolves the pane's current immutable owner on every
+// attempt. If ownership changes before the tab lock is acquired, retrying the
+// lookup routes exit through the destination. The owner pointer and floating
+// slot generation are then checked together under tb.mu so an old exit can
+// never clear a reused slot.
+func (d *Daemon) reapInstalledFloating(p *pane) {
+	if p == nil {
 		return
 	}
-	closeFloatingPane(p)
-	sess.mu.Lock()
-	ac := sess.client
-	sess.mu.Unlock()
-	if ac != nil {
-		ac.pruneCaptureFrames(p)
-	}
-	copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
-	if ac != nil && (visible || copyCleared) {
-		d.invalidateRender(sess, ac, true, "floating.go")
+	for {
+		owner := p.ownerSnapshot()
+		if owner == nil || owner.session == nil || owner.tab == nil || owner.floatingSlotGeneration == 0 {
+			return
+		}
+		sess, tb, generation := owner.session, owner.tab, owner.floatingSlotGeneration
+		tb.mu.Lock()
+		if p.ownerSnapshot() != owner {
+			tb.mu.Unlock()
+			continue
+		}
+		visible := tb.floating.state == floatingVisible && tb.floating.pane == p && tb.floating.generation == generation
+		cleared := tb.clearFloatingLocked(p, generation)
+		tb.mu.Unlock()
+		if !cleared {
+			return
+		}
+		closeFloatingPane(p)
+		sess.mu.Lock()
+		ac := sess.client
+		sess.mu.Unlock()
+		if ac != nil {
+			ac.pruneCaptureFrames(p)
+		}
+		copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
+		if ac != nil && (visible || copyCleared) {
+			d.invalidateRender(sess, ac, true, "floating.go")
+		}
+		return
 	}
 }
 
@@ -485,17 +547,7 @@ func (d *Daemon) teardownFloating(tb *tab, ac *attachedClient) {
 // closeFloatingPane releases a floating runtime at most once. It is called
 // only after a generation/identity check has detached the pane from its slot.
 func closeFloatingPane(p *pane) {
-	if p == nil {
-		return
-	}
-	p.floatingCloseOnce.Do(func() {
-		if p.cancel != nil {
-			p.cancel()
-		}
-		if p.pty != nil {
-			_ = p.pty.Close()
-		}
-	})
+	closePaneProcess(p)
 }
 
 func floatingCommandFallback(command, shell string) string {

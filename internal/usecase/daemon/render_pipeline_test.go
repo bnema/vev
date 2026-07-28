@@ -511,7 +511,7 @@ func TestCaptureOverlayLayersRendersEveryModelToResolvedInner(t *testing.T) {
 	snap := &overlayRenderSnapshot{
 		copySearchModel:      visualsearch.New(snapshot),
 		pickerActive:         true,
-		pickerModel:          picker.New(nil, "", 0),
+		pickerModel:          picker.New(nil, picker.SelectionConfig{}),
 		noticesOverlayActive: true,
 		noticesOverlayModel:  notices.New(nil, time.Time{}),
 		paletteActive:        true,

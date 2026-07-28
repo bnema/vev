@@ -143,6 +143,58 @@ func TestPaletteCommandFailureSurfacesAsNotice(t *testing.T) {
 	require.Equal(t, domain.NoticeTabSpawn, history[0].Code)
 }
 
+func TestPaletteCommandNoticeErrorPreservesTypedErrorsAndMapsMoveFailures(t *testing.T) {
+	typedTabSpawn := domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab", errors.New("open failed"))
+	tests := []struct {
+		name, slug, message string
+		err                 error
+		code                domain.NoticeCode
+		severity            domain.NoticeSeverity
+		wantSame            bool
+	}{
+		{name: "CNT typed command error", slug: "new-tab", err: typedTabSpawn, code: domain.NoticeTabSpawn, severity: domain.NoticeError, message: "couldn't open tab", wantSame: true},
+		{name: "MPN no destination", slug: "move-pane", err: errNoMoveDestination, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "No destination available."},
+		{name: "MTB warming floating", slug: "move-tab", err: errMoveFloatingWarming, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Wait for the floating pane to finish opening."},
+		{name: "MPN final pane with floating slot", slug: "move-pane", err: errMoveFinalSourceFloating, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Close the floating pane or move the whole tab."},
+		{name: "MPN destination too small", slug: "move-pane", err: errMoveTooSmall, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Not enough space in destination tab."},
+		{name: "MTB stale destination", slug: "move-tab", err: errMoveStaleTarget, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Destination is no longer available."},
+		{name: "MPN generic invalid", slug: "move-pane", err: errMovePaneInvalid, code: domain.NoticeInternal, severity: domain.NoticeError, message: "Move failed."},
+		{name: "MPN typed application error", slug: "move-pane", err: typedTabSpawn, code: domain.NoticeTabSpawn, severity: domain.NoticeError, message: "couldn't open tab", wantSame: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, ok := command.BySlug(tt.slug)
+			require.True(t, ok)
+			got := paletteCommandNoticeError(cmd, tt.err)
+			if tt.wantSame {
+				require.Same(t, tt.err, got)
+			}
+			var userErr *domain.UserError
+			require.ErrorAs(t, got, &userErr)
+			require.Equal(t, tt.code, userErr.Code)
+			require.Equal(t, tt.severity, userErr.Severity)
+			require.Equal(t, tt.message, userErr.Msg)
+		})
+	}
+}
+
+func TestPaletteCommandNoticeErrorUsesCommandScope(t *testing.T) {
+	t.Run("future cross-session command inherits move rejection presentation", func(t *testing.T) {
+		cmd := command.Command{Slug: "future-transfer", Scope: command.CommandScopeCrossSession}
+		got := paletteCommandNoticeError(cmd, errMoveStaleTarget)
+		var userErr *domain.UserError
+		require.ErrorAs(t, got, &userErr)
+		require.Equal(t, domain.NoticeSessionUnavailable, userErr.Code)
+		require.Equal(t, "Destination is no longer available.", userErr.Msg)
+	})
+
+	t.Run("move-like slug without metadata is unchanged", func(t *testing.T) {
+		err := errors.New("ordinary failure")
+		got := paletteCommandNoticeError(command.Command{Slug: "move-pane"}, err)
+		require.Same(t, err, got)
+	})
+}
+
 func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -287,12 +339,19 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
+	generation := ac.roleGeneration.Load()
 	d.handleInput(current, ac, []byte("stopped\r"))
 
-	require.Equal(t, "stopped", ac.currentSession().name)
-	require.Equal(t, int64(42), ac.currentSession().createdAt)
+	resumed := ac.currentSession()
+	require.Equal(t, "stopped", resumed.name)
+	require.Equal(t, int64(42), resumed.createdAt)
+	require.Equal(t, attachmentActive, resumed.attachmentRole(ac))
+	require.Greater(t, ac.roleGeneration.Load(), generation, "stopped-session handoff must publish through the attachment transition")
 	require.False(t, ac.overlays.paletteActive())
-	awaitFrame(t, sends, ports.MsgOutput)
+	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
+	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
+	require.NoError(t, err)
+	require.Zero(t, firstOutput.BaseStateNum, "stopped-session first paint must reset moving output state")
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -392,6 +451,58 @@ func TestPaletteJRSThenBSKReversesJump(t *testing.T) {
 
 	runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
 	require.Same(t, current, ac.currentSession())
+}
+
+func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	// Establish a valid back-session target, then remove that target immediately
+	// after the command releases its role admission.
+	target := d.sessions[domain.SessionID("recent")]
+	ac.previousSession.Set(target)
+	invalidations := installPaletteInvalidationObserver(current)
+	d.enterPalette(current, ac)
+	d.handlePaletteInput(ac, []byte("BSK"))
+	d.afterActionRoleEffectEnded = func(action string) {
+		if action == "back-session" {
+			d.mu.Lock()
+			delete(d.sessions, target.id)
+			d.mu.Unlock()
+		}
+	}
+
+	token := current.attachmentToken(ac, ac.transport())
+	effect, admitted := ac.beginRoleEffect(token)
+	require.True(t, admitted)
+	d.handlePaletteInput(ac, []byte("\r"), effect)
+
+	require.False(t, ac.overlays.paletteActive(), "a failed executed handoff must not leave a stale palette")
+	require.Same(t, current, ac.currentSession(), "failed handoff must preserve the source attachment")
+	invalidation := awaitTestValue(t, invalidations, "failed palette handoff did not invalidate rendering")
+	require.True(t, invalidation.reset)
+}
+
+func TestPaletteDeniedPostHandoffRoleEffectClosesAndInvalidates(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	invalidations := installPaletteInvalidationObserver(sess)
+
+	d.enterPalette(sess, ac)
+	d.handlePaletteInput(ac, []byte("BSK"))
+	// Make the attachment token detached while retaining currentSession. The
+	// no-op BSK command succeeds, but its post-execution beginRoleEffect is
+	// deterministically denied.
+	sess.mu.Lock()
+	sess.client = nil
+	sess.mu.Unlock()
+
+	d.handlePaletteInput(ac, []byte("\r"))
+
+	require.False(t, ac.overlays.paletteActive(), "denied cleanup admission must still close the executed palette")
+	invalidation := awaitTestValue(t, invalidations, "denied palette cleanup did not invalidate rendering")
+	require.True(t, invalidation.reset)
 }
 
 func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
@@ -538,11 +649,15 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.True(t, ac.overlays.promptActive())
 	require.Contains(t, string(promptOutput.Data), "Create session")
 
+	generation := ac.roleGeneration.Load()
 	d.handleInput(sess, ac, []byte("scratch\r"))
 	// The submit first paints the newly attached session while the prompt is
 	// still open, then handlePromptInput closes the prompt and repaints the
 	// client's current session. The final frame must be for the new session.
-	awaitFrame(t, sends, ports.MsgOutput)
+	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
+	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
+	require.NoError(t, err)
+	require.Zero(t, firstOutput.BaseStateNum, "new-session first paint must reset moving output state")
 	finalRepaint := awaitFrame(t, sends, ports.MsgOutput)
 	finalOutput, err := ports.UnmarshalOutput(finalRepaint.Payload)
 	require.NoError(t, err)
@@ -555,6 +670,8 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.Equal(t, "scratch", newSess.name)
 	require.False(t, newSess.ephemeral)
 	require.Same(t, ac, newSess.client)
+	require.Equal(t, attachmentActive, newSess.attachmentRole(ac))
+	require.Greater(t, ac.roleGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
 	require.Contains(t, string(finalOutput.Data), "scratch")
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }
@@ -625,12 +742,12 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	d := &Daemon{}
-	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	var wg sync.WaitGroup
 	for range 50 {

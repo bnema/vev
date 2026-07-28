@@ -3,10 +3,12 @@ package daemon
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -200,6 +202,25 @@ func chunkReadPTY(t *testing.T, chunks ...[]byte) *portsmocks.MockPTY {
 	return p
 }
 
+func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClient, tr ports.Transport) {
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	token := sess.attachmentToken(ac, tr)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishRoleCapability(token)
+}
+
+func clipboardOwnerLease(t *testing.T, sess *session) paneEffectLease {
+	t.Helper()
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	p := tb.terminalTargetLocked()
+	tb.mu.Unlock()
+	if p == nil {
+		t.Fatal("clipboard owner has no terminal target")
+	}
+	return p.effectLease()
+}
+
 func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	p := chunkReadPTY(t, []byte("\x1b]52;c;aGVsbG8=\x07"))
@@ -211,16 +232,25 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "clip", name: "clip", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
+	publishActiveClipboardCapability(d, sess, ac, tr)
 
 	d.sessWg.Add(1)
 	d.ptyReader(sess, win, win.focusedPane())
 
-	f := awaitFrame(t, sends, ports.MsgOutput)
-	out, err := ports.UnmarshalOutput(f.Payload)
-	require.NoError(t, err)
-	require.Contains(t, string(out.Data), "\x1b]52;c;aGVsbG8=\x07")
+	var clipboardOutput string
+	for range 3 {
+		f := awaitFrame(t, sends, ports.MsgOutput)
+		out, err := ports.UnmarshalOutput(f.Payload)
+		require.NoError(t, err)
+		clipboardOutput = string(out.Data)
+		if strings.Contains(clipboardOutput, "\x1b]52;c;aGVsbG8=\x07") {
+			break
+		}
+	}
+	require.Contains(t, clipboardOutput, "\x1b]52;c;aGVsbG8=\x07")
 }
 
 func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
@@ -236,6 +266,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "clip-big", name: "clip-big", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 
@@ -260,6 +291,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "clip-bad", name: "clip-bad", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 
@@ -281,6 +313,7 @@ func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
 	sess := &session{id: "clip-noclient", name: "clip-noclient", tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	publishTiledPaneOwners(sess, win)
 	d.sessions[sess.id] = sess
 
 	d.sessWg.Add(1)
@@ -289,22 +322,196 @@ func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
 	})
 }
 
+type staleClipboardErrorTransport struct {
+	mu    sync.Mutex
+	sends int
+}
+
+func (t *staleClipboardErrorTransport) Send(ports.Frame) error {
+	t.mu.Lock()
+	t.sends++
+	t.mu.Unlock()
+	return errors.New("stale clipboard send")
+}
+
+func (*staleClipboardErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*staleClipboardErrorTransport) Close() error               { return nil }
+
+func (t *staleClipboardErrorTransport) sendCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.sends
+}
+
+func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	oldTransport := &staleClipboardErrorTransport{}
+	ac.replaceTransport(oldTransport)
+	publishActiveClipboardCapability(d, sess, ac, oldTransport)
+
+	sess.mu.Lock()
+	sess.clipboardWorkerRunning = true
+	sess.mu.Unlock()
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+
+	sourceTab := sess.activeTab()
+	p := sourceTab.focusedPane()
+	destination := &session{id: "destination", name: "destination"}
+	publishPaneOwner(p, destination, &tab{}, 0)
+	publishPaneOwner(p, sess, sourceTab, 0)
+
+	d.clipboardWorker(sess)
+
+	require.Zero(t, oldTransport.sendCount(), "clipboard queued by the former pane owner reached its client")
+	require.Same(t, ac, sess.client, "stale clipboard send handling detached the former owner's client")
+}
+
+type movingClipboardErrorTransport struct {
+	started     chan struct{}
+	release     chan struct{}
+	closed      chan struct{}
+	startedOnce sync.Once
+	closeOnce   sync.Once
+}
+
+func newMovingClipboardErrorTransport() *movingClipboardErrorTransport {
+	return &movingClipboardErrorTransport{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (t *movingClipboardErrorTransport) Send(ports.Frame) error {
+	t.startedOnce.Do(func() { close(t.started) })
+	<-t.release
+	return errors.New("clipboard send failed after pane move")
+}
+
+func (*movingClipboardErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+
+func (t *movingClipboardErrorTransport) Close() error {
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	oldTransport := &staleClipboardErrorTransport{}
+	ac.replaceTransport(oldTransport)
+	publishActiveClipboardCapability(d, sess, ac, oldTransport)
+
+	sess.mu.Lock()
+	sess.clipboardWorkerRunning = true
+	sess.mu.Unlock()
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+
+	ac.sendMu.Lock()
+	sendMuLocked := true
+	defer func() {
+		if sendMuLocked {
+			ac.sendMu.Unlock()
+		}
+	}()
+	workerDone := make(chan struct{})
+	go func() {
+		d.clipboardWorker(sess)
+		close(workerDone)
+	}()
+	require.Eventually(t, func() bool {
+		return ac.roleEffects.inFlightCount() == 1
+	}, time.Second, time.Millisecond, "clipboard send was not admitted before waiting on sendMu")
+
+	sourceTab := sess.activeTab()
+	p := sourceTab.focusedPane()
+	destination := &session{id: "destination", name: "destination"}
+	publishPaneOwner(p, destination, &tab{}, 0)
+	publishPaneOwner(p, sess, sourceTab, 0)
+	ac.sendMu.Unlock()
+	sendMuLocked = false
+	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
+
+	require.Zero(t, oldTransport.sendCount(), "clipboard send was not revalidated immediately before transport I/O")
+	require.Same(t, ac, sess.client)
+}
+
+func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	oldTransport := newMovingClipboardErrorTransport()
+	ac.replaceTransport(oldTransport)
+	publishActiveClipboardCapability(d, sess, ac, oldTransport)
+
+	sess.mu.Lock()
+	sess.clipboardWorkerRunning = true
+	sess.mu.Unlock()
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+
+	workerDone := make(chan struct{})
+	go func() {
+		d.clipboardWorker(sess)
+		close(workerDone)
+	}()
+	awaitTestCompletion(t, oldTransport.started, "clipboard send did not start")
+
+	sourceTab := sess.activeTab()
+	p := sourceTab.focusedPane()
+	destination := &session{id: "destination", name: "destination"}
+	publishPaneOwner(p, destination, &tab{}, 0)
+	publishPaneOwner(p, sess, sourceTab, 0)
+	close(oldTransport.release)
+	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
+
+	require.Same(t, ac, sess.client, "a send error from the pane's retired owner detached its client")
+	select {
+	case <-oldTransport.closed:
+		t.Fatal("a send error from the pane's retired owner closed its client transport")
+	default:
+	}
+}
+
+func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
+	d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	oldTransport := &staleClipboardErrorTransport{}
+	old.replaceTransport(oldTransport)
+	rc := d.attachCoordinator(sess, nil, old, true)
+	token := sess.attachmentToken(old, oldTransport)
+	token.lease = rc.attachmentLease(old)
+	old.publishRoleCapability(token)
+
+	sess.mu.Lock()
+	sess.clipboardWorkerRunning = true
+	sess.mu.Unlock()
+	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+
+	newTransport := &closeTrackingTransport{}
+	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), size: old.size}
+	next.initOverlays()
+	_, err := d.transitionAttachment(attachmentTransitionRequest{
+		target: sess, next: next, expectedRole: attachmentDetached, targetRole: attachmentActive,
+		expectedTransport: next.transportSnapshot(), ready: true,
+	})
+	require.NoError(t, err)
+
+	d.clipboardWorker(sess)
+	require.Zero(t, oldTransport.sendCount(), "stale queued work reached its captured failing transport")
+	require.Empty(t, newTransport.Sends(), "stale queued work was redirected to the replacement")
+	require.Same(t, next, sess.client, "stale clipboard send handling detached the current client")
+	require.False(t, newTransport.Closed())
+}
+
 func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
+	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
 	tr := newBlockingClipboardTransport()
-	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
-	ac.initOverlays()
-	sctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sess := &session{id: "clip-order", name: "clip-order", ctx: sctx, cancel: cancel, client: ac}
-	ac.setSession(sess)
+	ac.replaceTransport(tr)
+	publishActiveClipboardCapability(d, sess, ac, tr)
+	owner := clipboardOwnerLease(t, sess)
 
 	first := base64.StdEncoding.EncodeToString([]byte("first"))
 	second := base64.StdEncoding.EncodeToString([]byte("second"))
-	d.forwardClipboardAsync(sess, first)
+	d.forwardClipboardAsync(owner, first)
 	require.Equal(t, "first", <-tr.started)
 
-	d.forwardClipboardAsync(sess, second)
+	d.forwardClipboardAsync(owner, second)
 	select {
 	case got := <-tr.started:
 		t.Fatalf("second clipboard send started before first completed: %q", got)

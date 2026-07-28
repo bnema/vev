@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -158,9 +159,7 @@ func TestPaneRearrangeUsesExplicitTargetAndPreservesPaneIdentity(t *testing.T) {
 	h.tab.mu.Lock()
 	h.tab.tree.Focus = "pane-3"
 	before := make(map[layout.PaneID]*pane, len(h.tab.panes))
-	for id, p := range h.tab.panes {
-		before[id] = p
-	}
+	maps.Copy(before, h.tab.panes)
 	h.tab.mu.Unlock()
 
 	err := (daemonActions{d: h.daemon}).Run(daemonActionRequest{

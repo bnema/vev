@@ -381,12 +381,22 @@ func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan ports.
 
 func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
 	t.Helper()
-	return newManualSessionWithPTYsCleanup(t, true, ptys...)
+	return newManualSessionWithPTYsClock(t, stubClock{}, ptys...)
+}
+
+func newManualSessionWithPTYsClock(t testing.TB, clock ports.Clock, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+	t.Helper()
+	return newManualSessionWithPTYsClockCleanup(t, clock, true, ptys...)
 }
 
 func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
 	t.Helper()
-	d := newTestDaemonWithCleanup(t, nil, stubClock{}, registerCleanup)
+	return newManualSessionWithPTYsClockCleanup(t, stubClock{}, registerCleanup, ptys...)
+}
+
+func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+	t.Helper()
+	d := newTestDaemonWithCleanup(t, nil, clock, registerCleanup)
 	tr, sends := newCapturingTransport(t)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac.initOverlays()
@@ -402,6 +412,9 @@ func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ..
 		tabs = append(tabs, tb)
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: tabs, client: ac}
+	for _, tb := range tabs {
+		publishTiledPaneOwners(sess, tb)
+	}
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, nil)
 	d.sessions[sess.id] = sess

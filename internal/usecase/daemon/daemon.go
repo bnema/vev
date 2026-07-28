@@ -85,6 +85,19 @@ type Daemon struct {
 	// under the same mutex — so a Hello racing shutdown can never insert a new
 	// session that nobody would tear down.
 	closing bool
+
+	// moveLifecycleMu is the daemon-level admission gate for transferable
+	// ownership changes. It is acquired before any session teardownMu, and is
+	// never held while a move, teardown, or external operation runs.
+	moveLifecycleMu      sync.Mutex
+	moveLifecycleClosing bool
+	moveLifecycleActive  uint
+	moveLifecycleChanged chan struct{}
+	// paneProcessCtx roots transferable pane processes outside any one session.
+	// Shutdown cancels it only after the global move gate drains.
+	paneProcessCtx    context.Context
+	paneProcessCancel context.CancelFunc
+
 	// notifies holds one completion channel per in-flight async Detached
 	// notification (guarded by mu, pruned on insert). Channels rather than a
 	// WaitGroup: notifications are spawned from arbitrary goroutines while
@@ -112,18 +125,84 @@ type Daemon struct {
 	// and before coordinator epoch admission. It is a deterministic regression
 	// seam for stale resize publication.
 	beforeSessionResizePublication func()
-	ptys                           ports.PTYFactory
-	clock                          ports.Clock
-	log                            *slog.Logger
-	runtimeObserver                ports.RuntimeObserver
-	baseEnv                        []string
-	shell                          string
-	shellArgs                      []string
-	shellOverride                  bool
-	persistEnabled                 bool
-	catalogue                      ports.Catalogue
-	catalogueRecords               []domain.CatalogueRecord
-	catalogueRecordsProvided       bool
+	// beforeResizeOwnerPostEffect pauses after a resize's optimistic owner check
+	// and immediately before a post-commit effect is published. Tests use it to
+	// move a pane through the ordered resize fences at the former TOCTOU window.
+	beforeResizeOwnerPostEffect func(resizeOwnerPostEffect)
+	// afterResizeCommitSendLocked is a deterministic lock-order seam. It runs
+	// after publishResizeCommit acquires attachment sendMu and before it acquires
+	// owner fences. Tests must not perform external work from this callback.
+	afterResizeCommitSendLocked func()
+	// afterSnatchOverlayFamily is a deterministic structural lock seam. It runs
+	// after one overlay-family mutex is released and before the next is taken.
+	afterSnatchOverlayFamily func(string)
+	// afterSnatchedEscapeAccepted observes a standalone ESC after parser state
+	// is consumed and before its captured role and transport are revalidated.
+	afterSnatchedEscapeAccepted func()
+	// afterSnatchedEscapeAttempt reports whether that callback acquired its exact
+	// role capability after revalidation.
+	afterSnatchedEscapeAttempt func(bool)
+	// afterActiveFrameDispatch is a deterministic test seam after the connection
+	// loop's first role check and before a decoded active frame takes effect.
+	afterActiveFrameDispatch func(attachmentRoleToken)
+	// afterRoleEffectParticipantsSnapshotted observes immutable role-gate
+	// participants after architecture preflight locks are released and before
+	// the globally ordered freeze begins.
+	afterRoleEffectParticipantsSnapshotted func(string, []*attachedClient)
+	// afterRoleEffectGateFrozen observes each participant after it is frozen in
+	// immutable identity order and before drain/publication continues.
+	afterRoleEffectGateFrozen func(string, *attachedClient)
+	// afterRoleEffectsFrozen observes the lock-free boundary after all affected
+	// attachment gates are frozen and drained, before architecture publication.
+	afterRoleEffectsFrozen func()
+	// afterMoveLifecycleReserved and afterMovePaneSourceSnapshot are test-only
+	// seams. They run before role/fence work and after the pre-fence source
+	// attachment snapshot respectively. beforeMovePaneCommit runs inside the
+	// non-failing publication section. None is set in production, and none may
+	// perform external work while locks are held.
+	afterMoveLifecycleReserved                func()
+	afterMoveLifecycleGateBeforeTeardownLocks func()
+	afterMovePaneSourceSnapshot               func()
+	afterMoveTabSourceSnapshot                func()
+	beforeMovePaneCommit                      func()
+	beforeMoveTabCommit                       func()
+	// afterDetachRoleEffectsFrozen observes terminal detach after it wins the
+	// attachment gate but before it checks session ownership.
+	afterDetachRoleEffectsFrozen func()
+	// afterDisplacedCleanupStarted observes deferred displaced cleanup before it
+	// synchronizes with the attachment gate.
+	afterDisplacedCleanupStarted func()
+	// beforeReclaimFirstPaint observes a committed reclaim after displaced cleanup
+	// is queued and before its generation-bound reset first paint is admitted.
+	beforeReclaimFirstPaint func(attachmentRoleToken)
+	// afterRoleEffectAdmitted is a deterministic test seam after a frame/paint
+	// reserves its exact capability and before its first observable mutation.
+	afterRoleEffectAdmitted func(attachmentRoleToken)
+	// beforeFirstPaintSendWait is a test-only seam immediately before a
+	// transition first paint waits for the attachment send lock.
+	beforeFirstPaintSendWait func(attachmentRoleToken)
+	// afterDelayedKeyEffectAttempt observes whether a timer callback acquired a
+	// fresh exact capability before producing PTY, action, or overlay effects.
+	afterDelayedKeyEffectAttempt func(bool)
+	// afterActionRoleEffectEnded observes action-specific admission release. It
+	// is a deterministic seam for proving no role-bound mutation follows release.
+	afterActionRoleEffectEnded func(string)
+	// beforeRoleSendErrorCleanup pauses asynchronous render-failure retirement
+	// after the render ticket ends and before exact lifecycle validation.
+	beforeRoleSendErrorCleanup func(attachmentRoleToken)
+	afterRoleSendErrorCleanup  func()
+	ptys                       ports.PTYFactory
+	clock                      ports.Clock
+	log                        *slog.Logger
+	runtimeObserver            ports.RuntimeObserver
+	baseEnv                    []string
+	shell                      string
+	shellArgs                  []string
+	shellOverride              bool
+	persistEnabled             bool
+	catalogue                  ports.Catalogue
+	catalogueRecords           []domain.CatalogueRecord
+	catalogueRecordsProvided   bool
 	// snapshotRepository is the sole checkpoint storage contract.
 	snapshotRepository      ports.SnapshotRepository
 	recovery                *recoveryusecase.Coordinator
@@ -212,6 +291,7 @@ type Daemon struct {
 type parkedAttachment struct {
 	sess     *session
 	ac       *attachedClient
+	role     attachmentRole
 	timer    ports.Timer
 	done     chan struct{}
 	doneOnce sync.Once
@@ -443,25 +523,28 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	if shell == "" {
 		shell = "/bin/sh"
 	}
+	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:         make(map[domain.SessionID]*session),
-		stopped:          make(map[string]stoppedSession),
-		creating:         make(map[string]struct{}),
-		parked:           make(map[uint64]*parkedAttachment),
-		ptys:             ptys,
-		clock:            clock,
-		log:              log,
-		baseEnv:          os.Environ(),
-		shell:            shell,
-		dirOrHome:        dirOrHome,
-		done:             make(chan struct{}),
-		restoreDone:      make(chan struct{}),
-		animWake:         make(chan struct{}, 1),
-		snapshotJobs:     make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted: make(map[*snapshotCapture]struct{}),
-		snapshotWake:     make(chan struct{}, 1),
-		notices:          newNoticeCenter(),
-		resumeParkGrace:  defaultResumeParkGrace,
+		sessions:          make(map[domain.SessionID]*session),
+		stopped:           make(map[string]stoppedSession),
+		creating:          make(map[string]struct{}),
+		parked:            make(map[uint64]*parkedAttachment),
+		paneProcessCtx:    paneProcessCtx,
+		paneProcessCancel: paneProcessCancel,
+		ptys:              ptys,
+		clock:             clock,
+		log:               log,
+		baseEnv:           os.Environ(),
+		shell:             shell,
+		dirOrHome:         dirOrHome,
+		done:              make(chan struct{}),
+		restoreDone:       make(chan struct{}),
+		animWake:          make(chan struct{}, 1),
+		snapshotJobs:      make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted:  make(map[*snapshotCapture]struct{}),
+		snapshotWake:      make(chan struct{}, 1),
+		notices:           newNoticeCenter(),
+		resumeParkGrace:   defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -635,14 +718,14 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 }
 
 func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
+	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true
-	for token, parked := range d.parked {
-		d.removeParkedLocked(token, parked)
-	}
+	parkedRetirements := d.purgeAllParkedLocked()
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
+	finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
@@ -656,7 +739,7 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 		ephemeral := s.ephemeral
 		s.mu.Unlock()
 		s.stopInMemoryLifecycle()
-		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline); err != nil {
+		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline, nil); err != nil {
 			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
 		}
@@ -918,21 +1001,64 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		lease = rc.attachmentLease(ac)
 	}
 	expected := ac.transportSnapshot()
-	if lease == nil || expected.transport != tr {
+	welcomeToken := sess.attachmentToken(ac, tr)
+	welcomeToken.lease = lease
+	welcomeTicket, admitted := ac.beginRoleEffect(welcomeToken)
+	validRole := welcomeToken.role == attachmentSnatched || welcomeToken.role == attachmentActive && lease != nil
+	if expected.transport != tr || !admitted || !validRole {
+		if admitted {
+			welcomeTicket.End()
+		}
+		if welcomeToken.role == attachmentSnatched {
+			d.parkOrDropSnatchedAttachment(welcomeToken)
+		} else {
+			d.clientGone(sess, ac, tr, false)
+		}
+		return
+	}
+	if err := ac.sendExpectedTransportForRole(expected, frameWelcome(sess, ac), welcomeTicket); err != nil {
+		welcomeTicket.End()
+		if welcomeToken.role == attachmentSnatched {
+			d.parkOrDropSnatchedAttachment(welcomeToken)
+		} else {
+			d.clientGone(sess, ac, tr, false)
+		}
+		return
+	}
+	// Welcome is the only effect allowed to retain the route-time role. Release
+	// it before discovering post-handshake authority so a replacement blocked
+	// behind the send can publish its generation and lease first.
+	welcomeTicket.End()
+	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentRoleEffect(sess, tr)
+	if !admitted {
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	if err := ac.sendExpectedTransport(expected, frameWelcome(sess, ac)); err != nil {
-		d.clientGone(sess, ac, tr, false)
+	if postWelcomeToken.role == attachmentSnatched {
+		if err := d.sendInitialSnatchedPanel(postWelcomeToken, postWelcomeTicket); err != nil {
+			postWelcomeTicket.End()
+			d.parkOrDropSnatchedAttachment(postWelcomeToken)
+			return
+		}
+		postWelcomeTicket.End()
+		d.runConnLoop(ac)
+		_ = tr.Close()
 		return
 	}
-	if !rc.markAttachmentReady(lease) {
+	postWelcomeLease := postWelcomeToken.lease
+	if postWelcomeToken.role != attachmentActive || rc == nil || postWelcomeLease == nil || !rc.markAttachmentReady(postWelcomeLease) {
+		postWelcomeTicket.End()
 		// The attachment was displaced or detached while Welcome was in flight;
 		// never let this stale handshake emit an Output frame.
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	d.firstPaint(sess, ac, h.Size)
+	postWelcomeTicket.End()
+	paintToken := sess.attachmentToken(ac, tr)
+	if !d.firstPaintForTransition(paintToken) {
+		d.clientGone(sess, ac, tr, false)
+		return
+	}
 	d.runConnLoop(ac)
 	_ = tr.Close()
 }
@@ -945,24 +1071,42 @@ type protoErr struct {
 
 func (e *protoErr) Error() string { return e.text }
 
-// finishAttach completes an attachment prepared while d.mu is held. It
-// publishes the terminal state before releasing d.mu, then queues replacement
-// teardown so obsolete worker joins never delay the new handshake.
-func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) *attachedClient {
+// finishAttach completes an attachment prepared while d.mu is held. Every
+// caller must hold d.mu on entry; finishAttach transfers ownership by
+// unlocking d.mu before returning, including every error path. It publishes
+// terminal and role state before releasing d.mu, then defers coordinator
+// cleanup so obsolete workers never delay the new handshake.
+func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) (*attachedClient, error) {
 	// Session state is the sole source for future PTY children. Update it before
 	// publishing the attachment; existing PTYs keep their original environment.
 	sess.mu.Lock()
 	sess.env = copyEnvironment(h.Env)
 	sess.terminal = term
 	sess.mu.Unlock()
-	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{
+	opts := attachClientOptions{
 		clientID:          h.ClientID,
 		resumeCapable:     true,
 		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
-	})
+	}
+	ac := d.prepareAttachedClientLocked(tr, sz, opts)
 	d.mu.Unlock()
-	d.retireReplacedClient(old, cleanup)
-	return ac
+	result, err := d.transitionAttachment(attachmentTransitionRequest{
+		target:            sess,
+		next:              ac,
+		expectedRole:      attachmentDetached,
+		targetRole:        attachmentActive,
+		expectedTransport: ac.transportSnapshot(),
+		ready:             false,
+	})
+	if err != nil {
+		if tr != nil {
+			_ = tr.Close()
+		}
+		return nil, err
+	}
+	d.finishAttachedClient(sess, ac, opts)
+	d.deferAttachmentTransitionCleanups(result)
+	return ac, nil
 }
 
 func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
@@ -1021,9 +1165,28 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	}
 	term := terminalEnv{TrueColor: h.TrueColor}
 
-	if h.Intent == ports.IntentResume {
-		if sess, ac, ok, err := d.resumeParked(h, tr, sz); ok || err != nil {
-			return sess, ac, err
+	// A non-zero token is an authoritative resume credential. If it is unknown,
+	// expired, or raced with lifecycle teardown, fail closed instead of routing
+	// the Hello as an ordinary attach that could create or replace ownership.
+	if h.ResumeToken != 0 {
+		d.mu.Lock()
+		parkedAtStart := d.parked[h.ResumeToken]
+		d.mu.Unlock()
+		if parkedAtStart == nil {
+			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		}
+		if sess, ac, ok, err := d.resumeParked(h, tr, sz); err == nil {
+			if ok {
+				return sess, ac, nil
+			}
+			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		} else if errors.Is(err, errResumeTokenLifecycleRace) {
+			// The parked entry was replaced while this handshake waited for
+			// its send lock. The ordinary attach path can reclaim the still-live
+			// named session instead of turning this grace-period race into a
+			// terminal no-such-session error.
+		} else {
+			return nil, nil, err
 		}
 	}
 	if h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach {
@@ -1063,8 +1226,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				return nil, nil, err
 			}
 		}
-		d.purgeParkedForSessionLocked(sess)
-		return sess, d.finishAttach(sess, tr, sz, term, h), nil
+		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		return sess, ac, err
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
@@ -1073,8 +1236,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		d.purgeParkedForSessionLocked(sess)
-		return sess, d.finishAttach(sess, tr, sz, term, h), nil
+		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		return sess, ac, err
 
 	case ports.IntentNew:
 		if h.Name == "" {
@@ -1094,8 +1257,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		d.purgeParkedForSessionLocked(sess)
-		return sess, d.finishAttach(sess, tr, sz, term, h), nil
+		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		return sess, ac, err
 
 	case ports.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
@@ -1113,8 +1276,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				return nil, nil, err
 			}
 		}
-		d.purgeParkedForSessionLocked(sess)
-		return sess, d.finishAttach(sess, tr, sz, term, h), nil
+		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		return sess, ac, err
 
 	default:
 		d.mu.Unlock()

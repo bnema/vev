@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -107,15 +108,77 @@ func TestCmdHelpUsesRegistryWithoutDialing(t *testing.T) {
 	}
 }
 
+func TestMoveCommandHelpUsesExactUsages(t *testing.T) {
+	for _, tt := range []struct {
+		slug, usage, desc string
+	}{
+		{"move-pane", "move-pane <destination-session> <destination-tab-id>", "Move the focused pane to another live tab"},
+		{"move-tab", "move-tab <destination-session>", "Move the active tab to another live session"},
+	} {
+		t.Run(tt.slug, func(t *testing.T) {
+			got := cmdHelp(cmdInvocation{slug: tt.slug})
+			want := "usage: vev cmd [-s <session>] [--self] " + tt.usage + "\n\n" + tt.desc
+			if got != want {
+				t.Fatalf("cmdHelp() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
+	for _, tt := range []struct {
+		slug string
+		args []string
+	}{
+		{slug: "move-pane", args: []string{"work", "t_dest"}},
+		{slug: "move-tab", args: []string{"work"}},
+	} {
+		t.Run(tt.slug, func(t *testing.T) {
+			parsed, err := parseArgs(append([]string{"cmd", tt.slug}, tt.args...))
+			require.NoError(t, err)
+			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+			require.NoError(t, runCmdWithDeps(context.Background(), parsed.cmd, cmdDeps{
+				stdout: io.Discard,
+				getenv: func(string) string { return "" },
+				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+			}))
+			require.Len(t, transport.sent, 1)
+			request, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+			require.NoError(t, err)
+			require.Equal(t, tt.slug, request.Slug)
+			require.Equal(t, tt.args, request.Args)
+			require.Equal(t, ports.ProtocolVersion, request.Version)
+		})
+	}
+}
+
+func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
+	for _, invocation := range []cmdInvocation{
+		{slug: "move-pane"},
+		{slug: "move-pane", args: []string{"work", "t_dest", "extra"}},
+		{slug: "move-tab"},
+		{slug: "move-tab", args: []string{"work", "extra"}},
+	} {
+		t.Run(invocation.slug+"/"+strconv.Itoa(len(invocation.args)), func(t *testing.T) {
+			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{
+				Code: ports.ErrInvalidCommandArgs, Text: "invalid command arguments",
+			})}}
+			err := runCmdWithDeps(context.Background(), invocation, cmdDeps{
+				stdout: io.Discard,
+				getenv: func(string) string { return "" },
+				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+			})
+			if ExitCode(err) != 2 {
+				t.Fatalf("ExitCode(%v) = %d, want 2", err, ExitCode(err))
+			}
+		})
+	}
+}
+
 func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 	for _, slug := range []string{
-		"grow-pane-width",
-		"shrink-pane-width",
-		"grow-pane-height",
-		"shrink-pane-height",
-		"equalize-panes",
-		"consume-or-expel-pane-left",
-		"consume-or-expel-pane-right",
+		"grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes",
+		"consume-or-expel-pane-left", "consume-or-expel-pane-right",
 	} {
 		t.Run(slug, func(t *testing.T) {
 			invocation, err := parseArgs([]string{"cmd", "--self", slug})

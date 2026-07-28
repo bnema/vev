@@ -52,6 +52,19 @@ func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandReque
 	if sess == nil {
 		return commandFailure(code, text)
 	}
+	if cmd.Scope == command.CommandScopeCrossSession {
+		// Cross-session moves intentionally skip sess.dispatchMu: movePane and
+		// moveTab acquire both session dispatch locks through lockMoveDispatch in
+		// global order. Pre-locking the source here could recreate the
+		// opposite-direction deadlock covered by
+		// TestHandleCommandOppositeMoveCommandsDoNotDeadlock.
+		tb, pane, code, text := resolveControlTarget(sess, cmd.Target, request)
+		if code != 0 {
+			return commandFailure(code, text)
+		}
+		return d.runControl(cmd, controlExec{ctx: ctx, d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
+	}
+
 	sess.dispatchMu.Lock()
 	defer sess.dispatchMu.Unlock()
 
@@ -72,6 +85,8 @@ func (d *Daemon) runControl(cmd command.Command, exec controlExec, request ports
 		return commandFailure(ports.ErrInvalidCommandArgs, "usage: "+cmd.Usage)
 	case errors.Is(err, errSessionNameInUse):
 		return commandFailure(ports.ErrNameTaken, err.Error())
+	case isMoveCommandError(err):
+		return moveCommandFailure(err)
 	case errors.Is(err, layout.ErrNotInSplit):
 		return commandFailure(ports.ErrNoSuchTarget, "pane is not in a split")
 	case errors.Is(err, layout.ErrTooSmall):
@@ -86,8 +101,8 @@ func commandFailure(code uint16, text string) ports.CommandResult {
 }
 
 // resolveTargetSession applies explicit-name, stable-ID, then unique-session
-// resolution. A name paired with IDs is advisory only when no live session has
-// that name (the VEV value can survive a rename).
+// resolution. A name paired with complete stable IDs is always advisory because
+// a process keeps its original VEV session component after relocation.
 func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, uint16, string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -106,13 +121,18 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 		if request.TargetTab == "" || request.TargetPane == "" {
 			return nil, ports.ErrNoSuchTarget, "target tab and pane IDs must be provided together"
 		}
+		var match *session
 		for _, sess := range d.sessions {
-			if sess.containsStableIDs(request.TargetTab, request.TargetPane) {
-				if named != nil && named != sess {
-					return nil, ports.ErrNoSuchTarget, "tab/pane IDs belong to another session"
-				}
-				return sess, 0, ""
+			if !sess.containsStableIDs(request.TargetTab, request.TargetPane) {
+				continue
 			}
+			if match != nil {
+				return nil, ports.ErrAmbiguousTarget, "target tab and pane IDs are ambiguous"
+			}
+			match = sess
+		}
+		if match != nil {
+			return match, 0, ""
 		}
 		return nil, ports.ErrNoSuchTarget, "no live session contains the target tab/pane"
 	}
@@ -401,6 +421,51 @@ func (e controlExec) CloseTab() error {
 }
 func (e controlExec) ClosePane() error {
 	return e.runAction(daemonActionRequest{kind: daemonActionClosePane})
+}
+
+func (e controlExec) MovePane(destinationSession, destinationTabID string) error {
+	destination := e.d.liveSessionByName(destinationSession)
+	if destination == nil {
+		return errMoveStaleTarget
+	}
+	if e.sess == nil || e.tab == nil || e.target.pane == nil {
+		return errMovePaneInvalid
+	}
+	return e.d.movePane(movePaneRequest{
+		Source:           sessionMoveLocator(e.sess),
+		SourceTabID:      domain.TabStableID(e.tab.stableID),
+		SourcePaneID:     domain.PaneStableID(e.target.pane.stableID),
+		Destination:      sessionMoveLocator(destination),
+		DestinationTabID: domain.TabStableID(destinationTabID),
+	})
+}
+
+func (e controlExec) MoveTab(destinationSession string) error {
+	destination := e.d.liveSessionByName(destinationSession)
+	if destination == nil {
+		return errMoveStaleTarget
+	}
+	if e.sess == nil || e.tab == nil {
+		return errMovePaneInvalid
+	}
+	return e.d.moveTab(moveTabRequest{
+		Source:      sessionMoveLocator(e.sess),
+		SourceTabID: domain.TabStableID(e.tab.stableID),
+		Destination: sessionMoveLocator(destination),
+	})
+}
+
+func (d *Daemon) liveSessionByName(name string) *session {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.findByNameLocked(name)
+}
+
+func sessionMoveLocator(sess *session) moveSessionLocator {
+	sess.mu.Lock()
+	name := sess.name
+	sess.mu.Unlock()
+	return moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation, Name: name}
 }
 func (e controlExec) split(direction layout.Direction) error {
 	return e.runAction(daemonActionRequest{kind: daemonActionSplitPane, direction: direction})

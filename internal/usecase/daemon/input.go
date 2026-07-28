@@ -20,6 +20,13 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 	d.handleInput(sess, ac, data)
 }
 
+func (d *Daemon) handleSequencedInputForRole(token attachmentRoleToken, _ uint64, data []byte) {
+	if !token.activeEffect() {
+		return
+	}
+	d.handleInputForRole(token, data)
+}
+
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.initOverlays()
 	ac.mouseScan.Scan(data,
@@ -29,6 +36,30 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 				return
 			}
 			ac.keys.Route(b)
+		},
+	)
+}
+
+func (d *Daemon) handleInputForRole(token attachmentRoleToken, data []byte) {
+	ac := token.ac
+	ac.initOverlays()
+	ac.mouseScan.Scan(data,
+		func(ev mouse.Event) {
+			if token.activeEffect() {
+				d.handleMouse(ac, ev)
+			}
+		},
+		func(b []byte) {
+			if !token.activeEffect() {
+				return
+			}
+			if ac.overlays.HandleInput(d, b, token.effect) {
+				return
+			}
+			if !token.activeEffect() {
+				return
+			}
+			ac.keys.RouteWithHandler(b, daemonKeyHandler{d: d, ac: ac, roleToken: token})
 		},
 	)
 }
@@ -267,15 +298,48 @@ func sgrOffset(raw []byte, colDelta, rowDelta int) []byte {
 }
 
 type daemonKeyHandler struct {
-	d       *Daemon
-	ac      *attachedClient
-	actions daemonActionRunner
+	d         *Daemon
+	ac        *attachedClient
+	actions   daemonActionRunner
+	roleToken attachmentRoleToken
+}
+
+// acquireRoleEffect preserves a synchronous frame's existing admission and
+// gives delayed router callbacks a fresh ticket for the exact captured role.
+// Direct/headless callers without a role token retain their existing behavior.
+func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool) {
+	if h.roleToken.ac != nil {
+		if effect := h.roleToken.effect; effect != nil && !effect.ended.Load() {
+			return h.roleToken.sess, effect, false
+		}
+		effect, admitted := h.roleToken.ac.beginRoleEffect(h.roleToken)
+		if h.d.afterDelayedKeyEffectAttempt != nil {
+			h.d.afterDelayedKeyEffectAttempt(admitted)
+		}
+		if !admitted {
+			return nil, nil, false
+		}
+		if h.d.afterRoleEffectAdmitted != nil {
+			token := h.roleToken
+			token.effect = effect
+			h.d.afterRoleEffectAdmitted(token)
+		}
+		return h.roleToken.sess, effect, true
+	}
+	sess := h.ac.currentSession()
+	if sess == nil || sess.attachmentRole(h.ac) == attachmentSnatched {
+		return nil, nil, false
+	}
+	return sess, nil, false
 }
 
 func (h daemonKeyHandler) Forward(data []byte) {
-	sess := h.ac.currentSession()
+	sess, effect, owned := h.acquireRoleEffect()
 	if sess == nil {
 		return
+	}
+	if owned {
+		defer effect.End()
 	}
 	tb := sess.activeTab()
 	if tb == nil {
@@ -288,9 +352,12 @@ func (h daemonKeyHandler) Forward(data []byte) {
 }
 
 func (h daemonKeyHandler) Action(action keys.Action) {
-	sess := h.ac.currentSession()
+	sess, effect, owned := h.acquireRoleEffect()
 	if sess == nil {
 		return
+	}
+	if owned {
+		defer effect.End()
 	}
 	runAction := func(request daemonActionRequest) {
 		request.target = resolveDaemonActionTarget(sess)
@@ -317,7 +384,16 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	case keys.ActionOpenPalette:
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
-		if err := h.d.jumpAttention(sess, h.ac); err != nil {
+		if effect == nil {
+			if err := h.d.jumpAttention(sess, h.ac); err != nil {
+				h.d.reportError(sess, err)
+			}
+			return
+		}
+		effect.bindActionEnd(h.d, "jump-attention")
+		token := h.roleToken
+		token.effect = effect
+		if err := h.d.jumpAttentionForRole(sess, h.ac, token); err != nil {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionToggleFloatingPane:
@@ -326,19 +402,19 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneLeft:
-		if err := h.d.focusDir(sess, h.ac, layout.Left); err != nil {
+		if err := h.d.focusDir(sess, h.ac, layout.Left, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneRight:
-		if err := h.d.focusDir(sess, h.ac, layout.Right); err != nil {
+		if err := h.d.focusDir(sess, h.ac, layout.Right, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneUp:
-		if err := h.d.focusDir(sess, h.ac, layout.Up); err != nil {
+		if err := h.d.focusDir(sess, h.ac, layout.Up, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneDown:
-		if err := h.d.focusDir(sess, h.ac, layout.Down); err != nil {
+		if err := h.d.focusDir(sess, h.ac, layout.Down, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionGrowPaneWidth:

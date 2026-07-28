@@ -132,35 +132,46 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 	return c.invalidateForLeaseAtResizeEpoch(source, nil, epoch, inv)
 }
 
-// invalidateForLeaseAtResizeEpoch is the attachment-callback variant: it
-// rejects a same-object replacement whose source pointer still matches but
-// whose lifecycle lease has been revoked.
-func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) bool {
+// renderInvalidationReservation is the in-memory half of an invalidation.
+// finish performs observer, timer, and callback work after ownership fences are
+// released.
+type renderInvalidationReservation struct {
+	coordinator      *renderCoordinator
+	invalidation     renderInvalidation
+	onInvalidate     func(renderInvalidation)
+	queueStart       bool
+	queueCorrelation ports.RuntimeCorrelation
+	observer         ports.RuntimeObserver
+	old              *timerToken
+	arm              bool
+	generation       uint64
+	delay            time.Duration
+	clock            ports.Clock
+}
+
+// reserveInvalidationForLeaseAtResizeEpoch publishes only coordinator memory.
+// It is safe inside a short pane-owner fence and performs no timer or observer
+// calls.
+func (c *renderCoordinator) reserveInvalidationForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) (*renderInvalidationReservation, bool) {
 	c.mu.Lock()
-	// An unbound coordinator is the manual/headless harness state; there is no
-	// published production attachment to protect there. A parked target may
-	// still publish its own PTY/session mutations to picker observers, but no
-	// attachment-owned callback may revive that target's render path.
+	defer c.mu.Unlock()
 	detachedPreviewOnly := c.primaryDetachedLocked() && source == nil && (c.previewWake != nil || len(c.previewWakes) != 0)
 	if c.torndown || (lease != nil && (!c.leaseCurrentLocked(lease, true) || lease.attachment != source)) ||
 		(c.primaryDetachedLocked() && !detachedPreviewOnly) || (source != nil && c.lease != nil && c.lease.attachment != source) ||
 		(epoch != 0 && (c.resize.epoch != epoch || c.resize.source != source || (lease != nil && c.resize.lease != lease))) {
-		c.mu.Unlock()
-		return false
+		return nil, false
 	}
-	onInvalidate := c.opts.onInvalidate
+	reservation := &renderInvalidationReservation{coordinator: c, invalidation: inv, onInvalidate: c.opts.onInvalidate}
 	c.metrics.invalidations.Add(1)
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
-	queueStart := false
-	var queueCorrelation ports.RuntimeCorrelation
 	if !wasPending {
 		c.ackDeferred = false
 		c.deadlineDue = false
 		if c.opts.observer != nil {
 			c.queueMarked = true
 			c.queueCorrelation = ports.NewRuntimeCorrelation()
-			queueCorrelation = c.queueCorrelation
-			queueStart = true
+			reservation.queueCorrelation = c.queueCorrelation
+			reservation.queueStart = true
 		}
 	}
 	c.pending = true
@@ -168,43 +179,43 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
 	c.pendingPreview = c.pendingPreview || c.previewWake != nil || len(c.previewWakes) != 0
 	c.coalesced++
-	// A deadline may have expired while synchronized output still gated the
-	// pending work. Completion republishes urgently and must reserve a fresh
-	// deadline rather than leaving that already-fired timer as the only arm.
-	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
-	var old *timerToken
-	if arm {
-		_, old = c.normalLane.replaceLocked()
+	reservation.arm = !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
+	if reservation.arm {
+		_, reservation.old = c.normalLane.replaceLocked()
 	}
-	gen := c.normalLane.generation
-	delay := minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
+	reservation.generation = c.normalLane.generation
+	reservation.delay = minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
 	if c.pendingUrgent {
-		delay = urgentRenderDeadline
+		reservation.delay = urgentRenderDeadline
 	}
-	clock := c.opts.clock
-	c.armed = c.armed || arm
-	observer := c.opts.observer
-	c.mu.Unlock()
-	if queueStart && observer != nil {
-		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
-	}
-	stopDetachedTimer(old)
-	if !arm || clock == nil {
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		return true
-	}
+	reservation.clock = c.opts.clock
+	reservation.observer = c.opts.observer
+	c.armed = c.armed || reservation.arm
+	return reservation, true
+}
 
-	// NewTimer and C may re-enter the coordinator. Publish only if this
-	// generation is still the reserved deadline after those external calls.
-	timer := clock.NewTimer(delay)
+func (r *renderInvalidationReservation) finish() {
+	if r == nil || r.coordinator == nil {
+		return
+	}
+	c := r.coordinator
+	if r.queueStart && r.observer != nil {
+		r.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", r.queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
+	}
+	stopDetachedTimer(r.old)
+	if !r.arm || r.clock == nil {
+		if r.onInvalidate != nil {
+			r.onInvalidate(r.invalidation)
+		}
+		return
+	}
+	timer := r.clock.NewTimer(r.delay)
 	timerC := timer.C()
 	c.mu.Lock()
-	valid := !c.torndown && c.pending && c.normalLane.generation == gen
+	valid := !c.torndown && c.pending && c.normalLane.generation == r.generation
 	var token *timerToken
 	if valid && timerC != nil {
-		token = c.normalLane.publishLocked(gen, timer)
+		token = c.normalLane.publishLocked(r.generation, timer)
 		valid = token != nil
 		if valid {
 			c.supervisor.startLocked(token, timerC, func() {
@@ -216,34 +227,44 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	c.mu.Unlock()
 	if !valid {
 		timer.Stop()
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		return true
-	}
-	if timerC == nil {
+	} else if timerC == nil {
 		timer.Stop()
-		c.fire(gen, false, true)
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		return true
+		c.fire(r.generation, false, true)
 	}
-	// Test-visible observation follows deadline publication, so a producer
-	// callback cannot observe a successful invalidation before its timer owns
-	// a worker (and race tests cannot finish while a mock expectation remains).
-	if onInvalidate != nil {
-		onInvalidate(inv)
+	if r.onInvalidate != nil {
+		r.onInvalidate(r.invalidation)
 	}
-	runtime.Gosched()
+	if valid && timerC != nil {
+		runtime.Gosched()
+	}
+}
+
+// invalidateForLeaseAtResizeEpoch is the attachment-callback variant: it
+// rejects a same-object replacement whose source pointer still matches but
+// whose lifecycle lease has been revoked.
+func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) bool {
+	reservation, ok := c.reserveInvalidationForLeaseAtResizeEpoch(source, lease, epoch, inv)
+	if !ok {
+		return false
+	}
+	reservation.finish()
 	return true
 }
 
 // notifyAck reports that the client acknowledged an output state, releasing
 // at most one deadline/watchdog-deferred wake. It never bypasses an unexpired
 // normal or urgent deadline.
-func (c *renderCoordinator) notifyAck() {
+func (c *renderCoordinator) notifyAck() { c.notifyAckForLease(nil) }
+
+// notifyAckForLease prevents an acknowledgement captured by an obsolete active
+// frame from flushing the replacement attachment's render queue. A nil lease is
+// reserved for coordinator-owned/direct test callers.
+func (c *renderCoordinator) notifyAckForLease(lease *attachmentLease) {
 	c.mu.Lock()
+	if lease != nil && !c.leaseCurrentLocked(lease, true) {
+		c.mu.Unlock()
+		return
+	}
 	if (!c.ackDeferred && !c.deadlineDue) || !c.pending {
 		c.mu.Unlock()
 		return
@@ -278,20 +299,47 @@ func (c *renderCoordinator) noteSyncBegin(p *pane, gen uint64, force ...func()) 
 	c.noteSyncBeginWithRenderability(p, gen, renderable, force...)
 }
 
+// syncTimerCleanup carries detached timer work across an enclosing pane or
+// coordinator critical section. finish never waits for a worker.
+type syncTimerCleanup struct{ tokens []*timerToken }
+
+func (cleanup *syncTimerCleanup) add(token *timerToken) {
+	if token != nil {
+		cleanup.tokens = append(cleanup.tokens, token)
+	}
+}
+
+func (cleanup *syncTimerCleanup) append(other syncTimerCleanup) {
+	cleanup.tokens = append(cleanup.tokens, other.tokens...)
+}
+
+func (cleanup syncTimerCleanup) finish() {
+	for _, token := range cleanup.tokens {
+		stopDetachedTimer(token)
+	}
+}
+
 // noteSyncBeginWithRenderability records lifecycle unconditionally while the
 // supplied predicate decides dynamically whether this batch gates composition.
 func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, renderable func() bool, force ...func()) {
+	c.beginSyncBatchWithRenderability(p, gen, renderable, force...).finish()
+}
+
+// beginSyncBatchWithRenderability publishes a batch and returns every timer
+// detached while doing so. Callers that already own pane.mu defer finish until
+// after releasing the parsing fence.
+func (c *renderCoordinator) beginSyncBatchWithRenderability(p *pane, gen uint64, renderable func() bool, force ...func()) syncTimerCleanup {
+	var cleanup syncTimerCleanup
 	c.mu.Lock()
 	if c.torndown {
 		c.mu.Unlock()
-		return
+		return cleanup
 	}
 	if c.syncBatches == nil {
 		c.syncBatches = make(map[*pane]*syncBatch)
 	}
-	var old *timerToken
 	if previous := c.syncBatches[p]; previous != nil {
-		old = detachSyncBatchLocked(previous)
+		cleanup.add(detachSyncBatchLocked(previous))
 	}
 	batch := &syncBatch{generation: gen, renderable: renderable}
 	if len(force) != 0 {
@@ -301,9 +349,8 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	c.syncRegistryVersion++
 	clock := c.opts.clock
 	c.mu.Unlock()
-	stopDetachedTimer(old)
 	if clock == nil {
-		return
+		return cleanup
 	}
 
 	// Both timer operations are external. A reentrant callback may replace or
@@ -323,9 +370,25 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	}
 	c.mu.Unlock()
 	if !valid || timerC == nil {
-		stopDetachedTimer(&timerToken{timer: timer})
-		return
+		cleanup.add(&timerToken{timer: timer})
 	}
+	return cleanup
+}
+
+// detachSyncBatchGeneration removes only the exact pane generation. It returns
+// timer cleanup to the caller so no Timer method runs under an enclosing pane
+// or coordinator lock.
+func (c *renderCoordinator) detachSyncBatchGeneration(p *pane, gen uint64) syncTimerCleanup {
+	var cleanup syncTimerCleanup
+	c.mu.Lock()
+	batch := c.syncBatches[p]
+	if batch != nil && batch.generation == gen {
+		delete(c.syncBatches, p)
+		c.syncRegistryVersion++
+		cleanup.add(detachSyncBatchLocked(batch))
+	}
+	c.mu.Unlock()
+	return cleanup
 }
 
 func (c *renderCoordinator) runSyncWatchdog(p *pane, batch *syncBatch, token *timerToken) {
@@ -558,29 +621,41 @@ func (cleanup renderLifecycleCleanup) finish() {
 // beginDetach invalidates pending work. It never waits for detached workers.
 func (c *renderCoordinator) beginDetach(ac *attachedClient) renderLifecycleCleanup {
 	c.mu.Lock()
+	cleanup := c.beginDetachLocked(ac)
+	c.mu.Unlock()
+	return cleanup
+}
+
+// beginDetachLocked is the prelocked lifecycle seam used when registry,
+// current-session, and lease publication must share one commit boundary.
+func (c *renderCoordinator) beginDetachLocked(ac *attachedClient) renderLifecycleCleanup {
 	var cleanup renderLifecycleCleanup
 	if c.lease != nil && c.lease.active && c.lease.attachment == ac {
 		c.lease.active = false
-		c.pending = false
-		c.pendingReset = false
-		c.pendingUrgent = false
-		c.ackDeferred = false
-		c.pendingPreview = false
-		c.coalesced = 0
-		_, timer := c.normalLane.replaceLocked()
-		c.armed = false
-		_, resizeTimer := c.resizeLane.replaceLocked()
-		_, retryTimer := c.retryLane.replaceLocked()
-		cleanup = renderLifecycleCleanup{
-			tokens:           []*timerToken{timer, resizeTimer, retryTimer},
-			observer:         c.opts.observer,
-			queueCorrelation: c.queueCorrelation,
-			queueMarked:      c.queueMarked,
-			ackBlocked:       c.ackBlocked,
-		}
-		c.queueMarked, c.ackBlocked = false, nil
+		cleanup = c.resetAttachmentLifecycleLocked()
 	}
-	c.mu.Unlock()
+	return cleanup
+}
+
+func (c *renderCoordinator) resetAttachmentLifecycleLocked() renderLifecycleCleanup {
+	c.pending = false
+	c.pendingReset = false
+	c.pendingUrgent = false
+	c.ackDeferred = false
+	c.pendingPreview = false
+	c.coalesced = 0
+	_, timer := c.normalLane.replaceLocked()
+	c.armed = false
+	_, resizeTimer := c.resizeLane.replaceLocked()
+	_, retryTimer := c.retryLane.replaceLocked()
+	cleanup := renderLifecycleCleanup{
+		tokens:           []*timerToken{timer, resizeTimer, retryTimer},
+		observer:         c.opts.observer,
+		queueCorrelation: c.queueCorrelation,
+		queueMarked:      c.queueMarked,
+		ackBlocked:       c.ackBlocked,
+	}
+	c.queueMarked, c.ackBlocked = false, nil
 	return cleanup
 }
 
@@ -593,34 +668,27 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 // for detached workers.
 func (c *renderCoordinator) beginReplace(old, replacement *attachedClient, ready bool) renderLifecycleCleanup {
 	c.mu.Lock()
-	var cleanup renderLifecycleCleanup
-	// A coordinator may be installed while replacing a legacy attachment
-	// which predated coordinator ownership. In that case nil has no pending
-	// identity to invalidate, and the replacement becomes the first bound
-	// attachment atomically with this lifecycle transition.
-	if c.lease == nil || c.lease.attachment == old {
-		c.installLeaseLocked(replacement, ready)
-		c.pending = false
-		c.pendingReset = false
-		c.pendingUrgent = false
-		c.ackDeferred = false
-		c.pendingPreview = false
-		c.coalesced = 0
-		_, timer := c.normalLane.replaceLocked()
-		c.armed = false
-		_, resizeTimer := c.resizeLane.replaceLocked()
-		_, retryTimer := c.retryLane.replaceLocked()
-		cleanup = renderLifecycleCleanup{
-			tokens:           []*timerToken{timer, resizeTimer, retryTimer},
-			observer:         c.opts.observer,
-			queueCorrelation: c.queueCorrelation,
-			queueMarked:      c.queueMarked,
-			ackBlocked:       c.ackBlocked,
-		}
-		c.queueMarked, c.ackBlocked = false, nil
-	}
+	cleanup, _ := c.beginReplaceLocked(old, replacement, ready)
 	c.mu.Unlock()
 	return cleanup
+}
+
+// beginReplaceLocked requires c.mu. Callers validate canReplaceLocked before
+// their ownership commit, making lease installation non-failing afterward.
+func (c *renderCoordinator) beginReplaceLocked(old, replacement *attachedClient, ready bool) (renderLifecycleCleanup, *attachmentLease) {
+	if !c.canReplaceLocked(old, replacement) {
+		return renderLifecycleCleanup{}, nil
+	}
+	lease := c.installLeaseLocked(replacement, ready)
+	return c.resetAttachmentLifecycleLocked(), lease
+}
+
+func (c *renderCoordinator) canReplaceLocked(old, replacement *attachedClient) bool {
+	// A coordinator may be installed while replacing a legacy attachment which
+	// predated coordinator ownership. Any inactive lease is detached historical
+	// state; a resume may also replace the same client object because registry and
+	// transport validation proved a new role incarnation.
+	return !c.torndown && (c.lease == nil || !c.lease.active || c.lease.attachment == old || c.lease.attachment == replacement)
 }
 
 // noteReplace is for callers that hold no outer lifecycle locks.

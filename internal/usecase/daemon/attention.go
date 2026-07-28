@@ -47,6 +47,10 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 // happened — it also covers "no target exists", which is routine and not an
 // error. Only a failure to reach a target that does exist is a genuine error.
 func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {
+	return d.jumpAttentionForRole(sess, ac, attachmentRoleToken{})
+}
+
+func (d *Daemon) jumpAttentionForRole(sess *session, ac *attachedClient, token attachmentRoleToken) error {
 	if sess == nil || ac == nil {
 		return nil
 	}
@@ -62,7 +66,11 @@ func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {
 	if !ok {
 		return nil
 	}
-	return d.switchToTarget(sess, ac, picker.Target{Session: target.sessionID, TabIndex: target.tabIndex})
+	pickerTarget := picker.Target{Session: target.sessionID, TabIndex: target.tabIndex}
+	if token.ac == nil {
+		return d.switchToTarget(sess, ac, pickerTarget)
+	}
+	return d.switchActiveTargetForRole(token, pickerTarget)
 }
 
 func oldestAttentionTab(sess *session) (int, bool) {

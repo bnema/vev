@@ -63,11 +63,12 @@ type Router struct {
 	h        Handler
 	bindings *atomic.Pointer[Bindings]
 
-	mu          sync.Mutex
-	pending     bool
-	pendingAlt  []byte
-	timer       ports.Timer
-	pendingDone chan struct{}
+	mu             sync.Mutex
+	pending        bool
+	pendingAlt     []byte
+	pendingHandler Handler
+	timer          ports.Timer
+	pendingDone    chan struct{}
 }
 
 // NewRouter constructs a Router. bindings may be nil, in which case
@@ -76,33 +77,49 @@ func NewRouter(clock ports.Clock, h Handler, bindings *atomic.Pointer[Bindings])
 	return &Router{clock: clock, delay: ESCDelay, h: h, bindings: bindings}
 }
 
-// Route routes one transport read.
-func (r *Router) Route(data []byte) {
+// Route routes one transport read with the router's default handler.
+func (r *Router) Route(data []byte) { r.RouteWithHandler(data, r.h) }
+
+// RouteWithHandler binds every synchronous or delayed result from data to the
+// supplied handler. A retained ESC therefore cannot gain authority from a
+// later transport frame after the original frame's ownership token is stale.
+func (r *Router) RouteWithHandler(data []byte, h Handler) {
 	if len(data) == 0 {
 		return
 	}
+	if h == nil {
+		h = r.h
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var pendingAlt []byte
 	if r.pending {
-		pendingAlt := r.pendingAlt
+		pendingAlt = append([]byte(nil), r.pendingAlt...)
+	}
+	pendingHandler := r.pendingHandler
+	wasPending := r.pending
+	if wasPending {
 		r.stopTimer()
 		r.pending = false
 		r.pendingAlt = nil
+		r.pendingHandler = nil
+	}
+	r.mu.Unlock()
+	if wasPending {
 		combined := append(append([]byte(nil), pendingAlt...), data...)
-		if consumed := r.routeAfterPendingESC(combined, len(pendingAlt)); consumed > len(pendingAlt) {
+		if consumed := r.routeAfterPendingESC(combined, len(pendingAlt), pendingHandler); consumed > len(pendingAlt) {
 			data = data[consumed-len(pendingAlt):]
 		}
 	}
-	r.route(data)
+	r.route(data, h)
 }
 
-func (r *Router) route(data []byte) {
+func (r *Router) route(data []byte, h Handler) {
 	buf := make([]byte, 0, len(data))
 	flush := func() {
 		if len(buf) == 0 {
 			return
 		}
-		r.forward(buf)
+		r.forward(buf, h)
 		buf = buf[:0]
 	}
 	for i := 0; i < len(data); {
@@ -113,7 +130,7 @@ func (r *Router) route(data []byte) {
 		}
 		if i == len(data)-1 {
 			flush()
-			r.retainESC()
+			r.retainESC(h)
 			return
 		}
 		remaining := data[i+1:]
@@ -134,12 +151,12 @@ func (r *Router) route(data []byte) {
 		}
 		if action, size, ok, partial := r.altArrowCSI(remaining); ok {
 			flush()
-			r.h.Action(action)
+			h.Action(action)
 			i += 1 + size
 			continue
 		} else if partial {
 			flush()
-			r.retainESC(remaining)
+			r.retainESC(h, remaining)
 			return
 		}
 		next := data[i+1]
@@ -150,13 +167,13 @@ func (r *Router) route(data []byte) {
 		}
 		if action, size, ok := r.binding(remaining); ok {
 			flush()
-			r.h.Action(action)
+			h.Action(action)
 			i += 1 + size
 			continue
 		}
 		if partialUTF8Rune(remaining) {
 			flush()
-			r.retainESC(remaining)
+			r.retainESC(h, remaining)
 			return
 		}
 		buf = append(buf, ESC)
@@ -165,63 +182,77 @@ func (r *Router) route(data []byte) {
 	flush()
 }
 
-func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int) int {
+func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler) int {
 	if action, size, ok, partial := r.altArrowCSI(data); ok {
-		r.h.Action(action)
+		h.Action(action)
 		return size
 	} else if partial {
-		r.retainESC(data)
+		r.retainESC(h, data)
 		return len(data)
 	}
 	next := data[0]
 	if action, size, ok := r.binding(data); ok {
-		r.h.Action(action)
+		h.Action(action)
 		return size
 	}
 	if partialUTF8Rune(data) {
-		r.retainESC(data)
+		r.retainESC(h, data)
 		return len(data)
 	}
 	_, size := utf8.DecodeRune(data)
 	if size > 1 {
-		r.forward(append([]byte{ESC}, data[:size]...))
+		r.forward(append([]byte{ESC}, data[:size]...), h)
 		return size
 	}
 	if pendingAltLen > 0 {
-		r.forward(append([]byte{ESC}, data[:pendingAltLen]...))
+		r.forward(append([]byte{ESC}, data[:pendingAltLen]...), h)
 		return pendingAltLen
 	}
 	if passThroughPrefix(next) {
-		r.forward([]byte{ESC, next})
+		r.forward([]byte{ESC, next}, h)
 		return 1
 	}
-	r.forward([]byte{ESC})
+	r.forward([]byte{ESC}, h)
 	return 0
 }
 
-func (r *Router) retainESC(altBytes ...[]byte) {
+func (r *Router) retainESC(h Handler, altBytes ...[]byte) {
+	r.mu.Lock()
 	r.pending = true
 	r.pendingAlt = nil
+	r.pendingHandler = h
 	if len(altBytes) > 0 {
 		r.pendingAlt = append([]byte(nil), altBytes[0]...)
 	}
 	r.timer = r.clock.NewTimer(r.delay)
 	r.pendingDone = make(chan struct{})
+	timer, done := r.timer, r.pendingDone
+	r.mu.Unlock()
 	go func(timer ports.Timer, done <-chan struct{}) {
 		select {
 		case <-timer.C():
 		case <-done:
 			return
 		}
+		var (
+			data []byte
+			h    Handler
+		)
 		r.mu.Lock()
-		defer r.mu.Unlock()
 		if r.pending && r.timer == timer {
 			r.pending = false
-			data := append([]byte{ESC}, r.pendingAlt...)
+			data = append([]byte{ESC}, r.pendingAlt...)
+			h = r.pendingHandler
 			r.pendingAlt = nil
-			r.forward(data)
+			r.pendingHandler = nil
+			r.timer = nil
+			r.pendingDone = nil
 		}
-	}(r.timer, r.pendingDone)
+		r.mu.Unlock()
+		if h != nil {
+			r.forward(data, h)
+		}
+	}(timer, done)
 }
 
 func (r *Router) stopTimer() {
@@ -243,9 +274,9 @@ func partialUTF8Rune(data []byte) bool {
 	return key == utf8.RuneError && size == 1
 }
 
-func (r *Router) forward(data []byte) {
+func (r *Router) forward(data []byte, h Handler) {
 	cp := append([]byte(nil), data...)
-	r.h.Forward(cp)
+	h.Forward(cp)
 }
 
 func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }

@@ -261,16 +261,23 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 		}
 	}
 	command, args := d.ptyCommand(restoreEnv)
-	pty, err := d.ptys.Open(ctx, command, args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
+	lifetime := d.newPaneProcessLifetime(ctx, tabCtx)
+	pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
 	if err != nil {
+		lifetime.abort()
+		if pty != nil {
+			_ = pty.Close()
+		}
 		return nil, err
 	}
 	p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, restorePTYSize(contentRect, tabSize))
-	p.ctx, p.cancel = context.WithCancel(tabCtx)
+	if !lifetime.publish(p) {
+		_ = pty.Close()
+		return nil, lifetime.ctx.Err()
+	}
 	p.rect = contentRect
 	if err := restorePaneTerminal(p, paneSnap); err != nil {
-		p.cancel()
-		_ = pty.Close()
+		closePaneProcess(p)
 		return nil, err
 	}
 	if decision := planProcessRestore(paneSnap.Process, allowlist); decision.Restore {
@@ -284,6 +291,12 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 
 func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab) *session {
 	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: tabs, active: int(snap.Active), terminal: terminalEnv{}, env: copyEnvironment(d.baseEnv), createdAt: int64(snap.CreatedAt), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
+	// Restored tabs remain private until persistAndRegisterRestoredSession.
+	// Initialize owners now so registration and reader startup cannot expose an
+	// ownerless pane.
+	for _, tb := range tabs {
+		publishTiledPaneOwners(sess, tb)
+	}
 	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd

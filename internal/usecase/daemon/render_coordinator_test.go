@@ -1334,7 +1334,7 @@ func TestRenderCoordinatorResizeLaneRejectsStaleToken(t *testing.T) {
 	rc.mu.Unlock()
 }
 
-func TestRenderCoordinatorNilClockRetryCompletesWithoutSynchronousRun(t *testing.T) {
+func TestRenderCoordinatorNilClockRetryRunsSynchronously(t *testing.T) {
 	rc := newRenderCoordinator(renderCoordinatorOptions{})
 	owner := &attachedClient{}
 	rc.attach(owner)
@@ -1345,7 +1345,7 @@ func TestRenderCoordinatorNilClockRetryCompletesWithoutSynchronousRun(t *testing
 
 	called := false
 	rc.scheduleResizeRetryForLease(epoch, owner, lease, func() { called = true })
-	require.False(t, called, "a nil clock is a disabled retry lane, not a synchronous retry")
+	require.True(t, called, "a nil clock must run the retry without a timer")
 	rc.mu.Lock()
 	retryToken := rc.retryLane.token
 	rc.mu.Unlock()

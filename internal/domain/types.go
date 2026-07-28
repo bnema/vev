@@ -92,5 +92,11 @@ type Rect struct {
 // SessionID uniquely identifies a session.
 type SessionID string
 
-// TabID uniquely identifies a tab within a session.
+// TabID identifies a tab by its session-local, user-facing ID.
 type TabID string
+
+// TabStableID identifies a tab independently of its mutable session position.
+type TabStableID string
+
+// PaneStableID identifies a pane independently of its layout-local PaneID.
+type PaneStableID string

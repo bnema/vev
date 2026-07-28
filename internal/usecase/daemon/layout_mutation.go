@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"slices"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -31,14 +33,7 @@ func (d *Daemon) mutateTargetLayoutChanged(target daemonActionTarget, requirePan
 		return false, layout.ErrNotFound
 	}
 	target.session.mu.Lock()
-	foundTab := false
-	for _, tb := range target.session.tabs {
-		if tb == target.tab {
-			foundTab = true
-			break
-		}
-	}
-	if !foundTab {
+	if !slices.Contains(target.session.tabs, target.tab) {
 		target.session.mu.Unlock()
 		d.mu.Unlock()
 		return false, layout.ErrNotFound
@@ -74,7 +69,12 @@ func (d *Daemon) mutateTargetLayoutChanged(target daemonActionTarget, requirePan
 	d.mu.Unlock()
 
 	if !d.applyTabLayout(target.session, target.tab) {
-		return false, layout.ErrNotFound
+		target.tab.mu.Lock()
+		applied := target.tab.tree == candidate
+		target.tab.mu.Unlock()
+		if !applied {
+			return false, layout.ErrNotFound
+		}
 	}
 	return true, nil
 }

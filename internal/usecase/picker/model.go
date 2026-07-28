@@ -17,6 +17,7 @@ const (
 
 type SessionView struct {
 	ID                domain.SessionID
+	Incarnation       domain.IncarnationID
 	Name              string
 	TargetName        string
 	Tabs              []TabEntry
@@ -27,9 +28,33 @@ type SessionView struct {
 
 // TabEntry is one tab row; Name is drawn emphasized, Detail muted.
 type TabEntry struct {
-	Name      string // tab display name
-	Detail    string // " (paneTitle)" or "", drawn muted
-	Attention bool   // draw the attention marker right after Name, before Detail
+	TabID     domain.TabStableID // stable tab identity; independent of its current index
+	Name      string             // tab display name
+	Detail    string             // " (paneTitle)" or "", drawn muted
+	Attention bool               // draw the attention marker right after Name, before Detail
+}
+
+type SelectionMode uint8
+
+const (
+	SelectNavigationTab SelectionMode = iota
+	SelectMovePaneTab
+	SelectMoveTabSession
+)
+
+type SourceFilter struct {
+	Session     domain.SessionID
+	Incarnation domain.IncarnationID
+	TabID       domain.TabStableID
+}
+
+// SelectionConfig describes which rows are selectable, which stable target
+// should remain selected, and which source must not be offered as a move
+// destination.
+type SelectionConfig struct {
+	Mode    SelectionMode
+	Current SourceFilter
+	Source  SourceFilter
 }
 
 // RenderStyles are the styles Render uses to draw list rows. The zero value
@@ -59,10 +84,12 @@ func defaultRenderStyles() RenderStyles {
 }
 
 type Target struct {
-	Session  domain.SessionID
-	Name     string
-	TabIndex int
-	Stopped  bool
+	Session     domain.SessionID
+	Incarnation domain.IncarnationID
+	Name        string
+	TabID       domain.TabStableID
+	TabIndex    int
+	Stopped     bool
 	// ExpectedCreatedAt optionally pins this target to a particular named
 	// session lifecycle. Callers that obtain a snapshot outside the daemon use
 	// it to reject a same-name replacement at commit time.
@@ -88,44 +115,62 @@ type Layout struct {
 }
 
 type Model struct {
+	mode     SelectionMode
 	rows     []row
 	selected int
 }
 
-type row struct {
-	header    bool
-	dispName  string // display name segment; bold on truecolor
-	detail    string // " (paneTitle)" segment, muted; "" for headers
-	attention bool   // draw the attention marker right after the name, before detail; tab rows only
-	session   domain.SessionID
-	// targetName is the named-session lookup name threaded into Target;
-	// distinct from dispName, which is what gets drawn.
-	targetName        string
-	tabIndex          int
-	stopped           bool
-	expectedCreatedAt *int64
+type rowKind uint8
+
+const (
+	rowSession rowKind = iota
+	rowTab
+)
+
+func (k rowKind) rendersAsHeader() bool {
+	return k == rowSession
 }
 
-func New(sessions []SessionView, cur domain.SessionID, curTab int) *Model {
-	m := &Model{selected: -1}
+func (k rowKind) selectable(mode SelectionMode) bool {
+	switch mode {
+	case SelectNavigationTab, SelectMovePaneTab:
+		return k == rowTab
+	case SelectMoveTabSession:
+		return k == rowSession
+	default:
+		return false
+	}
+}
+
+type row struct {
+	kind        rowKind
+	dispName    string // display name segment; bold on truecolor
+	detail      string // " (paneTitle)" segment, muted; "" for session rows
+	attention   bool   // draw the attention marker right after the name, before detail; tab rows only
+	session     domain.SessionID
+	incarnation domain.IncarnationID
+	// targetName is the named-session lookup name threaded into Target;
+	// distinct from dispName, which is what gets drawn.
+	targetName           string
+	tabID                domain.TabStableID
+	tabIndex             int
+	stopped              bool
+	expectedCreatedAt    int64
+	hasExpectedCreatedAt bool
+}
+
+func New(sessions []SessionView, config SelectionConfig) *Model {
+	m := &Model{mode: config.Mode, selected: -1}
 	activeSelection := -1
 	for _, session := range sessions {
-		targetName := session.TargetName
-		if targetName == "" && (session.Stopped || session.ExpectedCreatedAt != nil) {
-			targetName = session.Name
-		}
-		m.rows = append(m.rows, row{header: true, dispName: session.Name, session: session.ID, targetName: targetName, tabIndex: -1, stopped: session.Stopped, expectedCreatedAt: session.ExpectedCreatedAt})
-		active := session.Active
-		if active < 0 || active >= len(session.Tabs) {
-			active = 0
-		}
-		for i, tab := range session.Tabs {
+		sessionRows := rowsForSession(session, config)
+		for _, pickerRow := range sessionRows {
 			idx := len(m.rows)
-			m.rows = append(m.rows, row{dispName: tab.Name, detail: tab.Detail, attention: tab.Attention, session: session.ID, targetName: targetName, tabIndex: i, stopped: session.Stopped, expectedCreatedAt: session.ExpectedCreatedAt})
-			if session.ID == cur && i == curTab {
+			m.rows = append(m.rows, pickerRow)
+			if pickerRow.kind.selectable(config.Mode) && selectionMatches(pickerRow, config.Current, config.Mode) {
 				m.selected = idx
 			}
-			if activeSelection < 0 && i == active {
+			if config.Mode == SelectNavigationTab && activeSelection < 0 && pickerRow.kind == rowTab && pickerRow.tabIndex == normalizedActive(session) {
 				activeSelection = idx
 			}
 		}
@@ -134,12 +179,87 @@ func New(sessions []SessionView, cur domain.SessionID, curTab int) *Model {
 		m.selected = activeSelection
 	}
 	if m.selected < 0 {
-		m.selected = m.firstLeaf()
+		m.selected = m.firstSelectable()
 	}
 	if m.selected < 0 && len(m.rows) > 0 {
 		m.selected = 0
 	}
 	return m
+}
+
+// rowsForSession is the sole owner of mode-specific destination eligibility.
+// The daemon supplies canonical lifecycle/tab snapshots without prefiltering.
+func rowsForSession(session SessionView, config SelectionConfig) []row {
+	if config.Mode != SelectNavigationTab && session.Stopped {
+		return nil
+	}
+	if config.Mode == SelectMoveTabSession && (sourceMatchesSession(config.Source, session) || len(session.Tabs) == 0) {
+		return nil
+	}
+
+	targetName := session.TargetName
+	if config.Mode == SelectNavigationTab && !session.Stopped && session.ExpectedCreatedAt == nil {
+		targetName = ""
+	} else if targetName == "" {
+		targetName = session.Name
+	}
+	expectedCreatedAt, hasExpectedCreatedAt := int64Value(session.ExpectedCreatedAt)
+	common := row{
+		session: session.ID, incarnation: session.Incarnation, targetName: targetName,
+		stopped: session.Stopped, expectedCreatedAt: expectedCreatedAt,
+		hasExpectedCreatedAt: hasExpectedCreatedAt,
+	}
+	header := common
+	header.kind, header.dispName, header.tabIndex = rowSession, session.Name, -1
+	rows := []row{header}
+	for i, tab := range session.Tabs {
+		if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
+			continue
+		}
+		tabRow := common
+		tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
+		tabRow.tabID, tabRow.tabIndex = tab.TabID, i
+		rows = append(rows, tabRow)
+	}
+	if config.Mode == SelectMovePaneTab && len(rows) == 1 {
+		return nil
+	}
+	return rows
+}
+
+func sourceMatchesSession(source SourceFilter, session SessionView) bool {
+	if source.Session != session.ID {
+		return false
+	}
+	return source.Incarnation == (domain.IncarnationID{}) || source.Incarnation == session.Incarnation
+}
+
+func sourceMatchesTab(source SourceFilter, session SessionView, tab TabEntry) bool {
+	return sourceMatchesSession(source, session) && source.TabID == tab.TabID
+}
+
+func normalizedActive(session SessionView) int {
+	if session.Active < 0 || session.Active >= len(session.Tabs) {
+		return 0
+	}
+	return session.Active
+}
+
+func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) bool {
+	if pickerRow.session != current.Session || (current.Incarnation != (domain.IncarnationID{}) && pickerRow.incarnation != current.Incarnation) {
+		return false
+	}
+	if mode == SelectMoveTabSession {
+		return pickerRow.kind == rowSession
+	}
+	return pickerRow.kind == rowTab && current.TabID != "" && pickerRow.tabID == current.TabID
+}
+
+func int64Value(value *int64) (int64, bool) {
+	if value == nil {
+		return 0, false
+	}
+	return *value, true
 }
 
 func ChooseLayout(inner domain.Size) Layout {
@@ -184,10 +304,13 @@ func (m *Model) Selected() (Target, bool) {
 		return Target{}, false
 	}
 	r := m.rows[m.selected]
-	if r.header {
+	if !r.kind.selectable(m.mode) {
 		return Target{}, false
 	}
-	return Target{Session: r.session, Name: r.targetName, TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAt}, true
+	return Target{
+		Session: r.session, Incarnation: r.incarnation, Name: r.targetName, TabID: r.tabID,
+		TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAtPointer(),
+	}, true
 }
 
 func (m *Model) Clone() *Model {
@@ -222,25 +345,33 @@ func (m *Model) move(delta int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
-	if m.selected < 0 || m.selected >= len(m.rows) || m.rows[m.selected].header {
-		m.selected = m.firstLeaf()
+	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].kind.selectable(m.mode) {
+		m.selected = m.firstSelectable()
 		return
 	}
 	for i := m.selected + delta; i >= 0 && i < len(m.rows); i += delta {
-		if !m.rows[i].header {
+		if m.rows[i].kind.selectable(m.mode) {
 			m.selected = i
 			return
 		}
 	}
 }
 
-func (m *Model) firstLeaf() int {
+func (m *Model) firstSelectable() int {
 	for i, r := range m.rows {
-		if !r.header {
+		if r.kind.selectable(m.mode) {
 			return i
 		}
 	}
 	return -1
+}
+
+func (r row) expectedCreatedAtPointer() *int64 {
+	if !r.hasExpectedCreatedAt {
+		return nil
+	}
+	value := r.expectedCreatedAt
+	return &value
 }
 
 // renderList draws each visible row as up to three segments: a name segment
@@ -268,13 +399,13 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
 
 		name := r.dispName
-		if !r.header {
+		if !r.kind.rendersAsHeader() {
 			name = "  " + name
 		}
 		name = ui.TruncateText(name, rect.Width)
 		x := ui.DrawText(frame, rect.X, rect.Y+y, clipX, name, nameStyle)
 
-		if r.header {
+		if r.kind.rendersAsHeader() {
 			if r.stopped {
 				ui.DrawText(frame, x, rect.Y+y, clipX, " (stopped)", base)
 			}

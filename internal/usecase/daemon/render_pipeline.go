@@ -437,17 +437,10 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 			return false
 		}
 	}
-	ac.sess.mu.Lock()
-	if ac.sess.v != sess {
-		ac.sess.mu.Unlock()
-		ac.sendMu.Unlock()
-		return false
-	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
 	prepared, err := ac.output.prepare(composed.frame, composed.damage, composed.reset)
 	endDiff(0, err == nil)
 	if err != nil {
-		ac.sess.mu.Unlock()
 		ac.sendMu.Unlock()
 		d.log.Error("render draw failed", "err", err, "session", sess.name)
 		// Without a coordinator reportError repaints synchronously. Suppress only
@@ -470,7 +463,8 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	var sendTr ports.Transport
 	var sendErr error
 	if len(data) > 0 {
-		sendTr = ac.transport()
+		sendTransport := ac.transportSnapshot()
+		sendTr = sendTransport.transport
 		endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
 		if sendTr == nil {
 			sendErr = errors.New("client transport is nil")
@@ -479,18 +473,25 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 			if async, ok := sendTr.(ports.AsyncTransport); ok {
 				send = async.SendAsync
 			}
+			interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
 			sendErr = prepared.send(data, ac.echoAck.Load(), send)
+			if interruptible {
+				if sendErr != nil {
+					marks.roleEffect.reportTransportFailure(sendTransport)
+				}
+				marks.roleEffect.endTransportSend()
+			}
 		}
 		endEmit(uint64(len(data)), sendErr == nil)
 	}
 	if sendErr == nil {
 		// Publish only after output preparation and transport emission both
-		// succeed. Receipt acknowledgement follows after releasing the attachment
-		// session guard, while sendMu still owns this transaction.
+		// succeed. A cross-session transition may publish concurrently, but its
+		// mandatory first-paint rebase waits for sendMu and therefore follows this
+		// completed output transaction.
 		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
 	}
-	ac.sess.mu.Unlock()
 	if sendErr == nil {
 		// A successful no-byte emission also commits: its renderer shadow still
 		// represents the captured frame. Lock panes only under sendMu and with no
@@ -502,7 +503,20 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	}
 	ac.sendMu.Unlock()
 	if sendErr != nil {
-		d.detachOnSendError(sess, ac, sendTr)
+		// A transport failure may invalidate the role gate. Release this render's
+		// admission first. Detachment freezes the gate and therefore cannot mutate
+		// ownership until any enclosing admitted operation has also ended.
+		if marks.roleEffect == nil {
+			d.detachOnSendError(sess, ac, sendTr)
+		} else {
+			// Capture the exact admitted capability, including its coordinator
+			// lease, before End permits a replacement publication. Reserve cleanup
+			// accounting before End so terminal Wait cannot race a later Add.
+			token := marks.roleEffect.roleToken()
+			launchCleanup := d.reserveRoleSendErrorCleanup(token, sendTr)
+			marks.roleEffect.End()
+			launchCleanup()
+		}
 	}
 	return true
 }
