@@ -49,6 +49,7 @@ type session struct {
 	teardownMu        sync.Mutex
 	teardownActive    bool
 	teardownDone      chan struct{}
+	moveReservations  uint
 	teardownWaiters   uint
 	teardownChanged   chan struct{}
 	lifecycleStopOnce sync.Once
@@ -251,13 +252,23 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 		}
 		command, args := d.ptyCommand(env)
-		pty, err := d.ptys.Open(d.serveCtx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
+		lifetime := d.newPaneProcessLifetime(d.serveCtx)
+		pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
+			lifetime.abort()
+			if pty != nil {
+				_ = pty.Close()
+			}
 			closeTabs(tabs)
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", err)
 		}
 		tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
+		if !lifetime.publish(tb.focusedPane()) {
+			_ = pty.Close()
+			closeTabs(tabs)
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", lifetime.ctx.Err())
+		}
 		if i < len(names) {
 			tb.name = names[i]
 		}
@@ -297,6 +308,11 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	}
 	sess.mruAt.Store(lastUsedSeq)
 	sess.snapEligible.Store(!ephemeral && name != "")
+	// These tabs are still private construction state. Publish every tiled
+	// owner before the session enters d.sessions or any PTY reader starts.
+	for _, tb := range tabs {
+		publishTiledPaneOwners(sess, tb)
+	}
 	if !ephemeral {
 		if d.persistEnabled {
 			record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}
@@ -339,9 +355,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 
 func closeTabs(tabs []*tab) {
 	for _, tb := range tabs {
-		for _, p := range tb.panes {
-			_ = p.pty.Close()
-		}
+		tb.closeAllPanes()
 	}
 }
 
@@ -468,8 +482,13 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 		return err
 	}
 	command, args := d.ptyCommand(env)
-	pty, err := d.ptys.Open(sess.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
+	lifetime := d.newPaneProcessLifetime(sess.ctx)
+	pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
+		lifetime.abort()
+		if pty != nil {
+			_ = pty.Close()
+		}
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
@@ -488,14 +507,21 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	d.mu.Lock()
 	if d.closing || d.sessions[sess.id] != sess || sess.ctx.Err() != nil {
 		d.mu.Unlock()
+		lifetime.abort()
 		_ = pty.Close()
 		return errors.New("daemon: session closed")
 	}
 	tb.ctx, tb.cancel = context.WithCancel(sess.ctx)
-	for _, p := range tb.panes {
-		p.ctx, p.cancel = context.WithCancel(tb.ctx)
-	}
 	sess.mu.Lock()
+	p := tb.focusedPane()
+	if !lifetime.publish(p) {
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		_ = pty.Close()
+		return errors.New("daemon: session closed")
+	}
+	// Publish ownership before appending the tab to the visible session.
+	publishPaneOwner(p, sess, tb, 0)
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
 	tabIndex := sess.active
@@ -560,12 +586,7 @@ func (tb *tab) closeAllPanes() {
 		panes = append(panes, floating)
 	}
 	for _, p := range panes {
-		if p.cancel != nil {
-			p.cancel()
-		}
-		if p.pty != nil {
-			_ = p.pty.Close()
-		}
+		closePaneProcess(p)
 	}
 }
 
@@ -614,12 +635,22 @@ func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
 }
 
 func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
-	if p != nil {
-		sess.mu.Lock()
-		name := sess.name
-		sess.mu.Unlock()
-		d.log.Info("pane created", "session", name, "pane", p.id)
+	if p == nil {
+		return
 	}
+	owner := p.ownerSnapshot()
+	if owner == nil {
+		// Teardown may win after publication but before reader startup. In that
+		// case the process is already closed and no ownerless reader may start.
+		return
+	}
+	if owner.session != sess || owner.tab != tb {
+		panic("daemon: starting pane reader for a different published owner")
+	}
+	sess.mu.Lock()
+	name := sess.name
+	sess.mu.Unlock()
+	d.log.Info("pane created", "session", name, "pane", p.id)
 	// Scheduler ownership was removed; this launch creates exactly one reader.
 	d.sessWg.Add(1)
 	go d.ptyReader(sess, tb, p)
@@ -1215,7 +1246,7 @@ func (s *session) beginTeardown(deadline *snapshotShutdownDeadline) bool {
 		}
 
 		s.teardownMu.Lock()
-		if !s.teardownActive {
+		if !s.teardownActive && s.moveReservations == 0 {
 			if deadline != nil {
 				select {
 				case <-deadline.Done():
@@ -1230,17 +1261,17 @@ func (s *session) beginTeardown(deadline *snapshotShutdownDeadline) bool {
 			s.teardownMu.Unlock()
 			return true
 		}
-		done := s.teardownDone
 		s.teardownWaiters++
 		s.signalTeardownChangedLocked()
+		changed := s.teardownChangeLocked()
 		s.teardownMu.Unlock()
 
 		timedOut := false
 		if deadline == nil {
-			<-done
+			<-changed
 		} else {
 			select {
-			case <-done:
+			case <-changed:
 			case <-deadline.Done():
 				timedOut = true
 			}

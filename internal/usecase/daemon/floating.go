@@ -387,17 +387,22 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	if err := spec.parentCtx.Err(); err != nil {
 		return
 	}
-	openCtx, cancelOpen := context.WithCancel(spec.parentCtx)
-	stopSessionCancel := context.AfterFunc(sess.ctx, cancelOpen)
+	lifetime := d.newPaneProcessLifetime(spec.parentCtx, sess.ctx)
 	ownedByPane := false
 	defer func() {
 		if !ownedByPane {
-			stopSessionCancel()
-			cancelOpen()
+			lifetime.abort()
 		}
 	}()
-	pty, err := d.ptys.Open(openCtx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
+	pty, err := d.ptys.Open(lifetime.ctx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	if err != nil {
+		// Open retains ownership of a nonnil PTY only on success. Some factory
+		// implementations can return a partially opened PTY with an error, so
+		// release both resources before publishing the launch failure.
+		lifetime.abort()
+		if pty != nil {
+			_ = pty.Close()
+		}
 		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, err)
 		return
 	}
@@ -405,12 +410,10 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	p.rect = spec.geometry.Inner
 	p.popupGeometry = spec.geometry
 	p.title.displayFallback = spec.fallback
-	// CommandContext owns the child through openCtx, so retain both this context
-	// and its cancellation until the installed pane is reaped or torn down.
-	p.ctx = openCtx
-	p.cancel = func() {
-		stopSessionCancel()
-		cancelOpen()
+	if !lifetime.publish(p) {
+		_ = pty.Close()
+		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, lifetime.ctx.Err())
+		return
 	}
 	ownedByPane = true
 	// The reader may run as soon as install returns; make its exit policy
@@ -444,8 +447,18 @@ func (d *Daemon) failFloatingLaunch(sess *session, tb *tab, generation uint64, u
 // installFloating installs only the current generation. A stale successful
 // launch is cancelled and closed outside the tab lock.
 func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uint64) {
+	if sess == nil || tb == nil || p == nil {
+		closeFloatingPane(p)
+		return
+	}
 	tb.mu.Lock()
-	installed := tb.installFloatingLocked(p, generation)
+	installable := tb.floating.state == floatingWarming && tb.floating.generation == generation
+	if installable {
+		// Publish under pane.mu before the slot becomes hidden or visible. The
+		// tab-to-pane lock order also linearizes owner and slot publication.
+		publishPaneOwner(p, sess, tb, generation)
+	}
+	installed := installable && tb.installFloatingLocked(p, generation)
 	visible := installed && tb.floating.state == floatingVisible
 	tb.mu.Unlock()
 	if !installed {
@@ -506,17 +519,7 @@ func (d *Daemon) teardownFloating(tb *tab, ac *attachedClient) {
 // closeFloatingPane releases a floating runtime at most once. It is called
 // only after a generation/identity check has detached the pane from its slot.
 func closeFloatingPane(p *pane) {
-	if p == nil {
-		return
-	}
-	p.floatingCloseOnce.Do(func() {
-		if p.cancel != nil {
-			p.cancel()
-		}
-		if p.pty != nil {
-			_ = p.pty.Close()
-		}
-	})
+	closePaneProcess(p)
 }
 
 func floatingCommandFallback(command, shell string) string {

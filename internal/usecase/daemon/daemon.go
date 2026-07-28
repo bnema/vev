@@ -85,6 +85,19 @@ type Daemon struct {
 	// under the same mutex — so a Hello racing shutdown can never insert a new
 	// session that nobody would tear down.
 	closing bool
+
+	// moveLifecycleMu is the daemon-level admission gate for transferable
+	// ownership changes. It is acquired before any session teardownMu, and is
+	// never held while a move, teardown, or external operation runs.
+	moveLifecycleMu      sync.Mutex
+	moveLifecycleClosing bool
+	moveLifecycleActive  uint
+	moveLifecycleChanged chan struct{}
+	// paneProcessCtx roots transferable pane processes outside any one session.
+	// Shutdown cancels it only after the global move gate drains.
+	paneProcessCtx    context.Context
+	paneProcessCancel context.CancelFunc
+
 	// notifies holds one completion channel per in-flight async Detached
 	// notification (guarded by mu, pruned on insert). Channels rather than a
 	// WaitGroup: notifications are spawned from arbitrary goroutines while
@@ -488,25 +501,28 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	if shell == "" {
 		shell = "/bin/sh"
 	}
+	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:         make(map[domain.SessionID]*session),
-		stopped:          make(map[string]stoppedSession),
-		creating:         make(map[string]struct{}),
-		parked:           make(map[uint64]*parkedAttachment),
-		ptys:             ptys,
-		clock:            clock,
-		log:              log,
-		baseEnv:          os.Environ(),
-		shell:            shell,
-		dirOrHome:        dirOrHome,
-		done:             make(chan struct{}),
-		restoreDone:      make(chan struct{}),
-		animWake:         make(chan struct{}, 1),
-		snapshotJobs:     make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted: make(map[*snapshotCapture]struct{}),
-		snapshotWake:     make(chan struct{}, 1),
-		notices:          newNoticeCenter(),
-		resumeParkGrace:  defaultResumeParkGrace,
+		sessions:          make(map[domain.SessionID]*session),
+		stopped:           make(map[string]stoppedSession),
+		creating:          make(map[string]struct{}),
+		parked:            make(map[uint64]*parkedAttachment),
+		paneProcessCtx:    paneProcessCtx,
+		paneProcessCancel: paneProcessCancel,
+		ptys:              ptys,
+		clock:             clock,
+		log:               log,
+		baseEnv:           os.Environ(),
+		shell:             shell,
+		dirOrHome:         dirOrHome,
+		done:              make(chan struct{}),
+		restoreDone:       make(chan struct{}),
+		animWake:          make(chan struct{}, 1),
+		snapshotJobs:      make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted:  make(map[*snapshotCapture]struct{}),
+		snapshotWake:      make(chan struct{}, 1),
+		notices:           newNoticeCenter(),
+		resumeParkGrace:   defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -680,6 +696,7 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 }
 
 func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
+	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true
 	parkedRetirements := d.purgeAllParkedLocked()

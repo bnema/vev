@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"fmt"
 
@@ -80,24 +79,35 @@ func (d *Daemon) spawnPaneOpAt(
 		return fmt.Errorf("daemon: generating pane identity: %w", err)
 	}
 	command, args := d.ptyCommand(env)
-	pty, err := d.ptys.Open(sess.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
+	lifetime := d.newPaneProcessLifetime(tb.ctx)
+	pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
 	if err != nil {
+		lifetime.abort()
+		if pty != nil {
+			_ = pty.Close()
+		}
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		return domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
 	}
 
-	pctx, cancel := context.WithCancel(tb.ctx)
 	p := newPaneWithStableID(newID, paneStableID, pty, rectSize(newRect))
-	p.ctx, p.cancel = pctx, cancel
 	p.rect = newRect
 
 	tb.mu.Lock()
-	if tb.layoutGeneration != generation || tb.panes[oldFocus] != target || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, oldFocus) {
+	if tb.layoutGeneration != generation || tb.panes[oldFocus] != target || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, oldFocus) || tb.ctx != nil && tb.ctx.Err() != nil {
 		tb.mu.Unlock()
-		cancel()
+		lifetime.abort()
 		_ = pty.Close()
 		return layout.ErrNotFound
 	}
+	if !lifetime.publish(p) {
+		tb.mu.Unlock()
+		_ = pty.Close()
+		return layout.ErrNotFound
+	}
+	// The tab lock excludes membership observers while pane.mu publishes the
+	// initial owner generation.
+	publishPaneOwner(p, sess, tb, 0)
 	tb.tree = candidate
 	tb.panes[newID] = p
 	tb.bumpLayoutGenerationLocked()
@@ -239,12 +249,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteSyncPaneRemoved(p)
 	}
-	if p.cancel != nil {
-		p.cancel()
-	}
-	if p.pty != nil {
-		_ = p.pty.Close()
-	}
+	closePaneProcess(p)
 	d.log.Info("pane closed", "session", sess.name, "pane", id)
 	if repaint {
 		if ac != nil {

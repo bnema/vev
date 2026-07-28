@@ -402,6 +402,9 @@ func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ..
 		tabs = append(tabs, tb)
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: tabs, client: ac}
+	for _, tb := range tabs {
+		publishTiledPaneOwners(sess, tb)
+	}
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, nil)
 	d.sessions[sess.id] = sess
