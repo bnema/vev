@@ -1178,10 +1178,17 @@ func TestRoleEffectGateAdmittedSnatchedPanelFinishesBeforePromotion(t *testing.T
 	token := replaced.displaced
 
 	admitted := make(chan struct{})
-	release := make(chan struct{})
+	releaseGate := make(chan struct{})
+	release := releaseTestGate(t, releaseGate)
+	afterFrozen := make(chan struct{})
 	d.afterRoleEffectAdmitted = func(attachmentRoleToken) {
 		close(admitted)
-		<-release
+		<-releaseGate
+	}
+	d.afterRoleEffectGateFrozen = func(action string, ac *attachedClient) {
+		if action == "" && ac == old {
+			close(afterFrozen)
+		}
 	}
 	effectDone := make(chan struct{})
 	wantSize := domain.Size{Cols: 100, Rows: 30}
@@ -1199,12 +1206,13 @@ func TestRoleEffectGateAdmittedSnatchedPanelFinishesBeforePromotion(t *testing.T
 		})
 		transitionDone <- err
 	}()
+	<-afterFrozen
 	select {
 	case err := <-transitionDone:
 		t.Fatalf("promotion overtook admitted snatched panel: %v", err)
-	case <-time.After(20 * time.Millisecond):
+	default:
 	}
-	close(release)
+	release()
 	<-effectDone
 	require.NoError(t, <-transitionDone)
 	old.sendMu.Lock()

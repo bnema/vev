@@ -291,7 +291,7 @@ func (d *Daemon) applyTabLayoutTransactionWithNotice(sess *session, tb *tab, rep
 				failed = append(failed, member)
 			}
 		}
-		if reportFailure && len(failed) != 0 {
+		if reportFailure && len(failed) != 0 && resizeMembersOwnerCurrent(failed) {
 			d.notify(sess, domain.NoticeWarn, domain.NoticeResizeFailed,
 				"pane resize failed; retrying in background", failed[len(failed)-1].err)
 		}

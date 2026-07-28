@@ -78,10 +78,10 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 		oldSame       *parkedAttachment
 	)
 	if old := d.parked[token]; old != nil {
-		retirement := d.retireParkedAttachmentLocked(token, old)
 		if old.ac == ac {
 			oldSame = old
 		} else {
+			retirement := d.retireParkedAttachmentLocked(token, old)
 			oldRetirement = &retirement
 		}
 	}

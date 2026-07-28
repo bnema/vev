@@ -154,7 +154,11 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		}
 		source.mu.Unlock()
 		d.mu.Unlock()
-		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: interrupts, nonblocking: true}, participants...)
+		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
+			if d.afterRoleEffectGateFrozen != nil {
+				d.afterRoleEffectGateFrozen("move-pane", ac)
+			}
+		}}, participants...)
 		if !frozen.acquired || !frozen.drained {
 			frozen.unfreeze()
 			return errMovePaneInvalid

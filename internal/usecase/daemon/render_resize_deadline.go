@@ -112,7 +112,7 @@ type resizeRetryReservation struct {
 func (c *renderCoordinator) reserveResizeRetryForLease(epoch uint64, source *attachedClient, lease *attachmentLease, run func()) (*resizeRetryReservation, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.leaseCurrentLocked(lease, false) || lease.attachment != source || c.resize.lease != lease || c.resize.source != source || c.resize.epoch != epoch || c.resize.committed != epoch || c.resize.retryAttempts >= maxResizeRetryAttempts {
+	if c.torndown || !c.leaseCurrentLocked(lease, false) || lease.attachment != source || c.resize.lease != lease || c.resize.source != source || c.resize.epoch != epoch || c.resize.committed != epoch || c.resize.retryAttempts >= maxResizeRetryAttempts {
 		return nil, false
 	}
 	c.resize.retryAttempts++

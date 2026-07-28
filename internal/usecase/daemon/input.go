@@ -384,6 +384,12 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	case keys.ActionOpenPalette:
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
+		if effect == nil {
+			if err := h.d.jumpAttention(sess, h.ac); err != nil {
+				h.d.reportError(sess, err)
+			}
+			return
+		}
 		effect.bindActionEnd(h.d, "jump-attention")
 		token := h.roleToken
 		token.effect = effect

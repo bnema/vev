@@ -311,7 +311,7 @@ func TestPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
 			require.NotNil(t, p)
 			pty, openCtx := factory.opened(0)
 			require.NotNil(t, p.ctx)
-			require.Equal(t, openCtx, p.ctx)
+			require.Same(t, openCtx, p.ctx)
 			require.NotNil(t, p.cancel)
 
 			cancelSession()
