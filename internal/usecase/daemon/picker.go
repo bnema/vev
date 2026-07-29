@@ -87,17 +87,28 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 		}
 	}
 	d.mu.Unlock()
-	// Snapshot mruAt once: comparators must not observe concurrent touchMRU
-	// updates mid-sort.
-	mru := make(map[*session]uint64, len(sessions))
+	// Snapshot mruAt, name, and ephemeral once: comparators must not observe
+	// concurrent touchMRU updates or a renameSession mutation (which mutates
+	// name/ephemeral under sess.mu) mid-sort.
+	type pickerSortSnapshot struct {
+		mruAt     uint64
+		name      string
+		ephemeral bool
+	}
+	snap := make(map[*session]pickerSortSnapshot, len(sessions))
 	for _, s := range sessions {
-		mru[s] = s.mruAt.Load()
+		mruAt := s.mruAt.Load()
+		s.mu.Lock()
+		name := s.name
+		ephemeral := s.ephemeral
+		s.mu.Unlock()
+		snap[s] = pickerSortSnapshot{mruAt: mruAt, name: name, ephemeral: ephemeral}
 	}
 	sort.Slice(sessions, func(i, j int) bool {
-		if mru[sessions[i]] != mru[sessions[j]] {
-			return mru[sessions[i]] > mru[sessions[j]]
+		if snap[sessions[i]].mruAt != snap[sessions[j]].mruAt {
+			return snap[sessions[i]].mruAt > snap[sessions[j]].mruAt
 		}
-		return sessions[i].name < sessions[j].name
+		return snap[sessions[i]].name < snap[sessions[j]].name
 	})
 	sort.Slice(stopped, func(i, j int) bool {
 		if stopped[i].lastUsedSeq != stopped[j].lastUsedSeq {
@@ -109,7 +120,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 		// Stable partition: named sessions first, ephemeral after, each keeping
 		// its MRU order from the sort above.
 		sort.SliceStable(sessions, func(i, j int) bool {
-			return !sessions[i].ephemeral && sessions[j].ephemeral
+			return !snap[sessions[i]].ephemeral && snap[sessions[j]].ephemeral
 		})
 	}
 
