@@ -3,7 +3,7 @@
 <p align="center"><em>Norwegian: to weave</em></p>
 
 <p align="center">A terminal multiplexer for Linux and macOS.<br>
-One Go binary, zero runtime dependencies, remote attach that survives bad networks.</p>
+Like tmux, minus the prefix key. Like mosh, minus mosh. One binary.</p>
 
 <p align="center"><img src="docs/assets/demo.gif" alt="vev demo: named sessions, splits, stacked panes, floating window, agent bell notification, detach and re-attach" width="800"></p>
 
@@ -15,6 +15,14 @@ Install a pre-built release on Linux x86_64/arm64 or macOS Apple silicon (arm64)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
+```
+
+On Arch Linux, install [`vev-bin`](https://aur.archlinux.org/packages/vev-bin) from the AUR:
+
+```sh
+yay -S vev-bin
+# or
+paru -S vev-bin
 ```
 
 Alternatively, build and install the binary with Go:
