@@ -30,7 +30,15 @@ func snatchedPanelFrame(size domain.Size, styles themeui.Styles, feedback string
 		message = feedback
 	}
 	drawCenteredLine(frame, inner, inner.Y+1, message, styles.PickerBase)
-	drawCenteredLine(frame, inner, inner.Y+3, "r  Resume here        q / Esc  Quit", styles.PickerSelection)
+	drawCenteredSegments(frame, inner, inner.Y+3, []textSegment{
+		{" r ", styles.HintKey},
+		{"  Resume here", styles.PickerBase},
+		{"  ", styles.PickerBase},
+		{" q ", styles.HintKey},
+		{" / ", styles.PickerDescription},
+		{" Esc ", styles.HintKey},
+		{"  Quit", styles.PickerBase},
+	})
 	return frame
 }
 
@@ -39,20 +47,46 @@ func drawSnatchedCompact(frame renderer.Frame, styles themeui.Styles, feedback s
 	if feedback != "" {
 		status = "Session unavailable"
 	}
-	lines := []string{status, "r Resume", "q Quit"}
-	startY := max((frame.Height-len(lines))/2, 0)
-	for i, line := range lines {
-		drawCenteredLine(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, startY+i, line, styles.PickerBase)
-	}
+	bounds := domain.Rect{Width: frame.Width, Height: frame.Height}
+	startY := max((frame.Height-3)/2, 0)
+	drawCenteredLine(frame, bounds, startY, status, styles.PickerBase)
+	drawCenteredSegments(frame, bounds, startY+1, []textSegment{
+		{" r ", styles.HintKey},
+		{" Resume", styles.PickerBase},
+	})
+	drawCenteredSegments(frame, bounds, startY+2, []textSegment{
+		{" q ", styles.HintKey},
+		{" Quit", styles.PickerBase},
+	})
+}
+
+// textSegment is one differently-styled run within a centered hint line.
+type textSegment struct {
+	text  string
+	style renderer.Style
 }
 
 func drawCenteredLine(frame renderer.Frame, bounds domain.Rect, y int, text string, style renderer.Style) {
-	width := 0
-	for _, r := range text {
-		width += renderer.RuneWidth(r)
+	drawCenteredSegments(frame, bounds, y, []textSegment{{text, style}})
+}
+
+// drawCenteredSegments draws consecutive differently-styled segments as one
+// logical line, centered as a whole within bounds.
+func drawCenteredSegments(frame renderer.Frame, bounds domain.Rect, y int, segments []textSegment) {
+	total := 0
+	for _, seg := range segments {
+		for _, r := range seg.text {
+			total += renderer.RuneWidth(r)
+		}
 	}
-	x := bounds.X + max((bounds.Width-width)/2, 0)
-	ui.DrawText(frame, x, y, bounds.X+bounds.Width, text, style)
+	x := bounds.X + max((bounds.Width-total)/2, 0)
+	limit := bounds.X + bounds.Width
+	for _, seg := range segments {
+		ui.DrawText(frame, x, y, limit, seg.text, seg.style)
+		for _, r := range seg.text {
+			x += renderer.RuneWidth(r)
+		}
+	}
 }
 
 var errSnatchedOutputStale = errors.New("snatched output role changed")

@@ -55,6 +55,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 
 		PickerBase:        renderer.DefaultStyle(),
 		PickerSelection:   EmphasisStyle(ramp.SurfaceActive, t),
+		HintKey:           EmphasisStyle(ramp.SurfaceActive, t),
 		PickerDescription: overlayDescription,
 		// Separators are secondary text on the terminal background, not
 		// non-text borders; they therefore require the normal 4.5:1 contrast.
@@ -148,6 +149,7 @@ func neutralStyles(t Theme) Styles {
 
 		PickerBase:        renderer.DefaultStyle(),
 		PickerSelection:   EmphasisStyle(accent, t),
+		HintKey:           EmphasisStyle(accent, t),
 		PickerDescription: overlayDescription,
 		PickerSeparator:   overlayDescription,
 		PromptBase:        renderer.DefaultStyle(),

@@ -89,8 +89,11 @@ type Styles struct {
 	TabActiveTitle   renderer.Style
 	MRURecent        renderer.Style
 
-	PickerBase        renderer.Style
-	PickerSelection   renderer.Style
+	PickerBase      renderer.Style
+	PickerSelection renderer.Style
+	// HintKey is the keycap badge style for key hints: an accent background
+	// over " key " padding, distinct from PickerSelection's full-line emphasis.
+	HintKey           renderer.Style
 	PickerDescription renderer.Style
 	PickerSeparator   renderer.Style
 	PromptBase        renderer.Style
