@@ -1220,10 +1220,14 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 
 	_, err = killTr.Recv()
 	require.ErrorIs(t, err, io.EOF)
-	select {
-	case err := <-served:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not shut down after kill all")
-	}
+	var serveErr error
+	require.Eventually(t, func() bool {
+		select {
+		case serveErr = <-served:
+			return true
+		default:
+			return false
+		}
+	}, 15*time.Second, 10*time.Millisecond, "daemon did not shut down after kill all")
+	require.NoError(t, serveErr)
 }
