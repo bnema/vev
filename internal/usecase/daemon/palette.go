@@ -74,12 +74,9 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 		if candidate == current {
 			continue
 		}
-		candidate.mu.Lock()
-		name, createdAt, ephemeral := candidate.name, candidate.createdAt, candidate.ephemeral
-		id := candidate.id
-		candidate.mu.Unlock()
-		if name != "" && !ephemeral {
-			active = append(active, palette.NewActiveSessionResult(name, time.Unix(0, createdAt), id))
+		snap := candidate.snapshotView(viewOptions{})
+		if snap.name != "" && !snap.ephemeral {
+			active = append(active, palette.NewActiveSessionResult(snap.name, time.Unix(0, snap.createdAt), snap.id))
 		}
 	}
 	sort.Slice(active, func(i, j int) bool {
