@@ -26,17 +26,18 @@ type tabView struct {
 // list-sessions) read local session state through snapshotView; proxy rows in
 // later phases still come from registry/discovery, not this type alone.
 type sessionView struct {
-	id           domain.SessionID
-	incarnation  domain.IncarnationID
-	name         string
-	ephemeral    bool
-	createdAt    int64
-	active       int
-	mruAt        uint64
-	attached     bool
-	tabCount     int
-	hasAttention bool
-	tabs         []tabView
+	id                domain.SessionID
+	incarnation       domain.IncarnationID
+	name              string
+	ephemeral         bool
+	createdAt         int64
+	active            int
+	mruAt             uint64
+	attached          bool
+	tabCount          int
+	hasAttention      bool
+	tabs              []tabView
+	cannotAcceptMoves bool
 }
 
 // snapshotView reads session fields under s.mu and samples the independently
@@ -50,15 +51,16 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	view := sessionView{
-		id:          s.id,
-		incarnation: s.incarnation,
-		name:        s.name,
-		ephemeral:   s.ephemeral,
-		createdAt:   s.createdAt,
-		active:      s.active,
-		mruAt:       s.mruAt.Load(),
-		attached:    s.client != nil,
-		tabCount:    len(s.tabs),
+		id:                s.id,
+		incarnation:       s.incarnation,
+		name:              s.name,
+		ephemeral:         s.ephemeral,
+		createdAt:         s.createdAt,
+		active:            s.active,
+		mruAt:             s.mruAt.Load(),
+		attached:          s.client != nil,
+		tabCount:          len(s.tabs),
+		cannotAcceptMoves: s.capabilities().cannotAcceptMoves,
 	}
 	if opts.tabDetails {
 		view.tabs = make([]tabView, 0, len(s.tabs))
@@ -90,12 +92,13 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 // equivalent to the inline construction previously in pickerViews.
 func (view sessionView) pickerView() picker.SessionView {
 	out := picker.SessionView{
-		ID:          view.id,
-		Incarnation: view.incarnation,
-		Name:        view.name,
-		TargetName:  view.name,
-		Active:      view.active,
-		Tabs:        make([]picker.TabEntry, 0, len(view.tabs)),
+		ID:                view.id,
+		Incarnation:       view.incarnation,
+		Name:              view.name,
+		TargetName:        view.name,
+		Active:            view.active,
+		Tabs:              make([]picker.TabEntry, 0, len(view.tabs)),
+		CannotAcceptMoves: view.cannotAcceptMoves,
 	}
 	if !view.ephemeral {
 		createdAt := view.createdAt

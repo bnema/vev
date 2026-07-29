@@ -24,6 +24,10 @@ type SessionView struct {
 	Active            int
 	Stopped           bool
 	ExpectedCreatedAt *int64
+	// CannotAcceptMoves reports whether this session cannot receive a moved tab
+	// or pane. False for ordinary local (and stopped) sessions; true for
+	// restricted proxy sessions in phase 4. Populated, not yet consumed.
+	CannotAcceptMoves bool
 }
 
 // TabEntry is one tab row; Name is drawn emphasized, Detail muted.
