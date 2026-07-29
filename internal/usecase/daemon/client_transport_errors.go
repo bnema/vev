@@ -5,11 +5,18 @@ import "github.com/bnema/vev/internal/ports"
 // clientGone detaches ac if it is still the session's current client. The
 // session remains registered and headless after the client is gone.
 func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
-	if failed != nil && !ac.currentTransportIs(failed) {
-		return // stale connection loop; a newer transport owns this client
+	expected := transportSnapshot{}
+	if failed != nil {
+		expected = ac.transportSnapshot()
+		if expected.transport != failed {
+			return // stale connection loop; a newer transport owns this client
+		}
 	}
-	if !d.detachIfCurrent(sess, ac) {
-		return // already displaced by a newer client; nothing to do
+	if d.beforeClientGoneDetach != nil {
+		d.beforeClientGoneDetach()
+	}
+	if !d.detachIfCurrentTransport(sess, ac, expected) {
+		return // displaced, or the link was rebound after the precheck
 	}
 	d.finishClientGone(sess, ac, failed, explicit)
 }
@@ -65,10 +72,14 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 // detachOnSendError drops a client whose transport failed, leaving the session
 // registered and headless.
 func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed ports.Transport) {
-	if failed != nil && !ac.currentTransportIs(failed) {
-		return
+	expected := transportSnapshot{}
+	if failed != nil {
+		expected = ac.transportSnapshot()
+		if expected.transport != failed {
+			return
+		}
 	}
-	if d.detachIfCurrent(sess, ac) {
+	if d.detachIfCurrentTransport(sess, ac, expected) {
 		d.finishSendErrorDetach(sess, ac, failed)
 	}
 }

@@ -172,6 +172,13 @@ type Daemon struct {
 	// afterDetachRoleEffectsFrozen observes terminal detach after it wins the
 	// attachment gate but before it checks session ownership.
 	afterDetachRoleEffectsFrozen func()
+	// beforeClientGoneDetach pauses clientGone after the stale-transport
+	// precheck and before exact transport/incarnation detach validation.
+	beforeClientGoneDetach func()
+	// beforeResumeParkedSendMu pauses resumeParked after the initial parked
+	// lookup and before the attachment send lock, so tests can consume or
+	// replace the credential while the handshake waits.
+	beforeResumeParkedSendMu func()
 	// afterDisplacedCleanupStarted observes deferred displaced cleanup before it
 	// synchronizes with the attachment gate.
 	afterDisplacedCleanupStarted func()
@@ -1171,11 +1178,24 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	// A non-zero token is an authoritative resume credential. If it is unknown,
 	// expired, or raced with lifecycle teardown, fail closed instead of routing
 	// the Hello as an ordinary attach that could create or replace ownership.
+	// The one legitimate pre-park race is a still-active same-client credential
+	// for the requested session; hand that into the park/resume lifecycle.
 	if h.ResumeToken != 0 {
 		d.mu.Lock()
 		parkedAtStart := d.parked[h.ResumeToken]
 		d.mu.Unlock()
 		if parkedAtStart == nil {
+			if sess, ac, ok, err := d.resumeLiveAttachment(h, tr, sz); err != nil {
+				if errors.Is(err, errResumeTokenLifecycleRace) {
+					// Live recovery parked then lost a competing resumeParked
+					// race; keep the fail-closed wire response instead of
+					// leaking the internal sentinel to handleHello as ErrInternal.
+					return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+				}
+				return nil, nil, err
+			} else if ok {
+				return sess, ac, nil
+			}
 			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 		}
 		if sess, ac, ok, err := d.resumeParked(h, tr, sz); err == nil {
@@ -1185,9 +1205,9 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 		} else if errors.Is(err, errResumeTokenLifecycleRace) {
 			// The parked entry was replaced while this handshake waited for
-			// its send lock. The ordinary attach path can reclaim the still-live
-			// named session instead of turning this grace-period race into a
-			// terminal no-such-session error.
+			// its send lock. Fail closed on the original credential rather
+			// than falling through to ordinary attach/create routing.
+			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 		} else {
 			return nil, nil, err
 		}

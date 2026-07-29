@@ -205,6 +205,86 @@ func finishParkedAttachmentRetirements(retirements []parkedAttachmentRetirement)
 	}
 }
 
+// resumeLiveAttachment recovers a nonzero resume credential that still belongs
+// to the named session's active attachment because transport teardown has not
+// parked it yet. Only the exact live owner (same session, token, and client ID)
+// is accepted; arbitrary unknown tokens stay fail-closed.
+func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+	d.mu.Lock()
+	if d.closing {
+		d.mu.Unlock()
+		return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+	}
+	// Teardown may have parked the credential already.
+	if d.parked[h.ResumeToken] != nil {
+		d.mu.Unlock()
+		return d.resumeParked(h, tr, sz)
+	}
+	sess := d.findByNameLocked(h.Name)
+	var (
+		ac              *attachedClient
+		oldSnap         transportSnapshot
+		credentialMatch bool
+		clientMismatch  bool
+	)
+	if sess != nil {
+		sess.mu.Lock()
+		ac = sess.client
+		// resumeToken writes run under d.mu; read the live credential here
+		// before releasing the daemon lock, then revalidate via the exact
+		// transport incarnation through detachIfCurrentTransport.
+		if ac != nil && ac.resumeCapable && ac.resumeToken == h.ResumeToken {
+			if ac.clientID != h.ClientID {
+				clientMismatch = true
+			} else {
+				oldSnap = ac.transportSnapshot()
+				credentialMatch = oldSnap.transport != nil
+			}
+		}
+		sess.mu.Unlock()
+	}
+	// Teardown may have parked the credential while we resolved the session.
+	if d.parked[h.ResumeToken] != nil {
+		d.mu.Unlock()
+		return d.resumeParked(h, tr, sz)
+	}
+	d.mu.Unlock()
+
+	if clientMismatch {
+		d.log.Warn("resume rejected", "session", sess.name, "err", "client id mismatch")
+		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+	}
+	if !credentialMatch {
+		return nil, nil, false, nil
+	}
+
+	if !d.detachIfCurrentTransport(sess, ac, oldSnap) {
+		// A newer owner, rebound link, or teardown won; try the parked path.
+		return d.resumeParked(h, tr, sz)
+	}
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteDetach(ac)
+	}
+	d.unregisterPreview(ac)
+	if !d.parkAttachment(sess, ac) {
+		// Detach already published; retire the captured link exactly once so
+		// shutdown cannot leave an orphaned open transport with no owner.
+		d.resetScreenDefaultColors(sess)
+		ac.clearPreviousSession()
+		_ = ac.closeCapturedTransport(ac.revokeTransport(oldSnap.transport))
+		d.mu.Lock()
+		closing := d.closing
+		d.mu.Unlock()
+		if closing {
+			return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		}
+		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+	}
+	_ = ac.closeCapturedTransport(oldSnap.transport)
+	d.log.Info("live resume credential parked for reconnect", "session", sess.name)
+	return d.resumeParked(h, tr, sz)
+}
+
 // resumeParked acquires the parked client's output lock before the daemon
 // registry lock, preserving the global sendMu > Daemon.mu ordering. The parked
 // entry is revalidated after both locks are held because it may expire between
@@ -218,6 +298,9 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 	}
 
 	ac := parked.ac
+	if d.beforeResumeParkedSendMu != nil {
+		d.beforeResumeParkedSendMu()
+	}
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	d.mu.Lock()

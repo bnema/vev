@@ -268,6 +268,293 @@ func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 	require.Same(t, resumedAC, sess.client)
 }
 
+// TestResumeParkedTokenReplacedDuringWaitFailsClosed covers the lifecycle race
+// where a parked credential is consumed or replaced while IntentResume waits on
+// the attachment send lock. The nonzero token must fail closed instead of
+// falling through to ordinary attach/create routing.
+func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+	oldTr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	require.NotZero(t, token)
+	d.clientGone(sess, ac, oldTr, false)
+	require.Nil(t, sess.client)
+	d.mu.Lock()
+	parked := d.parked[token]
+	sessionsBefore := len(d.sessions)
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+
+	reachedLookup := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLookup) }) })
+	d.beforeResumeParkedSendMu = func() {
+		close(reachedLookup)
+		<-releaseLookup
+	}
+
+	resumeTr := &closeTrackingTransport{}
+	type routeResult struct {
+		sess *session
+		ac   *attachedClient
+		err  error
+	}
+	result := make(chan routeResult, 1)
+	go func() {
+		routedSess, routedAC, routeErr := d.route(helloResumeCapable(ports.IntentResume, "work", token), resumeTr)
+		result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
+	}()
+	awaitTestCompletion(t, reachedLookup, "resumeParked did not pause after the parked lookup")
+
+	d.mu.Lock()
+	require.Same(t, parked, d.parked[token], "fixture: token must still be parked at the seam")
+	d.removeParkedLocked(token, parked)
+	require.Nil(t, d.parked[token])
+	require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
+	d.mu.Unlock()
+
+	releaseOnce.Do(func() { close(releaseLookup) })
+	got := awaitTestValue(t, result, "IntentResume did not finish after parked token replacement")
+
+	require.Error(t, got.err)
+	require.Nil(t, got.sess)
+	require.Nil(t, got.ac)
+	var pe *protoErr
+	require.ErrorAs(t, got.err, &pe)
+	require.Equal(t, ports.ErrNoSuchSession, pe.code)
+	require.Contains(t, pe.Error(), "resume token is no longer valid")
+	require.Nil(t, sess.client, "lifecycle-race resume must not take over the named session")
+	require.Empty(t, resumeTr.Sends(), "failed resume must not complete a Welcome handshake")
+	d.mu.Lock()
+	_, stillParked := d.parked[token]
+	sessionsAfter := len(d.sessions)
+	d.mu.Unlock()
+	require.False(t, stillParked, "consumed token must stay invalid")
+	require.Equal(t, sessionsBefore, sessionsAfter, "lifecycle-race resume must not create a session")
+}
+
+// TestResumeLiveAttachmentParkedResumeRaceFailsClosed covers the live-recovery
+// path that parks a still-active credential and then loses a competing
+// resumeParked race before sendMu revalidation. The lifecycle sentinel must
+// surface as fail-closed ErrNoSuchSession, never as a raw ErrInternal leak to
+// handleHello.
+func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+	oldTr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	require.NotZero(t, token)
+	require.Same(t, ac, sess.client)
+	d.mu.Lock()
+	_, parkedAtStart := d.parked[token]
+	sessionsBefore := len(d.sessions)
+	d.mu.Unlock()
+	require.False(t, parkedAtStart, "fixture: live attachment must not be parked yet")
+
+	reachedLookup := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLookup) }) })
+	d.beforeResumeParkedSendMu = func() {
+		close(reachedLookup)
+		<-releaseLookup
+	}
+
+	resumeTr := &closeTrackingTransport{}
+	type routeResult struct {
+		sess *session
+		ac   *attachedClient
+		err  error
+	}
+	result := make(chan routeResult, 1)
+	go func() {
+		routedSess, routedAC, routeErr := d.route(helloResumeCapable(ports.IntentResume, "work", token), resumeTr)
+		result <- routeResult{sess: routedSess, ac: routedAC, err: routeErr}
+	}()
+	awaitTestCompletion(t, reachedLookup, "live resume did not pause inside resumeParked after parking")
+
+	d.mu.Lock()
+	parked := d.parked[token]
+	require.NotNil(t, parked, "fixture: live recovery must have parked before the sendMu seam")
+	require.Same(t, ac, parked.ac)
+	d.removeParkedLocked(token, parked)
+	require.Nil(t, d.parked[token])
+	require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
+	d.mu.Unlock()
+
+	releaseOnce.Do(func() { close(releaseLookup) })
+	got := awaitTestValue(t, result, "live IntentResume did not finish after competing resume consumed the token")
+
+	require.Error(t, got.err)
+	require.Nil(t, got.sess)
+	require.Nil(t, got.ac)
+	require.False(t, errors.Is(got.err, errResumeTokenLifecycleRace), "raw lifecycle sentinel must not reach route callers")
+	var pe *protoErr
+	require.ErrorAs(t, got.err, &pe)
+	require.Equal(t, ports.ErrNoSuchSession, pe.code)
+	require.Contains(t, pe.Error(), "resume token is no longer valid")
+	require.Nil(t, sess.client, "losing live resume must not take over the named session")
+	require.Empty(t, resumeTr.Sends(), "failed live resume must not complete a Welcome handshake")
+	d.mu.Lock()
+	_, stillParked := d.parked[token]
+	sessionsAfter := len(d.sessions)
+	d.mu.Unlock()
+	require.False(t, stillParked, "consumed token must stay invalid")
+	require.Equal(t, sessionsBefore, sessionsAfter, "losing live resume must not create a session")
+}
+
+// TestResumeActiveTokenBeforeParkRecoversSameAttachment covers the laptop-sleep
+// reconnect race: IntentResume arrives with the live attachment's token before
+// transport teardown has parked it. Same client must recover; unknown and
+// mismatched credentials stay fail-closed.
+func TestResumeActiveTokenBeforeParkRecoversSameAttachment(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+	oldTr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	require.NotZero(t, token)
+	require.True(t, ac.resumeCapable)
+	require.Same(t, ac, sess.client)
+	d.mu.Lock()
+	_, parked := d.parked[token]
+	d.mu.Unlock()
+	require.False(t, parked, "fixture: live attachment must not be parked yet")
+
+	_, _, err = d.route(helloResumeCapable(ports.IntentResume, "work", 0xdecafbad), &closeTrackingTransport{})
+	require.Error(t, err)
+	var unknownErr *protoErr
+	require.ErrorAs(t, err, &unknownErr)
+	require.Equal(t, ports.ErrNoSuchSession, unknownErr.code)
+	require.Contains(t, unknownErr.Error(), "resume token is no longer valid")
+	require.Same(t, ac, sess.client)
+	require.Equal(t, token, ac.resumeToken)
+	require.Same(t, oldTr, ac.transport())
+
+	wrongClient := helloResumeCapable(ports.IntentResume, "work", token)
+	wrongClient.ClientID = [16]byte{9, 9, 9, 9}
+	_, _, err = d.route(wrongClient, &closeTrackingTransport{})
+	require.Error(t, err)
+	var mismatchErr *protoErr
+	require.ErrorAs(t, err, &mismatchErr)
+	require.Equal(t, ports.ErrNoSuchSession, mismatchErr.code)
+	require.Contains(t, mismatchErr.Error(), "resume token is no longer valid")
+	require.Same(t, ac, sess.client)
+	require.Equal(t, token, ac.resumeToken)
+	require.Same(t, oldTr, ac.transport())
+
+	newTr := &closeTrackingTransport{}
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), newTr)
+	require.NoError(t, err, "same-token same-client IntentResume must recover before parking")
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	require.Same(t, ac, sess.client)
+	require.Same(t, newTr, ac.transport())
+	require.NotEqual(t, token, ac.resumeToken, "successful resume rotates the credential")
+	d.mu.Lock()
+	_, oldTokenParked := d.parked[token]
+	d.mu.Unlock()
+	require.False(t, oldTokenParked, "consumed live credential must not remain resumeable")
+
+	d.clientGone(sess, ac, oldTr, false)
+	require.Same(t, ac, sess.client, "retired pre-park transport must not detach the rebound attachment")
+	require.Same(t, newTr, ac.transport())
+	require.False(t, newTr.Closed())
+}
+
+// TestStaleClientGoneAfterTransportCheckDoesNotDetachReboundAttachment covers
+// the TOCTOU where clientGone passes the old-transport precheck, then a live
+// resume rebinds the same attachment before detach runs.
+func TestStaleClientGoneAfterTransportCheckDoesNotDetachReboundAttachment(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+	oldTr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	require.NotZero(t, token)
+
+	passedPrecheck := make(chan struct{})
+	releaseDetach := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseDetach) }) })
+	d.beforeClientGoneDetach = func() {
+		close(passedPrecheck)
+		<-releaseDetach
+	}
+
+	goneDone := make(chan struct{})
+	go func() {
+		d.clientGone(sess, ac, oldTr, false)
+		close(goneDone)
+	}()
+	awaitTestCompletion(t, passedPrecheck, "stale clientGone did not reach the post-precheck seam")
+
+	newTr := &closeTrackingTransport{}
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), newTr)
+	require.NoError(t, err)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	require.Same(t, newTr, ac.transport())
+
+	releaseOnce.Do(func() { close(releaseDetach) })
+	awaitTestCompletion(t, goneDone, "stale clientGone did not finish after resume rebound")
+
+	require.Same(t, ac, sess.client, "stale cleanup must not detach the rebound attachment")
+	require.Same(t, newTr, ac.transport())
+	require.False(t, newTr.Closed(), "rebound transport must survive stale old-link cleanup")
+	require.True(t, oldTr.Closed(), "live resume retires the captured old transport")
+}
+
+// TestResumeLiveAttachmentParkFailureRetiresOldTransport covers shutdown racing
+// park after live detach: the old link must still be revoked/closed exactly once
+// and the session must not keep a half-detached owner.
+func TestResumeLiveAttachmentParkFailureRetiresOldTransport(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+	oldTr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	require.NotZero(t, token)
+
+	d.afterDetachRoleEffectsFrozen = func() {
+		d.mu.Lock()
+		d.closing = true
+		d.mu.Unlock()
+	}
+
+	_, _, err = d.route(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{})
+	require.Error(t, err)
+	var pe *protoErr
+	require.ErrorAs(t, err, &pe)
+	require.Equal(t, ports.ErrServerShutdown, pe.code)
+	require.Nil(t, sess.client, "failed live park must leave the session without an owner")
+	require.Nil(t, ac.transport(), "failed live park must revoke the captured old transport")
+	require.True(t, oldTr.Closed(), "failed live park must close the captured old transport")
+	d.mu.Lock()
+	_, parked := d.parked[token]
+	d.mu.Unlock()
+	require.False(t, parked, "failed live park must not publish a resume credential")
+}
+
 func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()

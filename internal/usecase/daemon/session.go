@@ -675,6 +675,13 @@ func (s *session) detachIfCurrent(ac *attachedClient) bool {
 // detachIfCurrent publishes terminal role invalidation through the attachment
 // gate. Freeze/drain happens before routing or session locks are acquired.
 func (d *Daemon) detachIfCurrent(sess *session, ac *attachedClient) bool {
+	return d.detachIfCurrentTransport(sess, ac, transportSnapshot{})
+}
+
+// detachIfCurrentTransport is detachIfCurrent with an optional exact-link
+// fence. When expected.transport is non-nil, a rebound incarnation of the same
+// attachment object cannot be detached by a stale connection loop.
+func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, expected transportSnapshot) bool {
 	if sess == nil || ac == nil {
 		return false
 	}
@@ -686,6 +693,9 @@ func (d *Daemon) detachIfCurrent(sess *session, ac *attachedClient) bool {
 	d.notices.routingMu.Lock()
 	sess.mu.Lock()
 	current := sess.client == ac && ac.currentSession() == sess
+	if current && expected.transport != nil && !ac.transportSnapshotCurrent(expected) {
+		current = false
+	}
 	if current {
 		sess.client = nil
 		ac.roleGeneration.Add(1)
