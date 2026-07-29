@@ -43,7 +43,7 @@ func TestConsumeOrExpelPaneTransitions(t *testing.T) {
 			want: &Tree{Root: verticalNodes(
 				consumeExpelWeightedLeaf("a", 6),
 				consumeExpelWeightedLeaf("b", 5),
-				NewLeaf("c"),
+				consumeExpelWeightedLeaf("c", 5.5),
 			), Focus: "c"},
 			wantChange: true,
 		},
@@ -55,7 +55,7 @@ func TestConsumeOrExpelPaneTransitions(t *testing.T) {
 			want: &Tree{Root: verticalNodes(
 				consumeExpelWeightedLeaf("b", 6),
 				consumeExpelWeightedLeaf("c", 5),
-				NewLeaf("a"),
+				consumeExpelWeightedLeaf("a", 5.5),
 			), Focus: "a"},
 			wantChange: true,
 		},
@@ -97,7 +97,7 @@ func TestConsumeOrExpelPaneTransitions(t *testing.T) {
 			target: "b",
 			dir:    Left,
 			want: &Tree{Root: horizontal(
-				NewLeaf("b"),
+				consumeExpelWeightedLeaf("b", 50),
 				consumeExpelWeightedNode(vertical("a", "c"), 50),
 				consumeExpelWeightedLeaf("d", 50),
 			), Focus: "b"},
@@ -110,7 +110,7 @@ func TestConsumeOrExpelPaneTransitions(t *testing.T) {
 			dir:    Right,
 			want: &Tree{Root: horizontal(
 				consumeExpelWeightedNode(vertical("a", "c"), 50),
-				NewLeaf("b"),
+				consumeExpelWeightedLeaf("b", 50),
 				consumeExpelWeightedLeaf("d", 50),
 			), Focus: "b"},
 			wantChange: true,

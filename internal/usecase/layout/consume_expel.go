@@ -162,6 +162,19 @@ func findColumnMember(columns []*Node, target PaneID) (int, int, bool) {
 	return 0, 0, false
 }
 
+// fairShareWeight returns the mean effective sibling weight so an inserted
+// node lands with an equal share while siblings keep their proportions.
+func fairShareWeight(siblings []*Node) float64 {
+	if len(siblings) == 0 {
+		return 0
+	}
+	total := 0.0
+	for _, sibling := range siblings {
+		total += effectiveWeight(sibling.Weight)
+	}
+	return total / float64(len(siblings))
+}
+
 func consumeSingletonColumn(t *Tree, sourceIndex int, dir Direction, area domain.Rect) {
 	root := t.Root
 	destinationIndex := sourceIndex - 1
@@ -186,6 +199,7 @@ func consumeSingletonColumn(t *Tree, sourceIndex int, dir Direction, area domain
 		}
 	case Split:
 		normalizeChildWeightsFromArea(destination, columnAreas[destinationIndex])
+		moved.Weight = fairShareWeight(destination.Children)
 		destination.Children = append(destination.Children, moved)
 	case Stack:
 		destination.Children = append(destination.Children, moved)
@@ -239,6 +253,7 @@ func expelColumnMember(t *Tree, columnIndex, memberIndex int, dir Direction) {
 	}
 
 	root.Children[columnIndex] = remaining
+	moved.Weight = fairShareWeight(root.Children)
 	insertionIndex := columnIndex
 	if dir == Right {
 		insertionIndex++
