@@ -220,6 +220,161 @@ func TestRemoteCatalogClientContextCanceled(t *testing.T) {
 	}
 }
 
+func TestCatalogOutputSafety(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command func(ctx context.Context) *exec.Cmd
+		wantErr error
+		check   func(t *testing.T, err error)
+	}{
+		{
+			name: "oversized stdout",
+			command: func(ctx context.Context) *exec.Cmd {
+				return exec.CommandContext(ctx, "sh", "-c",
+					fmt.Sprintf("head -c %d /dev/zero", maxCatalogBytes+1))
+			},
+			wantErr: errCatalogTooLarge,
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if strings.Contains(err.Error(), strings.Repeat("\x00", 64)) {
+					t.Fatalf("error embeds oversized stdout: %v", err)
+				}
+			},
+		},
+		{
+			name: "oversized stderr",
+			command: func(ctx context.Context) *exec.Cmd {
+				return exec.CommandContext(ctx, "sh", "-c",
+					fmt.Sprintf("head -c %d /dev/zero >&2; exit 1", maxCatalogDiagnosticBytes+1))
+			},
+			wantErr: errCatalogTooLarge,
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if strings.Contains(err.Error(), strings.Repeat("\x00", 64)) {
+					t.Fatalf("error embeds oversized stderr: %v", err)
+				}
+				if errors.Is(err, errCatalogSSH) {
+					t.Fatalf("oversized stderr must not wrap SSH with captured output: %v", err)
+				}
+			},
+		},
+		{
+			name: "ansi control stderr",
+			command: func(ctx context.Context) *exec.Cmd {
+				cmd := exec.CommandContext(ctx, "sh", "-c", "cat >&2; exit 255")
+				cmd.Stdin = strings.NewReader("\x1b[31mconnection refused\x1b[0m\x07")
+				return cmd
+			},
+			wantErr: errCatalogSSH,
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				msg := err.Error()
+				if strings.ContainsRune(msg, '\x1b') || strings.ContainsRune(msg, '\x07') {
+					t.Fatalf("error retains control/ANSI bytes: %q", msg)
+				}
+				if strings.Contains(msg, "[31m") || strings.Contains(msg, "[0m") {
+					t.Fatalf("error retains terminal escape remnants: %q", msg)
+				}
+				if !strings.Contains(msg, "connection refused") {
+					t.Fatalf("error = %q, want printable diagnostic text preserved", msg)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := &CatalogClient{
+				command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+					return tt.command(ctx)
+				},
+			}
+			_, err := client.List(context.Background(), "arch")
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("List() error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.check != nil {
+				tt.check(t, err)
+			}
+		})
+	}
+}
+
+func TestBoundedBufferLimits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		limit     int
+		chunks    [][]byte
+		wantLen   int
+		wantOver  bool
+		wantBytes string
+	}{
+		{
+			name:      "under limit",
+			limit:     8,
+			chunks:    [][]byte{[]byte("abcd"), []byte("ef")},
+			wantLen:   6,
+			wantOver:  false,
+			wantBytes: "abcdef",
+		},
+		{
+			name:      "exact limit",
+			limit:     4,
+			chunks:    [][]byte{[]byte("abcd")},
+			wantLen:   4,
+			wantOver:  false,
+			wantBytes: "abcd",
+		},
+		{
+			name:      "overflow discards remainder",
+			limit:     4,
+			chunks:    [][]byte{[]byte("abc"), []byte("defgh")},
+			wantLen:   4,
+			wantOver:  true,
+			wantBytes: "abcd",
+		},
+		{
+			name:      "further writes stay discarded",
+			limit:     2,
+			chunks:    [][]byte{[]byte("abcdef"), []byte("xyz")},
+			wantLen:   2,
+			wantOver:  true,
+			wantBytes: "ab",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var buf boundedBuffer
+			buf.limit = tt.limit
+			for _, chunk := range tt.chunks {
+				n, err := buf.Write(chunk)
+				if err != nil {
+					t.Fatalf("Write(%q) error = %v", chunk, err)
+				}
+				if n != len(chunk) {
+					t.Fatalf("Write(%q) n = %d, want %d", chunk, n, len(chunk))
+				}
+			}
+			if buf.overflow != tt.wantOver {
+				t.Fatalf("overflow = %v, want %v", buf.overflow, tt.wantOver)
+			}
+			if got := len(buf.Bytes()); got != tt.wantLen {
+				t.Fatalf("len = %d, want %d", got, tt.wantLen)
+			}
+			if got := string(buf.Bytes()); got != tt.wantBytes {
+				t.Fatalf("bytes = %q, want %q", got, tt.wantBytes)
+			}
+		})
+	}
+}
+
 func stdoutCmd(ctx context.Context, stdout string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "cat")
 	cmd.Stdin = strings.NewReader(stdout)

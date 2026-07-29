@@ -10,13 +10,18 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
-const maxCatalogBytes = 1 << 20
+const (
+	maxCatalogBytes           = 1 << 20
+	maxCatalogDiagnosticBytes = 4 << 10
+)
 
 var (
 	errCatalogDecode   = errors.New("remote catalog: invalid JSON")
@@ -56,23 +61,27 @@ func (c *CatalogClient) List(ctx context.Context, target string) (ports.RemoteCa
 	}
 	spec := sshstdio.BuildCommandForRemoteCommand(target, "vev", "cmd", "remote-catalog", "--json")
 	cmd := command(ctx, spec.Path, spec.Args...)
-	var stdout boundedBuffer
-	var stderr bytes.Buffer
+	stdout := boundedBuffer{limit: maxCatalogBytes}
+	stderr := boundedBuffer{limit: maxCatalogDiagnosticBytes}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ports.RemoteCatalog{}, ctxErr
 		}
-		stderrText := strings.TrimSpace(stderr.String())
+		if stdout.overflow || stderr.overflow {
+			slog.Debug("remote catalog output too large", "target", target, "stdout_limit", maxCatalogBytes, "stderr_limit", maxCatalogDiagnosticBytes)
+			return ports.RemoteCatalog{}, errCatalogTooLarge
+		}
+		stderrText := sanitizeCatalogDiagnostic(string(stderr.Bytes()))
 		slog.Debug("remote catalog ssh failed", "target", target, "err", err, "stderr", stderrText)
 		if stderrText != "" {
 			return ports.RemoteCatalog{}, fmt.Errorf("%w: %w: %s", errCatalogSSH, err, stderrText)
 		}
 		return ports.RemoteCatalog{}, fmt.Errorf("%w: %w", errCatalogSSH, err)
 	}
-	if stdout.overflow {
-		slog.Debug("remote catalog output too large", "target", target, "limit", maxCatalogBytes)
+	if stdout.overflow || stderr.overflow {
+		slog.Debug("remote catalog output too large", "target", target, "stdout_limit", maxCatalogBytes, "stderr_limit", maxCatalogDiagnosticBytes)
 		return ports.RemoteCatalog{}, errCatalogTooLarge
 	}
 
@@ -149,9 +158,66 @@ func validCatalogState(state string) bool {
 	}
 }
 
-// boundedBuffer captures stdout up to maxCatalogBytes and records overflow.
+// sanitizeCatalogDiagnostic strips terminal escapes and control bytes while
+// preserving useful printable diagnostic text for errors and logs.
+func sanitizeCatalogDiagnostic(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); {
+		if raw[i] == 0x1b {
+			i = skipTerminalEscape(raw, i+1)
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(raw[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if unicode.IsPrint(r) || r == '\t' || r == '\n' {
+			b.WriteRune(r)
+		}
+		i += size
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func skipTerminalEscape(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch s[i] {
+	case '[': // CSI: ESC [ ... final byte in 0x40-0x7E
+		i++
+		for i < len(s) {
+			ch := s[i]
+			i++
+			if ch >= 0x40 && ch <= 0x7e {
+				break
+			}
+		}
+		return i
+	case ']': // OSC: ESC ] ... BEL or ST (ESC \)
+		i++
+		for i < len(s) {
+			if s[i] == 0x07 {
+				return i + 1
+			}
+			if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+				return i + 2
+			}
+			i++
+		}
+		return i
+	default:
+		// Two-byte Fe escape or unknown: drop ESC and the next byte.
+		return i + 1
+	}
+}
+
+// boundedBuffer captures stream output up to an explicit byte limit and records overflow.
 type boundedBuffer struct {
 	buf      bytes.Buffer
+	limit    int
 	overflow bool
 }
 
@@ -159,7 +225,7 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	if b.overflow {
 		return len(p), nil
 	}
-	remaining := maxCatalogBytes - b.buf.Len()
+	remaining := b.limit - b.buf.Len()
 	if remaining <= 0 {
 		b.overflow = true
 		return len(p), nil
