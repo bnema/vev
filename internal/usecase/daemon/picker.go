@@ -48,6 +48,7 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	rt.pickerPreviewSession = nil
 	rt.pickerPreview = nil
 	rt.picker = model
+	rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
 	rt.pickerIntent = intent
 	rt.pickerSource = source
 	rt.pickerPending = nil
@@ -452,6 +453,7 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = nil
+	ac.overlays.pickerTitle = ""
 	ac.overlays.pickerIntent = pickerNavigate
 	ac.overlays.pickerSource = moveSourceLocator{}
 	ac.overlays.pickerPending = nil

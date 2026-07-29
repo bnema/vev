@@ -230,7 +230,11 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	}
 	if snap.pickerActive && snap.pickerModel != nil {
 		presentation := pickerModal.Resolve(size)
-		o.picker = capturedModal{active: true, title: pickerModal.Title, presentation: presentation, focused: true}
+		title := snap.pickerTitle
+		if title == "" {
+			title = pickerModal.Title
+		}
+		o.picker = capturedModal{active: true, title: title, presentation: presentation, focused: true}
 		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.PickerName, Detail: styles.PickerDescription, Base: styles.PickerBase, Separator: styles.PickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(presentation.Inner), state.preview, renderStyles)
 	}

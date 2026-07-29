@@ -179,6 +179,7 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 	updated := rt.picker != nil && rt.pickerIntent == intent && rt.pickerSource == source
 	if updated {
 		rt.picker = model
+		rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
 	}
 	rt.pickerMu.Unlock()
 	if updated {

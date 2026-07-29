@@ -237,9 +237,11 @@ func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
 			require.True(t, ac.overlays.pickerActive())
 			ac.overlays.pickerMu.Lock()
 			selected, ok := ac.overlays.picker.Selected()
+			title := ac.overlays.pickerTitle
 			ac.overlays.pickerMu.Unlock()
 			require.True(t, ok)
 			require.Equal(t, before, selected)
+			require.Equal(t, " Sessions · grouped ", title)
 
 			d.handleInput(sess, ac, []byte("s"))
 			awaitFrame(t, sends, ports.MsgOutput)
@@ -248,9 +250,27 @@ func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
 			require.True(t, ac.overlays.pickerActive())
 			ac.overlays.pickerMu.Lock()
 			selected, ok = ac.overlays.picker.Selected()
+			title = ac.overlays.pickerTitle
 			ac.overlays.pickerMu.Unlock()
 			require.True(t, ok)
 			require.Equal(t, before, selected)
+			require.Equal(t, " Sessions · recent ", title)
+		})
+	}
+}
+
+func TestPickerTitleReflectsSortMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode pickerSortMode
+		want string
+	}{
+		{name: "recent", mode: pickerSortRecent, want: " Sessions · recent "},
+		{name: "grouped", mode: pickerSortGrouped, want: " Sessions · grouped "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, pickerTitle(tc.mode))
 		})
 	}
 }
