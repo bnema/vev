@@ -57,6 +57,9 @@ type moveSourceLocator struct {
 
 // enterPickerForIntent returns errNoMoveDestination only for move intents.
 func (d *Daemon) enterPickerForIntent(sess *session, ac *attachedClient, intent pickerIntent, source moveSourceLocator) error {
+	if intent != pickerNavigate && !sess.capabilities().yieldsMoves() {
+		return errSessionCannotYieldMoves
+	}
 	model := d.newPickerModel(sess, intent, source, picker.SourceFilter{})
 	if intent != pickerNavigate {
 		if _, ok := model.Selected(); !ok {

@@ -27,23 +27,11 @@ func (d *Daemon) recentSessions(current *session) []recentSession {
 		if sess == current {
 			continue
 		}
-		sess.mu.Lock()
-		if sess.ephemeral {
-			sess.mu.Unlock()
+		snap := sess.snapshotView(viewOptions{})
+		if snap.ephemeral {
 			continue
 		}
-		entry := recentSession{
-			id:    sess.id,
-			name:  sess.name,
-			mruAt: sess.mruAt.Load(),
-		}
-		for _, tb := range sess.tabs {
-			if tb.attention {
-				entry.attention = true
-				break
-			}
-		}
-		sess.mu.Unlock()
+		entry := recentSession{id: snap.id, name: snap.name, mruAt: snap.mruAt, attention: snap.hasAttention}
 		recent = append(recent, entry)
 	}
 	d.mu.Unlock()

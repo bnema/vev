@@ -32,6 +32,8 @@ type session struct {
 	id        domain.SessionID
 	name      string
 	ephemeral bool
+	// caps is immutable after construction; see sessionCapabilities.
+	caps sessionCapabilities
 
 	ctx    context.Context
 	cancel context.CancelFunc
