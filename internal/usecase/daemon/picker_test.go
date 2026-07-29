@@ -520,7 +520,7 @@ func TestPickerMoveRefreshPreservesSelectedDestination(t *testing.T) {
 		destination.mu.Lock()
 		destination.tabs[0], destination.tabs[1] = destination.tabs[1], destination.tabs[0]
 		destination.mu.Unlock()
-		d.refreshPicker(ac)
+		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: -1})
 
 		ac.overlays.pickerMu.Lock()
 		after, ok := ac.overlays.picker.Selected()
@@ -569,7 +569,7 @@ func TestPickerMoveRefreshPreservesSelectedDestination(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, domain.SessionID("selected"), before.Session)
 
-		d.refreshPicker(ac)
+		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: -1})
 
 		ac.overlays.pickerMu.Lock()
 		after, ok := ac.overlays.picker.Selected()

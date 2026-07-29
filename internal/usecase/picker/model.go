@@ -327,8 +327,10 @@ func (m *Model) Selected() (Target, bool) {
 	}, true
 }
 
-// SelectedIndex reports the raw selected row index, -1 when nothing is
-// selected. Row indices are only meaningful against this exact model.
+// SelectedIndex reports the raw selected row index. It is -1 only when the
+// model is nil or has no rows at all; otherwise it is a real row index even
+// when that row is not selectable (see Selected). Row indices are only
+// meaningful against this exact model.
 func (m *Model) SelectedIndex() int {
 	if m == nil {
 		return -1

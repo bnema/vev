@@ -416,17 +416,32 @@ func TestSelectNearestRow(t *testing.T) {
 	tests := []struct {
 		name string
 		idx  int
+		cfg  SelectionConfig
 		want domain.SessionID
 	}{
-		{name: "exact selectable row", idx: 3, want: "b"},
-		{name: "header row snaps to its tab", idx: 2, want: "b"},
-		{name: "past end clamps to last selectable", idx: 40, want: "c"},
-		{name: "negative clamps to first selectable", idx: -2, want: "a"},
-		{name: "last row is a tab and stays put", idx: 5, want: "c"},
+		{name: "exact selectable row", idx: 3, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
+		{name: "header row snaps to its tab", idx: 2, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
+		{name: "past end clamps to last selectable", idx: 40, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "c"},
+		{
+			// Starts selection on "c" (via Current) so a no-op SelectNearestRow
+			// would leave the selection on "c" and this case would fail; the
+			// plain SelectNavigationTab config used above starts on "a" already,
+			// which can't tell a real clamp-to-first from a no-op.
+			name: "negative clamps to first selectable",
+			idx:  -2,
+			cfg:  SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "c", TabID: "tc"}},
+			want: "a",
+		},
+		{name: "last row is a tab and stays put", idx: 5, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "c"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(sessions, SelectionConfig{Mode: SelectNavigationTab})
+			m := New(sessions, tc.cfg)
+			if tc.name == "negative clamps to first selectable" {
+				pre, ok := m.Selected()
+				require.True(t, ok)
+				require.Equal(t, domain.SessionID("c"), pre.Session, "guard: starting selection must not already be the expected result")
+			}
 			m.SelectNearestRow(tc.idx)
 			target, ok := m.Selected()
 			require.True(t, ok)

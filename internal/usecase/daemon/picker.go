@@ -32,6 +32,22 @@ func pickerTitle(mode pickerSortMode) string {
 	return " Sessions · recent "
 }
 
+// togglePickerSort flips the daemon's picker sort mode between the two known
+// modes with a CompareAndSwap loop, so a concurrent double-press can't lose
+// an update the way a bare Load-then-Store XOR can.
+func (d *Daemon) togglePickerSort() {
+	for {
+		cur := pickerSortMode(d.pickerSort.Load())
+		next := pickerSortRecent
+		if cur == pickerSortRecent {
+			next = pickerSortGrouped
+		}
+		if d.pickerSort.CompareAndSwap(uint32(cur), uint32(next)) {
+			return
+		}
+	}
+}
+
 // enterPicker preserves the existing navigation entry point. Navigation always
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
@@ -235,7 +251,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	rt.pickerMu.Unlock()
 
 	if result.action == 's' {
-		d.pickerSort.Store(d.pickerSort.Load() ^ 1)
+		d.togglePickerSort()
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
 		d.invalidateRender(sess, ac, true, "picker.go")
 		return

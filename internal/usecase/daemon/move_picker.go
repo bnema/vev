@@ -146,10 +146,6 @@ type pickerRefreshOptions struct {
 	nearestRow int
 }
 
-func (d *Daemon) refreshPicker(ac *attachedClient) {
-	d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: -1})
-}
-
 func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions) {
 	sess := ac.currentSession()
 	if sess == nil {
