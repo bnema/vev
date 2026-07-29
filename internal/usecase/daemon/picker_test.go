@@ -184,54 +184,75 @@ func TestPickerViewsGroupedModePutsNamedBeforeEphemeral(t *testing.T) {
 }
 
 func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer releaseAll(releases)
-	sess.mu.Lock()
-	sess.client = ac
-	secondTabID := domain.TabStableID(sess.tabs[1].stableID)
-	sess.mu.Unlock()
-	sess.mruAt.Store(1)
-	// A second live session, ephemeral and more recently used: recent mode lists
-	// it first, grouped mode moves it below the named session.
-	eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
-	eph.mruAt.Store(5)
-	d.mu.Lock()
-	d.sessions[eph.id] = eph
-	d.mu.Unlock()
+	// Rows in recent mode are: ephemeral "1" (header + tab), "work" (header +
+	// two tabs), then the stopped block. Navigation starts on "work"'s active
+	// tab, so "j" walks down from there.
+	cases := []struct {
+		name        string
+		navigate    []byte
+		wantStopped bool
+	}{
+		{name: "live tab selection", navigate: []byte("j")},
+		{name: "stopped session selection", navigate: []byte("jj"), wantStopped: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, sends, releases := newManualTabSession(t, 2)
+			defer releaseAll(releases)
+			sess.mu.Lock()
+			sess.client = ac
+			secondTabID := domain.TabStableID(sess.tabs[1].stableID)
+			sess.mu.Unlock()
+			sess.mruAt.Store(1)
+			// A second live session, ephemeral and more recently used: recent mode
+			// lists it first, grouped mode moves it below the named session.
+			eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
+			eph.mruAt.Store(5)
+			d.mu.Lock()
+			d.sessions[eph.id] = eph
+			d.stopped["halted"] = stoppedSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
+			d.mu.Unlock()
 
-	d.enterPicker(sess, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
-	// Move off the attached session's active tab: a navigate rebuild snaps back
-	// to it unless the toggle preserves the selection.
-	d.handleInput(sess, ac, []byte("j"))
-	awaitFrame(t, sends, ports.MsgOutput)
-	ac.overlays.pickerMu.Lock()
-	before, ok := ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.Equal(t, secondTabID, before.TabID)
+			d.enterPicker(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			// Move off the attached session's active tab: a navigate rebuild snaps
+			// back to it unless the toggle preserves the selection.
+			d.handleInput(sess, ac, tc.navigate)
+			awaitFrame(t, sends, ports.MsgOutput)
+			ac.overlays.pickerMu.Lock()
+			before, ok := ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, tc.wantStopped, before.Stopped)
+			if tc.wantStopped {
+				require.Equal(t, "halted", before.Name)
+			} else {
+				require.Equal(t, secondTabID, before.TabID)
+			}
 
-	d.handleInput(sess, ac, []byte("s"))
-	awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, []byte("s"))
+			awaitFrame(t, sends, ports.MsgOutput)
 
-	require.Equal(t, uint32(pickerSortGrouped), d.pickerSort.Load())
-	require.True(t, ac.overlays.pickerActive())
-	ac.overlays.pickerMu.Lock()
-	selected, ok := ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.Equal(t, before, selected)
+			require.Equal(t, uint32(pickerSortGrouped), d.pickerSort.Load())
+			require.True(t, ac.overlays.pickerActive())
+			ac.overlays.pickerMu.Lock()
+			selected, ok := ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, before, selected)
 
-	d.handleInput(sess, ac, []byte("s"))
-	awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, []byte("s"))
+			awaitFrame(t, sends, ports.MsgOutput)
 
-	require.Equal(t, uint32(pickerSortRecent), d.pickerSort.Load())
-	require.True(t, ac.overlays.pickerActive())
-	ac.overlays.pickerMu.Lock()
-	selected, ok = ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.Equal(t, before, selected)
+			require.Equal(t, uint32(pickerSortRecent), d.pickerSort.Load())
+			require.True(t, ac.overlays.pickerActive())
+			ac.overlays.pickerMu.Lock()
+			selected, ok = ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, before, selected)
+		})
+	}
 }
 
 func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {

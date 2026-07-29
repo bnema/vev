@@ -252,7 +252,17 @@ func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) b
 	if mode == SelectMoveTabSession {
 		return pickerRow.kind == rowSession
 	}
-	return pickerRow.kind == rowTab && current.TabID != "" && pickerRow.tabID == current.TabID
+	if pickerRow.kind != rowTab {
+		return false
+	}
+	// A stopped session contributes one synthetic tab row carrying no stable tab
+	// identity, so it matches on session identity alone. Its session ID is
+	// namespaced ("stopped:<name>"), and move modes drop stopped sessions
+	// entirely, so no live row can be reached this way.
+	if current.TabID == "" {
+		return pickerRow.stopped
+	}
+	return pickerRow.tabID == current.TabID
 }
 
 func int64Value(value *int64) (int64, bool) {
