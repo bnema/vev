@@ -417,7 +417,11 @@ func TestSelectNearestRow(t *testing.T) {
 		name string
 		idx  int
 		cfg  SelectionConfig
-		want domain.SessionID
+		// wantStart, when set, pins the selection New produced before
+		// SelectNearestRow runs, so a case cannot silently degrade into one a
+		// no-op implementation would also pass.
+		wantStart domain.SessionID
+		want      domain.SessionID
 	}{
 		{name: "exact selectable row", idx: 3, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
 		{name: "header row snaps to its tab", idx: 2, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
@@ -427,20 +431,21 @@ func TestSelectNearestRow(t *testing.T) {
 			// would leave the selection on "c" and this case would fail; the
 			// plain SelectNavigationTab config used above starts on "a" already,
 			// which can't tell a real clamp-to-first from a no-op.
-			name: "negative clamps to first selectable",
-			idx:  -2,
-			cfg:  SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "c", TabID: "tc"}},
-			want: "a",
+			name:      "negative clamps to first selectable",
+			idx:       -2,
+			cfg:       SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "c", TabID: "tc"}},
+			wantStart: "c",
+			want:      "a",
 		},
 		{name: "last row is a tab and stays put", idx: 5, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "c"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New(sessions, tc.cfg)
-			if tc.name == "negative clamps to first selectable" {
+			if tc.wantStart != "" {
 				pre, ok := m.Selected()
 				require.True(t, ok)
-				require.Equal(t, domain.SessionID("c"), pre.Session, "guard: starting selection must not already be the expected result")
+				require.Equal(t, tc.wantStart, pre.Session, "guard: starting selection must not already be the expected result")
 			}
 			m.SelectNearestRow(tc.idx)
 			target, ok := m.Selected()
