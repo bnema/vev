@@ -327,6 +327,37 @@ func (m *Model) Selected() (Target, bool) {
 	}, true
 }
 
+// SelectedIndex reports the raw selected row index, -1 when nothing is
+// selected. Row indices are only meaningful against this exact model.
+func (m *Model) SelectedIndex() int {
+	if m == nil {
+		return -1
+	}
+	return m.selected
+}
+
+// SelectNearestRow selects the first selectable row at or after idx, falling
+// back to the last selectable row before it. Callers use it to keep the
+// cursor on the row that takes a removed item's place.
+func (m *Model) SelectNearestRow(idx int) {
+	if m == nil || len(m.rows) == 0 {
+		return
+	}
+	idx = clamp(idx, 0, len(m.rows)-1)
+	for i := idx; i < len(m.rows); i++ {
+		if m.rows[i].kind.selectable(m.mode) {
+			m.selected = i
+			return
+		}
+	}
+	for i := idx - 1; i >= 0; i-- {
+		if m.rows[i].kind.selectable(m.mode) {
+			m.selected = i
+			return
+		}
+	}
+}
+
 func (m *Model) Clone() *Model {
 	if m == nil {
 		return nil

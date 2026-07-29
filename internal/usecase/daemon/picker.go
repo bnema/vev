@@ -225,8 +225,11 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	var ok bool
 	var intent pickerIntent
 	var source moveSourceLocator
+	// prevIdx is the row the victim occupied; -1 means "no post-delete hint".
+	prevIdx := -1
 	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
 		target, ok = rt.picker.Selected()
+		prevIdx = rt.picker.SelectedIndex()
 	}
 	intent, source = rt.pickerIntent, rt.pickerSource
 	rt.pickerMu.Unlock()
@@ -261,7 +264,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			}
 			defer fresh.End()
 		}
-		d.refreshPicker(ac)
+		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: prevIdx})
 		d.invalidateRender(sess, ac, true, "picker.go")
 		return
 	}

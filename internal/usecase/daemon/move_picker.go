@@ -175,6 +175,11 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 			return
 		}
 	}
+	// Navigate-only: move intents keep the selection-or-close logic above
+	// authoritative, so a stale row index can never override it.
+	if intent == pickerNavigate && opts.nearestRow >= 0 {
+		model.SelectNearestRow(opts.nearestRow)
+	}
 	rt.pickerMu.Lock()
 	updated := rt.picker != nil && rt.pickerIntent == intent && rt.pickerSource == source
 	if updated {

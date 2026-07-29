@@ -406,6 +406,70 @@ func TestSelectedMapping(t *testing.T) {
 	require.Equal(t, Target{Session: "beta", TabID: "three", TabIndex: 1}, got)
 }
 
+func TestSelectNearestRow(t *testing.T) {
+	// Three single-tab sessions: rows are [hdrA, tabA, hdrB, tabB, hdrC, tabC].
+	sessions := []SessionView{
+		{ID: "a", Name: "a", Tabs: []TabEntry{{TabID: "ta", Name: "ta"}}},
+		{ID: "b", Name: "b", Tabs: []TabEntry{{TabID: "tb", Name: "tb"}}},
+		{ID: "c", Name: "c", Tabs: []TabEntry{{TabID: "tc", Name: "tc"}}},
+	}
+	tests := []struct {
+		name string
+		idx  int
+		want domain.SessionID
+	}{
+		{name: "exact selectable row", idx: 3, want: "b"},
+		{name: "header row snaps to its tab", idx: 2, want: "b"},
+		{name: "past end clamps to last selectable", idx: 40, want: "c"},
+		{name: "negative clamps to first selectable", idx: -2, want: "a"},
+		{name: "last row is a tab and stays put", idx: 5, want: "c"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(sessions, SelectionConfig{Mode: SelectNavigationTab})
+			m.SelectNearestRow(tc.idx)
+			target, ok := m.Selected()
+			require.True(t, ok)
+			require.Equal(t, tc.want, target.Session)
+		})
+	}
+}
+
+func TestSelectNearestRowFallsBackBackwardAndToleratesEmptyModels(t *testing.T) {
+	// Move-tab mode makes only session headers selectable, so the trailing tab
+	// row has no selectable row at or after it.
+	m := New([]SessionView{
+		{ID: "a", Name: "a", Tabs: []TabEntry{{TabID: "ta", Name: "ta"}}},
+		{ID: "b", Name: "b", Tabs: []TabEntry{{TabID: "tb", Name: "tb"}}},
+	}, SelectionConfig{Mode: SelectMoveTabSession, Source: SourceFilter{Session: "zzz"}})
+	require.Equal(t, 0, m.SelectedIndex(), "guard: the backward fallback below must move the selection off this starting row")
+	m.SelectNearestRow(3)
+	target, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.SessionID("b"), target.Session)
+	require.Equal(t, 2, m.SelectedIndex())
+
+	empty := New(nil, SelectionConfig{Mode: SelectNavigationTab})
+	empty.SelectNearestRow(0)
+	_, ok = empty.Selected()
+	require.False(t, ok)
+	require.Equal(t, -1, empty.SelectedIndex())
+
+	var nilModel *Model
+	nilModel.SelectNearestRow(3)
+	require.Equal(t, -1, nilModel.SelectedIndex())
+}
+
+func TestSelectedIndexReportsRawSelectedRow(t *testing.T) {
+	m := New([]SessionView{
+		{ID: "alpha", Name: "alpha", Tabs: []TabEntry{{TabID: "one", Name: "one"}, {TabID: "two", Name: "two"}}},
+	}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "alpha", TabID: "two"}})
+
+	require.Equal(t, 2, m.SelectedIndex())
+	m.Up()
+	require.Equal(t, 1, m.SelectedIndex())
+}
+
 func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
 	got, ok := m.Selected()

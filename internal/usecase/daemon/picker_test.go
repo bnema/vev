@@ -1616,51 +1616,90 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	require.Same(t, from, ac.currentSession(), "a failed restore must leave the client on its origin session")
 }
 
-func TestPickerNavigationRefreshAfterSuccessfulDeleteSelectsAttachedActiveStableTab(t *testing.T) {
-	d, current, ac, _, currentReleases := newManualTabSession(t, 2)
-	defer releaseAll(currentReleases)
-	current.id, current.name, current.active = "current", "z-current", 1
-	current.tabs[0].stableID, current.tabs[1].stableID = "current-first", "current-active"
-	delete(d.sessions, domain.SessionID("manual"))
-	d.sessions[current.id] = current
+// TestPickerNavigationRefreshAfterDeleteSelectsReplacingRow pins the post-kill
+// contract: the cursor stays on the row index the killed session occupied, so
+// it lands on whatever session took its place — clamped to the new last
+// selectable row when the bottom session was killed. Session names drive the
+// picker's alphabetical tie-break (every session here shares mruAt 0), which is
+// what puts the victim in the middle or at the end of the list.
+func TestPickerNavigationRefreshAfterDeleteSelectsReplacingRow(t *testing.T) {
+	tests := []struct {
+		name         string
+		currentName  string
+		otherName    string
+		targetName   string
+		nav          []byte // keys walked from the attached session's active tab onto the victim
+		wantSession  domain.SessionID
+		wantTabID    domain.TabStableID
+		wantTabIndex int
+	}{
+		{
+			// Rows: [a-other, other-tab, m-target, target-tab, z-current, current-first, current-active].
+			// Killing target-tab (row 3) promotes z-current's header to row 2, so
+			// row 3 becomes current-first — not the attached active tab.
+			name:        "middle session killed selects the row taking its place",
+			currentName: "z-current", otherName: "a-other", targetName: "m-target",
+			nav:         []byte("kk"),
+			wantSession: "current", wantTabID: "current-first", wantTabIndex: 0,
+		},
+		{
+			// Rows: [a-current, current-first, current-active, m-other, other-tab, z-target, target-tab].
+			// Killing the bottom row (6) clamps to the new last selectable row.
+			name:        "last session killed selects the new last row",
+			currentName: "a-current", otherName: "m-other", targetName: "z-target",
+			nav:         []byte("jj"),
+			wantSession: "other", wantTabID: "other-tab", wantTabIndex: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, current, ac, _, currentReleases := newManualTabSession(t, 2)
+			defer releaseAll(currentReleases)
+			current.id, current.name, current.active = "current", tt.currentName, 1
+			current.tabs[0].stableID, current.tabs[1].stableID = "current-first", "current-active"
+			delete(d.sessions, domain.SessionID("manual"))
+			d.sessions[current.id] = current
 
-	otherPTY, releaseOther := newBlockingPTY(t)
-	defer releaseOther()
-	otherTab := newTestTabWithContext(otherPTY, current.ctx, current.cancel)
-	otherTab.stableID = "other-tab"
-	other := &session{id: "other", name: "a-other", ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{otherTab}}
-	d.sessions[other.id] = other
+			otherPTY, releaseOther := newBlockingPTY(t)
+			defer releaseOther()
+			otherTab := newTestTabWithContext(otherPTY, current.ctx, current.cancel)
+			otherTab.stableID = "other-tab"
+			other := &session{id: "other", name: tt.otherName, ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{otherTab}}
+			d.sessions[other.id] = other
 
-	targetPTY, releaseTarget := newBlockingPTY(t)
-	defer releaseTarget()
-	targetTab := newTestTabWithContext(targetPTY, current.ctx, current.cancel)
-	targetTab.stableID = "target-tab"
-	target := &session{id: "target", name: "m-target", ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{targetTab}}
-	d.sessions[target.id] = target
+			targetPTY, releaseTarget := newBlockingPTY(t)
+			defer releaseTarget()
+			targetTab := newTestTabWithContext(targetPTY, current.ctx, current.cancel)
+			targetTab.stableID = "target-tab"
+			target := &session{id: "target", name: tt.targetName, ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{targetTab}}
+			d.sessions[target.id] = target
 
-	d.enterPicker(current, ac)
-	d.handlePickerInput(ac, []byte("k"))
-	d.handlePickerInput(ac, []byte("k"))
-	ac.overlays.pickerMu.Lock()
-	selected, ok := ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.Equal(t, target.id, selected.Session, "test must delete the selected non-attached session")
+			d.enterPicker(current, ac)
+			for _, key := range tt.nav {
+				d.handlePickerInput(ac, []byte{key})
+			}
+			ac.overlays.pickerMu.Lock()
+			selected, ok := ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, target.id, selected.Session, "test must delete the selected non-attached session")
 
-	d.handlePickerInput(ac, []byte("x"))
+			d.handlePickerInput(ac, []byte("x"))
 
-	d.mu.Lock()
-	_, targetStillLive := d.sessions[target.id]
-	d.mu.Unlock()
-	require.False(t, targetStillLive, "ordinary picker deletion must remove the selected session")
+			d.mu.Lock()
+			_, targetStillLive := d.sessions[target.id]
+			d.mu.Unlock()
+			require.False(t, targetStillLive, "ordinary picker deletion must remove the selected session")
 
-	ac.overlays.pickerMu.Lock()
-	selected, ok = ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.Equal(t, current.id, selected.Session)
-	require.Equal(t, domain.TabStableID("current-active"), selected.TabID)
-	require.Equal(t, 1, selected.TabIndex)
+			ac.overlays.pickerMu.Lock()
+			selected, ok = ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, tt.wantSession, selected.Session)
+			require.Equal(t, tt.wantTabID, selected.TabID)
+			require.Equal(t, tt.wantTabIndex, selected.TabIndex)
+		})
+	}
 }
 
 func TestPickerRoleEffectDeleteRemovesSelectedSessionAndRefreshes(t *testing.T) {
