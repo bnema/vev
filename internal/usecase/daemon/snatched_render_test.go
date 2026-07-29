@@ -34,14 +34,14 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			name:       "centered bordered panel",
 			size:       domain.Size{Cols: 80, Rows: 24},
 			wantSize:   domain.Size{Cols: 80, Rows: 24},
-			want:       []string{"Session snatched", "This session is now active elsewhere.", "r  Resume here", "q / Esc  Quit"},
+			want:       []string{"Session snatched", "This session is now active elsewhere.", "r   Resume here", "q  /  Esc   Quit"},
 			wantBounds: domain.Rect{X: 19, Y: 8, Width: 42, Height: 7},
 		},
 		{
 			name:     "compact fallback",
 			size:     domain.Size{Cols: 24, Rows: 4},
 			wantSize: domain.Size{Cols: 24, Rows: 4},
-			want:     []string{"Session snatched", "r Resume", "q Quit"},
+			want:     []string{"Session snatched", "r  Resume", "q  Quit"},
 			compact:  true,
 		},
 		{
@@ -49,7 +49,7 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			size:     domain.Size{Cols: 24, Rows: 4},
 			feedback: "Session is no longer available.",
 			wantSize: domain.Size{Cols: 24, Rows: 4},
-			want:     []string{"Session unavailable", "r Resume", "q Quit"},
+			want:     []string{"Session unavailable", "r  Resume", "q  Quit"},
 			compact:  true,
 		},
 		{
@@ -57,7 +57,7 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			size:       domain.Size{Cols: 80, Rows: 24},
 			feedback:   "Session is no longer available.",
 			wantSize:   domain.Size{Cols: 80, Rows: 24},
-			want:       []string{"Session snatched", "Session is no longer available.", "r  Resume here", "q / Esc  Quit"},
+			want:       []string{"Session snatched", "Session is no longer available.", "r   Resume here", "q  /  Esc   Quit"},
 			wantBounds: domain.Rect{X: 19, Y: 8, Width: 42, Height: 7},
 		},
 		{
