@@ -575,17 +575,19 @@ func (e controlExec) ListSessions(asJSON bool) (string, error) {
 		sessions = append(sessions, sess)
 	}
 	e.d.mu.Unlock()
-	var active *session
+	snaps := make([]sessionView, 0, len(sessions))
 	for _, sess := range sessions {
-		if active == nil || sess.mruAt.Load() > active.mruAt.Load() {
-			active = sess
+		snaps = append(snaps, sess.snapshotView(viewOptions{}))
+	}
+	activeIdx := -1
+	for i, snap := range snaps {
+		if activeIdx == -1 || snap.mruAt > snaps[activeIdx].mruAt {
+			activeIdx = i
 		}
 	}
-	rows := make([]row, 0, len(sessions))
-	for _, sess := range sessions {
-		sess.mu.Lock()
-		rows = append(rows, row{Name: sess.name, Ephemeral: sess.ephemeral, Tabs: len(sess.tabs), Attached: sess.client != nil, Active: sess == active})
-		sess.mu.Unlock()
+	rows := make([]row, 0, len(snaps))
+	for i, snap := range snaps {
+		rows = append(rows, row{Name: snap.name, Ephemeral: snap.ephemeral, Tabs: snap.tabCount, Attached: snap.attached, Active: i == activeIdx})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	if asJSON {
