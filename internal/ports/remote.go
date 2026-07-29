@@ -1,6 +1,10 @@
 package ports
 
-import "log/slog"
+import (
+	"context"
+	"fmt"
+	"log/slog"
+)
 
 // RemoteTransportMode selects the transport used for remote attach after CLI parsing.
 type RemoteTransportMode string
@@ -29,6 +33,11 @@ type RemoteHostStore interface {
 	Remove(target string) error
 }
 
+// RemoteCatalogClient fetches a versioned session catalog from a remote host.
+type RemoteCatalogClient interface {
+	List(ctx context.Context, target string) (RemoteCatalog, error)
+}
+
 // RemoteCatalogSession is one live session in the remote discovery catalog.
 // State is an explicit string contract (running|stopped|broken), not SessionState.
 type RemoteCatalogSession struct {
@@ -43,4 +52,15 @@ type RemoteCatalogSession struct {
 type RemoteCatalog struct {
 	ProtocolVersion uint16                 `json:"protocol_version"`
 	Sessions        []RemoteCatalogSession `json:"sessions"`
+}
+
+// RemoteCatalogVersionMismatchError is returned when a remote catalog envelope
+// reports a protocol_version that is not equal to ProtocolVersion.
+type RemoteCatalogVersionMismatchError struct {
+	Got  uint16
+	Want uint16
+}
+
+func (e *RemoteCatalogVersionMismatchError) Error() string {
+	return fmt.Sprintf("remote catalog: protocol version mismatch: got %d, want %d", e.Got, e.Want)
 }

@@ -60,6 +60,51 @@ func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  string
+		command []string
+		want    []string
+	}{
+		{
+			name:    "catalog command",
+			target:  "arch",
+			command: []string{"vev", "cmd", "remote-catalog", "--json"},
+			want:    []string{"--", "arch", "'vev' 'cmd' 'remote-catalog' '--json'"},
+		},
+		{
+			name:    "metacharacters in remote words are quoted",
+			target:  "user@host; touch /tmp/pwn",
+			command: []string{"vev", "cmd", "remote-catalog; rm -rf /", "--json"},
+			want:    []string{"--", "user@host; touch /tmp/pwn", "'vev' 'cmd' 'remote-catalog; rm -rf /' '--json'"},
+		},
+		{
+			name:    "single quotes are posix escaped",
+			target:  "arch",
+			command: []string{"it's", "fine"},
+			want:    []string{"--", "arch", "'it'\\''s' 'fine'"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildCommandForRemoteCommand(tt.target, tt.command...)
+			if got.Path != "ssh" {
+				t.Fatalf("Path = %q, want ssh", got.Path)
+			}
+			if len(got.Args) != len(tt.want) {
+				t.Fatalf("Args len = %d, want %d (%q)", len(got.Args), len(tt.want), got.Args)
+			}
+			for i := range tt.want {
+				if got.Args[i] != tt.want[i] {
+					t.Fatalf("Args[%d] = %q, want %q (all args %q)", i, got.Args[i], tt.want[i], got.Args)
+				}
+			}
+		})
+	}
+}
+
 func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 	clientRead, serverWrite := io.Pipe()
 	serverRead, clientWrite := io.Pipe()
