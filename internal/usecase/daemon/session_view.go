@@ -1,6 +1,9 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import (
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/picker"
+)
 
 // viewOptions controls optional (costly) fields captured by snapshotView.
 type viewOptions struct {
@@ -81,4 +84,37 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		view.tabs = append(view.tabs, entry)
 	}
 	return view
+}
+
+// pickerView renders this snapshot as the picker's value type. Field-for-field
+// equivalent to the inline construction previously in pickerViews.
+func (view sessionView) pickerView() picker.SessionView {
+	out := picker.SessionView{
+		ID:          view.id,
+		Incarnation: view.incarnation,
+		Name:        view.name,
+		TargetName:  view.name,
+		Active:      view.active,
+		Tabs:        make([]picker.TabEntry, 0, len(view.tabs)),
+	}
+	if !view.ephemeral {
+		createdAt := view.createdAt
+		out.ExpectedCreatedAt = &createdAt
+	}
+	attention := false
+	for _, tb := range view.tabs {
+		out.Tabs = append(out.Tabs, picker.TabEntry{
+			TabID:     tb.id,
+			Name:      tb.name,
+			Detail:    tabTitleDetail(tb.name, tb.focusedTitle),
+			Attention: tb.attention,
+		})
+		if tb.attention {
+			attention = true
+		}
+	}
+	if attention {
+		out.Name = attentionSuffix(out.Name)
+	}
+	return out
 }

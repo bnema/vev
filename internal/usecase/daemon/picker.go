@@ -87,28 +87,30 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 		}
 	}
 	d.mu.Unlock()
-	// Snapshot mruAt, name, and ephemeral once: comparators must not observe
-	// concurrent touchMRU updates or a renameSession mutation (which mutates
-	// name/ephemeral under sess.mu) mid-sort.
-	type pickerSortSnapshot struct {
-		mruAt     uint64
-		name      string
-		ephemeral bool
-	}
-	snap := make(map[*session]pickerSortSnapshot, len(sessions))
+
 	for _, s := range sessions {
-		mruAt := s.mruAt.Load()
-		s.mu.Lock()
-		name := s.name
-		ephemeral := s.ephemeral
-		s.mu.Unlock()
-		snap[s] = pickerSortSnapshot{mruAt: mruAt, name: name, ephemeral: ephemeral}
+		d.refreshSessionFocusedTitles(s)
 	}
-	sort.Slice(sessions, func(i, j int) bool {
-		if snap[sessions[i]].mruAt != snap[sessions[j]].mruAt {
-			return snap[sessions[i]].mruAt > snap[sessions[j]].mruAt
+	opts := viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: d.currentTabsConfig().TerminalTitle}
+
+	// One snapshot per session: sorting and view building read the same
+	// capture, so comparators cannot observe a concurrent touchMRU or
+	// renameSession mid-sort (the invariant previously enforced by the
+	// pickerSortSnapshot map).
+	snaps := make([]sessionView, 0, len(sessions))
+	var current picker.SourceFilter
+	for _, s := range sessions {
+		snap := s.snapshotView(opts)
+		if s == cur && snap.active >= 0 && snap.active < len(snap.tabs) {
+			current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.active].id}
 		}
-		return snap[sessions[i]].name < snap[sessions[j]].name
+		snaps = append(snaps, snap)
+	}
+	sort.Slice(snaps, func(i, j int) bool {
+		if snaps[i].mruAt != snaps[j].mruAt {
+			return snaps[i].mruAt > snaps[j].mruAt
+		}
+		return snaps[i].name < snaps[j].name
 	})
 	sort.Slice(stopped, func(i, j int) bool {
 		if stopped[i].lastUsedSeq != stopped[j].lastUsedSeq {
@@ -119,50 +121,14 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 	if pickerSortMode(d.pickerSort.Load()) == pickerSortGrouped {
 		// Stable partition: named sessions first, ephemeral after, each keeping
 		// its MRU order from the sort above.
-		sort.SliceStable(sessions, func(i, j int) bool {
-			return !snap[sessions[i]].ephemeral && snap[sessions[j]].ephemeral
+		sort.SliceStable(snaps, func(i, j int) bool {
+			return !snaps[i].ephemeral && snaps[j].ephemeral
 		})
 	}
 
-	for _, s := range sessions {
-		d.refreshSessionFocusedTitles(s)
-	}
-
-	includeTerminalTitle := d.currentTabsConfig().TerminalTitle
-	views := make([]picker.SessionView, 0, len(sessions)+len(stopped))
-	var current picker.SourceFilter
-	for _, s := range sessions {
-		s.mu.Lock()
-		view := picker.SessionView{
-			ID: s.id, Incarnation: s.incarnation, Name: s.name, TargetName: s.name, Active: s.active,
-			Tabs: make([]picker.TabEntry, 0, len(s.tabs)),
-		}
-		if !s.ephemeral {
-			createdAt := s.createdAt
-			view.ExpectedCreatedAt = &createdAt
-		}
-		sessionAttention := false
-		for i, tb := range s.tabs {
-			name := tabDisplayName(tb, i)
-			tabID := domain.TabStableID(tb.stableID)
-			view.Tabs = append(view.Tabs, picker.TabEntry{
-				TabID:     tabID,
-				Name:      name,
-				Detail:    tabTitleDetail(name, tb.focusedPaneTitle(includeTerminalTitle)),
-				Attention: tb.attention,
-			})
-			if tb.attention {
-				sessionAttention = true
-			}
-			if s == cur && i == s.active {
-				current = picker.SourceFilter{Session: s.id, Incarnation: s.incarnation, TabID: tabID}
-			}
-		}
-		if sessionAttention {
-			view.Name = attentionSuffix(view.Name)
-		}
-		s.mu.Unlock()
-		views = append(views, view)
+	views := make([]picker.SessionView, 0, len(snaps)+len(stopped))
+	for _, snap := range snaps {
+		views = append(views, snap.pickerView())
 	}
 	for _, s := range stopped {
 		createdAt := s.createdAt
