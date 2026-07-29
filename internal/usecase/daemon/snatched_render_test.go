@@ -17,9 +17,11 @@ import (
 
 func TestSnatchedPanelFrame(t *testing.T) {
 	styles := themeui.Styles{
-		PickerBase:      renderer.Style{Foreground: 1},
-		PickerSelection: renderer.Style{Foreground: 2},
-		BorderMuted:     renderer.Style{Foreground: 3},
+		PickerBase:        renderer.Style{Foreground: 1},
+		PickerSelection:   renderer.Style{Foreground: 2},
+		BorderMuted:       renderer.Style{Foreground: 3},
+		HintKey:           renderer.Style{Foreground: 4},
+		PickerDescription: renderer.Style{Foreground: 5},
 	}
 	tests := []struct {
 		name       string
@@ -27,6 +29,8 @@ func TestSnatchedPanelFrame(t *testing.T) {
 		feedback   string
 		wantSize   domain.Size
 		want       []string
+		wantKeys   string
+		wantSep    string
 		wantBounds domain.Rect
 		compact    bool
 	}{
@@ -35,6 +39,8 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			size:       domain.Size{Cols: 80, Rows: 24},
 			wantSize:   domain.Size{Cols: 80, Rows: 24},
 			want:       []string{"Session snatched", "This session is now active elsewhere.", "r   Resume here", "q  /  Esc   Quit"},
+			wantKeys:   " r  q  Esc ",
+			wantSep:    " / ",
 			wantBounds: domain.Rect{X: 19, Y: 8, Width: 42, Height: 7},
 		},
 		{
@@ -42,6 +48,7 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			size:     domain.Size{Cols: 24, Rows: 4},
 			wantSize: domain.Size{Cols: 24, Rows: 4},
 			want:     []string{"Session snatched", "r  Resume", "q  Quit"},
+			wantKeys: " r  q ",
 			compact:  true,
 		},
 		{
@@ -50,6 +57,7 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			feedback: "Session is no longer available.",
 			wantSize: domain.Size{Cols: 24, Rows: 4},
 			want:     []string{"Session unavailable", "r  Resume", "q  Quit"},
+			wantKeys: " r  q ",
 			compact:  true,
 		},
 		{
@@ -58,6 +66,8 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			feedback:   "Session is no longer available.",
 			wantSize:   domain.Size{Cols: 80, Rows: 24},
 			want:       []string{"Session snatched", "Session is no longer available.", "r   Resume here", "q  /  Esc   Quit"},
+			wantKeys:   " r  q  Esc ",
+			wantSep:    " / ",
 			wantBounds: domain.Rect{X: 19, Y: 8, Width: 42, Height: 7},
 		},
 		{
@@ -85,6 +95,8 @@ func TestSnatchedPanelFrame(t *testing.T) {
 			for _, want := range tt.want {
 				require.Contains(t, text, want)
 			}
+			require.Equal(t, tt.wantKeys, snatchedStyledText(frame, styles.HintKey), "keycap badges must use the HintKey style")
+			require.Equal(t, tt.wantSep, snatchedStyledText(frame, styles.PickerDescription), "hint separator must use the muted description style")
 
 			if tt.compact {
 				require.NotContains(t, text, "┌")
@@ -235,6 +247,26 @@ func requireFreshSnatchedBackground(t *testing.T, frame renderer.Frame, panel do
 			require.True(t, cell.Style.Equal(style), "cell (%d,%d) outside panel did not use captured base style", x, y)
 		}
 	}
+}
+
+// snatchedStyledText concatenates, in reading order, the runes of every cell
+// drawn with exactly the given style, so tests can assert which text runs a
+// style covers without depending on layout coordinates.
+func snatchedStyledText(frame renderer.Frame, style renderer.Style) string {
+	var out strings.Builder
+	for y := 0; y < frame.Height; y++ {
+		for _, cell := range frame.Row(y) {
+			if cell.Continuation || !cell.Style.Equal(style) {
+				continue
+			}
+			r := cell.Rune
+			if r == 0 {
+				r = ' '
+			}
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
 
 func snatchedFrameText(frame renderer.Frame) string {
