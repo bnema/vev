@@ -137,7 +137,20 @@ func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*sess
 	return sess, sess.tabs[target.TabIndex]
 }
 
+type pickerRefreshOptions struct {
+	// preserveSelection keeps the currently selected target selected across the
+	// rebuild even for navigate intent (used by the sort toggle).
+	preserveSelection bool
+	// nearestRow, when >= 0, selects the row occupying this index after the
+	// rebuild (used after deletes). -1 disables it.
+	nearestRow int
+}
+
 func (d *Daemon) refreshPicker(ac *attachedClient) {
+	d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: -1})
+}
+
+func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions) {
 	sess := ac.currentSession()
 	if sess == nil {
 		return
@@ -150,7 +163,7 @@ func (d *Daemon) refreshPicker(ac *attachedClient) {
 	}
 	intent, source := rt.pickerIntent, rt.pickerSource
 	current := picker.SourceFilter{}
-	if intent != pickerNavigate {
+	if intent != pickerNavigate || opts.preserveSelection {
 		selected, _ := rt.picker.Selected()
 		current = picker.SourceFilter{Session: selected.Session, Incarnation: selected.Incarnation, TabID: selected.TabID}
 	}

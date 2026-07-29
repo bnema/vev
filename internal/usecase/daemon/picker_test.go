@@ -158,6 +158,82 @@ func TestPickerViewsMRUTieBreaksAlphabetically(t *testing.T) {
 	require.Equal(t, "bravo", views[1].Name)
 }
 
+func TestPickerViewsGroupedModePutsNamedBeforeEphemeral(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.pickerSort.Store(uint32(pickerSortGrouped))
+	eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	eph.mruAt.Store(5)
+	named := &session{id: "named", name: "work", tabs: []*tab{{}}}
+	named.mruAt.Store(2)
+	named2 := &session{id: "named2", name: "notes", tabs: []*tab{{}}}
+	named2.mruAt.Store(3)
+	d.sessions[eph.id] = eph
+	d.sessions[named.id] = named
+	d.sessions[named2.id] = named2
+	d.stopped["halted"] = stoppedSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
+
+	views, _ := d.pickerViews(named)
+
+	names := make([]string, 0, len(views))
+	for _, v := range views {
+		names = append(names, v.Name)
+	}
+	// Named (MRU-desc) → ephemeral (MRU-desc) → stopped, even though the
+	// ephemeral session has the highest mruAt.
+	require.Equal(t, []string{"notes", "work", "1", "halted"}, names)
+}
+
+func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releaseAll(releases)
+	sess.mu.Lock()
+	sess.client = ac
+	secondTabID := domain.TabStableID(sess.tabs[1].stableID)
+	sess.mu.Unlock()
+	sess.mruAt.Store(1)
+	// A second live session, ephemeral and more recently used: recent mode lists
+	// it first, grouped mode moves it below the named session.
+	eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	eph.mruAt.Store(5)
+	d.mu.Lock()
+	d.sessions[eph.id] = eph
+	d.mu.Unlock()
+
+	d.enterPicker(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	// Move off the attached session's active tab: a navigate rebuild snaps back
+	// to it unless the toggle preserves the selection.
+	d.handleInput(sess, ac, []byte("j"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.pickerMu.Lock()
+	before, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, secondTabID, before.TabID)
+
+	d.handleInput(sess, ac, []byte("s"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.Equal(t, uint32(pickerSortGrouped), d.pickerSort.Load())
+	require.True(t, ac.overlays.pickerActive())
+	ac.overlays.pickerMu.Lock()
+	selected, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, before, selected)
+
+	d.handleInput(sess, ac, []byte("s"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.Equal(t, uint32(pickerSortRecent), d.pickerSort.Load())
+	require.True(t, ac.overlays.pickerActive())
+	ac.overlays.pickerMu.Lock()
+	selected, ok = ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, before, selected)
+}
+
 func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	ctx, cancel := context.WithCancel(d.serveCtx)

@@ -16,6 +16,22 @@ import (
 
 var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
 
+// pickerSortMode orders the picker's live sessions. It lives for the daemon's
+// lifetime only and is never persisted.
+type pickerSortMode uint32
+
+const (
+	pickerSortRecent pickerSortMode = iota
+	pickerSortGrouped
+)
+
+func pickerTitle(mode pickerSortMode) string {
+	if mode == pickerSortGrouped {
+		return " Sessions · grouped "
+	}
+	return " Sessions · recent "
+}
+
 // enterPicker preserves the existing navigation entry point. Navigation always
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
@@ -72,6 +88,13 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 		}
 		return stopped[i].name < stopped[j].name
 	})
+	if pickerSortMode(d.pickerSort.Load()) == pickerSortGrouped {
+		// Stable partition: named sessions first, ephemeral after, each keeping
+		// its MRU order from the sort above.
+		sort.SliceStable(sessions, func(i, j int) bool {
+			return !sessions[i].ephemeral && sessions[j].ephemeral
+		})
+	}
 
 	for _, s := range sessions {
 		d.refreshSessionFocusedTitles(s)
@@ -130,7 +153,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 
 func (d *Daemon) newPickerModel(cur *session, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
 	views, attachedCurrent := d.pickerViews(cur)
-	if intent == pickerNavigate {
+	if intent == pickerNavigate && current == (picker.SourceFilter{}) {
 		current = attachedCurrent
 	}
 	return picker.New(views, picker.SelectionConfig{
@@ -189,6 +212,8 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		switch b {
 		case 'x':
 			return listInputResult{action: b, stop: true}
+		case 's':
+			return listInputResult{action: b, stop: true}
 		case '\r', '\n':
 			return listInputResult{action: b, exit: true}
 		default:
@@ -205,6 +230,12 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	intent, source = rt.pickerIntent, rt.pickerSource
 	rt.pickerMu.Unlock()
 
+	if result.action == 's' {
+		d.pickerSort.Store(d.pickerSort.Load() ^ 1)
+		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		d.invalidateRender(sess, ac, true, "picker.go")
+		return
+	}
 	if result.action == 'x' {
 		var effect *roleEffectTicket
 		if len(effects) != 0 {
