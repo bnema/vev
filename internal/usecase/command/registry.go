@@ -51,6 +51,7 @@ func Registry() []Command {
 		listCommand("list-sessions", "List sessions", "List sessions with active markers", TargetNone, func(ctx ControlContext, json bool) (string, error) { return ctx.ListSessions(json) }),
 		listCommand("list-tabs", "List tabs", "List tabs in the target session", TargetSession, func(ctx ControlContext, json bool) (string, error) { return ctx.ListTabs(json) }),
 		listCommand("list-panes", "List panes", "List panes in the target tab", TargetTab, func(ctx ControlContext, json bool) (string, error) { return ctx.ListPanes(json) }),
+		remoteCatalogCommand(),
 		sessionRecoveryCommand(),
 	}
 	return commands
@@ -134,6 +135,21 @@ func sessionRecoveryCommand() Command {
 				return ControlResult{}, ErrInvalidArguments
 			}
 			output, err := ctx.SessionRecovery("discard")
+			return ControlResult{Output: output}, err
+		},
+	}
+}
+
+func remoteCatalogCommand() Command {
+	return Command{
+		Slug: "remote-catalog", Name: "Remote catalog",
+		Desc:  "Return the versioned session catalog for remote discovery",
+		Usage: "remote-catalog --json", Scriptable: true, Target: TargetNone,
+		Control: func(ctx ControlContext, args []string, opts ControlOptions) (ControlResult, error) {
+			if len(args) != 0 || !opts.JSON {
+				return ControlResult{}, ErrInvalidArguments
+			}
+			output, err := ctx.RemoteCatalog(true)
 			return ControlResult{Output: output}, err
 		},
 	}

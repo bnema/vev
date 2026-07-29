@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -646,6 +647,85 @@ func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
 	require.Equal(t, "p_work", decoded[0]["id"])
 	require.Equal(t, "/tmp/work", decoded[0]["cwd"])
 	require.Equal(t, true, decoded[0]["focused"])
+}
+
+func TestRemoteCatalogJSONOutput(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	work := addControlSession(d, "work", "t_work", "p_work")
+	work.ephemeral = false
+	work.client = &attachedClient{}
+	work.mruAt.Store(2)
+	tb := newTabWithStableID("t_work_2", "p_work_2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	tb.ctx, tb.cancel = context.WithCancel(d.serveCtx)
+	work.mu.Lock()
+	work.tabs = append(work.tabs, tb)
+	work.mu.Unlock()
+
+	build := addControlSession(d, "build", "t_build", "p_build")
+	build.ephemeral = true
+	build.mruAt.Store(1)
+
+	d.mu.Lock()
+	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp/old", createdAt: 1, state: ports.SessionStopped}
+	d.mu.Unlock()
+
+	listBefore := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
+	require.True(t, listBefore.OK, listBefore.Text)
+
+	missingJSON := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog"})
+	require.False(t, missingJSON.OK)
+	require.Equal(t, ports.ErrInvalidCommandArgs, missingJSON.Code)
+
+	withArgs := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", Args: []string{"extra"}, JSON: true})
+	require.False(t, withArgs.OK)
+	require.Equal(t, ports.ErrInvalidCommandArgs, withArgs.Code)
+
+	result := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", JSON: true})
+	require.True(t, result.OK, result.Text)
+	require.True(t, strings.HasSuffix(result.Output, "\n"), "catalog output must be newline-terminated")
+
+	var catalog ports.RemoteCatalog
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
+	require.Equal(t, ports.ProtocolVersion, catalog.ProtocolVersion)
+
+	raw := map[string]json.RawMessage{}
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &raw))
+	require.Len(t, raw, 2)
+	_, hasProtocol := raw["protocol_version"]
+	_, hasSessions := raw["sessions"]
+	require.True(t, hasProtocol && hasSessions)
+
+	require.Equal(t, []ports.RemoteCatalogSession{
+		{Name: "build", State: "running", Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", State: "running", Ephemeral: false, Tabs: 2, Attached: true},
+	}, catalog.Sessions)
+
+	for _, session := range catalog.Sessions {
+		require.Equal(t, "running", session.State)
+		require.NotEqual(t, "old", session.Name)
+	}
+
+	listAfter := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
+	require.True(t, listAfter.OK, listAfter.Text)
+	require.Equal(t, listBefore.Output, listAfter.Output)
+	require.Contains(t, listAfter.Output, "work\tnamed\t2\ttrue\t")
+	require.NotContains(t, listAfter.Output, "old")
+}
+
+func TestRemoteCatalogStateMapping(t *testing.T) {
+	tests := []struct {
+		state ports.SessionState
+		want  string
+	}{
+		{state: ports.SessionRunning, want: "running"},
+		{state: ports.SessionStopped, want: "stopped"},
+		{state: ports.SessionBroken, want: "broken"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			require.Equal(t, tt.want, remoteCatalogState(tt.state))
+		})
+	}
 }
 
 func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {

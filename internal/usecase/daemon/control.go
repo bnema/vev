@@ -605,6 +605,45 @@ func (e controlExec) ListSessions(asJSON bool) (string, error) {
 	return out.String(), nil
 }
 
+func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
+	if !asJSON {
+		return "", command.ErrInvalidArguments
+	}
+	e.d.mu.Lock()
+	sessions := make([]*session, 0, len(e.d.sessions))
+	for _, sess := range e.d.sessions {
+		sessions = append(sessions, sess)
+	}
+	e.d.mu.Unlock()
+	rows := make([]ports.RemoteCatalogSession, 0, len(sessions))
+	for _, sess := range sessions {
+		snap := sess.snapshotView(viewOptions{})
+		rows = append(rows, ports.RemoteCatalogSession{
+			Name:      snap.name,
+			State:     remoteCatalogState(ports.SessionRunning),
+			Ephemeral: snap.ephemeral,
+			Tabs:      uint16(snap.tabCount),
+			Attached:  snap.attached,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return marshalListing(ports.RemoteCatalog{
+		ProtocolVersion: ports.ProtocolVersion,
+		Sessions:        rows,
+	})
+}
+
+func remoteCatalogState(state ports.SessionState) string {
+	switch state {
+	case ports.SessionStopped:
+		return "stopped"
+	case ports.SessionBroken:
+		return "broken"
+	default:
+		return "running"
+	}
+}
+
 func (e controlExec) ListTabs(asJSON bool) (string, error) {
 	type row struct {
 		Index  int    `json:"index"`

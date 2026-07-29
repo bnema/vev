@@ -28,3 +28,19 @@ type RemoteHostStore interface {
 	// Remove deletes target from both pinned and learned lists atomically.
 	Remove(target string) error
 }
+
+// RemoteCatalogSession is one live session in the remote discovery catalog.
+// State is an explicit string contract (running|stopped|broken), not SessionState.
+type RemoteCatalogSession struct {
+	Name      string `json:"name"`
+	State     string `json:"state"`
+	Ephemeral bool   `json:"ephemeral"`
+	Tabs      uint16 `json:"tabs"`
+	Attached  bool   `json:"attached"`
+}
+
+// RemoteCatalog is the versioned JSON envelope returned by remote-catalog --json.
+type RemoteCatalog struct {
+	ProtocolVersion uint16                 `json:"protocol_version"`
+	Sessions        []RemoteCatalogSession `json:"sessions"`
+}
