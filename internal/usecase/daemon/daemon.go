@@ -108,6 +108,11 @@ type Daemon struct {
 	// with Wait.
 	notifies []chan struct{}
 	parked   map[uint64]*parkedAttachment
+	// parking tracks resume-capable attachments from before detach clears the
+	// live seat until parkAttachment publishes the token into parked.
+	// IntentResume waits on the matching entry instead of treating the live
+	// credential as unknown across that gap.
+	parking map[uint64]*parkingAttachment
 
 	attnMu    sync.Mutex
 	animFrame int
@@ -175,6 +180,25 @@ type Daemon struct {
 	// beforeClientGoneDetach pauses clientGone after the stale-transport
 	// precheck and before exact transport/incarnation detach validation.
 	beforeClientGoneDetach func()
+	// beforeMarkParkingInFlight pauses resumeLiveAttachment after the live
+	// credential matches and before markParkingInFlight, so tests can win
+	// explicit detach or session removal before late marker publication.
+	beforeMarkParkingInFlight func()
+	// afterClientGoneDetach pauses finishClientGone after detach won and before
+	// parkAttachment. The parking-in-flight marker must already be published.
+	afterClientGoneDetach func()
+	// afterResumeLiveDetach pauses resumeLiveAttachment after detach won and
+	// before parkAttachment. The parking-in-flight marker must already be
+	// published so a concurrent same-token resume can wait the gap.
+	afterResumeLiveDetach func()
+	// afterParkingWaitArmed observes waitParkingInFlight after it has resolved a
+	// matching in-flight entry and before it blocks on done.
+	afterParkingWaitArmed func()
+	// afterSnatchedUnrouteBeforePark pauses parkSnatchedAttachment and
+	// cleanupInterruptedSnatchedAttachment after exact snatched ownership is
+	// removed and before parkAttachmentAs. The parking-in-flight marker must
+	// already be published so a concurrent same-token resume can wait the gap.
+	afterSnatchedUnrouteBeforePark func()
 	// beforeResumeParkedSendMu pauses resumeParked after the initial parked
 	// lookup and before the attachment send lock, so tests can consume or
 	// replace the credential while the handshake waits.
@@ -305,6 +329,23 @@ type parkedAttachment struct {
 	timer    ports.Timer
 	done     chan struct{}
 	doneOnce sync.Once
+}
+
+// parkingAttachment is the observable detach→park lifecycle for one resume
+// credential. done closes when the token is published into parked or parking
+// is abandoned.
+type parkingAttachment struct {
+	sess     *session
+	ac       *attachedClient
+	done     chan struct{}
+	doneOnce sync.Once
+}
+
+func (p *parkingAttachment) closeDone() {
+	if p == nil || p.done == nil {
+		return
+	}
+	p.doneOnce.Do(func() { close(p.done) })
 }
 
 // session is a single multiplexed session. It owns one or more full-screen
@@ -539,6 +580,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		stopped:           make(map[string]stoppedSession),
 		creating:          make(map[string]struct{}),
 		parked:            make(map[uint64]*parkedAttachment),
+		parking:           make(map[uint64]*parkingAttachment),
 		paneProcessCtx:    paneProcessCtx,
 		paneProcessCancel: paneProcessCancel,
 		ptys:              ptys,
@@ -731,6 +773,7 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true
+	d.purgeAllParkingLocked()
 	parkedRetirements := d.purgeAllParkedLocked()
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
