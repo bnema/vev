@@ -335,7 +335,7 @@ func TestWeightConsumeOrExpelPaneSemantics(t *testing.T) {
 		check  func(*testing.T, *Tree, []Placement, []Placement)
 	}{
 		{
-			name: "horizontal insertion preserves normalized sibling shares and gives expelled column default weight",
+			name: "horizontal insertion preserves normalized sibling shares and gives expelled column fair-share weight",
 			tree: &Tree{Root: weightedNode(horizontal(
 				weightedNode(vertical("a", "b"), 3),
 				weightedLeaf("c", 1),
@@ -346,13 +346,13 @@ func TestWeightConsumeOrExpelPaneSemantics(t *testing.T) {
 			check: func(t *testing.T, tree *Tree, before, after []Placement) {
 				require.Equal(t, map[PaneID]int{"a": 151, "b": 151, "c": 50}, placementWidths(before))
 				require.Equal(t, 11.0, tree.Root.Weight)
-				require.Equal(t, []float64{151, 0, 50}, childWeights(tree.Root))
+				require.Equal(t, []float64{151, 100.5, 50}, childWeights(tree.Root))
 				require.Equal(t, []PaneID{"a", "b", "c"}, LeafIDs(tree.Root))
-				require.Equal(t, map[PaneID]int{"a": 135, "b": 20, "c": 45}, placementWidths(after))
+				require.Equal(t, map[PaneID]int{"a": 100, "b": 67, "c": 33}, placementWidths(after))
 			},
 		},
 		{
-			name: "vertical consume preserves solved member shares and gives moved pane default weight",
+			name: "vertical consume preserves solved member shares and gives moved pane fair-share weight",
 			tree: &Tree{Root: weightedNode(horizontal(
 				weightedNode(verticalNodes(weightedLeaf("a", 3), weightedLeaf("b", 1)), 2),
 				weightedLeaf("c", 1),
@@ -364,8 +364,8 @@ func TestWeightConsumeOrExpelPaneSemantics(t *testing.T) {
 				require.Equal(t, map[PaneID]int{"a": 14, "b": 5, "c": 20}, placementHeights(before))
 				require.Equal(t, Vertical, tree.Root.Dir)
 				require.Equal(t, 9.0, tree.Root.Weight, "root promotion retains the removed horizontal wrapper share")
-				require.Equal(t, []float64{14, 5, 0}, childWeights(tree.Root))
-				require.Equal(t, map[PaneID]int{"a": 12, "b": 4, "c": 2}, placementHeights(after))
+				require.Equal(t, []float64{14, 5, 9.5}, childWeights(tree.Root))
+				require.Equal(t, map[PaneID]int{"a": 9, "b": 3, "c": 6}, placementHeights(after))
 			},
 		},
 		{
@@ -426,8 +426,12 @@ func TestWeightConsumeOrExpelPaneSemantics(t *testing.T) {
 				require.Equal(t, Leaf, tree.Root.Children[2].Kind)
 				require.Equal(t, PaneID("b"), tree.Root.Children[2].Leaf)
 				require.Equal(t, 61.0, tree.Root.Children[2].Weight)
-				require.Equal(t, []float64{20, 0, 61, 20}, childWeights(tree.Root))
-				require.Equal(t, map[PaneID]int{"x": 20, "a": 20, "b": 40, "y": 20}, placementWidths(after))
+				weights := childWeights(tree.Root)
+				require.Equal(t, 20.0, weights[0])
+				require.InDelta(t, 101.0/3.0, weights[1], 1e-9)
+				require.Equal(t, 61.0, weights[2])
+				require.Equal(t, 20.0, weights[3])
+				require.Equal(t, map[PaneID]int{"x": 20, "a": 21, "b": 39, "y": 20}, placementWidths(after))
 			},
 		},
 		{
@@ -441,6 +445,20 @@ func TestWeightConsumeOrExpelPaneSemantics(t *testing.T) {
 				require.Equal(t, 9.0, tree.Root.Weight)
 				require.Equal(t, []float64{0, 0}, childWeights(tree.Root))
 				require.Equal(t, map[PaneID]int{"a": 50, "b": 50}, placementWidths(after))
+			},
+		},
+		{
+			name: "expel from equal columns yields three homogeneous columns",
+			tree: &Tree{Root: horizontal(
+				NewLeaf("a"),
+				verticalNodes(NewLeaf("b"), NewLeaf("c")),
+			), Focus: "c"},
+			target: "c",
+			dir:    Right,
+			area:   domain.Rect{Width: 122, Height: 10},
+			check: func(t *testing.T, tree *Tree, _, after []Placement) {
+				require.Equal(t, []PaneID{"a", "b", "c"}, LeafIDs(tree.Root))
+				require.Equal(t, map[PaneID]int{"a": 40, "b": 40, "c": 40}, placementWidths(after))
 			},
 		},
 	}
