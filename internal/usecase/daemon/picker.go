@@ -54,8 +54,24 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 		}
 	}
 	d.mu.Unlock()
-	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
-	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
+	// Snapshot mruAt once: comparators must not observe concurrent touchMRU
+	// updates mid-sort.
+	mru := make(map[*session]uint64, len(sessions))
+	for _, s := range sessions {
+		mru[s] = s.mruAt.Load()
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		if mru[sessions[i]] != mru[sessions[j]] {
+			return mru[sessions[i]] > mru[sessions[j]]
+		}
+		return sessions[i].name < sessions[j].name
+	})
+	sort.Slice(stopped, func(i, j int) bool {
+		if stopped[i].lastUsedSeq != stopped[j].lastUsedSeq {
+			return stopped[i].lastUsedSeq > stopped[j].lastUsedSeq
+		}
+		return stopped[i].name < stopped[j].name
+	})
 
 	for _, s := range sessions {
 		d.refreshSessionFocusedTitles(s)

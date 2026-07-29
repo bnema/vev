@@ -118,6 +118,46 @@ func TestPickerViewsIncludesEphemeralSessions(t *testing.T) {
 	require.Equal(t, "1", ephemeralView.Name)
 }
 
+func TestPickerViewsOrdersByMRUWithEphemeralInterleaved(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	old := &session{id: "old", name: "alpha", tabs: []*tab{{}}}
+	old.mruAt.Store(1)
+	eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	eph.mruAt.Store(3)
+	recent := &session{id: "recent", name: "zeta", tabs: []*tab{{}}}
+	recent.mruAt.Store(2)
+	d.sessions[old.id] = old
+	d.sessions[eph.id] = eph
+	d.sessions[recent.id] = recent
+	d.stopped["halted-old"] = stoppedSession{name: "halted-old", createdAt: 10, lastUsedSeq: 1}
+	d.stopped["halted-new"] = stoppedSession{name: "halted-new", createdAt: 11, lastUsedSeq: 2}
+
+	views, _ := d.pickerViews(recent)
+
+	names := make([]string, 0, len(views))
+	for _, v := range views {
+		names = append(names, v.Name)
+	}
+	// Live MRU-desc (ephemeral "1" is most recent), then stopped block MRU-desc.
+	require.Equal(t, []string{"1", "zeta", "alpha", "halted-new", "halted-old"}, names)
+	require.True(t, views[3].Stopped)
+	require.True(t, views[4].Stopped)
+}
+
+func TestPickerViewsMRUTieBreaksAlphabetically(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	b := &session{id: "b", name: "bravo", tabs: []*tab{{}}}
+	a := &session{id: "a", name: "alpha", tabs: []*tab{{}}}
+	// Equal mruAt (both zero) must yield a stable alphabetical order.
+	d.sessions[b.id] = b
+	d.sessions[a.id] = a
+
+	views, _ := d.pickerViews(a)
+
+	require.Equal(t, "alpha", views[0].Name)
+	require.Equal(t, "bravo", views[1].Name)
+}
+
 func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	ctx, cancel := context.WithCancel(d.serveCtx)
@@ -1563,7 +1603,8 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 
 	d.enterPicker(from, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(from, ac, []byte("k"))
+	// MRU-desc order is from(current), recent, older; "j" moves onto "recent".
+	d.handleInput(from, ac, []byte("j"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(from, ac, []byte("x"))
 
