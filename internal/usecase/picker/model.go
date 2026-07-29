@@ -71,6 +71,7 @@ type RenderStyles struct {
 	// rows, preserving a distinct inactive surface from modal chrome.
 	Background renderer.Style
 	Base       renderer.Style // non-selected row fill + suffixes
+	Stopped    renderer.Style // full row style for non-selected stopped rows (fill, name, detail, suffix)
 	Separator  renderer.Style // preview separator
 }
 
@@ -80,7 +81,10 @@ func defaultRenderStyles() RenderStyles {
 	base := renderer.DefaultStyle()
 	separator := renderer.DefaultStyle()
 	separator.Attrs = renderer.AttrDim
-	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator}
+	stopped := renderer.DefaultStyle()
+	stopped.Attrs = renderer.AttrDim
+	stopped.Italic = true
+	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator, Stopped: stopped}
 }
 
 type Target struct {
@@ -405,6 +409,9 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		base, nameStyle, detailStyle := styles.Base, styles.Name, styles.Detail
 		if idx == m.selected {
 			base, nameStyle, detailStyle = styles.Selection, styles.SelectionName, styles.SelectionMuted
+		}
+		if r.stopped && idx != m.selected {
+			base, nameStyle, detailStyle = styles.Stopped, styles.Stopped, styles.Stopped
 		}
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
 

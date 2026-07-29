@@ -416,6 +416,27 @@ func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 	require.Equal(t, '(', frame.At(5, 0).Rune)
 }
 
+func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
+	live := SessionView{ID: "live", Name: "work", Tabs: []TabEntry{{TabID: "t1", Name: "tab"}}}
+	halted := SessionView{ID: "stopped:old", Name: "old", TargetName: "old", Stopped: true, Tabs: []TabEntry{{}}}
+	m := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab})
+
+	stoppedStyle := renderer.Style{Foreground: -1, Background: -1, Italic: true, Attrs: renderer.AttrDim}
+	styles := defaultRenderStyles()
+	require.Equal(t, stoppedStyle, styles.Stopped)
+
+	frame := m.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
+	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old (stopped)" header, 3 its tab row.
+	require.Equal(t, stoppedStyle, frame.Row(2)[0].Style, "stopped header must be dim italic")
+	require.Equal(t, stoppedStyle, frame.Row(3)[0].Style, "stopped tab row must be dim italic")
+	require.NotEqual(t, stoppedStyle, frame.Row(0)[0].Style, "live header keeps base style")
+
+	selected := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: halted.ID}})
+	selectedFrame := selected.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
+	require.NotEqual(t, stoppedStyle, selectedFrame.Row(3)[0].Style, "selected stopped row keeps selection style, not Stopped")
+	require.True(t, selectedFrame.Row(3)[0].Style.Inverse, "selected stopped row still shows selection")
+}
+
 func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
 	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
 	preview := Preview{
