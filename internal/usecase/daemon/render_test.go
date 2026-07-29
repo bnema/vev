@@ -107,7 +107,7 @@ func TestPaletteBackdropDimsSimultaneousPicker(t *testing.T) {
 
 	d.enterPicker(sess, ac)
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
-	pickerTitle := client.Frame.At(36, 2)
+	pickerTitle := client.Frame.At(31, 2)
 	require.Equal(t, 'S', pickerTitle.Rune, "fixture must address the picker title")
 	undimmedPane := client.Frame.At(0, 1)
 
@@ -115,7 +115,7 @@ func TestPaletteBackdropDimsSimultaneousPicker(t *testing.T) {
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 	dimmedPickerTitle := pickerTitle
 	dimmedPickerTitle.Style = themeui.NewDimmer(backdropTheme()).Dim(pickerTitle.Style)
-	require.Equal(t, dimmedPickerTitle, client.Frame.At(36, 2), "the lower-priority picker must be part of the palette backdrop")
+	require.Equal(t, dimmedPickerTitle, client.Frame.At(31, 2), "the lower-priority picker must be part of the palette backdrop")
 	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmedPane.Style), client.Frame.At(0, 1).Style, "pane content outside overlays must use the theme dim style")
 }
 

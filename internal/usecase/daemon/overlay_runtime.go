@@ -18,6 +18,7 @@ type overlayRuntime struct {
 
 	pickerMu                sync.Mutex
 	picker                  *picker.Model
+	pickerTitle             string
 	pickerIntent            pickerIntent
 	pickerSource            moveSourceLocator
 	pickerPreview           *tab
@@ -381,6 +382,7 @@ type overlayRenderSnapshot struct {
 
 	pickerActive bool
 	pickerModel  *picker.Model
+	pickerTitle  string
 	previewTab   *tab
 
 	noticesOverlayActive bool
@@ -451,6 +453,7 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	rt.pickerMu.Lock()
 	snap.pickerActive = rt.picker != nil
 	snap.pickerModel = rt.picker.Clone()
+	snap.pickerTitle = rt.pickerTitle
 	snap.previewTab = rt.pickerPreview
 	rt.pickerMu.Unlock()
 

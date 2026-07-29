@@ -79,6 +79,9 @@ type Daemon struct {
 	// reusing a lifecycle identity.
 	lastAllocatedCreatedAt int64
 	mruSeq                 atomic.Uint64
+	// pickerSort is the picker ordering mode for this daemon's lifetime
+	// (pickerSortMode); not persisted across restarts.
+	pickerSort atomic.Uint32
 	// closing marks that shutdown has irreversibly begun. It is set under mu,
 	// atomically with the event that makes shutdown inevitable (the registry
 	// emptying in killSession, or shutdownAll starting), and checked by route

@@ -16,6 +16,38 @@ import (
 
 var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
 
+// pickerSortMode orders the picker's live sessions. It lives for the daemon's
+// lifetime only and is never persisted.
+type pickerSortMode uint32
+
+const (
+	pickerSortRecent pickerSortMode = iota
+	pickerSortGrouped
+)
+
+func pickerTitle(mode pickerSortMode) string {
+	if mode == pickerSortGrouped {
+		return " Sessions · grouped "
+	}
+	return " Sessions · recent "
+}
+
+// togglePickerSort flips the daemon's picker sort mode between the two known
+// modes with a CompareAndSwap loop, so a concurrent double-press can't lose
+// an update the way a bare Load-then-Store XOR can.
+func (d *Daemon) togglePickerSort() {
+	for {
+		cur := pickerSortMode(d.pickerSort.Load())
+		next := pickerSortRecent
+		if cur == pickerSortRecent {
+			next = pickerSortGrouped
+		}
+		if d.pickerSort.CompareAndSwap(uint32(cur), uint32(next)) {
+			return
+		}
+	}
+}
+
 // enterPicker preserves the existing navigation entry point. Navigation always
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
@@ -32,6 +64,7 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	rt.pickerPreviewSession = nil
 	rt.pickerPreview = nil
 	rt.picker = model
+	rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
 	rt.pickerIntent = intent
 	rt.pickerSource = source
 	rt.pickerPending = nil
@@ -54,8 +87,42 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 		}
 	}
 	d.mu.Unlock()
-	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
-	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
+	// Snapshot mruAt, name, and ephemeral once: comparators must not observe
+	// concurrent touchMRU updates or a renameSession mutation (which mutates
+	// name/ephemeral under sess.mu) mid-sort.
+	type pickerSortSnapshot struct {
+		mruAt     uint64
+		name      string
+		ephemeral bool
+	}
+	snap := make(map[*session]pickerSortSnapshot, len(sessions))
+	for _, s := range sessions {
+		mruAt := s.mruAt.Load()
+		s.mu.Lock()
+		name := s.name
+		ephemeral := s.ephemeral
+		s.mu.Unlock()
+		snap[s] = pickerSortSnapshot{mruAt: mruAt, name: name, ephemeral: ephemeral}
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		if snap[sessions[i]].mruAt != snap[sessions[j]].mruAt {
+			return snap[sessions[i]].mruAt > snap[sessions[j]].mruAt
+		}
+		return snap[sessions[i]].name < snap[sessions[j]].name
+	})
+	sort.Slice(stopped, func(i, j int) bool {
+		if stopped[i].lastUsedSeq != stopped[j].lastUsedSeq {
+			return stopped[i].lastUsedSeq > stopped[j].lastUsedSeq
+		}
+		return stopped[i].name < stopped[j].name
+	})
+	if pickerSortMode(d.pickerSort.Load()) == pickerSortGrouped {
+		// Stable partition: named sessions first, ephemeral after, each keeping
+		// its MRU order from the sort above.
+		sort.SliceStable(sessions, func(i, j int) bool {
+			return !snap[sessions[i]].ephemeral && snap[sessions[j]].ephemeral
+		})
+	}
 
 	for _, s := range sessions {
 		d.refreshSessionFocusedTitles(s)
@@ -114,7 +181,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 
 func (d *Daemon) newPickerModel(cur *session, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
 	views, attachedCurrent := d.pickerViews(cur)
-	if intent == pickerNavigate {
+	if intent == pickerNavigate && current == (picker.SourceFilter{}) {
 		current = attachedCurrent
 	}
 	return picker.New(views, picker.SelectionConfig{
@@ -173,6 +240,8 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		switch b {
 		case 'x':
 			return listInputResult{action: b, stop: true}
+		case 's':
+			return listInputResult{action: b, stop: true}
 		case '\r', '\n':
 			return listInputResult{action: b, exit: true}
 		default:
@@ -183,12 +252,21 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	var ok bool
 	var intent pickerIntent
 	var source moveSourceLocator
+	// prevIdx is the row the victim occupied; -1 means "no post-delete hint".
+	prevIdx := -1
 	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
 		target, ok = rt.picker.Selected()
+		prevIdx = rt.picker.SelectedIndex()
 	}
 	intent, source = rt.pickerIntent, rt.pickerSource
 	rt.pickerMu.Unlock()
 
+	if result.action == 's' {
+		d.togglePickerSort()
+		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		d.invalidateRender(sess, ac, true, "picker.go")
+		return
+	}
 	if result.action == 'x' {
 		var effect *roleEffectTicket
 		if len(effects) != 0 {
@@ -213,7 +291,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			}
 			defer fresh.End()
 		}
-		d.refreshPicker(ac)
+		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: prevIdx})
 		d.invalidateRender(sess, ac, true, "picker.go")
 		return
 	}
@@ -405,6 +483,7 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = nil
+	ac.overlays.pickerTitle = ""
 	ac.overlays.pickerIntent = pickerNavigate
 	ac.overlays.pickerSource = moveSourceLocator{}
 	ac.overlays.pickerPending = nil

@@ -71,6 +71,7 @@ type RenderStyles struct {
 	// rows, preserving a distinct inactive surface from modal chrome.
 	Background renderer.Style
 	Base       renderer.Style // non-selected row fill + suffixes
+	Stopped    renderer.Style // full row style for non-selected stopped rows (fill, name, detail, suffix)
 	Separator  renderer.Style // preview separator
 }
 
@@ -80,7 +81,10 @@ func defaultRenderStyles() RenderStyles {
 	base := renderer.DefaultStyle()
 	separator := renderer.DefaultStyle()
 	separator.Attrs = renderer.AttrDim
-	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator}
+	stopped := renderer.DefaultStyle()
+	stopped.Attrs = renderer.AttrDim
+	stopped.Italic = true
+	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator, Stopped: stopped}
 }
 
 type Target struct {
@@ -252,7 +256,17 @@ func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) b
 	if mode == SelectMoveTabSession {
 		return pickerRow.kind == rowSession
 	}
-	return pickerRow.kind == rowTab && current.TabID != "" && pickerRow.tabID == current.TabID
+	if pickerRow.kind != rowTab {
+		return false
+	}
+	// A stopped session contributes one synthetic tab row carrying no stable tab
+	// identity, so it matches on session identity alone. Its session ID is
+	// namespaced ("stopped:<name>"), and move modes drop stopped sessions
+	// entirely, so no live row can be reached this way.
+	if current.TabID == "" {
+		return pickerRow.stopped
+	}
+	return pickerRow.tabID == current.TabID
 }
 
 func int64Value(value *int64) (int64, bool) {
@@ -311,6 +325,39 @@ func (m *Model) Selected() (Target, bool) {
 		Session: r.session, Incarnation: r.incarnation, Name: r.targetName, TabID: r.tabID,
 		TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAtPointer(),
 	}, true
+}
+
+// SelectedIndex reports the raw selected row index. It is -1 only when the
+// model is nil or has no rows at all; otherwise it is a real row index even
+// when that row is not selectable (see Selected). Row indices are only
+// meaningful against this exact model.
+func (m *Model) SelectedIndex() int {
+	if m == nil {
+		return -1
+	}
+	return m.selected
+}
+
+// SelectNearestRow selects the first selectable row at or after idx, falling
+// back to the last selectable row before it. Callers use it to keep the
+// cursor on the row that takes a removed item's place.
+func (m *Model) SelectNearestRow(idx int) {
+	if m == nil || len(m.rows) == 0 {
+		return
+	}
+	idx = clamp(idx, 0, len(m.rows)-1)
+	for i := idx; i < len(m.rows); i++ {
+		if m.rows[i].kind.selectable(m.mode) {
+			m.selected = i
+			return
+		}
+	}
+	for i := idx - 1; i >= 0; i-- {
+		if m.rows[i].kind.selectable(m.mode) {
+			m.selected = i
+			return
+		}
+	}
 }
 
 func (m *Model) Clone() *Model {
@@ -395,6 +442,9 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		base, nameStyle, detailStyle := styles.Base, styles.Name, styles.Detail
 		if idx == m.selected {
 			base, nameStyle, detailStyle = styles.Selection, styles.SelectionName, styles.SelectionMuted
+		}
+		if r.stopped && idx != m.selected {
+			base, nameStyle, detailStyle = styles.Stopped, styles.Stopped, styles.Stopped
 		}
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
 

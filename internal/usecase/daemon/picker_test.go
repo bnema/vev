@@ -118,6 +118,163 @@ func TestPickerViewsIncludesEphemeralSessions(t *testing.T) {
 	require.Equal(t, "1", ephemeralView.Name)
 }
 
+func TestPickerViewsOrdersByMRUWithEphemeralInterleaved(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	old := &session{id: "old", name: "alpha", tabs: []*tab{{}}}
+	old.mruAt.Store(1)
+	eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	eph.mruAt.Store(3)
+	recent := &session{id: "recent", name: "zeta", tabs: []*tab{{}}}
+	recent.mruAt.Store(2)
+	d.sessions[old.id] = old
+	d.sessions[eph.id] = eph
+	d.sessions[recent.id] = recent
+	d.stopped["halted-old"] = stoppedSession{name: "halted-old", createdAt: 10, lastUsedSeq: 1}
+	d.stopped["halted-new"] = stoppedSession{name: "halted-new", createdAt: 11, lastUsedSeq: 2}
+
+	views, _ := d.pickerViews(recent)
+
+	names := make([]string, 0, len(views))
+	for _, v := range views {
+		names = append(names, v.Name)
+	}
+	// Live MRU-desc (ephemeral "1" is most recent), then stopped block MRU-desc.
+	require.Equal(t, []string{"1", "zeta", "alpha", "halted-new", "halted-old"}, names)
+	require.True(t, views[3].Stopped)
+	require.True(t, views[4].Stopped)
+}
+
+func TestPickerViewsMRUTieBreaksAlphabetically(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	b := &session{id: "b", name: "bravo", tabs: []*tab{{}}}
+	a := &session{id: "a", name: "alpha", tabs: []*tab{{}}}
+	// Equal mruAt (both zero) must yield a stable alphabetical order.
+	d.sessions[b.id] = b
+	d.sessions[a.id] = a
+
+	views, _ := d.pickerViews(a)
+
+	require.Equal(t, "alpha", views[0].Name)
+	require.Equal(t, "bravo", views[1].Name)
+}
+
+func TestPickerViewsGroupedModePutsNamedBeforeEphemeral(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.pickerSort.Store(uint32(pickerSortGrouped))
+	eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	eph.mruAt.Store(5)
+	named := &session{id: "named", name: "work", tabs: []*tab{{}}}
+	named.mruAt.Store(2)
+	named2 := &session{id: "named2", name: "notes", tabs: []*tab{{}}}
+	named2.mruAt.Store(3)
+	d.sessions[eph.id] = eph
+	d.sessions[named.id] = named
+	d.sessions[named2.id] = named2
+	d.stopped["halted"] = stoppedSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
+
+	views, _ := d.pickerViews(named)
+
+	names := make([]string, 0, len(views))
+	for _, v := range views {
+		names = append(names, v.Name)
+	}
+	// Named (MRU-desc) → ephemeral (MRU-desc) → stopped, even though the
+	// ephemeral session has the highest mruAt.
+	require.Equal(t, []string{"notes", "work", "1", "halted"}, names)
+}
+
+func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
+	// Rows in recent mode are: ephemeral "1" (header + tab), "work" (header +
+	// two tabs), then the stopped block. Navigation starts on "work"'s active
+	// tab, so "j" walks down from there.
+	cases := []struct {
+		name        string
+		navigate    []byte
+		wantStopped bool
+	}{
+		{name: "live tab selection", navigate: []byte("j")},
+		{name: "stopped session selection", navigate: []byte("jj"), wantStopped: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, sends, releases := newManualTabSession(t, 2)
+			defer releaseAll(releases)
+			sess.mu.Lock()
+			sess.client = ac
+			secondTabID := domain.TabStableID(sess.tabs[1].stableID)
+			sess.mu.Unlock()
+			sess.mruAt.Store(1)
+			// A second live session, ephemeral and more recently used: recent mode
+			// lists it first, grouped mode moves it below the named session.
+			eph := &session{id: "eph", name: "1", ephemeral: true, tabs: []*tab{{}}}
+			eph.mruAt.Store(5)
+			d.mu.Lock()
+			d.sessions[eph.id] = eph
+			d.stopped["halted"] = stoppedSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
+			d.mu.Unlock()
+
+			d.enterPicker(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			// Move off the attached session's active tab: a navigate rebuild snaps
+			// back to it unless the toggle preserves the selection.
+			d.handleInput(sess, ac, tc.navigate)
+			awaitFrame(t, sends, ports.MsgOutput)
+			ac.overlays.pickerMu.Lock()
+			before, ok := ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, tc.wantStopped, before.Stopped)
+			if tc.wantStopped {
+				require.Equal(t, "halted", before.Name)
+			} else {
+				require.Equal(t, secondTabID, before.TabID)
+			}
+
+			d.handleInput(sess, ac, []byte("s"))
+			awaitFrame(t, sends, ports.MsgOutput)
+
+			require.Equal(t, uint32(pickerSortGrouped), d.pickerSort.Load())
+			require.True(t, ac.overlays.pickerActive())
+			ac.overlays.pickerMu.Lock()
+			selected, ok := ac.overlays.picker.Selected()
+			title := ac.overlays.pickerTitle
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, before, selected)
+			require.Equal(t, " Sessions · grouped ", title)
+
+			d.handleInput(sess, ac, []byte("s"))
+			awaitFrame(t, sends, ports.MsgOutput)
+
+			require.Equal(t, uint32(pickerSortRecent), d.pickerSort.Load())
+			require.True(t, ac.overlays.pickerActive())
+			ac.overlays.pickerMu.Lock()
+			selected, ok = ac.overlays.picker.Selected()
+			title = ac.overlays.pickerTitle
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, before, selected)
+			require.Equal(t, " Sessions · recent ", title)
+		})
+	}
+}
+
+func TestPickerTitleReflectsSortMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode pickerSortMode
+		want string
+	}{
+		{name: "recent", mode: pickerSortRecent, want: " Sessions · recent "},
+		{name: "grouped", mode: pickerSortGrouped, want: " Sessions · grouped "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, pickerTitle(tc.mode))
+		})
+	}
+}
+
 func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	ctx, cancel := context.WithCancel(d.serveCtx)
@@ -363,7 +520,7 @@ func TestPickerMoveRefreshPreservesSelectedDestination(t *testing.T) {
 		destination.mu.Lock()
 		destination.tabs[0], destination.tabs[1] = destination.tabs[1], destination.tabs[0]
 		destination.mu.Unlock()
-		d.refreshPicker(ac)
+		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: -1})
 
 		ac.overlays.pickerMu.Lock()
 		after, ok := ac.overlays.picker.Selected()
@@ -412,7 +569,7 @@ func TestPickerMoveRefreshPreservesSelectedDestination(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, domain.SessionID("selected"), before.Session)
 
-		d.refreshPicker(ac)
+		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: -1})
 
 		ac.overlays.pickerMu.Lock()
 		after, ok := ac.overlays.picker.Selected()
@@ -1459,51 +1616,90 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	require.Same(t, from, ac.currentSession(), "a failed restore must leave the client on its origin session")
 }
 
-func TestPickerNavigationRefreshAfterSuccessfulDeleteSelectsAttachedActiveStableTab(t *testing.T) {
-	d, current, ac, _, currentReleases := newManualTabSession(t, 2)
-	defer releaseAll(currentReleases)
-	current.id, current.name, current.active = "current", "z-current", 1
-	current.tabs[0].stableID, current.tabs[1].stableID = "current-first", "current-active"
-	delete(d.sessions, domain.SessionID("manual"))
-	d.sessions[current.id] = current
+// TestPickerNavigationRefreshAfterDeleteSelectsReplacingRow pins the post-kill
+// contract: the cursor stays on the row index the killed session occupied, so
+// it lands on whatever session took its place — clamped to the new last
+// selectable row when the bottom session was killed. Session names drive the
+// picker's alphabetical tie-break (every session here shares mruAt 0), which is
+// what puts the victim in the middle or at the end of the list.
+func TestPickerNavigationRefreshAfterDeleteSelectsReplacingRow(t *testing.T) {
+	tests := []struct {
+		name         string
+		currentName  string
+		otherName    string
+		targetName   string
+		nav          []byte // keys walked from the attached session's active tab onto the victim
+		wantSession  domain.SessionID
+		wantTabID    domain.TabStableID
+		wantTabIndex int
+	}{
+		{
+			// Rows: [a-other, other-tab, m-target, target-tab, z-current, current-first, current-active].
+			// Killing target-tab (row 3) promotes z-current's header to row 2, so
+			// row 3 becomes current-first — not the attached active tab.
+			name:        "middle session killed selects the row taking its place",
+			currentName: "z-current", otherName: "a-other", targetName: "m-target",
+			nav:         []byte("kk"),
+			wantSession: "current", wantTabID: "current-first", wantTabIndex: 0,
+		},
+		{
+			// Rows: [a-current, current-first, current-active, m-other, other-tab, z-target, target-tab].
+			// Killing the bottom row (6) clamps to the new last selectable row.
+			name:        "last session killed selects the new last row",
+			currentName: "a-current", otherName: "m-other", targetName: "z-target",
+			nav:         []byte("jj"),
+			wantSession: "other", wantTabID: "other-tab", wantTabIndex: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, current, ac, _, currentReleases := newManualTabSession(t, 2)
+			defer releaseAll(currentReleases)
+			current.id, current.name, current.active = "current", tt.currentName, 1
+			current.tabs[0].stableID, current.tabs[1].stableID = "current-first", "current-active"
+			delete(d.sessions, domain.SessionID("manual"))
+			d.sessions[current.id] = current
 
-	otherPTY, releaseOther := newBlockingPTY(t)
-	defer releaseOther()
-	otherTab := newTestTabWithContext(otherPTY, current.ctx, current.cancel)
-	otherTab.stableID = "other-tab"
-	other := &session{id: "other", name: "a-other", ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{otherTab}}
-	d.sessions[other.id] = other
+			otherPTY, releaseOther := newBlockingPTY(t)
+			defer releaseOther()
+			otherTab := newTestTabWithContext(otherPTY, current.ctx, current.cancel)
+			otherTab.stableID = "other-tab"
+			other := &session{id: "other", name: tt.otherName, ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{otherTab}}
+			d.sessions[other.id] = other
 
-	targetPTY, releaseTarget := newBlockingPTY(t)
-	defer releaseTarget()
-	targetTab := newTestTabWithContext(targetPTY, current.ctx, current.cancel)
-	targetTab.stableID = "target-tab"
-	target := &session{id: "target", name: "m-target", ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{targetTab}}
-	d.sessions[target.id] = target
+			targetPTY, releaseTarget := newBlockingPTY(t)
+			defer releaseTarget()
+			targetTab := newTestTabWithContext(targetPTY, current.ctx, current.cancel)
+			targetTab.stableID = "target-tab"
+			target := &session{id: "target", name: tt.targetName, ephemeral: true, ctx: current.ctx, cancel: func() {}, tabs: []*tab{targetTab}}
+			d.sessions[target.id] = target
 
-	d.enterPicker(current, ac)
-	d.handlePickerInput(ac, []byte("k"))
-	d.handlePickerInput(ac, []byte("k"))
-	ac.overlays.pickerMu.Lock()
-	selected, ok := ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.Equal(t, target.id, selected.Session, "test must delete the selected non-attached session")
+			d.enterPicker(current, ac)
+			for _, key := range tt.nav {
+				d.handlePickerInput(ac, []byte{key})
+			}
+			ac.overlays.pickerMu.Lock()
+			selected, ok := ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, target.id, selected.Session, "test must delete the selected non-attached session")
 
-	d.handlePickerInput(ac, []byte("x"))
+			d.handlePickerInput(ac, []byte("x"))
 
-	d.mu.Lock()
-	_, targetStillLive := d.sessions[target.id]
-	d.mu.Unlock()
-	require.False(t, targetStillLive, "ordinary picker deletion must remove the selected session")
+			d.mu.Lock()
+			_, targetStillLive := d.sessions[target.id]
+			d.mu.Unlock()
+			require.False(t, targetStillLive, "ordinary picker deletion must remove the selected session")
 
-	ac.overlays.pickerMu.Lock()
-	selected, ok = ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok)
-	require.Equal(t, current.id, selected.Session)
-	require.Equal(t, domain.TabStableID("current-active"), selected.TabID)
-	require.Equal(t, 1, selected.TabIndex)
+			ac.overlays.pickerMu.Lock()
+			selected, ok = ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
+			require.True(t, ok)
+			require.Equal(t, tt.wantSession, selected.Session)
+			require.Equal(t, tt.wantTabID, selected.TabID)
+			require.Equal(t, tt.wantTabIndex, selected.TabIndex)
+		})
+	}
 }
 
 func TestPickerRoleEffectDeleteRemovesSelectedSessionAndRefreshes(t *testing.T) {
@@ -1563,7 +1759,8 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 
 	d.enterPicker(from, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(from, ac, []byte("k"))
+	// MRU-desc order is from(current), recent, older; "j" moves onto "recent".
+	d.handleInput(from, ac, []byte("j"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(from, ac, []byte("x"))
 

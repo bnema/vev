@@ -406,6 +406,90 @@ func TestSelectedMapping(t *testing.T) {
 	require.Equal(t, Target{Session: "beta", TabID: "three", TabIndex: 1}, got)
 }
 
+func TestSelectNearestRow(t *testing.T) {
+	// Three single-tab sessions: rows are [hdrA, tabA, hdrB, tabB, hdrC, tabC].
+	sessions := []SessionView{
+		{ID: "a", Name: "a", Tabs: []TabEntry{{TabID: "ta", Name: "ta"}}},
+		{ID: "b", Name: "b", Tabs: []TabEntry{{TabID: "tb", Name: "tb"}}},
+		{ID: "c", Name: "c", Tabs: []TabEntry{{TabID: "tc", Name: "tc"}}},
+	}
+	tests := []struct {
+		name string
+		idx  int
+		cfg  SelectionConfig
+		// wantStart, when set, pins the selection New produced before
+		// SelectNearestRow runs, so a case cannot silently degrade into one a
+		// no-op implementation would also pass.
+		wantStart domain.SessionID
+		want      domain.SessionID
+	}{
+		{name: "exact selectable row", idx: 3, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
+		{name: "header row snaps to its tab", idx: 2, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
+		{name: "past end clamps to last selectable", idx: 40, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "c"},
+		{
+			// Starts selection on "c" (via Current) so a no-op SelectNearestRow
+			// would leave the selection on "c" and this case would fail; the
+			// plain SelectNavigationTab config used above starts on "a" already,
+			// which can't tell a real clamp-to-first from a no-op.
+			name:      "negative clamps to first selectable",
+			idx:       -2,
+			cfg:       SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "c", TabID: "tc"}},
+			wantStart: "c",
+			want:      "a",
+		},
+		{name: "last row is a tab and stays put", idx: 5, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "c"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(sessions, tc.cfg)
+			if tc.wantStart != "" {
+				pre, ok := m.Selected()
+				require.True(t, ok)
+				require.Equal(t, tc.wantStart, pre.Session, "guard: starting selection must not already be the expected result")
+			}
+			m.SelectNearestRow(tc.idx)
+			target, ok := m.Selected()
+			require.True(t, ok)
+			require.Equal(t, tc.want, target.Session)
+		})
+	}
+}
+
+func TestSelectNearestRowFallsBackBackwardAndToleratesEmptyModels(t *testing.T) {
+	// Move-tab mode makes only session headers selectable, so the trailing tab
+	// row has no selectable row at or after it.
+	m := New([]SessionView{
+		{ID: "a", Name: "a", Tabs: []TabEntry{{TabID: "ta", Name: "ta"}}},
+		{ID: "b", Name: "b", Tabs: []TabEntry{{TabID: "tb", Name: "tb"}}},
+	}, SelectionConfig{Mode: SelectMoveTabSession, Source: SourceFilter{Session: "zzz"}})
+	require.Equal(t, 0, m.SelectedIndex(), "guard: the backward fallback below must move the selection off this starting row")
+	m.SelectNearestRow(3)
+	target, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.SessionID("b"), target.Session)
+	require.Equal(t, 2, m.SelectedIndex())
+
+	empty := New(nil, SelectionConfig{Mode: SelectNavigationTab})
+	empty.SelectNearestRow(0)
+	_, ok = empty.Selected()
+	require.False(t, ok)
+	require.Equal(t, -1, empty.SelectedIndex())
+
+	var nilModel *Model
+	nilModel.SelectNearestRow(3)
+	require.Equal(t, -1, nilModel.SelectedIndex())
+}
+
+func TestSelectedIndexReportsRawSelectedRow(t *testing.T) {
+	m := New([]SessionView{
+		{ID: "alpha", Name: "alpha", Tabs: []TabEntry{{TabID: "one", Name: "one"}, {TabID: "two", Name: "two"}}},
+	}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "alpha", TabID: "two"}})
+
+	require.Equal(t, 2, m.SelectedIndex())
+	m.Up()
+	require.Equal(t, 1, m.SelectedIndex())
+}
+
 func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
 	got, ok := m.Selected()
@@ -414,6 +498,27 @@ func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, Preview{})
 	require.Equal(t, 'w', frame.At(0, 0).Rune)
 	require.Equal(t, '(', frame.At(5, 0).Rune)
+}
+
+func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
+	live := SessionView{ID: "live", Name: "work", Tabs: []TabEntry{{TabID: "t1", Name: "tab"}}}
+	halted := SessionView{ID: "stopped:old", Name: "old", TargetName: "old", Stopped: true, Tabs: []TabEntry{{}}}
+	m := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab})
+
+	stoppedStyle := renderer.Style{Foreground: -1, Background: -1, Italic: true, Attrs: renderer.AttrDim}
+	styles := defaultRenderStyles()
+	require.Equal(t, stoppedStyle, styles.Stopped)
+
+	frame := m.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
+	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old (stopped)" header, 3 its tab row.
+	require.Equal(t, stoppedStyle, frame.Row(2)[0].Style, "stopped header must be dim italic")
+	require.Equal(t, stoppedStyle, frame.Row(3)[0].Style, "stopped tab row must be dim italic")
+	require.NotEqual(t, stoppedStyle, frame.Row(0)[0].Style, "live header keeps base style")
+
+	selected := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: halted.ID}})
+	selectedFrame := selected.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
+	require.NotEqual(t, stoppedStyle, selectedFrame.Row(3)[0].Style, "selected stopped row keeps selection style, not Stopped")
+	require.True(t, selectedFrame.Row(3)[0].Style.Inverse, "selected stopped row still shows selection")
 }
 
 func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
