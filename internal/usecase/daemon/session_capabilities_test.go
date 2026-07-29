@@ -37,12 +37,21 @@ func TestSnapshotViewCarriesCannotAcceptMoves(t *testing.T) {
 func TestEnterPickerForIntentRejectsNonYieldingSource(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t)
 	sess.caps = sessionCapabilities{cannotYieldMoves: true}
-	err := d.enterPickerForIntent(sess, ac, pickerMoveTab, moveSourceLocator{})
-	if !errors.Is(err, errSessionCannotYieldMoves) {
-		t.Fatalf("enterPickerForIntent error = %v, want errSessionCannotYieldMoves", err)
+
+	tests := []struct {
+		name    string
+		intent  pickerIntent
+		wantErr error
+	}{
+		{name: "pickerMoveTab", intent: pickerMoveTab, wantErr: errSessionCannotYieldMoves},
+		{name: "pickerNavigate", intent: pickerNavigate, wantErr: nil},
 	}
-	// Navigation intent must stay unaffected by the yield capability.
-	if err := d.enterPickerForIntent(sess, ac, pickerNavigate, moveSourceLocator{}); err != nil {
-		t.Fatalf("navigate intent returned %v, want nil", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := d.enterPickerForIntent(sess, ac, tt.intent, moveSourceLocator{})
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("enterPickerForIntent error = %v, want %v", err, tt.wantErr)
+			}
+		})
 	}
 }
