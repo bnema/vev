@@ -195,7 +195,7 @@ func TestScreenSnapshotFidelity(t *testing.T) {
 				}
 				copy(screen.Frame.Row(0), cells)
 				screen.buffer.boundaries[0] = LineBound{End: 3, Soft: true}
-				return screen, cells, []LineBound{LineBound{End: 3, Soft: true}, LineBound{}}
+				return screen, cells, []LineBound{{End: 3, Soft: true}, {}}
 			},
 		},
 		{
@@ -222,6 +222,20 @@ func TestScreenSnapshotFidelity(t *testing.T) {
 				require.Equal(t, want, snapshot.Bound(row))
 			}
 		})
+	}
+}
+
+func TestScreenSnapshotPreservesLogicalRowsAfterScroll(t *testing.T) {
+	screen := NewScreen(3, 2)
+	screen.Write([]byte("ABC"))
+	screen.Write([]byte("DEF"))
+	screen.Write([]byte("G"))
+
+	snapshot := screen.Snapshot()
+	for y, want := range []string{"DEF", "G  "} {
+		require.Equal(t, want, rowText(snapshot.Row(y)))
+		require.Equal(t, screen.Frame.Row(y), snapshot.Row(y))
+		require.Equal(t, screen.LineBounds()[y], snapshot.Bound(y))
 	}
 }
 
@@ -330,9 +344,18 @@ func TestScreenSnapshotDoesNotMutateHistoryOrDamage(t *testing.T) {
 			screen := test.make()
 			beforeDamage := screen.CaptureDamage()
 			var beforeHistory HistorySnapshotView
+			var beforeRows [][]renderer.Cell
+			var beforeBounds []LineBound
 			beforeCap, beforeCellCap := 0, 0
 			if screen.History() != nil {
 				beforeHistory = screen.History().SnapshotView()
+				beforeView := screen.History().View()
+				beforeRows = make([][]renderer.Cell, beforeView.Len())
+				beforeBounds = make([]LineBound, beforeView.Len())
+				for i := range beforeRows {
+					beforeRows[i] = beforeView.Row(i)
+					beforeBounds[i] = beforeView.Bound(i)
+				}
 				beforeCap = screen.History().Cap()
 				beforeCellCap = screen.History().CellCap()
 			}
@@ -342,7 +365,20 @@ func TestScreenSnapshotDoesNotMutateHistoryOrDamage(t *testing.T) {
 			afterDamage := screen.CaptureDamage()
 			require.Equal(t, beforeDamage, afterDamage)
 			if screen.History() != nil {
-				require.Equal(t, beforeHistory, screen.History().SnapshotView())
+				afterHistory := screen.History().SnapshotView()
+				afterView := screen.History().View()
+				afterRows := make([][]renderer.Cell, afterView.Len())
+				afterBounds := make([]LineBound, afterView.Len())
+				for i := range afterRows {
+					afterRows[i] = afterView.Row(i)
+					afterBounds[i] = afterView.Bound(i)
+				}
+				require.Equal(t, beforeHistory.ChunkCount(), afterHistory.ChunkCount())
+				require.Equal(t, beforeHistory.Len(), afterHistory.Len())
+				require.Equal(t, beforeHistory.Cells(), afterHistory.Cells())
+				require.Equal(t, beforeHistory.Tail().Len(), afterHistory.Tail().Len())
+				require.Equal(t, beforeRows, afterRows)
+				require.Equal(t, beforeBounds, afterBounds)
 				require.Equal(t, beforeCap, screen.History().Cap())
 				require.Equal(t, beforeCellCap, screen.History().CellCap())
 			}
