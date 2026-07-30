@@ -358,9 +358,6 @@ func TestParse(t *testing.T) {
 			if !tt.want.Palette.AnchorSet {
 				tt.want.Palette = domain.Defaults().Palette
 			}
-			if tt.want.Remote.Hosts == nil {
-				tt.want.Remote = domain.Defaults().Remote
-			}
 			got, warnings, err := Parse(strings.NewReader(tt.input))
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)

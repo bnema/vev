@@ -6,13 +6,6 @@ import (
 	"unicode"
 )
 
-// RemoteConfig contains user-configurable remote host settings.
-type RemoteConfig struct {
-	Enabled  bool
-	Remember bool
-	Hosts    []string
-}
-
 // RemoteHost is a merged remote host entry with its source markers.
 type RemoteHost struct {
 	Target  string

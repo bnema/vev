@@ -21,13 +21,11 @@ const pollInterval = 2 * time.Second
 var (
 	processNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 	percentagePattern  = regexp.MustCompile(`^[0-9]{1,3}%$`)
-	sectionPattern     = regexp.MustCompile(`^\[([^\]]+)\]$`)
 )
 
 // Parse reads vev's flat action = value config format. Duplicate action keys
 // are accepted with a warning; the last value wins while first-seen action order
-// is preserved for binding conflict resolution. An optional [remote] section
-// accepts enabled/remember/hosts with TOML-style true/false values.
+// is preserved for binding conflict resolution.
 func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	cfg := domain.Defaults()
 	var warnings []domain.Warning
@@ -37,8 +35,6 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenPaletteKeys := make(map[string]bool)
 	seenNavKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
-	seenRemoteKeys := make(map[string]bool)
-	section := ""
 
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
@@ -53,17 +49,6 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 			continue
 		}
 
-		if matches := sectionPattern.FindStringSubmatch(line); matches != nil {
-			name := matches[1]
-			if name == "remote" {
-				section = "remote"
-			} else {
-				section = "unknown:" + name
-				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("unknown section %q", name)})
-			}
-			continue
-		}
-
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			warnings = append(warnings, domain.Warning{Line: lineNo, Msg: "missing '='"})
@@ -73,16 +58,6 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 		value = strings.TrimSpace(value)
 		if key == "" {
 			warnings = append(warnings, domain.Warning{Line: lineNo, Msg: "missing key"})
-			continue
-		}
-
-		if strings.HasPrefix(section, "unknown:") {
-			continue
-		}
-		if section == "remote" {
-			var remoteWarnings []domain.Warning
-			cfg.Remote, remoteWarnings = parseRemoteKey(cfg.Remote, seenRemoteKeys, key, value, lineNo)
-			warnings = append(warnings, remoteWarnings...)
 			continue
 		}
 

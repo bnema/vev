@@ -80,7 +80,7 @@ diagnostic_files=()
 # and common key material labels from bundles that may be shared.
 redact() {
   sed -E \
-    -e "s|${target//\/\\/\\}|[remote]|g" \
+    -e "s|${target//\/\\/\\}|[target]|g" \
     -e "s|${HOME//\/\\/\\}|[home]|g" \
     -e 's/([[:alnum:]_.-]+@)?([[:alnum:]_.-]+\.)+[[:alpha:]]{2,}/[host]/g' \
     -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[address]/g' \
