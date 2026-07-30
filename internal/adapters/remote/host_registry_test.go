@@ -13,6 +13,14 @@ import (
 	"testing"
 )
 
+func TestHostStorePath(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	want := filepath.Join(stateDir, "hosts.json")
+	if got := HostStorePath(stateDir); got != want {
+		t.Fatalf("HostStorePath(%q) = %q, want %q", stateDir, got, want)
+	}
+}
+
 func TestHostStoreCrossProcessHelper(t *testing.T) {
 	if os.Getenv("VEV_HOST_STORE_HELPER") != "1" {
 		t.Skip("helper process")
@@ -515,12 +523,15 @@ func TestHostStore(t *testing.T) {
 		}
 	})
 
-	t.Run("hardens existing lock file permissions to 0600", func(t *testing.T) {
+	t.Run("hardens existing file and lock permissions to 0600", func(t *testing.T) {
 		t.Parallel()
 		path := storePath(t)
 		dir := filepath.Dir(path)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(`{"version":2,"pinned":[],"learned":[]}`), 0o644); err != nil {
+			t.Fatalf("seed hosts: %v", err)
 		}
 		lockPath := path + ".lock"
 		if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
@@ -539,6 +550,13 @@ func TestHostStore(t *testing.T) {
 			t.Fatalf("Remember() error = %v", err)
 		}
 
+		info, err = os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat hosts: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("hosts permissions = %04o, want 0600", perm)
+		}
 		info, err = os.Stat(lockPath)
 		if err != nil {
 			t.Fatalf("stat lock: %v", err)

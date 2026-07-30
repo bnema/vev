@@ -343,6 +343,9 @@ func parseHostArgs(args []string) (command, error) {
 // opening real transports.
 var (
 	newPerformanceTrace                       = performanceTrace
+	newRemoteHostStore                        = remoteadapter.NewFileHostStore
+	newRemoteCatalogCache                     = remoteadapter.NewFileCatalogCache
+	newRemoteCatalogClient                    = remoteadapter.NewCatalogClient
 	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
 		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer)
 	}
@@ -610,6 +613,10 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
+	remoteDiscoveryOpt, err := remoteDiscoveryDaemonOption(platform.StateDir(), observer, os.Getenv(envRemoteTransport))
+	if err != nil {
+		return err
+	}
 	if addr := os.Getenv("VEV_PPROF_ADDR"); addr != "" {
 		if !pprofAddrIsLoopback(addr) {
 			log.Warn("pprof bound to non-loopback address; /debug/pprof is unauthenticated", "addr", addr)
@@ -622,7 +629,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		log.Info("pprof enabled", "addr", addr)
 	}
 
-	daemonOpts := []daemon.Option(nil)
+	daemonOpts := []daemon.Option{remoteDiscoveryOpt}
 	if observer != nil {
 		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
 	}
@@ -779,6 +786,22 @@ func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error)
 	default:
 		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, ports.RemoteTransportUDP, ports.RemoteTransportStdio)
 	}
+}
+
+// remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
+// the same validated transport selection used by direct remote attach.
+func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRuntimeObserver, transport string) (daemon.Option, error) {
+	mode, err := remoteTransportModeFromEnv(transport)
+	if err != nil {
+		return nil, err
+	}
+	return daemon.WithRemoteDiscovery(
+		newRemoteHostStore(remoteadapter.HostStorePath(stateDir)),
+		newRemoteCatalogClient(),
+		newRemoteCatalogCache(filepath.Join(stateDir, "remote-catalog-cache.json")),
+		newRemoteDialerFactoryWithRuntimeObserver(observer),
+		mode,
+	), nil
 }
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
