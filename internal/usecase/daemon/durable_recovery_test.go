@@ -73,6 +73,23 @@ func mustDurableRecords(t *testing.T, c *durableRecoveryCatalogue) []domain.Cata
 	return records
 }
 
+func (c *durableRecoveryCatalogue) Create(record domain.CatalogueRecord) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.records[record.Name]; exists {
+		return errors.New("catalogue record already exists")
+	}
+	c.records[record.Name] = record
+	return nil
+}
+
+func (c *durableRecoveryCatalogue) Delete(name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.records, name)
+	return nil
+}
+
 func (c *durableRecoveryCatalogue) Replace(name string, record domain.CatalogueRecord) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -645,6 +662,78 @@ func TestFinishRecordRestoreDoesNotDegradeStaleCatalogueAuthority(t *testing.T) 
 	}
 }
 
+func TestPersistAndRegisterRestoredSessionRegistrationFailurePreservesStoppedEntry(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
+	d.mu.Lock()
+	before := d.stopped[record.Name]
+	collisionID := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
+	d.sessions[collisionID] = &session{sessionCore: sessionCore{id: collisionID, name: "collision"}}
+	d.mu.Unlock()
+	sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
+	sess.incarnation = record.IncarnationID
+
+	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)
+
+	require.ErrorContains(t, err, "registry rejected")
+	require.False(t, registered)
+	d.mu.Lock()
+	after := d.stopped[record.Name]
+	d.mu.Unlock()
+	require.Equal(t, before, after, "failed runtime publication must preserve the exact stopped authority and barrier")
+	require.Equal(t, before.restoreDone, after.restoreDone)
+}
+
+func TestCreateNamedSessionRegistrationFailureRollsBackDurableState(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		records  []domain.CatalogueRecord
+		sessName string
+		cwd      string
+	}{
+		{name: "fresh create", sessName: "fresh", cwd: "/fresh"},
+		{name: "stopped metadata update", records: []domain.CatalogueRecord{durableRecoveryRecord(0)}, sessName: durableRecoveryRecord(0).Name, cwd: "/resumed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty, release := newBlockingPTY(t)
+			defer release()
+			catalogue := newDurableRecoveryCatalogue(tc.records)
+			coordinator := recoveryusecase.NewCoordinator(catalogue, nil, bytes.NewReader(bytes.Repeat([]byte{0x6a}, 16)))
+			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			WithCatalogue(catalogue, tc.records)(d)
+			WithRecoveryCoordinator(coordinator)(d)
+
+			d.mu.Lock()
+			for _, record := range tc.records {
+				d.stopped[record.Name] = stoppedSession{
+					name: record.Name, cwd: record.Cwd, createdAt: record.CreatedAt,
+					incarnation: record.IncarnationID, lastUsedSeq: record.LastUsedSeq,
+					tabNames: append([]string(nil), record.TabNames...), record: record,
+					state: ports.SessionStopped, restoreDone: make(chan struct{}),
+				}
+			}
+			beforeStopped, hadStopped := d.stopped[tc.sessName]
+			collisionID := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
+			d.sessions[collisionID] = &session{sessionCore: sessionCore{id: collisionID, name: "collision"}}
+			d.mu.Unlock()
+			beforeRecords := mustDurableRecords(t, catalogue)
+
+			_, err := createSessionForTest(d, tc.sessName, false, tc.cwd, defaultSize, terminalEnv{}, d.baseEnv)
+
+			require.ErrorContains(t, err, "registry rejected")
+			require.ElementsMatch(t, beforeRecords, mustDurableRecords(t, catalogue), "failed runtime publication must leave no created record or metadata mutation")
+			d.mu.Lock()
+			afterStopped, stillStopped := d.stopped[tc.sessName]
+			d.mu.Unlock()
+			require.Equal(t, hadStopped, stillStopped)
+			if hadStopped {
+				require.Equal(t, beforeStopped, afterStopped, "resume publication failure must restore the exact stopped state")
+				require.Equal(t, beforeStopped.restoreDone, afterStopped.restoreDone)
+			}
+		})
+	}
+}
+
 func TestPersistAndRegisterRestoredSessionRejectsReplacementIncarnation(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
@@ -750,7 +839,7 @@ func TestAttachBarrierSurvivesLiveRegistryPublication(t *testing.T) {
 	d.mu.Lock()
 	done := d.stopped[record.Name].restoreDone
 	d.mu.Unlock()
-	sess := &session{name: record.Name, incarnation: record.IncarnationID}
+	sess := &session{sessionCore: sessionCore{name: record.Name, incarnation: record.IncarnationID}}
 
 	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)
 	require.NoError(t, err)

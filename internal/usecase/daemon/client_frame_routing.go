@@ -77,7 +77,9 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 		}
 	case ports.MsgResize:
 		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.activeEffect() {
-			d.requestTransactionalResizeForLease(token.sess, token.ac, token.lease, rz.Size, false)
+			if sess, ok := localSession(token.sess); ok {
+				d.requestTransactionalResizeForLease(sess, token.ac, token.lease, rz.Size, false)
+			}
 		}
 	case ports.MsgTheme:
 		if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
@@ -123,7 +125,7 @@ func (d *Daemon) ackActiveOutput(token attachmentRoleToken, state uint64) bool {
 	ac.sendMu.Lock()
 	ac.output.ack(state)
 	ac.sendMu.Unlock()
-	if rc := token.sess.renderCoordinator(); rc != nil {
+	if rc := token.sess.core().coordinator.Load(); rc != nil {
 		rc.notifyAckForLease(token.lease)
 	}
 	return true

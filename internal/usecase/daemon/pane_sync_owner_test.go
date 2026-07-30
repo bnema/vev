@@ -27,9 +27,9 @@ func newPaneSyncOwnerFixture(t *testing.T) paneSyncOwnerFixture {
 	size := domain.Size{Cols: 80, Rows: 23}
 	sourceTab := newTab(newQuietPTY(), size)
 	targetTab := newTab(newQuietPTY(), size)
-	source := &session{id: "sync-source", tabs: []*tab{sourceTab}, active: 0, client: &attachedClient{}}
-	destination := &session{id: "sync-destination", tabs: []*tab{targetTab}, active: 0, client: &attachedClient{}}
-	d := &Daemon{sessions: map[domain.SessionID]*session{source.id: source, destination.id: destination}}
+	source := &session{sessionCore: sessionCore{id: "sync-source", client: &attachedClient{}}, tabs: []*tab{sourceTab}, active: 0}
+	destination := &session{sessionCore: sessionCore{id: "sync-destination", client: &attachedClient{}}, tabs: []*tab{targetTab}, active: 0}
+	d := &Daemon{sessions: map[domain.SessionID]attachmentSession{source.id: source, destination.id: destination}}
 	p := sourceTab.focusedPane()
 	publishPaneOwner(p, source, sourceTab, 0)
 

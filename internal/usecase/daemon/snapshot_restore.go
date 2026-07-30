@@ -290,7 +290,7 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 }
 
 func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab) *session {
-	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: tabs, active: int(snap.Active), terminal: terminalEnv{}, env: copyEnvironment(d.baseEnv), createdAt: int64(snap.CreatedAt), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
+	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, active: int(snap.Active), terminal: terminalEnv{}, env: copyEnvironment(d.baseEnv), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
 	// Restored tabs remain private until persistAndRegisterRestoredSession.
 	// Initialize owners now so registration and reader startup cannot expose an
 	// ownerless pane.
@@ -350,8 +350,13 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	sess.mu.Lock()
 	sess.restoreDone = stopped.restoreDone
 	sess.mu.Unlock()
+	if !d.registerSessionLocked(sess) {
+		return false, errors.New("daemon: session registry rejected restored session")
+	}
+	// The stopped entry is the durable authority and restore barrier until the
+	// runtime identity has actually been published. A registry rejection must
+	// leave that exact entry available for attach/recovery retries.
 	delete(d.stopped, sess.name)
-	d.sessions[sess.id] = sess
 	sess.snapDirty.Store(false)
 	return true, nil
 }

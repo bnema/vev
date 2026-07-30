@@ -17,7 +17,7 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 	d := New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sess := &session{id: "s", name: "s", ctx: ctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s"}, ctx: ctx, cancel: cancel}
 	d.sessions[sess.id] = sess
 	first := newTab(nil, domain.Size{Cols: 41, Rows: 10})
 	second := newTab(nil, domain.Size{Cols: 41, Rows: 10})
@@ -47,7 +47,7 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 func TestKillSessionIgnoresNilPanePTYs(t *testing.T) {
 	d := New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
-	sess := &session{id: "s", name: "s", ephemeral: true, ctx: ctx, cancel: cancel, tabs: []*tab{newTab(nil, domain.Size{Cols: 10, Rows: 3})}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{newTab(nil, domain.Size{Cols: 10, Rows: 3})}}
 	d.sessions[sess.id] = sess
 
 	require.NotPanics(t, func() {
@@ -61,7 +61,7 @@ func TestNilPTYInputPathsDoNotPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
-	sess := &session{id: "s", name: "s", ctx: ctx, cancel: cancel, tabs: []*tab{tb}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s"}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}}
 	ac := &attachedClient{}
 	ac.initOverlays()
 	ac.setSession(sess)

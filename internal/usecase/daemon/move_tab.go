@@ -384,7 +384,7 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 		c.sourceCleanupToken = c.source.attachmentTokenLocked(c.source.client)
 	}
 	if len(c.source.tabs) == 0 {
-		delete(d.sessions, c.source.id)
+		d.unregisterSessionLocked(c.source)
 		c.retiredAttachments = retireEmptyMoveSessionLocked(c.source, retirement)
 		d.purgeParkingForSessionLocked(c.source)
 		c.retiredParked = d.purgeParkedForSessionLocked(c.source)

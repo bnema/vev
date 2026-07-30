@@ -168,7 +168,7 @@ func TestHandshakeOldHelloLayoutReportsVersionMismatch(t *testing.T) {
 func TestHandshakeNameTaken(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	// Pre-populate a bare session (no goroutines) to collide with.
-	d.sessions[domain.SessionID("x")] = &session{id: "x", name: "work"}
+	d.sessions[domain.SessionID("x")] = &session{sessionCore: sessionCore{id: "x", name: "work"}}
 
 	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	d.handleConn(tr)
@@ -272,8 +272,8 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 func TestEphemeralNumberingReuse(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// Emulate two ephemeral sessions "0" and "1".
-	d.sessions["a"] = &session{id: "a", name: "0"}
-	d.sessions["b"] = &session{id: "b", name: "1"}
+	d.sessions["a"] = &session{sessionCore: sessionCore{id: "a", name: "0"}}
+	d.sessions["b"] = &session{sessionCore: sessionCore{id: "b", name: "1"}}
 	require.Equal(t, "2", d.allocEphemeralNameLocked())
 
 	// Kill "0": the freed number is reused before "2".
@@ -890,14 +890,14 @@ func TestTouchMRUPersistsNamedButNotEphemeral(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithStore(t, store)(d)
-	named := &session{name: "work", tabs: []*tab{{}}, createdAt: 1, incarnation: domain.IncarnationID{1}}
+	named := &session{sessionCore: sessionCore{name: "work", createdAt: 1, incarnation: domain.IncarnationID{1}}, tabs: []*tab{{}}}
 	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: named.incarnation, Cwd: "/work", CreatedAt: 1, UpdatedAt: 1}))
 
 	d.touchMRU(named)
 	require.Equal(t, named.mruAt.Load(), state.record(t, "work").LastUsedSeq)
 	setsAfterNamed := state.sets
 
-	ephemeral := &session{name: "0", ephemeral: true, tabs: []*tab{{}}}
+	ephemeral := &session{sessionCore: sessionCore{name: "0", ephemeral: true}, tabs: []*tab{{}}}
 	d.touchMRU(ephemeral)
 	require.False(t, state.has("0"))
 	require.Equal(t, setsAfterNamed, state.sets)
@@ -1609,7 +1609,7 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	ac.sendMu.Unlock()
 
 	require.NoError(t, d.createSessionAndSwitch(sess, ac, "next"))
-	got := ac.sess.Get()
+	got := ac.currentSession()
 	require.NotNil(t, got)
 	sourceCoordinator.mu.Lock()
 	require.NotNil(t, sourceCoordinator.lease)
@@ -1839,7 +1839,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 	t.Run("active replacement is rejected", func(t *testing.T) {
 		d, from, ac, _, releases := newRecentNavigationTestSessions(t)
 		defer releaseAll(releases)
-		target := d.sessions["recent"]
+		target := mustLocalSession(t, d.sessions["recent"])
 		target.createdAt = 22
 		expected := int64(21)
 
@@ -1865,7 +1865,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 	t.Run("stopped target that became active switches same lifecycle", func(t *testing.T) {
 		d, from, ac, _, releases := newRecentNavigationTestSessions(t)
 		defer releaseAll(releases)
-		target := d.sessions["recent"]
+		target := mustLocalSession(t, d.sessions["recent"])
 		target.createdAt = 41
 		expected := int64(41)
 

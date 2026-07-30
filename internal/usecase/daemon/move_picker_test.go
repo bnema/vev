@@ -35,10 +35,7 @@ func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDest
 	releases = append(releases, releaseDest)
 	destinationTab := newTabWithStableID("destination-tab", "destination-pane", destPTY, domain.Size{Cols: 80, Rows: 23})
 	publishTiledPaneOwners(source, sourceTab)
-	destination := &session{
-		id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true,
-		ctx: source.ctx, cancel: func() {}, tabs: []*tab{destinationTab}, active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{destinationTab}, active: 0}
 	publishTiledPaneOwners(destination, destinationTab)
 	for range extraDestinationTabs {
 		extraPTY, releaseExtra := newBlockingPTY(t)

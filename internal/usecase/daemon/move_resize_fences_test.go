@@ -22,8 +22,8 @@ func requireMutexLocked(t *testing.T, mu *sync.Mutex, message string) {
 }
 
 func TestMoveResizeFencesAcquireSessionsByStableID(t *testing.T) {
-	first := &session{id: "a-first"}
-	second := &session{id: "z-second"}
+	first := &session{sessionCore: sessionCore{id: "a-first"}}
+	second := &session{sessionCore: sessionCore{id: "z-second"}}
 	fences := newMoveResizeFences([]*session{second, first}, nil, nil)
 
 	first.layoutApplyMu.Lock()
@@ -45,7 +45,7 @@ func TestMoveResizeFencesAcquireSessionsByStableID(t *testing.T) {
 }
 
 func TestMoveResizeFencesAcquireTabsByStableIDAfterSessions(t *testing.T) {
-	sess := &session{id: "session"}
+	sess := &session{sessionCore: sessionCore{id: "session"}}
 	first := &tab{stableID: "a-first"}
 	second := &tab{stableID: "z-second"}
 	fences := newMoveResizeFences([]*session{sess}, []*tab{second, first}, nil)
@@ -71,7 +71,7 @@ func TestMoveResizeFencesAcquireTabsByStableIDAfterSessions(t *testing.T) {
 }
 
 func TestMoveResizeFencesAcquirePanesByStableIDAfterTabs(t *testing.T) {
-	sess := &session{id: "session"}
+	sess := &session{sessionCore: sessionCore{id: "session"}}
 	tb := &tab{stableID: "tab"}
 	first := &pane{stableID: "a-first"}
 	second := &pane{stableID: "z-second"}
@@ -99,7 +99,7 @@ func TestMoveResizeFencesAcquirePanesByStableIDAfterTabs(t *testing.T) {
 }
 
 func TestMoveResizeFencesDeduplicateStableIdentities(t *testing.T) {
-	sess := &session{id: "session"}
+	sess := &session{sessionCore: sessionCore{id: "session"}}
 	tb := &tab{stableID: "tab"}
 	p := &pane{stableID: "pane"}
 
@@ -113,8 +113,8 @@ func TestMoveResizeFencesDeduplicateStableIdentities(t *testing.T) {
 }
 
 func TestMoveResizeFencesDeduplicateSessionIDWithoutReplacingResolvedOwner(t *testing.T) {
-	resolved := &session{id: "same"}
-	collision := &session{id: "same"}
+	resolved := &session{sessionCore: sessionCore{id: "same"}}
+	collision := &session{sessionCore: sessionCore{id: "same"}}
 
 	fences := newMoveResizeFences([]*session{resolved, collision}, nil, nil)
 
@@ -143,7 +143,7 @@ func TestMoveResizeFencesDeduplicatePaneIDWithoutReplacingResolvedOwner(t *testi
 }
 
 func TestMoveResizeFencesRejectStaleMembershipAndCleanUp(t *testing.T) {
-	sess := &session{id: "session"}
+	sess := &session{sessionCore: sessionCore{id: "session"}}
 	tb := &tab{stableID: "tab"}
 	p := &pane{stableID: "pane"}
 	fences := newMoveResizeFences([]*session{sess}, []*tab{tb}, []*pane{p})
@@ -171,7 +171,7 @@ func TestMoveResizeFencesRejectStaleMembershipAndCleanUp(t *testing.T) {
 }
 
 func TestMoveResizeFencesCleanUpWhenPublicationPanics(t *testing.T) {
-	sess := &session{id: "session"}
+	sess := &session{sessionCore: sessionCore{id: "session"}}
 	tb := &tab{stableID: "tab"}
 	p := &pane{stableID: "pane"}
 	fences := newMoveResizeFences([]*session{sess}, []*tab{tb}, []*pane{p})
@@ -187,7 +187,7 @@ func TestMoveResizeFencesCleanUpWhenPublicationPanics(t *testing.T) {
 
 func TestPublishResizeOwnerPostEffectReleasesAllFencesWhenCallbackPanics(t *testing.T) {
 	d := &Daemon{}
-	sess := &session{id: "session"}
+	sess := &session{sessionCore: sessionCore{id: "session"}}
 	tb := &tab{stableID: "tab"}
 	p := &pane{stableID: "pane"}
 	members := []resizeMember{{session: sess, tab: tb, pane: p}}
@@ -216,7 +216,7 @@ func TestPublishResizeOwnerPostEffectReleasesAllFencesWhenCallbackPanics(t *test
 
 func TestMoveResizeFencesWaitBeforeTakingArchitectureLocks(t *testing.T) {
 	d := &Daemon{}
-	sess := &session{id: "session"}
+	sess := &session{sessionCore: sessionCore{id: "session"}}
 	tb := &tab{stableID: "tab"}
 	p := &pane{stableID: "pane"}
 	fences := newMoveResizeFences([]*session{sess}, []*tab{tb}, []*pane{p})
@@ -243,8 +243,8 @@ func TestMoveResizeFencesWaitBeforeTakingArchitectureLocks(t *testing.T) {
 }
 
 func TestMoveResizeFencesHoldThroughPublicationAndGenerationBumps(t *testing.T) {
-	source := &session{id: "source"}
-	destination := &session{id: "destination"}
+	source := &session{sessionCore: sessionCore{id: "source"}}
+	destination := &session{sessionCore: sessionCore{id: "destination"}}
 	sourceTab := &tab{stableID: "a-source-tab"}
 	destinationTab := &tab{stableID: "z-destination-tab"}
 	p := &pane{stableID: "pane"}
@@ -280,8 +280,8 @@ func TestMoveResizeFencesHoldThroughPublicationAndGenerationBumps(t *testing.T) 
 }
 
 func TestMovePaneResizeFencesCoverAffectedOwners(t *testing.T) {
-	source := &session{id: "source"}
-	destination := &session{id: "destination"}
+	source := &session{sessionCore: sessionCore{id: "source"}}
+	destination := &session{sessionCore: sessionCore{id: "destination"}}
 	sourceTab := &tab{stableID: "source-tab"}
 	destinationTab := &tab{stableID: "destination-tab"}
 	moved := &pane{stableID: "moved-pane"}
@@ -299,8 +299,8 @@ func TestMoveTabResizeFencesCoverEveryContainedPane(t *testing.T) {
 		state floatingState
 	}{{name: "hidden", state: floatingHidden}, {name: "visible", state: floatingVisible}} {
 		t.Run(tc.name, func(t *testing.T) {
-			source := &session{id: "source"}
-			destination := &session{id: "destination"}
+			source := &session{sessionCore: sessionCore{id: "source"}}
+			destination := &session{sessionCore: sessionCore{id: "destination"}}
 			first := &pane{stableID: "first"}
 			second := &pane{stableID: "second"}
 			floating := &pane{stableID: "floating"}

@@ -200,11 +200,7 @@ func (d *Daemon) refreshBarScriptsAllSessions() {
 func (d *Daemon) sessionsSnapshot() []*session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	sessions := make([]*session, 0, len(d.sessions))
-	for _, sess := range d.sessions {
-		sessions = append(sessions, sess)
-	}
-	return sessions
+	return localSessionsSnapshot(d.sessions)
 }
 
 func (d *Daemon) clearBarScriptsForSession(id domain.SessionID) {

@@ -66,7 +66,7 @@ func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
 	defer release2()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d.sessions["other"] = &session{id: "other", name: "taken", ctx: ctx, cancel: cancel, tabs: []*tab{newTestTabWithContext(p2, ctx, cancel)}}
+	d.sessions["other"] = &session{sessionCore: sessionCore{id: "other", name: "taken"}, ctx: ctx, cancel: cancel, tabs: []*tab{newTestTabWithContext(p2, ctx, cancel)}}
 
 	d.enterPrompt(sess, ac, " Rename session ", "", func(name string) error { return d.renameSession(sess, name) })
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -123,7 +123,7 @@ func TestPromptSubmitValidationErrorStaysInlineOnly(t *testing.T) {
 			input:   []byte("taken\r"),
 			wantErr: errSessionNameInUse,
 			setup: func(d *Daemon) {
-				d.sessions["taken"] = &session{id: "taken", name: "taken"}
+				d.sessions["taken"] = &session{sessionCore: sessionCore{id: "taken", name: "taken"}}
 			},
 		},
 	}

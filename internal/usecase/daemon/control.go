@@ -122,8 +122,9 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 			return nil, ports.ErrNoSuchTarget, "target tab and pane IDs must be provided together"
 		}
 		var match *session
-		for _, sess := range d.sessions {
-			if !sess.containsStableIDs(request.TargetTab, request.TargetPane) {
+		for _, entry := range d.sessions {
+			sess, ok := localSession(entry)
+			if !ok || !sess.containsStableIDs(request.TargetTab, request.TargetPane) {
 				continue
 			}
 			if match != nil {
@@ -136,13 +137,14 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 		}
 		return nil, ports.ErrNoSuchTarget, "no live session contains the target tab/pane"
 	}
-	if len(d.sessions) == 0 {
+	locals := localSessionsSnapshot(d.sessions)
+	if len(locals) == 0 {
 		return nil, ports.ErrNoSuchTarget, "no live sessions"
 	}
-	if len(d.sessions) != 1 {
+	if len(locals) != 1 {
 		return nil, ports.ErrAmbiguousTarget, "several sessions are live; use -s <session> or run from inside a pane"
 	}
-	for _, sess := range d.sessions {
+	for _, sess := range locals {
 		return sess, 0, ""
 	}
 	panic("unreachable")
@@ -570,10 +572,7 @@ func (e controlExec) ListSessions(asJSON bool) (string, error) {
 		Active    bool   `json:"active"`
 	}
 	e.d.mu.Lock()
-	sessions := make([]*session, 0, len(e.d.sessions))
-	for _, sess := range e.d.sessions {
-		sessions = append(sessions, sess)
-	}
+	sessions := localSessionsSnapshot(e.d.sessions)
 	e.d.mu.Unlock()
 	snaps := make([]sessionView, 0, len(sessions))
 	for _, sess := range sessions {
@@ -610,10 +609,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		return "", command.ErrInvalidArguments
 	}
 	e.d.mu.Lock()
-	sessions := make([]*session, 0, len(e.d.sessions))
-	for _, sess := range e.d.sessions {
-		sessions = append(sessions, sess)
-	}
+	sessions := localSessionsSnapshot(e.d.sessions)
 	e.d.mu.Unlock()
 	rows := make([]ports.RemoteCatalogSession, 0, len(sessions))
 	// Stopped sessions live in d.stopped and are intentionally not in this listing.

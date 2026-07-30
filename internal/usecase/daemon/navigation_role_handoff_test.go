@@ -89,7 +89,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			d, source, old, _, releases := newManualTabSession(t, 2)
 			defer releaseAll(releases)
 			d.ptys = newFactorySeq(t)
-			target := &session{id: "target", name: "target", ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+			target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
 				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
 				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
 			}}

@@ -1648,7 +1648,7 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
 
-	previous := &session{id: "previous"}
+	previous := &session{sessionCore: sessionCore{id: "previous"}}
 	ac.previousSession.Set(previous)
 	d.clientGone(sess, ac, ac.transport(), false)
 
@@ -1694,7 +1694,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 			require.NoError(t, err)
 
-			ac.previousSession.Set(&session{id: "previous"})
+			ac.previousSession.Set(&session{sessionCore: sessionCore{id: "previous"}})
 			d.clientGone(sess, ac, ac.transport(), false)
 
 			d.mu.Lock()

@@ -70,7 +70,7 @@ type movePaneState struct {
 
 type moveState struct {
 	closing        bool
-	registry       map[domain.SessionID]*session
+	registry       map[domain.SessionID]attachmentSession
 	source         moveSessionState
 	destination    moveSessionState
 	sourceTab      moveTabState
@@ -87,7 +87,7 @@ func captureMoveState(d *Daemon, source, destination *session, sourceTab, destin
 	unlockTabs := lockMoveTabs(sourceTab, destinationTab)
 	movedPane.mu.Lock()
 
-	registry := make(map[domain.SessionID]*session, len(d.sessions))
+	registry := make(map[domain.SessionID]attachmentSession, len(d.sessions))
 	maps.Copy(registry, d.sessions)
 	state := moveState{
 		closing:        d.closing,
@@ -207,12 +207,10 @@ func TestMovePaneFinalSourceHandoffValidationFailureIsAtomic(t *testing.T) {
 	sourceTab.stableID = "source-tab"
 	movedPane := sourceTab.focusedPane()
 
-	destination := &session{
-		id:        "destination",
+	destination := &session{sessionCore: sessionCore{id: "destination",
 		name:      "destination",
-		ephemeral: true,
-		tabs:      []*tab{newTabWithStableID("destination-tab", "destination-pane", p2, domain.Size{Cols: 80, Rows: 23})},
-		active:    0,
+		ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", p2, domain.Size{Cols: 80, Rows: 23})},
+		active: 0,
 	}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)
@@ -261,7 +259,7 @@ func TestMovePaneFinalSourceHandoffValidationFailureIsAtomic(t *testing.T) {
 
 type moveTabHandoffState struct {
 	closing     bool
-	registry    map[domain.SessionID]*session
+	registry    map[domain.SessionID]attachmentSession
 	source      moveSessionState
 	destination moveSessionState
 	movedTab    moveTabState
@@ -275,7 +273,7 @@ func captureMoveTabHandoffState(d *Daemon, source, destination *session, moved *
 	unlockSessions := lockAttachmentSessions(source, destination)
 	moved.mu.Lock()
 
-	registry := make(map[domain.SessionID]*session, len(d.sessions))
+	registry := make(map[domain.SessionID]attachmentSession, len(d.sessions))
 	maps.Copy(registry, d.sessions)
 	state := moveTabHandoffState{
 		closing:     d.closing,

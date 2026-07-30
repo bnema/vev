@@ -176,7 +176,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	sctxW, cancelW := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelW)
 	tabW := newTestTabWithContext(newScriptPTY(nil), sctxW, cancelW)
-	sessW := &session{id: "wedged", name: "wedged", ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}, client: acW}
+	sessW := &session{sessionCore: sessionCore{id: "wedged", name: "wedged", client: acW}, ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}}
 	acW.setSession(sessW)
 	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW}, nil)
 	d.sessions[sessW.id] = sessW
@@ -446,7 +446,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	sctxB, cancelB := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelB)
 	tbB := newTestTabWithContext(pB, sctxB, cancelB)
-	sessB := &session{id: "sessB", name: "other", ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}, client: acB}
+	sessB := &session{sessionCore: sessionCore{id: "sessB", name: "other", client: acB}, ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}}
 	acB.setSession(sessB)
 	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB}, nil)
 	d.sessions[sessB.id] = sessB
@@ -502,10 +502,8 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	tab2a.attentionAt = time.Unix(9, 0)
 	tab2b.attention = true
 	tab2b.attentionAt = time.Unix(5, 0)
-	sess2 := &session{
-		id:     "other",
-		name:   "other",
-		ctx:    sctx2,
+	sess2 := &session{sessionCore: sessionCore{id: "other",
+		name: "other"}, ctx: sctx2,
 		cancel: cancel2,
 		tabs:   []*tab{tab2a, tab2b},
 	}
@@ -554,7 +552,7 @@ func TestJumpAttentionSwitchFailureReportsNotice(t *testing.T) {
 	tab2 := newTestTabWithContext(p2, sctx2, cancel2)
 	tab2.attention = true
 	tab2.attentionAt = time.Unix(9, 0)
-	sess2 := &session{id: "other", name: "other", ctx: sctx2, cancel: cancel2, tabs: []*tab{tab2}}
+	sess2 := &session{sessionCore: sessionCore{id: "other", name: "other"}, ctx: sctx2, cancel: cancel2, tabs: []*tab{tab2}}
 	d.sessions[sess2.id] = sess2
 
 	sess1.mu.Lock()

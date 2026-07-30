@@ -759,7 +759,7 @@ func newSplitTestDaemon(t *testing.T, sz domain.Size) (*Daemon, *session, *ports
 	for _, p := range tb.panes {
 		p.ctx, p.cancel = tctx, cancel
 	}
-	sess := &session{id: "s", name: "s", cwd: "/work", tabs: []*tab{tb}, ctx: tctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s"}, cwd: "/work", tabs: []*tab{tb}, ctx: tctx, cancel: cancel}
 	return d, sess, oldPTY, factory
 }
 

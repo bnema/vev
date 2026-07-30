@@ -89,10 +89,7 @@ func TestMovePaneAcceptanceRetainsSourceFocusAndDestinationActivity(t *testing.T
 
 	destinationActive := newTabWithStableID("destination-active", "active-pane", activePTY, domain.Size{Cols: 80, Rows: 23})
 	destinationTab := newTabWithStableID("destination-target", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs: []*tab{destinationActive, destinationTab}, active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{destinationActive, destinationTab}, active: 0}
 	publishTiledPaneOwners(destination, destinationActive)
 	publishTiledPaneOwners(destination, destinationTab)
 	d.mu.Lock()
@@ -185,10 +182,7 @@ func TestMovePaneRejectsStaleIncarnationWithoutMutation(t *testing.T) {
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}, active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}, active: 0}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)
 	d.mu.Lock()
@@ -237,10 +231,7 @@ func TestMovePaneRejectsStaleLayoutGenerationBeforeMutation(t *testing.T) {
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}, active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}, active: 0}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)
 	d.mu.Lock()

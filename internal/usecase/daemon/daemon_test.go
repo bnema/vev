@@ -297,8 +297,10 @@ func awaitFrame(t *testing.T, ch chan ports.Frame, typ ports.MsgType) ports.Fram
 func firstSession(d *Daemon) *session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, s := range d.sessions {
-		return s
+	for _, entry := range d.sessions {
+		if s, ok := localSession(entry); ok {
+			return s
+		}
 	}
 	return nil
 }
@@ -411,7 +413,7 @@ func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, regis
 		}
 		tabs = append(tabs, tb)
 	}
-	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: tabs, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", client: ac}, ctx: sctx, cancel: cancel, tabs: tabs}
 	for _, tb := range tabs {
 		publishTiledPaneOwners(sess, tb)
 	}

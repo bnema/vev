@@ -310,7 +310,8 @@ type daemonKeyHandler struct {
 func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool) {
 	if h.roleToken.ac != nil {
 		if effect := h.roleToken.effect; effect != nil && !effect.ended.Load() {
-			return h.roleToken.sess, effect, false
+			sess, _ := localSession(h.roleToken.sess)
+			return sess, effect, false
 		}
 		effect, admitted := h.roleToken.ac.beginRoleEffect(h.roleToken)
 		if h.d.afterDelayedKeyEffectAttempt != nil {
@@ -324,7 +325,12 @@ func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool
 			token.effect = effect
 			h.d.afterRoleEffectAdmitted(token)
 		}
-		return h.roleToken.sess, effect, true
+		sess, ok := localSession(h.roleToken.sess)
+		if !ok {
+			effect.End()
+			return nil, nil, false
+		}
+		return sess, effect, true
 	}
 	sess := h.ac.currentSession()
 	if sess == nil || sess.attachmentRole(h.ac) == attachmentSnatched {

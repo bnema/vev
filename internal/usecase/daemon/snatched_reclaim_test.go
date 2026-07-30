@@ -42,9 +42,8 @@ func newAtomicReclaimFixture(t *testing.T, clock ports.Clock, waitingTransport, 
 	active := &attachedClient{tr: activeTransport, output: newOutputStateStream(), size: waiting.size}
 	waiting.initOverlays()
 	active.initOverlays()
-	sess := &session{
-		id: "atomic-reclaim", client: active,
-		snatched: map[*attachedClient]struct{}{waiting: {}},
+	sess := &session{sessionCore: sessionCore{id: "atomic-reclaim", client: active,
+		snatched: map[*attachedClient]struct{}{waiting: {}}},
 	}
 	waiting.setSession(sess)
 	active.setSession(sess)

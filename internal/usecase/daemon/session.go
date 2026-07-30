@@ -29,11 +29,7 @@ type terminalEnv struct {
 }
 
 type session struct {
-	id        domain.SessionID
-	name      string
-	ephemeral bool
-	// caps is immutable after construction; see sessionCapabilities.
-	caps sessionCapabilities
+	sessionCore
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -55,15 +51,14 @@ type session struct {
 	teardownWaiters   uint
 	teardownChanged   chan struct{}
 	lifecycleStopOnce sync.Once
-	mu                sync.Mutex // guards tabs, active, client, snatched, restoreDone, clipFiles, and clipboard queue state
+	// sessionCore.mu guards tabs, active, attachment membership, restoreDone,
+	// clipFiles, and clipboard queue state.
 	// restoreDone remains attached to a restored session after it is published in
 	// the live registry, so racing attaches cannot bypass restoration completion.
 	restoreDone            chan struct{}
 	themeMu                sync.Mutex
 	tabs                   []*tab
 	active                 int
-	client                 *attachedClient
-	snatched               map[*attachedClient]struct{}
 	clipboardQueue         []clipboardForward
 	clipboardWorkerRunning bool
 	cwd                    string
@@ -71,9 +66,6 @@ type session struct {
 	// env is the authoritative immutable environment snapshot for future PTY children.
 	// It is guarded by mu and is always copied on ingress and egress.
 	env          []string
-	createdAt    int64
-	incarnation  domain.IncarnationID
-	mruAt        atomic.Uint64
 	snapDirty    atomic.Bool
 	snapEligible atomic.Bool
 	// snapshotMu serializes mutation revisions and repository publication
@@ -110,8 +102,6 @@ type session struct {
 	// syncGen makes synchronized-output watchdog generations unique across all
 	// panes in this session.
 	syncGen atomic.Uint64
-	// coordinator fans in this session's producer render invalidations.
-	coordinator atomic.Pointer[renderCoordinator]
 	// layoutApplyMu serializes whole-session resize prepare/apply/admit/publish
 	// transactions. It is deliberately not an architecture lock and may span
 	// external PTY.Resize calls.
@@ -293,17 +283,19 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		lastUsedSeq = d.mruSeq.Add(1)
 	}
 	sess := &session{
-		id:           id,
-		name:         name,
-		ephemeral:    ephemeral,
+		sessionCore: sessionCore{
+			id:          id,
+			name:        name,
+			ephemeral:   ephemeral,
+			createdAt:   createdAt,
+			incarnation: incarnation,
+		},
 		ctx:          sctx,
 		cancel:       cancel,
 		tabs:         tabs,
 		cwd:          cwd,
 		terminal:     term,
 		env:          env,
-		createdAt:    createdAt,
-		incarnation:  incarnation,
 		snapshotWake: d.snapshotWake,
 	}
 	if !ephemeral && name != "" {
@@ -316,38 +308,68 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	for _, tb := range tabs {
 		publishTiledPaneOwners(sess, tb)
 	}
-	if !ephemeral {
-		if d.persistEnabled {
-			record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}
-			if d.recovery == nil {
-				closeTabs(tabs)
-				cancel()
-				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("durable session authority is not configured"))
+	var rollbackDurable func() error
+	if !ephemeral && d.persistEnabled {
+		record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}
+		if d.recovery == nil {
+			closeTabs(tabs)
+			cancel()
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("durable session authority is not configured"))
+		}
+		var err error
+		if resuming && authoritativeExists {
+			err = d.catalogue.UpdateMetadata(record.MetadataUpdate())
+			if err == nil {
+				rollbackDurable = func() error { return d.catalogue.Replace(name, authoritative) }
+				err = d.catalogue.Sync()
 			}
-			var err error
-			if resuming && authoritativeExists {
-				err = d.catalogue.UpdateMetadata(record.MetadataUpdate())
-				if err == nil {
-					err = d.catalogue.Sync()
+		} else {
+			record, err = d.recovery.Create(d.serveCtx, record)
+			if err == nil {
+				rollbackDurable = func() error {
+					current, ok, recordErr := d.catalogue.Record(name)
+					if recordErr != nil {
+						return recordErr
+					}
+					if !ok {
+						return nil
+					}
+					if current.IncarnationID != record.IncarnationID {
+						return errors.New("daemon: created session authority changed before rollback")
+					}
+					return d.catalogue.Delete(name)
 				}
-			} else {
-				record, err = d.recovery.Create(d.serveCtx, record)
-			}
-			if err != nil {
-				closeTabs(tabs)
-				cancel()
-				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
-			}
-			sess.incarnation = record.IncarnationID
-			if resuming && authoritativeExists && authoritative.Committed != nil && authoritative.IncarnationID == sess.incarnation {
-				checkpoint := *authoritative.Committed
-				sess.snapshotPublishedGeneration = checkpoint.Generation
-				sess.snapshotPublishedCheckpoint = &checkpoint
 			}
 		}
+		if err != nil {
+			if rollbackDurable != nil {
+				err = errors.Join(err, rollbackDurable())
+			}
+			closeTabs(tabs)
+			cancel()
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
+		}
+		sess.incarnation = record.IncarnationID
+		if resuming && authoritativeExists && authoritative.Committed != nil && authoritative.IncarnationID == sess.incarnation {
+			checkpoint := *authoritative.Committed
+			sess.snapshotPublishedGeneration = checkpoint.Generation
+			sess.snapshotPublishedCheckpoint = &checkpoint
+		}
+	}
+	if !d.registerSessionLocked(sess) {
+		err := errors.New("daemon: session registry rejected local session")
+		if rollbackDurable != nil {
+			err = errors.Join(err, rollbackDurable())
+		}
+		closeTabs(tabs)
+		cancel()
+		return nil, err
+	}
+	if !ephemeral {
+		// Keep stopped lifecycle authority intact until runtime publication and
+		// its durable side effects have both succeeded.
 		delete(d.stopped, name)
 	}
-	d.sessions[id] = sess
 	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
 	for i, tb := range tabs {
 		d.log.Info("tab created", "session", name, "tab", i)
@@ -442,15 +464,19 @@ func (d *Daemon) createSessionAndSwitchForRole(token attachmentRoleToken, name s
 		expectedTransport: token.transport, sourceToken: &token, action: "create-session",
 		copySourceEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
+			source, ok := localSession(token.sess)
+			if !ok {
+				return nil, errAttachmentTransition
+			}
 			if d.closing {
 				return nil, errors.New("daemon is shutting down")
 			}
 			if d.nameLiveOrStoppedLocked(name) {
 				return nil, errSessionNameInUse
 			}
-			token.sess.mu.Lock()
-			cwd, term, env := token.sess.cwd, token.sess.terminal, copyEnvironment(token.sess.env)
-			token.sess.mu.Unlock()
+			source.mu.Lock()
+			cwd, term, env := source.cwd, source.terminal, copyEnvironment(source.env)
+			source.mu.Unlock()
 			var createErr error
 			created, createErr = d.createSessionLocked(name, false, cwd, token.ac.size, term, env)
 			return created, createErr
@@ -464,7 +490,9 @@ func (d *Daemon) createSessionAndSwitchForRole(token attachmentRoleToken, name s
 	}
 
 	d.touchMRU(created)
-	token.ac.recordPreviousSession(token.sess)
+	if source, ok := localSession(token.sess); ok {
+		token.ac.recordPreviousSession(source)
+	}
 	d.log.Info("client attached", "session", created.name, "resume", token.ac.resumeCapable)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
@@ -729,13 +757,14 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 		d.afterDetachRoleEffectsFrozen()
 	}
 	d.mu.Lock()
-	if d.sessions[token.sess.id] != token.sess {
+	core := token.sess.core()
+	if core == nil || d.sessions[core.id] != token.sess {
 		d.mu.Unlock()
 		return false
 	}
 	d.notices.routingMu.Lock()
-	token.sess.mu.Lock()
-	coordinator := token.sess.renderCoordinator()
+	core.mu.Lock()
+	coordinator := core.coordinator.Load()
 	if coordinator != nil {
 		coordinator.mu.Lock()
 	}
@@ -745,7 +774,7 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 	}
 	current := coordinator != nil && transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
 	if current {
-		token.sess.client = nil
+		core.client = nil
 		token.ac.roleGeneration.Add(1)
 		token.ac.setSession(nil)
 		token.ac.invalidateFrozenRoleCapability()
@@ -753,7 +782,7 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 	if coordinator != nil {
 		coordinator.mu.Unlock()
 	}
-	token.sess.mu.Unlock()
+	core.mu.Unlock()
 	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
 	return current
@@ -1107,7 +1136,11 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		if token.sess == nil || token.ac == nil || token.role != attachmentActive || token.transport.transport == nil {
 			return sessionKillParticipants{}, false
 		}
-		snapshot.source = token.sess
+		var ok bool
+		snapshot.source, ok = localSession(token.sess)
+		if !ok {
+			return sessionKillParticipants{}, false
+		}
 		snapshot.sourceToken = &admission.token
 	}
 
@@ -1481,7 +1514,13 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	// d.mu -> routingMu -> ordered sessions -> ordered coordinators are held
 	// here. Registry removal and every role invalidation are one publication
 	// while the complete immutable gate set remains frozen.
-	delete(d.sessions, sess.id)
+	if !d.unregisterSessionLocked(sess) {
+		unlockCoordinators()
+		unlockSessions()
+		d.notices.routingMu.Unlock()
+		d.mu.Unlock()
+		return errAttachmentTransition
+	}
 	d.clearBarScriptsForSession(sess.id)
 	d.purgeParkingForSessionLocked(sess)
 	parkedRetirements := d.purgeParkedForSessionLocked(sess)
@@ -1591,8 +1630,10 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 // d.mu.
 func (d *Daemon) allocEphemeralNameLocked() string {
 	used := make(map[string]struct{}, len(d.sessions)+len(d.stopped))
-	for _, s := range d.sessions {
-		used[s.name] = struct{}{}
+	for _, entry := range d.sessions {
+		if s, ok := localSession(entry); ok {
+			used[s.name] = struct{}{}
+		}
 	}
 	for name := range d.stopped {
 		used[name] = struct{}{}
@@ -1606,8 +1647,9 @@ func (d *Daemon) allocEphemeralNameLocked() string {
 }
 
 func (d *Daemon) findByNameLocked(name string) *session {
-	for _, s := range d.sessions {
-		if s.name == name {
+	for _, entry := range d.sessions {
+		s, ok := localSession(entry)
+		if ok && s.name == name {
 			return s
 		}
 	}

@@ -79,11 +79,11 @@ func TestPTYReaderRoutesEffectsToOwnerPublishedForEachRead(t *testing.T) {
 	source.snapEligible.Store(true)
 
 	destinationTab := newTab(nil, domain.Size{Cols: 80, Rows: 23})
-	destination := &session{
-		id:           domain.SessionID("destination"),
-		name:         "destination",
-		tabs:         []*tab{destinationTab},
-		client:       &attachedClient{},
+	destination := &session{sessionCore: sessionCore{id: domain.SessionID("destination"),
+		name: "destination",
+
+		client: &attachedClient{}}, tabs: []*tab{destinationTab},
+
 		snapEligible: atomic.Bool{},
 	}
 	destination.snapEligible.Store(true)
@@ -134,7 +134,7 @@ func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {
 	require.NoError(t, destinationTab.tree.Split(layout.PaneID("pane-1"), layout.Right, true, other.id, domain.Rect{Width: 80, Height: 23}))
 	destinationTab.panes[other.id] = other
 	destinationTab.mu.Unlock()
-	destination := &session{id: domain.SessionID("destination"), name: "destination", tabs: []*tab{destinationTab}}
+	destination := &session{sessionCore: sessionCore{id: domain.SessionID("destination"), name: "destination"}, tabs: []*tab{destinationTab}}
 	d.sessions[destination.id] = destination
 
 	// Model a completed owner commit while the one reader remains blocked in

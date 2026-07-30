@@ -231,7 +231,7 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{id: "clip", name: "clip", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "clip", name: "clip", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -265,7 +265,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{id: "clip-big", name: "clip-big", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "clip-big", name: "clip-big", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -290,7 +290,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{id: "clip-bad", name: "clip-bad", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "clip-bad", name: "clip-bad", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -312,7 +312,7 @@ func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
-	sess := &session{id: "clip-noclient", name: "clip-noclient", tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "clip-noclient", name: "clip-noclient"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	d.sessions[sess.id] = sess
 
@@ -356,7 +356,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 
 	sourceTab := sess.activeTab()
 	p := sourceTab.focusedPane()
-	destination := &session{id: "destination", name: "destination"}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
 	publishPaneOwner(p, sess, sourceTab, 0)
 
@@ -424,7 +424,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 
 	sourceTab := sess.activeTab()
 	p := sourceTab.focusedPane()
-	destination := &session{id: "destination", name: "destination"}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
 	publishPaneOwner(p, sess, sourceTab, 0)
 	ac.sendMu.Unlock()
@@ -455,7 +455,7 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 
 	sourceTab := sess.activeTab()
 	p := sourceTab.focusedPane()
-	destination := &session{id: "destination", name: "destination"}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
 	publishPaneOwner(p, sess, sourceTab, 0)
 	close(oldTransport.release)

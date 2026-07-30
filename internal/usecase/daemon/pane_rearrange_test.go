@@ -84,7 +84,7 @@ func TestMutateTargetLayoutRejectsStaleTargetsBeforeMutation(t *testing.T) {
 			name: "session",
 			stale: func(h *paneRearrangeHarness) daemonActionTarget {
 				target := h.target("pane-1")
-				h.daemon.sessions[h.session.id] = &session{id: h.session.id}
+				h.daemon.sessions[h.session.id] = &session{sessionCore: sessionCore{id: h.session.id}}
 				return target
 			},
 		},
@@ -481,7 +481,7 @@ func newPaneRearrangeHarness(t *testing.T, size domain.Size, tree *layout.Tree) 
 	for _, p := range tb.panes {
 		p.ctx, p.cancel = contextWithTestCleanup(t, tb.ctx)
 	}
-	sess := &session{id: "s", name: "work", cwd: "/work", tabs: []*tab{tb}, ctx: d.serveCtx, cancel: func() {}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "work"}, cwd: "/work", tabs: []*tab{tb}, ctx: d.serveCtx, cancel: func() {}}
 	sess.snapEligible.Store(true)
 	d.sessions[sess.id] = sess
 	return &paneRearrangeHarness{daemon: d, session: sess, tab: tb, panes: panes, ptys: ptys, factory: factory}

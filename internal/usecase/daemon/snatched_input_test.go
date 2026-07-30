@@ -139,9 +139,7 @@ func newSnatchedInputFixture(t *testing.T, clock ports.Clock) (*Daemon, *session
 	}
 	waiting.initOverlays()
 	active.initOverlays()
-	sess := &session{
-		id: "strict-input", client: active, snatched: map[*attachedClient]struct{}{waiting: {}},
-	}
+	sess := &session{sessionCore: sessionCore{id: "strict-input", client: active, snatched: map[*attachedClient]struct{}{waiting: {}}}}
 	waiting.setSession(sess)
 	active.setSession(sess)
 	d.sessions[sess.id] = sess

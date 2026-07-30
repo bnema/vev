@@ -966,7 +966,7 @@ func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
-	live := &session{id: "live", name: "live", tabs: []*tab{{}}}
+	live := &session{sessionCore: sessionCore{id: "live", name: "live"}, tabs: []*tab{{}}}
 	live.mruAt.Store(1)
 	d.sessions[live.id] = live
 
@@ -1007,7 +1007,7 @@ func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T)
 	sess.name = "current"
 	sess.mruAt.Store(100)
 	for i := range 10 {
-		other := &session{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i), tabs: []*tab{{attention: i == 8}}}
+		other := &session{sessionCore: sessionCore{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i)}, tabs: []*tab{{attention: i == 8}}}
 		other.mruAt.Store(uint64(i + 1))
 		d.sessions[other.id] = other
 	}
@@ -1028,9 +1028,9 @@ func TestBarStateForMRUExcludesEphemeralSessions(t *testing.T) {
 	d, current, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 
-	persistent := &session{id: "named", name: "named", tabs: []*tab{{}}}
+	persistent := &session{sessionCore: sessionCore{id: "named", name: "named"}, tabs: []*tab{{}}}
 	persistent.mruAt.Store(1)
-	ephemeral := &session{id: "ephemeral", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	ephemeral := &session{sessionCore: sessionCore{id: "ephemeral", name: "1", ephemeral: true}, tabs: []*tab{{}}}
 	ephemeral.mruAt.Store(2)
 	d.sessions[persistent.id] = persistent
 	d.sessions[ephemeral.id] = ephemeral
@@ -1046,7 +1046,7 @@ func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	for _, name := range []string{"bravo", "alpha", "charlie"} {
-		d.sessions[domain.SessionID(name)] = &session{id: domain.SessionID(name), name: name, tabs: []*tab{{}}}
+		d.sessions[domain.SessionID(name)] = &session{sessionCore: sessionCore{id: domain.SessionID(name), name: name}, tabs: []*tab{{}}}
 	}
 
 	state := d.barStateFor(sess, "")
@@ -1065,7 +1065,7 @@ func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
 	d.stopped["alpha"] = stoppedSession{name: "alpha", cwd: "/tmp/alpha", createdAt: 1, lastUsedSeq: 30}
 	d.stopped["zeta"] = stoppedSession{name: "zeta", cwd: "/tmp/zeta", createdAt: 1, lastUsedSeq: 20}
 	d.mruSeq.Store(30)
-	cur := &session{id: "cur", name: "current", tabs: []*tab{{}}}
+	cur := &session{sessionCore: sessionCore{id: "cur", name: "current"}, tabs: []*tab{{}}}
 	d.sessions[cur.id] = cur
 
 	_, err := createSessionForTest(d, "zeta", false, "/tmp/zeta", sz, terminalEnv{}, d.baseEnv)

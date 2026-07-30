@@ -25,7 +25,7 @@ func TestAttachmentTransitionPrelockedMatchesWrapper(t *testing.T) {
 	setup := func(t *testing.T) (*Daemon, *session, *attachedClient, *attachedClient) {
 		t.Helper()
 		d := newTestDaemon(t, nil, stubClock{})
-		sess := &session{id: domain.SessionID("work")}
+		sess := &session{sessionCore: sessionCore{id: domain.SessionID("work")}}
 		old := &attachedClient{tr: &closeTrackingTransport{}}
 		old.setSession(sess)
 		sess.client = old
@@ -120,8 +120,8 @@ func TestValidateAttachmentTransitionPrelockedLeavesMembershipUntouchedOnFailure
 	t.Parallel()
 
 	d := newTestDaemon(t, nil, stubClock{})
-	source := &session{id: domain.SessionID("source")}
-	target := &session{id: domain.SessionID("target"), active: 0}
+	source := &session{sessionCore: sessionCore{id: domain.SessionID("source")}}
+	target := &session{sessionCore: sessionCore{id: domain.SessionID("target")}, active: 0}
 	next := &attachedClient{tr: &closeTrackingTransport{}}
 	next.setSession(source)
 	source.addSnatchedLocked(next)

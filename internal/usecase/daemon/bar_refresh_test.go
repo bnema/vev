@@ -220,7 +220,7 @@ func TestRefreshBarScriptsAllSessionsForcesRun(t *testing.T) {
 	d := newBarRefreshTestDaemon(r, 60*time.Second)
 	sess := newBarRefreshTestSession()
 	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
-	d.sessions = map[domain.SessionID]*session{sess.id: sess}
+	d.sessions = map[domain.SessionID]attachmentSession{sess.id: sess}
 
 	// Verifies refreshBarScriptsAllSessions iterates every live session and
 	// dispatches a run for each. This does not exercise force specifically:
@@ -587,7 +587,7 @@ func newBarRefreshTestSession() *session {
 	inactive := newTabWithStableID("tab-inactive", "pane-inactive", nil, domain.Size{Cols: 80, Rows: 22})
 	active := newTabWithStableID("tab-active", "pane-active", nil, domain.Size{Cols: 80, Rows: 22})
 	active.tree.Focus = layout.PaneID("pane-1")
-	return &session{id: "s", name: "s", cwd: "/tmp", tabs: []*tab{inactive, active}, active: 0, ctx: context.Background()}
+	return &session{sessionCore: sessionCore{id: "s", name: "s"}, cwd: "/tmp", tabs: []*tab{inactive, active}, active: 0, ctx: context.Background()}
 }
 
 func waitBarRefreshIdle(t *testing.T, d *Daemon) {

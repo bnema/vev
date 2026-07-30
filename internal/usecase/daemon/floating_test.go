@@ -172,7 +172,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	cwd := t.TempDir()
 	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
-	sess := &session{name: "work", cwd: cwd, terminal: terminalEnv{TrueColor: true}, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{sessionCore: sessionCore{name: "work"}, cwd: cwd, terminal: terminalEnv{TrueColor: true}, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
 	d.ensureFloatingWarm(sess, tb)
 	// Open has started while this goroutine owns tab.mu: an external factory
@@ -239,7 +239,7 @@ func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
 	t.Cleanup(cancelTab)
 	tb := newTab(&transactionalResizePTY{}, tabSize(initial))
 	tb.ctx, tb.cancel = tabCtx, cancelTab
-	sess := &session{id: "responsive-open", name: "work", tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{sessionCore: sessionCore{id: "responsive-open", name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
 
 	d.startFloating(sess, tb, true)
 	openCall := <-opened
@@ -294,7 +294,7 @@ func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	tb := newFloatingTestTab(t)
 	sessCtx, cancel := context.WithCancel(t.Context())
-	sess := &session{id: "floating-ownership", name: "work", tabs: []*tab{tb}, ctx: sessCtx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "floating-ownership", name: "work"}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancel}
 	d.mu.Lock()
 	d.sessions[sess.id] = sess
 	d.mu.Unlock()
@@ -345,7 +345,7 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
 	d := newTestDaemon(t, factory, stubClock{})
 	tb := newFloatingTestTab(t)
-	sess := &session{name: "work", tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.ensureFloatingWarm(sess, tb)
 	<-opened
 	d.teardownFloating(tb, nil) // invalidate before the delayed Open returns
@@ -378,8 +378,8 @@ func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
 	factory := &lifetimePTYFactory{}
 	d := newTestDaemon(t, factory, stubClock{})
 	tb := newFloatingTestTab(t)
-	source := &session{id: "source", name: "source", tabs: []*tab{tb}, ctx: t.Context()}
-	destination := &session{id: "destination", name: "destination", tabs: []*tab{tb}, ctx: t.Context()}
+	source := &session{sessionCore: sessionCore{id: "source", name: "source"}, tabs: []*tab{tb}, ctx: t.Context()}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{tb}, ctx: t.Context()}
 
 	tb.mu.Lock()
 	generation := tb.beginFloatingWarmLocked(false)
@@ -630,7 +630,7 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 				d.procCwd = func(int) (string, error) { return tt.liveCwd, nil }
 			}
 			tb := newFloatingTestTab(t)
-			sess := &session{name: "work", cwd: tt.sessionCwd, tabs: []*tab{tb}, ctx: t.Context()}
+			sess := &session{sessionCore: sessionCore{name: "work"}, cwd: tt.sessionCwd, tabs: []*tab{tb}, ctx: t.Context()}
 			d.startFloating(sess, tb, false)
 			select {
 			case got := <-opened:
@@ -668,7 +668,7 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 	d := newTestDaemon(t, factory, stubClock{})
 	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
-	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.startFloating(sess, tb, false)
 	<-opened
 	stopRename := make(chan struct{})
@@ -706,7 +706,7 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
-	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{sessionCore: sessionCore{name: "captured"}, tabs: []*tab{tb}, ctx: t.Context()}
 
 	d.startFloating(sess, tb, false)
 	<-opened
@@ -770,7 +770,7 @@ func TestFloatingAsyncSpawnFailureToastsOnlyForUserOpen(t *testing.T) {
 			tr, _ := newCapturingTransport(t)
 			ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 			ac.initOverlays()
-			sess := &session{id: "floating-spawn", name: "work", tabs: []*tab{tb}, ctx: t.Context(), client: ac}
+			sess := &session{sessionCore: sessionCore{id: "floating-spawn", name: "work", client: ac}, tabs: []*tab{tb}, ctx: t.Context()}
 			ac.setSession(sess)
 
 			d.startFloating(sess, tb, tc.userOpen)

@@ -745,31 +745,27 @@ func (c *renderCoordinator) waitForTimerWorkers() { c.supervisor.wait() }
 // invalidateRender is the sole producer fan-in. In tests and transitional
 // headless paths without an attached coordinator it retains the old private
 // compositor; attached sessions always schedule through their coordinator.
-func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool, producer string) {
-	if sess != nil {
-		if rc := sess.renderCoordinator(); rc != nil {
-			rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
-			return
-		}
+func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
+	if rc := attachmentRenderCoordinator(entry); rc != nil {
+		rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
+		return
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset, nil)
+		d.paint(entry, ac, reset, nil)
 	}
 }
 
 // invalidateRenderNow publishes through the coordinator but immediately
 // flushes the wake when the client can accept state. Attach uses this path so
 // the required first full frame never depends on a debounce timer.
-func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bool, producer string) {
-	if sess != nil {
-		if rc := sess.renderCoordinator(); rc != nil {
-			rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
-			rc.fireCurrent(false)
-			return
-		}
+func (d *Daemon) invalidateRenderNow(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
+	if rc := attachmentRenderCoordinator(entry); rc != nil {
+		rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
+		rc.fireCurrent(false)
+		return
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset, nil)
+		d.paint(entry, ac, reset, nil)
 	}
 }
 

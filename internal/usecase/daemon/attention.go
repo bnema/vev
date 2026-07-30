@@ -87,8 +87,8 @@ type attentionTarget struct {
 func (d *Daemon) oldestOtherSessionAttention(current *session) (attentionTarget, bool) {
 	d.mu.Lock()
 	sessions := make([]*session, 0, len(d.sessions))
-	for _, sess := range d.sessions {
-		if sess != current {
+	for _, entry := range d.sessions {
+		if sess, ok := localSession(entry); ok && sess != current {
 			sessions = append(sessions, sess)
 		}
 	}
@@ -137,10 +137,7 @@ func (d *Daemon) repaintAttachedClients(sess *session) {
 
 func (d *Daemon) repaintAllAttachedClients() {
 	d.mu.Lock()
-	sessions := make([]*session, 0, len(d.sessions))
-	for _, sess := range d.sessions {
-		sessions = append(sessions, sess)
-	}
+	sessions := localSessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 
 	for _, sess := range sessions {
@@ -247,10 +244,7 @@ func (d *Daemon) attentionAnimator(ctx context.Context) {
 
 func (d *Daemon) anyAttention() bool {
 	d.mu.Lock()
-	sessions := make([]*session, 0, len(d.sessions))
-	for _, sess := range d.sessions {
-		sessions = append(sessions, sess)
-	}
+	sessions := localSessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 
 	for _, sess := range sessions {

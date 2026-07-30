@@ -190,11 +190,11 @@ type primaryCaptureRequest struct {
 	lease           *attachmentLease
 }
 
-// capturePrimaryRenderState is the ownership boundary for a primary render
-// transaction. Callers hold attachment sendMu; this function then follows
+// captureLocalPrimaryRenderState is the ownership boundary for a local primary
+// render transaction. Callers hold attachment sendMu; this function then follows
 // session -> tab -> pane lock order. ACK-blocked capture returns before touching
 // VT damage, and every captured pane records a receipt for successful emission.
-func capturePrimaryRenderState(
+func captureLocalPrimaryRenderState(
 	sess *session,
 	ac *attachedClient,
 	request primaryCaptureRequest,
@@ -319,6 +319,12 @@ func capturePrimaryRenderState(
 	}
 	scratch.receipts = state.receipts
 	return state, true
+}
+
+// capturePrimaryRenderState preserves the focused local test seam. Production
+// rendering delegates through attachmentSession.capturePrimary.
+func capturePrimaryRenderState(sess *session, ac *attachedClient, request primaryCaptureRequest) (*capturedRenderState, bool) {
+	return captureLocalPrimaryRenderState(sess, ac, request)
 }
 
 // copyRankedRecentInto preserves the non-nil empty slice that selects

@@ -354,8 +354,10 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	d.mu.Lock()
 	var sess *session
 	for _, candidate := range d.sessions {
-		sess = candidate
-		break
+		if local, ok := localSession(candidate); ok {
+			sess = local
+			break
+		}
 	}
 	d.mu.Unlock()
 	require.NotNil(t, sess)
@@ -971,7 +973,7 @@ func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 func TestPaletteBackSessionTogglesPreviousSession(t *testing.T) {
 	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
-	recent := d.sessions[domain.SessionID("recent")]
+	recent := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
 
 	// Picker-style successful transition records its origin.
 	require.NoError(t, d.switchToTarget(current, ac, picker.Target{Session: recent.id, TabIndex: -1}))
@@ -989,7 +991,7 @@ func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
 		prepare func()
 	}{
 		{name: "no target", prepare: func() {}},
-		{name: "stale target", prepare: func() { ac.previousSession.Set(&session{id: "gone"}) }},
+		{name: "stale target", prepare: func() { ac.previousSession.Set(&session{sessionCore: sessionCore{id: "gone"}}) }},
 		{name: "same session", prepare: func() { ac.previousSession.Set(current) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1027,8 +1029,8 @@ func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
 
 func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
 	ac := &attachedClient{}
-	stale := &session{id: "stale"}
-	updated := &session{id: "updated"}
+	stale := &session{sessionCore: sessionCore{id: "stale"}}
+	updated := &session{sessionCore: sessionCore{id: "updated"}}
 	ac.previousSession.Set(stale)
 
 	// Model a completed hand-off between observing a stale target and clearing
@@ -1051,7 +1053,7 @@ func TestBackSessionInvalidTargetsFallBackThroughOneInvalidation(t *testing.T) {
 	}{
 		{name: "no previous target", prepare: func(*session, *attachedClient) {}},
 		{name: "stale previous target", prepare: func(_ *session, ac *attachedClient) {
-			ac.previousSession.Set(&session{id: "gone"})
+			ac.previousSession.Set(&session{sessionCore: sessionCore{id: "gone"}})
 		}},
 		{name: "previous target equals current", prepare: func(current *session, ac *attachedClient) {
 			ac.previousSession.Set(current)
@@ -1121,7 +1123,7 @@ func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
 			defer releaseAll(releases)
-			recent := d.sessions[domain.SessionID("recent")]
+			recent := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
 
 			if tc.name == "missing target does not record" {
 				require.Error(t, d.switchToTarget(current, ac, tc.target(current, recent)))
@@ -1133,7 +1135,7 @@ func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
 				require.Nil(t, ac.previousSession.Get())
 				return
 			}
-			require.Equal(t, domain.SessionID(tc.wantPrev), ac.previousSession.Get().id)
+			require.Equal(t, domain.SessionID(tc.wantPrev), ac.previousSession.Get().core().id)
 		})
 	}
 }
@@ -1170,8 +1172,8 @@ func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attached
 	current.id = "current"
 	delete(d.sessions, domain.SessionID("manual"))
 	d.sessions[current.id] = current
-	recent := &session{id: "recent", name: "recent", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
-	older := &session{id: "older", name: "older", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p3, domain.Size{Cols: 80, Rows: 23})}}
+	recent := &session{sessionCore: sessionCore{id: "recent", name: "recent"}, ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
+	older := &session{sessionCore: sessionCore{id: "older", name: "older"}, ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p3, domain.Size{Cols: 80, Rows: 23})}}
 	d.sessions[recent.id] = recent
 	d.sessions[older.id] = older
 	current.mruAt.Store(30)

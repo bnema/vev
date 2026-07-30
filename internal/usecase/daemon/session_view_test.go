@@ -17,13 +17,13 @@ func TestSnapshotViewCapturesSessionFields(t *testing.T) {
 		{
 			name: "named session with attention tab",
 			build: func() *session {
-				s := &session{
-					id:          domain.SessionID("s1"),
+				s := &session{sessionCore: sessionCore{id: domain.SessionID("s1"),
 					incarnation: domain.IncarnationID{1},
 					name:        "alpha",
 					createdAt:   42,
-					active:      1,
-					client:      &attachedClient{},
+
+					client: &attachedClient{}}, active: 1,
+
 					tabs: []*tab{
 						{stableID: "t1", name: "build"},
 						{stableID: "t2", name: "logs", attention: true},
@@ -52,7 +52,7 @@ func TestSnapshotViewCapturesSessionFields(t *testing.T) {
 		{
 			name: "ephemeral detached session without tabs",
 			build: func() *session {
-				return &session{id: domain.SessionID("s2"), name: "9", ephemeral: true}
+				return &session{sessionCore: sessionCore{id: domain.SessionID("s2"), name: "9", ephemeral: true}}
 			},
 			opts: viewOptions{},
 			want: sessionView{
@@ -74,10 +74,8 @@ func TestSnapshotViewCapturesSessionFields(t *testing.T) {
 }
 
 func TestSnapshotViewFocusedTitlesOption(t *testing.T) {
-	s := &session{
-		id:   domain.SessionID("s1"),
-		name: "alpha",
-		tabs: []*tab{{stableID: "t1", name: "build"}},
+	s := &session{sessionCore: sessionCore{id: domain.SessionID("s1"),
+		name: "alpha"}, tabs: []*tab{{stableID: "t1", name: "build"}},
 	}
 	off := s.snapshotView(viewOptions{tabDetails: true})
 	if off.tabs[0].focusedTitle != "" {

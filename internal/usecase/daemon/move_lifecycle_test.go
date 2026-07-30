@@ -66,7 +66,7 @@ func awaitDaemonMoveClosing(t *testing.T, d *Daemon) {
 
 func TestMoveLifecycleReservationMakesTeardownWait(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	sess := &session{id: "source"}
+	sess := &session{sessionCore: sessionCore{id: "source"}}
 
 	reservation, err := d.reserveMoveLifecycles(sess, sess)
 	require.NoError(t, err)
@@ -88,11 +88,13 @@ func TestMoveLifecycleReservationMakesTeardownWait(t *testing.T) {
 
 func TestMoveLifecycleReservationsUseStableSessionOrder(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	first := &session{id: "a"}
-	second := &session{id: "b"}
+	first := &session{sessionCore: sessionCore{id: "a"}}
+	second := &session{sessionCore:
 
 	// Both opposite-direction reservations must block on a before either takes
 	// b. This proves order from immutable IDs rather than argument direction.
+	sessionCore{id: "b"}}
+
 	first.teardownMu.Lock()
 	beforeTeardownLocks := make(chan struct{}, 2)
 	d.afterMoveLifecycleGateBeforeTeardownLocks = func() { beforeTeardownLocks <- struct{}{} }
@@ -127,8 +129,8 @@ func TestMoveLifecycleReservationRejectsTeardownWithoutLeakingCounts(t *testing.
 	for _, teardownSession := range []string{"source", "destination"} {
 		t.Run(teardownSession, func(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
-			source := &session{id: "source"}
-			destination := &session{id: "destination"}
+			source := &session{sessionCore: sessionCore{id: "source"}}
+			destination := &session{sessionCore: sessionCore{id: "destination"}}
 			tearingDown := source
 			if teardownSession == "destination" {
 				tearingDown = destination
@@ -148,7 +150,7 @@ func TestMoveLifecycleReservationRejectsTeardownWithoutLeakingCounts(t *testing.
 
 func TestMoveLifecycleReservationDeduplicatesAndReleasesExactlyOnce(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	sess := &session{id: "same"}
+	sess := &session{sessionCore: sessionCore{id: "same"}}
 	reservation, err := d.reserveMoveLifecycles(sess, sess)
 	require.NoError(t, err)
 	awaitMoveTeardownState(t, sess, 1, 0)
@@ -170,7 +172,7 @@ func TestMoveLifecycleReservationDeduplicatesAndReleasesExactlyOnce(t *testing.T
 
 func TestMoveLifecycleReservationWaitCanBeCancelledWithoutChangingCounts(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	sess := &session{id: "source"}
+	sess := &session{sessionCore: sessionCore{id: "source"}}
 	reservation, err := d.reserveMoveLifecycles(sess, sess)
 	require.NoError(t, err)
 	deadline := &snapshotShutdownDeadline{done: make(chan struct{})}
@@ -190,7 +192,7 @@ func TestMoveLifecycleReservationWaitCanBeCancelledWithoutChangingCounts(t *test
 
 func TestMoveLifecycleReservationWakesAllTeardownWaiters(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	sess := &session{id: "source"}
+	sess := &session{sessionCore: sessionCore{id: "source"}}
 	reservation, err := d.reserveMoveLifecycles(sess, sess)
 	require.NoError(t, err)
 
@@ -221,8 +223,8 @@ func TestMoveLifecycleReservationWakesAllTeardownWaiters(t *testing.T) {
 
 func TestDaemonShutdownDrainsMoveBeforePaneLifetimeCancellation(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	source := &session{id: "source"}
-	destination := &session{id: "destination"}
+	source := &session{sessionCore: sessionCore{id: "source"}}
+	destination := &session{sessionCore: sessionCore{id: "destination"}}
 	reservation, err := d.reserveMoveLifecycles(source, destination)
 	require.NoError(t, err)
 	paneLifetime := d.paneProcessCtx

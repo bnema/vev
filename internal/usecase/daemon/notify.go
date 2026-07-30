@@ -293,10 +293,7 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 func (d *Daemon) deliverGlobal(n domain.Notification) {
 	d.mu.Lock()
 	d.notices.routingMu.Lock()
-	sessions := make([]*session, 0, len(d.sessions))
-	for _, s := range d.sessions {
-		sessions = append(sessions, s)
-	}
+	sessions := localSessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 
 	if d.notices.beforeGlobalDelivery != nil {

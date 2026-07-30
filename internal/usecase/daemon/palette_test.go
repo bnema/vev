@@ -199,8 +199,8 @@ func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, _ := newManualSessionWithPTYs(t, p)
-	d.sessions["active"] = &session{id: "active", name: "active", createdAt: 10}
-	d.sessions["ephemeral"] = &session{id: "ephemeral", name: "ephemeral", ephemeral: true, createdAt: 11}
+	d.sessions["active"] = &session{sessionCore: sessionCore{id: "active", name: "active", createdAt: 10}}
+	d.sessions["ephemeral"] = &session{sessionCore: sessionCore{id: "ephemeral", name: "ephemeral", ephemeral: true, createdAt: 11}}
 	d.stopped["stopped"] = stoppedSession{name: "stopped", createdAt: 12}
 	d.stopped["purging"] = stoppedSession{name: "purging", createdAt: 13, purging: true}
 
@@ -224,9 +224,9 @@ func TestPaletteRecentSessionsExcludeEphemeralSessions(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, _ := newManualSessionWithPTYs(t, p)
-	named := &session{id: "named", name: "named", tabs: []*tab{{}}}
+	named := &session{sessionCore: sessionCore{id: "named", name: "named"}, tabs: []*tab{{}}}
 	named.mruAt.Store(1)
-	ephemeral := &session{id: "ephemeral", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	ephemeral := &session{sessionCore: sessionCore{id: "ephemeral", name: "1", ephemeral: true}, tabs: []*tab{{}}}
 	ephemeral.mruAt.Store(2)
 	d.sessions[named.id] = named
 	d.sessions[ephemeral.id] = ephemeral
@@ -243,7 +243,7 @@ func TestPaletteSessionFailureFeedbackClearsOnQueryChange(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, _ := newManualSessionWithPTYs(t, p)
-	target := &session{id: "active", name: "active", createdAt: 10}
+	target := &session{sessionCore: sessionCore{id: "active", name: "active", createdAt: 10}}
 	d.sessions[target.id] = target
 
 	d.enterPalette(current, ac)
@@ -255,7 +255,7 @@ func TestPaletteSessionFailureFeedbackClearsOnQueryChange(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, isSession)
 	d.mu.Lock()
-	delete(d.sessions, target.id)
+	delete(d.sessions, target.core().id)
 	d.mu.Unlock()
 
 	d.handlePaletteInput(ac, []byte("\r"))
@@ -271,7 +271,7 @@ func TestPaletteSessionFailureFeedbackClearsOnQueryChange(t *testing.T) {
 func TestPaletteEnterFreezesActiveSessionSelectionAgainstTrailingInput(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
-	target := d.sessions[domain.SessionID("recent")]
+	target := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
 	target.createdAt = 42
 
 	d.handleInput(current, ac, []byte("\x1b "))
@@ -287,7 +287,7 @@ func TestPaletteEnterFreezesActiveSessionSelectionAgainstTrailingInput(t *testin
 func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
-	target := d.sessions[domain.SessionID("recent")]
+	target := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
 	target.createdAt = 42
 
 	d.handleInput(current, ac, []byte("\x1b "))
@@ -425,11 +425,11 @@ func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
 func TestPaletteJRSUsesCapturedRankAfterMRUChanges(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
-	captured := d.sessions[domain.SessionID("recent")]
+	captured := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	// Reordering live MRU after opening must not shift rank 1 from its capture.
-	d.sessions[domain.SessionID("older")].mruAt.Store(100)
+	d.sessions[domain.SessionID("older")].core().mruAt.Store(100)
 	d.handleInput(current, ac, []byte("JRS 1\r"))
 
 	require.Same(t, captured, ac.currentSession())
@@ -467,7 +467,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	d.afterActionRoleEffectEnded = func(action string) {
 		if action == "back-session" {
 			d.mu.Lock()
-			delete(d.sessions, target.id)
+			delete(d.sessions, target.core().id)
 			d.mu.Unlock()
 		}
 	}
@@ -509,7 +509,7 @@ func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	target := &session{id: "captured", name: "captured"}
+	target := &session{sessionCore: sessionCore{id: "captured", name: "captured"}}
 	d.sessions[target.id] = target
 
 	validated := make(chan struct{})
@@ -527,7 +527,7 @@ func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 	}()
 	awaitTestCompletion(t, validated, "JRS did not validate its captured target")
 	d.mu.Lock()
-	delete(d.sessions, target.id)
+	delete(d.sessions, target.core().id)
 	d.mu.Unlock()
 	close(releaseHandoff)
 

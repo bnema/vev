@@ -422,7 +422,11 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 	}
 	d.mu.Lock()
 	var clients []*attachedClient
-	for _, sess := range d.sessions {
+	for _, entry := range d.sessions {
+		sess, ok := localSession(entry)
+		if !ok {
+			continue
+		}
 		sess.mu.Lock()
 		if sess.client != nil {
 			clients = append(clients, sess.client)
@@ -470,7 +474,7 @@ func pickerTargetsEqual(left, right picker.Target) bool {
 	return *left.ExpectedCreatedAt == *right.ExpectedCreatedAt
 }
 
-func (d *Daemon) sessionByID(id domain.SessionID) *session {
+func (d *Daemon) sessionByID(id domain.SessionID) attachmentSession {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.sessions[id]
@@ -513,8 +517,12 @@ func (d *Daemon) switchActiveTargetForRole(token attachmentRoleToken, target pic
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", err)
 	}
-	d.touchMRU(targetSess)
-	token.ac.recordPreviousSession(token.sess)
+	if target, ok := localSession(targetSess); ok {
+		d.touchMRU(target)
+	}
+	if source, ok := localSession(token.sess); ok {
+		token.ac.recordPreviousSession(source)
+	}
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
 	return nil
@@ -537,7 +545,11 @@ func (d *Daemon) switchToTargetForRole(token attachmentRoleToken, target picker.
 	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
-	return d.switchToTargetGuardedForRole(token.sess, token.ac, target, guard, &token, action)
+	sess, ok := localSession(token.sess)
+	if !ok {
+		return errAttachmentTransition
+	}
+	return d.switchToTargetGuardedForRole(sess, token.ac, target, guard, &token, action)
 }
 
 // switchToTargetGuarded is retained for daemon-internal and headless callers.
@@ -580,7 +592,7 @@ func (d *Daemon) switchToTargetGuardedForRole(from *session, ac *attachedClient,
 				targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, resolvedTarget, guard, sourceToken, action)
 			}
 		}
-	} else if active := d.sessions[target.Session]; active != nil {
+	} else if active, ok := localSession(d.sessions[target.Session]); ok {
 		targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, target, guard, sourceToken, action)
 	}
 	d.mu.Unlock()
@@ -849,9 +861,9 @@ func (d *Daemon) killPickerTargetForRole(target picker.Target, token attachmentR
 		return d.killPickerTarget(target)
 	}
 	d.mu.Lock()
-	targetSess := d.sessions[target.Session]
+	targetSess, ok := localSession(d.sessions[target.Session])
 	d.mu.Unlock()
-	if targetSess == nil {
+	if !ok {
 		return nil
 	}
 	return d.killSessionForRole(targetSess, ports.ReasonSessionKilled, true, token, "picker-delete")
@@ -866,9 +878,9 @@ func (d *Daemon) killPickerTarget(target picker.Target) error {
 		return nil
 	}
 	d.mu.Lock()
-	targetSess := d.sessions[target.Session]
+	targetSess, ok := localSession(d.sessions[target.Session])
 	d.mu.Unlock()
-	if targetSess != nil {
+	if ok {
 		return d.killSession(targetSess, ports.ReasonSessionKilled, true)
 	}
 	return nil

@@ -26,9 +26,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	client.captureFrames = map[*pane]capturedPaneRenderState{moved: {}}
 	client.sendMu.Unlock()
 
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs:   []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
 		active: 0,
 	}
 	destinationTab := destination.tabs[0]
@@ -106,9 +104,7 @@ func TestMovePaneCleanupUsesCommitPointSourceAttachmentToken(t *testing.T) {
 	moved := sourceTab.focusedPane()
 	require.NotNil(t, d.attachCoordinator(source, nil, displaced, true))
 
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs:   []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
 		active: 0,
 	}
 	destinationTab := destination.tabs[0]
