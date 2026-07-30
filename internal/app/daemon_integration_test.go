@@ -481,7 +481,7 @@ func TestListWaitsForLifecycleOwner(t *testing.T) {
 	require.NoError(t, err)
 
 	done := make(chan error, 1)
-	go func() { done <- runList(context.Background()) }()
+	go func() { done <- runList(context.Background(), command{kind: kindList}) }()
 	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
 	require.NoError(t, owner.Release())
 	require.NoError(t, <-done)

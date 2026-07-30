@@ -40,7 +40,12 @@ vev                              create an ephemeral session
 vev new <name>                   create a named session
 vev attach <name>                attach to a session (alias: a)
 vev attach user@host[:session]   attach to a remote daemon over SSH
-vev ls                           list sessions
+vev ls                           list local sessions
+vev ls <host>                    list sessions on a known remote host
+vev ls --all                     list local and remote sessions
+vev host add <host>              add a pinned remote host
+vev host rm <host>               remove a pinned remote host
+vev host list                    list known remote hosts
 vev kill <name>                  kill a session (--all kills everything)
 ```
 
@@ -75,6 +80,25 @@ sudo ufw allow 61000:61023/udp
 ```
 
 Where UDP is not an option, `VEV_REMOTE_TRANSPORT=stdio` keeps everything inside SSH at the cost of slower disconnect detection. Details in [docs/remote-resilience.md](docs/remote-resilience.md).
+
+List sessions on a known host (OpenSSH resolves aliases from your SSH config):
+
+```sh
+vev ls arch
+vev ls --all
+```
+
+Remote session names appear as `session@host`. `vev ls --all` prints local sessions first, then remote sessions in host order. If one host fails, vev still prints the rest and exits non-zero.
+
+Manage pinned hosts in the unified host state file through the CLI:
+
+```sh
+vev host add arch
+vev host rm arch
+vev host list
+```
+
+Successful attaches learn hosts into `$XDG_STATE_HOME/vev/hosts.json`; that file stores both pinned and learned hosts. See [docs/configuration.md](docs/configuration.md#remote-hosts).
 
 ## Scripting
 

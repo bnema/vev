@@ -165,7 +165,9 @@ func TestOfflineCommandsPropagateLifecycleReleaseErrors(t *testing.T) {
 	}{
 		{
 			name: "list joins release failure to success",
-			run:  runList,
+			run: func(ctx context.Context) error {
+				return runList(ctx, command{kind: kindList})
+			},
 		},
 		{
 			name: "kill joins release failure to operation failure",
@@ -552,15 +554,20 @@ func TestRunUDPProxyClientDeadAfterExceedsIdleTTL(t *testing.T) {
 
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		wantKind   cmdKind
-		wantIntent uint8
-		wantName   string
-		wantRemote string
-		wantAll    bool
-		wantDaemon bool
-		wantErr    bool
+		name         string
+		args         []string
+		wantKind     cmdKind
+		wantIntent   uint8
+		wantName     string
+		wantRemote   string
+		wantListHost string
+		wantListAll  bool
+		wantHostAct  string
+		wantHostTgt  string
+		wantAll      bool
+		wantDaemon   bool
+		wantErr      bool
+		nonUsageErr  bool
 	}{
 		{name: "no args -> ephemeral attach", args: nil, wantKind: kindAttach, wantIntent: ports.IntentEphemeral},
 		{name: "empty slice -> ephemeral attach", args: []string{}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral},
@@ -578,6 +585,21 @@ func TestParseArgs(t *testing.T) {
 		{name: "attach without name", args: []string{"attach"}, wantErr: true},
 		{name: "ls", args: []string{"ls"}, wantKind: kindList},
 		{name: "list", args: []string{"list"}, wantKind: kindList},
+		{name: "ls host", args: []string{"ls", "arch"}, wantKind: kindList, wantListHost: "arch"},
+		{name: "list host", args: []string{"list", "build@mule"}, wantKind: kindList, wantListHost: "build@mule"},
+		{name: "ls --all", args: []string{"ls", "--all"}, wantKind: kindList, wantListAll: true},
+		{name: "list --all", args: []string{"list", "--all"}, wantKind: kindList, wantListAll: true},
+		{name: "ls host extra", args: []string{"ls", "arch", "extra"}, wantErr: true},
+		{name: "ls --all host", args: []string{"ls", "--all", "arch"}, wantErr: true},
+		{name: "ls invalid host", args: []string{"ls", "bad host"}, wantErr: true, nonUsageErr: true},
+		{name: "host add", args: []string{"host", "add", "arch"}, wantKind: kindHost, wantHostAct: "add", wantHostTgt: "arch"},
+		{name: "host rm", args: []string{"host", "rm", "build@mule"}, wantKind: kindHost, wantHostAct: "rm", wantHostTgt: "build@mule"},
+		{name: "host list", args: []string{"host", "list"}, wantKind: kindHost, wantHostAct: "list"},
+		{name: "host alone", args: []string{"host"}, wantErr: true},
+		{name: "host add missing target", args: []string{"host", "add"}, wantErr: true},
+		{name: "host add extra", args: []string{"host", "add", "arch", "extra"}, wantErr: true},
+		{name: "host add invalid", args: []string{"host", "add", " bad"}, wantErr: true, nonUsageErr: true},
+		{name: "host unknown action", args: []string{"host", "rename", "arch"}, wantErr: true},
 		{name: "kill named", args: []string{"kill", "work"}, wantKind: kindKill, wantName: "work"},
 		{name: "kill preserves legacy unsafe name via terminator", args: []string{"kill", "--", "my work"}, wantKind: kindKill, wantName: "my work"},
 		{name: "kill dashed name via terminator", args: []string{"kill", "--", "--all"}, wantKind: kindKill, wantName: "--all"},
@@ -609,9 +631,16 @@ func TestParseArgs(t *testing.T) {
 				if err == nil {
 					t.Fatalf("parseArgs(%q) = %+v, want error", tt.args, got)
 				}
-				var ue *usageError
-				if !errors.As(err, &ue) {
-					t.Fatalf("parseArgs(%q) error = %T, want *usageError", tt.args, err)
+				if tt.nonUsageErr {
+					var ue *usageError
+					if errors.As(err, &ue) {
+						t.Fatalf("parseArgs(%q) error = *usageError, want non-usage error", tt.args)
+					}
+				} else {
+					var ue *usageError
+					if !errors.As(err, &ue) {
+						t.Fatalf("parseArgs(%q) error = %T, want *usageError", tt.args, err)
+					}
 				}
 				return
 			}
@@ -629,6 +658,18 @@ func TestParseArgs(t *testing.T) {
 			}
 			if got.remoteTarget != tt.wantRemote {
 				t.Errorf("remoteTarget = %q, want %q", got.remoteTarget, tt.wantRemote)
+			}
+			if got.listHost != tt.wantListHost {
+				t.Errorf("listHost = %q, want %q", got.listHost, tt.wantListHost)
+			}
+			if got.listAll != tt.wantListAll {
+				t.Errorf("listAll = %v, want %v", got.listAll, tt.wantListAll)
+			}
+			if got.hostAction != tt.wantHostAct {
+				t.Errorf("hostAction = %q, want %q", got.hostAction, tt.wantHostAct)
+			}
+			if got.hostTarget != tt.wantHostTgt {
+				t.Errorf("hostTarget = %q, want %q", got.hostTarget, tt.wantHostTgt)
 			}
 			if got.killAll != tt.wantAll {
 				t.Errorf("killAll = %v, want %v", got.killAll, tt.wantAll)
@@ -711,7 +752,7 @@ func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 	}
 
 	got := captureStdout(t, func() {
-		if err := runList(context.Background()); err != nil {
+		if err := runList(context.Background(), command{kind: kindList}); err != nil {
 			t.Fatalf("runList error = %v", err)
 		}
 	})

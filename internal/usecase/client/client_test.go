@@ -841,6 +841,451 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	require.Contains(t, term.out.String(), "\x1b[2K")
 }
 
+func TestAttachRememberRemoteHost(t *testing.T) {
+	tests := []struct {
+		name             string
+		request          client.AttachRequest
+		remember         func() error
+		recv             []recvItem
+		preWelcomeReject bool
+		wantCalled       bool
+		wantErr          bool
+	}{
+		{
+			name: "remote success",
+			request: client.AttachRequest{
+				Intent:      ports.IntentAttach,
+				SessionName: "main",
+				Remote:      true,
+			},
+			remember: func() error { return nil },
+			recv: []recvItem{
+				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+				{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+			},
+			wantCalled: true,
+		},
+		{
+			name: "callback failure does not fail attach",
+			request: client.AttachRequest{
+				Intent:      ports.IntentAttach,
+				SessionName: "main",
+				Remote:      true,
+			},
+			remember: func() error { return errors.New("disk full") },
+			recv: []recvItem{
+				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+				{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+			},
+			wantCalled: true,
+		},
+		{
+			name: "local attach does not call callback",
+			request: client.AttachRequest{
+				Intent:      ports.IntentAttach,
+				SessionName: "main",
+				Remote:      false,
+			},
+			remember: func() error {
+				t.Fatal("remember callback must not run for local attach")
+				return nil
+			},
+			recv: []recvItem{
+				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+				{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+			},
+		},
+		{
+			name: "rejected before welcome does not call callback",
+			request: client.AttachRequest{
+				Intent:      ports.IntentAttach,
+				SessionName: "main",
+				Remote:      true,
+			},
+			remember: func() error {
+				t.Fatal("remember callback must not run before welcome")
+				return nil
+			},
+			recv: []recvItem{
+				{f: frameOf(ports.MsgError, ports.MarshalErrorMsg(ports.ErrorMsg{Code: ports.ErrVersionMismatch, Text: "version mismatch"}))},
+			},
+			preWelcomeReject: true,
+			wantErr:          true,
+		},
+		{
+			name: "post-welcome error still uses happy terminal fixture",
+			request: client.AttachRequest{
+				Intent:      ports.IntentAttach,
+				SessionName: "main",
+				Remote:      true,
+			},
+			remember: func() error { return nil },
+			recv: []recvItem{
+				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+				{err: errors.New("connection reset")},
+			},
+			wantCalled: true,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var tm *portsmocks.MockTerminal
+			var unblockIn func()
+			if tt.preWelcomeReject {
+				tm = portsmocks.NewMockTerminal(t)
+				tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+				// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
+			} else {
+				var out bytes.Buffer
+				var restoreCount atomic.Int32
+				resizeCh := make(chan domain.Size)
+				var in *blockingReader
+				tm, in = newHappyTerminal(t, &out, &restoreCount, resizeCh)
+				unblockIn = in.unblock
+			}
+			if unblockIn != nil {
+				defer unblockIn()
+			}
+
+			var called atomic.Bool
+			learnerDone := make(chan struct{})
+			rememberHook := func() error {
+				called.Store(true)
+				defer close(learnerDone)
+				if tt.remember != nil {
+					return tt.remember()
+				}
+				return nil
+			}
+
+			tr := portsmocks.NewMockTransport(t)
+			if !tt.preWelcomeReject {
+				tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+			}
+			tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+			if tt.preWelcomeReject {
+				tr.EXPECT().Recv().Return(tt.recv[0].f, tt.recv[0].err).Once()
+			} else {
+				unblock := scriptRecv(tr, tt.recv...)
+				defer unblock()
+			}
+			tr.EXPECT().Close().Return(nil).Once()
+
+			deps := attachTestDependencies(tr, tm, realClock{})
+			learner := portsmocks.NewMockRemoteHostLearner(t)
+			if tt.wantCalled {
+				learner.EXPECT().RememberRemoteHost().RunAndReturn(rememberHook).Once()
+			}
+			deps.RemoteHostLearner = learner
+
+			err := runTestClient(context.Background(), deps, tt.request)
+			if tt.wantCalled {
+				select {
+				case <-learnerDone:
+				case <-time.After(2 * time.Second):
+					t.Fatal("remote host learner did not complete")
+				}
+			}
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tt.wantCalled, called.Load())
+		})
+	}
+}
+
+func TestRunRememberRemoteHostAtMostOnceAcrossReconnects(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	var rememberCalls atomic.Int32
+	learnerDone := make(chan struct{})
+
+	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
+	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
+	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2}}
+
+	deps := testDependencies(d, term, realClock{}, nil, nil)
+	learner := portsmocks.NewMockRemoteHostLearner(t)
+	learner.EXPECT().RememberRemoteHost().RunAndReturn(func() error {
+		rememberCalls.Add(1)
+		close(learnerDone)
+		return nil
+	}).Once()
+	deps.RemoteHostLearner = learner
+	err := runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent:      ports.IntentAttach,
+		SessionName: "main",
+		Remote:      true,
+	})
+	require.NoError(t, err)
+	select {
+	case <-learnerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote host learner did not complete")
+	}
+	require.Equal(t, int32(1), rememberCalls.Load())
+	require.Equal(t, int32(2), d.calls.Load())
+}
+
+func TestAttachRememberRemoteHostDoesNotBlockAfterWelcome(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	enteredRaw := make(chan struct{})
+	tm.EXPECT().EnterRaw().Run(func() { close(enteredRaw) }).Return(func() error {
+		restoreCount.Add(1)
+		return nil
+	}, nil).Once()
+	in := newBlockingReader()
+	tm.EXPECT().In().Return(in).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+	defer in.unblock()
+
+	learnerStarted := make(chan struct{})
+	releaseLearner := make(chan struct{})
+	learnerDone := make(chan struct{})
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	deps := attachTestDependencies(tr, tm, realClock{})
+	learner := portsmocks.NewMockRemoteHostLearner(t)
+	learner.EXPECT().RememberRemoteHost().RunAndReturn(func() error {
+		close(learnerStarted)
+		<-releaseLearner
+		close(learnerDone)
+		return nil
+	}).Once()
+	deps.RemoteHostLearner = learner
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runTestClient(context.Background(), deps, client.AttachRequest{
+			Intent:      ports.IntentAttach,
+			SessionName: "main",
+			Remote:      true,
+		})
+	}()
+
+	select {
+	case <-learnerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote host learner did not start")
+	}
+	select {
+	case <-enteredRaw:
+	case <-time.After(2 * time.Second):
+		t.Fatal("attach did not enter raw mode while remote host learner was blocked")
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("run returned before remote host learner completed: %v", err)
+	default:
+	}
+	close(releaseLearner)
+	select {
+	case <-learnerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote host learner did not complete after release")
+	}
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after remote host learner completed")
+	}
+}
+
+func TestRunRestoresTerminalBeforeWaitingForLearner(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	restored := make(chan struct{})
+	resizeCh := make(chan domain.Size)
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error {
+		restoreCount.Add(1)
+		close(restored)
+		return nil
+	}, nil).Once()
+	in := newBlockingReader()
+	tm.EXPECT().In().Return(in).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+	defer in.unblock()
+
+	learnerStarted := make(chan struct{})
+	releaseLearner := make(chan struct{})
+	learnerDone := make(chan struct{})
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	deps := attachTestDependencies(tr, tm, realClock{})
+	learner := portsmocks.NewMockRemoteHostLearner(t)
+	learner.EXPECT().RememberRemoteHost().RunAndReturn(func() error {
+		close(learnerStarted)
+		<-releaseLearner
+		close(learnerDone)
+		return nil
+	}).Once()
+	deps.RemoteHostLearner = learner
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runTestClient(context.Background(), deps, client.AttachRequest{
+			Intent:      ports.IntentAttach,
+			SessionName: "main",
+			Remote:      true,
+		})
+	}()
+
+	select {
+	case <-learnerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote host learner did not start")
+	}
+	select {
+	case <-restored:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal was not restored while remote host learner was blocked")
+	}
+	require.Equal(t, int32(1), restoreCount.Load())
+	select {
+	case err := <-errCh:
+		t.Fatalf("run returned before remote host learner completed: %v", err)
+	default:
+	}
+	close(releaseLearner)
+	select {
+	case <-learnerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote host learner did not complete after release")
+	}
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after remote host learner completed")
+	}
+}
+
+func TestRunReturnsWhenRemoteHostLearnerStalls(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	restored := make(chan struct{})
+	resizeCh := make(chan domain.Size)
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error {
+		restoreCount.Add(1)
+		close(restored)
+		return nil
+	}, nil).Once()
+	in := newBlockingReader()
+	tm.EXPECT().In().Return(in).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+	defer in.unblock()
+
+	learnerStarted := make(chan struct{})
+	blockLearner := make(chan struct{})
+	defer close(blockLearner)
+
+	shutdownTimerC := make(chan time.Time, 1)
+	shutdownTimerCreated := make(chan struct{})
+	shutdownTimer := portsmocks.NewMockTimer(t)
+	shutdownTimer.EXPECT().C().Return((<-chan time.Time)(shutdownTimerC)).Once()
+	shutdownTimer.EXPECT().Stop().Return(true).Once()
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(time.Now()).Maybe()
+	clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		if d == time.Second {
+			close(shutdownTimerCreated)
+			return shutdownTimer
+		}
+		return realClock{}.NewTimer(d)
+	}).Maybe()
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	deps := attachTestDependencies(tr, tm, clock)
+	learner := portsmocks.NewMockRemoteHostLearner(t)
+	learner.EXPECT().RememberRemoteHost().RunAndReturn(func() error {
+		close(learnerStarted)
+		<-blockLearner
+		return nil
+	}).Once()
+	deps.RemoteHostLearner = learner
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runTestClient(context.Background(), deps, client.AttachRequest{
+			Intent:      ports.IntentAttach,
+			SessionName: "main",
+			Remote:      true,
+		})
+	}()
+
+	select {
+	case <-learnerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote host learner did not start")
+	}
+	select {
+	case <-restored:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal was not restored while remote host learner was stalled")
+	}
+	require.Equal(t, int32(1), restoreCount.Load())
+
+	select {
+	case <-shutdownTimerCreated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote host learner shutdown timer was not created")
+	}
+	shutdownTimerC <- time.Now()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after remote host learner shutdown timer fired")
+	}
+}
+
 func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()

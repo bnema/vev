@@ -29,8 +29,16 @@ type RemoteHostStore interface {
 	RemovePinned(target string) error
 	Remember(target string) error
 	Forget(target string) error
-	// Remove deletes target from both pinned and learned lists atomically.
-	Remove(target string) error
+	// Remove deletes target from both pinned and learned lists atomically and
+	// reports whether the target existed in either list.
+	Remove(target string) (deleted bool, err error)
+}
+
+// RemoteHostLearner records the remote target after a successful attach.
+// It deliberately has no arguments because app captures the validated target
+// while constructing the client dependency.
+type RemoteHostLearner interface {
+	RememberRemoteHost() error
 }
 
 // RemoteCatalogClient fetches a versioned session catalog from a remote host.
