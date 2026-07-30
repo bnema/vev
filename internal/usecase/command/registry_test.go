@@ -145,6 +145,7 @@ func TestRegistryControlMetadata(t *testing.T) {
 		"grow-pane-height": TargetPane, "shrink-pane-height": TargetPane, "equalize-panes": TargetTab,
 		"move-pane": TargetPane, "move-tab": TargetTab,
 		"list-sessions": TargetNone, "list-tabs": TargetSession, "list-panes": TargetTab,
+		"remote-catalog": TargetNone,
 	}
 	notScriptable := []string{
 		"session-picker", "notifications", "visual-mode", "yank-last-notification",
@@ -173,7 +174,7 @@ func TestPaletteRegistryHidesAPIOnly(t *testing.T) {
 		if !cmd.PaletteVisible || cmd.Run == nil {
 			t.Errorf("palette command is not executable and visible: %#v", cmd)
 		}
-		if cmd.Slug == "toast" || cmd.Slug == "list-sessions" || cmd.Slug == "list-tabs" || cmd.Slug == "list-panes" {
+		if cmd.Slug == "toast" || cmd.Slug == "list-sessions" || cmd.Slug == "list-tabs" || cmd.Slug == "list-panes" || cmd.Slug == "remote-catalog" {
 			t.Errorf("API-only command %q is visible", cmd.Slug)
 		}
 	}
@@ -205,6 +206,45 @@ func TestSessionRecoveryCommand(t *testing.T) {
 		if !errors.Is(err, test.wantErr) || ctx.call != test.wantCall || got.Output != wantOutput {
 			t.Errorf("args %v: call/output/error = %q/%q/%v, want %q/%q/%v", test.args, ctx.call, got.Output, err, test.wantCall, wantOutput, test.wantErr)
 		}
+	}
+}
+
+func TestRemoteCatalogCommand(t *testing.T) {
+	cmd, ok := BySlug("remote-catalog")
+	if !ok {
+		t.Fatal("BySlug(\"remote-catalog\") missing")
+	}
+	if cmd.Name != "Remote catalog" || cmd.Desc == "" || cmd.Usage != "remote-catalog --json" {
+		t.Fatalf("remote-catalog metadata = %#v", cmd)
+	}
+	if !cmd.Scriptable || cmd.PaletteVisible || cmd.Target != TargetNone || cmd.Run != nil || cmd.Control == nil {
+		t.Fatalf("remote-catalog visibility/target = %#v", cmd)
+	}
+
+	tests := []struct {
+		name     string
+		args     []string
+		opts     ControlOptions
+		wantCall string
+		wantErr  error
+	}{
+		{name: "json delegates", opts: ControlOptions{JSON: true}, wantCall: "remote-catalog:true"},
+		{name: "rejects missing json", wantErr: ErrInvalidArguments},
+		{name: "rejects args", args: []string{"extra"}, opts: ControlOptions{JSON: true}, wantErr: ErrInvalidArguments},
+		{name: "rejects args without json", args: []string{"extra"}, wantErr: ErrInvalidArguments},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &controlSpy{catalogOutput: `{"protocol_version":19,"sessions":[]}` + "\n"}
+			got, err := cmd.Control(ctx, tt.args, tt.opts)
+			wantOutput := ""
+			if tt.wantCall != "" {
+				wantOutput = ctx.catalogOutput
+			}
+			if !errors.Is(err, tt.wantErr) || ctx.call != tt.wantCall || got.Output != wantOutput {
+				t.Fatalf("Control() call/output/error = %q/%q/%v, want %q/%q/%v", ctx.call, got.Output, err, tt.wantCall, wantOutput, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -257,6 +297,7 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 type controlSpy struct {
 	call           string
 	recoveryOutput string
+	catalogOutput  string
 }
 
 func (s *controlSpy) record(call string) error          { s.call = call; return nil }
@@ -306,6 +347,10 @@ func (s *controlSpy) ListTabs(json bool) (string, error) {
 func (s *controlSpy) ListPanes(json bool) (string, error) {
 	_ = s.record("list-panes:" + strconv.FormatBool(json))
 	return "panes", nil
+}
+func (s *controlSpy) RemoteCatalog(json bool) (string, error) {
+	_ = s.record("remote-catalog:" + strconv.FormatBool(json))
+	return s.catalogOutput, nil
 }
 
 func TestRegistryIncludesFloatingPaneToggle(t *testing.T) {

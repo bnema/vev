@@ -301,9 +301,20 @@ func BuildCommand(target, session string) CommandSpec {
 // BuildCommandForMode constructs the local ssh subprocess argv for a hidden vev
 // remote mode such as _stdio or _udp-bootstrap.
 func BuildCommandForMode(target, mode, session string) CommandSpec {
-	remote := []string{shellQuote("vev"), shellQuote(mode)}
+	remote := []string{"vev", mode}
 	if session != "" {
-		remote = append(remote, shellQuote(session))
+		remote = append(remote, session)
+	}
+	return BuildCommandForRemoteCommand(target, remote...)
+}
+
+// BuildCommandForRemoteCommand constructs ssh argv for an arbitrary remote
+// command. Every remote word is POSIX single-quoted; the target remains one
+// local argv word after the option terminator.
+func BuildCommandForRemoteCommand(target string, command ...string) CommandSpec {
+	remote := make([]string, 0, len(command))
+	for _, word := range command {
+		remote = append(remote, shellQuote(word))
 	}
 	args := []string{"--", target, strings.Join(remote, " ")}
 	return CommandSpec{Path: "ssh", Args: args}
