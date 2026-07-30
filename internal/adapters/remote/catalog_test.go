@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
@@ -217,6 +218,109 @@ func TestRemoteCatalogClientContextCanceled(t *testing.T) {
 	_, err := client.List(ctx, "arch")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("List() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRemoteCatalogClientAppliesLifetimeAndWaitDelay(t *testing.T) {
+	t.Parallel()
+
+	var commandCtx context.Context
+	var cmd *exec.Cmd
+	client := &CatalogClient{
+		command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			commandCtx = ctx
+			cmd = stdoutCmd(ctx, mustCatalogJSON(t, ports.RemoteCatalog{
+				ProtocolVersion: ports.ProtocolVersion,
+				Sessions:        []ports.RemoteCatalogSession{},
+			}))
+			return cmd
+		},
+	}
+	if _, err := client.List(context.Background(), "arch"); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	deadline, ok := commandCtx.Deadline()
+	if !ok {
+		t.Fatal("command context missing default lifetime deadline")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > catalogCommandTimeout {
+		t.Fatalf("deadline remaining = %v, want within (0, %v]", remaining, catalogCommandTimeout)
+	}
+	if cmd.WaitDelay != catalogCommandWaitDelay {
+		t.Fatalf("WaitDelay = %v, want %v", cmd.WaitDelay, catalogCommandWaitDelay)
+	}
+}
+
+func TestRemoteCatalogClientClassifiesRunContextErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		newContext func() (context.Context, context.CancelFunc)
+		timeout    time.Duration
+		cancel     bool
+		want       error
+	}{
+		{
+			name: "own deadline",
+			newContext: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			timeout: 20 * time.Millisecond,
+			want:    context.DeadlineExceeded,
+		},
+		{
+			name: "parent deadline",
+			newContext: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 20*time.Millisecond)
+			},
+			timeout: time.Minute,
+			want:    context.DeadlineExceeded,
+		},
+		{
+			name: "parent cancellation",
+			newContext: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			timeout: time.Minute,
+			cancel:  true,
+			want:    context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.newContext()
+			defer cancel()
+			started := make(chan struct{})
+			client := &CatalogClient{
+				timeout: tt.timeout,
+				command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+					close(started)
+					return exec.CommandContext(ctx, "sleep", "10")
+				},
+			}
+
+			errCh := make(chan error, 1)
+			go func() {
+				_, err := client.List(ctx, "arch")
+				errCh <- err
+			}()
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("command did not start")
+			}
+			if tt.cancel {
+				cancel()
+			}
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, tt.want) {
+					t.Fatalf("List() error = %v, want %v", err, tt.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("List() did not return after context ended")
+			}
+		})
 	}
 }
 

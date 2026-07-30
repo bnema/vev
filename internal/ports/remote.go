@@ -48,6 +48,17 @@ type RemoteCatalogSession struct {
 	Attached  bool   `json:"attached"`
 }
 
+// SaturateUint16 clamps n to the uint16 range.
+func SaturateUint16(n int) uint16 {
+	if n <= 0 {
+		return 0
+	}
+	if n >= 1<<16 {
+		return ^uint16(0)
+	}
+	return uint16(n)
+}
+
 // RemoteCatalog is the versioned JSON envelope returned by remote-catalog --json.
 type RemoteCatalog struct {
 	ProtocolVersion uint16                 `json:"protocol_version"`

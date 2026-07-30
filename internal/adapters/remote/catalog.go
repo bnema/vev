@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -21,6 +22,8 @@ import (
 const (
 	maxCatalogBytes           = 1 << 20
 	maxCatalogDiagnosticBytes = 4 << 10
+	catalogCommandTimeout     = 30 * time.Second
+	catalogCommandWaitDelay   = 500 * time.Millisecond
 )
 
 var (
@@ -35,6 +38,8 @@ var (
 // CatalogClient fetches remote session catalogs over SSH.
 type CatalogClient struct {
 	command func(ctx context.Context, name string, args ...string) *exec.Cmd
+	// timeout bounds each List when > 0; otherwise catalogCommandTimeout is used.
+	timeout time.Duration
 }
 
 var _ ports.RemoteCatalogClient = (*CatalogClient)(nil)
@@ -44,8 +49,17 @@ func NewCatalogClient() ports.RemoteCatalogClient {
 	return &CatalogClient{command: exec.CommandContext}
 }
 
+func (c *CatalogClient) listTimeout() time.Duration {
+	if c != nil && c.timeout > 0 {
+		return c.timeout
+	}
+	return catalogCommandTimeout
+}
+
 // List runs `ssh -- <target> 'vev' 'cmd' 'remote-catalog' '--json'` and decodes
-// exactly one versioned catalog envelope from stdout.
+// exactly one versioned catalog envelope from stdout. List always applies a
+// bounded command timeout derived from ctx so a caller with no deadline cannot
+// hang indefinitely, while still honoring caller cancellation.
 func (c *CatalogClient) List(ctx context.Context, target string) (ports.RemoteCatalog, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.RemoteCatalog{}, err
@@ -55,20 +69,25 @@ func (c *CatalogClient) List(ctx context.Context, target string) (ports.RemoteCa
 		return ports.RemoteCatalog{}, err
 	}
 
+	runCtx, cancel := context.WithTimeout(ctx, c.listTimeout())
+	defer cancel()
+
 	command := c.command
 	if command == nil {
 		command = exec.CommandContext
 	}
 	spec := sshstdio.BuildCommandForRemoteCommand(target, "vev", "cmd", "remote-catalog", "--json")
-	cmd := command(ctx, spec.Path, spec.Args...)
+	cmd := command(runCtx, spec.Path, spec.Args...)
 	stdout := boundedBuffer{limit: maxCatalogBytes}
 	stderr := boundedBuffer{limit: maxCatalogDiagnosticBytes}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ports.RemoteCatalog{}, ctxErr
-		}
+	cmd.WaitDelay = catalogCommandWaitDelay
+	err := cmd.Run()
+	if ctxErr := runCtx.Err(); ctxErr != nil {
+		return ports.RemoteCatalog{}, ctxErr
+	}
+	if err != nil {
 		if stdout.overflow || stderr.overflow {
 			slog.Debug("remote catalog output too large", "target", target, "stdout_limit", maxCatalogBytes, "stderr_limit", maxCatalogDiagnosticBytes)
 			return ports.RemoteCatalog{}, errCatalogTooLarge

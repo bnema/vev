@@ -616,13 +616,14 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 	}
 	e.d.mu.Unlock()
 	rows := make([]ports.RemoteCatalogSession, 0, len(sessions))
+	// Stopped sessions live in d.stopped and are intentionally not in this listing.
 	for _, sess := range sessions {
 		snap := sess.snapshotView(viewOptions{})
 		rows = append(rows, ports.RemoteCatalogSession{
 			Name:      snap.name,
-			State:     remoteCatalogState(ports.SessionRunning),
+			State:     "running",
 			Ephemeral: snap.ephemeral,
-			Tabs:      uint16(snap.tabCount),
+			Tabs:      ports.SaturateUint16(snap.tabCount),
 			Attached:  snap.attached,
 		})
 	}
@@ -631,17 +632,6 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		ProtocolVersion: ports.ProtocolVersion,
 		Sessions:        rows,
 	})
-}
-
-func remoteCatalogState(state ports.SessionState) string {
-	switch state {
-	case ports.SessionStopped:
-		return "stopped"
-	case ports.SessionBroken:
-		return "broken"
-	default:
-		return "running"
-	}
 }
 
 func (e controlExec) ListTabs(asJSON bool) (string, error) {

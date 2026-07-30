@@ -712,20 +712,24 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	require.NotContains(t, listAfter.Output, "old")
 }
 
-func TestRemoteCatalogStateMapping(t *testing.T) {
-	tests := []struct {
-		state ports.SessionState
-		want  string
-	}{
-		{state: ports.SessionRunning, want: "running"},
-		{state: ports.SessionStopped, want: "stopped"},
-		{state: ports.SessionBroken, want: "broken"},
+func TestRemoteCatalogTabCountSaturates(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	sess.mu.Lock()
+	base := sess.tabs[0]
+	sess.tabs = make([]*tab, int(^uint16(0))+1)
+	for i := range sess.tabs {
+		sess.tabs[i] = base
 	}
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			require.Equal(t, tt.want, remoteCatalogState(tt.state))
-		})
-	}
+	sess.mu.Unlock()
+
+	result := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", JSON: true})
+	require.True(t, result.OK, result.Text)
+	var catalog ports.RemoteCatalog
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
+	require.Equal(t, []ports.RemoteCatalogSession{{
+		Name: "work", State: "running", Ephemeral: true, Tabs: ^uint16(0), Attached: false,
+	}}, catalog.Sessions)
 }
 
 func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
