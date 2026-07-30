@@ -722,3 +722,159 @@ func TestPickerRowsKeepTerminalBackgroundAcrossAccentFallbacks(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoteRowsCarryStructuredIdentityAndRemainNonSelectable(t *testing.T) {
+	key := domain.RemoteSessionKey{Host: "build@mule", Name: "work"}
+	availability := []RemoteAvailability{RemoteCached, RemoteFresh, RemoteStale, RemoteVersionMismatch}
+	sessions := make([]SessionView, 0, len(availability))
+	for _, state := range availability {
+		sessions = append(sessions, SessionView{
+			ID:                 key.ID(),
+			Name:               "presentation text is not routing data",
+			Tabs:               []TabEntry{{Name: "relayed metadata is not a picker target"}},
+			RemoteKey:          &key,
+			RemoteAvailability: state,
+			RemoteDetail:       "remote state detail",
+			ConnectOnly:        true,
+			RemoteAttachReady:  false,
+		})
+	}
+
+	model := New(sessions, SelectionConfig{Mode: SelectNavigationTab})
+	require.Len(t, model.rows, len(availability), "connect-only remote rows do not synthesize tab destinations")
+	for i, pickerRow := range model.rows {
+		require.Equal(t, rowSession, pickerRow.kind)
+		require.Equal(t, key, pickerRow.remoteKey)
+		require.True(t, pickerRow.hasRemoteKey)
+		require.False(t, pickerRow.selectable, "remote state %d must remain gated in phase 5", availability[i])
+		require.True(t, pickerRow.dim, "remote state %d is visibly unavailable", availability[i])
+		wantDetail := "proxy activation pending"
+		if availability[i] == RemoteStale || availability[i] == RemoteVersionMismatch {
+			wantDetail = "remote state detail"
+		}
+		require.Equal(t, wantDetail, pickerRow.detail)
+	}
+	_, ok := model.Selected()
+	require.False(t, ok)
+	frame := model.Render(domain.Size{Cols: 80, Rows: len(availability)}, Preview{})
+	for y := range availability {
+		require.NotZero(t, frame.At(0, y).Style.Attrs&renderer.AttrDim)
+	}
+}
+
+func TestRemoteCursorIdentitySurvivesCacheToLiveUpgradeWithoutActivation(t *testing.T) {
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	cached := New([]SessionView{{
+		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteAvailability: RemoteCached,
+		ConnectOnly: true, RemoteAttachReady: false,
+	}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: key.ID()}})
+
+	cursor, ok := cached.Cursor()
+	require.True(t, ok)
+	require.Equal(t, key.ID(), cursor.Session)
+	require.Equal(t, &key, cursor.RemoteKey)
+	_, selectable := cached.Selected()
+	require.False(t, selectable, "cursor identity must not bypass the phase 5 activation gate")
+
+	live := New([]SessionView{{
+		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteAvailability: RemoteFresh,
+		ConnectOnly: true, RemoteAttachReady: false,
+	}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{
+		Session: cursor.Session, Incarnation: cursor.Incarnation, TabID: cursor.TabID, RemoteKey: cursor.RemoteKey,
+	}})
+
+	upgraded, ok := live.Cursor()
+	require.True(t, ok)
+	require.Equal(t, cursor, upgraded)
+	_, selectable = live.Selected()
+	require.False(t, selectable, "cache-to-live cursor preservation must not enable attach")
+}
+
+func TestRemoteTabsRemainNonSelectableWhileAttachmentIsGated(t *testing.T) {
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	model := New([]SessionView{{
+		ID:                 key.ID(),
+		Name:               key.Display(),
+		Tabs:               []TabEntry{{TabID: "remote-tab", Name: "metadata"}},
+		RemoteKey:          &key,
+		RemoteAvailability: RemoteFresh,
+		RemoteAttachReady:  false,
+	}}, SelectionConfig{Mode: SelectNavigationTab})
+
+	require.Len(t, model.rows, 2)
+	for _, pickerRow := range model.rows {
+		require.False(t, pickerRow.selectable)
+		require.True(t, pickerRow.dim)
+	}
+}
+
+func TestRemoteConnectOnlyTargetUsesStructuredKey(t *testing.T) {
+	key := domain.RemoteSessionKey{Host: "user@build.example", Name: "work"}
+	wantKey := key
+	model := New([]SessionView{{
+		ID:                 key.ID(),
+		Name:               "not a parseable remote display label",
+		RemoteKey:          &key,
+		RemoteAvailability: RemoteFresh,
+		ConnectOnly:        true,
+		RemoteAttachReady:  true,
+	}}, SelectionConfig{Mode: SelectNavigationTab})
+	key.Host = "mutated-after-model-construction"
+
+	got, ok := model.Selected()
+	require.True(t, ok)
+	require.Equal(t, wantKey.ID(), got.Session)
+	require.Equal(t, &wantKey, got.RemoteKey)
+	require.Equal(t, "", got.Name, "connect-only remote routing never derives a name from display text")
+}
+
+func TestRemoteRowsCannotAcceptMovesInEitherMoveMode(t *testing.T) {
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	local := SessionView{ID: "local", Name: "local", Tabs: []TabEntry{{TabID: "local-tab", Name: "local"}}}
+	availability := []struct {
+		name  string
+		state RemoteAvailability
+	}{
+		{name: "cached", state: RemoteCached},
+		{name: "fresh", state: RemoteFresh},
+		{name: "stale", state: RemoteStale},
+		{name: "version mismatch", state: RemoteVersionMismatch},
+	}
+	modes := []struct {
+		name string
+		mode SelectionMode
+	}{
+		{name: "move pane", mode: SelectMovePaneTab},
+		{name: "move tab", mode: SelectMoveTabSession},
+	}
+
+	for _, availability := range availability {
+		t.Run(availability.name, func(t *testing.T) {
+			remote := SessionView{
+				ID:                 key.ID(),
+				Name:               key.Display(),
+				Tabs:               []TabEntry{{TabID: "remote-tab", Name: "metadata"}},
+				RemoteKey:          &key,
+				RemoteAvailability: availability.state,
+				ConnectOnly:        true,
+				RemoteAttachReady:  true,
+				CannotAcceptMoves:  true,
+			}
+			for _, mode := range modes {
+				t.Run(mode.name, func(t *testing.T) {
+					model := New([]SessionView{local, remote}, SelectionConfig{Mode: mode.mode, Source: SourceFilter{Session: "source"}})
+					var remoteRow *row
+					for i := range model.rows {
+						if model.rows[i].session == key.ID() {
+							remoteRow = &model.rows[i]
+							break
+						}
+					}
+					require.NotNil(t, remoteRow)
+					require.True(t, remoteRow.dim)
+					require.False(t, remoteRow.selectable)
+				})
+			}
+		})
+	}
+}

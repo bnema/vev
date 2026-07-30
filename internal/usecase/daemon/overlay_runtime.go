@@ -16,8 +16,12 @@ import (
 type overlayRuntime struct {
 	ac *attachedClient
 
-	pickerMu                sync.Mutex
-	picker                  *picker.Model
+	pickerMu sync.Mutex
+	picker   *picker.Model
+	// pickerGeneration identifies one open lifecycle. It advances only when a
+	// picker is published, so delayed close and registration work can prove it
+	// still owns the exact lifecycle it captured.
+	pickerGeneration        uint64
 	pickerTitle             string
 	pickerIntent            pickerIntent
 	pickerSource            moveSourceLocator
@@ -26,6 +30,11 @@ type overlayRuntime struct {
 	pickerPreviewGeneration uint64
 	pickerPending           []byte
 	pickerESC               pendingByteTimer
+
+	// Deterministic lifecycle seams used by ownership race tests. Hooks run
+	// without pickerMu or remoteCatalog.mu held.
+	beforeRemotePickerRegistration func()
+	afterPickerRefreshBuild        func(*picker.Model)
 
 	paletteMu         sync.Mutex
 	palette           *palette.Model
@@ -257,6 +266,7 @@ func (d *Daemon) clearForSnatch(token attachmentRoleToken) bool {
 	}
 	previewSession := rt.pickerPreviewSession
 	previewGeneration := rt.pickerPreviewGeneration
+	pickerInstance := remotePickerInstance{ac: token.ac, generation: rt.pickerGeneration, model: rt.picker}
 	rt.picker = nil
 	rt.pickerIntent = pickerNavigate
 	rt.pickerSource = moveSourceLocator{}
@@ -270,6 +280,9 @@ func (d *Daemon) clearForSnatch(token attachmentRoleToken) bool {
 	// Subscription teardown may enter a coordinator and therefore runs outside
 	// every overlay-family lock.
 	d.teardownPreviewSubscription(token.ac, previewSession, previewGeneration)
+	if pickerInstance.model != nil {
+		d.remotePickerClosed(pickerInstance)
+	}
 
 	rt.paletteMu.Lock()
 	if !current() {

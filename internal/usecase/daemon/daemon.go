@@ -795,6 +795,7 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 }
 
 func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
+	d.cancelRemotePickerRefresh()
 	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true
@@ -970,7 +971,9 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	case ports.MsgList:
 		d.handleList(tr)
 	case ports.MsgCommand:
-		d.handleCommand(tr, first)
+		if err := d.handleCommand(tr, first); err != nil {
+			d.log.Warn("command handler failed", "err", err)
+		}
 	case ports.MsgKill:
 		d.handleKill(tr, first)
 	case ports.MsgHello:
