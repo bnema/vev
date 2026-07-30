@@ -73,7 +73,7 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 				TrueColor:         true,
 				MaxOutputInFlight: 8,
 			},
-			want: []byte{0x00, 0x01, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x02, 0x77, 0x30, 0x00, 0x50, 0x00, 0x18, 0x00, 0x0e, 0x78, 0x74, 0x65, 0x72, 0x6d, 0x2d, 0x32, 0x35, 0x36, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x0c, 0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x01, 0x01, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x02, 0x77, 0x30, 0x00, 0x50, 0x00, 0x18, 0x00, 0x0e, 0x78, 0x74, 0x65, 0x72, 0x6d, 0x2d, 0x32, 0x35, 0x36, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x0c, 0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00},
 		},
 		{
 			name: "empty strings",
@@ -86,7 +86,7 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 				Cwd:       "",
 				TrueColor: false,
 			},
-			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 	}
 
@@ -122,7 +122,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			Env:     []string{"A=B", "XY=123"},
 		})
 		want := []byte{
-			0x00, 0x13, 0x00, // version, intent
+			0x00, 0x14, 0x00, 0x00, // version, intent, proxied
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -336,7 +336,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(19), ProtocolVersion)
+	require.Equal(t, uint16(20), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -461,8 +461,10 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "minimal",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
 			want: []byte{
-				0x00, 0x13,
-				0x00,
+				0x00, 0x14,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
+				0x00, // attached
+				0x00, // self
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -482,8 +484,10 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 				JSON:          true,
 			},
 			want: []byte{
-				0x00, 0x13,
-				0x01,
+				0x00, 0x14,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
+				0x00, // attached
+				0x01, // self
 				0x00, 0x05, 't', 'o', 'a', 's', 't',
 				0x00, 0x03,
 				0x00, 0x00, 0x00, 0x02, '-', 'l',
@@ -532,7 +536,7 @@ func TestMarshalCommandRequestRejectsTooManyArguments(t *testing.T) {
 func TestCommandRequestRejectsImpossibleArgumentCount(t *testing.T) {
 	payload, err := MarshalCommandRequest(CommandRequest{Version: ProtocolVersion, Slug: "toast"})
 	require.NoError(t, err)
-	argCountOffset := 2 + 1 + 2 + len("toast")
+	argCountOffset := 2 + 8 + 1 + 1 + 2 + len("toast")
 	payload[argCountOffset] = 0xff
 	payload[argCountOffset+1] = 0xff
 
@@ -551,6 +555,7 @@ func TestCommandResultGoldenAndRoundTrip(t *testing.T) {
 			name: "error",
 			msg:  CommandResult{Code: ErrNoSuchTarget, Text: "no such session"},
 			want: []byte{
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00,
 				0x00, 0x09,
 				0x00, 0x0f, 'n', 'o', ' ', 's', 'u', 'c', 'h', ' ', 's', 'e', 's', 's', 'i', 'o', 'n',
@@ -561,6 +566,7 @@ func TestCommandResultGoldenAndRoundTrip(t *testing.T) {
 			name: "success with output",
 			msg:  CommandResult{OK: true, Text: "listed", Output: "ID\tFOCUSED\n"},
 			want: []byte{
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x01,
 				0x00, 0x00,
 				0x00, 0x06, 'l', 'i', 's', 't', 'e', 'd',
@@ -868,9 +874,9 @@ func TestHelloOutputWindowByteExactValues(t *testing.T) {
 	for _, window := range []uint8{0, 1, 8} {
 		t.Run(fmt.Sprintf("window_%d", window), func(t *testing.T) {
 			hello := Hello{Version: 14, MaxOutputInFlight: window}
-			// The empty Hello has 38 zero bytes before the negotiated output window,
+			// The empty Hello has 39 zero bytes before the negotiated output window,
 			// followed by a uint32 zero environment-entry count.
-			want := append(make([]byte, 38), window, 0, 0, 0, 0)
+			want := append(make([]byte, 39), window, 0, 0, 0, 0)
 			want[1] = 14
 			got := MarshalHello(hello)
 			requireBytesEqual(t, want, got)
@@ -887,5 +893,196 @@ func requireBytesEqual(t *testing.T, want, got []byte) {
 	t.Helper()
 	if !bytes.Equal(want, got) {
 		t.Fatalf("bytes = %#v, want %#v", got, want)
+	}
+}
+func TestProxiedHelloGoldenAndStrict(t *testing.T) {
+	msg := Hello{
+		Version:           ProtocolVersion,
+		Intent:            IntentAttach,
+		Proxied:           true,
+		ClientID:          [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		ResumeToken:       0x0102030405060708,
+		Name:              "remote",
+		Size:              domain.Size{Cols: 80, Rows: 22},
+		TermEnv:           "xterm",
+		Cwd:               "/tmp",
+		TrueColor:         true,
+		MaxOutputInFlight: 8,
+	}
+	want := []byte{
+		0x00, 0x14, 0x02, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x00, 0x06, 'r', 'e', 'm', 'o', 't', 'e',
+		0x00, 0x50, 0x00, 0x16,
+		0x00, 0x05, 'x', 't', 'e', 'r', 'm',
+		0x00, 0x04, '/', 't', 'm', 'p',
+		0x01, 0x08, 0x00, 0x00, 0x00, 0x00,
+	}
+	got := MarshalHello(msg)
+	require.Equal(t, want, got)
+	back, err := UnmarshalHello(got)
+	require.NoError(t, err)
+	require.Equal(t, msg, back)
+	assertAllPrefixesFail(t, got, UnmarshalHello)
+	assertTrailingGarbageFails(t, got, UnmarshalHello)
+
+	malformed := append([]byte(nil), got...)
+	malformed[3] = 2
+	_, err = UnmarshalHello(malformed)
+	require.Error(t, err)
+}
+
+func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  CommandRequest
+		want []byte
+	}{
+		{
+			name: "attached",
+			msg:  CommandRequest{Version: ProtocolVersion, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
+			want: []byte{
+				0x00, 0x14, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
+				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
+				0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, '-', '-', 'v', 'e', 'r', 't', 'i', 'c', 'a', 'l',
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			},
+		},
+		{
+			name: "control",
+			msg:  CommandRequest{Version: ProtocolVersion, Slug: "ls"},
+			want: []byte{
+				0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x02, 'l', 's', 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MarshalCommandRequest(tt.msg)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+			back, err := UnmarshalCommandRequest(got)
+			require.NoError(t, err)
+			require.Equal(t, tt.msg, back)
+			assertAllPrefixesFail(t, got, UnmarshalCommandRequest)
+			assertTrailingGarbageFails(t, got, UnmarshalCommandRequest)
+		})
+	}
+
+	payload, err := MarshalCommandRequest(tests[0].msg)
+	require.NoError(t, err)
+	for _, offset := range []int{10, 11, len(payload) - 1} {
+		malformed := append([]byte(nil), payload...)
+		malformed[offset] = 2
+		_, err := UnmarshalCommandRequest(malformed)
+		require.Error(t, err)
+	}
+}
+
+func TestCommandResultCorrelationGoldenAndStrict(t *testing.T) {
+	msg := CommandResult{RequestID: 0x0102030405060708, OK: true, Code: 7, Text: "ok", Output: "result"}
+	want := []byte{
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x01, 0x00, 0x07, 0x00, 0x02, 'o', 'k', 0x00, 0x00, 0x00, 0x06, 'r', 'e', 's', 'u', 'l', 't',
+	}
+	got := MarshalCommandResult(msg)
+	require.Equal(t, want, got)
+	back, err := UnmarshalCommandResult(got)
+	require.NoError(t, err)
+	require.Equal(t, msg, back)
+	assertAllPrefixesFail(t, got, UnmarshalCommandResult)
+	assertTrailingGarbageFails(t, got, UnmarshalCommandResult)
+
+	malformed := append([]byte(nil), got...)
+	malformed[8] = 2
+	_, err = UnmarshalCommandResult(malformed)
+	require.Error(t, err)
+}
+
+func TestOutputResetRequestStrict(t *testing.T) {
+	got := MarshalOutputResetRequest(OutputResetRequest{})
+	require.Empty(t, got)
+	back, err := UnmarshalOutputResetRequest(got)
+	require.NoError(t, err)
+	require.Equal(t, OutputResetRequest{}, back)
+	assertTrailingGarbageFails(t, got, UnmarshalOutputResetRequest)
+}
+
+func TestSessionMetaGoldenAndStrict(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  SessionMeta
+		want []byte
+	}{
+		{
+			name: "one unicode tab",
+			msg:  SessionMeta{SessionName: "démo", Active: 0, Tabs: []SessionTabMeta{{Index: 0, Name: "é", Attention: true}}},
+			want: []byte{0x00, 0x05, 'd', 0xc3, 0xa9, 'm', 'o', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0xc3, 0xa9, 0x01},
+		},
+		{
+			name: "multiple tabs",
+			msg:  SessionMeta{SessionName: "work", Active: 1, Tabs: []SessionTabMeta{{Index: 0, Name: "shell"}, {Index: 1, Name: "build", Attention: true}}},
+			want: []byte{0x00, 0x04, 'w', 'o', 'r', 'k', 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x05, 's', 'h', 'e', 'l', 'l', 0x00, 0x00, 0x01, 0x00, 0x05, 'b', 'u', 'i', 'l', 'd', 0x01},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MarshalSessionMeta(tt.msg)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+			back, err := UnmarshalSessionMeta(got)
+			require.NoError(t, err)
+			require.Equal(t, tt.msg, back)
+			assertAllPrefixesFail(t, got, UnmarshalSessionMeta)
+			assertTrailingGarbageFails(t, got, UnmarshalSessionMeta)
+		})
+	}
+
+	maxString := string(bytes.Repeat([]byte{'x'}, math.MaxUint16))
+	payload, err := MarshalSessionMeta(SessionMeta{SessionName: maxString, Tabs: []SessionTabMeta{{Name: maxString}}})
+	require.NoError(t, err)
+	back, err := UnmarshalSessionMeta(payload)
+	require.NoError(t, err)
+	require.Equal(t, maxString, back.SessionName)
+	require.Equal(t, maxString, back.Tabs[0].Name)
+
+	invalid := []SessionMeta{
+		{},
+		{Tabs: []SessionTabMeta{{Name: "one"}}, Active: 1},
+		{Tabs: []SessionTabMeta{{Index: 1, Name: "one"}}},
+		{Tabs: []SessionTabMeta{{Name: string(bytes.Repeat([]byte{'x'}, math.MaxUint16+1))}}, Active: 0},
+		{SessionName: string(bytes.Repeat([]byte{'x'}, math.MaxUint16+1)), Tabs: []SessionTabMeta{{Name: "one"}}},
+	}
+	for _, msg := range invalid {
+		_, err := MarshalSessionMeta(msg)
+		require.Error(t, err)
+	}
+
+	valid, err := MarshalSessionMeta(tests[1].msg)
+	require.NoError(t, err)
+	for _, tt := range []struct {
+		name      string
+		mutate    func([]byte)
+		wantError error
+	}{
+		{name: "active outside tab count", mutate: func(b []byte) { b[6] = 0; b[7] = 2 }, wantError: ErrInvalidSessionMeta},
+		// The first tab index is the uint16 at bytes 10–11, after the session
+		// name, active index, and tab count.
+		{name: "first tab index out of order", mutate: func(b []byte) { b[10] = 0; b[11] = 1 }, wantError: ErrInvalidSessionMeta},
+		{name: "attention flag malformed", mutate: func(b []byte) { b[len(b)-1] = 2 }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			malformed := append([]byte(nil), valid...)
+			tt.mutate(malformed)
+			_, err := UnmarshalSessionMeta(malformed)
+			if tt.wantError != nil {
+				require.ErrorIs(t, err, tt.wantError)
+				return
+			}
+			require.Error(t, err)
+		})
 	}
 }

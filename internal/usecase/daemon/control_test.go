@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -120,6 +124,23 @@ type actionRunnerSpy struct {
 func (s *actionRunnerSpy) Run(request daemonActionRequest) error {
 	s.requests = append(s.requests, request)
 	return s.err
+}
+
+func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	var logs bytes.Buffer
+	d.log = slog.New(slog.NewTextHandler(&logs, nil))
+	sendErr := errors.New("command result send failed")
+	tr := &commandSendErrorTransport{err: sendErr}
+
+	err := d.handleCommand(tr, commandFrame(t, ports.CommandRequest{
+		RequestID: 41,
+		Attached:  true,
+	}))
+
+	require.ErrorIs(t, err, sendErr)
+	require.Contains(t, logs.String(), "command response send failed")
+	require.True(t, tr.closed, "the failed one-shot transport must still close")
 }
 
 func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
@@ -1221,6 +1242,15 @@ func (f *controlPTYFactory) close() {
 		_ = pty.Close()
 	}
 }
+
+type commandSendErrorTransport struct {
+	err    error
+	closed bool
+}
+
+func (tr *commandSendErrorTransport) Send(ports.Frame) error  { return tr.err }
+func (*commandSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (tr *commandSendErrorTransport) Close() error            { tr.closed = true; return nil }
 
 func addControlSession(d *Daemon, name, tabID, paneID string) *session {
 	tb := newTabWithStableID(tabID, paneID, newQuietPTY(), domain.Size{Cols: 80, Rows: 22})

@@ -178,6 +178,10 @@ func (d *Daemon) touchMRU(sess *session) {
 }
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithMode(name, ephemeral, cwd, sz, term, env, false, restoredTabNames...)
+}
+
+func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, proxied bool, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
 	if _, reserved := d.creating[name]; reserved {
 		return nil, errSessionNameInUse
@@ -231,7 +235,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		}
 	}
 
-	tbSize := tabSize(sz)
+	tbSize := contentSize(sz, proxied)
 	var names []string
 	if len(restoredTabNames) > 0 {
 		names = append([]string(nil), restoredTabNames[0]...)
@@ -412,7 +416,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Unlock()
 
-	newSess, err := d.createSessionLocked(name, false, cwd, sz, term, env)
+	newSess, err := d.createSessionLockedWithMode(name, false, cwd, sz, term, env, ac.proxied)
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -478,7 +482,7 @@ func (d *Daemon) createSessionAndSwitchForRole(token attachmentRoleToken, name s
 			cwd, term, env := source.cwd, source.terminal, copyEnvironment(source.env)
 			source.mu.Unlock()
 			var createErr error
-			created, createErr = d.createSessionLocked(name, false, cwd, token.ac.size, term, env)
+			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.size, term, env, token.ac.proxied)
 			return created, createErr
 		},
 	})
@@ -500,7 +504,6 @@ func (d *Daemon) createSessionAndSwitchForRole(token attachmentRoleToken, name s
 }
 
 func (d *Daemon) createTab(sess *session, sz domain.Size) error {
-	tbSize := tabSize(sz)
 	sess.mu.Lock()
 	name := sess.name
 	cwd := sess.cwd
@@ -508,6 +511,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	term := sess.terminal
 	env := copyEnvironment(sess.env)
 	sess.mu.Unlock()
+	tbSize := contentSize(sz, client != nil && client.proxied)
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err
@@ -627,8 +631,18 @@ func (tb *tab) closeAllPanes() {
 const tabChromeRows = 2
 
 func tabSize(clientSize domain.Size) domain.Size {
+	return contentSize(clientSize, false)
+}
+
+// contentSize maps the negotiated viewport to PTY geometry. A proxied client
+// has already removed its local chrome rows, so the remote daemon must consume
+// the received size verbatim instead of subtracting chrome a second time.
+func contentSize(clientSize domain.Size, proxied bool) domain.Size {
 	if !clientSize.Valid() {
 		clientSize = defaultSize
+	}
+	if proxied {
+		return clientSize
 	}
 	rows := max(clientSize.Rows-tabChromeRows, 1)
 	return domain.Size{Cols: clientSize.Cols, Rows: rows}

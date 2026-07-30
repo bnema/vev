@@ -43,6 +43,7 @@ type capturedRenderState struct {
 	attachment         *attachedClient // identity only; never dereferenced by composition
 	lease              *attachmentLease
 	reset              bool
+	contentOnly        bool
 	layout             capturedTabLayout
 	panes              []capturedPaneRenderState
 	floating           capturedFloatingRenderState
@@ -257,7 +258,7 @@ func captureLocalPrimaryRenderState(
 	}
 	state := &scratch.state
 	*state = capturedRenderState{
-		attachment: ac, lease: lease, reset: reset, bars: bars, theme: bars.theme,
+		attachment: ac, lease: lease, reset: reset, contentOnly: ac.proxied, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
 		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},

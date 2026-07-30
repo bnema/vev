@@ -48,7 +48,10 @@ type attachedClient struct {
 	resumeCapable  bool
 	resumeToken    uint64
 	parked         bool
-	echoAck        atomic.Uint64
+	// proxied is negotiated once by Hello and remains immutable for this
+	// attachment, including across transport resume.
+	proxied bool
+	echoAck atomic.Uint64
 	// prepareFailureFallback prevents a direct fallback paint from recursively
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.
@@ -59,6 +62,10 @@ type attachedClient struct {
 	pipelineCache   composeCacheInput
 	pipelineScratch composeCacheInput
 	renderScratch   renderCaptureScratch // only touched while sendMu is held
+	// sessionMeta is the last authoritative metadata snapshot successfully sent
+	// on a proxied attachment. It is only read or written while sendMu is held.
+	sessionMeta     ports.SessionMeta
+	sessionMetaSent bool
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
@@ -454,6 +461,7 @@ type attachClientOptions struct {
 	clientID          [16]byte
 	resumeCapable     bool
 	maxOutputInFlight uint8
+	proxied           bool
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient, error) {
@@ -500,6 +508,7 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		clientID:      opts.clientID,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
+		proxied:       opts.proxied,
 	}
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
@@ -648,7 +657,7 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 	tb.mu.Unlock()
 
 	outerResizeAccepted := false
-	if clientSize.Valid() && wsz != tabSize(clientSize) {
+	if clientSize.Valid() && wsz != contentSize(clientSize, ac.proxied) {
 		if lease == nil {
 			outerResizeAccepted = d.resizeForFirstPaint(sess, ac, clientSize)
 		} else {
