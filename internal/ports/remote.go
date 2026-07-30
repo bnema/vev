@@ -15,3 +15,16 @@ const (
 type RemoteDialerFactory interface {
 	DialerForRemote(target string, session string, mode RemoteTransportMode, log *slog.Logger) (Dialer, error)
 }
+
+// RemoteHostStore persists pinned and learned remote host targets in one
+// versioned state file across processes.
+type RemoteHostStore interface {
+	// Hosts returns pinned hosts in stored order and learned hosts in lexical order.
+	Hosts() (pinned, learned []string, err error)
+	AddPinned(target string) error
+	RemovePinned(target string) error
+	Remember(target string) error
+	Forget(target string) error
+	// Remove deletes target from both pinned and learned lists atomically.
+	Remove(target string) error
+}
