@@ -27,7 +27,8 @@ var (
 // Parse reads vev's flat action = value config format. Duplicate action keys
 // are accepted with a warning; the last value wins while first-seen action order
 // is preserved for binding conflict resolution. An optional [remote] section
-// accepts enabled/remember/hosts with TOML-style true/false values.
+// accepts enabled/remember with TOML-style true/false values. A leftover hosts
+// assignment fails closed as unsupported.
 func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	cfg := domain.Defaults()
 	var warnings []domain.Warning
@@ -81,8 +82,12 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 		}
 		if section == "remote" {
 			var remoteWarnings []domain.Warning
-			cfg.Remote, remoteWarnings = parseRemoteKey(cfg.Remote, seenRemoteKeys, key, value, lineNo)
+			var remoteErr error
+			cfg.Remote, remoteWarnings, remoteErr = parseRemoteKey(cfg.Remote, seenRemoteKeys, key, value, lineNo)
 			warnings = append(warnings, remoteWarnings...)
+			if remoteErr != nil {
+				return cfg, warnings, remoteErr
+			}
 			continue
 		}
 

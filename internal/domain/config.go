@@ -139,7 +139,6 @@ func Defaults() Config {
 		Remote: RemoteConfig{
 			Enabled:  true,
 			Remember: true,
-			Hosts:    []string{},
 		},
 	}
 }

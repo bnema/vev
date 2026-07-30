@@ -75,9 +75,21 @@ code.toggle-floating-pane = FLT
 code.rename-session = RNS
 code.rename-tab = RNT
 code.detach = DET
+
+[remote]
+enabled = true
+remember = true
 ```
 
-Invalid values log a warning and resolve that setting to its default on both initial load and reload.
+Invalid values log a warning and resolve that setting to its default on both initial load and reload. A leftover `[remote] hosts = ...` assignment fails closed as unsupported; host lists are not stored in config.
+
+## Remote
+
+The optional `[remote]` section accepts only scalar booleans: `enabled` and `remember` (TOML-style `true`/`false`). Both default to `true`.
+
+`enabled = false` is a kill-switch for unified remote listing and host management. Direct `vev attach user@host[:session]` still works. `remember = false` stops learning hosts on successful attach.
+
+Host lists are not part of config. A `hosts` key under `[remote]` is a hard load error. Unrecognized remote keys log an `unknown key` warning. An unrecognized section header logs an `unknown section` warning and ignores its keys until the next section header.
 
 ## Logs and durable state
 

@@ -80,10 +80,7 @@ func TestRemoteHostConfigDefaults(t *testing.T) {
 	if !cfg.Remote.Remember {
 		t.Fatal("Defaults().Remote.Remember = false, want true")
 	}
-	if cfg.Remote.Hosts == nil {
-		t.Fatal("Defaults().Remote.Hosts = nil, want empty slice")
-	}
-	if len(cfg.Remote.Hosts) != 0 {
-		t.Fatalf("Defaults().Remote.Hosts = %v, want empty", cfg.Remote.Hosts)
+	if cfg.Remote != (RemoteConfig{Enabled: true, Remember: true}) {
+		t.Fatalf("Defaults().Remote = %#v, want Enabled=true Remember=true only", cfg.Remote)
 	}
 }
