@@ -148,11 +148,11 @@ func (s *fileHostStore) Forget(target string) error {
 	return err
 }
 
-func (s *fileHostStore) Remove(target string) error {
+func (s *fileHostStore) Remove(target string) (deleted bool, err error) {
 	if err := validateHostTarget(target); err != nil {
-		return err
+		return false, err
 	}
-	err := s.withLock(func() error {
+	err = s.withLock(func() error {
 		state, err := s.loadLocked()
 		if err != nil {
 			return err
@@ -164,12 +164,17 @@ func (s *fileHostStore) Remove(target string) error {
 		}
 		state.pinned = nextPinned
 		delete(state.learned, target)
-		return s.saveLocked(state)
+		if err := s.saveLocked(state); err != nil {
+			return err
+		}
+		deleted = true
+		return nil
 	})
 	if err != nil {
 		slog.Debug("remote host store remove failed", "path", s.path, "target", target, "err", err)
+		return false, err
 	}
-	return err
+	return deleted, nil
 }
 
 func (s *fileHostStore) withLock(fn func() error) error {

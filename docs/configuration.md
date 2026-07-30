@@ -79,9 +79,17 @@ code.detach = DET
 
 Invalid values log a warning and resolve that setting to its default on both initial load and reload.
 
+## Remote hosts
+
+Remote host commands, listing, and successful direct-attach learning are always active.
+
+`$XDG_STATE_HOME/vev/hosts.json` (or `~/.local/state/vev/hosts.json` when unset) is the only host-list location. It is versioned JSON with pinned and learned targets. `vev host add` adds a pinned target, `vev host rm` atomically removes a target from both sets, and `vev host list` shows `pinned`, `learned`, or `pinned,learned` in its `SOURCE` column. Pinned hosts keep stored order; learned-only hosts follow in lexical order. vev rejects empty targets, surrounding whitespace, and internal whitespace or control characters; SSH alias grammar is left to OpenSSH.
+
+`vev ls <host>` and `vev ls --all` run `ssh -- <host> 'vev cmd remote-catalog --json'` for each known host. OpenSSH resolves aliases and connection settings from your SSH config. Remote session names appear as `session@host`. `vev ls --all` prints local sessions first, then remote sessions in merged host order. A catalog failure is reported after the successful output with the host and error; the command exits non-zero so partial output is not mistaken for a complete inventory.
+
 ## Logs and durable state
 
-Set `VEV_LOG=debug`, `VEV_LOG=warn`, or `VEV_LOG=error` to change verbosity; the default is `info`. JSON-line logs such as `vev-daemon.log` live in `$XDG_STATE_HOME/vev`, or `~/.local/state/vev` when unset. The same state directory contains the strict session catalogue, migration journal, notices, and `snapshots/`. The lifecycle lock and socket live in `$XDG_RUNTIME_DIR/vev` (with platform runtime fallbacks).
+Set `VEV_LOG=debug`, `VEV_LOG=warn`, or `VEV_LOG=error` to change verbosity; the default is `info`. JSON-line logs such as `vev-daemon.log` live in `$XDG_STATE_HOME/vev`, or `~/.local/state/vev` when unset. The same state directory contains the strict session catalogue, migration journal, notices, `hosts.json`, and `snapshots/`. The lifecycle lock and socket live in `$XDG_RUNTIME_DIR/vev` (with platform runtime fallbacks).
 
 Recovery events include `lifecycle_owner_wait`, `lifecycle_owner_acquired`, `lifecycle_owner_released`, `catalogue_validated`, `catalogue_compaction_recovery_complete`, `session_restore_complete`, `fallback_checkpoint_promoted`, `snapshot_head_repair_complete`, `session_degraded`, `snapshot_maintenance_progress`, `interrupted_transaction_recovery_complete`, and `daemon_startup_complete`.
 

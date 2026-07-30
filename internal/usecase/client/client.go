@@ -134,6 +134,11 @@ const sendQueueDepth = 64
 // accepted the attach. Mosh uses the same 15-second startup budget.
 const preWelcomeTimeout = 15 * time.Second
 
+// remoteHostLearnerShutdownTimeout bounds how long Run waits for async remote
+// host learning after terminal restoration. Learning is best-effort; a stalled
+// learner must not block shell prompt return indefinitely.
+const remoteHostLearnerShutdownTimeout = time.Second
+
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -144,12 +149,13 @@ const (
 
 // Dependencies supplies the collaborators required by a Runner.
 type Dependencies struct {
-	Dialer          ports.Dialer
-	Terminal        ports.Terminal
-	Clock           ports.Clock
-	Clipboard       ports.ClipboardReader
-	Logger          *slog.Logger
-	RuntimeObserver ports.SerializedRuntimeObserver
+	Dialer            ports.Dialer
+	Terminal          ports.Terminal
+	Clock             ports.Clock
+	Clipboard         ports.ClipboardReader
+	Logger            *slog.Logger
+	RuntimeObserver   ports.SerializedRuntimeObserver
+	RemoteHostLearner ports.RemoteHostLearner
 }
 
 // AttachRequest identifies the session and transport mode for one client run.
@@ -161,12 +167,13 @@ type AttachRequest struct {
 
 // Runner owns the client lifecycle across one or more attachment attempts.
 type Runner struct {
-	dialer          ports.Dialer
-	term            ports.Terminal
-	clock           ports.Clock
-	clipboard       ports.ClipboardReader
-	logger          *slog.Logger
-	runtimeObserver ports.SerializedRuntimeObserver
+	dialer            ports.Dialer
+	term              ports.Terminal
+	clock             ports.Clock
+	clipboard         ports.ClipboardReader
+	logger            *slog.Logger
+	runtimeObserver   ports.SerializedRuntimeObserver
+	remoteHostLearner ports.RemoteHostLearner
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -179,12 +186,13 @@ func NewRunner(deps Dependencies) *Runner {
 		log = slog.Default()
 	}
 	return &Runner{
-		dialer:          deps.Dialer,
-		term:            deps.Terminal,
-		clock:           deps.Clock,
-		clipboard:       deps.Clipboard,
-		logger:          log,
-		runtimeObserver: deps.RuntimeObserver,
+		dialer:            deps.Dialer,
+		term:              deps.Terminal,
+		clock:             deps.Clock,
+		clipboard:         deps.Clipboard,
+		logger:            log,
+		runtimeObserver:   deps.RuntimeObserver,
+		remoteHostLearner: deps.RemoteHostLearner,
 	}
 }
 
@@ -217,13 +225,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 
 	var restore func() error
 	rawEntered := false
-	defer func() {
-		if rawEntered {
-			if rerr := restore(); rerr != nil && retErr == nil {
-				retErr = fmt.Errorf("vev: restoring terminal: %w", rerr)
-			}
-		}
-	}()
 	enterRaw := func() error {
 		if rawEntered {
 			return nil
@@ -242,6 +243,48 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	attemptRequest := request
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
+	var rememberOnce sync.Once
+	var rememberWG sync.WaitGroup
+	var learnerStarted bool
+	rememberRemoteHost := func() {
+		if r.remoteHostLearner == nil {
+			return
+		}
+		rememberOnce.Do(func() {
+			learnerStarted = true
+			rememberWG.Add(1)
+			go func() {
+				defer rememberWG.Done()
+				if err := r.remoteHostLearner.RememberRemoteHost(); err != nil {
+					r.logger.Warn("remembering remote host failed", "err", err)
+				}
+			}()
+		})
+	}
+	defer func() {
+		if !learnerStarted {
+			return
+		}
+		done := make(chan struct{})
+		go func() {
+			rememberWG.Wait()
+			close(done)
+		}()
+		timer := r.clock.NewTimer(remoteHostLearnerShutdownTimeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C():
+			r.logger.Warn("remote host learner stalled past shutdown timeout")
+		}
+	}()
+	defer func() {
+		if rawEntered {
+			if rerr := restore(); rerr != nil && retErr == nil {
+				retErr = fmt.Errorf("vev: restoring terminal: %w", rerr)
+			}
+		}
+	}()
 	reconnect := &reconnectUI{
 		term:       r.term,
 		remote:     request.Remote,
@@ -299,16 +342,17 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			linkEvents = reporter.LinkEvents()
 		}
 		result := (&attachAttempt{
-			runner:      r,
-			transport:   transport,
-			request:     attemptRequest,
-			resumeToken: resumeToken,
-			clientID:    processClientID,
-			milestones:  &ms,
-			themeState:  themeState,
-			enterRaw:    enterRaw,
-			reconnect:   reconnect,
-			linkEvents:  linkEvents,
+			runner:             r,
+			transport:          transport,
+			request:            attemptRequest,
+			resumeToken:        resumeToken,
+			clientID:           processClientID,
+			milestones:         &ms,
+			themeState:         themeState,
+			enterRaw:           enterRaw,
+			reconnect:          reconnect,
+			linkEvents:         linkEvents,
+			rememberRemoteHost: rememberRemoteHost,
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
@@ -473,17 +517,18 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 }
 
 type attachAttempt struct {
-	runner        *Runner
-	transport     ports.Transport
-	request       AttachRequest
-	resumeToken   uint64
-	clientID      [16]byte
-	milestones    *milestones
-	themeState    *terminalThemeState
-	enterRaw      func() error
-	reconnect     *reconnectUI
-	linkEvents    <-chan ports.LinkEvent
-	terminalInput func() *terminalInputPump
+	runner             *Runner
+	transport          ports.Transport
+	request            AttachRequest
+	resumeToken        uint64
+	clientID           [16]byte
+	milestones         *milestones
+	themeState         *terminalThemeState
+	enterRaw           func() error
+	reconnect          *reconnectUI
+	linkEvents         <-chan ports.LinkEvent
+	rememberRemoteHost func()
+	terminalInput      func() *terminalInputPump
 }
 
 type attachResult struct {
@@ -636,6 +681,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		name = welcome.SessionName
 		ms.welcomed = true
 		log.Debug("welcomed by daemon", "resume_token_present", resumeToken != 0)
+		if remote {
+			if remember := a.rememberRemoteHost; remember != nil {
+				remember()
+			}
+		}
 	case ports.MsgError:
 		em, derr := ports.UnmarshalErrorMsg(reply.Payload)
 		if derr != nil {

@@ -229,12 +229,16 @@ func TestHostStore(t *testing.T) {
 		if err := store.Forget("missing"); err != nil {
 			t.Fatalf("Forget(missing) error = %v", err)
 		}
-		if err := store.Remove("missing"); err != nil {
+		if deleted, err := store.Remove("missing"); err != nil {
 			t.Fatalf("Remove(missing) error = %v", err)
+		} else if deleted {
+			t.Fatal("Remove(missing) deleted = true, want false")
 		}
 
-		if err := store.Remove("arch"); err != nil {
+		if deleted, err := store.Remove("arch"); err != nil {
 			t.Fatalf("Remove(arch) error = %v", err)
+		} else if !deleted {
+			t.Fatal("Remove(arch) deleted = false, want true")
 		}
 		pinned, learned, err := store.Hosts()
 		if err != nil {
@@ -278,7 +282,7 @@ func TestHostStore(t *testing.T) {
 		if err := store.Remember("arch"); err == nil {
 			t.Fatal("Remember() error = nil, want malformed error")
 		}
-		if err := store.Remove("arch"); err == nil {
+		if _, err := store.Remove("arch"); err == nil {
 			t.Fatal("Remove() error = nil, want malformed error")
 		}
 
@@ -446,7 +450,7 @@ func TestHostStore(t *testing.T) {
 			if err := store.Remember(target); err == nil {
 				t.Fatalf("Remember(%q) error = nil, want validation error", target)
 			}
-			if err := store.Remove(target); err == nil {
+			if _, err := store.Remove(target); err == nil {
 				t.Fatalf("Remove(%q) error = nil, want validation error", target)
 			}
 		}

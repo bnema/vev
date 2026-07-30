@@ -60,6 +60,7 @@ type cmdKind int
 const (
 	kindAttach cmdKind = iota // ephemeral/new/attach — distinguished by intent
 	kindList
+	kindHost
 	kindKill
 	kindCmd
 	kindDaemon
@@ -78,6 +79,10 @@ type command struct {
 	intent       uint8
 	name         string
 	remoteTarget string
+	listHost     string
+	listAll      bool
+	hostAction   string
+	hostTarget   string
 	killAll      bool
 	killDaemon   bool
 	cmd          cmdInvocation
@@ -101,7 +106,12 @@ usage:
   vev attach <name>   attach to an existing session (alias: a)
   vev attach user@host[:session]
                       attach through SSH to a remote vev daemon
-  vev ls              list sessions
+  vev ls              list local sessions
+  vev ls <host>       list sessions on a known remote host
+  vev ls --all        list local and remote sessions
+  vev host add <host> add a pinned remote host
+  vev host rm <host>  remove a pinned remote host
+  vev host list       list known remote hosts
   vev kill <name>     kill a session
   vev kill --all      kill all sessions and stop the daemon
   vev kill --daemon   stop the active vev daemon
@@ -206,7 +216,9 @@ func parseArgs(args []string) (command, error) {
 		}
 		return cmd, nil
 	case "ls", "list":
-		return command{kind: kindList}, nil
+		return parseListArgs(args[1:])
+	case "host":
+		return parseHostArgs(args[1:])
 	case "cmd":
 		invocation, err := parseCmdArgs(args[1:])
 		if err != nil {
@@ -263,7 +275,9 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindUDPProxy:
 		return runUDPProxy(ctx, cmd.name, os.Stdout)
 	case kindList:
-		return runList(ctx)
+		return runList(ctx, cmd)
+	case kindHost:
+		return runHostCommand(ctx, cmd, defaultRemoteHostDeps())
 	case kindKill:
 		return runKill(ctx, cmd.name, cmd.killAll, cmd.killDaemon)
 	case kindCmd:
@@ -272,6 +286,53 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runAttach(ctx, cmd.intent, cmd.name, cmd.remoteTarget)
 	default:
 		return usagef("unhandled command")
+	}
+}
+
+func parseListArgs(args []string) (command, error) {
+	if len(args) == 0 {
+		return command{kind: kindList}, nil
+	}
+	if len(args) > 1 {
+		return command{}, usagef("`ls` accepts at most one host or --all")
+	}
+	switch args[0] {
+	case "--all":
+		return command{kind: kindList, listAll: true}, nil
+	default:
+		if strings.HasPrefix(args[0], "-") {
+			return command{}, usagef("unknown flag %q for `ls`", args[0])
+		}
+		if err := domain.ValidateRemoteHostTarget(args[0]); err != nil {
+			return command{}, err
+		}
+		return command{kind: kindList, listHost: args[0]}, nil
+	}
+}
+
+func parseHostArgs(args []string) (command, error) {
+	if len(args) == 0 {
+		return command{}, usagef("`host` requires add, rm, or list")
+	}
+	switch args[0] {
+	case hostActionAdd, hostActionRm:
+		if len(args) < 2 || args[1] == "" {
+			return command{}, usagef("`host %s` requires a host target", args[0])
+		}
+		if len(args) > 2 {
+			return command{}, usagef("`host %s` accepts exactly one host target", args[0])
+		}
+		if err := domain.ValidateRemoteHostTarget(args[1]); err != nil {
+			return command{}, err
+		}
+		return command{kind: kindHost, hostAction: args[0], hostTarget: args[1]}, nil
+	case hostActionList:
+		if len(args) > 1 {
+			return command{}, usagef("`host list` accepts no arguments")
+		}
+		return command{kind: kindHost, hostAction: hostActionList}, nil
+	default:
+		return command{}, usagef("unknown host action %q", args[0])
 	}
 }
 
@@ -678,6 +739,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 		createDetached:          createDetachedLocalSession,
 		clipboard:               clipboard.New(),
 		runtimeObserver:         observer,
+		stateDir:                platform.StateDir,
 	})
 }
 
@@ -703,6 +765,9 @@ type runAttachDeps struct {
 	// Only used for the remote-dialer branch below; local attaches never
 	// intercept Ctrl+V regardless of this field.
 	clipboard ports.ClipboardReader
+	// Optional remote-learning seams.
+	stateDir  func() string
+	hostStore ports.RemoteHostStore
 }
 
 func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error) {
@@ -745,12 +810,13 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			return err
 		}
 		return runClient(ctx, client.Dependencies{
-			Dialer:          dialer,
-			Terminal:        term.New(),
-			Clock:           clock.New(),
-			Clipboard:       deps.clipboard,
-			Logger:          log,
-			RuntimeObserver: deps.runtimeObserver,
+			Dialer:            dialer,
+			Terminal:          term.New(),
+			Clock:             clock.New(),
+			Clipboard:         deps.clipboard,
+			Logger:            log,
+			RuntimeObserver:   deps.runtimeObserver,
+			RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
 		}, client.AttachRequest{Intent: intent, SessionName: name, Remote: true})
 	}
 
@@ -1287,20 +1353,35 @@ func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger
 }
 
 // runList prints the daemon's session listing. With no daemon running, it
-// falls back to the persisted stopped-session records.
-func runList(ctx context.Context) (retErr error) {
+// falls back to the persisted stopped-session records. Remote forms list one
+// known host or local+remote when --all is set.
+func runList(ctx context.Context, cmd command) (retErr error) {
+	if cmd.listAll || cmd.listHost != "" {
+		return runRemoteList(ctx, cmd, defaultRemoteHostDeps())
+	}
+	sessions, err := listLocalSessions(ctx)
+	if sessions != nil {
+		printSessions(os.Stdout, sessions)
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func listLocalSessions(ctx context.Context) (_ []ports.SessionInfo, retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
-		return fmt.Errorf("vev: waiting for durable session state: %w", err)
+		return nil, fmt.Errorf("vev: waiting for durable session state: %w", err)
 	}
 	if owner != nil {
 		defer joinLifecycleReleaseError(&retErr, owner)
 		records, loadErr := persist.LoadReadOnly(platform.StateDir())
 		if loadErr != nil {
 			if errors.Is(loadErr, persist.ErrCatalogueUnreadable) {
-				return unreadableCatalogueError(platform.StateDir())
+				return nil, unreadableCatalogueError(platform.StateDir())
 			}
-			return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
+			return nil, fmt.Errorf("vev: reading stored sessions: %w", loadErr)
 		}
 		infos := make([]ports.SessionInfo, 0, len(records))
 		for _, r := range records {
@@ -1310,31 +1391,36 @@ func runList(ctx context.Context) (retErr error) {
 			}
 			infos = append(infos, ports.SessionInfo{Name: r.Name, State: state})
 		}
-		printSessions(os.Stdout, infos)
-		return nil
+		return infos, nil
 	}
 	defer func() { _ = transport.Close() }()
 
 	if err := transport.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}); err != nil {
-		return fmt.Errorf("vev: requesting session list: %w", err)
+		return nil, fmt.Errorf("vev: requesting session list: %w", err)
 	}
 	reply, err := transport.Recv()
 	if err != nil {
-		return fmt.Errorf("vev: reading session list: %w", err)
+		return nil, fmt.Errorf("vev: reading session list: %w", err)
 	}
+	return decodeSessionListReply(reply)
+}
+
+func decodeSessionListReply(reply ports.Frame) ([]ports.SessionInfo, error) {
 	if reply.Type == ports.MsgError {
-		em, _ := ports.UnmarshalErrorMsg(reply.Payload)
-		return fmt.Errorf("vev: %s", em.Text)
+		em, err := ports.UnmarshalErrorMsg(reply.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("vev: decoding error reply: %w", err)
+		}
+		return nil, fmt.Errorf("vev: %s", em.Text)
 	}
 	if reply.Type != ports.MsgSessions {
-		return fmt.Errorf("vev: unexpected reply type %d to list", reply.Type)
+		return nil, fmt.Errorf("vev: unexpected reply type %d to list", reply.Type)
 	}
 	sessions, err := ports.UnmarshalSessions(reply.Payload)
 	if err != nil {
-		return fmt.Errorf("vev: decoding session list: %w", err)
+		return nil, fmt.Errorf("vev: decoding session list: %w", err)
 	}
-	printSessions(os.Stdout, sessions.Sessions)
-	return nil
+	return sessions.Sessions, nil
 }
 
 // printSessions renders a session table (or a friendly note when empty).
