@@ -26,9 +26,161 @@ func (d *Daemon) nextResumeTokenLocked() uint64 {
 			continue
 		}
 		if _, exists := d.parked[tok]; !exists {
-			return tok
+			if _, parking := d.parking[tok]; !parking {
+				return tok
+			}
 		}
 	}
+}
+
+// markParkingInFlight publishes an observable parking lifecycle so IntentResume
+// can wait out the detach→park gap. Callers must publish this before clearing
+// the live seat so resume never observes both registries empty for a still-valid
+// credential. Under d.mu then sess.mu it advertises only when the daemon still
+// registers the exact session and ac is still the exact active or snatched
+// owner; otherwise it returns 0 and never creates a marker after terminal
+// cleanup. Returns the resume token, or 0 when parking cannot be advertised.
+func (d *Daemon) markParkingInFlight(sess *session, ac *attachedClient) uint64 {
+	if sess == nil || ac == nil || !ac.resumeCapable {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closing || d.sessions[sess.id] != sess {
+		return 0
+	}
+	sess.mu.Lock()
+	role := sess.attachmentRoleLocked(ac)
+	owner := role == attachmentActive || role == attachmentSnatched
+	sess.mu.Unlock()
+	if !owner {
+		return 0
+	}
+	if ac.resumeToken == 0 {
+		ac.resumeToken = d.nextResumeTokenLocked()
+	}
+	d.ensureParkingInFlightLocked(sess, ac)
+	d.log.Info("parking in flight", "session", sess.name)
+	return ac.resumeToken
+}
+
+// ensureParkingInFlightLocked records or refreshes the in-flight marker for ac.
+// Caller holds d.mu and has verified the daemon is not closing.
+func (d *Daemon) ensureParkingInFlightLocked(sess *session, ac *attachedClient) {
+	token := ac.resumeToken
+	if token == 0 {
+		return
+	}
+	if existing := d.parking[token]; existing != nil {
+		if existing.ac == ac {
+			existing.sess = sess
+			return
+		}
+		delete(d.parking, token)
+		existing.closeDone()
+	}
+	d.parking[token] = &parkingAttachment{
+		sess: sess,
+		ac:   ac,
+		done: make(chan struct{}),
+	}
+}
+
+func (d *Daemon) clearParkingInFlight(token uint64, ac *attachedClient) {
+	if token == 0 {
+		return
+	}
+	d.mu.Lock()
+	d.clearParkingInFlightLocked(token, ac)
+	d.mu.Unlock()
+}
+
+// clearParkingInFlightIfAbandoned drops a pre-detach parking marker when this
+// teardown lost the seat while still the live owner (stale transport fence for
+// active or snatched). If another path already detached/unrouted, that path
+// owns park publication.
+func (d *Daemon) clearParkingInFlightIfAbandoned(sess *session, ac *attachedClient, token uint64) {
+	if token == 0 || ac == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.parked[token] != nil {
+		return
+	}
+	stillOwner := false
+	if sess != nil {
+		sess.mu.Lock()
+		role := sess.attachmentRoleLocked(ac)
+		stillOwner = role == attachmentActive || role == attachmentSnatched
+		sess.mu.Unlock()
+	}
+	if !stillOwner {
+		return
+	}
+	d.clearParkingInFlightLocked(token, ac)
+}
+
+func (d *Daemon) clearParkingInFlightLocked(token uint64, ac *attachedClient) {
+	pending := d.parking[token]
+	if pending == nil {
+		return
+	}
+	if ac != nil && pending.ac != ac {
+		return
+	}
+	delete(d.parking, token)
+	pending.closeDone()
+}
+
+func (d *Daemon) purgeAllParkingLocked() {
+	for token, pending := range d.parking {
+		delete(d.parking, token)
+		pending.closeDone()
+	}
+}
+
+// purgeParkingForSessionLocked removes and closes every in-flight parking
+// marker for sess so same-token waiters fail closed instead of hanging when
+// the session is removed before park publication. Caller holds d.mu.
+func (d *Daemon) purgeParkingForSessionLocked(sess *session) {
+	for token, pending := range d.parking {
+		if pending.sess == sess {
+			delete(d.parking, token)
+			pending.closeDone()
+		}
+	}
+}
+
+// waitParkingInFlight waits for an identified same-client parking publication
+// to finish. Returns true when a matching in-flight entry was observed.
+// Unknown and mismatched credentials return false without waiting.
+func (d *Daemon) waitParkingInFlight(h ports.Hello) bool {
+	if h.ResumeToken == 0 {
+		return false
+	}
+	d.mu.Lock()
+	pending := d.parking[h.ResumeToken]
+	if pending == nil {
+		d.mu.Unlock()
+		return false
+	}
+	if pending.ac.clientID != h.ClientID {
+		d.mu.Unlock()
+		return false
+	}
+	if h.Name != "" && pending.sess != nil && pending.sess.name != h.Name {
+		d.mu.Unlock()
+		return false
+	}
+	done := pending.done
+	d.mu.Unlock()
+	d.log.Info("resume waiting for in-flight parking", "session", h.Name)
+	if d.afterParkingWaitArmed != nil {
+		d.afterParkingWaitArmed()
+	}
+	<-done
+	return true
 }
 
 func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
@@ -43,6 +195,10 @@ func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
 	if ac.resumeToken == 0 {
 		ac.resumeToken = d.nextResumeTokenLocked()
 	}
+	// Do not recreate parking markers here: post-detach publication races
+	// terminal session removal and can strand IntentResume waiters. Callers
+	// that need the detach→park gap advertised must markParkingInFlight while
+	// still the exact live owner. Direct parkAttachment still parks below.
 	d.log.Info("parking client prepared", "session", sess.name)
 	return true
 }
@@ -62,6 +218,7 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 	ac.clearCaptureFrames()
 	d.mu.Lock()
 	if d.closing || d.sessions[sess.id] != sess {
+		d.clearParkingInFlightLocked(ac.resumeToken, ac)
 		d.mu.Unlock()
 		return false
 	}
@@ -90,6 +247,7 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 	parked := &parkedAttachment{sess: sess, ac: ac, role: role, timer: timer, done: make(chan struct{})}
 	ac.parked = true
 	d.parked[token] = parked
+	d.clearParkingInFlightLocked(token, ac)
 	d.mu.Unlock()
 	if oldRetirement != nil {
 		finishParkedAttachmentRetirements([]parkedAttachmentRetirement{*oldRetirement})
@@ -205,6 +363,103 @@ func finishParkedAttachmentRetirements(retirements []parkedAttachmentRetirement)
 	}
 }
 
+// resumeLiveAttachment recovers a nonzero resume credential that still belongs
+// to the named session's active attachment because transport teardown has not
+// parked it yet. Only the exact live owner (same session, token, and client ID)
+// is accepted; arbitrary unknown tokens stay fail-closed.
+func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+	d.mu.Lock()
+	if d.closing {
+		d.mu.Unlock()
+		return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+	}
+	// Teardown may have parked the credential already.
+	if d.parked[h.ResumeToken] != nil {
+		d.mu.Unlock()
+		return d.resumeParked(h, tr, sz)
+	}
+	sess := d.findByNameLocked(h.Name)
+	var (
+		ac              *attachedClient
+		oldSnap         transportSnapshot
+		credentialMatch bool
+		clientMismatch  bool
+	)
+	if sess != nil {
+		sess.mu.Lock()
+		ac = sess.client
+		// resumeToken writes run under d.mu; read the live credential here
+		// before releasing the daemon lock, then revalidate via the exact
+		// transport incarnation through detachIfCurrentTransport.
+		if ac != nil && ac.resumeCapable && ac.resumeToken == h.ResumeToken {
+			if ac.clientID != h.ClientID {
+				clientMismatch = true
+			} else {
+				oldSnap = ac.transportSnapshot()
+				credentialMatch = oldSnap.transport != nil
+			}
+		}
+		sess.mu.Unlock()
+	}
+	// Teardown may have parked the credential while we resolved the session.
+	if d.parked[h.ResumeToken] != nil {
+		d.mu.Unlock()
+		return d.resumeParked(h, tr, sz)
+	}
+	d.mu.Unlock()
+
+	if clientMismatch {
+		d.log.Warn("resume rejected", "session", sess.name, "err", "client id mismatch")
+		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+	}
+	if !credentialMatch {
+		// Detach may have won and not published parked yet; wait out that gap
+		// for the exact same-client credential, then try the parked path.
+		_ = d.waitParkingInFlight(h)
+		return d.resumeParked(h, tr, sz)
+	}
+
+	if d.beforeMarkParkingInFlight != nil {
+		d.beforeMarkParkingInFlight()
+	}
+	// Advertise parking before detach so a concurrent same-token resume never
+	// observes both the live seat and parking/parked registries empty. Late
+	// publication after terminal detach/session removal returns 0.
+	parkingToken := d.markParkingInFlight(sess, ac)
+	if !d.detachIfCurrentTransport(sess, ac, oldSnap) {
+		d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
+		// A newer owner, rebound link, or teardown won; wait if teardown is
+		// still publishing the park, then try the parked path.
+		_ = d.waitParkingInFlight(h)
+		return d.resumeParked(h, tr, sz)
+	}
+	if d.afterResumeLiveDetach != nil {
+		d.afterResumeLiveDetach()
+	}
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteDetach(ac)
+	}
+	d.unregisterPreview(ac)
+	if !d.parkAttachment(sess, ac) {
+		// Detach already published; retire the captured link exactly once so
+		// shutdown cannot leave an orphaned open transport with no owner.
+		d.clearParkingInFlight(ac.resumeToken, ac)
+		d.resetScreenDefaultColors(sess)
+		ac.clearPreviousSession()
+		_ = ac.closeCapturedTransport(ac.revokeTransport(oldSnap.transport))
+		d.mu.Lock()
+		closing := d.closing
+		d.mu.Unlock()
+		if closing {
+			return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		}
+		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+	}
+	_ = ac.closeCapturedTransport(oldSnap.transport)
+	d.log.Info("live resume credential parked for reconnect", "session", sess.name)
+	return d.resumeParked(h, tr, sz)
+}
+
 // resumeParked acquires the parked client's output lock before the daemon
 // registry lock, preserving the global sendMu > Daemon.mu ordering. The parked
 // entry is revalidated after both locks are held because it may expire between
@@ -218,6 +473,9 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 	}
 
 	ac := parked.ac
+	if d.beforeResumeParkedSendMu != nil {
+		d.beforeResumeParkedSendMu()
+	}
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	d.mu.Lock()

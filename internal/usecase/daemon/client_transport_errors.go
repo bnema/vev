@@ -5,11 +5,25 @@ import "github.com/bnema/vev/internal/ports"
 // clientGone detaches ac if it is still the session's current client. The
 // session remains registered and headless after the client is gone.
 func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
-	if failed != nil && !ac.currentTransportIs(failed) {
-		return // stale connection loop; a newer transport owns this client
+	expected := transportSnapshot{}
+	if failed != nil {
+		expected = ac.transportSnapshot()
+		if expected.transport != failed {
+			return // stale connection loop; a newer transport owns this client
+		}
 	}
-	if !d.detachIfCurrent(sess, ac) {
-		return // already displaced by a newer client; nothing to do
+	// Advertise parking before detach so IntentResume never observes both the
+	// live seat and parking/parked registries empty for a still-valid token.
+	var parkingToken uint64
+	if !explicit {
+		parkingToken = d.markParkingInFlight(sess, ac)
+	}
+	if d.beforeClientGoneDetach != nil {
+		d.beforeClientGoneDetach()
+	}
+	if !d.detachIfCurrentTransport(sess, ac, expected) {
+		d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
+		return // displaced, or the link was rebound after the precheck
 	}
 	d.finishClientGone(sess, ac, failed, explicit)
 }
@@ -20,7 +34,12 @@ func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) boo
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
+	var parkingToken uint64
+	if !explicit {
+		parkingToken = d.markParkingInFlight(token.sess, token.ac)
+	}
 	if !d.detachIfRoleCurrent(token) {
+		d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
 		return false
 	}
 	d.finishClientGone(token.sess, token.ac, token.transport.transport, explicit)
@@ -28,6 +47,9 @@ func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) boo
 }
 
 func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	if d.afterClientGoneDetach != nil {
+		d.afterClientGoneDetach()
+	}
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
@@ -48,6 +70,10 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		d.log.Info("client parked", "session", sess.name)
 		return
 	}
+	// Explicit winners (and non-explicit park failures) must drop any same-
+	// attachment parking marker left by a raced non-explicit teardown so
+	// IntentResume waiters are not stranded on a never-published park.
+	d.clearParkingInFlight(ac.resumeToken, ac)
 
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()
@@ -65,12 +91,19 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 // detachOnSendError drops a client whose transport failed, leaving the session
 // registered and headless.
 func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed ports.Transport) {
-	if failed != nil && !ac.currentTransportIs(failed) {
+	expected := transportSnapshot{}
+	if failed != nil {
+		expected = ac.transportSnapshot()
+		if expected.transport != failed {
+			return
+		}
+	}
+	parkingToken := d.markParkingInFlight(sess, ac)
+	if d.detachIfCurrentTransport(sess, ac, expected) {
+		d.finishSendErrorDetach(sess, ac, failed)
 		return
 	}
-	if d.detachIfCurrent(sess, ac) {
-		d.finishSendErrorDetach(sess, ac, failed)
-	}
+	d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
 }
 
 func (d *Daemon) detachOnRoleSendError(token attachmentRoleToken, failed ports.Transport) {
@@ -81,9 +114,12 @@ func (d *Daemon) detachOnRoleSendErrorUntil(token attachmentRoleToken, failed po
 	if failed != token.transport.transport {
 		return
 	}
+	parkingToken := d.markParkingInFlight(token.sess, token.ac)
 	if d.detachIfRoleCurrentUntil(token, done) {
 		d.finishSendErrorDetach(token.sess, token.ac, failed)
+		return
 	}
+	d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
 }
 
 // reserveRoleSendErrorCleanup accounts for cleanup before End releases the
@@ -117,6 +153,7 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 		d.log.Warn("parked client after send error", "session", sess.name)
 		return
 	}
+	d.clearParkingInFlight(ac.resumeToken, ac)
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()
 	_ = ac.closeCapturedTransport(failed)

@@ -37,21 +37,43 @@ func (d *Daemon) unrouteSnatchedAttachment(token attachmentRoleToken, terminal b
 	}
 	token.ac.setSession(nil)
 	token.ac.clearCaptureFrames()
+	if terminal {
+		// A losing park path may have published a same-attachment marker before
+		// this terminal unroute won. Retire only that attachment's marker so
+		// waiters fail closed instead of hanging; park paths (terminal=false)
+		// keep the marker until parkAttachmentAs or abandonment cleanup.
+		d.clearParkingInFlight(token.ac.resumeToken, token.ac)
+	}
 	return true
 }
 
 // parkSnatchedAttachment removes only the exact lost snatched incarnation and
 // retains its resume identity for a role-preserving reconnect.
 func (d *Daemon) parkSnatchedAttachment(token attachmentRoleToken) bool {
-	if token.ac == nil || !token.ac.resumeCapable || !d.unrouteSnatchedAttachment(token, false) {
+	if token.ac == nil || !token.ac.resumeCapable {
 		return false
 	}
+	// Advertise parking before unroute so IntentResume never observes both the
+	// snatched seat and parking/parked registries empty for a still-valid token.
+	parkingToken := d.markParkingInFlight(token.sess, token.ac)
+	if !d.unrouteSnatchedAttachment(token, false) {
+		d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
+		return false
+	}
+	if d.afterSnatchedUnrouteBeforePark != nil {
+		d.afterSnatchedUnrouteBeforePark()
+	}
 	if d.parkAttachmentAs(token.sess, token.ac, attachmentSnatched) {
-		_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+		captured := token.transport.transport
+		_ = token.ac.revokeTransport(captured)
+		_ = token.ac.closeCapturedTransport(captured)
 		return true
 	}
+	d.clearParkingInFlight(parkingToken, token.ac)
 	token.ac.clearPreviousSession()
-	_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+	captured := token.transport.transport
+	_ = token.ac.revokeTransport(captured)
+	_ = token.ac.closeCapturedTransport(captured)
 	return false
 }
 
@@ -85,6 +107,13 @@ func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken)
 		return false
 	}
 
+	// Advertise parking before ownership removal so IntentResume can wait out
+	// the unroute→park gap for a still-valid snatched credential.
+	var parkingToken uint64
+	if token.ac.resumeCapable {
+		parkingToken = d.markParkingInFlight(token.sess, token.ac)
+	}
+
 	// The frozen gate prevents a promotion from publishing between overlay
 	// cleanup and terminal registry publication.
 	d.clearForSnatch(token)
@@ -102,17 +131,26 @@ func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken)
 	token.sess.mu.Unlock()
 	d.notices.routingMu.Unlock()
 	if !current {
+		d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
 		return false
 	}
 
 	token.ac.setSession(nil)
+	if d.afterSnatchedUnrouteBeforePark != nil {
+		d.afterSnatchedUnrouteBeforePark()
+	}
 	if token.ac.resumeCapable && d.parkAttachmentAs(token.sess, token.ac, attachmentSnatched) {
-		_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+		captured := token.transport.transport
+		_ = token.ac.revokeTransport(captured)
+		_ = token.ac.closeCapturedTransport(captured)
 		token.ac.clearSnatchedInput()
 		d.unregisterPreview(token.ac)
 		return true
 	}
-	_ = token.ac.closeCapturedTransport(token.ac.revokeTransport(token.transport.transport))
+	d.clearParkingInFlight(parkingToken, token.ac)
+	captured := token.transport.transport
+	_ = token.ac.revokeTransport(captured)
+	_ = token.ac.closeCapturedTransport(captured)
 	token.ac.clearSnatchedInput()
 	d.unregisterPreview(token.ac)
 	token.ac.clearPreviousSession()
