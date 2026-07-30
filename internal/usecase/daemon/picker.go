@@ -51,12 +51,12 @@ func (d *Daemon) togglePickerSort() {
 // enterPicker preserves the existing navigation entry point. Navigation always
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
-func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
+func (d *Daemon) enterPicker(sess attachmentSession, ac *attachedClient) {
 	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
 }
 
-func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {
+func (d *Daemon) publishPicker(sess attachmentSession, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {
 	rt := ac.overlays
 	rt.pickerMu.Lock()
 	previous, previousGeneration := rt.pickerPreviewSession, rt.pickerPreviewGeneration
@@ -83,7 +83,7 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 
 // pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
 // knows nothing about picker intent; picker.New owns all destination policy.
-func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceFilter) {
+func (d *Daemon) pickerViews(cur attachmentSession) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
 	sessions := make([]attachmentSession, 0, len(d.sessions))
 	proxies := make(map[domain.SessionID]*proxySession)
@@ -120,8 +120,13 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 	var current picker.SourceFilter
 	for _, entry := range sessions {
 		snap := entry.snapshotView(opts)
-		if entry == cur && snap.active >= 0 && snap.active < len(snap.tabs) {
-			current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.active].id}
+		if entry == cur {
+			if proxy, ok := entry.(*proxySession); ok {
+				key := proxy.key
+				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, RemoteKey: &key}
+			} else if snap.active >= 0 && snap.active < len(snap.tabs) {
+				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.active].id}
+			}
 		}
 		live = append(live, liveSnapshot{entry: entry, view: snap})
 	}
@@ -196,7 +201,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 	return views, current
 }
 
-func (d *Daemon) newPickerModel(cur *session, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
+func (d *Daemon) newPickerModel(cur attachmentSession, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
 	views, attachedCurrent := d.pickerViews(cur)
 	if intent == pickerNavigate && current == (picker.SourceFilter{}) {
 		current = attachedCurrent
@@ -236,7 +241,7 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		afterClose: func() {
 			d.clearPreviewGeneration(ac, previewGeneration)
 			d.remotePickerClosed(instance)
-			if sess := ac.currentSession(); sess != nil {
+			if sess := ac.currentAttachmentSession(); sess != nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
 		},
@@ -244,7 +249,7 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 }
 
 func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*roleEffectTicket) {
-	sess := ac.currentSession()
+	sess := ac.currentAttachmentSession()
 	if sess == nil {
 		return
 	}
@@ -301,7 +306,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 				err = d.killPickerTarget(target)
 			}
 			if err != nil {
-				d.reportError(sess, err)
+				d.reportAttachmentError(sess, err)
 			}
 		}
 		if effect != nil && effect.ended.Load() {
@@ -325,7 +330,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	if committing {
 		if intent == pickerMovePane || intent == pickerMoveTab {
 			if err := d.movePickerSourceError(source); err != nil {
-				d.reportError(sess, err)
+				d.reportAttachmentError(sess, err)
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
 			}
@@ -335,7 +340,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			d.closePicker(ac)
 			err := d.commitMovePickerSelection(intent, source, target)
 			if err != nil {
-				d.reportError(sess, movePickerUserError(err))
+				d.reportAttachmentError(sess, movePickerUserError(err))
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
 			}
@@ -345,15 +350,17 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		var err error
 		if len(effects) != 0 && effects[0] != nil {
 			err = d.switchToTargetForRole(effects[0].roleToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
-		} else {
+		} else if local, ok := localSession(sess); ok {
 			d.closePicker(ac)
-			err = d.switchToTarget(sess, ac, target)
+			err = d.switchToTarget(local, ac, target)
+		} else {
+			err = errAttachmentTransition
 		}
 		if errors.Is(err, errAttachmentTransition) {
 			return
 		}
 		if err != nil {
-			d.reportError(sess, err)
+			d.reportAttachmentError(sess, err)
 			return
 		}
 		return
@@ -403,13 +410,13 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	// A same-session preview is already invalidated by its own coordinator.
 	// Cross-session previews subscribe to the target's producer wake instead
 	// of starting a direct paint/timer path.
-	if targetSess == ac.currentSession() {
+	if targetSess == ac.currentAttachmentSession() {
 		return
 	}
 	rc := d.attachCoordinator(targetSess, nil, nil, false)
 	rc.subscribePreviewFor(ac, generation, func(renderWake) {
 		if pickerPreviewCurrent(ac, targetSess, next, generation) {
-			if owner := ac.currentSession(); owner != nil {
+			if owner := ac.currentAttachmentSession(); owner != nil {
 				d.invalidateRender(owner, ac, false, "picker preview")
 			}
 		}
@@ -497,7 +504,7 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 		observed := ac.overlays.pickerPreview == tb
 		ac.overlays.pickerMu.Unlock()
 		if observed && d.clearPreviewGeneration(ac, generation) {
-			if sess := ac.currentSession(); sess != nil {
+			if sess := ac.currentAttachmentSession(); sess != nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
 		}
@@ -535,13 +542,21 @@ func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, g
 
 func pickerTargetsEqual(left, right picker.Target) bool {
 	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name ||
-		left.TabID != right.TabID || left.TabIndex != right.TabIndex || left.Stopped != right.Stopped {
+		left.TabID != right.TabID || left.TabIndex != right.TabIndex || left.Stopped != right.Stopped ||
+		!remoteKeysEqual(left.RemoteKey, right.RemoteKey) {
 		return false
 	}
 	if left.ExpectedCreatedAt == nil || right.ExpectedCreatedAt == nil {
 		return left.ExpectedCreatedAt == nil && right.ExpectedCreatedAt == nil
 	}
 	return *left.ExpectedCreatedAt == *right.ExpectedCreatedAt
+}
+
+func remoteKeysEqual(left, right *domain.RemoteSessionKey) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (d *Daemon) sessionByID(id domain.SessionID) attachmentSession {
@@ -615,11 +630,142 @@ func (d *Daemon) switchToTargetForRole(token attachmentRoleToken, target picker.
 	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
+	if target.RemoteKey != nil {
+		return d.switchToRemoteTargetForRole(token, target, *target.RemoteKey, guard, action)
+	}
 	sess, ok := localSession(token.sess)
 	if !ok {
 		return errAttachmentTransition
 	}
 	return d.switchToTargetGuardedForRole(sess, token.ac, target, guard, &token, action)
+}
+
+// switchToRemoteTargetForRole performs dialing after the initiating effect has
+// ended and without role or architecture locks. transitionAttachment then
+// freezes and revalidates the exact source role and exact structured-key proxy
+// before publishing ownership.
+func (d *Daemon) switchToRemoteTargetForRole(token attachmentRoleToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, action string) error {
+	if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" {
+		return errAttachmentTransition
+	}
+	ctx := d.serveCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Only the caller that observed neither a published proxy nor an in-flight
+	// constructor may own failure cleanup. Waiters and existing-proxy users must
+	// never tear down the shared link when their source transition goes stale.
+	d.mu.Lock()
+	_, alreadyPublished := d.sessions[key.ID()]
+	constructionInFlight := d.proxyConstructions[key] != nil
+	d.mu.Unlock()
+	ownsCandidate := !alreadyPublished && !constructionInFlight
+	proxy, err := d.openProxySession(ctx, key, token.ac.size)
+	if err != nil {
+		if !token.activeCurrent() {
+			return errAttachmentTransition
+		}
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't connect to that remote session", err)
+	}
+	if proxy == nil || proxy.key != key || proxy.id != key.ID() {
+		return errAttachmentTransition
+	}
+	proxy.mu.Lock()
+	candidateGeneration := proxy.generation
+	proxy.mu.Unlock()
+
+	transition, err := d.transitionAttachment(attachmentTransitionRequest{
+		source: token.sess, target: proxy, next: token.ac,
+		expectedRole: attachmentActive, targetRole: attachmentActive,
+		expectedTransport: token.transport, sourceToken: &token, action: action,
+		preserveRole: proxy == token.sess, ready: true,
+	})
+	if err != nil {
+		if ownsCandidate {
+			d.discardUnattachedProxyGeneration(proxy, candidateGeneration)
+		}
+		return errAttachmentTransition
+	}
+	if guard.closePicker {
+		fresh, admitted := token.ac.beginRoleEffect(transition.published)
+		if admitted {
+			d.closePicker(token.ac)
+			fresh.End()
+		}
+	}
+	if proxy != token.sess {
+		token.ac.recordPreviousSession(token.sess)
+	}
+	d.deferAttachmentTransitionCleanups(transition)
+	if proxy == token.sess {
+		d.invalidateRender(proxy, token.ac, true, "picker.go")
+	} else {
+		d.firstPaintForTransition(transition.published)
+	}
+	return nil
+}
+
+// discardUnattachedProxyGeneration removes only a transition-owned candidate
+// that never acquired a client. It mirrors normal proxy teardown fencing but
+// deliberately does not arm the five-minute warm lifetime for an attachment
+// that was never published.
+func (d *Daemon) discardUnattachedProxyGeneration(proxy *proxySession, generation uint64) bool {
+	if d == nil || proxy == nil {
+		return false
+	}
+	d.mu.Lock()
+	if d.sessions[proxy.id] != proxy {
+		d.mu.Unlock()
+		return false
+	}
+	proxy.sessionCore.mu.Lock()
+	if proxy.client != nil {
+		proxy.sessionCore.mu.Unlock()
+		d.mu.Unlock()
+		return false
+	}
+	proxy.mu.Lock()
+	if proxy.generation != generation || proxy.expired || proxy.warm != nil {
+		proxy.mu.Unlock()
+		proxy.sessionCore.mu.Unlock()
+		d.mu.Unlock()
+		return false
+	}
+	proxy.generation++
+	proxy.expired = true
+	cancel := proxy.cancel
+	transport := proxy.transport
+	coordinator := proxy.coordinator.Load()
+	proxy.mu.Unlock()
+	if !d.unregisterSessionLocked(proxy) {
+		proxy.sessionCore.mu.Unlock()
+		d.mu.Unlock()
+		return false
+	}
+	proxy.sessionCore.mu.Unlock()
+	empty := len(d.sessions) == 0
+	if empty {
+		d.closing = true
+	}
+	d.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if transport != nil {
+		_ = transport.Close()
+	}
+	if coordinator != nil {
+		coordinator.beginSessionTeardown().finish()
+		coordinator.waitForTimerWorkers()
+	}
+	proxy.finish()
+	if empty {
+		d.doneOnce.Do(func() { close(d.done) })
+	} else {
+		d.refreshRemoteOpenPickers()
+	}
+	return true
 }
 
 // switchToTargetGuarded is retained for daemon-internal and headless callers.
@@ -919,6 +1065,10 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 func (d *Daemon) killPickerTargetForRole(target picker.Target, token attachmentRoleToken) error {
 	if token.ac == nil {
 		return d.killPickerTarget(target)
+	}
+	if target.RemoteKey != nil {
+		d.enterRemoteKillConfirmation(token.sess, token.ac, target)
+		return nil
 	}
 	if target.Stopped {
 		token.effect.bindActionEnd(d, "picker-delete")

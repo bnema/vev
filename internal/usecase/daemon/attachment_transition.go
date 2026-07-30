@@ -64,6 +64,7 @@ func transitionSourceTokenCurrentLocked(token attachmentRoleToken, source attach
 type attachmentTransitionResult struct {
 	published            attachmentRoleToken
 	displaced            attachmentRoleToken
+	terminalDisplaced    detachedAttachmentSnapshot
 	displacedInterrupted bool
 	cleanups             []renderLifecycleCleanup
 }
@@ -233,5 +234,9 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if result.published.role == attachmentActive {
 		result.published.ac.clearSnatchedInput()
 	}
+	// Warm-proxy timers are external clock operations. Apply them only after
+	// frozen ownership publication and every architecture lock have completed;
+	// the lifecycle helper revalidates exact registry pointers and clients.
+	d.proxyAttachmentTransitionCommitted(req.source, req.target, req.next, req.preserveRole)
 	return result, nil
 }

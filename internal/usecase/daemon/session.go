@@ -156,19 +156,26 @@ type tab struct {
 // what it has actually seen). sendMu serialises the two senders — the render
 // coordinator and the connection handler — so the transport's single-writer
 
-func (d *Daemon) touchMRU(sess *session) {
-	if d == nil || sess == nil {
+func (d *Daemon) touchMRU(entry attachmentSession) {
+	if d == nil || entry == nil || entry.core() == nil {
 		return
 	}
+	core := entry.core()
 	seq := d.mruSeq.Add(1)
 	for {
-		old := sess.mruAt.Load()
+		old := core.mruAt.Load()
 		if old >= seq {
 			return
 		}
-		if sess.mruAt.CompareAndSwap(old, seq) {
+		if core.mruAt.CompareAndSwap(old, seq) {
 			break
 		}
+	}
+	// Proxy recency is live derived state only. Local named sessions retain the
+	// existing catalogue metadata publication semantics.
+	sess, ok := localSession(entry)
+	if !ok {
+		return
 	}
 	sess.mu.Lock()
 	if !sess.ephemeral {

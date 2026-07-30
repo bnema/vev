@@ -1,6 +1,11 @@
 package daemon
 
-import "github.com/bnema/vev/internal/ports"
+import (
+	"errors"
+
+	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/command"
+)
 
 // runConnLoop is the per-connection input router: it pumps client messages
 // until detach, EOF, or a transport error. Role is resolved after every Recv so
@@ -116,19 +121,7 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 			if derr != nil {
 				return false
 			}
-			// Attached commands are intentionally admitted only on the proxied
-			// attachment path. Phase 6 supplies execution; until then every
-			// decoded request is rejected with its original correlation ID.
-			valid := request.Version == ports.ProtocolVersion && request.Attached && request.RequestID != 0 &&
-				request.TargetSession == "" && request.TargetTab == "" && request.TargetPane == ""
-			if !valid {
-				d.log.Warn("invalid attached command", "request_id", request.RequestID)
-			}
-			result := ports.CommandResult{
-				RequestID: request.RequestID,
-				Code:      ports.ErrNotScriptable,
-				Text:      "attached command relay is not enabled",
-			}
+			result := d.executeAttachedCommand(token, request)
 			if err := token.sendActiveControl(frameCommandResult(result)); err != nil {
 				token.endRoleEffect()
 				d.detachOnRoleSendError(token, token.transport.transport)
@@ -146,6 +139,86 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 		// client can add message types without breaking an older daemon.
 	}
 	return false
+}
+
+func (d *Daemon) executeAttachedCommand(token attachmentRoleToken, request ports.CommandRequest) ports.CommandResult {
+	result := ports.CommandResult{RequestID: request.RequestID}
+	if request.Version != ports.ProtocolVersion {
+		result.Code = ports.ErrInvalidCommandArgs
+		result.Text = "unsupported command protocol version"
+		return result
+	}
+	if !request.Attached {
+		result.Code = ports.ErrInvalidCommandArgs
+		result.Text = "attached command flag is required"
+		return result
+	}
+	if request.RequestID == 0 {
+		result.Code = ports.ErrInvalidCommandArgs
+		result.Text = "command request id is required"
+		return result
+	}
+	if request.Self {
+		result.Code = ports.ErrInvalidCommandArgs
+		result.Text = "attached commands cannot target themselves"
+		return result
+	}
+	if request.TargetSession != "" || request.TargetTab != "" || request.TargetPane != "" {
+		result.Code = ports.ErrInvalidCommandArgs
+		result.Text = "attached commands cannot override their active session target"
+		return result
+	}
+	sess, ok := localSession(token.sess)
+	if !ok || !token.activeEffect() {
+		result.Code = ports.ErrNoSuchTarget
+		result.Text = "attached session is no longer active"
+		return result
+	}
+	cmd, ok := command.BySlug(request.Slug)
+	if !ok {
+		result.Code = ports.ErrUnknownCommand
+		result.Text = "unknown command: " + request.Slug
+		return result
+	}
+	if !cmd.PaletteVisible {
+		result.Code = ports.ErrNotScriptable
+		result.Text = request.Slug + " is not available in the palette"
+		return result
+	}
+	if cmd.Run == nil {
+		result.Code = ports.ErrNotScriptable
+		result.Text = request.Slug + " is not scriptable"
+		return result
+	}
+	if !proxyAttachedCommandOwnedRemotely(cmd.Slug) {
+		result.Code = ports.ErrNotScriptable
+		result.Text = request.Slug + " is owned by the local proxy daemon"
+		return result
+	}
+
+	// The frame's role token is the target capability. No registry/name lookup is
+	// performed, so the command cannot escape to another remote session.
+	sess.dispatchMu.Lock()
+	err := cmd.Run(paletteExec{d: d, sess: sess, ac: token.ac, effect: token.effect}, request.Args)
+	sess.dispatchMu.Unlock()
+	if err == nil {
+		result.OK = true
+		return result
+	}
+	if errors.Is(err, command.ErrInvalidArguments) {
+		result.Code = ports.ErrInvalidCommandArgs
+		result.Text = "usage: " + cmd.Usage
+		return result
+	}
+	result.Code = ports.ErrInternal
+	result.Text = err.Error()
+	return result
+}
+
+// proxyAttachedCommandOwnedRemotely applies the palette's canonical ownership
+// policy to command frames received by the remote daemon.
+func proxyAttachedCommandOwnedRemotely(slug string) bool {
+	return proxyPaletteCommandOwnership(slug) == proxyPaletteRemote
 }
 
 // resetActiveOutput rebases only the exact proxied role and transport admitted

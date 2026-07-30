@@ -229,12 +229,16 @@ func (d *Daemon) reportError(sess *session, err error) {
 	if err == nil || benignNoticeError(err) {
 		return
 	}
-	var ue *domain.UserError
-	if errors.As(err, &ue) {
+	if ue, ok := errors.AsType[*domain.UserError](err); ok {
 		d.notify(sess, ue.Severity, ue.Code, ue.Msg, ue.Err)
 		return
 	}
 	d.notify(sess, domain.NoticeError, domain.NoticeInternal, "internal error", err)
+}
+
+func (d *Daemon) reportAttachmentError(entry attachmentSession, err error) {
+	local, _ := localSession(entry)
+	d.reportError(local, err)
 }
 
 // notify records a notice and routes it to whoever can see it. A nil sess means
@@ -293,7 +297,10 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 func (d *Daemon) deliverGlobal(n domain.Notification) {
 	d.mu.Lock()
 	d.notices.routingMu.Lock()
-	sessions := localSessionsSnapshot(d.sessions)
+	sessions := make([]attachmentSession, 0, len(d.sessions))
+	for _, entry := range d.sessions {
+		sessions = append(sessions, entry)
+	}
 	d.mu.Unlock()
 
 	if d.notices.beforeGlobalDelivery != nil {
@@ -301,9 +308,10 @@ func (d *Daemon) deliverGlobal(n domain.Notification) {
 	}
 	targets := make([]*attachedClient, 0, len(sessions))
 	for _, s := range sessions {
-		s.mu.Lock()
-		ac := s.client
-		s.mu.Unlock()
+		core := s.core()
+		core.mu.Lock()
+		ac := core.client
+		core.mu.Unlock()
 		if ac == nil || !d.publishToast(ac, n) {
 			continue
 		}

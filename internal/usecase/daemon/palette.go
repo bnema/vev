@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
@@ -19,6 +20,34 @@ const (
 	paletteRailBreakpoint = 96
 	paletteRailWidth      = 64
 )
+
+type proxyPaletteOwnership uint8
+
+const (
+	proxyPaletteRejected proxyPaletteOwnership = iota
+	proxyPaletteLocal
+	proxyPaletteRemote
+)
+
+// proxyPaletteCommandOwnership is exhaustive by policy: an unknown future
+// palette command is rejected until its proxy ownership is deliberately added.
+func proxyPaletteCommandOwnership(slug string) proxyPaletteOwnership {
+	switch slug {
+	case "new-tab", "close-tab",
+		"split-right", "split-left", "split-up", "split-down",
+		"consume-or-expel-pane-left", "consume-or-expel-pane-right",
+		"stack-pane", "toggle-stack", "toggle-floating-pane", "close-pane",
+		"focus-pane-left", "focus-pane-right", "focus-pane-up", "focus-pane-down",
+		"resize-pane", "grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes",
+		"next-tab", "previous-tab", "rename-tab":
+		return proxyPaletteRemote
+	case "new-session", "back-session", "jump-recent-session", "session-picker",
+		"notifications", "yank-last-notification", "detach":
+		return proxyPaletteLocal
+	default:
+		return proxyPaletteRejected
+	}
+}
 
 var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
 
@@ -146,10 +175,12 @@ func (d *Daemon) recordPaletteUse(code string) {
 }
 
 func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*roleEffectTicket) {
-	sess := ac.currentSession()
-	if sess == nil {
+	entry := ac.currentAttachmentSession()
+	if entry == nil {
 		return
 	}
+	sess, local := localSession(entry)
+	proxy, remote := entry.(*proxySession)
 	var cmd command.Command
 	var sessionTarget palette.Result
 	var hasSessionTarget bool
@@ -252,12 +283,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
-		d.invalidateRender(sess, ac, true, "palette.go")
+		d.invalidateRender(entry, ac, true, "palette.go")
 		return
 	}
 	if !execute {
 		if changed {
-			d.invalidateRender(sess, ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 		}
 		return
 	}
@@ -275,19 +306,21 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		var err error
 		if effect != nil {
 			err = d.switchToTargetForRole(effect.roleToken(), target, sessionHandoffGuard{}, "palette-session")
-		} else {
+		} else if local {
 			err = d.switchToTarget(sess, ac, target)
+		} else {
+			err = errAttachmentTransition
 		}
-		if effect != nil && errors.Is(err, errAttachmentTransition) {
+		if errors.Is(err, errAttachmentTransition) {
 			return
 		}
 		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "requested session is unavailable")
-			d.invalidateRender(sess, ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
-			d.invalidateRender(ac.currentSession(), ac, true, "palette.go")
+			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
 		}
 		return
 	}
@@ -296,21 +329,87 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		rank, err := command.ParsePositiveDecimal(args)
 		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "rank must be one positive decimal")
-			d.invalidateRender(sess, ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		exec := paletteExec{d: d, sess: sess, ac: ac, recent: recent, effect: effect}
+		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, recent: recent, effect: effect}
 		if err := exec.JumpRecentSession(rank); err != nil {
 			if errors.Is(err, errAttachmentTransition) {
 				return
 			}
 			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
-			d.invalidateRender(sess, ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
-			d.invalidateRender(ac.currentSession(), ac, true, "palette.go")
+			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
+		}
+		return
+	}
+	ownership := proxyPaletteCommandOwnership(cmd.Slug)
+	if remote && ownership == proxyPaletteRemote {
+		if !ac.closeExecutedPalette(generation, rawQuery) {
+			return
+		}
+		ctx := d.serveCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		result, err := proxy.sendCommand(ctx, d.clock, cmd.Slug, args)
+		if err != nil {
+			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, "remote command failed", err)
+			return
+		}
+		if !result.OK {
+			text := result.Text
+			if text == "" {
+				text = "remote command failed"
+			}
+			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, text, nil)
+			return
+		}
+		d.recordPaletteUse(cmd.Code)
+		d.invalidateRender(proxy, ac, true, "palette.go")
+		return
+	}
+	if remote && ownership == proxyPaletteLocal {
+		// Every local action supersedes this exact remote palette generation.
+		// Close it before role handoff or opening another overlay so a delayed
+		// action cannot leave the old palette rendered over the new state.
+		if !ac.closeExecutedPalette(generation, rawQuery) {
+			return
+		}
+		var err error
+		switch cmd.Slug {
+		case "new-session", "yank-last-notification":
+			err = cmd.Run(paletteExec{d: d, ac: ac, effect: effect, attachment: proxy}, args)
+			if err == nil {
+				d.recordPaletteUse(cmd.Code)
+			}
+		case "back-session":
+			if effect != nil {
+				err = d.backSessionForRole(effect.roleToken())
+			}
+		case "detach":
+			if effect != nil && !d.clientGoneForRole(effect.roleToken(), true) {
+				err = errAttachmentTransition
+			}
+		case "session-picker":
+			d.enterPicker(proxy, ac)
+		case "notifications":
+			d.enterNotices(proxy, ac)
+		default:
+			err = errors.New(cmd.Name + " is unavailable for a remote session")
+		}
+		if err != nil && !errors.Is(err, errAttachmentTransition) {
+			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, err.Error(), nil)
+		}
+		return
+	}
+	if !local {
+		if ac.closeExecutedPalette(generation, rawQuery) {
+			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, cmd.Name+" is unavailable for this attachment", nil)
 		}
 		return
 	}
@@ -392,6 +491,7 @@ func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery strin
 type paletteExec struct {
 	d                   *Daemon
 	sess                *session
+	attachment          attachmentSession
 	ac                  *attachedClient
 	recent              []recentSession
 	actions             daemonActionRunner
@@ -428,9 +528,17 @@ func (e paletteExec) CreateTab() error {
 }
 
 func (e paletteExec) CreateSession() error {
-	e.d.enterTransitionPrompt(e.sess, e.ac, " Create session ", "", func(name string, token attachmentRoleToken) error {
+	entry := e.attachment
+	if entry == nil {
+		entry = e.sess
+	}
+	e.d.enterTransitionPrompt(entry, e.ac, " Create session ", "", func(name string, token attachmentRoleToken) error {
 		if token.ac == nil {
-			return e.d.createSessionAndSwitch(e.sess, e.ac, name)
+			sess, ok := e.localSession()
+			if !ok {
+				return errAttachmentTransition
+			}
+			return e.d.createSessionAndSwitch(sess, e.ac, name)
 		}
 		return e.d.createSessionAndSwitchForRole(token, name)
 	})
@@ -588,16 +696,28 @@ func (e paletteExec) OpenNotifications() error {
 }
 
 func (e paletteExec) YankLastNotification() error {
+	entry := e.attachment
+	if entry == nil {
+		entry = e.sess
+	}
 	n, ok := e.d.notices.latest()
 	if !ok {
 		// Reported directly rather than returned: the generic cmd.Run error
 		// path only logs, so a returned error here would never reach the
 		// user as the warn toast this no-op is supposed to produce.
-		e.d.reportError(e.sess, domain.UserWarn(domain.NoticeClipboard, "no notifications yet", nil))
+		e.d.reportAttachmentError(entry, domain.UserWarn(domain.NoticeClipboard, "no notifications yet", nil))
 		return nil
 	}
-	e.d.yankNotice(e.sess, e.ac, n)
+	e.d.yankNotice(entry, e.ac, n)
 	return nil
+}
+
+func (e paletteExec) localSession() (*session, bool) {
+	entry := e.attachment
+	if entry == nil {
+		entry = e.sess
+	}
+	return localSession(entry)
 }
 
 func (e paletteExec) JumpRecentSession(rank int) error {
@@ -615,7 +735,11 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	if e.effect != nil {
 		err = e.d.switchToTargetForRole(e.effect.roleToken(), picker.Target{Session: target.id, TabIndex: -1}, sessionHandoffGuard{}, "palette-recent-session")
 	} else {
-		err = e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})
+		sess, ok := e.localSession()
+		if !ok {
+			return errAttachmentTransition
+		}
+		err = e.d.switchToTarget(sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})
 	}
 	if e.effect != nil && errors.Is(err, errAttachmentTransition) {
 		return err

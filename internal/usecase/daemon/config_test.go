@@ -21,7 +21,9 @@ type captureKeyHandler struct {
 func (h *captureKeyHandler) Forward(data []byte) {
 	h.forward = append(h.forward, append([]byte(nil), data...))
 }
-func (h *captureKeyHandler) Action(action keys.Action) { h.actions = append(h.actions, action) }
+func (h *captureKeyHandler) Action(action keys.Action, _ []byte) {
+	h.actions = append(h.actions, action)
+}
 
 func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})

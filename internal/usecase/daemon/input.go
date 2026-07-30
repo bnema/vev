@@ -43,6 +43,23 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 func (d *Daemon) handleInputForRole(token attachmentRoleToken, data []byte) {
 	ac := token.ac
 	ac.initOverlays()
+	if proxy, ok := token.sess.(*proxySession); ok {
+		handler := proxyKeyHandler{d: d, proxy: proxy, ac: ac, roleToken: token}
+		ac.mouseScan.Scan(data,
+			func(ev mouse.Event) {
+				if token.activeEffect() && !proxyMouseOwnedLocally(ac.overlays) {
+					handler.Mouse(ev)
+				}
+			},
+			func(b []byte) {
+				if !token.activeEffect() || ac.overlays.HandleInput(d, b, token.effect) || !token.activeEffect() {
+					return
+				}
+				ac.keys.RouteWithHandler(b, handler)
+			},
+		)
+		return
+	}
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) {
 			if token.activeEffect() {
@@ -357,7 +374,7 @@ func (h daemonKeyHandler) Forward(data []byte) {
 	h.d.writeToPane(sess, p, data)
 }
 
-func (h daemonKeyHandler) Action(action keys.Action) {
+func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 	sess, effect, owned := h.acquireRoleEffect()
 	if sess == nil {
 		return
@@ -390,6 +407,13 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	case keys.ActionOpenPalette:
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
+		if !proxiedJumpSearchesOtherSessions(h.ac.proxied) {
+			if idx, ok := oldestAttentionTab(sess); ok && sess.switchTab(idx) {
+				h.d.activateTab(sess, sess.activeTab())
+				h.d.invalidateRender(sess, h.ac, true, "input.go")
+			}
+			return
+		}
 		if effect == nil {
 			if err := h.d.jumpAttention(sess, h.ac); err != nil {
 				h.d.reportError(sess, err)
@@ -408,21 +432,13 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneLeft:
-		if err := h.d.focusDir(sess, h.ac, layout.Left, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
-			h.d.reportError(sess, err)
-		}
+		h.focus(sess, layout.Left, effect)
 	case keys.ActionFocusPaneRight:
-		if err := h.d.focusDir(sess, h.ac, layout.Right, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
-			h.d.reportError(sess, err)
-		}
+		h.focus(sess, layout.Right, effect)
 	case keys.ActionFocusPaneUp:
-		if err := h.d.focusDir(sess, h.ac, layout.Up, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
-			h.d.reportError(sess, err)
-		}
+		h.focus(sess, layout.Up, effect)
 	case keys.ActionFocusPaneDown:
-		if err := h.d.focusDir(sess, h.ac, layout.Down, effect); err != nil && !errors.Is(err, errAttachmentTransition) {
-			h.d.reportError(sess, err)
-		}
+		h.focus(sess, layout.Down, effect)
 	case keys.ActionGrowPaneWidth:
 		runAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: resizeStepCols})
 	case keys.ActionShrinkPaneWidth:
@@ -445,5 +461,17 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			h.d.activateTab(sess, sess.activeTab())
 			h.d.invalidateRender(sess, h.ac, true, "input.go")
 		}
+	}
+}
+
+func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *roleEffectTicket) {
+	var err error
+	if h.ac.proxied {
+		err = h.d.focusDirProxied(sess, h.ac, dir)
+	} else {
+		err = h.d.focusDir(sess, h.ac, dir, effect)
+	}
+	if err != nil && !errors.Is(err, errAttachmentTransition) && !errors.Is(err, errNoNeighbor) {
+		h.d.reportError(sess, err)
 	}
 }

@@ -13,7 +13,7 @@ func promptModalFor(title string) ui.Modal {
 	return ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 4, Title: title, Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
 }
 
-func (d *Daemon) enterPrompt(sess *session, ac *attachedClient, title, initial string, submit func(string) error) {
+func (d *Daemon) enterPrompt(sess attachmentSession, ac *attachedClient, title, initial string, submit func(string) error) {
 	d.closePrompt(ac)
 	ac.overlays.promptMu.Lock()
 	ac.overlays.prompt = promptui.New(title, initial)
@@ -23,7 +23,7 @@ func (d *Daemon) enterPrompt(sess *session, ac *attachedClient, title, initial s
 	d.invalidateRender(sess, ac, true, "prompt.go")
 }
 
-func (d *Daemon) enterTransitionPrompt(sess *session, ac *attachedClient, title, initial string, submit func(string, attachmentRoleToken) error) {
+func (d *Daemon) enterTransitionPrompt(sess attachmentSession, ac *attachedClient, title, initial string, submit func(string, attachmentRoleToken) error) {
 	d.closePrompt(ac)
 	ac.overlays.promptMu.Lock()
 	ac.overlays.prompt = promptui.New(title, initial)
@@ -47,11 +47,12 @@ func (d *Daemon) closePrompt(ac *attachedClient) {
 func promptValidationError(err error) bool {
 	return errors.Is(err, domain.ErrInvalidSessionName) ||
 		errors.Is(err, errSessionNameRequired) ||
-		errors.Is(err, errSessionNameInUse)
+		errors.Is(err, errSessionNameInUse) ||
+		errors.Is(err, errProxyKillConfirmation)
 }
 
 func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte, effects ...*roleEffectTicket) {
-	sess := ac.currentSession()
+	sess := ac.currentAttachmentSession()
 	if sess == nil {
 		return
 	}
@@ -112,13 +113,13 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte, effects ...*
 			}
 			ac.overlays.promptMu.Unlock()
 			if !promptValidationError(err) {
-				d.reportError(sess, err)
+				d.reportAttachmentError(sess, err)
 			}
 			d.invalidateRender(sess, ac, true, "prompt.go")
 			return
 		}
 		d.closePrompt(ac)
-		if current := ac.currentSession(); current != nil {
+		if current := ac.currentAttachmentSession(); current != nil {
 			d.invalidateRender(current, ac, true, "prompt.go")
 		}
 		return

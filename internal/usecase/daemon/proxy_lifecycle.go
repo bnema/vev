@@ -36,6 +36,52 @@ func (t *proxyWarmTimer) stop() {
 	t.cancelOnce.Do(func() { close(t.cancel) })
 }
 
+// proxyAttachmentTransitionCommitted applies lifecycle policy only after the
+// attachment publication has released every architecture lock. Each helper
+// performs its own exact pointer/client revalidation before changing a timer.
+func (d *Daemon) proxyAttachmentTransitionCommitted(source, target attachmentSession, ac *attachedClient, preserveRole bool) {
+	if d == nil || preserveRole || source == target {
+		return
+	}
+	if proxy, ok := source.(*proxySession); ok {
+		d.armProxyWarm(proxy)
+	}
+	if proxy, ok := target.(*proxySession); ok {
+		if d.cancelProxyWarmForAttachment(proxy, ac) {
+			d.touchMRU(proxy)
+		}
+	}
+}
+
+// cancelProxyWarmForAttachment marks an exact published attachment as active.
+// Timer operations occur only after d.mu, sessionCore.mu, and proxy.mu have all
+// been released.
+func (d *Daemon) cancelProxyWarmForAttachment(p *proxySession, ac *attachedClient) bool {
+	if d == nil || p == nil || ac == nil {
+		return false
+	}
+	d.mu.Lock()
+	if d.sessions[p.id] != p {
+		d.mu.Unlock()
+		return false
+	}
+	p.sessionCore.mu.Lock()
+	if p.client != ac {
+		p.sessionCore.mu.Unlock()
+		d.mu.Unlock()
+		return false
+	}
+	p.mu.Lock()
+	p.generation++
+	old := p.warm
+	p.warm = nil
+	p.mu.Unlock()
+	p.sessionCore.mu.Unlock()
+	d.mu.Unlock()
+	old.stop()
+	return true
+}
+
 // armProxyWarm reserves and publishes a fresh five-minute timer only while the
 // exact proxy remains registered and headless. Clock and Timer methods are
 // external operations and therefore run outside architecture locks.

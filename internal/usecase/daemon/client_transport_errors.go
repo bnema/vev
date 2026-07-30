@@ -29,12 +29,23 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 }
 
 func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) bool {
-	sess, ok := localSession(token.sess)
-	if !ok || token.effect == nil {
+	if token.effect == nil {
 		return false
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
+	if proxy, ok := token.sess.(*proxySession); ok {
+		if !d.detachIfRoleCurrent(token) {
+			return false
+		}
+		d.finishProxyClientGone(proxy, token.ac, token.transport.transport, explicit)
+		d.armProxyWarm(proxy)
+		return true
+	}
+	sess, ok := localSession(token.sess)
+	if !ok {
+		return false
+	}
 	var parkingToken uint64
 	if !explicit {
 		parkingToken = d.markParkingInFlight(sess, token.ac)
@@ -116,22 +127,37 @@ func (d *Daemon) detachProxyOnSendError(p *proxySession, ac *attachedClient, fai
 		return
 	}
 	expected := transportSnapshot{}
+	oldTr := failed
 	if failed != nil {
 		expected = ac.transportSnapshot()
 		if expected.transport != failed {
 			return
 		}
+	} else {
+		oldTr = ac.transport()
 	}
 	if !d.detachProxyIfCurrentTransport(p, ac, expected) {
 		return
 	}
+	d.finishProxyClientGone(p, ac, oldTr, false)
+}
+
+// finishProxyClientGone retires external client ownership after the exact proxy
+// role has been unpublished. Warm-timer publication remains with the caller so
+// each detach path can arm once, after p.client is nil.
+func (d *Daemon) finishProxyClientGone(p *proxySession, ac *attachedClient, failed ports.Transport, explicit bool) {
 	if rc := p.coordinator.Load(); rc != nil {
 		rc.noteDetach(ac)
 	}
-	d.unregisterPreview(ac)
+	if ac.overlays != nil {
+		d.closePicker(ac)
+	}
 	ac.clearPreviousSession()
+	if explicit {
+		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
+	}
 	_ = ac.closeCapturedTransport(failed)
-	d.log.Warn("detached proxy client after send error", "host", p.key.Host, "session", p.key.Name)
+	d.log.Warn("detached proxy client", "host", p.key.Host, "session", p.key.Name, "explicit", explicit)
 }
 
 func (d *Daemon) detachOnRoleSendError(token attachmentRoleToken, failed ports.Transport) {
@@ -139,8 +165,20 @@ func (d *Daemon) detachOnRoleSendError(token attachmentRoleToken, failed ports.T
 }
 
 func (d *Daemon) detachOnRoleSendErrorUntil(token attachmentRoleToken, failed ports.Transport, done func() <-chan struct{}) {
+	// A delayed sender may report after the client has rebound. Only the exact
+	// transport captured by this role is allowed to detach either lifecycle.
+	if failed == nil || failed != token.transport.transport {
+		return
+	}
+	if proxy, ok := token.sess.(*proxySession); ok {
+		if d.detachIfRoleCurrentUntil(token, done) {
+			d.finishProxyClientGone(proxy, token.ac, failed, false)
+			d.armProxyWarm(proxy)
+		}
+		return
+	}
 	sess, ok := localSession(token.sess)
-	if !ok || failed != token.transport.transport {
+	if !ok {
 		return
 	}
 	parkingToken := d.markParkingInFlight(sess, token.ac)

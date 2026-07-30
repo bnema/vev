@@ -759,7 +759,7 @@ func TestRemoteRefreshPreservesRemoteCursorAcrossCacheToProxyUpgrade(t *testing.
 	owner.overlays.pickerMu.Unlock()
 	require.True(t, ok)
 	require.Equal(t, &key, before.RemoteKey)
-	require.False(t, beforeSelectable, "cache-derived remote row must stay gated until proxy activation lands")
+	require.True(t, beforeSelectable, "ownership activation makes a compatible cached row selectable")
 
 	proxy := &proxySession{
 		sessionCore: sessionCore{id: key.ID(), name: key.Display()},
@@ -779,7 +779,7 @@ func TestRemoteRefreshPreservesRemoteCursorAcrossCacheToProxyUpgrade(t *testing.
 	require.True(t, ok)
 	require.Equal(t, before.Session, after.Session)
 	require.Equal(t, before.RemoteKey, after.RemoteKey)
-	require.False(t, selectable, "cache-to-live upgrade must preserve the proxy activation gate")
+	require.True(t, selectable, "completed ownership must keep the upgraded proxy row selectable")
 }
 
 func TestRemoteRefreshCancellationWhenLastPickerCloses(t *testing.T) {
@@ -951,14 +951,15 @@ func TestRemotePickerStaleRefreshCannotOverwriteReopenedModel(t *testing.T) {
 	ac.overlays.pickerMu.Unlock()
 }
 
-func TestRemoteRowsRemainNonSelectableDuringRefreshPhase(t *testing.T) {
+func TestRemoteRowsBecomeSelectableOnlyAfterOwnershipCompletion(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
-	for _, availability := range []picker.RemoteAvailability{picker.RemoteCached, picker.RemoteFresh, picker.RemoteStale, picker.RemoteVersionMismatch} {
-		model := picker.New([]picker.SessionView{{
-			ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteAvailability: availability,
-			ConnectOnly: true, RemoteAttachReady: false,
-		}}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
-		_, selectable := model.Selected()
-		require.False(t, selectable, "availability %d became remotely attachable in phase 5", availability)
+	for _, status := range []remoteHostStatus{remoteHostCached, remoteHostRefreshing, remoteHostFresh, remoteHostUnreachable} {
+		view := remotePickerView(key, ports.RemoteCatalogSession{Name: key.Name, State: "running"}, status, time.Unix(1, 0))
+		_, selectable := picker.New([]picker.SessionView{view}, picker.SelectionConfig{Mode: picker.SelectNavigationTab}).Selected()
+		require.True(t, selectable, "status %d is ready after ownership completion", status)
 	}
+	mismatch := remotePickerView(key, ports.RemoteCatalogSession{Name: key.Name, State: "running"}, remoteHostVersionMismatch, time.Time{})
+	require.False(t, mismatch.RemoteAttachReady)
+	_, selectable := picker.New([]picker.SessionView{mismatch}, picker.SelectionConfig{Mode: picker.SelectNavigationTab}).Selected()
+	require.False(t, selectable)
 }

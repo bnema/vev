@@ -338,7 +338,7 @@ func TestPaneRearrangeAdaptersOwnDirectionalRequestsAndNormalizeOnlyNoChange(t *
 
 					paletteErr := direction.paletteRun(paletteExec{d: d, sess: sess, ac: ac, actions: paletteSpy})
 					controlErr := direction.controlRun(controlExec{d: d, sess: sess, target: target, actions: controlSpy})
-					daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(direction.keyAction)
+					daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(direction.keyAction, nil)
 
 					if outcome.wantErr == nil {
 						require.NoError(t, paletteErr)
@@ -394,7 +394,7 @@ func TestPaneRearrangeNoChangeAdapterSideEffects(t *testing.T) {
 		{
 			name: "key remains silent",
 			invoke: func(h *paneRearrangeHarness, ac *attachedClient) error {
-				daemonKeyHandler{d: h.daemon, ac: ac}.Action(keys.ActionConsumeOrExpelPaneLeft)
+				daemonKeyHandler{d: h.daemon, ac: ac}.Action(keys.ActionConsumeOrExpelPaneLeft, nil)
 				return nil
 			},
 		},

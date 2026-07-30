@@ -85,6 +85,7 @@ type attachmentPublication struct {
 	targetCoordinator   *renderCoordinator
 	releaseCoordinators func()
 	displacedTransport  transportSnapshot
+	terminalDisplaced   bool
 	nextGeneration      uint64
 	displacedGeneration uint64
 }
@@ -176,6 +177,10 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	req := publication.req
 	if req.targetRole == attachmentActive && publication.old != nil && publication.old != req.next {
 		publication.displacedTransport = publication.old.transportSnapshot()
+		// A proxied daemon attachment has no local snatched UI and must never
+		// linger in that role. Replacing it is terminal so its owning local proxy
+		// receives ReasonReplaced and cannot kick the direct user back later.
+		publication.terminalDisplaced = publication.old.proxied
 	}
 	if publication.source != req.target {
 		if publication.source.core().client == req.next {
@@ -186,7 +191,11 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	if req.targetRole == attachmentActive {
 		delete(req.target.core().snatched, req.next)
 		if publication.old != nil && publication.old != req.next {
-			addSnatchedLocked(req.target, publication.old)
+			if publication.terminalDisplaced {
+				delete(req.target.core().snatched, publication.old)
+			} else {
+				addSnatchedLocked(req.target, publication.old)
+			}
 		}
 		req.target.core().client = req.next
 	} else {
@@ -195,6 +204,10 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	publication.nextGeneration = req.next.roleGeneration.Add(1)
 	if publication.old != nil && publication.old != req.next && req.targetRole == attachmentActive {
 		publication.displacedGeneration = publication.old.roleGeneration.Add(1)
+		if publication.terminalDisplaced {
+			publication.old.setSession(nil)
+			publication.old.invalidateFrozenRoleCapability()
+		}
 	}
 	req.next.setSession(req.target)
 }
@@ -223,14 +236,18 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 		rebase:     publication.source != req.target && req.expectedRole == attachmentActive,
 	}
 	if publication.displacedGeneration != 0 {
-		result.displaced = attachmentRoleToken{
-			sess:       req.target,
-			ac:         publication.old,
-			role:       attachmentSnatched,
-			generation: publication.displacedGeneration,
-			transport:  publication.displacedTransport,
+		if publication.terminalDisplaced {
+			result.terminalDisplaced = detachedAttachmentSnapshot{ac: publication.old, transport: publication.displacedTransport}
+		} else {
+			result.displaced = attachmentRoleToken{
+				sess:       req.target,
+				ac:         publication.old,
+				role:       attachmentSnatched,
+				generation: publication.displacedGeneration,
+				transport:  publication.displacedTransport,
+			}
+			result.displacedInterrupted = req.expectedTargetTransportInterrupted
 		}
-		result.displacedInterrupted = req.expectedTargetTransportInterrupted
 	}
 	// Membership, currentSession, lease, generation, and both exact admission
 	// capabilities become visible as one frozen publication. The gates remain
