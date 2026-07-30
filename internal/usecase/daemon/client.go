@@ -565,7 +565,14 @@ func (d *Daemon) ensureRenderCoordinator(sess *session) *renderCoordinator {
 // ensureRenderCoordinatorPrelocked is the non-reentrant coordinator setup seam
 // for transactions that already hold sess.mu.
 func (d *Daemon) ensureRenderCoordinatorPrelocked(sess *session) *renderCoordinator {
-	if rc := sess.renderCoordinator(); rc != nil {
+	return d.ensureAttachmentRenderCoordinatorPrelocked(sess)
+}
+
+// ensureAttachmentRenderCoordinatorPrelocked publishes the coordinator for an
+// exact attachment implementation. The caller holds entry.core().mu; proxy
+// VT state is deliberately not touched here.
+func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSession) *renderCoordinator {
+	if rc := attachmentRenderCoordinator(entry); rc != nil {
 		return rc
 	}
 	var rc *renderCoordinator
@@ -573,18 +580,16 @@ func (d *Daemon) ensureRenderCoordinatorPrelocked(sess *session) *renderCoordina
 		clock:    d.clock,
 		observer: d.runtimeObserver,
 		wake: func(w renderWake) {
-			// Never reread sess.client here: a wake is bound to both its
-			// attachment and its coordinator incarnation. The second check in
-			// paint occurs under sendMu, closing a park/resume race after this
-			// unlocked coordinator validation.
+			// The wake retains the exact attachment lease. paint repeats this
+			// identity check under sendMu before composing any snapshot.
 			if w.lease != nil && rc.wakeCurrent(w) {
-				d.paint(sess, w.lease.attachment, w.reset, w.lease)
+				d.paint(entry, w.lease.attachment, w.reset, w.lease)
 			}
 		},
 		ackReady: func() bool {
-			sess.mu.Lock()
-			attached := sess.client
-			sess.mu.Unlock()
+			entry.core().mu.Lock()
+			attached := entry.core().client
+			entry.core().mu.Unlock()
 			if attached == nil {
 				return false
 			}
@@ -594,7 +599,7 @@ func (d *Daemon) ensureRenderCoordinatorPrelocked(sess *session) *renderCoordina
 			return ready
 		},
 	})
-	sess.installRenderCoordinator(rc)
+	installAttachmentRenderCoordinator(entry, rc)
 	return rc
 }
 
@@ -644,6 +649,10 @@ func (d *Daemon) firstPaintForTransition(token attachmentRoleToken) bool {
 		// to be reused by the destination.
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
+	}
+	if proxy, ok := token.sess.(*proxySession); ok {
+		d.firstProxyPaintWithLease(proxy, token.ac, token.lease)
+		return true
 	}
 	sess, ok := localSession(token.sess)
 	if !ok {

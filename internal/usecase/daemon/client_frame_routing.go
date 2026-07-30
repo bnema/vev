@@ -79,6 +79,8 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.activeEffect() {
 			if sess, ok := localSession(token.sess); ok {
 				d.requestTransactionalResizeForLease(sess, token.ac, token.lease, rz.Size, false)
+			} else if proxy, ok := token.sess.(*proxySession); ok {
+				d.resizeProxyForLease(proxy, token.ac, token.lease, rz.Size)
 			}
 		}
 	case ports.MsgTheme:

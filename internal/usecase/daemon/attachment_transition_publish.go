@@ -120,9 +120,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 
 	var targetCoordinator *renderCoordinator
 	if req.targetRole == attachmentActive {
-		if target, ok := localSession(req.target); ok {
-			targetCoordinator = d.ensureRenderCoordinatorPrelocked(target)
-		}
+		targetCoordinator = d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
 	}
 	sourceCoordinator := sourceCore.coordinator.Load()
 	if attachmentSessionRoleLocked(source, req.next) != req.expectedRole ||

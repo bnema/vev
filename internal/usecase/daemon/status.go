@@ -225,19 +225,40 @@ func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession
 // palette interaction has captured recent-session hints. Normal palette state
 // continues to use the canonical, live MRU list.
 func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	ranked := rankedRecentForHints(hints, recent)
-	if ranked != nil {
-		return d.barStateForContextual(cur, statusFeedback, ranked)
+	var entry attachmentSession
+	if cur != nil {
+		entry = cur
 	}
-	return d.barStateFor(cur, statusFeedback)
+	return d.barStateForAttachmentPaletteHints(entry, statusFeedback, hints, recent)
 }
 
-// barStateForContextual composes ranks captured for the palette interaction.
-// It deliberately does not call recentSessions: live MRU changes must not
-// affect contextual rendering, and palette rendering must not acquire d.mu.
-func (d *Daemon) barStateForContextual(cur *session, statusFeedback string, ranked []rankedRecent) barState {
-	state := d.barStateBase(cur, statusFeedback)
-	state.rankedRecent = ranked
+// barStateForAttachmentPaletteHints composes daemon-owned chrome for either
+// attachment implementation. Bar scripts remain local-session-only because
+// their existing execution contract depends on local tabs and PTYs.
+func (d *Daemon) barStateForAttachmentPaletteHints(cur attachmentSession, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
+	if attachmentSessionCore(cur) == nil {
+		cur = nil
+	}
+	ranked := rankedRecentForHints(hints, recent)
+	state := barState{statusFeedback: statusFeedback}
+	if d != nil {
+		state.attentionFrame = d.attentionFrame()
+	}
+	if cur != nil {
+		includeTerminalTitle := true
+		if d != nil {
+			includeTerminalTitle = d.currentTabsConfig().TerminalTitle
+		}
+		state.status = cur.statusSegments(includeTerminalTitle)
+	}
+	if local, ok := localSession(cur); ok && d != nil {
+		state.topRight, state.bottomRight = d.barScriptSnapshot(local)
+	}
+	if ranked != nil {
+		state.rankedRecent = ranked
+	} else if d != nil {
+		state.mru = d.recentSessions(cur)
+	}
 	return state
 }
 

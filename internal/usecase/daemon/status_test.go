@@ -24,6 +24,19 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+type coreNilAttachment struct{}
+
+func (*coreNilAttachment) core() *sessionCore { return nil }
+func (*coreNilAttachment) snapshotView(viewOptions) sessionView {
+	return sessionView{}
+}
+func (*coreNilAttachment) statusSegments(bool) statusSnapshot { return statusSnapshot{} }
+func (*coreNilAttachment) capturePrimary(*attachedClient, primaryCaptureRequest) (*capturedRenderState, bool) {
+	return nil, false
+}
+func (*coreNilAttachment) activateTargetLocked(int) bool { return false }
+func (*coreNilAttachment) isProxy() bool                 { return false }
+
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
@@ -960,6 +973,40 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 		}
 	}
 	t.Fatalf("attention glyph not rendered in top bar: %q", rowText(frame.Row(0)))
+}
+
+func TestLockAttachmentSessionsRejectsNilEntriesWithoutPanic(t *testing.T) {
+	var nilEntry attachmentSession
+	var typedNil *session
+	valid := &session{sessionCore: sessionCore{id: "valid"}}
+
+	for _, tc := range []struct {
+		name string
+		a    attachmentSession
+		b    attachmentSession
+	}{
+		{name: "nil interfaces", a: nilEntry, b: nilEntry},
+		{name: "typed nil", a: typedNil, b: valid},
+		{name: "core nil", a: &coreNilAttachment{}, b: valid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				unlock := lockAttachmentSessions(tc.a, tc.b)
+				unlock()
+			})
+		})
+	}
+}
+
+func TestBarStateForPaletteHintsNormalizesTypedNilSession(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	var sess *session
+
+	require.NotPanics(t, func() {
+		state := d.barStateForPaletteHints(sess, "feedback", nil, nil)
+		require.Equal(t, "feedback", state.statusFeedback)
+		require.Empty(t, state.status.session)
+	})
 }
 
 func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.T) {

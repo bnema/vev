@@ -292,13 +292,10 @@ func (b *runtimeMarkBatch) flush() {
 }
 
 func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, lease *attachmentLease) {
-	// Phase 1 has only the local implementation. Keep all local preparation
-	// byte-identical while routing the attachment-facing capture through the
-	// interface; proxy-specific preparation is added with proxy rendering.
-	sess, ok := localSession(entry)
-	if !ok {
-		return
-	}
+	// Local sessions retain their tab/PTY preparation below. Proxy sessions
+	// enter the same attachment pipeline but supply their VT snapshot through
+	// attachmentSession.capturePrimary.
+	sess, local := localSession(entry)
 	marks := d.newRuntimeMarkBatch()
 	if lease != nil {
 		token := attachmentToken(entry, ac, ac.transport())
@@ -310,18 +307,21 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 		marks.roleEffect = ticket
 		defer ticket.End()
 	}
-	tb := sess.activeTab()
-	if tb == nil {
-		return
+	var tb *tab
+	if local {
+		tb = sess.activeTab()
+		if tb == nil {
+			return
+		}
 	}
 
 	ac.sendMu.Lock()
 	// sendMu is the attachment ownership boundary. Check the session's
 	// published identity while holding it so a deadline captured before an
 	// attach/replace cannot emit on either the old or new output chain.
-	sess.mu.Lock()
-	owned := sess.client == ac
-	sess.mu.Unlock()
+	entry.core().mu.Lock()
+	owned := entry.core().client == ac
+	entry.core().mu.Unlock()
 	if !owned || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
 		return
@@ -359,40 +359,46 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 		}
 	}()
 	preview := snapshotPickerPreview(nil)
-	if overlays.previewTab != tb {
+	if local && overlays.previewTab != tb {
 		preview = snapshotPickerPreview(overlays.previewTab)
 	}
-	d.refreshSessionFocusedTitles(sess)
+	if local {
+		d.refreshSessionFocusedTitles(sess)
+	}
 	// Contextual ranks are completely captured under paletteMu. Compose them
 	// without reading the live MRU, whose order may have changed mid-interaction.
 	statusFeedback := overlays.statusFeedback
 	if statusFeedback == "" && overlays.resizeActive {
 		statusFeedback = "resize: h/j/k/l or arrows · = equalize · q/esc/enter exit"
 	}
-	bars := d.barStateForPaletteHints(sess, statusFeedback, overlays.paletteHints, overlays.paletteRecent)
+	bars := d.barStateForAttachmentPaletteHints(entry, statusFeedback, overlays.paletteHints, overlays.paletteRecent)
 	applied := ac.getAppliedTheme()
 	bars.theme = applied.Raw
-	attentionVisible := pulseVisible(bars.attentionFrame)
-	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
+	if local {
+		attentionVisible := pulseVisible(bars.attentionFrame)
+		repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
+	}
 
 	paletteCfg := d.currentPaletteConfig()
 	floatingCfg := d.currentFloatingConfig()
 	// Title refresh may inspect process state, so it remains before the capture
 	// boundary and outside tab/pane ownership locks.
-	tb.mu.Lock()
-	titleIDs := ac.renderScratch.titleIDs[:0]
-	if tb.tree != nil {
-		titleIDs = appendStackPaneIDs(titleIDs, tb.tree.Root)
-	}
-	ac.renderScratch.titleIDs = titleIDs
-	floating := tb.floating.pane
-	hasFloating := tb.floating.state == floatingVisible && floating != nil
-	tb.mu.Unlock()
-	for _, id := range titleIDs {
-		d.refreshPaneTitle(sess, id)
-	}
-	if hasFloating {
-		d.refreshPaneDisplayTitle(sess, floating, false)
+	if local {
+		tb.mu.Lock()
+		titleIDs := ac.renderScratch.titleIDs[:0]
+		if tb.tree != nil {
+			titleIDs = appendStackPaneIDs(titleIDs, tb.tree.Root)
+		}
+		ac.renderScratch.titleIDs = titleIDs
+		floating := tb.floating.pane
+		hasFloating := tb.floating.state == floatingVisible && floating != nil
+		tb.mu.Unlock()
+		for _, id := range titleIDs {
+			d.refreshPaneTitle(sess, id)
+		}
+		if hasFloating {
+			d.refreshPaneDisplayTitle(sess, floating, false)
+		}
 	}
 
 	capturedOverlays := capturedOverlayRenderState{
@@ -419,7 +425,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	if ac.renderStages.capture != nil {
 		ac.renderStages.capture()
 	}
-	if overlays.pickerActive && overlays.previewTab == tb {
+	if local && overlays.pickerActive && overlays.previewTab == tb {
 		previewState := *state
 		previewState.overlays = capturedOverlayRenderState{}
 		previewState.reset = true
@@ -432,7 +438,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()
 	}
-	d.emitFrame(sess, ac, state, composed, &marks)
+	d.emitFrame(entry, ac, state, composed, &marks)
 }
 
 var fallbackChromeStyles = themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
