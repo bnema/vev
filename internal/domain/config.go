@@ -98,6 +98,7 @@ type Config struct {
 	Floating       FloatingConfig
 	Nav            NavConfig
 	Tabs           TabsConfig
+	Remote         RemoteConfig
 }
 
 // Warning describes a non-fatal config problem. Parsers and reloaders should
@@ -134,6 +135,11 @@ func Defaults() Config {
 		},
 		Tabs: TabsConfig{
 			TerminalTitle: true,
+		},
+		Remote: RemoteConfig{
+			Enabled:  true,
+			Remember: true,
+			Hosts:    []string{},
 		},
 	}
 }
