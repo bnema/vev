@@ -71,16 +71,3 @@ func TestRemoteHostUniqueTargets(t *testing.T) {
 		})
 	}
 }
-
-func TestRemoteHostConfigDefaults(t *testing.T) {
-	cfg := Defaults()
-	if !cfg.Remote.Enabled {
-		t.Fatal("Defaults().Remote.Enabled = false, want true")
-	}
-	if !cfg.Remote.Remember {
-		t.Fatal("Defaults().Remote.Remember = false, want true")
-	}
-	if cfg.Remote != (RemoteConfig{Enabled: true, Remember: true}) {
-		t.Fatalf("Defaults().Remote = %#v, want Enabled=true Remember=true only", cfg.Remote)
-	}
-}
