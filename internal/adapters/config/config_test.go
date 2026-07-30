@@ -29,6 +29,7 @@ func TestParse(t *testing.T) {
 		input        string
 		want         domain.Config
 		wantWarnings []domain.Warning
+		checkRemote  bool
 	}{
 		{
 			name:  "comments and inline comments",
@@ -50,6 +51,17 @@ func TestParse(t *testing.T) {
 				BindingEntries: []domain.ConfigEntry{},
 				Codes:          map[string]string{"detach": "dt"},
 			},
+		},
+		{
+			name:  "remote can disable enabled and remember",
+			input: "[remote]\nenabled = false\nremember = false\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+				Remote:         domain.RemoteConfig{Enabled: false, Remember: false},
+			},
+			checkRemote: true,
 		},
 		{
 			name:  "invalid theme warns and keeps default",
@@ -358,7 +370,7 @@ func TestParse(t *testing.T) {
 			if !tt.want.Palette.AnchorSet {
 				tt.want.Palette = domain.Defaults().Palette
 			}
-			if tt.want.Remote == (domain.RemoteConfig{}) {
+			if !tt.checkRemote {
 				tt.want.Remote = domain.Defaults().Remote
 			}
 			got, warnings, err := Parse(strings.NewReader(tt.input))

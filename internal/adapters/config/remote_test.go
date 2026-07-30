@@ -16,6 +16,7 @@ func TestParseRemote(t *testing.T) {
 		input              string
 		want               domain.RemoteConfig
 		wantErr            string
+		wantErrIs          error
 		wantWarnings       []domain.Warning
 		wantTheme          domain.ThemeMode
 		checkTheme         bool
@@ -94,21 +95,27 @@ remember = True
 			input: `[remote]
 hosts = ["arch", "build@mule"]
 `,
-			wantErr: `line 2: unsupported remote hosts assignment`,
+			wantErr:      `line 2: unsupported remote hosts assignment`,
+			wantErrIs:    ErrUnsupportedRemoteHosts,
+			wantWarnings: nil,
 		},
 		{
 			name: "empty hosts array fails closed",
 			input: `[remote]
 hosts = []
 `,
-			wantErr: `line 2: unsupported remote hosts assignment`,
+			wantErr:      `line 2: unsupported remote hosts assignment`,
+			wantErrIs:    ErrUnsupportedRemoteHosts,
+			wantWarnings: nil,
 		},
 		{
 			name: "malformed hosts assignment fails closed",
 			input: `[remote]
 hosts = not-an-array
 `,
-			wantErr: `line 2: unsupported remote hosts assignment`,
+			wantErr:      `line 2: unsupported remote hosts assignment`,
+			wantErrIs:    ErrUnsupportedRemoteHosts,
+			wantWarnings: nil,
 		},
 		{
 			name: "hosts cannot fall through as a binding",
@@ -117,7 +124,9 @@ hosts = not-an-array
 hosts = ["arch"]
 new-tab = alt+t
 `,
-			wantErr: `line 3: unsupported remote hosts assignment`,
+			wantErr:      `line 3: unsupported remote hosts assignment`,
+			wantErrIs:    ErrUnsupportedRemoteHosts,
+			wantWarnings: nil,
 		},
 		{
 			name: "unknown remote key warns",
@@ -167,6 +176,9 @@ enabled = true
 			cfg, warnings, err := Parse(strings.NewReader(tt.input))
 			if tt.wantErr != "" {
 				require.EqualError(t, err, tt.wantErr)
+				require.ErrorIs(t, err, tt.wantErrIs)
+				require.Equal(t, tt.wantWarnings, warnings)
+				require.Empty(t, cfg.BindingEntries)
 				return
 			}
 			require.NoError(t, err)
