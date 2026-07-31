@@ -11,6 +11,14 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+func TestCatalogCachePath(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	want := filepath.Join(stateDir, "remote-catalog-cache.json")
+	if got := CatalogCachePath(stateDir); got != want {
+		t.Fatalf("CatalogCachePath(%q) = %q, want %q", stateDir, got, want)
+	}
+}
+
 func TestCatalogCacheStoreLoad(t *testing.T) {
 	t.Parallel()
 
