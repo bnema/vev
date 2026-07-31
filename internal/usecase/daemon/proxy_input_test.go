@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -680,4 +681,146 @@ func TestRemotePickerEnterRoutesStructuredKeyThroughProxyOwnership(t *testing.T)
 	require.True(t, ok, "Enter must route the row instead of only marking it selectable")
 	require.Equal(t, key, proxy.key)
 	t.Cleanup(func() { stopProxy(t, proxy) })
+}
+
+func TestRemotePickerSwitchesFromProxyBackToLocalSession(t *testing.T) {
+	d, proxy, ac, _, handler := newProxyInputHarness(t)
+	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	local := &session{sessionCore: sessionCore{id: "local", name: "local"}, tabs: []*tab{tb}}
+	publishTiledPaneOwners(local, tb)
+	d.mu.Lock()
+	require.True(t, d.registerSessionLocked(local))
+	d.mu.Unlock()
+
+	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(tb.stableID)})
+	d.publishPicker(proxy, ac, model, pickerNavigate, moveSourceLocator{})
+	target, selectable := model.Selected()
+	require.True(t, selectable)
+	require.Equal(t, local.id, target.Session)
+	require.Equal(t, local.name, target.Name)
+	require.False(t, target.Stopped)
+
+	require.NoError(t, d.switchToTargetForRole(handler.roleToken, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.Same(t, local, ac.currentSession())
+	require.False(t, ac.overlays.pickerActive(), "successful handoff must close the picker")
+}
+
+func TestRemotePickerCanReselectWarmProxyAfterReturningLocal(t *testing.T) {
+	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d.attachCoordinator(local, nil, ac, true)
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	remote := newProxyTestTransport()
+	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
+	remote.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	d.remoteDialerFactory = newProxyConstructionFactory(remote)
+	d.remoteTransportMode = ports.RemoteTransportUDP
+
+	localToken := roleEffectForTest(t, local.attachmentToken(ac, ac.transport()))
+	require.NoError(t, d.switchToTargetForRole(localToken, picker.Target{Session: key.ID(), RemoteKey: &key, TabIndex: -1}, sessionHandoffGuard{}, "picker-select"))
+	proxy, ok := ac.currentAttachmentSession().(*proxySession)
+	require.True(t, ok)
+	t.Cleanup(func() { stopProxy(t, proxy) })
+
+	proxyToken := roleEffectForTest(t, attachmentToken(proxy, ac, ac.transport()))
+	require.NoError(t, d.switchToTargetForRole(proxyToken, picker.Target{Session: local.id, TabIndex: 0}, sessionHandoffGuard{}, "picker-select"))
+	require.Same(t, local, ac.currentSession())
+
+	model := d.newPickerModel(local, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: key.ID(), RemoteKey: &key})
+	d.publishPicker(local, ac, model, pickerNavigate, moveSourceLocator{})
+	target, selectable := model.Selected()
+	require.True(t, selectable)
+	require.Empty(t, target.Name, "live proxy rows must route only by their structured remote key")
+	localToken = roleEffectForTest(t, local.attachmentToken(ac, ac.transport()))
+	require.NoError(t, d.switchToTargetForRole(localToken, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.Same(t, proxy, ac.currentAttachmentSession())
+	require.False(t, ac.overlays.pickerActive())
+}
+
+func TestConnectionLoopCleansCurrentProxyAfterHandoffReceiveError(t *testing.T) {
+	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	client := newProxyTestTransport()
+	ac.replaceTransport(client)
+	d.attachCoordinator(local, nil, ac, true)
+
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	remote := newProxyTestTransport()
+	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
+	remote.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	d.remoteDialerFactory = newProxyConstructionFactory(remote)
+	d.remoteTransportMode = ports.RemoteTransportUDP
+
+	loopDone := make(chan struct{})
+	go func() {
+		d.runConnLoop(ac)
+		close(loopDone)
+	}()
+	require.Eventually(t, func() bool { return client.receiving.Load() == 1 }, time.Second, time.Millisecond)
+
+	token := roleEffectForTest(t, local.attachmentToken(ac, client))
+	require.NoError(t, d.switchToTargetForRole(token, picker.Target{Session: key.ID(), RemoteKey: &key, TabIndex: -1}, sessionHandoffGuard{}, "picker-select"))
+	proxy, ok := ac.currentAttachmentSession().(*proxySession)
+	require.True(t, ok)
+	t.Cleanup(func() { stopProxy(t, proxy) })
+
+	client.recv <- proxyRecv{err: io.EOF}
+	awaitTestCompletion(t, loopDone, "connection loop did not return after receive failure")
+	require.Nil(t, ac.currentAttachmentSession(), "receive failure cleaned the stale local role instead of the current proxy role")
+}
+
+func TestConnectionLoopFollowsClientFromProxyBackToLocal(t *testing.T) {
+	d, _, ac, _, handler := newProxyInputHarness(t)
+	client := ac.transport().(*proxyTestTransport)
+	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	local := &session{sessionCore: sessionCore{id: "local", name: "local"}, tabs: []*tab{tb}}
+	publishTiledPaneOwners(local, tb)
+	d.mu.Lock()
+	require.True(t, d.registerSessionLocked(local))
+	d.mu.Unlock()
+
+	loopDone := make(chan struct{})
+	go func() {
+		d.runConnLoop(ac)
+		close(loopDone)
+	}()
+	require.Eventually(t, func() bool { return client.receiving.Load() == 1 }, time.Second, time.Millisecond)
+
+	require.NoError(t, d.switchToTargetForRole(handler.roleToken, picker.Target{Session: local.id, TabIndex: 0}, sessionHandoffGuard{}, "picker-select"))
+	require.Same(t, local, ac.currentSession())
+	client.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}}
+	awaitTestCompletion(t, loopDone, "connection loop did not follow the client back to its local session")
+	require.Nil(t, ac.currentAttachmentSession())
+}
+
+func TestConnectionLoopFollowsClientFromLocalToRemoteProxy(t *testing.T) {
+	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	client := newProxyTestTransport()
+	ac.replaceTransport(client)
+	d.attachCoordinator(local, nil, ac, true)
+
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	remote := newProxyTestTransport()
+	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
+	remote.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	d.remoteDialerFactory = newProxyConstructionFactory(remote)
+	d.remoteTransportMode = ports.RemoteTransportUDP
+
+	loopDone := make(chan struct{})
+	go func() {
+		d.runConnLoop(ac)
+		close(loopDone)
+	}()
+	require.Eventually(t, func() bool { return client.receiving.Load() == 1 }, time.Second, time.Millisecond)
+
+	token := local.attachmentToken(ac, client)
+	effect, admitted := ac.beginRoleEffect(token)
+	require.True(t, admitted)
+	token.effect = effect
+	require.NoError(t, d.switchToTargetForRole(token, picker.Target{Session: key.ID(), RemoteKey: &key, TabIndex: -1}, sessionHandoffGuard{}, "picker-select"))
+	proxy, ok := ac.currentAttachmentSession().(*proxySession)
+	require.True(t, ok)
+	t.Cleanup(func() { stopProxy(t, proxy) })
+
+	client.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}}
+	awaitTestCompletion(t, loopDone, "connection loop did not handle input after the proxy handoff")
+	require.Nil(t, ac.currentAttachmentSession(), "connection loop abandoned the client after the proxy handoff")
 }

@@ -20,28 +20,37 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		if !ac.currentTransportIs(tr) {
 			return
 		}
-		sess := ac.currentSession()
+		sess := ac.currentAttachmentSession()
 		if sess == nil {
 			return
 		}
 		f, err := tr.Recv()
 		if err != nil {
-			token := sess.attachmentToken(ac, tr)
+			if !ac.currentTransportIs(tr) {
+				return
+			}
+			sess = ac.currentAttachmentSession()
+			if sess == nil {
+				return
+			}
+			token := attachmentToken(sess, ac, tr)
 			if token.role == attachmentSnatched {
 				d.parkOrDropSnatchedAttachment(token)
-			} else {
-				d.clientGone(sess, ac, tr, false)
+			} else if proxy, ok := sess.(*proxySession); ok {
+				d.detachProxyOnSendError(proxy, ac, tr)
+			} else if local, ok := localSession(sess); ok {
+				d.clientGone(local, ac, tr, false)
 			}
 			return
 		}
 		if !ac.currentTransportIs(tr) {
 			return
 		}
-		sess = ac.currentSession()
+		sess = ac.currentAttachmentSession()
 		if sess == nil {
 			return
 		}
-		token := sess.attachmentToken(ac, tr)
+		token := attachmentToken(sess, ac, tr)
 		switch token.role {
 		case attachmentActive:
 			if d.handleActiveClientFrame(token, f) {

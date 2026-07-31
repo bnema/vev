@@ -89,12 +89,26 @@ func TestRemoteSessionKeyValidate(t *testing.T) {
 }
 
 func TestRemoteSessionKeyDisplayIsPresentationOnly(t *testing.T) {
-	key := RemoteSessionKey{Host: "arch", Name: "hello"}
-
-	if got, want := key.Display(), "hello@arch"; got != want {
-		t.Fatalf("RemoteSessionKey.Display() = %q, want %q", got, want)
+	tests := []struct {
+		host string
+		want string
+	}{
+		{host: "arch", want: "hello@arch"},
+		{host: "test@arch", want: "hello@arch"},
+		{host: "test@arch:2222", want: "hello@arch:2222"},
+		{host: "test@[2001:db8::1]:2222", want: "hello@[2001:db8::1]:2222"},
+		{host: "test@", want: "hello@test@"},
+		{host: "@arch", want: "hello@@arch"},
 	}
-	if key.Host != "arch" || key.Name != "hello" {
-		t.Fatalf("Display mutated routing key: %#v", key)
+	for _, test := range tests {
+		t.Run(test.host, func(t *testing.T) {
+			key := RemoteSessionKey{Host: test.host, Name: "hello"}
+			if got := key.Display(); got != test.want {
+				t.Fatalf("RemoteSessionKey.Display() = %q, want %q", got, test.want)
+			}
+			if key.Host != test.host || key.Name != "hello" {
+				t.Fatalf("Display mutated routing key: %#v", key)
+			}
+		})
 	}
 }

@@ -1,6 +1,9 @@
 package domain
 
-import "encoding/base64"
+import (
+	"encoding/base64"
+	"strings"
+)
 
 // RemoteSessionKey identifies a discovered remote session independently from
 // its display label.
@@ -27,5 +30,9 @@ func (k RemoteSessionKey) ID() SessionID {
 
 // Display returns the presentation label for this remote session.
 func (k RemoteSessionKey) Display() string {
-	return k.Name + "@" + k.Host
+	host := k.Host
+	if i := strings.LastIndexByte(host, '@'); i > 0 && i < len(host)-1 {
+		host = host[i+1:]
+	}
+	return k.Name + "@" + host
 }
