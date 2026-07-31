@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -14,7 +15,13 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-const catalogCacheFileVersion = 1
+const (
+	catalogCacheFileName    = "remote-catalog-cache.json"
+	catalogCacheFileVersion = 1
+)
+
+// CatalogCachePath returns the canonical location of the remote catalog cache in stateDir.
+func CatalogCachePath(stateDir string) string { return filepath.Join(stateDir, catalogCacheFileName) }
 
 type catalogCacheFile struct {
 	Version *int                `json:"version"`
@@ -114,7 +121,7 @@ func (c *fileCatalogCache) Load() ([]ports.RemoteCatalogCacheEntry, error) {
 	}
 	normalized, err := normalizeCatalogCacheEntries(entries)
 	if err != nil {
-		return nil, fmt.Errorf("remote catalog cache: malformed cache file: %w", err)
+		return nil, err
 	}
 	return normalized, nil
 }

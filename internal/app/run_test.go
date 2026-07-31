@@ -1402,7 +1402,7 @@ func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
 	require.NoError(t, err)
 	_ = daemon.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), option)
 	require.Equal(t, remoteadapter.HostStorePath(stateDir), hostPath)
-	require.Equal(t, filepath.Join(stateDir, "remote-catalog-cache.json"), cachePath)
+	require.Equal(t, remoteadapter.CatalogCachePath(stateDir), cachePath)
 	require.Equal(t, 1, cache.loads, "daemon startup must load the cache once")
 }
 

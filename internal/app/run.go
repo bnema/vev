@@ -798,7 +798,7 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 	return daemon.WithRemoteDiscovery(
 		newRemoteHostStore(remoteadapter.HostStorePath(stateDir)),
 		newRemoteCatalogClient(),
-		newRemoteCatalogCache(filepath.Join(stateDir, "remote-catalog-cache.json")),
+		newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)),
 		newRemoteDialerFactoryWithRuntimeObserver(observer),
 		mode,
 	), nil
