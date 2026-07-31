@@ -94,6 +94,20 @@ func (p *attachmentPublication) unlockCoordinators() {
 	p.releaseCoordinators()
 }
 
+func attachmentLifecycleCurrentLocked(entry attachmentSession, fence *attachmentLifecycleFence) bool {
+	if fence == nil {
+		return true
+	}
+	target, ok := localSession(entry)
+	if !ok {
+		return false
+	}
+	if fence.checkCreatedAt && (target.name != fence.name || target.createdAt != fence.createdAt) {
+		return false
+	}
+	return !fence.checkIncarnation || target.incarnation == fence.incarnation
+}
+
 // validateAttachmentTransitionPrelocked performs every fallible transition
 // check without acquiring d.mu, notices.routingMu, or either session lock.
 // The caller holds those locks in that order, with session locks ordered by ID.
@@ -143,6 +157,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	invalid = invalid || targetCoordinator != nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next)
 	invalid = invalid || req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
 		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next)
+	invalid = invalid || !attachmentLifecycleCurrentLocked(req.target, req.expectedTargetLifecycle)
 	invalid = invalid || req.activateTargetTab && !req.target.activateTargetLocked(req.targetTabIndex)
 	if invalid {
 		publication.unlockCoordinators()

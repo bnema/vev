@@ -581,18 +581,29 @@ func (d *Daemon) switchActiveTargetForRole(token attachmentRoleToken, target pic
 	return d.switchActiveTargetForRoleGuarded(token, target, sessionHandoffGuard{}, "jump-attention")
 }
 
+func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence {
+	fence := &attachmentLifecycleFence{}
+	if target.ExpectedCreatedAt != nil {
+		fence.name = target.Name
+		fence.createdAt = *target.ExpectedCreatedAt
+		fence.checkCreatedAt = true
+	}
+	if target.Incarnation != (domain.IncarnationID{}) {
+		fence.incarnation = target.Incarnation
+		fence.checkIncarnation = true
+	}
+	if !fence.checkCreatedAt && !fence.checkIncarnation {
+		return nil
+	}
+	return fence
+}
+
 func (d *Daemon) switchActiveTargetForRoleGuarded(token attachmentRoleToken, target picker.Target, guard sessionHandoffGuard, action string) error {
 	if token.sess == nil || token.ac == nil || token.role != attachmentActive {
 		return nil
 	}
 	d.mu.Lock()
 	targetSess, ok := localSession(d.sessions[target.Session])
-	if ok {
-		targetSess.mu.Lock()
-		ok = targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) &&
-			(target.Incarnation == (domain.IncarnationID{}) || target.Incarnation == targetSess.incarnation)
-		targetSess.mu.Unlock()
-	}
 	d.mu.Unlock()
 	if !ok || targetSess == token.sess {
 		return nil
@@ -602,7 +613,8 @@ func (d *Daemon) switchActiveTargetForRoleGuarded(token attachmentRoleToken, tar
 		source: token.sess, target: targetSess, next: token.ac,
 		expectedRole: attachmentActive, targetRole: attachmentActive,
 		expectedTransport: token.transport, sourceToken: &token, action: action,
-		activateTargetTab: true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
+		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
+		activateTargetTab:       true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
 	})
 	if err != nil {
 		// Losing the exact source role is a benign stale action, not a notice for

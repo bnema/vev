@@ -722,12 +722,15 @@ func TestRemotePickerRejectsReplacedLocalLifecycle(t *testing.T) {
 	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(tb.stableID)})
 	target, selectable := model.Selected()
 	require.True(t, selectable)
-	local.mu.Lock()
-	local.name = "replacement"
-	local.createdAt++
-	local.mu.Unlock()
+	d.afterRoleEffectsFrozen = func() {
+		d.afterRoleEffectsFrozen = nil
+		local.mu.Lock()
+		local.name = "replacement"
+		local.createdAt++
+		local.mu.Unlock()
+	}
 
-	require.NoError(t, d.switchToTargetForRole(handler.roleToken, target, sessionHandoffGuard{}, "picker-select"))
+	require.Error(t, d.switchToTargetForRole(handler.roleToken, target, sessionHandoffGuard{}, "picker-select"))
 	require.Same(t, proxy, ac.currentAttachmentSession(), "stale picker lifecycle must not redirect the attachment")
 }
 
