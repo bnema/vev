@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -25,6 +26,9 @@ type remoteCatalogState struct {
 	cache   map[string]ports.RemoteCatalogCacheEntry
 	status  map[string]remoteHostStatus
 	failure map[string]time.Time
+	refresh uint64
+	cancel  context.CancelFunc
+	pickers map[*attachedClient]struct{}
 	writeMu sync.Mutex
 }
 
@@ -33,14 +37,17 @@ func newRemoteCatalogState() remoteCatalogState {
 		cache:   make(map[string]ports.RemoteCatalogCacheEntry),
 		status:  make(map[string]remoteHostStatus),
 		failure: make(map[string]time.Time),
+		pickers: make(map[*attachedClient]struct{}),
 	}
 }
 
 func cloneRemoteCatalogEntry(entry ports.RemoteCatalogCacheEntry) ports.RemoteCatalogCacheEntry {
+	sessions := make([]ports.RemoteCatalogSession, len(entry.Sessions))
+	copy(sessions, entry.Sessions)
 	return ports.RemoteCatalogCacheEntry{
 		Host:      entry.Host,
 		FetchedAt: entry.FetchedAt,
-		Sessions:  append([]ports.RemoteCatalogSession(nil), entry.Sessions...),
+		Sessions:  sessions,
 	}
 }
 

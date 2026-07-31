@@ -334,12 +334,13 @@ type Daemon struct {
 }
 
 type parkedAttachment struct {
-	sess     *session
-	ac       *attachedClient
-	role     attachmentRole
-	timer    ports.Timer
-	done     chan struct{}
-	doneOnce sync.Once
+	sess             *session
+	ac               *attachedClient
+	role             attachmentRole
+	pickerGeneration uint64
+	timer            ports.Timer
+	done             chan struct{}
+	doneOnce         sync.Once
 }
 
 // parkingAttachment is the observable detach→park lifecycle for one resume
@@ -795,6 +796,7 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 }
 
 func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
+	d.cancelRemotePickerRefresh()
 	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true
@@ -803,7 +805,7 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
-	finishParkedAttachmentRetirements(parkedRetirements)
+	d.finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
@@ -970,7 +972,9 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	case ports.MsgList:
 		d.handleList(tr)
 	case ports.MsgCommand:
-		d.handleCommand(tr, first)
+		if err := d.handleCommand(tr, first); err != nil {
+			d.log.Warn("command handler failed", "err", err)
+		}
 	case ports.MsgKill:
 		d.handleKill(tr, first)
 	case ports.MsgHello:

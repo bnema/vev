@@ -150,7 +150,7 @@ func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
 	tr, sends, _ := newConn(t, frame)
 
 	d := newTestDaemon(t, nil, stubClock{})
-	d.handleCommand(tr, frame)
+	require.NoError(t, d.handleCommand(tr, frame))
 
 	result := awaitCommandResult(t, sends)
 	require.False(t, result.OK)
@@ -773,7 +773,9 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	firstTransport, firstSends, _ := newConn(t, firstFrame)
 	firstDone := make(chan struct{})
 	go func() {
-		d.handleCommand(firstTransport, firstFrame)
+		if err := d.handleCommand(firstTransport, firstFrame); err != nil {
+			t.Errorf("handle first command: %v", err)
+		}
 		close(firstDone)
 	}()
 	select {
@@ -789,7 +791,9 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	secondTransport, secondSends, _ := newConn(t, secondFrame)
 	secondDone := make(chan struct{})
 	go func() {
-		d.handleCommand(secondTransport, secondFrame)
+		if err := d.handleCommand(secondTransport, secondFrame); err != nil {
+			t.Errorf("handle second command: %v", err)
+		}
 		close(secondDone)
 	}()
 	select {
@@ -1146,12 +1150,16 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 	done := make(chan struct{}, 2)
 	go func() {
 		<-start
-		d.handleCommand(leftTransport, leftFrame)
+		if err := d.handleCommand(leftTransport, leftFrame); err != nil {
+			t.Errorf("handle left command: %v", err)
+		}
 		done <- struct{}{}
 	}()
 	go func() {
 		<-start
-		d.handleCommand(rightTransport, rightFrame)
+		if err := d.handleCommand(rightTransport, rightFrame); err != nil {
+			t.Errorf("handle right command: %v", err)
+		}
 		done <- struct{}{}
 	}()
 	close(start)
@@ -1194,7 +1202,7 @@ func sendCommand(t *testing.T, d *Daemon, request ports.CommandRequest) ports.Co
 	t.Helper()
 	frame := commandFrame(t, request)
 	tr, sends, _ := newConn(t, frame)
-	d.handleCommand(tr, frame)
+	require.NoError(t, d.handleCommand(tr, frame))
 	return awaitCommandResult(t, sends)
 }
 

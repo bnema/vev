@@ -54,7 +54,6 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
-	d.unregisterPreview(ac)
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
@@ -75,6 +74,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	// attachment parking marker left by a raced non-explicit teardown so
 	// IntentResume waiters are not stranded on a never-published park.
 	d.clearParkingInFlight(ac.resumeToken, ac)
+	d.closePicker(ac)
 
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()
@@ -131,7 +131,6 @@ func (d *Daemon) detachProxyOnSendError(p *proxySession, ac *attachedClient, fai
 	d.unregisterPreview(ac)
 	ac.clearPreviousSession()
 	_ = ac.closeCapturedTransport(failed)
-	d.armProxyWarm(p)
 	d.log.Warn("detached proxy client after send error", "host", p.key.Host, "session", p.key.Name)
 }
 
@@ -177,13 +176,13 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
-	d.unregisterPreview(ac)
 	if d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(failed)
 		d.log.Warn("parked client after send error", "session", sess.name)
 		return
 	}
 	d.clearParkingInFlight(ac.resumeToken, ac)
+	d.closePicker(ac)
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()
 	_ = ac.closeCapturedTransport(failed)

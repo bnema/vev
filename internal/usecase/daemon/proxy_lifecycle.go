@@ -117,7 +117,7 @@ func (d *Daemon) armProxyWarm(p *proxySession) bool {
 // expireWarmProxy removes only the exact dormant proxy pointer and lifecycle
 // generation. The canonical d.mu -> core.mu -> proxy.mu order is held only for
 // validation/publication; cancellation, coordinator teardown, transport close,
-// and daemon completion happen afterward.
+// picker refresh, and daemon completion happen afterward.
 func (d *Daemon) expireWarmProxy(p *proxySession, token *proxyWarmTimer) bool {
 	if d == nil || p == nil || token == nil {
 		return false
@@ -176,6 +176,8 @@ func (d *Daemon) expireWarmProxy(p *proxySession, token *proxyWarmTimer) bool {
 	p.finish()
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
+	} else {
+		d.refreshRemoteOpenPickers()
 	}
 	return true
 }

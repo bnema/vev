@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 func setupMovePickerSessions(t *testing.T, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
@@ -312,6 +313,47 @@ func TestMovePickerFinalSourceClosesBeforeSnatchFinalization(t *testing.T) {
 	frames := displacedTransport.Sends()
 	require.NotEmpty(t, frames)
 	require.Equal(t, ports.MsgOutput, frames[0].Type)
+}
+
+func TestMovePickerRefreshCloseKeepsReplacementPicker(t *testing.T) {
+	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
+	defer releaseAll(releases)
+	require.NoError(t, d.enterPickerForIntent(source, ac, pickerMovePane, moveSourceLocator{
+		Session: moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name},
+		TabID:   "source-tab", PaneID: "source-pane",
+	}))
+	d.mu.Lock()
+	delete(d.sessions, destination.id)
+	d.mu.Unlock()
+
+	rebuildReached := make(chan struct{})
+	allowClose := make(chan struct{})
+	refreshed := make(chan struct{})
+	ac.overlays.afterPickerRefreshBuild = func(*picker.Model) {
+		close(rebuildReached)
+		<-allowClose
+	}
+	go func() {
+		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		close(refreshed)
+	}()
+	select {
+	case <-rebuildReached:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for move-picker refresh rebuild")
+	}
+
+	replacement := d.newPickerModel(source, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	d.publishPicker(source, ac, replacement, pickerNavigate, moveSourceLocator{})
+	close(allowClose)
+	select {
+	case <-refreshed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for move-picker refresh")
+	}
+	ac.overlays.pickerMu.Lock()
+	require.Same(t, replacement, ac.overlays.picker)
+	ac.overlays.pickerMu.Unlock()
 }
 
 func TestMovePickerDispatchMuNotHeldWhileOpen(t *testing.T) {

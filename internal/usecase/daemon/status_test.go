@@ -581,7 +581,8 @@ func TestAttachClientClearsStaleColorSchemeOnReplacement(t *testing.T) {
 	assertSessionColorScheme(t, sess, true)
 
 	tr, _ := newCapturingTransport(t)
-	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	require.NoError(t, err)
 
 	assertSessionColorSchemeUnknown(t, sess)
 }
@@ -682,7 +683,8 @@ func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
 	})
 	tr, _ := newCapturingTransport(t)
 
-	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	require.NoError(t, err)
 
 	var got []byte
 	tb := sess.activeTab()
@@ -791,7 +793,8 @@ func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
 	d, sess, old, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	tr, _ := newCapturingTransport(t)
-	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	require.NoError(t, err)
 
 	d.applyTheme(sess, old, ports.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},

@@ -162,6 +162,28 @@ func TestArmProxyWarmKeepsExpiryPathWhenPublicationFails(t *testing.T) {
 	}
 }
 
+func TestDetachProxyIfCurrentTransportArmsExpiredProxy(t *testing.T) {
+	d, p, clock := newProxyLifecycleFixture(t)
+	transport := newProxyTestTransport()
+	t.Cleanup(func() { _ = transport.Close() })
+	ac := &attachedClient{tr: transport, output: newOutputStateStream()}
+	ac.setSession(p)
+	setProxyLifecycleClient(p, ac)
+	p.mu.Lock()
+	p.expired = true
+	p.mu.Unlock()
+
+	require.True(t, d.detachProxyIfCurrentTransport(p, ac, ac.transportSnapshot()))
+	awaitTestValue(t, clock.timers, "expired proxy detach did not arm a warm timer")
+	token, generation := proxyWarmToken(p)
+	require.NotNil(t, token, "expired headless proxy has no expiry path")
+	require.Equal(t, generation, token.generation)
+	require.Nil(t, ac.currentAttachmentSession())
+
+	token.stop()
+	awaitTestCompletion(t, token.done, "warm timer did not stop during cleanup")
+}
+
 func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 	t.Run("rekeys an already armed timer", func(t *testing.T) {
 		d, p, clock := newProxyLifecycleFixture(t)

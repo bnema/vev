@@ -216,6 +216,12 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 	// cannot leave closed panes retained through its capture cache. This must
 	// remain outside d.mu: sendMu is ordered before the daemon lock.
 	ac.clearCaptureFrames()
+	var pickerGeneration uint64
+	if ac.overlays != nil {
+		ac.overlays.pickerMu.Lock()
+		pickerGeneration = ac.overlays.pickerGeneration
+		ac.overlays.pickerMu.Unlock()
+	}
 	d.mu.Lock()
 	if d.closing || d.sessions[sess.id] != sess {
 		d.clearParkingInFlightLocked(ac.resumeToken, ac)
@@ -244,13 +250,13 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 	}
 	grace := d.resumeParkGrace
 	timer := d.clock.NewTimer(grace)
-	parked := &parkedAttachment{sess: sess, ac: ac, role: role, timer: timer, done: make(chan struct{})}
+	parked := &parkedAttachment{sess: sess, ac: ac, role: role, pickerGeneration: pickerGeneration, timer: timer, done: make(chan struct{})}
 	ac.parked = true
 	d.parked[token] = parked
 	d.clearParkingInFlightLocked(token, ac)
 	d.mu.Unlock()
 	if oldRetirement != nil {
-		finishParkedAttachmentRetirements([]parkedAttachmentRetirement{*oldRetirement})
+		d.finishParkedAttachmentRetirements([]parkedAttachmentRetirement{*oldRetirement})
 	}
 	if oldSame != nil {
 		if oldSame.timer != nil {
@@ -275,6 +281,7 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 	if d.parked[token] == parked {
 		d.removeParkedLocked(token, parked)
 		d.mu.Unlock()
+		d.closePickerIfCurrent(parked.ac, nil, parked.pickerGeneration)
 		d.log.Warn("parked client expired", "session", parked.sess.name)
 		return
 	}
@@ -312,8 +319,9 @@ func (d *Daemon) demoteParkedActiveForSessionLocked(sess *session) {
 }
 
 type parkedAttachmentRetirement struct {
-	parked    *parkedAttachment
-	transport transportSnapshot
+	parked           *parkedAttachment
+	pickerGeneration uint64
+	transport        transportSnapshot
 }
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
@@ -324,8 +332,9 @@ func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttach
 	parked.ac.roleGeneration.Add(1)
 	parked.ac.setSession(nil)
 	return parkedAttachmentRetirement{
-		parked:    parked,
-		transport: parked.ac.transportSnapshot(),
+		parked:           parked,
+		pickerGeneration: parked.pickerGeneration,
+		transport:        parked.ac.transportSnapshot(),
 	}
 }
 
@@ -350,15 +359,16 @@ func (d *Daemon) purgeAllParkedLocked() []parkedAttachmentRetirement {
 	return retirements
 }
 
-// finishParkedAttachmentRetirements stops timers and closes transports without
-// holding daemon, session, coordinator, or pane locks.
-func finishParkedAttachmentRetirements(retirements []parkedAttachmentRetirement) {
+// finishParkedAttachmentRetirements stops timers and retires picker ownership
+// and transports without holding daemon, session, coordinator, or pane locks.
+func (d *Daemon) finishParkedAttachmentRetirements(retirements []parkedAttachmentRetirement) {
 	for _, retirement := range retirements {
 		if retirement.parked.timer != nil {
 			retirement.parked.timer.Stop()
 		}
 		retirement.parked.closeDone()
 		ac := retirement.parked.ac
+		d.closePickerIfCurrent(ac, nil, retirement.pickerGeneration)
 		_ = ac.closeCapturedTransport(ac.revokeTransport(retirement.transport.transport))
 	}
 }

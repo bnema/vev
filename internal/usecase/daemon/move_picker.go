@@ -161,16 +161,22 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 		return
 	}
 	intent, source := rt.pickerIntent, rt.pickerSource
+	observedModel, observedGeneration := rt.picker, rt.pickerGeneration
 	current := picker.SourceFilter{}
 	if intent != pickerNavigate || opts.preserveSelection {
-		selected, _ := rt.picker.Selected()
-		current = picker.SourceFilter{Session: selected.Session, Incarnation: selected.Incarnation, TabID: selected.TabID}
+		cursor, _ := rt.picker.Cursor()
+		current = picker.SourceFilter{
+			Session: cursor.Session, Incarnation: cursor.Incarnation, TabID: cursor.TabID, RemoteKey: cursor.RemoteKey,
+		}
 	}
 	rt.pickerMu.Unlock()
 	model := d.newPickerModel(sess, intent, source, current)
+	if rt.afterPickerRefreshBuild != nil {
+		rt.afterPickerRefreshBuild(model)
+	}
 	if intent != pickerNavigate {
 		if _, ok := model.Selected(); !ok {
-			d.closePicker(ac)
+			d.closePickerIfCurrent(ac, observedModel, observedGeneration)
 			return
 		}
 	}
@@ -180,7 +186,7 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 		model.SelectNearestRow(opts.nearestRow)
 	}
 	rt.pickerMu.Lock()
-	updated := rt.picker != nil && rt.pickerIntent == intent && rt.pickerSource == source
+	updated := rt.picker == observedModel && rt.pickerGeneration == observedGeneration && rt.pickerIntent == intent && rt.pickerSource == source
 	if updated {
 		rt.picker = model
 		rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))

@@ -15,6 +15,16 @@ const (
 	MinStackHeight            = 12
 )
 
+type RemoteAvailability uint8
+
+const (
+	RemoteNone RemoteAvailability = iota
+	RemoteCached
+	RemoteFresh
+	RemoteStale
+	RemoteVersionMismatch
+)
+
 type SessionView struct {
 	ID                domain.SessionID
 	Incarnation       domain.IncarnationID
@@ -24,9 +34,16 @@ type SessionView struct {
 	Active            int
 	Stopped           bool
 	ExpectedCreatedAt *int64
+	RemoteKey         *domain.RemoteSessionKey
+	// RemoteHost marks remote host status rows that have no session key.
+	RemoteHost         string
+	RemoteAvailability RemoteAvailability
+	RemoteDetail       string
+	ConnectOnly        bool
+	RemoteAttachReady  bool
 	// CannotAcceptMoves reports whether this session cannot receive a moved tab
 	// or pane. False for ordinary local (and stopped) sessions; true for
-	// restricted proxy sessions in phase 4. Populated, not yet consumed.
+	// restricted proxy sessions.
 	CannotAcceptMoves bool
 }
 
@@ -50,6 +67,7 @@ type SourceFilter struct {
 	Session     domain.SessionID
 	Incarnation domain.IncarnationID
 	TabID       domain.TabStableID
+	RemoteKey   *domain.RemoteSessionKey
 }
 
 // SelectionConfig describes which rows are selectable, which stable target
@@ -95,6 +113,7 @@ type Target struct {
 	Session     domain.SessionID
 	Incarnation domain.IncarnationID
 	Name        string
+	RemoteKey   *domain.RemoteSessionKey
 	TabID       domain.TabStableID
 	TabIndex    int
 	Stopped     bool
@@ -165,6 +184,11 @@ type row struct {
 	stopped              bool
 	expectedCreatedAt    int64
 	hasExpectedCreatedAt bool
+	remoteKey            domain.RemoteSessionKey
+	hasRemoteKey         bool
+	remote               bool
+	selectable           bool
+	dim                  bool
 }
 
 func New(sessions []SessionView, config SelectionConfig) *Model {
@@ -175,10 +199,10 @@ func New(sessions []SessionView, config SelectionConfig) *Model {
 		for _, pickerRow := range sessionRows {
 			idx := len(m.rows)
 			m.rows = append(m.rows, pickerRow)
-			if pickerRow.kind.selectable(config.Mode) && selectionMatches(pickerRow, config.Current, config.Mode) {
+			if selectionMatches(pickerRow, config.Current, config.Mode) {
 				m.selected = idx
 			}
-			if config.Mode == SelectNavigationTab && activeSelection < 0 && pickerRow.kind == rowTab && pickerRow.tabIndex == normalizedActive(session) {
+			if config.Mode == SelectNavigationTab && activeSelection < 0 && pickerRow.selectable && pickerRow.kind == rowTab && pickerRow.tabIndex == normalizedActive(session) {
 				activeSelection = idx
 			}
 		}
@@ -201,7 +225,10 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	if config.Mode != SelectNavigationTab && session.Stopped {
 		return nil
 	}
-	if config.Mode == SelectMoveTabSession && (sourceMatchesSession(config.Source, session) || len(session.Tabs) == 0) {
+	if config.Mode == SelectMoveTabSession && sourceMatchesSession(config.Source, session) {
+		return nil
+	}
+	if config.Mode == SelectMoveTabSession && len(session.Tabs) == 0 && !session.CannotAcceptMoves {
 		return nil
 	}
 
@@ -217,22 +244,63 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 		stopped: session.Stopped, expectedCreatedAt: expectedCreatedAt,
 		hasExpectedCreatedAt: hasExpectedCreatedAt,
 	}
+	if session.RemoteKey != nil {
+		common.remoteKey, common.hasRemoteKey = *session.RemoteKey, true
+	}
+	common.remote = common.hasRemoteKey || session.RemoteHost != ""
 	header := common
 	header.kind, header.dispName, header.tabIndex = rowSession, session.Name, -1
-	rows := []row{header}
-	for i, tab := range session.Tabs {
-		if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
-			continue
-		}
-		tabRow := common
-		tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
-		tabRow.tabID, tabRow.tabIndex = tab.TabID, i
-		rows = append(rows, tabRow)
+	header.selectable = header.kind.selectable(config.Mode)
+	if common.remote {
+		header.detail = remoteRowDetail(session)
+		header.selectable = common.hasRemoteKey && config.Mode == SelectNavigationTab && session.ConnectOnly && remoteSelectable(session)
+		header.dim = remoteDim(session)
 	}
-	if config.Mode == SelectMovePaneTab && len(rows) == 1 {
+	if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
+		header.selectable, header.dim = false, true
+	}
+	rows := []row{header}
+	if !session.ConnectOnly {
+		for i, tab := range session.Tabs {
+			if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
+				continue
+			}
+			tabRow := common
+			tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
+			tabRow.tabID, tabRow.tabIndex = tab.TabID, i
+			tabRow.selectable = tabRow.kind.selectable(config.Mode)
+			if common.remote {
+				tabRow.selectable = false
+				tabRow.dim = remoteDim(session)
+			}
+			if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
+				tabRow.selectable, tabRow.dim = false, true
+			}
+			rows = append(rows, tabRow)
+		}
+	}
+	if config.Mode == SelectMovePaneTab && len(rows) == 1 && !session.CannotAcceptMoves {
 		return nil
 	}
 	return rows
+}
+
+func remoteSelectable(session SessionView) bool {
+	return session.RemoteAttachReady && session.RemoteAvailability != RemoteVersionMismatch
+}
+
+func remoteDim(session SessionView) bool {
+	return !session.RemoteAttachReady || session.RemoteAvailability == RemoteStale || session.RemoteAvailability == RemoteVersionMismatch
+}
+
+func remoteRowDetail(session SessionView) string {
+	if session.RemoteDetail != "" && (session.RemoteAvailability == RemoteStale || session.RemoteAvailability == RemoteVersionMismatch) {
+		return session.RemoteDetail
+	}
+	if !session.RemoteAttachReady {
+		return "proxy activation pending"
+	}
+	return session.RemoteDetail
 }
 
 func sourceMatchesSession(source SourceFilter, session SessionView) bool {
@@ -256,6 +324,9 @@ func normalizedActive(session SessionView) int {
 func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) bool {
 	if pickerRow.session != current.Session || (current.Incarnation != (domain.IncarnationID{}) && pickerRow.incarnation != current.Incarnation) {
 		return false
+	}
+	if pickerRow.hasRemoteKey && pickerRow.kind == rowSession {
+		return current.RemoteKey == nil || pickerRow.remoteKey == *current.RemoteKey
 	}
 	if mode == SelectMoveTabSession {
 		return pickerRow.kind == rowSession
@@ -317,18 +388,25 @@ func (m *Model) Down() {
 	m.move(1)
 }
 
+// Cursor reports the identity under the picker cursor independently from
+// whether that row may be activated. Remote refreshes use it to preserve a
+// structured remote session key while Selected continues to enforce safety.
+func (m *Model) Cursor() (Target, bool) {
+	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
+		return Target{}, false
+	}
+	return m.rows[m.selected].target(), true
+}
+
 func (m *Model) Selected() (Target, bool) {
 	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
 		return Target{}, false
 	}
 	r := m.rows[m.selected]
-	if !r.kind.selectable(m.mode) {
+	if !r.selectable {
 		return Target{}, false
 	}
-	return Target{
-		Session: r.session, Incarnation: r.incarnation, Name: r.targetName, TabID: r.tabID,
-		TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAtPointer(),
-	}, true
+	return r.target(), true
 }
 
 // SelectedIndex reports the raw selected row index. It is -1 only when the
@@ -351,13 +429,13 @@ func (m *Model) SelectNearestRow(idx int) {
 	}
 	idx = clamp(idx, 0, len(m.rows)-1)
 	for i := idx; i < len(m.rows); i++ {
-		if m.rows[i].kind.selectable(m.mode) {
+		if m.rows[i].selectable {
 			m.selected = i
 			return
 		}
 	}
 	for i := idx - 1; i >= 0; i-- {
-		if m.rows[i].kind.selectable(m.mode) {
+		if m.rows[i].selectable {
 			m.selected = i
 			return
 		}
@@ -396,12 +474,12 @@ func (m *Model) move(delta int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
-	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].kind.selectable(m.mode) {
+	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].selectable {
 		m.selected = m.firstSelectable()
 		return
 	}
 	for i := m.selected + delta; i >= 0 && i < len(m.rows); i += delta {
-		if m.rows[i].kind.selectable(m.mode) {
+		if m.rows[i].selectable {
 			m.selected = i
 			return
 		}
@@ -410,11 +488,18 @@ func (m *Model) move(delta int) {
 
 func (m *Model) firstSelectable() int {
 	for i, r := range m.rows {
-		if r.kind.selectable(m.mode) {
+		if r.selectable {
 			return i
 		}
 	}
 	return -1
+}
+
+func (r row) target() Target {
+	return Target{
+		Session: r.session, Incarnation: r.incarnation, Name: r.targetName, RemoteKey: r.remoteKeyPointer(), TabID: r.tabID,
+		TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAtPointer(),
+	}
 }
 
 func (r row) expectedCreatedAtPointer() *int64 {
@@ -423,6 +508,14 @@ func (r row) expectedCreatedAtPointer() *int64 {
 	}
 	value := r.expectedCreatedAt
 	return &value
+}
+
+func (r row) remoteKeyPointer() *domain.RemoteSessionKey {
+	if !r.hasRemoteKey {
+		return nil
+	}
+	key := r.remoteKey
+	return &key
 }
 
 // renderList draws each visible row as up to three segments: a name segment
@@ -450,6 +543,11 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if r.stopped && idx != m.selected {
 			base, nameStyle, detailStyle = styles.Stopped, styles.Stopped, styles.Stopped
 		}
+		if r.dim {
+			base.Attrs |= renderer.AttrDim
+			nameStyle.Attrs |= renderer.AttrDim
+			detailStyle.Attrs |= renderer.AttrDim
+		}
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
 
 		name := r.dispName
@@ -462,6 +560,8 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if r.kind.rendersAsHeader() {
 			if r.stopped {
 				ui.DrawText(frame, x, rect.Y+y, clipX, " (stopped)", base)
+			} else {
+				ui.DrawText(frame, x, rect.Y+y, clipX, ui.TruncateText(r.detail, clipX-x), detailStyle)
 			}
 			continue
 		}

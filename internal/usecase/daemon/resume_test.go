@@ -1702,7 +1702,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			require.NotNil(t, parked)
 			retirements := tc.discard(d, ac.resumeToken, parked)
 			d.mu.Unlock()
-			finishParkedAttachmentRetirements(retirements)
+			d.finishParkedAttachmentRetirements(retirements)
 
 			require.Nil(t, ac.previousSession.Get())
 		})

@@ -64,6 +64,8 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	rt.pickerPreviewSession = nil
 	rt.pickerPreview = nil
 	rt.picker = model
+	rt.pickerGeneration++
+	instance := remotePickerInstance{ac: ac, generation: rt.pickerGeneration, model: model}
 	rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
 	rt.pickerIntent = intent
 	rt.pickerSource = source
@@ -73,13 +75,24 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	d.teardownPreviewSubscription(ac, previous, previousGeneration)
 	d.registerPreviewForSelection(ac)
 	d.invalidateRender(sess, ac, true, "picker.go")
+	if rt.beforeRemotePickerRegistration != nil {
+		rt.beforeRemotePickerRegistration()
+	}
+	d.remotePickerOpened(instance)
 }
 
 // pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
 // knows nothing about picker intent; picker.New owns all destination policy.
 func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
-	sessions := d.sessionsSnapshotLocked()
+	sessions := make([]attachmentSession, 0, len(d.sessions))
+	proxies := make(map[domain.SessionID]*proxySession)
+	for id, entry := range d.sessions {
+		sessions = append(sessions, entry)
+		if proxy, ok := entry.(*proxySession); ok {
+			proxies[id] = proxy
+		}
+	}
 	stopped := make([]stoppedSession, 0, len(d.stopped))
 	for _, s := range d.stopped {
 		if !s.purging {
@@ -88,29 +101,38 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 	}
 	d.mu.Unlock()
 
-	for _, s := range sessions {
-		d.refreshSessionFocusedTitles(s)
+	for _, entry := range sessions {
+		if local, ok := localSession(entry); ok {
+			d.refreshSessionFocusedTitles(local)
+		}
 	}
 	opts := viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: d.currentTabsConfig().TerminalTitle}
 
-	// One snapshot per session: sorting and view building read the same
+	type liveSnapshot struct {
+		entry attachmentSession
+		view  sessionView
+	}
+	// One snapshot per live session: sorting and view building read the same
 	// capture, so comparators cannot observe a concurrent touchMRU or
-	// renameSession mid-sort (the invariant previously enforced by the
-	// pickerSortSnapshot map).
-	snaps := make([]sessionView, 0, len(sessions))
+	// renameSession mid-sort. Proxy and remote-catalog locks are released before
+	// sorting and picker-row construction.
+	live := make([]liveSnapshot, 0, len(sessions))
 	var current picker.SourceFilter
-	for _, s := range sessions {
-		snap := s.snapshotView(opts)
-		if s == cur && snap.active >= 0 && snap.active < len(snap.tabs) {
+	for _, entry := range sessions {
+		snap := entry.snapshotView(opts)
+		if entry == cur && snap.active >= 0 && snap.active < len(snap.tabs) {
 			current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.active].id}
 		}
-		snaps = append(snaps, snap)
+		live = append(live, liveSnapshot{entry: entry, view: snap})
 	}
-	sort.Slice(snaps, func(i, j int) bool {
-		if snaps[i].mruAt != snaps[j].mruAt {
-			return snaps[i].mruAt > snaps[j].mruAt
+	sort.Slice(live, func(i, j int) bool {
+		if live[i].view.mruAt != live[j].view.mruAt {
+			return live[i].view.mruAt > live[j].view.mruAt
 		}
-		return snaps[i].name < snaps[j].name
+		if live[i].view.name != live[j].view.name {
+			return live[i].view.name < live[j].view.name
+		}
+		return live[i].view.id < live[j].view.id
 	})
 	sort.Slice(stopped, func(i, j int) bool {
 		if stopped[i].lastUsedSeq != stopped[j].lastUsedSeq {
@@ -121,14 +143,43 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 	if pickerSortMode(d.pickerSort.Load()) == pickerSortGrouped {
 		// Stable partition: named sessions first, ephemeral after, each keeping
 		// its MRU order from the sort above.
-		sort.SliceStable(snaps, func(i, j int) bool {
-			return !snaps[i].ephemeral && snaps[j].ephemeral
+		sort.SliceStable(live, func(i, j int) bool {
+			return !live[i].view.ephemeral && live[j].view.ephemeral
 		})
 	}
 
-	views := make([]picker.SessionView, 0, len(snaps)+len(stopped))
-	for _, snap := range snaps {
-		views = append(views, snap.pickerView())
+	catalog := d.remotePickerCatalogSnapshot()
+	sortRemotePickerCatalog(catalog, d.remotePickerHostRanks())
+
+	catalogRows := 0
+	for _, host := range catalog {
+		catalogRows += len(host.entry.Sessions)
+		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch) {
+			catalogRows++
+		}
+	}
+	views := make([]picker.SessionView, 0, len(live)+len(stopped)+catalogRows)
+	for _, item := range live {
+		if proxy, ok := item.entry.(*proxySession); ok {
+			views = append(views, remoteProxyPickerView(proxy.key, item.view))
+			continue
+		}
+		views = append(views, item.view.pickerView())
+	}
+	for _, host := range catalog {
+		for _, session := range host.entry.Sessions {
+			key := domain.RemoteSessionKey{Host: host.entry.Host, Name: session.Name}
+			if key.Validate() != nil {
+				continue
+			}
+			if proxy, ok := proxies[key.ID()]; ok && proxy.key == key {
+				continue
+			}
+			views = append(views, remotePickerView(key, session, host.status, host.entry.FetchedAt))
+		}
+		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch) {
+			views = append(views, remotePickerHostView(host.entry.Host, host.status))
+		}
 	}
 	for _, s := range stopped {
 		createdAt := s.createdAt
@@ -165,7 +216,8 @@ func attentionSuffix(label string) string {
 
 func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 	rt := ac.overlays
-	var generation uint64
+	var previewGeneration uint64
+	var instance remotePickerInstance
 	return listInputState{
 		pending:  &rt.pickerPending,
 		esc:      &rt.pickerESC,
@@ -175,13 +227,15 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		unlock:   rt.pickerMu.Unlock,
 		active:   func() bool { return rt.picker != nil },
 		closeLocked: func() {
+			instance = remotePickerInstance{ac: ac, generation: rt.pickerGeneration, model: rt.picker}
 			rt.picker = nil
 			rt.pickerIntent = pickerNavigate
 			rt.pickerSource = moveSourceLocator{}
-			generation = rt.pickerPreviewGeneration
+			previewGeneration = rt.pickerPreviewGeneration
 		},
 		afterClose: func() {
-			d.clearPreviewGeneration(ac, generation)
+			d.clearPreviewGeneration(ac, previewGeneration)
+			d.remotePickerClosed(instance)
 			if sess := ac.currentSession(); sess != nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
@@ -451,16 +505,32 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 }
 
 func (d *Daemon) closePicker(ac *attachedClient) {
+	d.closePickerIfCurrent(ac, nil, 0)
+}
+
+// closePickerIfCurrent closes only the observed picker lifecycle. A nonzero
+// generation guards terminal parked cleanup even when a refresh replaced the
+// model within that generation.
+func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
 	ac.overlays.pickerMu.Lock()
+	if model != nil && (ac.overlays.picker != model || ac.overlays.pickerGeneration != generation) || model == nil && generation != 0 && ac.overlays.pickerGeneration != generation {
+		ac.overlays.pickerMu.Unlock()
+		return false
+	}
+	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: ac.overlays.picker}
 	ac.overlays.picker = nil
 	ac.overlays.pickerTitle = ""
 	ac.overlays.pickerIntent = pickerNavigate
 	ac.overlays.pickerSource = moveSourceLocator{}
 	ac.overlays.pickerPending = nil
 	ac.overlays.pickerESC.stop()
-	generation := ac.overlays.pickerPreviewGeneration
+	previewGeneration := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
-	d.clearPreviewGeneration(ac, generation)
+	d.clearPreviewGeneration(ac, previewGeneration)
+	if instance.model != nil {
+		d.remotePickerClosed(instance)
+	}
+	return true
 }
 
 func pickerTargetsEqual(left, right picker.Target) bool {
