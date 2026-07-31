@@ -86,10 +86,12 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
 	sessions := make([]attachmentSession, 0, len(d.sessions))
-	registry := make(map[domain.SessionID]attachmentSession, len(d.sessions))
+	proxies := make(map[domain.SessionID]*proxySession)
 	for id, entry := range d.sessions {
 		sessions = append(sessions, entry)
-		registry[id] = entry
+		if proxy, ok := entry.(*proxySession); ok {
+			proxies[id] = proxy
+		}
 	}
 	stopped := make([]stoppedSession, 0, len(d.stopped))
 	for _, s := range d.stopped {
@@ -149,7 +151,14 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 	catalog := d.remotePickerCatalogSnapshot()
 	sortRemotePickerCatalog(catalog, d.remotePickerHostRanks())
 
-	views := make([]picker.SessionView, 0, len(live)+len(stopped))
+	catalogRows := 0
+	for _, host := range catalog {
+		catalogRows += len(host.entry.Sessions)
+		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch) {
+			catalogRows++
+		}
+	}
+	views := make([]picker.SessionView, 0, len(live)+len(stopped)+catalogRows)
 	for _, item := range live {
 		if proxy, ok := item.entry.(*proxySession); ok {
 			views = append(views, remoteProxyPickerView(proxy.key, item.view))
@@ -163,7 +172,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, picker.SourceF
 			if key.Validate() != nil {
 				continue
 			}
-			if proxy, ok := registry[key.ID()].(*proxySession); ok && proxy.key == key {
+			if proxy, ok := proxies[key.ID()]; ok && proxy.key == key {
 				continue
 			}
 			views = append(views, remotePickerView(key, session, host.status, host.entry.FetchedAt))
@@ -496,7 +505,18 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 }
 
 func (d *Daemon) closePicker(ac *attachedClient) {
+	d.closePickerIfCurrent(ac, nil, 0)
+}
+
+// closePickerIfCurrent closes only the observed picker lifecycle. A nonzero
+// generation guards terminal parked cleanup even when a refresh replaced the
+// model within that generation.
+func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
 	ac.overlays.pickerMu.Lock()
+	if model != nil && (ac.overlays.picker != model || ac.overlays.pickerGeneration != generation) || model == nil && generation != 0 && ac.overlays.pickerGeneration != generation {
+		ac.overlays.pickerMu.Unlock()
+		return false
+	}
 	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: ac.overlays.picker}
 	ac.overlays.picker = nil
 	ac.overlays.pickerTitle = ""
@@ -504,12 +524,13 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.pickerSource = moveSourceLocator{}
 	ac.overlays.pickerPending = nil
 	ac.overlays.pickerESC.stop()
-	generation := ac.overlays.pickerPreviewGeneration
+	previewGeneration := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
-	d.clearPreviewGeneration(ac, generation)
+	d.clearPreviewGeneration(ac, previewGeneration)
 	if instance.model != nil {
 		d.remotePickerClosed(instance)
 	}
+	return true
 }
 
 func pickerTargetsEqual(left, right picker.Target) bool {

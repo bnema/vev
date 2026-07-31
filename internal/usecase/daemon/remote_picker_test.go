@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -16,6 +17,40 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
+
+const remotePickerReceiveTimeout = time.Second
+
+func receiveRemotePicker[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case value, ok := <-ch:
+		if !ok {
+			t.Fatalf("channel closed unexpectedly while waiting for %s", what)
+		}
+		return value
+	case <-time.After(remotePickerReceiveTimeout):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+func waitRemotePickerClose(ch <-chan struct{}, what string) error {
+	select {
+	case _, ok := <-ch:
+		if ok {
+			return fmt.Errorf("received signal instead of closure while waiting for %s", what)
+		}
+		return nil
+	case <-time.After(remotePickerReceiveTimeout):
+		return fmt.Errorf("timed out waiting for %s", what)
+	}
+}
+
+func receiveRemotePickerClose(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	require.NoError(t, waitRemotePickerClose(ch, what))
+}
 
 func newRemotePickerDaemon(store ports.RemoteHostStore) *Daemon {
 	return New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(store, nil, nil, nil, ports.RemoteTransportUDP))
@@ -248,23 +283,25 @@ type remoteRefreshResult struct {
 }
 
 type channelRemoteCatalog struct {
-	d        *Daemon
-	requests chan remoteRefreshRequest
-	probeMu  sync.Mutex
+	d          *Daemon
+	requests   chan remoteRefreshRequest
+	probeMu    sync.Mutex
+	probes     bool
+	violations []string
 }
 
 func (c *channelRemoteCatalog) List(ctx context.Context, host string) (ports.RemoteCatalog, error) {
 	c.probeMu.Lock()
-	if !c.d.mu.TryLock() {
-		c.probeMu.Unlock()
-		return ports.RemoteCatalog{}, errors.New("daemon lock held during remote catalog I/O")
+	if c.probes && !c.d.mu.TryLock() {
+		c.violations = append(c.violations, "daemon lock held during remote catalog I/O")
+	} else if c.probes {
+		c.d.mu.Unlock()
 	}
-	c.d.mu.Unlock()
-	if !c.d.remoteCatalog.mu.TryLock() {
-		c.probeMu.Unlock()
-		return ports.RemoteCatalog{}, errors.New("remote catalog lock held during remote catalog I/O")
+	if c.probes && !c.d.remoteCatalog.mu.TryLock() {
+		c.violations = append(c.violations, "remote catalog lock held during remote catalog I/O")
+	} else if c.probes {
+		c.d.remoteCatalog.mu.Unlock()
 	}
-	c.d.remoteCatalog.mu.Unlock()
 	c.probeMu.Unlock()
 	request := remoteRefreshRequest{ctx: ctx, host: host, result: make(chan remoteRefreshResult, 1)}
 	c.requests <- request
@@ -277,21 +314,28 @@ func (c *channelRemoteCatalog) List(ctx context.Context, host string) (ports.Rem
 }
 
 type recordingRemoteCache struct {
-	d      *Daemon
-	stores chan []ports.RemoteCatalogCacheEntry
+	d          *Daemon
+	stores     chan []ports.RemoteCatalogCacheEntry
+	probeMu    sync.Mutex
+	probes     bool
+	violations []string
 }
 
 func (*recordingRemoteCache) Load() ([]ports.RemoteCatalogCacheEntry, error) { return nil, nil }
 
 func (c *recordingRemoteCache) Store(entries []ports.RemoteCatalogCacheEntry) error {
-	if !c.d.mu.TryLock() {
-		return errors.New("daemon lock held during remote cache write")
+	c.probeMu.Lock()
+	if c.probes && !c.d.mu.TryLock() {
+		c.violations = append(c.violations, "daemon lock held during remote cache write")
+	} else if c.probes {
+		c.d.mu.Unlock()
 	}
-	c.d.mu.Unlock()
-	if !c.d.remoteCatalog.mu.TryLock() {
-		return errors.New("remote catalog lock held during remote cache write")
+	if c.probes && !c.d.remoteCatalog.mu.TryLock() {
+		c.violations = append(c.violations, "remote catalog lock held during remote cache write")
+	} else if c.probes {
+		c.d.remoteCatalog.mu.Unlock()
 	}
-	c.d.remoteCatalog.mu.Unlock()
+	c.probeMu.Unlock()
 	copyEntries := make([]ports.RemoteCatalogCacheEntry, len(entries))
 	for i, entry := range entries {
 		copyEntries[i] = cloneRemoteCatalogEntry(entry)
@@ -304,6 +348,20 @@ type fixedRemoteRefreshClock struct{ now time.Time }
 
 func (c fixedRemoteRefreshClock) Now() time.Time                   { return c.now }
 func (fixedRemoteRefreshClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+
+func requireNoRemoteLockViolations(t *testing.T, catalog *channelRemoteCatalog, cache *recordingRemoteCache) {
+	t.Helper()
+	if catalog != nil {
+		catalog.probeMu.Lock()
+		require.Empty(t, catalog.violations)
+		catalog.probeMu.Unlock()
+	}
+	if cache != nil {
+		cache.probeMu.Lock()
+		require.Empty(t, cache.violations)
+		cache.probeMu.Unlock()
+	}
+}
 
 func newRemoteRefreshDaemon(t *testing.T, hosts *remoteRefreshHostStore, now time.Time) (*Daemon, *channelRemoteCatalog, *recordingRemoteCache) {
 	t.Helper()
@@ -333,11 +391,12 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	firstGeneration := d.startRemotePickerRefresh(instance)
 	first := map[string]remoteRefreshRequest{}
 	for range 2 {
-		request := <-catalog.requests
+		request := receiveRemotePicker(t, catalog.requests, "catalog request")
 		first[request.host] = request
 	}
 	require.Contains(t, first, "arch")
 	require.Contains(t, first, "mule")
+	requireNoRemoteLockViolations(t, catalog, nil)
 	d.remoteCatalog.mu.Lock()
 	require.Equal(t, []ports.RemoteCatalogSession{{Name: "cached", State: "running"}}, d.remoteCatalog.cache["arch"].Sessions, "cached rows publish before any remote completion")
 	require.Equal(t, remoteHostRefreshing, d.remoteCatalog.status["arch"])
@@ -346,20 +405,61 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	secondGeneration := d.startRemotePickerRefresh(instance)
 	require.Greater(t, secondGeneration, firstGeneration)
 	for _, request := range first {
-		<-request.ctx.Done()
+		receiveRemotePickerClose(t, request.ctx.Done(), "catalog request cancellation")
 	}
 	for range 2 {
-		request := <-catalog.requests
+		request := receiveRemotePicker(t, catalog.requests, "catalog request")
 		request.result <- remoteRefreshResult{catalog: ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion}}
 	}
 	for range 2 {
-		<-cache.stores
+		receiveRemotePicker(t, cache.stores, "remote cache store")
 	}
+	requireNoRemoteLockViolations(t, nil, cache)
 
 	d.remoteCatalog.mu.Lock()
 	require.Equal(t, secondGeneration, d.remoteCatalog.refresh)
 	require.Equal(t, remoteHostFresh, d.remoteCatalog.status["arch"])
 	require.Equal(t, remoteHostFresh, d.remoteCatalog.status["mule"])
+	d.remoteCatalog.mu.Unlock()
+}
+
+func TestRemoteRefreshLockProbesSerialized(t *testing.T) {
+	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
+	d, catalog, cache := newRemoteRefreshDaemon(t, hosts, time.Unix(125, 0))
+	catalog.probes, cache.probes = true, true
+	ac := &attachedClient{}
+	ac.initOverlays()
+	model := picker.New(nil, picker.SelectionConfig{})
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = model
+	ac.overlays.pickerGeneration++
+	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: model}
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, d.registerRemotePicker(instance))
+
+	d.startRemotePickerRefresh(instance)
+	request := receiveRemotePicker(t, catalog.requests, "catalog request")
+	request.result <- remoteRefreshResult{catalog: ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion}}
+	receiveRemotePicker(t, cache.stores, "remote cache store")
+	requireNoRemoteLockViolations(t, catalog, cache)
+}
+
+func TestRemoteRefreshWithoutCatalogClientDoesNotMarkHostsRefreshing(t *testing.T) {
+	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
+	d := newRemotePickerDaemon(hosts)
+	ac := &attachedClient{}
+	ac.initOverlays()
+	model := picker.New(nil, picker.SelectionConfig{})
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = model
+	ac.overlays.pickerGeneration++
+	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: model}
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, d.registerRemotePicker(instance))
+
+	require.NotZero(t, d.startRemotePickerRefresh(instance))
+	d.remoteCatalog.mu.Lock()
+	require.NotEqual(t, remoteHostRefreshing, d.remoteCatalog.status["arch"])
 	d.remoteCatalog.mu.Unlock()
 }
 
@@ -383,11 +483,12 @@ func TestRemoteRefreshResultPreservesFailuresAndEvictsSuccessfulOmissions(t *tes
 	d.remoteCatalog.mu.Unlock()
 
 	require.True(t, d.applyRemoteRefreshResult(7, "arch", ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion}, nil))
-	stored := <-cache.stores
+	stored := receiveRemotePicker(t, cache.stores, "remote cache store")
 	require.Equal(t, []ports.RemoteCatalogCacheEntry{
 		{Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{}},
 		{Host: "mule", FetchedAt: time.Unix(20, 0), Sessions: []ports.RemoteCatalogSession{{Name: "stale", State: "running"}}},
 	}, stored, "every successful write persists the newest full cache atomically")
+	requireNoRemoteLockViolations(t, nil, cache)
 	d.remoteCatalog.mu.Lock()
 	require.Empty(t, d.remoteCatalog.cache["arch"].Sessions, "a successful omission authoritatively evicts old rows")
 	require.Equal(t, remoteHostFresh, d.remoteCatalog.status["arch"])
@@ -407,7 +508,8 @@ func TestRemoteRefreshRejectsRemovedHostAndLateGeneration(t *testing.T) {
 	require.False(t, d.applyRemoteRefreshResult(8, "arch", ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "late", State: "running"}}}, nil))
 	hosts.set()
 	require.True(t, d.applyRemoteRefreshResult(9, "arch", ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "removed", State: "running"}}}, nil))
-	require.Empty(t, <-cache.stores)
+	require.Empty(t, receiveRemotePicker(t, cache.stores, "remote cache store"))
+	requireNoRemoteLockViolations(t, nil, cache)
 	d.remoteCatalog.mu.Lock()
 	require.NotContains(t, d.remoteCatalog.cache, "arch")
 	require.NotContains(t, d.remoteCatalog.status, "arch")
@@ -446,7 +548,7 @@ func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID) (
 
 func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
-	d, _, cache := newRemoteRefreshDaemon(t, hosts, time.Unix(450, 0))
+	d, catalog, cache := newRemoteRefreshDaemon(t, hosts, time.Unix(450, 0))
 	firstSession, first, _ := addRemoteRefreshPickerOwner(t, d, "first")
 	_, second, _ := addRemoteRefreshPickerOwner(t, d, "second")
 	before := make(map[*attachedClient]*picker.Model)
@@ -455,11 +557,11 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 		owner.overlays.pickerMu.Lock()
 		owner.overlays.picker = d.newPickerModel(firstSession, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: "second", TabID: "second-tab"})
 		owner.overlays.pickerIntent = pickerNavigate
+		owner.overlays.pickerGeneration++
+		instance := remotePickerInstance{ac: owner, generation: owner.overlays.pickerGeneration, model: owner.overlays.picker}
 		before[owner] = owner.overlays.picker
 		owner.overlays.pickerMu.Unlock()
-		d.remoteCatalog.mu.Lock()
-		d.remoteCatalog.pickers[owner] = struct{}{}
-		d.remoteCatalog.mu.Unlock()
+		require.True(t, d.registerRemotePicker(instance))
 	}
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.refresh = 4
@@ -469,7 +571,8 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 		ProtocolVersion: ports.ProtocolVersion,
 		Sessions:        []ports.RemoteCatalogSession{{Name: "work", State: "running", Tabs: 2}},
 	}, nil))
-	<-cache.stores
+	receiveRemotePicker(t, cache.stores, "remote cache store")
+	requireNoRemoteLockViolations(t, catalog, cache)
 
 	for _, owner := range []*attachedClient{first, second} {
 		owner.overlays.pickerMu.Lock()
@@ -480,6 +583,165 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, domain.SessionID("second"), selected.Session)
 	}
+}
+
+func TestRemotePickerTeardownLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		resumeCapable bool
+		teardown      func(*Daemon, *session, *attachedClient)
+	}{
+		{name: "client gone parks resumable attachment", resumeCapable: true, teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.clientGone(sess, ac, ac.transport(), false) }},
+		{name: "send error parks resumable attachment", resumeCapable: true, teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.detachOnSendError(sess, ac, ac.transport()) }},
+		{name: "client gone removes non-resumable attachment", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.clientGone(sess, ac, ac.transport(), false) }},
+		{name: "send error removes non-resumable attachment", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.detachOnSendError(sess, ac, ac.transport()) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d := newRemotePickerDaemon(nil)
+			sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+			ac.resumeCapable = test.resumeCapable
+			model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+			d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
+			ac.overlays.pickerMu.Lock()
+			generation := ac.overlays.pickerGeneration
+			ac.overlays.pickerMu.Unlock()
+
+			test.teardown(d, sess, ac)
+
+			d.remoteCatalog.mu.Lock()
+			_, registered := d.remoteCatalog.pickers[ac]
+			d.remoteCatalog.mu.Unlock()
+			ac.overlays.pickerMu.Lock()
+			current, currentGeneration := ac.overlays.picker, ac.overlays.pickerGeneration
+			ac.overlays.pickerMu.Unlock()
+			if !test.resumeCapable {
+				require.False(t, registered)
+				require.Nil(t, current)
+				return
+			}
+			require.True(t, ac.parked)
+			require.True(t, registered)
+			require.Same(t, model, current)
+			require.Equal(t, generation, currentGeneration)
+			d.mu.Lock()
+			parked := d.parked[ac.resumeToken]
+			d.mu.Unlock()
+			require.NotNil(t, parked)
+			require.Same(t, ac, parked.ac)
+		})
+	}
+}
+
+func TestParkedPickerExpiryClosesCapturedGenerationAndCancelsRefresh(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
+	d, catalog, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(475, 0))
+	d.clock = clock
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+	ac.resumeCapable = true
+	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	request := receiveRemotePicker(t, catalog.requests, "catalog request")
+
+	require.True(t, d.parkAttachment(sess, ac))
+	timer := receiveRemotePicker(t, clock.timers, "park expiry timer")
+	timer.ch <- clock.Now()
+	receiveRemotePickerClose(t, request.ctx.Done(), "catalog request cancellation")
+
+	ac.overlays.pickerMu.Lock()
+	require.Nil(t, ac.overlays.picker)
+	ac.overlays.pickerMu.Unlock()
+	d.remoteCatalog.mu.Lock()
+	require.NotContains(t, d.remoteCatalog.pickers, ac)
+	d.remoteCatalog.mu.Unlock()
+}
+
+func TestParkedPickerRetirementClosesCapturedGenerationOnly(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+	ac.resumeCapable = true
+	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+	ac.overlays.pickerMu.Lock()
+	refreshed := ac.overlays.picker
+	ac.overlays.pickerMu.Unlock()
+	require.NotNil(t, refreshed)
+	require.True(t, d.parkAttachment(sess, ac))
+	token := ac.resumeToken
+	d.mu.Lock()
+	parked := d.parked[token]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+
+	d.mu.Lock()
+	retirement := d.retireParkedAttachmentLocked(token, parked)
+	d.mu.Unlock()
+	d.finishParkedAttachmentRetirements([]parkedAttachmentRetirement{retirement})
+	ac.overlays.pickerMu.Lock()
+	require.Nil(t, ac.overlays.picker, "terminal retirement closes a refreshed model in its captured generation")
+	ac.overlays.pickerMu.Unlock()
+}
+
+func TestParkedPickerTokenReplacementRetiresPreviousGeneration(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	firstSession, first, _ := addRemoteRefreshPickerOwner(t, d, "first")
+	secondSession, second, _ := addRemoteRefreshPickerOwner(t, d, "second")
+	first.resumeCapable, second.resumeCapable = true, true
+	d.publishPicker(firstSession, first, d.newPickerModel(firstSession, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	require.True(t, d.parkAttachment(firstSession, first))
+	token := first.resumeToken
+	d.publishPicker(secondSession, second, d.newPickerModel(secondSession, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	second.resumeToken = token
+	require.True(t, d.parkAttachment(secondSession, second))
+
+	first.overlays.pickerMu.Lock()
+	require.Nil(t, first.overlays.picker)
+	first.overlays.pickerMu.Unlock()
+	second.overlays.pickerMu.Lock()
+	require.NotNil(t, second.overlays.picker)
+	second.overlays.pickerMu.Unlock()
+}
+
+func TestParkedPickerResumePreservesGeneration(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+	ac.resumeCapable = true
+	ac.clientID = [16]byte{1, 2, 3, 4}
+	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	ac.overlays.pickerMu.Lock()
+	model, generation := ac.overlays.picker, ac.overlays.pickerGeneration
+	ac.overlays.pickerMu.Unlock()
+	d.clientGone(sess, ac, ac.transport(), false)
+	token := ac.resumeToken
+	tr := &closeTrackingTransport{}
+	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, sess.name, token), tr, domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	ac.overlays.pickerMu.Lock()
+	require.Same(t, model, ac.overlays.picker)
+	require.Equal(t, generation, ac.overlays.pickerGeneration)
+	ac.overlays.pickerMu.Unlock()
+}
+
+func TestStaleParkedPickerExpiryPreservesNewGeneration(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+	ac.resumeCapable = true
+	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	require.True(t, d.parkAttachment(sess, ac))
+	token := ac.resumeToken
+	d.mu.Lock()
+	parked := d.parked[token]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+
+	newer := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	d.publishPicker(sess, ac, newer, pickerNavigate, moveSourceLocator{})
+	d.expireParked(token, parked)
+	ac.overlays.pickerMu.Lock()
+	require.Same(t, newer, ac.overlays.picker)
+	ac.overlays.pickerMu.Unlock()
 }
 
 func TestRemoteRefreshPreservesRemoteCursorAcrossCacheToProxyUpgrade(t *testing.T) {
@@ -542,10 +804,10 @@ func TestRemoteRefreshCancellationWhenLastPickerCloses(t *testing.T) {
 	}
 	first, second := newInstance(), newInstance()
 	d.remotePickerOpened(first)
-	request := <-catalog.requests
+	request := receiveRemotePicker(t, catalog.requests, "catalog request")
 	d.remotePickerOpened(second)
-	<-request.ctx.Done()
-	request = <-catalog.requests
+	receiveRemotePickerClose(t, request.ctx.Done(), "catalog request cancellation")
+	request = receiveRemotePicker(t, catalog.requests, "catalog request")
 
 	closeInstance(first)
 	select {
@@ -554,7 +816,7 @@ func TestRemoteRefreshCancellationWhenLastPickerCloses(t *testing.T) {
 	default:
 	}
 	closeInstance(second)
-	<-request.ctx.Done()
+	receiveRemotePickerClose(t, request.ctx.Done(), "catalog request cancellation")
 
 	d.remoteCatalog.mu.Lock()
 	require.Empty(t, d.remoteCatalog.pickers)
@@ -606,16 +868,17 @@ func TestRemotePickerPublishCannotRegisterAfterSnatchClear(t *testing.T) {
 	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	registrationReached := make(chan struct{})
 	allowRegistration := make(chan struct{})
+	registrationWait := make(chan error, 1)
 	ac.overlays.beforeRemotePickerRegistration = func() {
 		close(registrationReached)
-		<-allowRegistration
+		registrationWait <- waitRemotePickerClose(allowRegistration, "picker registration release")
 	}
 	published := make(chan struct{})
 	go func() {
 		d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
 		close(published)
 	}()
-	<-registrationReached
+	receiveRemotePickerClose(t, registrationReached, "picker registration")
 
 	token := attachmentRoleToken{
 		sess: sess, ac: ac, role: attachmentSnatched,
@@ -623,7 +886,8 @@ func TestRemotePickerPublishCannotRegisterAfterSnatchClear(t *testing.T) {
 	}
 	require.True(t, d.clearForSnatch(token))
 	close(allowRegistration)
-	<-published
+	require.NoError(t, receiveRemotePicker(t, registrationWait, "picker registration release"))
+	receiveRemotePickerClose(t, published, "picker publication")
 
 	d.remoteCatalog.mu.Lock()
 	_, registered := d.remoteCatalog.pickers[ac]
@@ -663,22 +927,24 @@ func TestRemotePickerStaleRefreshCannotOverwriteReopenedModel(t *testing.T) {
 
 	rebuildReached := make(chan struct{})
 	allowPublication := make(chan struct{})
+	publicationWait := make(chan error, 1)
 	ac.overlays.afterPickerRefreshBuild = func(*picker.Model) {
 		close(rebuildReached)
-		<-allowPublication
+		publicationWait <- waitRemotePickerClose(allowPublication, "picker publication release")
 	}
 	refreshed := make(chan struct{})
 	go func() {
 		d.refreshRemoteOpenPickers()
 		close(refreshed)
 	}()
-	<-rebuildReached
+	receiveRemotePickerClose(t, rebuildReached, "picker rebuild")
 
 	d.closePicker(ac)
 	reopened := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, reopened, pickerNavigate, moveSourceLocator{})
 	close(allowPublication)
-	<-refreshed
+	require.NoError(t, receiveRemotePicker(t, publicationWait, "picker publication release"))
+	receiveRemotePickerClose(t, refreshed, "picker refresh")
 
 	ac.overlays.pickerMu.Lock()
 	require.Same(t, reopened, ac.overlays.picker, "a rebuild for the old picker must not publish into its replacement")

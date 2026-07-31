@@ -1608,7 +1608,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		d.closing = true
 	}
 	d.mu.Unlock()
-	finishParkedAttachmentRetirements(parkedRetirements)
+	d.finishParkedAttachmentRetirements(parkedRetirements)
 	frozen.unfreeze()
 	frozen = frozenRoleEffectGates{}
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)

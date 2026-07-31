@@ -132,7 +132,7 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 		d.unregisterPreview(retirement.parked.ac)
 		retirement.parked.ac.clearCaptureFrames()
 	}
-	finishParkedAttachmentRetirements(p.retiredParked)
+	d.finishParkedAttachmentRetirements(p.retiredParked)
 	if p.sourceEmpty && p.sourceMetadataValid && d.persistEnabled {
 		if err := d.beginSnapshotPurge(p.source.name, p.source.incarnation); err == nil {
 			if err := d.finishSnapshotPurge(d.serveCtx, p.source.name, p.source.incarnation); err != nil {

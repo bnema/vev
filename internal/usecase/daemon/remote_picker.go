@@ -313,6 +313,9 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 	if previous != nil {
 		previous()
 	}
+	if d.remoteCatalogClient == nil {
+		return generation
+	}
 
 	hosts, err := d.remotePickerHosts()
 	if err != nil {
@@ -349,9 +352,6 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 		d.refreshRemoteOpenPickers()
 	}
 
-	if d.remoteCatalogClient == nil {
-		return generation
-	}
 	for _, host := range hosts {
 		d.sessWg.Go(func() {
 			catalog, listErr := d.remoteCatalogClient.List(ctx, host)

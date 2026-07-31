@@ -334,12 +334,13 @@ type Daemon struct {
 }
 
 type parkedAttachment struct {
-	sess     *session
-	ac       *attachedClient
-	role     attachmentRole
-	timer    ports.Timer
-	done     chan struct{}
-	doneOnce sync.Once
+	sess             *session
+	ac               *attachedClient
+	role             attachmentRole
+	pickerGeneration uint64
+	timer            ports.Timer
+	done             chan struct{}
+	doneOnce         sync.Once
 }
 
 // parkingAttachment is the observable detach→park lifecycle for one resume
@@ -804,7 +805,7 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
-	finishParkedAttachmentRetirements(parkedRetirements)
+	d.finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

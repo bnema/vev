@@ -31,8 +31,9 @@ type overlayRuntime struct {
 	pickerPending           []byte
 	pickerESC               pendingByteTimer
 
-	// Deterministic lifecycle seams used by ownership race tests. Hooks run
-	// without pickerMu or remoteCatalog.mu held.
+	// Test-only, unsynchronized lifecycle seams. Assign them before picker
+	// publication or goroutine startup. Hooks run without pickerMu or
+	// remoteCatalog.mu held.
 	beforeRemotePickerRegistration func()
 	afterPickerRefreshBuild        func(*picker.Model)
 

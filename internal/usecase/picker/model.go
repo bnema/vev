@@ -254,7 +254,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	if common.remote {
 		header.detail = remoteRowDetail(session)
 		header.selectable = common.hasRemoteKey && config.Mode == SelectNavigationTab && session.ConnectOnly && remoteSelectable(session)
-		header.dim = !session.RemoteAttachReady || session.RemoteAvailability == RemoteStale || session.RemoteAvailability == RemoteVersionMismatch
+		header.dim = remoteDim(session)
 	}
 	if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
 		header.selectable, header.dim = false, true
@@ -271,7 +271,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 			tabRow.selectable = tabRow.kind.selectable(config.Mode)
 			if common.remote {
 				tabRow.selectable = false
-				tabRow.dim = !session.RemoteAttachReady || session.RemoteAvailability == RemoteStale || session.RemoteAvailability == RemoteVersionMismatch
+				tabRow.dim = remoteDim(session)
 			}
 			if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
 				tabRow.selectable, tabRow.dim = false, true
@@ -287,6 +287,10 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 
 func remoteSelectable(session SessionView) bool {
 	return session.RemoteAttachReady && session.RemoteAvailability != RemoteVersionMismatch
+}
+
+func remoteDim(session SessionView) bool {
+	return !session.RemoteAttachReady || session.RemoteAvailability == RemoteStale || session.RemoteAvailability == RemoteVersionMismatch
 }
 
 func remoteRowDetail(session SessionView) string {

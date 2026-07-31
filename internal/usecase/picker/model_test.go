@@ -848,14 +848,14 @@ func TestRemoteRowsCannotAcceptMovesInEitherMoveMode(t *testing.T) {
 		{name: "move tab", mode: SelectMoveTabSession},
 	}
 
-	for _, availability := range availability {
-		t.Run(availability.name, func(t *testing.T) {
+	for _, availabilityCase := range availability {
+		t.Run(availabilityCase.name, func(t *testing.T) {
 			remote := SessionView{
 				ID:                 key.ID(),
 				Name:               key.Display(),
 				Tabs:               []TabEntry{{TabID: "remote-tab", Name: "metadata"}},
 				RemoteKey:          &key,
-				RemoteAvailability: availability.state,
+				RemoteAvailability: availabilityCase.state,
 				ConnectOnly:        true,
 				RemoteAttachReady:  true,
 				CannotAcceptMoves:  true,
