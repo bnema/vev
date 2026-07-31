@@ -17,7 +17,13 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-const hostsFileVersion = 2
+const (
+	hostsFileName    = "hosts.json"
+	hostsFileVersion = 2
+)
+
+// HostStorePath returns the canonical location of the remote host store in stateDir.
+func HostStorePath(stateDir string) string { return filepath.Join(stateDir, hostsFileName) }
 
 type hostsFile struct {
 	Version int      `json:"version"`
@@ -273,10 +279,15 @@ func (s *fileHostStore) saveLocked(state hostState) error {
 	if err != nil {
 		return err
 	}
-	payload = append(payload, '\n')
+	return atomicReplacePrivateFile(s.path, append(payload, '\n'))
+}
 
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, ".hosts-*.tmp")
+func atomicReplacePrivateFile(path string, payload []byte) error {
+	dir := filepath.Dir(path)
+	if err := safedir.EnsurePrivate(dir); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".vev-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -300,7 +311,7 @@ func (s *fileHostStore) saveLocked(state hostState) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
 	committed = true

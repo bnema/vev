@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/lifecycle"
+	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
@@ -1358,4 +1359,54 @@ func TestPprofAddrIsLoopback(t *testing.T) {
 			}
 		})
 	}
+}
+
+type appCatalogCacheStub struct {
+	loads int
+}
+
+func (s *appCatalogCacheStub) Load() ([]ports.RemoteCatalogCacheEntry, error) {
+	s.loads++
+	return nil, nil
+}
+
+func (s *appCatalogCacheStub) Store([]ports.RemoteCatalogCacheEntry) error { return nil }
+
+func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
+	oldHostStore := newRemoteHostStore
+	oldCatalogCache := newRemoteCatalogCache
+	oldCatalogClient := newRemoteCatalogClient
+	oldDialerFactory := newRemoteDialerFactoryWithRuntimeObserver
+	t.Cleanup(func() {
+		newRemoteHostStore = oldHostStore
+		newRemoteCatalogCache = oldCatalogCache
+		newRemoteCatalogClient = oldCatalogClient
+		newRemoteDialerFactoryWithRuntimeObserver = oldDialerFactory
+	})
+
+	stateDir := t.TempDir()
+	cache := &appCatalogCacheStub{}
+	var hostPath, cachePath string
+	newRemoteHostStore = func(path string) ports.RemoteHostStore {
+		hostPath = path
+		return nil
+	}
+	newRemoteCatalogCache = func(path string) ports.RemoteCatalogCache {
+		cachePath = path
+		return cache
+	}
+	newRemoteCatalogClient = func() ports.RemoteCatalogClient { return nil }
+	newRemoteDialerFactoryWithRuntimeObserver = func(ports.SerializedRuntimeObserver) ports.RemoteDialerFactory { return nil }
+
+	option, err := remoteDiscoveryDaemonOption(stateDir, nil, "stdio")
+	require.NoError(t, err)
+	_ = daemon.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), option)
+	require.Equal(t, remoteadapter.HostStorePath(stateDir), hostPath)
+	require.Equal(t, remoteadapter.CatalogCachePath(stateDir), cachePath)
+	require.Equal(t, 1, cache.loads, "daemon startup must load the cache once")
+}
+
+func TestRemoteDiscoveryDaemonOptionRejectsInvalidTransport(t *testing.T) {
+	_, err := remoteDiscoveryDaemonOption(t.TempDir(), nil, "serial")
+	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "udp" or "stdio")`)
 }

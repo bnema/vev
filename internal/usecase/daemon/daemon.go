@@ -296,6 +296,14 @@ type Daemon struct {
 	barScripts                     *barScriptState
 	notices                        *noticeCenter
 	resumeParkGrace                time.Duration
+	// remoteCatalog owns cache-derived discovery state independently of the
+	// live attachment registry. Its cache reads and writes never hold d.mu.
+	remoteCatalog       remoteCatalogState
+	remoteHostStore     ports.RemoteHostStore
+	remoteCatalogClient ports.RemoteCatalogClient
+	remoteCatalogCache  ports.RemoteCatalogCache
+	remoteDialerFactory ports.RemoteDialerFactory
+	remoteTransportMode ports.RemoteTransportMode
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -370,6 +378,18 @@ type Option func(*Daemon)
 // second reporting worker around it.
 func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 	return func(d *Daemon) { d.runtimeObserver = observer }
+}
+
+// WithRemoteDiscovery installs the remote discovery ports used by the daemon.
+// The composition root validates mode before constructing the daemon.
+func WithRemoteDiscovery(store ports.RemoteHostStore, catalog ports.RemoteCatalogClient, cache ports.RemoteCatalogCache, dialer ports.RemoteDialerFactory, mode ports.RemoteTransportMode) Option {
+	return func(d *Daemon) {
+		d.remoteHostStore = store
+		d.remoteCatalogClient = catalog
+		d.remoteCatalogCache = cache
+		d.remoteDialerFactory = dialer
+		d.remoteTransportMode = mode
+	}
 }
 
 // WithShell overrides the command (and its args) each session spawns. The
@@ -596,6 +616,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		snapshotAdmitted:  make(map[*snapshotCapture]struct{}),
 		snapshotWake:      make(chan struct{}, 1),
 		notices:           newNoticeCenter(),
+		remoteCatalog:     newRemoteCatalogState(),
 		resumeParkGrace:   defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
@@ -653,6 +674,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		d.lastAllocatedCreatedAt = maxCreatedAt
 	}
 	d.mruSeq.Store(maxSeq)
+	d.loadRemoteCatalogCache()
 	return d
 }
 

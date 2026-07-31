@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 // RemoteTransportMode selects the transport used for remote attach after CLI parsing.
@@ -44,6 +45,21 @@ type RemoteHostLearner interface {
 // RemoteCatalogClient fetches a versioned session catalog from a remote host.
 type RemoteCatalogClient interface {
 	List(ctx context.Context, target string) (RemoteCatalog, error)
+}
+
+// RemoteCatalogCacheEntry is one immutable host catalog snapshot persisted for
+// immediate remote discovery at daemon startup.
+type RemoteCatalogCacheEntry struct {
+	Host      string
+	FetchedAt time.Time
+	Sessions  []RemoteCatalogSession
+}
+
+// RemoteCatalogCache persists complete remote discovery snapshots independently
+// from the remote host registry.
+type RemoteCatalogCache interface {
+	Load() ([]RemoteCatalogCacheEntry, error)
+	Store([]RemoteCatalogCacheEntry) error
 }
 
 // RemoteCatalogSession is one live session in the remote discovery catalog.

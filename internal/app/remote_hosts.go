@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sort"
 	"text/tabwriter"
 
@@ -46,7 +45,7 @@ func (d remoteHostDeps) withDefaults() remoteHostDeps {
 		d.stateDir = platform.StateDir
 	}
 	if d.store == nil {
-		d.store = remoteadapter.NewFileHostStore(filepath.Join(d.stateDir(), "hosts.json"))
+		d.store = remoteadapter.NewFileHostStore(remoteadapter.HostStorePath(d.stateDir()))
 	}
 	if d.catalog == nil {
 		d.catalog = remoteadapter.NewCatalogClient()
@@ -277,7 +276,7 @@ func attachRememberLearner(deps runAttachDeps, remoteTarget string, _ *slog.Logg
 		if stateDir == nil {
 			stateDir = platform.StateDir
 		}
-		store = remoteadapter.NewFileHostStore(filepath.Join(stateDir(), "hosts.json"))
+		store = remoteadapter.NewFileHostStore(remoteadapter.HostStorePath(stateDir()))
 	}
 	return remoteHostLearner{store: store, target: remoteTarget}
 }
