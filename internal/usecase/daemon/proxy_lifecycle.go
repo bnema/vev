@@ -7,6 +7,13 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+// Proxy lifecycle owns the dormant-expiry timer and the link-state publication
+// of one remote attachment. It extends the package lock ordering documented at
+// the top of client.go: every function in this file acquires
+// d.mu -> p.sessionCore.mu -> p.mu, in that order and never any other, and
+// holds them only to validate and publish state. Clock, Timer, transport,
+// coordinator, and repaint work always runs after all three are released.
+
 const proxyWarmDuration = 5 * time.Minute
 
 // proxyWarmTimer is an exact lifecycle capability. Both pointer identity and
@@ -32,6 +39,11 @@ func (t *proxyWarmTimer) stop() {
 // armProxyWarm reserves and publishes a fresh five-minute timer only while the
 // exact proxy remains registered and headless. Clock and Timer methods are
 // external operations and therefore run outside architecture locks.
+//
+// The lifecycle generation is bumped and the incumbent token released only in
+// phase 2, atomically with publishing the replacement. A failed revalidation
+// therefore leaves the already-armed token both installed and current, so the
+// proxy can never be left registered without a path out of the live registry.
 func (d *Daemon) armProxyWarm(p *proxySession) bool {
 	if d == nil || p == nil || d.clock == nil {
 		return false
@@ -48,24 +60,20 @@ func (d *Daemon) armProxyWarm(p *proxySession) bool {
 		return false
 	}
 	p.mu.Lock()
-	p.generation++
 	generation := p.generation
 	old := p.warm
-	p.warm = nil
 	p.mu.Unlock()
 	p.sessionCore.mu.Unlock()
 	d.mu.Unlock()
-	old.stop()
 
 	timer := d.clock.NewTimer(proxyWarmDuration)
 	if timer == nil {
 		return false
 	}
 	token := &proxyWarmTimer{
-		generation: generation,
-		timer:      timer,
-		cancel:     make(chan struct{}),
-		done:       make(chan struct{}),
+		timer:  timer,
+		cancel: make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 
 	d.mu.Lock()
@@ -75,8 +83,10 @@ func (d *Daemon) armProxyWarm(p *proxySession) bool {
 		valid = p.client == nil
 		if valid {
 			p.mu.Lock()
-			valid = p.generation == generation && p.warm == nil
+			valid = p.generation == generation && p.warm == old
 			if valid {
+				p.generation++
+				token.generation = p.generation
 				p.warm = token
 			}
 			p.mu.Unlock()
@@ -89,6 +99,9 @@ func (d *Daemon) armProxyWarm(p *proxySession) bool {
 		close(token.done)
 		return false
 	}
+	// The incumbent token is retired only once its successor owns the exact
+	// lifecycle generation, never before.
+	old.stop()
 
 	go func() {
 		defer close(token.done)
@@ -127,6 +140,15 @@ func (d *Daemon) expireWarmProxy(p *proxySession, token *proxyWarmTimer) bool {
 		d.mu.Unlock()
 		return false
 	}
+	// Removal from the registry is what commits this expiry, so it is attempted
+	// before any terminal lifecycle state is published. unregisterSessionLocked
+	// only reads d.sessions, which this call already owns; it acquires no lock.
+	if !d.unregisterSessionLocked(p) {
+		p.mu.Unlock()
+		p.sessionCore.mu.Unlock()
+		d.mu.Unlock()
+		return false
+	}
 	p.warm = nil
 	p.generation++
 	p.expired = true
@@ -134,11 +156,6 @@ func (d *Daemon) expireWarmProxy(p *proxySession, token *proxyWarmTimer) bool {
 	transport := p.transport
 	coordinator := p.coordinator.Load()
 	p.mu.Unlock()
-	if !d.unregisterSessionLocked(p) {
-		p.sessionCore.mu.Unlock()
-		d.mu.Unlock()
-		return false
-	}
 	p.sessionCore.mu.Unlock()
 	empty := len(d.sessions) == 0
 	if empty {
@@ -163,11 +180,13 @@ func (d *Daemon) expireWarmProxy(p *proxySession, token *proxyWarmTimer) bool {
 	return true
 }
 
-// updateProxyLinkState publishes one transport callback only if the exact proxy,
-// link generation, and transport remain current. Repaint is deliberately after
-// all architecture locks have been released.
-func (d *Daemon) updateProxyLinkState(p *proxySession, generation uint64, transport ports.Transport, state ports.LinkState) bool {
-	if d == nil || p == nil || transport == nil {
+// withProxyLocked evaluates one lifecycle predicate under the canonical
+// d.mu -> p.sessionCore.mu -> p.mu order, but only while p is still the exact
+// registered session. update owns every state mutation it wants published and
+// reports whether it applied. Repaint is deliberately after all architecture
+// locks have been released.
+func (d *Daemon) withProxyLocked(p *proxySession, update func() bool) bool {
+	if d == nil || p == nil {
 		return false
 	}
 	d.mu.Lock()
@@ -177,10 +196,7 @@ func (d *Daemon) updateProxyLinkState(p *proxySession, generation uint64, transp
 	}
 	p.sessionCore.mu.Lock()
 	p.mu.Lock()
-	current := !p.expired && p.linkGeneration == generation && p.transport == transport
-	if current {
-		p.linkState = state
-	}
+	current := update()
 	ac := p.client
 	p.mu.Unlock()
 	p.sessionCore.mu.Unlock()
@@ -189,6 +205,21 @@ func (d *Daemon) updateProxyLinkState(p *proxySession, generation uint64, transp
 		d.invalidateRender(p, ac, false, "proxy_lifecycle.go")
 	}
 	return current
+}
+
+// updateProxyLinkState publishes one transport callback only if the exact proxy,
+// link generation, and transport remain current.
+func (d *Daemon) updateProxyLinkState(p *proxySession, generation uint64, transport ports.Transport, state ports.LinkState) bool {
+	if d == nil || p == nil || transport == nil {
+		return false
+	}
+	return d.withProxyLocked(p, func() bool {
+		current := !p.expired && p.linkGeneration == generation && p.transport == transport
+		if current {
+			p.linkState = state
+		}
+		return current
+	})
 }
 
 // updateProxyDisconnectedState publishes a state after the exact generation's
@@ -197,46 +228,19 @@ func (d *Daemon) updateProxyDisconnectedState(p *proxySession, generation uint64
 	if d == nil || p == nil {
 		return false
 	}
-	d.mu.Lock()
-	if d.sessions[p.id] != p {
-		d.mu.Unlock()
-		return false
-	}
-	p.sessionCore.mu.Lock()
-	p.mu.Lock()
-	current := !p.expired && p.linkGeneration == generation && p.transport == nil
-	if current {
-		p.linkState = state
-	}
-	ac := p.client
-	p.mu.Unlock()
-	p.sessionCore.mu.Unlock()
-	d.mu.Unlock()
-	if current && ac != nil {
-		d.invalidateRender(p, ac, false, "proxy_lifecycle.go")
-	}
-	return current
+	return d.withProxyLocked(p, func() bool {
+		current := !p.expired && p.linkGeneration == generation && p.transport == nil
+		if current {
+			p.linkState = state
+		}
+		return current
+	})
 }
 
 func (d *Daemon) repaintProxyLifecycle(p *proxySession) {
-	if d == nil || p == nil {
-		return
-	}
-	d.mu.Lock()
-	if d.sessions[p.id] != p {
-		d.mu.Unlock()
-		return
-	}
-	p.sessionCore.mu.Lock()
-	p.mu.Lock()
-	current := !p.expired && p.transport != nil
-	ac := p.client
-	p.mu.Unlock()
-	p.sessionCore.mu.Unlock()
-	d.mu.Unlock()
-	if current && ac != nil {
-		d.invalidateRender(p, ac, false, "proxy_lifecycle.go")
-	}
+	d.withProxyLocked(p, func() bool {
+		return !p.expired && p.transport != nil
+	})
 }
 
 // markProxyReplaced makes ReasonReplaced terminal for this exact remote link.
@@ -249,34 +253,27 @@ func (d *Daemon) markProxyReplaced(p *proxySession, generation uint64, transport
 	if d == nil || p == nil || transport == nil {
 		return false
 	}
-	d.mu.Lock()
-	if d.sessions[p.id] != p {
-		d.mu.Unlock()
-		return false
-	}
-	p.sessionCore.mu.Lock()
-	p.mu.Lock()
-	current := p.linkGeneration == generation && p.transport == transport
-	if current {
-		p.expired = true
-		p.linkState = ports.LinkStateDead
-		p.generation++
-		if p.warm != nil {
-			// Rekey the already-published exact timer instead of stopping it. This
-			// preserves its deadline while invalidating older lifecycle observers.
-			p.warm.generation = p.generation
+	// Arming and repainting are mutually exclusive: needsWarm requires a headless
+	// proxy, and the helper only repaints an attached one. Deferring the arm until
+	// after the helper's repaint therefore preserves the published order.
+	var needsWarm bool
+	current := d.withProxyLocked(p, func() bool {
+		current := p.linkGeneration == generation && p.transport == transport
+		if current {
+			p.expired = true
+			p.linkState = ports.LinkStateDead
+			p.generation++
+			if p.warm != nil {
+				// Rekey the already-published exact timer instead of stopping it. This
+				// preserves its deadline while invalidating older lifecycle observers.
+				p.warm.generation = p.generation
+			}
 		}
-	}
-	ac := p.client
-	needsWarm := current && ac == nil && p.warm == nil
-	p.mu.Unlock()
-	p.sessionCore.mu.Unlock()
-	d.mu.Unlock()
+		needsWarm = current && p.client == nil && p.warm == nil
+		return current
+	})
 	if needsWarm {
 		d.armProxyWarm(p)
-	}
-	if current && ac != nil {
-		d.invalidateRender(p, ac, false, "proxy_lifecycle.go")
 	}
 	return current
 }
