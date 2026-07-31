@@ -747,6 +747,30 @@ func TestRemotePickerRejectsReplacedLocalLifecycle(t *testing.T) {
 	require.Same(t, proxy, ac.currentAttachmentSession(), "stale picker lifecycle must not redirect the attachment")
 }
 
+func TestRemotePickerRejectsReplacedLocalIncarnation(t *testing.T) {
+	d, proxy, ac, _, handler := newProxyInputHarness(t)
+	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	tb.stableID = "local-tab"
+	local := &session{sessionCore: sessionCore{id: "local", name: "local", ephemeral: true, incarnation: domain.IncarnationID{1}}, tabs: []*tab{tb}}
+	publishTiledPaneOwners(local, tb)
+	d.mu.Lock()
+	require.True(t, d.registerSessionLocked(local))
+	d.mu.Unlock()
+
+	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, Incarnation: local.incarnation, TabID: domain.TabStableID(tb.stableID)})
+	target, selectable := model.Selected()
+	require.True(t, selectable)
+	d.afterRoleEffectsFrozen = func() {
+		d.afterRoleEffectsFrozen = nil
+		local.mu.Lock()
+		local.incarnation = domain.IncarnationID{2}
+		local.mu.Unlock()
+	}
+
+	require.Error(t, d.switchToTargetForRole(handler.roleToken, target, sessionHandoffGuard{}, "picker-select"))
+	require.Same(t, proxy, ac.currentAttachmentSession(), "stale picker incarnation must not redirect the attachment")
+}
+
 func TestRemotePickerRejectsReplacedLocalTab(t *testing.T) {
 	d, proxy, ac, _, handler := newProxyInputHarness(t)
 	first := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
