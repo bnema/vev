@@ -39,6 +39,12 @@ func (p *proxySession) applyOutputForGeneration(generation uint64, out ports.Out
 		return 0, false, len(data) != 0
 	}
 	if out.BaseStateNum == 0 {
+		// A retransmitted full paint must not clobber a newer screen or regress
+		// the applied state. Only a reset this proxy actually asked for may
+		// replay a state it has already applied.
+		if !p.awaitingReset && out.NewStateNum <= p.appliedState {
+			return 0, false, false
+		}
 		p.screen = vt.NewScreen(p.screen.Frame.Width, p.screen.Frame.Height)
 		p.screen.Write(data)
 		p.appliedState = out.NewStateNum
@@ -69,7 +75,7 @@ func (d *Daemon) handleProxyOutput(p *proxySession, generation uint64, out ports
 			Type:    ports.MsgAck,
 			Payload: ports.MarshalAck(ports.Ack{AckedStateNum: ack}),
 		}); err != nil {
-			return fmt.Errorf("proxy output ACK: %w", err)
+			return fmt.Errorf("proxy output ACK: %w: %w", errProxyLinkSend, err)
 		}
 	}
 	if requestReset {
@@ -77,7 +83,7 @@ func (d *Daemon) handleProxyOutput(p *proxySession, generation uint64, out ports
 			Type:    ports.MsgOutputResetRequest,
 			Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 		}); err != nil {
-			return fmt.Errorf("proxy output reset request: %w", err)
+			return fmt.Errorf("proxy output reset request: %w: %w", errProxyLinkSend, err)
 		}
 	}
 	if !changed || !p.currentLinkGeneration(generation) {

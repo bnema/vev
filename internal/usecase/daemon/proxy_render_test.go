@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"io"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -106,7 +109,9 @@ func TestProxyResizeUsesReducedRemoteGeometryOnce(t *testing.T) {
 	proxy.linkGeneration = 1
 	proxy.mu.Unlock()
 
-	require.True(t, proxy.resize(domain.Size{Cols: 20, Rows: 10}))
+	changed, sent := proxy.resize(domain.Size{Cols: 20, Rows: 10})
+	require.True(t, changed)
+	require.True(t, sent)
 	frame := awaitTestValue(t, transport.sent, "proxy resize did not reach remote transport")
 	require.Equal(t, ports.MsgResize, frame.Type)
 	resize, err := ports.UnmarshalResize(frame.Payload)
@@ -123,6 +128,109 @@ func TestProxyResizeUsesReducedRemoteGeometryOnce(t *testing.T) {
 	composed := composeFrame(*state, composeCacheInput{})
 	require.Equal(t, 10, composed.frame.Height, "local viewport remains full-sized")
 	require.Equal(t, 8, state.layout.area.Height)
+}
+
+// newAttachedProxyFixture publishes one proxy with a local thin client bound to
+// clientTr and its remote link bound to remoteTr, using no render coordinator so
+// invalidation paints synchronously.
+func newAttachedProxyFixture(t *testing.T, d *Daemon, clientTr ports.Transport, remoteTr ports.Transport) (*proxySession, *attachedClient) {
+	t.Helper()
+	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 16, Rows: 6})
+	require.NoError(t, err)
+	proxy.mu.Lock()
+	proxy.meta = ports.SessionMeta{SessionName: "work", Tabs: []ports.SessionTabMeta{{Index: 0, Name: "shell"}}}
+	proxy.transport = remoteTr
+	proxy.linkGeneration = 1
+	proxy.mu.Unlock()
+	d.mu.Lock()
+	require.True(t, d.registerSessionLocked(proxy))
+	d.mu.Unlock()
+
+	ac := &attachedClient{tr: clientTr, output: newOutputStateStream(), size: domain.Size{Cols: 16, Rows: 6}}
+	ac.setSession(proxy)
+	proxy.sessionCore.mu.Lock()
+	proxy.client = ac
+	proxy.sessionCore.mu.Unlock()
+	return proxy, ac
+}
+
+func newFailingTransport(t *testing.T) *portsmocks.MockTransport {
+	t.Helper()
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(io.ErrClosedPipe).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+	return tr
+}
+
+// TestProxyResizeRepaintsLocalChromeWhenRemoteSendFails covers the split
+// between "the local content rectangle moved" and "the remote was told". The
+// local VT has already been resized, so the client owes a repaint either way.
+func TestProxyResizeRepaintsLocalChromeWhenRemoteSendFails(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	clientTr, sent := newCapturingTransport(t)
+	remote := newProxyTestTransport()
+	remote.sendFails.Store(true)
+	proxy, ac := newAttachedProxyFixture(t, d, clientTr, remote)
+
+	d.resizeProxyForLease(proxy, ac, nil, domain.Size{Cols: 24, Rows: 10})
+
+	frame := awaitTestValue(t, sent, "failed remote resize did not repaint local chrome")
+	require.Equal(t, ports.MsgOutput, frame.Type)
+	proxy.mu.Lock()
+	content := proxy.contentSize
+	proxy.mu.Unlock()
+	require.Equal(t, contentSize(domain.Size{Cols: 24, Rows: 10}, false), content, "local VT resized despite the failed send")
+}
+
+// TestProxyResizeWithoutGeometryChangeDoesNotRepaint is the other half: an
+// identical size is not a reason to repaint.
+func TestProxyResizeWithoutGeometryChangeDoesNotRepaint(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	clientTr, sent := newCapturingTransport(t)
+	proxy, ac := newAttachedProxyFixture(t, d, clientTr, newProxyTestTransport())
+
+	d.resizeProxyForLease(proxy, ac, nil, domain.Size{Cols: 16, Rows: 6})
+
+	select {
+	case frame := <-sent:
+		t.Fatalf("no-op resize repainted: %v", frame.Type)
+	default:
+	}
+}
+
+// TestProxyPrepareFailureRepaintsWithoutLocalSession covers a failed render
+// transaction on an attachment that has no local session to report through.
+func TestProxyPrepareFailureRepaintsWithoutLocalSession(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	clientTr, sent := newCapturingTransport(t)
+	proxy, ac := newAttachedProxyFixture(t, d, clientTr, newProxyTestTransport())
+
+	ac.sendMu.Lock() // emitFrame releases the transaction lock.
+	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{bars: barState{status: proxy.statusSegments(false)}, reset: true})
+	require.True(t, ok)
+	composed := composeFrame(*state, composeCacheInput{})
+	// A malformed frame is what makes outputStateStream.prepare fail.
+	composed.frame = renderer.Frame{Width: 1}
+
+	require.True(t, d.emitFrame(proxy, ac, state, composed))
+	frame := awaitTestValue(t, sent, "prepare failure on a proxy did not schedule a repaint")
+	require.Equal(t, ports.MsgOutput, frame.Type)
+}
+
+// TestProxySendErrorDetachesProxyAttachment covers the transport-failure
+// cleanup path for an attachment with no local session lifecycle.
+func TestProxySendErrorDetachesProxyAttachment(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	clientTr := newFailingTransport(t)
+	proxy, ac := newAttachedProxyFixture(t, d, clientTr, newProxyTestTransport())
+
+	d.paint(proxy, ac, true, nil)
+
+	proxy.sessionCore.mu.Lock()
+	client := proxy.client
+	proxy.sessionCore.mu.Unlock()
+	require.Nil(t, client, "a failed send must release the proxy attachment")
+	require.Nil(t, ac.currentAttachmentSession(), "the client must no longer point at the proxy")
 }
 
 func proxyRowText(row []renderer.Cell) string {

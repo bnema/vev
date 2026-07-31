@@ -33,6 +33,10 @@ type proxyTestTransport struct {
 	sending      atomic.Int32
 	concurrent   atomic.Bool
 	receiving    atomic.Int32
+	// sendFails rejects every write while leaving Recv able to deliver queued
+	// frames, so a reply failure can be observed without also ending the receive
+	// pump.
+	sendFails atomic.Bool
 }
 
 func newProxyTestTransport() *proxyTestTransport {
@@ -56,6 +60,9 @@ func (t *proxyTestTransport) Send(frame ports.Frame) error {
 		t.concurrent.Store(true)
 	}
 	defer t.sending.Add(-1)
+	if t.sendFails.Load() {
+		return io.ErrClosedPipe
+	}
 	if t.sendGate != nil && t.ungatedSends.Add(-1) < 0 {
 		if t.sendEntered != nil {
 			select {
@@ -113,10 +120,28 @@ func proxyMeta(name string) ports.Frame {
 	return ports.Frame{Type: ports.MsgSessionMeta, Payload: payload}
 }
 
-func newProxyTestDaemon(t *testing.T, factory ports.RemoteDialerFactory) *Daemon {
+// newProxyTestDaemon always installs a controllable clock so no proxy test can
+// depend on wall-clock deadlines. Pass a signalClock to drive resume backoff.
+func newProxyTestDaemon(t *testing.T, factory ports.RemoteDialerFactory, clk ports.Clock) *Daemon {
 	t.Helper()
-	return New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+	if clk == nil {
+		clk = stubClock{}
+	}
+	return New(nil, clk, slog.New(slog.NewTextHandler(io.Discard, nil)),
 		WithRemoteDiscovery(nil, nil, nil, factory, ports.RemoteTransportUDP))
+}
+
+// proxySessionSnapshot clones the registry under d.mu so assertions never read
+// d.sessions while a registration writes it. Assertions run on the clone, after
+// the lock has been released.
+func proxySessionSnapshot(d *Daemon) map[domain.SessionID]attachmentSession {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	clone := make(map[domain.SessionID]attachmentSession, len(d.sessions))
+	for id, entry := range d.sessions {
+		clone[id] = entry
+	}
+	return clone
 }
 
 func proxyFactoryFor(t *testing.T, key domain.RemoteSessionKey, transports ...ports.Transport) ports.RemoteDialerFactory {
@@ -157,7 +182,7 @@ func stopProxy(t *testing.T, p *proxySession) {
 func TestProxyHandshakePublishesOnlyAfterWelcomeAndMetadata(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	tr := newProxyTestTransport()
-	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr))
+	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), stubClock{})
 
 	result := make(chan struct {
 		proxy *proxySession
@@ -178,15 +203,15 @@ func TestProxyHandshakePublishesOnlyAfterWelcomeAndMetadata(t *testing.T) {
 	require.Equal(t, key.Name, hello.Name)
 	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, hello.Size)
 	require.Equal(t, uint8(maxUnackedOutputStates), hello.MaxOutputInFlight)
-	require.Empty(t, d.sessions, "Hello alone must not publish a proxy")
+	require.Empty(t, proxySessionSnapshot(d), "Hello alone must not publish a proxy")
 
 	tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 44, ports.CapabilityResume|ports.CapabilityProxied)}
-	require.Empty(t, d.sessions, "Welcome alone must not publish a proxy")
+	require.Empty(t, proxySessionSnapshot(d), "Welcome alone must not publish a proxy")
 	tr.recv <- proxyRecv{frame: proxyMeta(key.Name)}
 
 	created := awaitTestValue(t, result, "proxy handshake did not complete")
 	require.NoError(t, created.err)
-	require.Same(t, created.proxy, d.sessions[key.ID()])
+	require.Same(t, created.proxy, proxySessionSnapshot(d)[key.ID()])
 	require.Equal(t, key, created.proxy.key)
 	require.Equal(t, uint64(44), created.proxy.resumeToken)
 	stopProxy(t, created.proxy)
@@ -206,12 +231,12 @@ func TestProxyHandshakeRejectsInvalidWelcomeWithoutPublication(t *testing.T) {
 			key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 			tr := newProxyTestTransport()
 			tr.recv <- proxyRecv{frame: tt.first}
-			d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr))
+			d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), stubClock{})
 
 			proxy, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
 			require.Error(t, err)
 			require.Nil(t, proxy)
-			require.Empty(t, d.sessions)
+			require.Empty(t, proxySessionSnapshot(d))
 			select {
 			case <-tr.closed:
 			default:
@@ -236,7 +261,7 @@ func TestProxyRegistryDedupesByExactStructuredKey(t *testing.T) {
 		factory.EXPECT().DialerForRemote(key.Host, key.Name, ports.RemoteTransportUDP, mock.Anything).Return(dialer, nil).Once()
 		dialer.EXPECT().Dial(mock.Anything).Return(transport, nil).Once()
 	}
-	d := newProxyTestDaemon(t, factory)
+	d := newProxyTestDaemon(t, factory, stubClock{})
 
 	first, err := d.openProxySession(context.Background(), firstKey, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
@@ -246,7 +271,7 @@ func TestProxyRegistryDedupesByExactStructuredKey(t *testing.T) {
 	second, err := d.openProxySession(context.Background(), secondKey, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.NotSame(t, first, second)
-	require.Len(t, d.sessions, 2)
+	require.Len(t, proxySessionSnapshot(d), 2)
 
 	stopProxy(t, first)
 	stopProxy(t, second)
@@ -264,7 +289,7 @@ func TestProxyCancelDuringDialOrHandshakeNeverPublishes(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}).Once()
-		d := newProxyTestDaemon(t, factory)
+		d := newProxyTestDaemon(t, factory, stubClock{})
 		ctx, cancel := context.WithCancel(context.Background())
 		result := make(chan struct {
 			proxy *proxySession
@@ -284,13 +309,13 @@ func TestProxyCancelDuringDialOrHandshakeNeverPublishes(t *testing.T) {
 		proxy, err := opened.proxy, opened.err
 		require.ErrorIs(t, err, context.Canceled)
 		require.Nil(t, proxy)
-		require.Empty(t, d.sessions)
+		require.Empty(t, proxySessionSnapshot(d))
 	})
 
 	t.Run("handshake", func(t *testing.T) {
 		key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 		tr := newProxyTestTransport()
-		d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr))
+		d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), stubClock{})
 		ctx, cancel := context.WithCancel(context.Background())
 		result := make(chan error, 1)
 		go func() {
@@ -300,7 +325,7 @@ func TestProxyCancelDuringDialOrHandshakeNeverPublishes(t *testing.T) {
 		requireProxyHello(t, tr)
 		cancel()
 		require.ErrorIs(t, awaitTestValue(t, result, "canceled proxy handshake did not finish"), context.Canceled)
-		require.Empty(t, d.sessions)
+		require.Empty(t, proxySessionSnapshot(d))
 		select {
 		case <-tr.closed:
 		default:
@@ -316,7 +341,10 @@ func TestProxyLinkResumesAndReplacementIsTerminal(t *testing.T) {
 	first.recv <- proxyRecv{frame: proxyMeta(key.Name)}
 	second := newProxyTestTransport()
 	factory := proxyFactoryFor(t, key, first, second)
-	d := newProxyTestDaemon(t, factory)
+	// The resume backoff is a ports.Clock deadline, so it is fired rather than
+	// waited out. The buffer also absorbs the warm timer armed by replacement.
+	clock := &signalClock{timers: make(chan *signalTimer, 8)}
+	d := newProxyTestDaemon(t, factory, clock)
 
 	proxy, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
@@ -324,6 +352,9 @@ func TestProxyLinkResumesAndReplacementIsTerminal(t *testing.T) {
 	require.Equal(t, ports.IntentAttach, firstHello.Intent)
 
 	first.recv <- proxyRecv{err: io.EOF}
+	backoff := awaitTestValue(t, clock.timers, "proxy resume backoff timer was not armed")
+	require.Equal(t, proxyResumeInitialBackoff, backoff.duration)
+	backoff.ch <- time.Time{}
 	resumeHello := requireProxyHello(t, second)
 	require.Equal(t, ports.IntentResume, resumeHello.Intent)
 	require.Equal(t, uint64(55), resumeHello.ResumeToken)
@@ -341,7 +372,7 @@ func TestProxyLinkResumesAndReplacementIsTerminal(t *testing.T) {
 	require.True(t, proxy.expired)
 	require.Equal(t, uint64(66), proxy.resumeToken)
 	proxy.mu.Unlock()
-	require.Same(t, proxy, d.sessions[key.ID()], "replacement leaves the expired proxy available for local presentation")
+	require.Same(t, proxy, proxySessionSnapshot(d)[key.ID()], "replacement leaves the expired proxy available for local presentation")
 }
 
 func TestRunProxyTransportStopsReceivePumpAfterInvalidFrame(t *testing.T) {
@@ -368,7 +399,7 @@ func TestProxySenderSerializesAllTransportWrites(t *testing.T) {
 	tr := newProxyTestTransportWithSendGate(gate, entered, 1)
 	tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
 	tr.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr))
+	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), stubClock{})
 	proxy, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	_ = requireProxyHello(t, tr)
@@ -398,24 +429,24 @@ func TestProxyHandshakeRejectsInvalidInitialMetadata(t *testing.T) {
 	tr := newProxyTestTransport()
 	tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
 	tr.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgSessionMeta, Payload: []byte{0xff}}}
-	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr))
+	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), stubClock{})
 
 	proxy, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
 	require.Error(t, err)
 	require.Nil(t, proxy)
-	require.Empty(t, d.sessions)
+	require.Empty(t, proxySessionSnapshot(d))
 }
 
 func TestProxyOpenValidatesDependenciesAndKey(t *testing.T) {
-	d := newProxyTestDaemon(t, nil)
+	d := newProxyTestDaemon(t, nil, stubClock{})
 	_, err := d.openProxySession(context.Background(), domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 80, Rows: 24})
 	require.Error(t, err)
 
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	d = newProxyTestDaemon(t, factory)
+	d = newProxyTestDaemon(t, factory, stubClock{})
 	_, err = d.openProxySession(context.Background(), domain.RemoteSessionKey{Host: "arch", Name: "bad:name"}, domain.Size{Cols: 80, Rows: 24})
 	require.Error(t, err)
-	require.Empty(t, d.sessions)
+	require.Empty(t, proxySessionSnapshot(d))
 }
 
 func newProxyOutputSession(t *testing.T) (*Daemon, *proxySession, *proxyTestTransport, uint64) {
@@ -424,7 +455,7 @@ func newProxyOutputSession(t *testing.T) (*Daemon, *proxySession, *proxyTestTran
 	require.NoError(t, err)
 	transport := newProxyTestTransport()
 	generation, _ := proxy.installTransport(transport)
-	return newProxyTestDaemon(t, nil), proxy, transport, generation
+	return newProxyTestDaemon(t, nil, stubClock{}), proxy, transport, generation
 }
 
 func proxyScreenText(p *proxySession) string {
@@ -492,6 +523,20 @@ func TestProxyOutputStateMachine(t *testing.T) {
 			wantChanged: true,
 			wantScreen:  "! ",
 		},
+		{
+			name:       "stale base zero is ignored",
+			initial:    &ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("A")},
+			output:     ports.Output{BaseStateNum: 0, NewStateNum: 3, Data: []byte("B")},
+			wantState:  5,
+			wantScreen: "A ",
+		},
+		{
+			name:       "duplicate base zero is ignored",
+			initial:    &ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("A")},
+			output:     ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("B")},
+			wantState:  5,
+			wantScreen: "A ",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -510,6 +555,69 @@ func TestProxyOutputStateMachine(t *testing.T) {
 			require.Equal(t, tt.wantScreen, proxyScreenText(proxy))
 		})
 	}
+}
+
+// TestProxyOutputAwaitedResetAcceptsReplayedState fences the stale base-zero
+// guard: a reset this proxy asked for must still be applied even when the
+// remote numbers it at or below the state already applied.
+func TestProxyOutputAwaitedResetAcceptsReplayedState(t *testing.T) {
+	_, proxy, _, generation := newProxyOutputSession(t)
+	_, _, _ = proxy.applyOutputForGeneration(generation, ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("A")})
+	_, requestReset, _ := proxy.applyOutputForGeneration(generation, ports.Output{BaseStateNum: 9, NewStateNum: 10, Data: []byte("x")})
+	require.True(t, requestReset)
+
+	ack, reset, changed := proxy.applyOutputForGeneration(generation, ports.Output{BaseStateNum: 0, NewStateNum: 3, Data: []byte("B")})
+	require.Equal(t, uint64(3), ack)
+	require.False(t, reset)
+	require.True(t, changed)
+	state, awaiting := proxyOutputState(proxy)
+	require.Equal(t, uint64(3), state)
+	require.False(t, awaiting)
+	require.Equal(t, "B ", proxyScreenText(proxy))
+}
+
+// TestProxyLinkReplySendFailureResumesInsteadOfStopping separates a broken
+// write from a broken remote: the frame was well formed, so the proxy link is
+// resumable and only this transport incarnation is retired.
+func TestProxyLinkReplySendFailureResumesInsteadOfStopping(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame ports.Frame
+	}{
+		{
+			name:  "pong reply",
+			frame: ports.Frame{Type: ports.MsgPing, Payload: ports.MarshalPing(ports.Ping{})},
+		},
+		{
+			name:  "output ack",
+			frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")})},
+		},
+		{
+			name:  "output reset request",
+			frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 7, NewStateNum: 8, Data: []byte("A")})},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, proxy, transport, generation := newProxyOutputSession(t)
+			t.Cleanup(func() { _ = transport.Close() })
+			transport.sendFails.Store(true)
+			transport.recv <- proxyRecv{frame: tt.frame}
+
+			result := d.runProxyTransport(context.Background(), proxy, generation, transport)
+			require.Equal(t, proxyLinkResume, result, "a failed reply must retire the transport, not the proxy link")
+		})
+	}
+}
+
+// TestProxyLinkProtocolErrorStillStops fences the sentinel so it cannot widen
+// into "every error is resumable".
+func TestProxyLinkProtocolErrorStillStops(t *testing.T) {
+	d, proxy, transport, generation := newProxyOutputSession(t)
+	t.Cleanup(func() { _ = transport.Close() })
+	transport.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{1}}}
+
+	require.Equal(t, proxyLinkStop, d.runProxyTransport(context.Background(), proxy, generation, transport))
 }
 
 func TestProxyOutputMismatchSendsOneResetUntilBaseZero(t *testing.T) {

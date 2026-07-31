@@ -751,6 +751,36 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	return current
 }
 
+// detachProxyIfCurrentTransport is detachIfCurrentTransport for a proxy
+// attachment. It fences on the same published identity — exact session pointer,
+// exact attachment, exact transport incarnation — but reads the attachment
+// through the shared sessionCore rather than a local session.
+func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClient, expected transportSnapshot) bool {
+	if p == nil || ac == nil {
+		return false
+	}
+	frozen := freezeRoleEffectGates(ac)
+	defer frozen.unfreeze()
+	if d.afterDetachRoleEffectsFrozen != nil {
+		d.afterDetachRoleEffectsFrozen()
+	}
+	d.notices.routingMu.Lock()
+	p.sessionCore.mu.Lock()
+	current := p.client == ac && ac.currentAttachmentSession() == attachmentSession(p)
+	if current && expected.transport != nil && !ac.transportSnapshotCurrent(expected) {
+		current = false
+	}
+	if current {
+		p.client = nil
+		ac.roleGeneration.Add(1)
+		ac.setSession(nil)
+		ac.invalidateFrozenRoleCapability()
+	}
+	p.sessionCore.mu.Unlock()
+	d.notices.routingMu.Unlock()
+	return current
+}
+
 // detachIfRoleCurrent invalidates only the exact role generation and transport
 // whose admitted send failed. A queued stale error cannot detach a later role
 // publication or a rebound transport on the same attachment object.

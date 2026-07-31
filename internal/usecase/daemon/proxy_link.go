@@ -22,6 +22,10 @@ var (
 	errProxyCommandTimeout     = errors.New("proxy session: attached command timed out")
 	errProxyCommandUnavailable = errors.New("proxy session: attached command link is unavailable")
 	errProxyCommandGeneration  = errors.New("proxy session: attached command link was replaced")
+	// errProxyLinkSend marks a reply that could not be written to the remote.
+	// The received frame was well formed, so the link is resumable rather than
+	// terminally broken.
+	errProxyLinkSend = errors.New("proxy session: link reply send failed")
 )
 
 type proxyCommandOutcome struct {
@@ -520,6 +524,12 @@ func (d *Daemon) runProxyTransport(ctx context.Context, p *proxySession, generat
 			}
 			result, err := d.handleLinkFrame(p, generation, received.frame)
 			if err != nil {
+				// A failed reply says nothing about the remote's framing, so it
+				// retires this transport instead of the whole proxy link.
+				if errors.Is(err, errProxyLinkSend) {
+					d.log.Warn("proxy link reply failed", "host", p.key.Host, "session", p.key.Name, "err", err)
+					return proxyLinkResume
+				}
 				d.log.Warn("invalid proxy link frame", "host", p.key.Host, "session", p.key.Name, "err", err)
 				return proxyLinkStop
 			}
@@ -567,7 +577,7 @@ func (d *Daemon) handleLinkFrame(p *proxySession, generation uint64, frame ports
 			return proxyLinkStop, err
 		}
 		if err := p.sendGeneration(generation, ports.Frame{Type: ports.MsgPong, Payload: ports.MarshalPong(ports.Pong{})}); err != nil {
-			return proxyLinkStop, err
+			return proxyLinkStop, fmt.Errorf("proxy pong reply: %w: %w", errProxyLinkSend, err)
 		}
 		return proxyLinkResume, nil
 	case ports.MsgDetached:
