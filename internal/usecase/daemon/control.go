@@ -17,19 +17,36 @@ import (
 
 // handleCommand serves one one-shot control request. The leading version is
 // checked before decoding the versioned body so newer layouts fail cleanly.
-func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) {
+func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 	defer func() { _ = tr.Close() }()
 
 	if version, ok := ports.PeekCommandVersion(f.Payload); !ok || version != ports.ProtocolVersion {
-		_ = tr.Send(frameCommandResult(ports.CommandResult{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}))
-		return
+		return d.sendCommandResult(tr, ports.CommandResult{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"})
 	}
 	request, err := ports.UnmarshalCommandRequest(f.Payload)
 	if err != nil {
-		_ = tr.Send(frameCommandResult(ports.CommandResult{Code: ports.ErrInternal, Text: "malformed command request"}))
-		return
+		return d.sendCommandResult(tr, ports.CommandResult{Code: ports.ErrInternal, Text: "malformed command request"})
 	}
-	_ = tr.Send(frameCommandResult(d.dispatchCommand(d.serveCtx, request)))
+	if request.Attached {
+		return d.sendCommandResult(tr, ports.CommandResult{
+			RequestID: request.RequestID,
+			Code:      ports.ErrNotScriptable,
+			Text:      "attached command relay is not enabled",
+		})
+	}
+	result := d.dispatchCommand(d.serveCtx, request)
+	result.RequestID = request.RequestID
+	return d.sendCommandResult(tr, result)
+}
+
+// sendCommandResult gives one-shot control responses the same observable
+// transport-failure behavior regardless of which validation path produced it.
+func (d *Daemon) sendCommandResult(tr ports.Transport, result ports.CommandResult) error {
+	if err := tr.Send(frameCommandResult(result)); err != nil {
+		d.log.Warn("command response send failed", "err", err)
+		return err
+	}
+	return nil
 }
 
 func frameCommandResult(result ports.CommandResult) ports.Frame {

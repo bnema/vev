@@ -384,6 +384,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 		oldSnap         transportSnapshot
 		credentialMatch bool
 		clientMismatch  bool
+		modeMismatch    bool
 	)
 	if sess != nil {
 		sess.mu.Lock()
@@ -394,6 +395,8 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 		if ac != nil && ac.resumeCapable && ac.resumeToken == h.ResumeToken {
 			if ac.clientID != h.ClientID {
 				clientMismatch = true
+			} else if ac.proxied != h.Proxied {
+				modeMismatch = true
 			} else {
 				oldSnap = ac.transportSnapshot()
 				credentialMatch = oldSnap.transport != nil
@@ -408,8 +411,12 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 	}
 	d.mu.Unlock()
 
-	if clientMismatch {
-		d.log.Warn("resume rejected", "session", sess.name, "err", "client id mismatch")
+	if clientMismatch || modeMismatch {
+		reason := "client id mismatch"
+		if modeMismatch {
+			reason = "proxied mode mismatch"
+		}
+		d.log.Warn("resume rejected", "session", sess.name, "err", reason)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	if !credentialMatch {
@@ -513,8 +520,12 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 		parked.role = attachmentSnatched
 	}
 	ac := parked.ac
-	if ac.clientID != h.ClientID {
-		d.log.Warn("resume rejected", "session", sess.name, "err", "client id mismatch")
+	if ac.clientID != h.ClientID || ac.proxied != h.Proxied {
+		reason := "client id mismatch"
+		if ac.proxied != h.Proxied {
+			reason = "proxied mode mismatch"
+		}
+		d.log.Warn("resume rejected", "session", sess.name, "err", reason)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	delete(d.parked, h.ResumeToken)

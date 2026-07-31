@@ -3,8 +3,8 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 19 {
-		t.Fatalf("ProtocolVersion = %d, want 19", ProtocolVersion)
+	if ProtocolVersion != 20 {
+		t.Fatalf("ProtocolVersion = %d, want 20", ProtocolVersion)
 	}
 }
 
@@ -14,6 +14,15 @@ func TestControlMsgTypes(t *testing.T) {
 	}
 	if MsgCommandResult != 22 {
 		t.Fatalf("MsgCommandResult = %d, want 22", MsgCommandResult)
+	}
+	if MsgOutputResetRequest != 13 {
+		t.Fatalf("MsgOutputResetRequest = %d, want 13", MsgOutputResetRequest)
+	}
+	if MsgSessionMeta != 23 {
+		t.Fatalf("MsgSessionMeta = %d, want 23", MsgSessionMeta)
+	}
+	if CapabilityProxied != 1<<3 {
+		t.Fatalf("CapabilityProxied = %d, want 8", CapabilityProxied)
 	}
 }
 
@@ -34,6 +43,7 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgImagePush", MsgImagePush},
 		{"MsgClientNotice", MsgClientNotice},
 		{"MsgCommand", MsgCommand},
+		{"MsgOutputResetRequest", MsgOutputResetRequest},
 		{"MsgWelcome", MsgWelcome},
 		{"MsgError", MsgError},
 		{"MsgOutput", MsgOutput},
@@ -41,6 +51,7 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgPong", MsgPong},
 		{"MsgSessions", MsgSessions},
 		{"MsgCommandResult", MsgCommandResult},
+		{"MsgSessionMeta", MsgSessionMeta},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

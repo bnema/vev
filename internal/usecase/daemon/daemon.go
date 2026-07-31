@@ -1149,7 +1149,22 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 	postWelcomeLease := postWelcomeToken.lease
-	if postWelcomeToken.role != attachmentActive || rc == nil || postWelcomeLease == nil || !rc.markAttachmentReady(postWelcomeLease) {
+	if postWelcomeToken.role != attachmentActive || rc == nil || postWelcomeLease == nil {
+		postWelcomeTicket.End()
+		d.clientGone(sess, ac, tr, false)
+		return
+	}
+	if ac.proxied {
+		meta, ok := sess.sessionMetaSnapshot()
+		metaFrame, metaErr := frameSessionMeta(meta)
+		if !ok || metaErr != nil || ac.sendExpectedTransportForRole(postWelcomeToken.transport, metaFrame, postWelcomeTicket) != nil {
+			postWelcomeTicket.End()
+			d.clientGone(sess, ac, tr, false)
+			return
+		}
+		ac.markSessionMetaSent(meta)
+	}
+	if !rc.markAttachmentReady(postWelcomeLease) {
 		postWelcomeTicket.End()
 		// The attachment was displaced or detached while Welcome was in flight;
 		// never let this stale handshake emit an Output frame.
@@ -1190,6 +1205,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		clientID:          h.ClientID,
 		resumeCapable:     true,
 		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
+		proxied:           h.Proxied,
 	}
 	ac := d.prepareAttachedClientLocked(tr, sz, opts)
 	d.mu.Unlock()
@@ -1336,7 +1352,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
+			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, term, h.Env, h.Proxied, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
@@ -1347,7 +1363,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLocked(name, true, h.Cwd, sz, term, h.Env)
+		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, sz, term, h.Env, h.Proxied)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -1368,7 +1384,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz, term, h.Env)
+		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, sz, term, h.Env, h.Proxied)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -1386,7 +1402,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
+			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, term, h.Env, h.Proxied, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

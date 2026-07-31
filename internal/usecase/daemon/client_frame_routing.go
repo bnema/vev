@@ -104,6 +104,35 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 		if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
 			d.ackActiveOutput(token, ack.AckedStateNum)
 		}
+	case ports.MsgOutputResetRequest:
+		if _, derr := ports.UnmarshalOutputResetRequest(f.Payload); derr == nil {
+			d.resetActiveOutput(token)
+		}
+	case ports.MsgCommand:
+		if token.ac.proxied {
+			request, derr := ports.UnmarshalCommandRequest(f.Payload)
+			if derr != nil {
+				return false
+			}
+			// Attached commands are intentionally admitted only on the proxied
+			// attachment path. Phase 6 supplies execution; until then every
+			// decoded request is rejected with its original correlation ID.
+			valid := request.Version == ports.ProtocolVersion && request.Attached && request.RequestID != 0 &&
+				request.TargetSession == "" && request.TargetTab == "" && request.TargetPane == ""
+			if !valid {
+				d.log.Warn("invalid attached command", "request_id", request.RequestID)
+			}
+			result := ports.CommandResult{
+				RequestID: request.RequestID,
+				Code:      ports.ErrNotScriptable,
+				Text:      "attached command relay is not enabled",
+			}
+			if err := token.sendActiveControl(frameCommandResult(result)); err != nil {
+				token.endRoleEffect()
+				d.detachOnRoleSendError(token, token.transport.transport)
+				return true
+			}
+		}
 	case ports.MsgPing:
 		if err := token.sendActiveControl(framePong()); err != nil {
 			token.endRoleEffect()
@@ -115,6 +144,28 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 		// client can add message types without breaking an older daemon.
 	}
 	return false
+}
+
+// resetActiveOutput rebases only the exact proxied role and transport admitted
+// by the frame router. sendMu serializes the rebase with every output send;
+// transport revalidation under that lock rejects a link replaced while waiting.
+func (d *Daemon) resetActiveOutput(token attachmentRoleToken) bool {
+	ac := token.ac
+	if ac == nil || !ac.proxied || token.effect == nil || token.effect.ended.Load() {
+		return false
+	}
+	ac.sendMu.Lock()
+	if token.effect.ended.Load() || !ac.proxied || !token.activeCurrent() || ac.output == nil {
+		ac.sendMu.Unlock()
+		return false
+	}
+	ac.output.rebase()
+	ac.sendMu.Unlock()
+
+	rc := token.sess.core().coordinator.Load()
+	return rc != nil && rc.invalidateForLease(ac, token.lease, renderInvalidation{
+		class: invalidateUrgent, reset: true, producer: "output-reset-request",
+	})
 }
 
 func (d *Daemon) ackActiveOutput(token attachmentRoleToken, state uint64) bool {

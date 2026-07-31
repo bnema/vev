@@ -73,12 +73,18 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	// Compose into the alternate attachment-owned buffer. The committed frame is
 	// copied before incremental drawing so prepare/send failures cannot change it.
-	canReuseFrame := scratch.frame.Width == width && scratch.frame.Height == rows+2
+	contentY := 1
+	frameHeight := rows + tabChromeRows
+	if state.contentOnly {
+		contentY = 0
+		frameHeight = rows
+	}
+	canReuseFrame := scratch.frame.Width == width && scratch.frame.Height == frameHeight
 	frame := scratch.frame
 	if !canReuseFrame {
-		frame = renderer.NewFrame(width, rows+2)
+		frame = renderer.NewFrame(width, frameHeight)
 	}
-	if in.frame.Width == width && in.frame.Height == rows+2 {
+	if in.frame.Width == width && in.frame.Height == frameHeight {
 		for y := 0; y < frame.Height; y++ {
 			copy(frame.Row(y), in.frame.Row(y))
 		}
@@ -93,14 +99,16 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	defaultDimmer := themeui.NewDimmer(state.theme)
 	neutralBorder := styles.NeutralBorder
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
-	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
-	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
-	content := domain.Rect{Y: 1, Width: width, Height: rows}
+	if !state.contentOnly {
+		drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
+		drawStatusBarState(frame.Row(rows+1), state.bars, styles)
+	}
+	content := domain.Rect{Y: contentY, Width: width, Height: rows}
 	if state.layout.valid {
 		drawDividers(frame, state.layout.dividers, content.Y, defaultDimmer.Dim(neutralBorder))
 	}
 
-	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.styleGeneration != state.styleGeneration || in.floatingVisible != state.floating.visible
+	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != frameHeight || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.styleGeneration != state.styleGeneration || in.floatingVisible != state.floating.visible
 	titles := scratch.titleGenerations
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))
@@ -108,7 +116,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	clear(titles)
 	damage := scratch.damage[:0]
 	for _, pane := range state.panes {
-		pl := offsetPlacement(pane.placement, 0, 1)
+		pl := offsetPlacement(pane.placement, 0, contentY)
 		if pl.TitleBar.Height > 0 {
 			drawCapturedPaneTitleBar(frame, pl, pane.title, pane.focused, styles, neutralBorder, defaultDimmer)
 			if !full && in.titleGenerations[pane.id] != pane.titleGeneration {
@@ -121,7 +129,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		}
 		for _, d := range pane.damage {
 			if d.Kind != renderer.DamageFullRedraw {
-				d.Y++
+				d.Y += contentY
 			}
 			damage = append(damage, d)
 		}
@@ -158,7 +166,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
 		frame, damage = composeCapturedOverlays(state, frame, damage)
 	}
-	if !full {
+	if !state.contentOnly && !full {
 		if !sameCells(in.bars.top, baseFrame.Row(0)) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
 		}
@@ -178,9 +186,13 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
-	cursor := desiredCapturedCursor(cursorInputs)
+	cursor := desiredCapturedCursor(cursorInputs, contentY)
 	outCache := composeCacheInput{valid: !overlaysActive, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
-	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
+	if !state.contentOnly {
+		outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
+	} else {
+		outCache.bars.Reset()
+	}
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
@@ -195,7 +207,7 @@ func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title s
 	ui.DrawText(frame, pl.TitleBar.X, pl.TitleBar.Y, pl.TitleBar.X+pl.TitleBar.Width, title, style)
 }
 
-func desiredCapturedCursor(c capturedCursorInputs) cursorOut {
+func desiredCapturedCursor(c capturedCursorInputs, contentY int) cursorOut {
 	if !c.renderable || c.hiddenByOverlay || !c.visible {
 		return cursorOut{hidden: true}
 	}
@@ -203,7 +215,7 @@ func desiredCapturedCursor(c capturedCursorInputs) cursorOut {
 	if !c.hasStyle {
 		style = 1
 	}
-	return cursorOut{row: c.content.Y + 1 + c.row, col: c.content.X + c.col, style: style, hasStyle: true}
+	return cursorOut{row: c.content.Y + contentY + c.row, col: c.content.X + c.col, style: style, hasStyle: true}
 }
 
 func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapshot, paletteCfg domain.PaletteConfig) {
@@ -222,7 +234,11 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	if styles == (themeui.Styles{}) {
 		styles = fallbackChromeStyles
 	}
-	size := domain.Size{Cols: state.layout.area.Width, Rows: state.layout.area.Height + 2}
+	rows := state.layout.area.Height
+	if !state.contentOnly {
+		rows += tabChromeRows
+	}
+	size := domain.Size{Cols: state.layout.area.Width, Rows: rows}
 	if snap.copySearchModel != nil {
 		presentation := copySearchModal.Resolve(size)
 		o.copySearch = capturedModal{active: true, title: copySearchModal.Title, presentation: presentation, focused: true}
@@ -469,27 +485,35 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	data = append(data, ac.encodeCursorTail(composed.cursor, len(data) > 0)...)
 	var sendTr ports.Transport
 	var sendErr error
-	if len(data) > 0 {
+	// Metadata precedes any output bytes and is published on its own when the
+	// terminal frame is empty, so a proxied client never keeps a stale snapshot.
+	if len(data) > 0 || ac.proxied {
 		sendTransport := ac.transportSnapshot()
 		sendTr = sendTransport.transport
-		endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
-		if sendTr == nil {
-			sendErr = errors.New("client transport is nil")
-		} else {
-			send := sendTr.Send
-			if async, ok := sendTr.(ports.AsyncTransport); ok {
-				send = async.SendAsync
-			}
-			interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
-			sendErr = prepared.send(data, ac.echoAck.Load(), send)
-			if interruptible {
-				if sendErr != nil {
-					marks.roleEffect.reportTransportFailure(sendTransport)
-				}
-				marks.roleEffect.endTransportSend()
-			}
+		if ac.proxied {
+			sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.roleEffect)
 		}
-		endEmit(uint64(len(data)), sendErr == nil)
+		if len(data) > 0 {
+			endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
+			if sendErr == nil && sendTr == nil {
+				sendErr = errors.New("client transport is nil")
+			}
+			if sendErr == nil {
+				send := sendTr.Send
+				if async, ok := sendTr.(ports.AsyncTransport); ok {
+					send = async.SendAsync
+				}
+				interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
+				sendErr = prepared.send(data, ac.echoAck.Load(), send)
+				if interruptible {
+					if sendErr != nil {
+						marks.roleEffect.reportTransportFailure(sendTransport)
+					}
+					marks.roleEffect.endTransportSend()
+				}
+			}
+			endEmit(uint64(len(data)), sendErr == nil)
+		}
 	}
 	if sendErr == nil {
 		// Publish only after output preparation and transport emission both

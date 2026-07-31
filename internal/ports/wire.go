@@ -9,6 +9,7 @@ package ports
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/renderer"
@@ -23,6 +24,16 @@ var errShortPayload = errors.New("ports: payload too short")
 // catches version drift early instead of silently ignoring extra data.
 var errTrailingBytes = errors.New("ports: unexpected trailing bytes in payload")
 
+var errInvalidBoolean = errors.New("ports: invalid boolean flag")
+
+// ErrInvalidSessionMeta reports metadata that cannot be represented by the
+// protocol's ordered uint16-indexed tab layout.
+var ErrInvalidSessionMeta = errors.New("ports: invalid session metadata")
+
+// ErrSessionMetaStringTooLong reports metadata containing a string too large
+// for the protocol's uint16 string encoding.
+var ErrSessionMetaStringTooLong = errors.New("ports: session metadata string too long")
+
 // Intent values carried by Hello, describing what the client wants to do.
 const (
 	IntentEphemeral uint8 = 0
@@ -36,6 +47,7 @@ const (
 	CapabilityResume  uint32 = 1 << 0
 	CapabilityUDP     uint32 = 1 << 1
 	CapabilityPredict uint32 = 1 << 2
+	CapabilityProxied uint32 = 1 << 3
 )
 
 // ErrorMsg codes.
@@ -65,6 +77,7 @@ const (
 type Hello struct {
 	Version     uint16
 	Intent      uint8
+	Proxied     bool
 	ClientID    [16]byte
 	ResumeToken uint64
 	Name        string
@@ -214,6 +227,24 @@ type Sessions struct {
 	Sessions []SessionInfo
 }
 
+// OutputResetRequest asks a proxied daemon to rebase its output stream.
+type OutputResetRequest struct{}
+
+// SessionTabMeta describes one tab in a proxied session's authoritative
+// metadata snapshot.
+type SessionTabMeta struct {
+	Index     uint16
+	Name      string
+	Attention bool
+}
+
+// SessionMeta is the authoritative tab metadata sent to a proxied client.
+type SessionMeta struct {
+	SessionName string
+	Active      uint16
+	Tabs        []SessionTabMeta
+}
+
 // payloadWriter builds a message payload by appending fields in wire order.
 type payloadWriter struct {
 	b []byte
@@ -221,6 +252,16 @@ type payloadWriter struct {
 
 func (w *payloadWriter) putUint8(v uint8) {
 	w.b = append(w.b, v)
+}
+
+// putBool writes the single byte payloadReader.getBool accepts: 1 for true and
+// 0 for false.
+func (w *payloadWriter) putBool(v bool) {
+	if v {
+		w.putUint8(1)
+		return
+	}
+	w.putUint8(0)
 }
 
 func (w *payloadWriter) putUint16(v uint16) {
@@ -268,6 +309,17 @@ func (r *payloadReader) getUint8() (uint8, error) {
 	v := r.b[0]
 	r.b = r.b[1:]
 	return v, nil
+}
+
+func (r *payloadReader) getBool() (bool, error) {
+	v, err := r.getUint8()
+	if err != nil {
+		return false, err
+	}
+	if v > 1 {
+		return false, errInvalidBoolean
+	}
+	return v == 1, nil
 }
 
 func (r *payloadReader) getUint16() (uint16, error) {
@@ -361,6 +413,7 @@ func MarshalHello(h Hello) []byte {
 	w := payloadWriter{}
 	w.putUint16(h.Version)
 	w.putUint8(h.Intent)
+	w.putBool(h.Proxied)
 	w.putBytes(h.ClientID[:])
 	w.putUint64(h.ResumeToken)
 	w.putString(h.Name)
@@ -368,11 +421,7 @@ func MarshalHello(h Hello) []byte {
 	w.putUint16(uint16(h.Size.Rows))
 	w.putString(h.TermEnv)
 	w.putString(h.Cwd)
-	if h.TrueColor {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
+	w.putBool(h.TrueColor)
 	w.putUint8(h.MaxOutputInFlight)
 	w.putUint32(uint32(len(h.Env)))
 	for _, entry := range h.Env {
@@ -391,6 +440,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	if h.Intent, err = r.getUint8(); err != nil {
+		return Hello{}, err
+	}
+	if h.Proxied, err = r.getBool(); err != nil {
 		return Hello{}, err
 	}
 	clientID, err := r.getBytes(len(h.ClientID))
@@ -833,6 +885,96 @@ func UnmarshalList(b []byte) (List, error) {
 		return List{}, err
 	}
 	return List{}, nil
+}
+
+// MarshalOutputResetRequest encodes an OutputResetRequest payload (always
+// empty).
+func MarshalOutputResetRequest(OutputResetRequest) []byte {
+	return nil
+}
+
+// UnmarshalOutputResetRequest decodes a strict empty OutputResetRequest
+// payload.
+func UnmarshalOutputResetRequest(b []byte) (OutputResetRequest, error) {
+	r := payloadReader{b: b}
+	if err := r.done(); err != nil {
+		return OutputResetRequest{}, err
+	}
+	return OutputResetRequest{}, nil
+}
+
+// MarshalSessionMeta encodes m when it satisfies the protocol's authoritative
+// ordered-tab constraints.
+func MarshalSessionMeta(m SessionMeta) ([]byte, error) {
+	if len(m.Tabs) == 0 || len(m.Tabs) > math.MaxUint16 || int(m.Active) >= len(m.Tabs) {
+		return nil, ErrInvalidSessionMeta
+	}
+	if len(m.SessionName) > math.MaxUint16 {
+		return nil, ErrSessionMetaStringTooLong
+	}
+	for i, tab := range m.Tabs {
+		if tab.Index != uint16(i) {
+			return nil, ErrInvalidSessionMeta
+		}
+		if len(tab.Name) > math.MaxUint16 {
+			return nil, ErrSessionMetaStringTooLong
+		}
+	}
+
+	w := payloadWriter{}
+	w.putString(m.SessionName)
+	w.putUint16(m.Active)
+	w.putUint16(uint16(len(m.Tabs)))
+	for _, tab := range m.Tabs {
+		w.putUint16(tab.Index)
+		w.putString(tab.Name)
+		w.putBool(tab.Attention)
+	}
+	return w.b, nil
+}
+
+// UnmarshalSessionMeta decodes a strict authoritative metadata snapshot.
+func UnmarshalSessionMeta(b []byte) (SessionMeta, error) {
+	r := payloadReader{b: b}
+	var m SessionMeta
+	var err error
+	if m.SessionName, err = r.getString(); err != nil {
+		return SessionMeta{}, err
+	}
+	if m.Active, err = r.getUint16(); err != nil {
+		return SessionMeta{}, err
+	}
+	count, err := r.getUint16()
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	if count == 0 || int(m.Active) >= int(count) {
+		return SessionMeta{}, ErrInvalidSessionMeta
+	}
+	if uint64(count) > uint64(len(r.b)/5) {
+		return SessionMeta{}, errShortPayload
+	}
+	m.Tabs = make([]SessionTabMeta, 0, int(count))
+	for i := range int(count) {
+		var tab SessionTabMeta
+		if tab.Index, err = r.getUint16(); err != nil {
+			return SessionMeta{}, err
+		}
+		if tab.Index != uint16(i) {
+			return SessionMeta{}, ErrInvalidSessionMeta
+		}
+		if tab.Name, err = r.getString(); err != nil {
+			return SessionMeta{}, err
+		}
+		if tab.Attention, err = r.getBool(); err != nil {
+			return SessionMeta{}, err
+		}
+		m.Tabs = append(m.Tabs, tab)
+	}
+	if err := r.done(); err != nil {
+		return SessionMeta{}, err
+	}
+	return m, nil
 }
 
 // MarshalKill encodes m into a Kill message payload.
