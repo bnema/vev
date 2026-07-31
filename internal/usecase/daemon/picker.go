@@ -592,7 +592,12 @@ func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence 
 		fence.incarnation = target.Incarnation
 		fence.checkIncarnation = true
 	}
-	if !fence.checkCreatedAt && !fence.checkIncarnation {
+	if target.TabID != "" {
+		fence.tabID = target.TabID
+		fence.tabIndex = target.TabIndex
+		fence.checkTab = true
+	}
+	if !fence.checkCreatedAt && !fence.checkIncarnation && !fence.checkTab {
 		return nil
 	}
 	return fence

@@ -1,5 +1,7 @@
 package daemon
 
+import "github.com/bnema/vev/internal/domain"
+
 // transitionSourcePreflightLocked validates an initiating role while its gate
 // is frozen and d.mu is held. No caller may create or delete a target before
 // this succeeds.
@@ -105,7 +107,11 @@ func attachmentLifecycleCurrentLocked(entry attachmentSession, fence *attachment
 	if fence.checkCreatedAt && (target.name != fence.name || target.createdAt != fence.createdAt) {
 		return false
 	}
-	return !fence.checkIncarnation || target.incarnation == fence.incarnation
+	if fence.checkIncarnation && target.incarnation != fence.incarnation {
+		return false
+	}
+	return !fence.checkTab || fence.tabIndex >= 0 && fence.tabIndex < len(target.tabs) &&
+		domain.TabStableID(target.tabs[fence.tabIndex].stableID) == fence.tabID
 }
 
 // validateAttachmentTransitionPrelocked performs every fallible transition

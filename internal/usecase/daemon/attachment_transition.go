@@ -14,6 +14,9 @@ type attachmentLifecycleFence struct {
 	checkCreatedAt   bool
 	incarnation      domain.IncarnationID
 	checkIncarnation bool
+	tabID            domain.TabStableID
+	tabIndex         int
+	checkTab         bool
 }
 
 type attachmentTransitionRequest struct {

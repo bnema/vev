@@ -734,6 +734,34 @@ func TestRemotePickerRejectsReplacedLocalLifecycle(t *testing.T) {
 	require.Same(t, proxy, ac.currentAttachmentSession(), "stale picker lifecycle must not redirect the attachment")
 }
 
+func TestRemotePickerRejectsReplacedLocalTab(t *testing.T) {
+	d, proxy, ac, _, handler := newProxyInputHarness(t)
+	first := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	first.stableID = "first"
+	second := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	second.stableID = "second"
+	local := &session{sessionCore: sessionCore{id: "local", name: "local"}, tabs: []*tab{first, second}}
+	publishTiledPaneOwners(local, first)
+	publishTiledPaneOwners(local, second)
+	d.mu.Lock()
+	require.True(t, d.registerSessionLocked(local))
+	d.mu.Unlock()
+
+	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(second.stableID)})
+	target, selectable := model.Selected()
+	require.True(t, selectable)
+	require.Equal(t, domain.TabStableID(second.stableID), target.TabID)
+	d.afterRoleEffectsFrozen = func() {
+		d.afterRoleEffectsFrozen = nil
+		local.mu.Lock()
+		local.tabs[0], local.tabs[1] = local.tabs[1], local.tabs[0]
+		local.mu.Unlock()
+	}
+
+	require.Error(t, d.switchToTargetForRole(handler.roleToken, target, sessionHandoffGuard{}, "picker-select"))
+	require.Same(t, proxy, ac.currentAttachmentSession(), "stale picker tab must not redirect the attachment")
+}
+
 func TestRemotePickerCanReselectWarmProxyAfterReturningLocal(t *testing.T) {
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	d.attachCoordinator(local, nil, ac, true)
