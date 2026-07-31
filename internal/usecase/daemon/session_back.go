@@ -1,6 +1,9 @@
 package daemon
 
-import "github.com/bnema/vev/internal/usecase/picker"
+import (
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/picker"
+)
 
 // backSession toggles this attachment between its current session and the
 // immediately preceding successfully activated session.
@@ -31,7 +34,15 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 		d.invalidateRender(current, ac, true, "session_back.go")
 		return
 	}
-	if err := d.switchToTarget(current, ac, picker.Target{Session: target.core().id, TabIndex: -1}); err != nil {
+	token := attachmentToken(current, ac, ac.transport())
+	effect, admitted := ac.beginRoleEffect(token)
+	if !admitted {
+		d.reportError(current, domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", errAttachmentTransition))
+		return
+	}
+	token.effect = effect
+	defer effect.End()
+	if err := d.backSessionForRole(token); err != nil {
 		d.reportError(current, err)
 	}
 }

@@ -610,7 +610,14 @@ func (d *Daemon) switchActiveTargetForRoleGuarded(token attachmentRoleToken, tar
 	d.mu.Lock()
 	targetSess, ok := localSession(d.sessions[target.Session])
 	d.mu.Unlock()
-	if !ok || targetSess == token.sess {
+	if !ok {
+		if !token.activeCurrent() {
+			return nil
+		}
+		d.invalidateRender(token.sess, token.ac, true, "picker.go")
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", nil)
+	}
+	if targetSess == token.sess {
 		return nil
 	}
 

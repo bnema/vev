@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"runtime"
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -21,6 +22,7 @@ func (d *Daemon) currentConnectionRole(ac *attachedClient, tr ports.Transport) (
 		}
 		token := attachmentToken(sess, ac, tr)
 		if token.role == attachmentDetached || ac.currentAttachmentSession() != sess {
+			runtime.Gosched()
 			continue
 		}
 		return sess, token, true

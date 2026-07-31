@@ -708,6 +708,19 @@ func TestRemotePickerSwitchesFromProxyBackToLocalSession(t *testing.T) {
 	localToken := roleEffectForTest(t, local.attachmentToken(ac, ac.transport()))
 	require.NoError(t, d.backSessionForRole(localToken))
 	require.Same(t, proxy, ac.currentAttachmentSession(), "back-session must return to the previous warm proxy")
+
+	proxyToken := roleEffectForTest(t, attachmentToken(proxy, ac, ac.transport()))
+	require.NoError(t, d.switchToTargetForRole(proxyToken, target, sessionHandoffGuard{}, "picker-select"))
+	require.Same(t, local, ac.currentSession())
+	d.backSession(local, ac)
+	require.Same(t, proxy, ac.currentAttachmentSession(), "legacy back-session must preserve the previous proxy identity")
+}
+
+func TestRemotePickerReportsUnavailableLocalTarget(t *testing.T) {
+	d, proxy, ac, _, handler := newProxyInputHarness(t)
+	err := d.switchToTargetForRole(handler.roleToken, picker.Target{Session: "missing", TabIndex: 0}, sessionHandoffGuard{}, "picker-select")
+	require.Error(t, err)
+	require.Same(t, proxy, ac.currentAttachmentSession())
 }
 
 func TestRemotePickerRejectsReplacedLocalLifecycle(t *testing.T) {
@@ -862,7 +875,8 @@ func TestConnectionLoopCleansCurrentProxyAfterHandoffReceiveError(t *testing.T) 
 
 func TestConnectionLoopFollowsClientFromProxyBackToLocal(t *testing.T) {
 	d, _, ac, _, handler := newProxyInputHarness(t)
-	client := ac.transport().(*proxyTestTransport)
+	client, ok := ac.transport().(*proxyTestTransport)
+	require.True(t, ok)
 	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	local := &session{sessionCore: sessionCore{id: "local", name: "local"}, tabs: []*tab{tb}}
 	publishTiledPaneOwners(local, tb)
