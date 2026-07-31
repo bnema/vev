@@ -118,7 +118,7 @@ func TestConsumeOrExpelKeyActionPreservesRearrangementWarning(t *testing.T) {
 				layout.ErrTooSmall,
 			)}
 
-			daemonKeyHandler{d: d, ac: ac, actions: runner}.Action(tt.action)
+			daemonKeyHandler{d: d, ac: ac, actions: runner}.Action(tt.action, nil)
 
 			history := d.notices.history()
 			require.Len(t, history, 1)
@@ -154,7 +154,7 @@ func TestResizeActionAdaptersSubmitEquivalentRequests(t *testing.T) {
 			paletteSpy := &actionRunnerSpy{}
 			controlSpy := &actionRunnerSpy{}
 
-			daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(tt.action)
+			daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(tt.action, nil)
 			require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, actions: paletteSpy}))
 			require.NoError(t, tt.control(controlExec{d: d, sess: sess, target: target, actions: controlSpy}))
 
@@ -238,7 +238,7 @@ func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
 
 				switch adapter {
 				case "key":
-					daemonKeyHandler{d: d, ac: ac}.Action(tt.action)
+					daemonKeyHandler{d: d, ac: ac}.Action(tt.action, nil)
 				case "palette":
 					require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, ac: ac}))
 				case "control":
@@ -400,7 +400,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	target.mu.Unlock()
 	// Use the real key action: it requests the mandatory complete repaint for
 	// the first target-tab frame.
-	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2, nil)
 	require.Equal(t, 1, activeTabIndex(sess))
 
 	second := awaitFrame(t, sends, ports.MsgOutput)
@@ -635,7 +635,7 @@ func TestFloatingStaysTerminalTargetAfterDirectionalFocus(t *testing.T) {
 	tb.mu.Unlock()
 	installTestFloating(tb, newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), true)
 
-	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneRight)
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneRight, nil)
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("x"))
 	requirePTYWrite(t, floatingWrites, []byte("x"))
@@ -647,7 +647,7 @@ func TestFloatingStaysTerminalTargetAfterDirectionalFocus(t *testing.T) {
 func TestActionFocusPaneAtEdgeStaysSilent(t *testing.T) {
 	d, _, ac, _ := newManualSessionWithPTYs(t, nil)
 
-	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft)
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft, nil)
 
 	require.Empty(t, d.notices.history(), "no-neighbor focus move must stay silent")
 }
@@ -663,7 +663,7 @@ func TestActionFocusPaneGenuineErrorReportsNoticeInternal(t *testing.T) {
 	tb.tree = nil
 	tb.mu.Unlock()
 
-	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft)
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft, nil)
 
 	history := d.notices.history()
 	require.Len(t, history, 2, "the layout error and its failed direct display update must both surface")
@@ -683,12 +683,12 @@ func TestFloatingVisibilityRemainsIndependentAcrossTabSwitches(t *testing.T) {
 	sess.tabs = append(sess.tabs, second)
 	sess.mu.Unlock()
 
-	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2, nil)
 	second.mu.Lock()
 	require.Equal(t, floatingHidden, second.floating.state)
 	second.mu.Unlock()
 
-	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab1)
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab1, nil)
 	first.mu.Lock()
 	require.Equal(t, floatingVisible, first.floating.state)
 	first.mu.Unlock()

@@ -1084,10 +1084,11 @@ var producerFiles = []string{
 
 func TestProducerInvalidations(t *testing.T) {
 	cases := []struct {
-		file string
-		name string
-		tabs int
-		run  func(t *testing.T, d *Daemon, sess *session, ac *attachedClient)
+		file     string
+		name     string
+		tabs     int
+		producer string
+		run      func(t *testing.T, d *Daemon, sess *session, ac *attachedClient)
 	}{
 		{
 			file: "attention.go",
@@ -1125,11 +1126,14 @@ func TestProducerInvalidations(t *testing.T) {
 			},
 		},
 		{
-			file: "input.go",
-			name: "switch tab key action",
-			tabs: 2,
+			file:     "input.go",
+			name:     "proxied jump attention switches a local tab",
+			tabs:     2,
+			producer: "input.go",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+				ac.proxied = true
+				sess.tabs[1].attention = true
+				daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionJumpAttention, nil)
 				require.Equal(t, 1, activeTabIndex(sess))
 			},
 		},
@@ -1222,7 +1226,10 @@ func TestProducerInvalidations(t *testing.T) {
 
 			tc.run(t, d, sess, ac)
 
-			awaitInvalidation(t, invs)
+			inv := awaitInvalidation(t, invs)
+			if tc.producer != "" {
+				require.Equal(t, tc.producer, inv.producer)
+			}
 			requireNoInvalidation(t, invs)
 			requireNoCoordinatorOutputFrame(t, sends)
 		})

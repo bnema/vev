@@ -48,10 +48,11 @@ const (
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should
-// reach the PTY; Action is called for intercepted bindings.
+// reach the PTY; Action receives intercepted bindings and the exact consumed
+// terminal bytes. Both byte slices are owned copies.
 type Handler interface {
 	Forward([]byte)
-	Action(Action)
+	Action(Action, []byte)
 }
 
 // Router implements vev's Alt/ESC input routing. It retains a trailing ESC for
@@ -151,7 +152,7 @@ func (r *Router) route(data []byte, h Handler) {
 		}
 		if action, size, ok, partial := r.altArrowCSI(remaining); ok {
 			flush()
-			h.Action(action)
+			r.action(action, data[i:i+1+size], h)
 			i += 1 + size
 			continue
 		} else if partial {
@@ -167,7 +168,7 @@ func (r *Router) route(data []byte, h Handler) {
 		}
 		if action, size, ok := r.binding(remaining); ok {
 			flush()
-			h.Action(action)
+			r.action(action, data[i:i+1+size], h)
 			i += 1 + size
 			continue
 		}
@@ -184,7 +185,7 @@ func (r *Router) route(data []byte, h Handler) {
 
 func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler) int {
 	if action, size, ok, partial := r.altArrowCSI(data); ok {
-		h.Action(action)
+		r.action(action, append([]byte{ESC}, data[:size]...), h)
 		return size
 	} else if partial {
 		r.retainESC(h, data)
@@ -192,7 +193,7 @@ func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler)
 	}
 	next := data[0]
 	if action, size, ok := r.binding(data); ok {
-		h.Action(action)
+		r.action(action, append([]byte{ESC}, data[:size]...), h)
 		return size
 	}
 	if partialUTF8Rune(data) {
@@ -277,6 +278,11 @@ func partialUTF8Rune(data []byte) bool {
 func (r *Router) forward(data []byte, h Handler) {
 	cp := append([]byte(nil), data...)
 	h.Forward(cp)
+}
+
+func (r *Router) action(action Action, raw []byte, h Handler) {
+	cp := append([]byte(nil), raw...)
+	h.Action(action, cp)
 }
 
 func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }

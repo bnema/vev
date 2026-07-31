@@ -106,36 +106,76 @@ func TestSessionMetaShadowUpdatesOnlyAfterSuccessfulSend(t *testing.T) {
 	require.False(t, ac.sessionMetaSent)
 }
 
-func TestProxiedAttachedCommandRejectionPreservesRequestID(t *testing.T) {
+func TestProxiedAttachedCommandValidationPreservesRequestID(t *testing.T) {
 	tests := []struct {
-		name     string
-		request  ports.CommandRequest
-		wantCode uint16
-		wantText string
+		name    string
+		request ports.CommandRequest
+		ok      bool
+		code    uint16
+		text    string
 	}{
 		{
 			name: "valid attached command",
 			request: ports.CommandRequest{
-				Version: ports.ProtocolVersion, RequestID: 41, Attached: true, Slug: "new-tab",
+				Version: ports.ProtocolVersion, RequestID: 41, Attached: true, Slug: "next-tab",
 			},
-			wantCode: ports.ErrNotScriptable,
-			wantText: "attached command relay is not enabled",
+			ok: true,
 		},
 		{
 			name: "target override is rejected",
 			request: ports.CommandRequest{
-				Version: ports.ProtocolVersion, RequestID: 42, Attached: true, Slug: "new-tab", TargetSession: "other",
+				Version: ports.ProtocolVersion, RequestID: 42, Attached: true, Slug: "next-tab", TargetSession: "other",
 			},
-			wantCode: ports.ErrNotScriptable,
-			wantText: "attached command relay is not enabled",
+			code: ports.ErrInvalidCommandArgs,
+			text: "attached commands cannot override their active session target",
 		},
 		{
 			name: "missing attached flag is rejected",
 			request: ports.CommandRequest{
-				Version: ports.ProtocolVersion, RequestID: 43, Slug: "new-tab",
+				Version: ports.ProtocolVersion, RequestID: 43, Slug: "next-tab",
 			},
-			wantCode: ports.ErrNotScriptable,
-			wantText: "attached command relay is not enabled",
+			code: ports.ErrInvalidCommandArgs,
+			text: "attached command flag is required",
+		},
+		{
+			name: "unsupported version is rejected",
+			request: ports.CommandRequest{
+				Version: ports.ProtocolVersion + 1, RequestID: 44, Attached: true, Slug: "next-tab",
+			},
+			code: ports.ErrInvalidCommandArgs,
+			text: "unsupported command protocol version",
+		},
+		{
+			name: "missing request id is rejected",
+			request: ports.CommandRequest{
+				Version: ports.ProtocolVersion, Attached: true, Slug: "next-tab",
+			},
+			code: ports.ErrInvalidCommandArgs,
+			text: "command request id is required",
+		},
+		{
+			name: "self target is rejected",
+			request: ports.CommandRequest{
+				Version: ports.ProtocolVersion, RequestID: 45, Attached: true, Self: true, Slug: "next-tab",
+			},
+			code: ports.ErrInvalidCommandArgs,
+			text: "attached commands cannot target themselves",
+		},
+		{
+			name: "unknown slug is rejected",
+			request: ports.CommandRequest{
+				Version: ports.ProtocolVersion, RequestID: 46, Attached: true, Slug: "missing",
+			},
+			code: ports.ErrUnknownCommand,
+			text: "unknown command: missing",
+		},
+		{
+			name: "local detach is not scriptable",
+			request: ports.CommandRequest{
+				Version: ports.ProtocolVersion, RequestID: 47, Attached: true, Slug: "detach",
+			},
+			code: ports.ErrNotScriptable,
+			text: "detach is owned by the local proxy daemon",
 		},
 	}
 	for _, tt := range tests {
@@ -149,14 +189,13 @@ func TestProxiedAttachedCommandRejectionPreservesRequestID(t *testing.T) {
 			token := sess.attachmentToken(ac, ac.transport())
 			require.False(t, d.handleActiveClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
 
-			reply := <-sends
-			require.Equal(t, ports.MsgCommandResult, reply.Type)
+			reply := awaitFrame(t, sends, ports.MsgCommandResult)
 			result, err := ports.UnmarshalCommandResult(reply.Payload)
 			require.NoError(t, err)
 			require.Equal(t, tt.request.RequestID, result.RequestID)
-			require.False(t, result.OK)
-			require.Equal(t, tt.wantCode, result.Code)
-			require.Equal(t, tt.wantText, result.Text)
+			require.Equal(t, tt.ok, result.OK)
+			require.Equal(t, tt.code, result.Code)
+			require.Equal(t, tt.text, result.Text)
 		})
 	}
 }

@@ -69,7 +69,7 @@ func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 			target.mu.Unlock()
 			d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowTabs: true}})
 
-			daemonKeyHandler{d: d, ac: ac}.Action(tt.action)
+			daemonKeyHandler{d: d, ac: ac}.Action(tt.action, nil)
 
 			require.Equal(t, tt.wantActive, activeTabIndex(sess))
 			target.mu.Lock()
@@ -124,7 +124,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	}
 	for _, move := range moves {
 		t.Run(move.name, func(t *testing.T) {
-			handler.Action(move.action)
+			handler.Action(move.action, nil)
 			require.Same(t, move.want, ac.currentSession())
 		})
 	}
@@ -168,7 +168,7 @@ func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
 	d.mu.Unlock()
 	d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
 
-	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneDown)
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneDown, nil)
 
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
@@ -296,8 +296,8 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 	close(start)
 	handler := daemonKeyHandler{d: d, ac: ac}
 	for range 20 {
-		handler.Action(keys.ActionFocusPaneDown)
-		handler.Action(keys.ActionFocusPaneUp)
+		handler.Action(keys.ActionFocusPaneDown, nil)
+		handler.Action(keys.ActionFocusPaneUp, nil)
 	}
 	wg.Wait()
 	close(renameErrors)
@@ -349,7 +349,7 @@ func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t
 			d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
 			tt.setup(d, sess)
 
-			daemonKeyHandler{d: d, ac: ac}.Action(tt.dir)
+			daemonKeyHandler{d: d, ac: ac}.Action(tt.dir, nil)
 
 			require.Equal(t, 0, activeTabIndex(sess))
 		})

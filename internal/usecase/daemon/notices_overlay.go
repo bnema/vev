@@ -17,7 +17,7 @@ var noticesModal = ui.Modal{WidthPct: 70, HeightPct: 70, MinWidth: 40, MinHeight
 
 // enterNotices opens the notification history overlay from the daemon's full
 // notice center history, newest first.
-func (d *Daemon) enterNotices(sess *session, ac *attachedClient) {
+func (d *Daemon) enterNotices(sess attachmentSession, ac *attachedClient) {
 	history := d.notices.history()
 	now := d.clock.Now()
 	ac.overlays.noticeMu.Lock()
@@ -172,16 +172,16 @@ func (d *Daemon) noticesListInputState(ac *attachedClient) listInputState {
 			rt.noticesOverlay = nil
 		},
 		afterClose: func() {
-			if sess := ac.currentSession(); sess != nil {
-				d.invalidateRender(sess, ac, true, "notices_overlay.go")
+			if entry := ac.currentAttachmentSession(); entry != nil {
+				d.invalidateRender(entry, ac, true, "notices_overlay.go")
 			}
 		},
 	}
 }
 
 func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
-	sess := ac.currentSession()
-	if sess == nil {
+	entry := ac.currentAttachmentSession()
+	if entry == nil {
 		return
 	}
 	rt := ac.overlays
@@ -210,10 +210,10 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 		// yankNotice sends over the wire and repaints itself, so it must run
 		// with noticeMu released; a quick yank doesn't close the overlay the
 		// way copy mode's own 'y' commits and exits.
-		d.yankNotice(sess, ac, yankTarget)
+		d.yankNotice(entry, ac, yankTarget)
 	}
 	if result.exit || result.changed {
-		d.invalidateRender(sess, ac, true, "notices_overlay.go")
+		d.invalidateRender(entry, ac, true, "notices_overlay.go")
 	}
 }
 
@@ -221,12 +221,18 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 // OSC52, mirroring copy mode's own yank path (copymode.go handleCopyInput):
 // send each chunk, then leave a one-shot status-bar confirmation that the
 // next repaint clears.
-func (d *Daemon) yankNotice(sess *session, ac *attachedClient, n domain.Notification) {
+func (d *Daemon) yankNotice(entry attachmentSession, ac *attachedClient, n domain.Notification) {
 	chunks := scopy.OSC52(noticeYankPayload(n))
 	for _, chunk := range chunks {
 		failed, err := d.boundedSendOutputErrTransport(ac, chunk)
 		if err != nil {
-			d.detachOnSendError(sess, ac, failed)
+			if sess, ok := localSession(entry); ok {
+				d.detachOnSendError(sess, ac, failed)
+			} else if proxy, ok := entry.(*proxySession); ok {
+				d.detachProxyOnSendError(proxy, ac, failed)
+			} else {
+				_ = ac.closeCapturedTransport(failed)
+			}
 			return
 		}
 	}
@@ -237,7 +243,7 @@ func (d *Daemon) yankNotice(sess *session, ac *attachedClient, n domain.Notifica
 		ac.overlays.statusFeedback = "notification too large to copy"
 	}
 	ac.overlays.copyMu.Unlock()
-	d.invalidateRender(sess, ac, true, "notices_overlay.go")
+	d.invalidateRender(entry, ac, true, "notices_overlay.go")
 }
 
 // noticeYankPayload formats n the way the yank commands put it on the

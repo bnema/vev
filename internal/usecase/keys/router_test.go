@@ -33,9 +33,10 @@ func (t *fakeTimer) Stop() bool                 { t.stopped = true; return true 
 func (t *fakeTimer) fire()                      { t.ch <- time.Time{} }
 
 type captureHandler struct {
-	forwards [][]byte
-	actions  []Action
-	notify   chan struct{}
+	forwards  [][]byte
+	actions   []Action
+	actionRaw [][]byte
+	notify    chan struct{}
 }
 
 func (h *captureHandler) Forward(data []byte) {
@@ -44,7 +45,43 @@ func (h *captureHandler) Forward(data []byte) {
 		h.notify <- struct{}{}
 	}
 }
-func (h *captureHandler) Action(a Action) { h.actions = append(h.actions, a) }
+func (h *captureHandler) Action(a Action, raw []byte) {
+	h.actions = append(h.actions, a)
+	h.actionRaw = append(h.actionRaw, append([]byte(nil), raw...))
+}
+
+func TestRouterRawActionPreservesExactConsumedBytes(t *testing.T) {
+	custom := DefaultBindings().clone()
+	custom.bind(ActionEqualizePanes, KeySpec{altRunes: []rune{'ø'}})
+	var bindings atomic.Pointer[Bindings]
+	bindings.Store(custom)
+
+	tests := []struct {
+		name   string
+		reads  [][]byte
+		action Action
+		raw    []byte
+	}{
+		{name: "single frame", reads: [][]byte{{ESC, 'j'}}, action: ActionFocusPaneDown, raw: []byte{ESC, 'j'}},
+		{name: "delayed escape", reads: [][]byte{{ESC}, {'1'}}, action: ActionSwitchTab1, raw: []byte{ESC, '1'}},
+		{name: "split UTF-8 custom binding", reads: [][]byte{{ESC, 0xc3}, {0xb8}}, action: ActionEqualizePanes, raw: []byte{ESC, 0xc3, 0xb8}},
+		{name: "split Alt arrow", reads: [][]byte{{ESC, '[', '1'}, {';', '9', 'D'}}, action: ActionFocusPaneLeft, raw: []byte{ESC, '[', '1', ';', '9', 'D'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			router := NewRouter(clk, h, &bindings)
+			for _, read := range tt.reads {
+				router.Route(read)
+			}
+			require.Equal(t, []Action{tt.action}, h.actions)
+			require.Equal(t, [][]byte{tt.raw}, h.actionRaw)
+			require.Empty(t, h.forwards)
+		})
+	}
+}
 
 func TestDefaultBindingsParityRoutesBuiltInBindings(t *testing.T) {
 	cases := []struct {

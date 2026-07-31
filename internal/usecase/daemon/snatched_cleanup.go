@@ -1,5 +1,7 @@
 package daemon
 
+import "github.com/bnema/vev/internal/ports"
+
 // removeSnatchedAttachment removes exactly one role generation and transport
 // from session routing. It never touches the active attachment or closes a
 // transport, allowing callers that already interrupted a blocked send to avoid
@@ -176,6 +178,13 @@ func (d *Daemon) dropSnatchedAttachment(token attachmentRoleToken) bool {
 // captured transport; an idle healthy snatched transport remains connected and
 // receives a dependency-free reset panel.
 func (d *Daemon) deferAttachmentTransitionCleanups(result attachmentTransitionResult) {
+	if terminal := result.terminalDisplaced; terminal.ac != nil && terminal.transport.transport != nil {
+		terminal.ac.clearSnatchedInput()
+		d.unregisterPreview(terminal.ac)
+		terminal.ac.clearPreviousSession()
+		terminal.ac.clearCaptureFrames()
+		d.notifyDetachedSnapshotAsync(terminal, ports.ReasonReplaced)
+	}
 	if token := result.displaced; token.ac != nil && token.transport.transport != nil {
 		blockedRender := result.displacedInterrupted
 		if !blockedRender && !token.ac.initialSnatchedPanelClaimed(token.generation) {
