@@ -778,6 +778,9 @@ func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClie
 	}
 	p.sessionCore.mu.Unlock()
 	d.notices.routingMu.Unlock()
+	if current {
+		d.armProxyWarm(p)
+	}
 	return current
 }
 

@@ -131,7 +131,6 @@ func (d *Daemon) detachProxyOnSendError(p *proxySession, ac *attachedClient, fai
 	d.unregisterPreview(ac)
 	ac.clearPreviousSession()
 	_ = ac.closeCapturedTransport(failed)
-	d.armProxyWarm(p)
 	d.log.Warn("detached proxy client after send error", "host", p.key.Host, "session", p.key.Name)
 }
 
