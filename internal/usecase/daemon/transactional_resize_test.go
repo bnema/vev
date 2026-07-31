@@ -521,7 +521,7 @@ func TestRetryOwnerCannotPublishFloatingGeometryAfterMove(t *testing.T) {
 	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 80, Rows: 24}, ac, lease)
 	require.True(t, d.runResizeTransaction(source, ac, lease, epoch))
 
-	destination := &session{id: "destination", name: "destination", ctx: source.ctx, tabs: []*tab{tb}}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, ctx: source.ctx, tabs: []*tab{tb}}
 	publishPaneOwner(popup, destination, tb, 7)
 	destinationRect := domain.Rect{X: 9, Y: 4, Width: 31, Height: 9}
 	popup.mu.Lock()

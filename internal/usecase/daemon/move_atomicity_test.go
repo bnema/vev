@@ -84,12 +84,10 @@ func TestMovePaneCommitPointHidesPartialPublication(t *testing.T) {
 	sourceTab.stableID = "source-tab"
 	movedPane := sourceTab.focusedPane()
 
-	destination := &session{
-		id:        "destination",
+	destination := &session{sessionCore: sessionCore{id: "destination",
 		name:      "destination",
-		ephemeral: true,
-		tabs:      []*tab{newTabWithStableID("destination-tab", "destination-pane", p2, domain.Size{Cols: 80, Rows: 23})},
-		active:    0,
+		ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", p2, domain.Size{Cols: 80, Rows: 23})},
+		active: 0,
 	}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)

@@ -21,7 +21,7 @@ func TestSessionAttachmentRole(t *testing.T) {
 	active := &attachedClient{}
 	waiting := &attachedClient{}
 	unknown := &attachedClient{}
-	sess := &session{client: active, snatched: map[*attachedClient]struct{}{waiting: {}}}
+	sess := &session{sessionCore: sessionCore{client: active, snatched: map[*attachedClient]struct{}{waiting: {}}}}
 
 	require.Equal(t, attachmentActive, sess.attachmentRole(active))
 	require.Equal(t, attachmentSnatched, sess.attachmentRole(waiting))
@@ -30,7 +30,7 @@ func TestSessionAttachmentRole(t *testing.T) {
 
 func TestTransitionAttachmentReplacesActiveMembership(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	sess := &session{id: domain.SessionID("work")}
+	sess := &session{sessionCore: sessionCore{id: domain.SessionID("work")}}
 	oldTransport := &closeTrackingTransport{}
 	old := &attachedClient{tr: oldTransport}
 	old.setSession(sess)
@@ -67,7 +67,7 @@ func TestTransitionAttachmentReplacesActiveMembership(t *testing.T) {
 
 func TestDeferredAttachmentCleanupKeepsReplacementOpenAndSendsResetPanel(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	sess := &session{id: domain.SessionID("work")}
+	sess := &session{sessionCore: sessionCore{id: domain.SessionID("work")}}
 	oldTransport := &closeTrackingTransport{}
 	old := &attachedClient{
 		tr:     oldTransport,
@@ -283,7 +283,7 @@ func TestKillSessionClosesActiveAndAllSnatchedClients(t *testing.T) {
 	otherTransport := newDatagramTestTransport()
 	otherClient := &attachedClient{tr: otherTransport, output: newOutputStateStream(), size: first.size}
 	otherClient.initOverlays()
-	other := &session{id: "other", name: "other", ctx: otherCtx, cancel: otherCancel, client: otherClient}
+	other := &session{sessionCore: sessionCore{id: "other", name: "other", client: otherClient}, ctx: otherCtx, cancel: otherCancel}
 	otherClient.setSession(other)
 	d.mu.Lock()
 	d.sessions[other.id] = other
@@ -754,7 +754,7 @@ func TestSnatchedPanelSendFailureRemovesOnlyWaitingClient(t *testing.T) {
 	oldTransport := &failingSnatchedTransport{}
 	old := &attachedClient{tr: oldTransport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	old.initOverlays()
-	sess := &session{id: "work", client: old}
+	sess := &session{sessionCore: sessionCore{id: "work", client: old}}
 	old.setSession(sess)
 	d.sessions[sess.id] = sess
 
@@ -823,7 +823,7 @@ func TestSnatchedThemePanelFailureRemovesOnlySnatchedAttachment(t *testing.T) {
 	oldTransport := &failingSnatchedTransport{}
 	old := &attachedClient{tr: oldTransport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	old.initOverlays()
-	sess := &session{id: "work", client: old}
+	sess := &session{sessionCore: sessionCore{id: "work", client: old}}
 	old.setSession(sess)
 	d.sessions[sess.id] = sess
 
@@ -864,7 +864,7 @@ func TestClearForSnatchReleasesEachOverlayFamilyBeforeTakingNext(t *testing.T) {
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	ac.roleGeneration.Store(1)
-	sess := &session{id: "work", snatched: map[*attachedClient]struct{}{ac: {}}}
+	sess := &session{sessionCore: sessionCore{id: "work", snatched: map[*attachedClient]struct{}{ac: {}}}}
 	ac.setSession(sess)
 	token := attachmentRoleToken{
 		sess: sess, ac: ac, role: attachmentSnatched,
@@ -905,7 +905,7 @@ func TestClearForSnatchRejectsStaleGenerationWithoutClearingNewOverlay(t *testin
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	ac.roleGeneration.Store(1)
-	sess := &session{id: "work", snatched: map[*attachedClient]struct{}{ac: {}}}
+	sess := &session{sessionCore: sessionCore{id: "work", snatched: map[*attachedClient]struct{}{ac: {}}}}
 	ac.setSession(sess)
 	token := attachmentRoleToken{
 		sess: sess, ac: ac, role: attachmentSnatched,
@@ -960,7 +960,7 @@ func TestTransitionAttachmentRejectsBeforeOwnershipCommit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
-			sess := &session{id: domain.SessionID("work")}
+			sess := &session{sessionCore: sessionCore{id: domain.SessionID("work")}}
 			old := &attachedClient{tr: &closeTrackingTransport{}}
 			old.setSession(sess)
 			sess.client = old
@@ -986,8 +986,8 @@ func TestTransitionAttachmentRejectsBeforeOwnershipCommit(t *testing.T) {
 
 func TestCrossSessionTransitionPublishesCoherentOwnershipBeforeBlockedFirstPaint(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	from := &session{id: "z-source"}
-	target := &session{id: "a-target"}
+	from := &session{sessionCore: sessionCore{id: "z-source"}}
+	target := &session{sessionCore: sessionCore{id: "a-target"}}
 	moving := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	displaced := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: moving.size}
 	moving.initOverlays()
@@ -1088,7 +1088,7 @@ func TestFirstPaintForTransitionRejectsStaleRoleTokenBeforeRebaseOrReset(t *test
 	ac.roleGeneration.Store(2)
 	ac.output.next = 4
 	ac.output.acked = 1
-	sess := &session{id: "work", client: ac}
+	sess := &session{sessionCore: sessionCore{id: "work", client: ac}}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	rc := d.attachCoordinator(sess, nil, ac, true)
@@ -1109,8 +1109,8 @@ func TestFirstPaintForTransitionRejectsStaleRoleTokenBeforeRebaseOrReset(t *test
 
 func TestTransitionAttachmentMovesActiveBetweenSessions(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	from := &session{id: domain.SessionID("z-source")}
-	target := &session{id: domain.SessionID("a-target")}
+	from := &session{sessionCore: sessionCore{id: domain.SessionID("z-source")}}
+	target := &session{sessionCore: sessionCore{id: domain.SessionID("a-target")}}
 	moving := &attachedClient{tr: &closeTrackingTransport{}}
 	displaced := &attachedClient{tr: &closeTrackingTransport{}}
 	moving.setSession(from)

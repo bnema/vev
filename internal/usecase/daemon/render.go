@@ -60,10 +60,7 @@ func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
 		return false
 	}
 	d.mu.Lock()
-	sessions := make([]*session, 0, len(d.sessions))
-	for _, sess := range d.sessions {
-		sessions = append(sessions, sess)
-	}
+	sessions := localSessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 	for _, sess := range sessions {
 		sess.mu.Lock()
@@ -294,10 +291,17 @@ func (b *runtimeMarkBatch) flush() {
 	}
 }
 
-func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *attachmentLease) {
+func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, lease *attachmentLease) {
+	// Phase 1 has only the local implementation. Keep all local preparation
+	// byte-identical while routing the attachment-facing capture through the
+	// interface; proxy-specific preparation is added with proxy rendering.
+	sess, ok := localSession(entry)
+	if !ok {
+		return
+	}
 	marks := d.newRuntimeMarkBatch()
 	if lease != nil {
-		token := sess.attachmentToken(ac, ac.transport())
+		token := attachmentToken(entry, ac, ac.transport())
 		token.lease = lease
 		ticket, admitted := ac.beginRoleEffect(token)
 		if !admitted {
@@ -318,12 +322,12 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 	sess.mu.Lock()
 	owned := sess.client == ac
 	sess.mu.Unlock()
-	if !owned || ac.currentSession() != sess {
+	if !owned || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
 		return
 	}
 	if lease != nil {
-		rc := sess.renderCoordinator()
+		rc := attachmentRenderCoordinator(entry)
 		if rc == nil || lease.attachment != ac || !rc.leaseCurrent(lease, true) {
 			ac.sendMu.Unlock()
 			return
@@ -397,7 +401,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 		resizeActive: overlays.resizeActive, statusFeedback: statusFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
-	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+	state, ok := entry.capturePrimary(ac, primaryCaptureRequest{
 		bars:            bars,
 		overlays:        capturedOverlays,
 		preview:         preview,

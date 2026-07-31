@@ -70,7 +70,7 @@ type attachedClient struct {
 	initialSnatchedAttempt    *initialSnatchedPanelAttempt
 	size                      domain.Size
 	keys                      *keys.Router
-	sess                      Guarded[*session]
+	sess                      Guarded[attachmentSession]
 	mouseScan                 mouse.Scanner
 	themeMu                   sync.Mutex
 	clientTheme               themeui.Theme
@@ -79,7 +79,7 @@ type attachedClient struct {
 	renderStages              renderStageHooks // optional render and handoff observability hooks
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
-	previousSession Guarded[*session]
+	previousSession Guarded[attachmentSession]
 	// snatchedInputMu serializes the restricted input parser with its delayed
 	// standalone-ESC callback. It is independent of routing and transport locks;
 	// role activation and terminal close clear it only after releasing those locks.
@@ -135,9 +135,17 @@ func (ac *attachedClient) initOverlays() {
 	ac.overlayOnce.Do(func() { ac.overlays = newOverlayRuntime(ac) })
 }
 
-func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
+func (ac *attachedClient) currentAttachmentSession() attachmentSession { return ac.sess.Get() }
 
-func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
+// currentSession is the explicit local-only narrowing used until proxy-aware
+// consumers are introduced. Local PTY/tab paths must treat non-local entries as
+// unavailable rather than infer proxy behavior.
+func (ac *attachedClient) currentSession() *session {
+	sess, _ := localSession(ac.currentAttachmentSession())
+	return sess
+}
+
+func (ac *attachedClient) setSession(sess attachmentSession) { ac.sess.Set(sess) }
 
 func (ac *attachedClient) clearPreviousSession() {
 	if ac != nil {
@@ -610,7 +618,11 @@ func (d *Daemon) firstPaintForTransition(token attachmentRoleToken) bool {
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
 	}
-	d.firstPaintWithLease(token.sess, token.ac, token.ac.size, token.lease)
+	sess, ok := localSession(token.sess)
+	if !ok {
+		return false
+	}
+	d.firstPaintWithLease(sess, token.ac, token.ac.size, token.lease)
 	return true
 }
 
@@ -690,13 +702,14 @@ func (d *Daemon) applyThemeForRole(token attachmentRoleToken, msg ports.Theme) b
 	}
 	clientTheme := themeFromMessage(msg)
 	token.ac.setClientTheme(clientTheme)
-	if !token.activeEffect() || !d.applyHostTheme(token.sess, token.ac, clientTheme, false) {
+	sess, ok := localSession(token.sess)
+	if !ok || !token.activeEffect() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
 		return false
 	}
 	if !token.activeEffect() {
 		return false
 	}
-	if rc := token.sess.renderCoordinator(); rc != nil {
+	if rc := token.sess.core().coordinator.Load(); rc != nil {
 		return rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
 	}
 	return false
@@ -739,7 +752,12 @@ func (d *Daemon) handleClientNoticeForRole(token attachmentRoleToken, notice por
 		d.notices.routingMu.Unlock()
 		return
 	}
-	repaint := d.mutateClientNotice(token.sess, token.ac, notice)
+	sess, ok := localSession(token.sess)
+	if !ok {
+		d.notices.routingMu.Unlock()
+		return
+	}
+	repaint := d.mutateClientNotice(sess, token.ac, notice)
 	d.notices.routingMu.Unlock()
 	if repaint && token.activeEffect() {
 		d.repaintForNotice(token.ac)

@@ -156,7 +156,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	}
 
 	if candidate.removeSourceTab && len(c.source.tabs) == 0 {
-		delete(d.sessions, c.source.id)
+		d.unregisterSessionLocked(c.source)
 		c.retiredAttachments = retireEmptyMoveSessionLocked(c.source, retirement)
 		d.purgeParkingForSessionLocked(c.source)
 		c.retiredParked = d.purgeParkedForSessionLocked(c.source)

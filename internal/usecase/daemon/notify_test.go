@@ -364,7 +364,7 @@ func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attach
 	for _, pane := range tb.panes {
 		pane.ctx, pane.cancel = wctx, wcancel
 	}
-	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: []*tab{tb}, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", client: ac}, ctx: sctx, cancel: cancel, tabs: []*tab{tb}}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
@@ -506,7 +506,7 @@ func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 
 	other := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	other.initOverlays()
-	sess2 := &session{id: "manual-2", name: "other", ctx: sess.ctx, cancel: func() {}, client: other}
+	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", client: other}, ctx: sess.ctx, cancel: func() {}}
 	other.setSession(sess2)
 	d.mu.Lock()
 	d.sessions[sess2.id] = sess2
@@ -596,7 +596,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 
 	clientB := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	clientB.initOverlays()
-	sessB := &session{id: "manual-2", name: "other", ctx: sessA.ctx, cancel: func() {}}
+	sessB := &session{sessionCore: sessionCore{id: "manual-2", name: "other"}, ctx: sessA.ctx, cancel: func() {}}
 	clientB.setSession(sessB)
 	d.mu.Lock()
 	d.sessions[sessB.id] = sessB
@@ -649,7 +649,7 @@ func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
 
 	second := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	second.initOverlays()
-	sess2 := &session{id: "manual-2", name: "other", ctx: sess.ctx, cancel: func() {}, client: second}
+	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", client: second}, ctx: sess.ctx, cancel: func() {}}
 	second.setSession(sess2)
 	d.mu.Lock()
 	d.sessions[sess2.id] = sess2

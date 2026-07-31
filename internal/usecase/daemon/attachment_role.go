@@ -12,42 +12,56 @@ const (
 
 // attachmentRole derives the attachment's role from the session-owned
 // registries. There is deliberately no second role field that could drift.
-func (s *session) attachmentRole(ac *attachedClient) attachmentRole {
-	if s == nil || ac == nil {
+func attachmentSessionRole(entry attachmentSession, ac *attachedClient) attachmentRole {
+	if entry == nil || ac == nil || entry.core() == nil {
 		return attachmentDetached
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.attachmentRoleLocked(ac)
+	core := entry.core()
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	return attachmentSessionRoleLocked(entry, ac)
 }
 
-// attachmentRoleLocked requires s.mu. Active membership wins if an invalid
-// intermediate state contains the same attachment in both registries.
-func (s *session) attachmentRoleLocked(ac *attachedClient) attachmentRole {
-	if ac == nil {
+// attachmentSessionRoleLocked requires entry.core().mu. Active membership wins
+// if an invalid intermediate state contains the same attachment in both
+// registries.
+func attachmentSessionRoleLocked(entry attachmentSession, ac *attachedClient) attachmentRole {
+	if entry == nil || ac == nil || entry.core() == nil {
 		return attachmentDetached
 	}
-	if s.client == ac {
+	core := entry.core()
+	if core.client == ac {
 		return attachmentActive
 	}
-	if _, ok := s.snatched[ac]; ok {
+	if _, ok := core.snatched[ac]; ok {
 		return attachmentSnatched
 	}
 	return attachmentDetached
 }
 
-func (s *session) addSnatchedLocked(ac *attachedClient) {
-	if ac == nil {
+func addSnatchedLocked(entry attachmentSession, ac *attachedClient) {
+	if entry == nil || ac == nil || entry.core() == nil {
 		return
 	}
-	if s.snatched == nil {
-		s.snatched = make(map[*attachedClient]struct{})
+	core := entry.core()
+	if core.snatched == nil {
+		core.snatched = make(map[*attachedClient]struct{})
 	}
-	s.snatched[ac] = struct{}{}
+	core.snatched[ac] = struct{}{}
 }
 
+func (s *session) attachmentRole(ac *attachedClient) attachmentRole {
+	return attachmentSessionRole(s, ac)
+}
+
+func (s *session) attachmentRoleLocked(ac *attachedClient) attachmentRole {
+	return attachmentSessionRoleLocked(s, ac)
+}
+
+func (s *session) addSnatchedLocked(ac *attachedClient) { addSnatchedLocked(s, ac) }
+
 type attachmentRoleToken struct {
-	sess       *session
+	sess       attachmentSession
 	ac         *attachedClient
 	role       attachmentRole
 	generation uint64
@@ -64,8 +78,8 @@ type attachmentRoleToken struct {
 // active coordinator lease at an architecture commit point. The caller must
 // hold s.mu; coordinator acquisition follows the canonical session ->
 // coordinator order.
-func (s *session) attachmentTokenLocked(ac *attachedClient) attachmentRoleToken {
-	if s == nil || ac == nil {
+func attachmentTokenLocked(entry attachmentSession, ac *attachedClient) attachmentRoleToken {
+	if entry == nil || entry.core() == nil || ac == nil {
 		return attachmentRoleToken{}
 	}
 	transport := ac.transportSnapshot()
@@ -73,40 +87,45 @@ func (s *session) attachmentTokenLocked(ac *attachedClient) attachmentRoleToken 
 		return attachmentRoleToken{}
 	}
 	token := attachmentRoleToken{
-		sess:       s,
+		sess:       entry,
 		ac:         ac,
-		role:       s.attachmentRoleLocked(ac),
+		role:       attachmentSessionRoleLocked(entry, ac),
 		generation: ac.roleGeneration.Load(),
 		transport:  transport,
 	}
 	if token.role == attachmentActive {
-		if rc := s.renderCoordinator(); rc != nil {
+		if rc := entry.core().coordinator.Load(); rc != nil {
 			token.lease = rc.attachmentLease(ac)
 		}
 	}
 	return token
 }
 
-func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attachmentRoleToken {
-	if s == nil || ac == nil || tr == nil {
+func (s *session) attachmentTokenLocked(ac *attachedClient) attachmentRoleToken {
+	return attachmentTokenLocked(s, ac)
+}
+
+func attachmentToken(entry attachmentSession, ac *attachedClient, tr ports.Transport) attachmentRoleToken {
+	if entry == nil || entry.core() == nil || ac == nil || tr == nil {
 		return attachmentRoleToken{}
 	}
-	s.mu.Lock()
+	core := entry.core()
+	core.mu.Lock()
 	transport := ac.transportSnapshot()
 	if transport.transport != tr {
-		s.mu.Unlock()
+		core.mu.Unlock()
 		return attachmentRoleToken{}
 	}
 	token := attachmentRoleToken{
-		sess:       s,
+		sess:       entry,
 		ac:         ac,
-		role:       s.attachmentRoleLocked(ac),
+		role:       attachmentSessionRoleLocked(entry, ac),
 		generation: ac.roleGeneration.Load(),
 		transport:  transport,
 	}
-	s.mu.Unlock()
+	core.mu.Unlock()
 	if token.role == attachmentActive {
-		if rc := s.renderCoordinator(); rc != nil {
+		if rc := core.coordinator.Load(); rc != nil {
 			token.lease = rc.attachmentLease(ac)
 		}
 	}
@@ -114,20 +133,24 @@ func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attach
 	return token
 }
 
+func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attachmentRoleToken {
+	return attachmentToken(s, ac, tr)
+}
+
 func (t attachmentRoleToken) current() bool {
 	return t.sess != nil && t.ac != nil &&
 		t.ac.roleGeneration.Load() == t.generation &&
 		t.ac.transportSnapshotCurrent(t.transport) &&
-		t.sess.attachmentRole(t.ac) == t.role
+		attachmentSessionRole(t.sess, t.ac) == t.role
 }
 
 // activeCurrent admits post-transition effects only for the exact published
 // role, transport incarnation, current-session link, and coordinator lease.
 func (t attachmentRoleToken) activeCurrent() bool {
-	if t.role != attachmentActive || t.lease == nil || !t.current() || t.ac.currentSession() != t.sess {
+	if t.role != attachmentActive || t.lease == nil || !t.current() || t.ac.currentAttachmentSession() != t.sess {
 		return false
 	}
-	rc := t.sess.renderCoordinator()
+	rc := t.sess.core().coordinator.Load()
 	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)
 }
 
@@ -141,11 +164,11 @@ func (t attachmentRoleToken) activeEffect() bool {
 	return t.activeCurrent()
 }
 
-func beginActiveLeaseEffect(sess *session, ac *attachedClient, lease *attachmentLease) (*roleEffectTicket, bool) {
+func beginActiveLeaseEffect(sess attachmentSession, ac *attachedClient, lease *attachmentLease) (*roleEffectTicket, bool) {
 	if sess == nil || ac == nil || lease == nil {
 		return nil, false
 	}
-	token := sess.attachmentToken(ac, ac.transport())
+	token := attachmentToken(sess, ac, ac.transport())
 	token.lease = lease
 	return ac.beginRoleEffect(token)
 }
@@ -166,10 +189,10 @@ func (t attachmentRoleToken) activeEffectSessionLocked() bool {
 	}
 	if t.role != attachmentActive || t.lease == nil || t.sess == nil || t.ac == nil ||
 		t.ac.roleGeneration.Load() != t.generation || !t.ac.transportSnapshotCurrent(t.transport) ||
-		t.ac.currentSession() != t.sess || t.sess.attachmentRoleLocked(t.ac) != attachmentActive {
+		t.ac.currentAttachmentSession() != t.sess || attachmentSessionRoleLocked(t.sess, t.ac) != attachmentActive {
 		return false
 	}
-	rc := t.sess.renderCoordinator()
+	rc := t.sess.core().coordinator.Load()
 	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)
 }
 

@@ -13,11 +13,33 @@ func (c *renderCoordinator) burstMetricsSnapshot() renderCoordinatorBurstMetrics
 	}
 }
 
-// renderCoordinator returns the coordinator installed for this session.
-func (s *session) renderCoordinator() *renderCoordinator { return s.coordinator.Load() }
+// attachmentRenderCoordinator returns the coordinator installed for the exact
+// attachment-session identity.
+func attachmentRenderCoordinator(entry attachmentSession) *renderCoordinator {
+	if entry == nil || entry.core() == nil {
+		return nil
+	}
+	return entry.core().coordinator.Load()
+}
 
-// installRenderCoordinator publishes rc as the session's coordinator.
-func (s *session) installRenderCoordinator(rc *renderCoordinator) { s.coordinator.Store(rc) }
+// installAttachmentRenderCoordinator publishes rc for the exact
+// attachment-session identity.
+func installAttachmentRenderCoordinator(entry attachmentSession, rc *renderCoordinator) {
+	if entry == nil || entry.core() == nil {
+		return
+	}
+	entry.core().coordinator.Store(rc)
+}
+
+// renderCoordinator retains the local-only method used by PTY and tab owners.
+func (s *session) renderCoordinator() *renderCoordinator {
+	return attachmentRenderCoordinator(s)
+}
+
+// installRenderCoordinator retains the local-only setup seam used by tests.
+func (s *session) installRenderCoordinator(rc *renderCoordinator) {
+	installAttachmentRenderCoordinator(s, rc)
+}
 
 func (c *renderCoordinator) fireCurrent(watchdog bool) {
 	c.mu.Lock()

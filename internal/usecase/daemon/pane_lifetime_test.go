@@ -95,7 +95,7 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 				sessCtx, cancelSession := context.WithCancel(t.Context())
 				base := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 				base.ctx, base.cancel = context.WithCancel(sessCtx)
-				sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{base}}
+				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, ctx: sessCtx, cancel: cancelSession, tabs: []*tab{base}}
 				d.mu.Lock()
 				d.sessions[sess.id] = sess
 				d.mu.Unlock()
@@ -113,7 +113,7 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 				sessCtx, cancelSession := context.WithCancel(t.Context())
 				tb := newTab(newQuietPTY(), domain.Size{Cols: 41, Rows: 10})
 				tb.ctx, tb.cancel = context.WithCancel(sessCtx)
-				sess := &session{id: "work", name: "work", cwd: "/tmp", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
+				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, cwd: "/tmp", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
 				err := d.splitPaneAt(sess, tb, tb.focusedPane(), layout.Right)
 				return []*tab{tb}, func() {
 					cancelSession()
@@ -234,7 +234,7 @@ func TestPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
 				sessCtx, cancelSession := context.WithCancel(t.Context())
 				base := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 				base.ctx, base.cancel = context.WithCancel(sessCtx)
-				sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{base}}
+				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, ctx: sessCtx, cancel: cancelSession, tabs: []*tab{base}}
 				d.mu.Lock()
 				d.sessions[sess.id] = sess
 				d.mu.Unlock()
@@ -249,7 +249,7 @@ func TestPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
 				sessCtx, cancelSession := context.WithCancel(t.Context())
 				tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 				tb.ctx, tb.cancel = context.WithCancel(sessCtx)
-				sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
+				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
 				target := tb.focusedPane()
 				require.NoError(t, d.splitPaneAt(sess, tb, target, layout.Right))
 				tb.mu.Lock()
@@ -265,7 +265,7 @@ func TestPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
 				sessCtx, cancelSession := context.WithCancel(t.Context())
 				tb := newFloatingTestTab(t)
 				tb.ctx, tb.cancel = context.WithCancel(sessCtx)
-				sess := &session{id: "work", name: "work", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
+				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
 				tb.mu.Lock()
 				generation := tb.beginFloatingWarmLocked(true)
 				tb.mu.Unlock()

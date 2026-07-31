@@ -15,16 +15,17 @@ func (d *Daemon) unrouteSnatchedAttachment(token attachmentRoleToken, terminal b
 	frozen := freezeRoleEffectGates(token.ac)
 	defer frozen.unfreeze()
 	d.notices.routingMu.Lock()
-	token.sess.mu.Lock()
-	current := token.sess.attachmentRoleLocked(token.ac) == attachmentSnatched &&
+	core := token.sess.core()
+	core.mu.Lock()
+	current := attachmentSessionRoleLocked(token.sess, token.ac) == attachmentSnatched &&
 		token.ac.roleGeneration.Load() == token.generation &&
 		token.ac.transportSnapshotCurrent(token.transport)
 	if current {
-		delete(token.sess.snatched, token.ac)
+		delete(core.snatched, token.ac)
 		token.ac.roleGeneration.Add(1)
 		token.ac.invalidateFrozenRoleCapability()
 	}
-	token.sess.mu.Unlock()
+	core.mu.Unlock()
 	d.notices.routingMu.Unlock()
 	if !current {
 		return false
@@ -50,20 +51,21 @@ func (d *Daemon) unrouteSnatchedAttachment(token attachmentRoleToken, terminal b
 // parkSnatchedAttachment removes only the exact lost snatched incarnation and
 // retains its resume identity for a role-preserving reconnect.
 func (d *Daemon) parkSnatchedAttachment(token attachmentRoleToken) bool {
-	if token.ac == nil || !token.ac.resumeCapable {
+	sess, ok := localSession(token.sess)
+	if !ok || token.ac == nil || !token.ac.resumeCapable {
 		return false
 	}
 	// Advertise parking before unroute so IntentResume never observes both the
 	// snatched seat and parking/parked registries empty for a still-valid token.
-	parkingToken := d.markParkingInFlight(token.sess, token.ac)
+	parkingToken := d.markParkingInFlight(sess, token.ac)
 	if !d.unrouteSnatchedAttachment(token, false) {
-		d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
+		d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
 		return false
 	}
 	if d.afterSnatchedUnrouteBeforePark != nil {
 		d.afterSnatchedUnrouteBeforePark()
 	}
-	if d.parkAttachmentAs(token.sess, token.ac, attachmentSnatched) {
+	if d.parkAttachmentAs(sess, token.ac, attachmentSnatched) {
 		captured := token.transport.transport
 		_ = token.ac.revokeTransport(captured)
 		_ = token.ac.closeCapturedTransport(captured)
@@ -90,18 +92,19 @@ func (d *Daemon) parkOrDropSnatchedAttachment(token attachmentRoleToken) bool {
 // published snatched incarnation. Attachment-local cleanup runs without routing
 // or session locks while the terminal capability remains frozen.
 func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken) bool {
-	if token.sess == nil || token.ac == nil || token.transport.transport == nil {
+	sess, ok := localSession(token.sess)
+	if !ok || token.ac == nil || token.transport.transport == nil {
 		return false
 	}
 	frozen := freezeRoleEffectGates(token.ac)
 	defer frozen.unfreeze()
 
 	d.notices.routingMu.Lock()
-	token.sess.mu.Lock()
-	current := token.sess.attachmentRoleLocked(token.ac) == attachmentSnatched &&
-		token.ac.currentSession() == token.sess && token.ac.roleGeneration.Load() == token.generation &&
+	sess.mu.Lock()
+	current := attachmentSessionRoleLocked(token.sess, token.ac) == attachmentSnatched &&
+		token.ac.currentAttachmentSession() == token.sess && token.ac.roleGeneration.Load() == token.generation &&
 		token.ac.transportSnapshotCurrent(token.transport)
-	token.sess.mu.Unlock()
+	sess.mu.Unlock()
 	d.notices.routingMu.Unlock()
 	if !current {
 		return false
@@ -111,7 +114,7 @@ func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken)
 	// the unroute→park gap for a still-valid snatched credential.
 	var parkingToken uint64
 	if token.ac.resumeCapable {
-		parkingToken = d.markParkingInFlight(token.sess, token.ac)
+		parkingToken = d.markParkingInFlight(sess, token.ac)
 	}
 
 	// The frozen gate prevents a promotion from publishing between overlay
@@ -119,19 +122,19 @@ func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken)
 	d.clearForSnatch(token)
 
 	d.notices.routingMu.Lock()
-	token.sess.mu.Lock()
-	current = token.sess.attachmentRoleLocked(token.ac) == attachmentSnatched &&
-		token.ac.currentSession() == token.sess && token.ac.roleGeneration.Load() == token.generation &&
+	sess.mu.Lock()
+	current = attachmentSessionRoleLocked(token.sess, token.ac) == attachmentSnatched &&
+		token.ac.currentAttachmentSession() == token.sess && token.ac.roleGeneration.Load() == token.generation &&
 		token.ac.transportSnapshotCurrent(token.transport)
 	if current {
-		delete(token.sess.snatched, token.ac)
+		delete(sess.snatched, token.ac)
 		token.ac.roleGeneration.Add(1)
 		token.ac.invalidateFrozenRoleCapability()
 	}
-	token.sess.mu.Unlock()
+	sess.mu.Unlock()
 	d.notices.routingMu.Unlock()
 	if !current {
-		d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
+		d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
 		return false
 	}
 
@@ -139,7 +142,7 @@ func (d *Daemon) cleanupInterruptedSnatchedAttachment(token attachmentRoleToken)
 	if d.afterSnatchedUnrouteBeforePark != nil {
 		d.afterSnatchedUnrouteBeforePark()
 	}
-	if token.ac.resumeCapable && d.parkAttachmentAs(token.sess, token.ac, attachmentSnatched) {
+	if token.ac.resumeCapable && d.parkAttachmentAs(sess, token.ac, attachmentSnatched) {
 		captured := token.transport.transport
 		_ = token.ac.revokeTransport(captured)
 		_ = token.ac.closeCapturedTransport(captured)

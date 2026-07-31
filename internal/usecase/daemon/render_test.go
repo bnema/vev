@@ -491,7 +491,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		viewer.overlays.pickerMu.Lock()
 		viewer.overlays.pickerPreview = target.tabs[0]
 		viewer.overlays.pickerMu.Unlock()
-		d.sessions["viewer"] = &session{id: "viewer", client: viewer}
+		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", client: viewer}}
 		previews := make(chan renderWake, 2)
 		rc.subscribePreviewFor(viewer, 1, func(w renderWake) { previews <- w })
 
@@ -673,7 +673,7 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 		viewer.overlays.pickerMu.Lock()
 		viewer.overlays.pickerPreview = tb
 		viewer.overlays.pickerMu.Unlock()
-		d.sessions["viewer"] = &session{id: "viewer", client: viewer}
+		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", client: viewer}}
 		p.screen.Write([]byte("preview"))
 		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
@@ -687,7 +687,7 @@ func TestPTYWriteErrorIsLogged(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)
 	p.EXPECT().Write([]byte("input")).Return(0, errBoom).Once()
 	win := newTab(p, domain.Size{Cols: 80, Rows: 23})
-	sess := &session{id: "manual", name: "work", tabs: []*tab{win}}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work"}, tabs: []*tab{win}}
 	ac := &attachedClient{}
 	ac.initOverlays()
 	ac.setSession(sess)
@@ -802,7 +802,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", client: ac}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	// Client rows are one more than the equivalent case in a single-bar
@@ -1062,7 +1062,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", client: ac}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	d.resize(sess, ac, newSize)
@@ -1091,7 +1091,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{id: "e", name: "0", ephemeral: true, tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "e", name: "0", ephemeral: true, client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 
@@ -1135,7 +1135,7 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{id: "query", name: "query", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{sessionCore: sessionCore{id: "query", name: "query", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)

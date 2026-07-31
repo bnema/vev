@@ -57,7 +57,7 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 	movedCtx, movedCancel := context.WithCancel(d.paneProcessCtx)
 	moved.ctx, moved.cancel = movedCtx, movedCancel
 
-	destination := &session{id: "destination", name: "destination", ephemeral: true, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}, active: 0}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}, active: 0}
 	destinationTab := destination.tabs[0]
 	destinationTab.stableID = "destination-tab"
 	publishTiledPaneOwners(destination, destinationTab)
@@ -97,7 +97,7 @@ func TestMovePaneFinalSourceClientFollowsDestination(t *testing.T) {
 	require.NotNil(t, rc)
 	var rebased atomic.Bool
 	client.renderStages.handoffRebase = func() { rebased.Store(true) }
-	destination := &session{id: "destination", name: "destination", tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}, active: 0}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}, active: 0}
 	destinationTab := destination.tabs[0]
 	destinationTab.stableID = "destination-tab"
 	publishTiledPaneOwners(destination, destinationTab)
@@ -140,9 +140,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 	movedTab.stableID = "source-tab"
 
 	destinationPTY := newQuietPTY()
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs:   []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
 		active: 0,
 	}
 	publishTiledPaneOwners(destination, destination.tabs[0])
@@ -192,9 +190,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	parked.initOverlays()
 	require.True(t, d.parkAttachment(source, parked))
 	destinationPTY := newQuietPTY()
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs:   []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
 		active: 0,
 	}
 	publishTiledPaneOwners(destination, destination.tabs[0])

@@ -1149,9 +1149,8 @@ func addNamedMoveDestination(d *Daemon, name, tabID, paneID string) *session {
 	ctx, cancel := context.WithCancel(d.serveCtx)
 	tb := newTabWithStableID(tabID, paneID, newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
 	tb.ctx, tb.cancel = context.WithCancel(ctx)
-	sess := &session{
-		id: domain.SessionID("sess-" + name), name: name, incarnation: domain.IncarnationID{5},
-		ephemeral: true, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0,
+	sess := &session{sessionCore: sessionCore{id: domain.SessionID("sess-" + name), name: name, incarnation: domain.IncarnationID{5},
+		ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0,
 	}
 	publishTiledPaneOwners(sess, tb)
 	d.mu.Lock()
@@ -1226,8 +1225,7 @@ func (f *controlPTYFactory) close() {
 func addControlSession(d *Daemon, name, tabID, paneID string) *session {
 	tb := newTabWithStableID(tabID, paneID, newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	tb.ctx, tb.cancel = context.WithCancel(d.serveCtx)
-	sess := &session{
-		id: domain.SessionID("sess-" + name), name: name, ephemeral: true, cwd: "/tmp/" + name,
+	sess := &session{sessionCore: sessionCore{id: domain.SessionID("sess-" + name), name: name, ephemeral: true}, cwd: "/tmp/" + name,
 		ctx: d.serveCtx, cancel: func() {}, tabs: []*tab{tb}, env: []string{"MARK=" + name},
 	}
 	sess.mruAt.Store(1)

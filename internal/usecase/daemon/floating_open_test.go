@@ -107,7 +107,7 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 			tabCtx, cancelTab := context.WithCancel(t.Context())
 			tb.ctx, tb.cancel = tabCtx, cancelTab
 			sessCtx, cancelSession := context.WithCancel(t.Context())
-			sess := &session{id: "context-" + domain.SessionID(tt.name), name: "work", tabs: []*tab{tb}, ctx: sessCtx, cancel: cancelSession}
+			sess := &session{sessionCore: sessionCore{id: "context-" + domain.SessionID(tt.name), name: "work"}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancelSession}
 			d.mu.Lock()
 			d.sessions[sess.id] = sess
 			d.mu.Unlock()
@@ -228,7 +228,7 @@ func TestFloatingOpenErrorReleasesReturnedPTYBeforePublishingFailure(t *testing.
 			ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 			ac.initOverlays()
 			sessCtx, cancelSession := context.WithCancel(t.Context())
-			sess := &session{id: "floating-open-error", name: "work", tabs: []*tab{tb}, ctx: sessCtx, cancel: cancelSession, client: ac}
+			sess := &session{sessionCore: sessionCore{id: "floating-open-error", name: "work", client: ac}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancelSession}
 			ac.setSession(sess)
 
 			// Close must be safe to run before failure publication and without
@@ -350,7 +350,7 @@ func TestFloatingFailedAndStaleOpenCancelContext(t *testing.T) {
 			factory := &contextAwareFloatingFactory{pty: pty, opened: make(chan context.Context, 1)}
 			d := newTestDaemon(t, factory, stubClock{})
 			tb := newFloatingTestTab(t)
-			sess := &session{name: "work", tabs: []*tab{tb}, ctx: t.Context()}
+			sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
 			tb.mu.Lock()
 			generation := tb.beginFloatingWarmLocked(true)
 			tb.mu.Unlock()
@@ -400,7 +400,7 @@ func TestFloatingOpenCancellationBoundsSessionTeardownAndClosesLatePTY(t *testin
 	d := newTestDaemon(t, factory, stubClock{})
 	tb := newFloatingTestTab(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	sess := &session{id: "blocked-open", name: "work", tabs: []*tab{tb}, ctx: ctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "blocked-open", name: "work"}, tabs: []*tab{tb}, ctx: ctx, cancel: cancel}
 	d.mu.Lock()
 	d.sessions[sess.id] = sess
 	d.mu.Unlock()
@@ -446,7 +446,7 @@ func TestFloatingOpensFromUnrelatedSessionsAreConcurrent(t *testing.T) {
 	for _, id := range []domain.SessionID{"one", "two"} {
 		tb := newFloatingTestTab(t)
 		ctx, cancel := context.WithCancel(t.Context())
-		sess := &session{id: id, name: string(id), tabs: []*tab{tb}, ctx: ctx, cancel: cancel}
+		sess := &session{sessionCore: sessionCore{id: id, name: string(id)}, tabs: []*tab{tb}, ctx: ctx, cancel: cancel}
 		tabs = append(tabs, tb)
 		cancels = append(cancels, cancel)
 		d.startFloating(sess, tb, false)

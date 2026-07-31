@@ -33,10 +33,7 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			t.Cleanup(destinationCancel)
 			destinationTab := newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 100, Rows: 30})
 			destinationTab.ctx, destinationTab.cancel = context.WithCancel(destinationCtx)
-			destination := &session{
-				id: "destination", name: "destination", incarnation: domain.IncarnationID{9}, ephemeral: destinationEphemeral,
-				ctx: destinationCtx, cancel: destinationCancel, tabs: []*tab{destinationTab}, active: 0,
-			}
+			destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{9}, ephemeral: destinationEphemeral}, ctx: destinationCtx, cancel: destinationCancel, tabs: []*tab{destinationTab}, active: 0}
 			publishTiledPaneOwners(destination, destinationTab)
 
 			floating := newPaneWithStableID("floating", "floating-stable", floatingPTY, domain.Size{Cols: 20, Rows: 8})
@@ -575,7 +572,7 @@ func addMoveTabTestSession(d *Daemon, id domain.SessionID, tabID string) *sessio
 	ctx, cancel := context.WithCancel(d.serveCtx)
 	tb := newTabWithStableID(tabID, tabID+"-pane", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
 	tb.ctx, tb.cancel = context.WithCancel(ctx)
-	sess := &session{id: id, name: string(id), incarnation: domain.IncarnationID{5}, ephemeral: true, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0}
+	sess := &session{sessionCore: sessionCore{id: id, name: string(id), incarnation: domain.IncarnationID{5}, ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0}
 	publishTiledPaneOwners(sess, tb)
 	d.mu.Lock()
 	d.sessions[sess.id] = sess

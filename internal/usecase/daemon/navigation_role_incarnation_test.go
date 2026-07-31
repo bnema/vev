@@ -39,7 +39,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-			target := &session{id: "target", name: "target", ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+			target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
 				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
 				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
 			}}

@@ -48,7 +48,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	ac := &attachedClient{output: newOutputStateStream()}
 	failed := &ownedSwapErrorTransport{ac: ac, replacement: replacement, err: sendErr, sent: make(chan ports.Frame, 1)}
 	ac.replaceTransport(failed)
-	sess := &session{name: "work", client: ac}
+	sess := &session{sessionCore: sessionCore{name: "work", client: ac}}
 	ac.setSession(sess)
 
 	used, err := d.boundedSendOutputErrTransport(ac, []byte("copy"))

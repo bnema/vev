@@ -18,10 +18,7 @@ func TestMovePaneRejectsStaleDestinationIncarnationWithoutMutation(t *testing.T)
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
-	destination := &session{
-		id: "destination", name: "destination", ephemeral: true,
-		tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}, active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}, active: 0}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)
 	d.mu.Lock()

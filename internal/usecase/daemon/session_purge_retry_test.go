@@ -38,7 +38,7 @@ func TestLivePurgeLeavesFailedDirectoryDeletionForStartupGarbageCollection(t *te
 	pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
 	require.True(t, ok)
 	pty.EXPECT().Close().Return(nil).Once()
-	d.sessions = map[domain.SessionID]*session{sess.id: sess}
+	d.sessions = map[domain.SessionID]attachmentSession{sess.id: sess}
 
 	require.Error(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 	require.Equal(t, []string{"delete incarnation"}, repository.calls)

@@ -287,7 +287,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	unrelatedTransport := &closeTrackingTransport{}
 	unrelatedClient := &attachedClient{tr: unrelatedTransport, output: newOutputStateStream(), size: active.size}
 	unrelatedClient.initOverlays()
-	unrelated := &session{id: "unrelated", name: "unrelated", ctx: sess.ctx, cancel: func() {}, client: unrelatedClient}
+	unrelated := &session{sessionCore: sessionCore{id: "unrelated", name: "unrelated", client: unrelatedClient}, ctx: sess.ctx, cancel: func() {}}
 	unrelatedClient.setSession(unrelated)
 	d.mu.Lock()
 	d.sessions[unrelated.id] = unrelated
@@ -873,7 +873,7 @@ func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	defer release2()
 	defer release3()
 	d, source, ac, _ := newManualSessionWithPTYs(t, p1)
-	target := &session{id: "target", name: "target", ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
 		newTab(p2, domain.Size{Cols: 80, Rows: 23}),
 		newTab(p3, domain.Size{Cols: 80, Rows: 23}),
 	}}
@@ -900,7 +900,7 @@ func TestJumpAttentionHandoffRevalidatesInitiatorAfterAdmissionEnds(t *testing.T
 	defer release2()
 	defer release3()
 	d, source, old, _ := newManualSessionWithPTYs(t, p1)
-	target := &session{id: "target", name: "target", ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
 		newTab(p2, domain.Size{Cols: 80, Rows: 23}),
 		newTab(p3, domain.Size{Cols: 80, Rows: 23}),
 	}}
@@ -1003,7 +1003,7 @@ func TestPickerDeleteOtherSessionRevalidatesInitiatorAfterAdmissionEnds(t *testi
 	defer release2()
 	d, source, old, _ := newManualSessionWithPTYs(t, p1)
 	source.name = "source"
-	target := &session{id: "target", name: "target", ctx: source.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
+	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
 	d.sessions[target.id] = target
 	d.enterPicker(source, old)
 	old.overlays.pickerMu.Lock()
@@ -1269,7 +1269,7 @@ func TestRoleEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testing.T) 
 	bTransport := newDatagramTestTransport()
 	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), size: a.size}
 	b.initOverlays()
-	second := &session{id: "second", name: "second", client: b, snatched: make(map[*attachedClient]struct{})}
+	second := &session{sessionCore: sessionCore{id: "second", name: "second", client: b, snatched: make(map[*attachedClient]struct{})}}
 	b.setSession(second)
 	d.mu.Lock()
 	d.sessions[second.id] = second
@@ -1326,9 +1326,8 @@ func TestPickerDeleteReversedWithTargetTransitionDoesNotDeadlock(t *testing.T) {
 	bTransport := newDatagramTestTransport()
 	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), size: a.size}
 	b.initOverlays()
-	target := &session{
-		id: "picker-delete-target", name: "picker-delete-target", ctx: source.ctx, cancel: func() {},
-		client: b, snatched: make(map[*attachedClient]struct{}),
+	target := &session{sessionCore: sessionCore{id: "picker-delete-target", name: "picker-delete-target",
+		client: b, snatched: make(map[*attachedClient]struct{})}, ctx: source.ctx, cancel: func() {},
 	}
 	b.setSession(target)
 	d.mu.Lock()

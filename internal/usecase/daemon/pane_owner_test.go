@@ -10,9 +10,9 @@ import (
 
 func TestPaneOwnerPublicationAdvancesGenerationAndInvalidatesLease(t *testing.T) {
 	p := newPaneWithStableID(layout.PaneID("pane-1"), "p_stable", nil, domain.Size{Cols: 80, Rows: 23})
-	firstSession := &session{id: "first"}
+	firstSession := &session{sessionCore: sessionCore{id: "first"}}
 	firstTab := newTab(nil, domain.Size{Cols: 80, Rows: 23})
-	secondSession := &session{id: "second"}
+	secondSession := &session{sessionCore: sessionCore{id: "second"}}
 	secondTab := newTab(nil, domain.Size{Cols: 80, Rows: 23})
 
 	p.mu.Lock()
@@ -51,7 +51,7 @@ func TestPaneOwnerPublicationAdvancesGenerationAndInvalidatesLease(t *testing.T)
 
 func TestFloatingPaneOwnerLeaseRequiresCurrentSlotGeneration(t *testing.T) {
 	p := newPaneWithStableID(layout.PaneID("floating"), "p_float", nil, domain.Size{Cols: 20, Rows: 8})
-	sess := &session{id: "owner"}
+	sess := &session{sessionCore: sessionCore{id: "owner"}}
 	tb := newTab(nil, domain.Size{Cols: 80, Rows: 23})
 
 	tb.mu.Lock()
@@ -72,7 +72,7 @@ func TestFloatingPaneOwnerLeaseRequiresCurrentSlotGeneration(t *testing.T) {
 }
 
 func TestPublishTiledPaneOwnersInitializesAllPanesBeforePublication(t *testing.T) {
-	sess := &session{id: "owner"}
+	sess := &session{sessionCore: sessionCore{id: "owner"}}
 	tb := newTabWithStableID("t_stable", "p_one", nil, domain.Size{Cols: 80, Rows: 23})
 	second := newPaneWithStableID("pane-2", "p_two", nil, domain.Size{Cols: 40, Rows: 23})
 	tb.panes[second.id] = second

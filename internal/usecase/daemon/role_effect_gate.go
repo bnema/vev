@@ -18,7 +18,7 @@ const (
 // effect admission. It deliberately contains no independently mutable state:
 // a ticket is admitted only when every field matches the frame's token.
 type roleCapability struct {
-	sess       *session
+	sess       attachmentSession
 	role       attachmentRole
 	generation uint64
 	transport  transportSnapshot

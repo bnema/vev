@@ -89,14 +89,19 @@ func (d *Daemon) writeClipboardImageForRole(token attachmentRoleToken, ip ports.
 	if err != nil {
 		return "", err
 	}
-	token.sess.mu.Lock()
-	if !token.activeEffectSessionLocked() {
-		token.sess.mu.Unlock()
+	sess, ok := localSession(token.sess)
+	if !ok {
 		_ = os.Remove(path)
 		return "", errAttachmentTransition
 	}
-	token.sess.clipFiles = append(token.sess.clipFiles, path)
-	token.sess.mu.Unlock()
+	sess.mu.Lock()
+	if !token.activeEffectSessionLocked() {
+		sess.mu.Unlock()
+		_ = os.Remove(path)
+		return "", errAttachmentTransition
+	}
+	sess.clipFiles = append(sess.clipFiles, path)
+	sess.mu.Unlock()
 	return path, nil
 }
 
@@ -130,10 +135,11 @@ func (d *Daemon) injectClipboardPath(sess *session, path string) {
 }
 
 func (d *Daemon) injectClipboardPathForRole(token attachmentRoleToken, path string) {
-	if !token.activeEffect() {
+	sess, ok := localSession(token.sess)
+	if !ok || !token.activeEffect() {
 		return
 	}
-	d.injectClipboardPathToTarget(token.sess, path, &token)
+	d.injectClipboardPathToTarget(sess, path, &token)
 }
 
 func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, token *attachmentRoleToken) {

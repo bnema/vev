@@ -69,7 +69,7 @@ var defaultSize = domain.Size{Cols: 80, Rows: 24}
 
 type Daemon struct {
 	mu       sync.Mutex
-	sessions map[domain.SessionID]*session
+	sessions map[domain.SessionID]attachmentSession
 	stopped  map[string]stoppedSession
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
@@ -576,7 +576,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:          make(map[domain.SessionID]*session),
+		sessions:          make(map[domain.SessionID]attachmentSession),
 		stopped:           make(map[string]stoppedSession),
 		creating:          make(map[string]struct{}),
 		parked:            make(map[uint64]*parkedAttachment),
@@ -896,12 +896,36 @@ func snapshotStopContext(deadline *snapshotShutdownDeadline) (context.Context, c
 	}
 }
 
-func (d *Daemon) sessionsSnapshotLocked() []*session {
-	snapshot := make([]*session, 0, len(d.sessions))
-	for _, s := range d.sessions {
-		snapshot = append(snapshot, s)
+// registerSessionLocked publishes an exact attachment-session identity. Caller
+// holds d.mu.
+func (d *Daemon) registerSessionLocked(entry attachmentSession) bool {
+	if entry == nil {
+		return false
 	}
-	return snapshot
+	core := entry.core()
+	if core == nil || core.id == "" || d.sessions[core.id] != nil {
+		return false
+	}
+	d.sessions[core.id] = entry
+	return true
+}
+
+// unregisterSessionLocked removes only the exact registered identity. Caller
+// holds d.mu.
+func (d *Daemon) unregisterSessionLocked(entry attachmentSession) bool {
+	if entry == nil {
+		return false
+	}
+	core := entry.core()
+	if core == nil || d.sessions[core.id] != entry {
+		return false
+	}
+	delete(d.sessions, core.id)
+	return true
+}
+
+func (d *Daemon) sessionsSnapshotLocked() []*session {
+	return localSessionsSnapshot(d.sessions)
 }
 
 // handleConn reads the first frame off a fresh connection and routes it. A
@@ -941,7 +965,11 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	d.mu.Lock()
 	infos := make([]ports.SessionInfo, 0, len(d.sessions)+len(d.stopped))
 	liveNames := make(map[string]struct{}, len(d.sessions))
-	for _, s := range d.sessions {
+	for _, entry := range d.sessions {
+		s, ok := localSession(entry)
+		if !ok {
+			continue
+		}
 		s.mu.Lock()
 		info := ports.SessionInfo{
 			SessionID: string(s.id),

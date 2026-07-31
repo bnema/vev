@@ -4,14 +4,14 @@ package daemon
 // is frozen and d.mu is held. No caller may create or delete a target before
 // this succeeds.
 func (d *Daemon) transitionSourcePreflightLocked(req attachmentTransitionRequest) bool {
-	if req.sourceToken == nil || req.source == nil || d.sessions[req.source.id] != req.source {
+	if req.sourceToken == nil || req.source == nil || req.source.core() == nil || d.sessions[req.source.core().id] != req.source {
 		return false
 	}
 	d.notices.routingMu.Lock()
 	defer d.notices.routingMu.Unlock()
-	req.source.mu.Lock()
-	defer req.source.mu.Unlock()
-	coordinator := req.source.renderCoordinator()
+	req.source.core().mu.Lock()
+	defer req.source.core().mu.Unlock()
+	coordinator := req.source.core().coordinator.Load()
 	if coordinator == nil {
 		return false
 	}
@@ -29,14 +29,14 @@ func (d *Daemon) sourceRoleTokenCurrentFrozen(token attachmentRoleToken) bool {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.closing || d.sessions[token.sess.id] != token.sess {
+	if d.closing || token.sess.core() == nil || d.sessions[token.sess.core().id] != token.sess {
 		return false
 	}
 	d.notices.routingMu.Lock()
 	defer d.notices.routingMu.Unlock()
-	token.sess.mu.Lock()
-	defer token.sess.mu.Unlock()
-	coordinator := token.sess.renderCoordinator()
+	token.sess.core().mu.Lock()
+	defer token.sess.core().mu.Unlock()
+	coordinator := token.sess.core().coordinator.Load()
 	if coordinator == nil {
 		return false
 	}
@@ -49,15 +49,16 @@ func (d *Daemon) sourceRoleTokenCurrentFrozen(token attachmentRoleToken) bool {
 	return transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
 }
 
-func transitionSourceTabCurrentLocked(source *session, expected *tab) bool {
+func transitionSourceTabCurrentLocked(source attachmentSession, expected *tab) bool {
 	return transitionSourceTabCurrentForRequestLocked(source, expected, false)
 }
 
-func transitionSourceTabCurrentForRequestLocked(source *session, expected *tab, transferExpected bool) bool {
+func transitionSourceTabCurrentForRequestLocked(source attachmentSession, expected *tab, transferExpected bool) bool {
 	if expected == nil {
 		return true
 	}
-	if source.active < 0 || source.active >= len(source.tabs) || source.tabs[source.active] != expected {
+	local, ok := localSession(source)
+	if !ok || local.active < 0 || local.active >= len(local.tabs) || local.tabs[local.active] != expected {
 		return false
 	}
 	expected.mu.Lock()
@@ -78,7 +79,7 @@ func (d *Daemon) transitionAttachmentLocked(req attachmentTransitionRequest) (at
 // own d.mu, notices.routingMu, and the ordered source/target session locks.
 type attachmentPublication struct {
 	req                 attachmentTransitionRequest
-	source              *session
+	source              attachmentSession
 	old                 *attachedClient
 	sourceCoordinator   *renderCoordinator
 	targetCoordinator   *renderCoordinator
@@ -102,10 +103,16 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	if source == nil {
 		source = req.target
 	}
-	if !req.preflighted || !req.roleEffectsFrozen ||
+	if source == nil || req.target == nil {
+		return nil, errAttachmentTransition
+	}
+	sourceCore := source.core()
+	targetCore := req.target.core()
+	if sourceCore == nil || targetCore == nil ||
+		!req.preflighted || !req.roleEffectsFrozen ||
 		!validAttachmentTransitionRole(req.expectedRole, true) || !validAttachmentTransitionRole(req.targetRole, false) ||
-		source == nil || req.target == nil || req.next == nil || d.closing ||
-		d.sessions[source.id] != source || d.sessions[req.target.id] != req.target ||
+		req.next == nil || d.closing ||
+		d.sessions[sourceCore.id] != source || d.sessions[targetCore.id] != req.target ||
 		req.expectedTransport.transport == nil || !req.next.transportSnapshotCurrent(req.expectedTransport) ||
 		req.preserveRole && req.sourceToken == nil {
 		return nil, errAttachmentTransition
@@ -113,15 +120,17 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 
 	var targetCoordinator *renderCoordinator
 	if req.targetRole == attachmentActive {
-		targetCoordinator = d.ensureRenderCoordinatorPrelocked(req.target)
+		if target, ok := localSession(req.target); ok {
+			targetCoordinator = d.ensureRenderCoordinatorPrelocked(target)
+		}
 	}
-	sourceCoordinator := source.renderCoordinator()
-	if source.attachmentRoleLocked(req.next) != req.expectedRole ||
+	sourceCoordinator := sourceCore.coordinator.Load()
+	if attachmentSessionRoleLocked(source, req.next) != req.expectedRole ||
 		!req.next.transportSnapshotCurrent(req.expectedTransport) {
 		return nil, errAttachmentTransition
 	}
 
-	old := req.target.client
+	old := targetCore.client
 	if old != req.expectedTargetCurrent || source != req.target && old == req.next {
 		return nil, errAttachmentTransition
 	}
@@ -135,7 +144,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	invalid = invalid || targetCoordinator != nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next)
 	invalid = invalid || req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
 		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next)
-	invalid = invalid || req.activateTargetTab && (req.targetTabIndex < 0 || req.targetTabIndex >= len(req.target.tabs))
+	invalid = invalid || req.activateTargetTab && !req.target.activateTargetLocked(req.targetTabIndex)
 	if invalid {
 		publication.unlockCoordinators()
 		return nil, errAttachmentTransition
@@ -148,14 +157,17 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool {
 	req := publication.req
 	if req.targetRole == attachmentActive {
-		d.demoteParkedActiveForSessionLocked(req.target)
+		if target, ok := localSession(req.target); ok {
+			d.demoteParkedActiveForSessionLocked(target)
+		}
 	}
 	if req.copySourceEnvironment {
-		req.target.terminal = publication.source.terminal
-		req.target.env = copyEnvironment(publication.source.env)
-	}
-	if req.activateTargetTab {
-		req.target.active = req.targetTabIndex
+		source, sourceOK := localSession(publication.source)
+		target, targetOK := localSession(req.target)
+		if sourceOK && targetOK {
+			target.terminal = source.terminal
+			target.env = copyEnvironment(source.env)
+		}
 	}
 	return req.preserveRole
 }
@@ -168,19 +180,19 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 		publication.displacedTransport = publication.old.transportSnapshot()
 	}
 	if publication.source != req.target {
-		if publication.source.client == req.next {
-			publication.source.client = nil
+		if publication.source.core().client == req.next {
+			publication.source.core().client = nil
 		}
-		delete(publication.source.snatched, req.next)
+		delete(publication.source.core().snatched, req.next)
 	}
 	if req.targetRole == attachmentActive {
-		delete(req.target.snatched, req.next)
+		delete(req.target.core().snatched, req.next)
 		if publication.old != nil && publication.old != req.next {
-			req.target.addSnatchedLocked(publication.old)
+			addSnatchedLocked(req.target, publication.old)
 		}
-		req.target.client = req.next
+		req.target.core().client = req.next
 	} else {
-		req.target.addSnatchedLocked(req.next)
+		addSnatchedLocked(req.target, req.next)
 	}
 	publication.nextGeneration = req.next.roleGeneration.Add(1)
 	if publication.old != nil && publication.old != req.next && req.targetRole == attachmentActive {
@@ -276,26 +288,26 @@ func validAttachmentTransitionRole(role attachmentRole, expected bool) bool {
 
 // lockAttachmentSessions gives every two-session transition one stable order.
 // Session IDs are immutable and unique while their lifecycles are registered.
-func lockAttachmentSessions(a, b *session) func() {
+func lockAttachmentSessions(a, b attachmentSession) func() {
 	if a == b {
-		a.mu.Lock()
-		return a.mu.Unlock
+		a.core().mu.Lock()
+		return a.core().mu.Unlock
 	}
 	first, second := a, b
-	if first.id > second.id {
+	if first.core().id > second.core().id {
 		first, second = second, first
 	}
-	first.mu.Lock()
-	second.mu.Lock()
+	first.core().mu.Lock()
+	second.core().mu.Lock()
 	return func() {
-		second.mu.Unlock()
-		first.mu.Unlock()
+		second.core().mu.Unlock()
+		first.core().mu.Unlock()
 	}
 }
 
 // lockAttachmentCoordinators follows the same immutable session-ID order as
 // lockAttachmentSessions. Callers already hold the ordered session locks.
-func lockAttachmentCoordinators(a *session, aCoordinator *renderCoordinator, b *session, bCoordinator *renderCoordinator) func() {
+func lockAttachmentCoordinators(a attachmentSession, aCoordinator *renderCoordinator, b attachmentSession, bCoordinator *renderCoordinator) func() {
 	if aCoordinator == nil && bCoordinator == nil {
 		return func() {}
 	}
@@ -308,7 +320,7 @@ func lockAttachmentCoordinators(a *session, aCoordinator *renderCoordinator, b *
 		return coordinator.mu.Unlock
 	}
 	first, second := aCoordinator, bCoordinator
-	if a.id > b.id {
+	if a.core().id > b.core().id {
 		first, second = second, first
 	}
 	if first != nil {

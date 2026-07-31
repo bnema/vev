@@ -11,10 +11,9 @@ import (
 )
 
 func TestSessionMoveLocatorSynchronizesMutableNameRead(t *testing.T) {
-	sess := &session{
-		id:          domain.SessionID("session-id"),
+	sess := &session{sessionCore: sessionCore{id: domain.SessionID("session-id"),
 		incarnation: domain.IncarnationID{1},
-		name:        "initial",
+		name:        "initial"},
 	}
 	start := make(chan struct{})
 	var wg sync.WaitGroup

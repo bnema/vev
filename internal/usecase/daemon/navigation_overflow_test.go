@@ -93,7 +93,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 		target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: focus}
 		target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 		target.mu.Unlock()
-		return &session{id: domain.SessionID(id), name: name, ctx: t.Context(), cancel: func() {}, tabs: tabs, active: active}
+		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name}, ctx: t.Context(), cancel: func() {}, tabs: tabs, active: active}
 	}
 	charlie := newSession("live-charlie", "charlie", 1, "pane-2")
 	echo := newSession("live-echo", "echo", 1, "pane-2")
@@ -138,7 +138,11 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	d.mu.Lock()
 	_, stopped := d.stopped["bravo"]
 	var bravoLive bool
-	for _, candidate := range d.sessions {
+	for _, entry := range d.sessions {
+		candidate, ok := localSession(entry)
+		if !ok {
+			continue
+		}
 		candidate.mu.Lock()
 		bravoLive = bravoLive || candidate.name == "bravo"
 		candidate.mu.Unlock()
@@ -158,7 +162,7 @@ func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
 	alpha.name = "alpha"
 	alpha.mu.Unlock()
 	installTestFloating(alpha.tabs[0], newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
-	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
 	d.sessions[charlie.id] = charlie
 	d.mu.Unlock()
@@ -180,7 +184,7 @@ func TestVerticalOverflowRevalidatesFloatingSourceBeforeHandoff(t *testing.T) {
 	alpha.mu.Lock()
 	alpha.name = "alpha"
 	alpha.mu.Unlock()
-	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
 	d.sessions[charlie.id] = charlie
 	d.mu.Unlock()
@@ -206,7 +210,7 @@ func TestVerticalOverflowRejectsStaleSourceTab(t *testing.T) {
 	expectedSource := alpha.tabs[0]
 	alpha.active = 1
 	alpha.mu.Unlock()
-	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
 	d.sessions[charlie.id] = charlie
 	d.mu.Unlock()
@@ -224,7 +228,7 @@ func TestVerticalOverflowRejectsStaleSourceTab(t *testing.T) {
 func TestOrdinarySessionSwitchDoesNotApplyOverflowGuard(t *testing.T) {
 	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
 	installTestFloating(alpha.tabs[0], newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
-	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
 	d.sessions[charlie.id] = charlie
 	d.mu.Unlock()
@@ -238,7 +242,7 @@ func TestVerticalOverflowTreatsDisplacedSourceClientAsNoNeighbor(t *testing.T) {
 	alpha.mu.Lock()
 	alpha.name = "alpha"
 	alpha.mu.Unlock()
-	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
 	d.sessions[charlie.id] = charlie
 	d.mu.Unlock()
@@ -265,8 +269,8 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 	alpha.mu.Lock()
 	alpha.name = "alpha"
 	alpha.mu.Unlock()
-	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
-	echo := &session{id: "live-echo", name: "echo", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	echo := &session{sessionCore: sessionCore{id: "live-echo", name: "echo"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
 	d.sessions[echo.id] = echo
 	d.sessions[charlie.id] = charlie
@@ -304,7 +308,11 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 	current := ac.currentSession()
 	owners := make([]*session, 0, 1)
 	d.mu.Lock()
-	for _, candidate := range d.sessions {
+	for _, entry := range d.sessions {
+		candidate, ok := localSession(entry)
+		if !ok {
+			continue
+		}
 		candidate.mu.Lock()
 		if candidate.client == ac {
 			owners = append(owners, candidate)

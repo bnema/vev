@@ -29,20 +29,21 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 }
 
 func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) bool {
-	if token.effect == nil {
+	sess, ok := localSession(token.sess)
+	if !ok || token.effect == nil {
 		return false
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
 	var parkingToken uint64
 	if !explicit {
-		parkingToken = d.markParkingInFlight(token.sess, token.ac)
+		parkingToken = d.markParkingInFlight(sess, token.ac)
 	}
 	if !d.detachIfRoleCurrent(token) {
-		d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
+		d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
 		return false
 	}
-	d.finishClientGone(token.sess, token.ac, token.transport.transport, explicit)
+	d.finishClientGone(sess, token.ac, token.transport.transport, explicit)
 	return true
 }
 
@@ -111,15 +112,16 @@ func (d *Daemon) detachOnRoleSendError(token attachmentRoleToken, failed ports.T
 }
 
 func (d *Daemon) detachOnRoleSendErrorUntil(token attachmentRoleToken, failed ports.Transport, done func() <-chan struct{}) {
-	if failed != token.transport.transport {
+	sess, ok := localSession(token.sess)
+	if !ok || failed != token.transport.transport {
 		return
 	}
-	parkingToken := d.markParkingInFlight(token.sess, token.ac)
+	parkingToken := d.markParkingInFlight(sess, token.ac)
 	if d.detachIfRoleCurrentUntil(token, done) {
-		d.finishSendErrorDetach(token.sess, token.ac, failed)
+		d.finishSendErrorDetach(sess, token.ac, failed)
 		return
 	}
-	d.clearParkingInFlightIfAbandoned(token.sess, token.ac, parkingToken)
+	d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
 }
 
 // reserveRoleSendErrorCleanup accounts for cleanup before End releases the

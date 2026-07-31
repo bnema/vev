@@ -169,7 +169,7 @@ func TestResponsiveFloatingZeroContentDrawerRemainsCommittedAndTargeted(t *testi
 	d := newTestDaemon(t, nil, stubClock{})
 	d.ApplyConfig(domain.Config{Floating: cfg})
 	tb := newTab(nil, domain.Size{Cols: 79, Rows: 2})
-	sess := &session{name: "test", tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{sessionCore: sessionCore{name: "test"}, tabs: []*tab{tb}, ctx: t.Context()}
 	spec, err := d.newFloatingLaunchSpec(sess, tb, cfg, true)
 	require.NoError(t, err)
 	require.Equal(t, geometry, spec.geometry, "the 1x1 PTY fallback must not replace drawer presentation")
@@ -595,7 +595,7 @@ func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	installTestFloating(tb, p, true)
 	ac := &attachedClient{}
 	ac.initOverlays()
-	sess := &session{tabs: []*tab{tb}, client: ac}
+	sess := &session{sessionCore: sessionCore{client: ac}, tabs: []*tab{tb}}
 	base := barState{}
 	cfg := domain.FloatingConfig{Width: 100, Height: 100}
 

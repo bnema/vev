@@ -5,8 +5,8 @@ import "errors"
 var errAttachmentTransition = errors.New("attachment transition is no longer valid")
 
 type attachmentTransitionRequest struct {
-	source                *session
-	target                *session
+	source                attachmentSession
+	target                attachmentSession
 	next                  *attachedClient
 	expectedRole          attachmentRole
 	targetRole            attachmentRole
@@ -38,7 +38,7 @@ type attachmentTransitionRequest struct {
 	activationBarrier bool
 }
 
-func transitionSourceTokenMatchesRequest(token attachmentRoleToken, source *session, req attachmentTransitionRequest) bool {
+func transitionSourceTokenMatchesRequest(token attachmentRoleToken, source attachmentSession, req attachmentTransitionRequest) bool {
 	return token.sess == source && token.ac == req.next && token.role == req.expectedRole &&
 		token.transport.transport == req.expectedTransport.transport &&
 		token.transport.incarnation == req.expectedTransport.incarnation
@@ -48,10 +48,10 @@ func transitionSourceTokenMatchesRequest(token attachmentRoleToken, source *sess
 // source, sourceCoordinator.mu. This is the canonical handoff preflight: every
 // client-originated navigation, delete, or create intent is bound to one exact
 // role generation, transport incarnation, and coordinator lease.
-func transitionSourceTokenCurrentLocked(token attachmentRoleToken, source *session, sourceCoordinator *renderCoordinator, req attachmentTransitionRequest) bool {
+func transitionSourceTokenCurrentLocked(token attachmentRoleToken, source attachmentSession, sourceCoordinator *renderCoordinator, req attachmentTransitionRequest) bool {
 	if token.sess != source || token.ac != req.next || token.role != req.expectedRole ||
-		token.generation != req.next.roleGeneration.Load() || source.attachmentRoleLocked(req.next) != token.role ||
-		req.next.currentSession() != source || !req.next.transportSnapshotCurrent(token.transport) {
+		token.generation != req.next.roleGeneration.Load() || attachmentSessionRoleLocked(source, req.next) != token.role ||
+		req.next.currentAttachmentSession() != source || !req.next.transportSnapshotCurrent(token.transport) {
 		return false
 	}
 	if token.role != attachmentActive {
@@ -84,19 +84,27 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 	if source == nil {
 		source = req.target
 	}
-	if source == nil || (req.target == nil && req.createTargetLocked == nil) || req.next == nil || d.closing ||
-		d.sessions[source.id] != source || req.target != nil && d.sessions[req.target.id] != req.target ||
+	if source == nil || (req.target == nil && req.createTargetLocked == nil) {
+		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
+	}
+	sourceCore := source.core()
+	var targetCore *sessionCore
+	if req.target != nil {
+		targetCore = req.target.core()
+	}
+	if sourceCore == nil || req.target != nil && targetCore == nil || req.next == nil || d.closing ||
+		d.sessions[sourceCore.id] != source || req.target != nil && d.sessions[targetCore.id] != req.target ||
 		req.activationBarrier && (req.sourceToken == nil || source != req.target ||
 			req.expectedRole != attachmentSnatched || req.targetRole != attachmentActive) {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
 	if req.target != nil {
-		req.target.mu.Lock()
-		req.expectedTargetCurrent = req.target.client
+		targetCore.mu.Lock()
+		req.expectedTargetCurrent = targetCore.client
 		if req.expectedTargetCurrent != nil && req.expectedTargetCurrent != req.next && req.targetRole == attachmentActive {
 			req.expectedTargetTransport = req.expectedTargetCurrent.transportSnapshot()
 		}
-		req.target.mu.Unlock()
+		targetCore.mu.Unlock()
 	}
 	if req.sourceToken != nil && !transitionSourceTokenMatchesRequest(*req.sourceToken, source, req) {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
@@ -174,7 +182,9 @@ func (d *Daemon) prepareActivatedAttachment(result *attachmentTransitionResult) 
 		ac.output.rebase()
 	}
 	ac.captureFrames = nil
-	d.applyHostThemeSendLocked(result.published.sess, ac, ac.getClientTheme(), false)
+	if sess, ok := localSession(result.published.sess); ok {
+		d.applyHostThemeSendLocked(sess, ac, ac.getClientTheme(), false)
+	}
 	// The first paint still requests a reset, but the old panel dependency chain
 	// has already been rebased atomically under the activation barrier.
 	result.published.rebase = false

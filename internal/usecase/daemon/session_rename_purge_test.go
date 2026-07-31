@@ -16,7 +16,7 @@ func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
 	store, state := newMockStore(t)
 	WithStore(t, store)(d)
 	sess := newSnapshotTestSession(t, "old", false, "/work")
-	d.sessions = map[domain.SessionID]*session{sess.id: sess}
+	d.sessions = map[domain.SessionID]attachmentSession{sess.id: sess}
 	sess.mu.Lock()
 	record := sess.persistRecordLocked(1)
 	sess.mu.Unlock()
