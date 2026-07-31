@@ -84,19 +84,27 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 	if source == nil {
 		source = req.target
 	}
-	if source == nil || (req.target == nil && req.createTargetLocked == nil) || req.next == nil || d.closing ||
-		d.sessions[source.core().id] != source || req.target != nil && d.sessions[req.target.core().id] != req.target ||
+	if source == nil || (req.target == nil && req.createTargetLocked == nil) {
+		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
+	}
+	sourceCore := source.core()
+	var targetCore *sessionCore
+	if req.target != nil {
+		targetCore = req.target.core()
+	}
+	if sourceCore == nil || req.target != nil && targetCore == nil || req.next == nil || d.closing ||
+		d.sessions[sourceCore.id] != source || req.target != nil && d.sessions[targetCore.id] != req.target ||
 		req.activationBarrier && (req.sourceToken == nil || source != req.target ||
 			req.expectedRole != attachmentSnatched || req.targetRole != attachmentActive) {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
 	if req.target != nil {
-		req.target.core().mu.Lock()
-		req.expectedTargetCurrent = req.target.core().client
+		targetCore.mu.Lock()
+		req.expectedTargetCurrent = targetCore.client
 		if req.expectedTargetCurrent != nil && req.expectedTargetCurrent != req.next && req.targetRole == attachmentActive {
 			req.expectedTargetTransport = req.expectedTargetCurrent.transportSnapshot()
 		}
-		req.target.core().mu.Unlock()
+		targetCore.mu.Unlock()
 	}
 	if req.sourceToken != nil && !transitionSourceTokenMatchesRequest(*req.sourceToken, source, req) {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition

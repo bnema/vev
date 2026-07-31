@@ -103,10 +103,16 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	if source == nil {
 		source = req.target
 	}
-	if !req.preflighted || !req.roleEffectsFrozen ||
+	if source == nil || req.target == nil {
+		return nil, errAttachmentTransition
+	}
+	sourceCore := source.core()
+	targetCore := req.target.core()
+	if sourceCore == nil || targetCore == nil ||
+		!req.preflighted || !req.roleEffectsFrozen ||
 		!validAttachmentTransitionRole(req.expectedRole, true) || !validAttachmentTransitionRole(req.targetRole, false) ||
-		source == nil || req.target == nil || req.next == nil || d.closing ||
-		d.sessions[source.core().id] != source || d.sessions[req.target.core().id] != req.target ||
+		req.next == nil || d.closing ||
+		d.sessions[sourceCore.id] != source || d.sessions[targetCore.id] != req.target ||
 		req.expectedTransport.transport == nil || !req.next.transportSnapshotCurrent(req.expectedTransport) ||
 		req.preserveRole && req.sourceToken == nil {
 		return nil, errAttachmentTransition
@@ -118,13 +124,13 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 			targetCoordinator = d.ensureRenderCoordinatorPrelocked(target)
 		}
 	}
-	sourceCoordinator := source.core().coordinator.Load()
+	sourceCoordinator := sourceCore.coordinator.Load()
 	if attachmentSessionRoleLocked(source, req.next) != req.expectedRole ||
 		!req.next.transportSnapshotCurrent(req.expectedTransport) {
 		return nil, errAttachmentTransition
 	}
 
-	old := req.target.core().client
+	old := targetCore.client
 	if old != req.expectedTargetCurrent || source != req.target && old == req.next {
 		return nil, errAttachmentTransition
 	}

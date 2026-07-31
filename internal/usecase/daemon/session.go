@@ -363,7 +363,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		}
 		closeTabs(tabs)
 		cancel()
-		return nil, err
+		return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 	}
 	if !ephemeral {
 		// Keep stopped lifecycle authority intact until runtime publication and

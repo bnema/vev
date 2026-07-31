@@ -134,12 +134,11 @@ func TestSessionCoreLockOrderUsesImmutableIDs(t *testing.T) {
 	second.core().mu.Unlock()
 }
 
-func TestProxiedInitialMetadataSkipsInvalidSnapshot(t *testing.T) {
+func TestInitialMetadataSkipsInvalidSnapshot(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	hello := ports.Hello{
 		Version: ports.ProtocolVersion,
 		Intent:  ports.IntentNew,
-		Proxied: true,
 		Name:    "remote-work",
 		Size:    defaultSize,
 	}
@@ -150,13 +149,16 @@ func TestProxiedInitialMetadataSkipsInvalidSnapshot(t *testing.T) {
 		close(done)
 	}()
 
-	awaitTestCompletion(t, tr.welcomeEntered, "proxied handshake did not send Welcome")
+	awaitTestCompletion(t, tr.welcomeEntered, "handshake did not send Welcome")
 	sess := firstSession(d)
 	require.NotNil(t, sess)
 	sess.mu.Lock()
 	sess.active = len(sess.tabs)
 	sess.mu.Unlock()
-	tr.release()
+	// finish (not just release) also closes recvDone, so runConnLoop's Recv
+	// fails immediately after the first paint and the handshake goroutine
+	// returns instead of blocking on further input.
+	tr.finish()
 	awaitTestCompletion(t, done, "invalid metadata snapshot did not end the handshake")
 
 	welcome := <-tr.sends
