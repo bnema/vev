@@ -122,7 +122,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 		RemoteAvailability: remotePickerAvailability(status),
 		RemoteDetail:       detail,
 		ConnectOnly:        true,
-		RemoteAttachReady:  status != remoteHostVersionMismatch,
+		RemoteAttachReady:  false,
 		CannotAcceptMoves:  true,
 	}
 }
@@ -155,7 +155,7 @@ func remoteProxyPickerView(key domain.RemoteSessionKey, snap sessionView) picker
 	view.RemoteAvailability = picker.RemoteFresh
 	view.RemoteDetail = remotePickerDetail(uint16(snap.tabCount))
 	view.ConnectOnly = true
-	view.RemoteAttachReady = true
+	view.RemoteAttachReady = false
 	if snap.expired {
 		view.RemoteAvailability = picker.RemoteStale
 		view.RemoteDetail = "expired"

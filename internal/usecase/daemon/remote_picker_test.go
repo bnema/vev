@@ -497,7 +497,7 @@ func TestRemoteRefreshPreservesRemoteCursorAcrossCacheToProxyUpgrade(t *testing.
 	owner.overlays.pickerMu.Unlock()
 	require.True(t, ok)
 	require.Equal(t, &key, before.RemoteKey)
-	require.True(t, beforeSelectable, "a reachable cache-derived remote row is selectable")
+	require.False(t, beforeSelectable, "cache-derived remote row must stay gated until proxy activation lands")
 
 	proxy := &proxySession{
 		sessionCore: sessionCore{id: key.ID(), name: key.Display()},
@@ -517,7 +517,7 @@ func TestRemoteRefreshPreservesRemoteCursorAcrossCacheToProxyUpgrade(t *testing.
 	require.True(t, ok)
 	require.Equal(t, before.Session, after.Session)
 	require.Equal(t, before.RemoteKey, after.RemoteKey)
-	require.True(t, selectable, "the cache-to-live upgrade must not drop the row's selectability")
+	require.False(t, selectable, "cache-to-live upgrade must preserve the proxy activation gate")
 }
 
 func TestRemoteRefreshCancellationWhenLastPickerCloses(t *testing.T) {
