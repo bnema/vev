@@ -8,11 +8,16 @@ import (
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
+const connectionRoleAttempts = 8
+
 // currentConnectionRole retries the lock-free session-to-role snapshot when a
 // handoff lands between those reads. The role gate still performs the final
 // mutation admission after this function returns.
 func (d *Daemon) currentConnectionRole(ac *attachedClient, tr ports.Transport) (attachmentSession, attachmentRoleToken, bool) {
-	for ac.currentTransportIs(tr) {
+	for range connectionRoleAttempts {
+		if !ac.currentTransportIs(tr) {
+			break
+		}
 		sess := ac.currentAttachmentSession()
 		if sess == nil {
 			return nil, attachmentRoleToken{}, false
@@ -45,7 +50,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		}
 		f, err := tr.Recv()
 		if err != nil {
-			for {
+			for range connectionRoleAttempts {
 				sess, token, ok := d.currentConnectionRole(ac, tr)
 				if !ok {
 					return
@@ -56,11 +61,15 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 					d.detachProxyOnSendError(proxy, ac, tr)
 				} else if local, ok := localSession(sess); ok {
 					d.clientGone(local, ac, tr, false)
+				} else {
+					return
 				}
-				if !ac.currentTransportIs(tr) || ac.currentAttachmentSession() == nil {
+				current := ac.currentAttachmentSession()
+				if current == sess || !ac.currentTransportIs(tr) || current == nil {
 					return
 				}
 			}
+			return
 		}
 		_, token, ok := d.currentConnectionRole(ac, tr)
 		if !ok {

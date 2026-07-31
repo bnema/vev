@@ -830,6 +830,64 @@ func TestRemotePickerCanReselectWarmProxyAfterReturningLocal(t *testing.T) {
 	require.False(t, ac.overlays.pickerActive())
 }
 
+func TestConnectionRoleResolutionStopsAfterUnstableSnapshots(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	client := newProxyTestTransport()
+	ac := &attachedClient{}
+	ac.replaceTransport(client)
+	first := &session{sessionCore: sessionCore{client: ac}}
+	second := &session{sessionCore: sessionCore{client: ac}}
+	ac.setSession(first)
+
+	const unstableSnapshots = 100
+	attempts := 0
+	d.afterConnectionSessionSnapshot = func(snapshot attachmentSession) {
+		attempts++
+		if attempts >= unstableSnapshots {
+			return
+		}
+		if snapshot == first {
+			ac.setSession(second)
+		} else {
+			ac.setSession(first)
+		}
+	}
+
+	_, _, ok := d.currentConnectionRole(ac, client)
+	require.False(t, ok)
+	require.Less(t, attempts, unstableSnapshots)
+}
+
+func TestConnectionLoopStopsWhenReceiveErrorCleanupMakesNoProgress(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	client := newProxyTestTransport()
+	ac := &attachedClient{}
+	ac.replaceTransport(client)
+	local := &session{sessionCore: sessionCore{client: ac}}
+	ac.setSession(local)
+
+	cleanupAttempts := 0
+	d.beforeClientGoneDetach = func() {
+		cleanupAttempts++
+		local.mu.Lock()
+		local.client = &attachedClient{}
+		local.mu.Unlock()
+	}
+	snapshots := 0
+	d.afterConnectionSessionSnapshot = func(attachmentSession) {
+		snapshots++
+		if snapshots == 100 {
+			ac.setSession(nil)
+		}
+	}
+	client.recv <- proxyRecv{err: io.EOF}
+
+	d.runConnLoop(ac)
+
+	require.Equal(t, 1, cleanupAttempts)
+	require.Equal(t, 1, snapshots)
+}
+
 func TestConnectionLoopRetriesRoleResolutionAcrossHandoff(t *testing.T) {
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	client := newProxyTestTransport()
@@ -843,10 +901,11 @@ func TestConnectionLoopRetriesRoleResolutionAcrossHandoff(t *testing.T) {
 	d.remoteDialerFactory = newProxyConstructionFactory(remote)
 	d.remoteTransportMode = ports.RemoteTransportUDP
 	token := roleEffectForTest(t, local.attachmentToken(ac, client))
+	snapshots := make(chan attachmentSession, 1)
 	transitionErr := make(chan error, 1)
 	d.afterConnectionSessionSnapshot = func(snapshot attachmentSession) {
 		d.afterConnectionSessionSnapshot = nil
-		require.Same(t, local, snapshot)
+		snapshots <- snapshot
 		transitionErr <- d.switchToTargetForRole(token, picker.Target{Session: key.ID(), RemoteKey: &key, TabIndex: -1}, sessionHandoffGuard{}, "picker-select")
 	}
 
@@ -856,6 +915,7 @@ func TestConnectionLoopRetriesRoleResolutionAcrossHandoff(t *testing.T) {
 		close(loopDone)
 	}()
 	client.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgPing, Payload: ports.MarshalPing(ports.Ping{})}}
+	require.Same(t, local, awaitTestValue(t, snapshots, "connection role was not snapshotted"))
 	require.NoError(t, awaitTestValue(t, transitionErr, "handoff did not run during role resolution"))
 	proxy, ok := ac.currentAttachmentSession().(*proxySession)
 	require.True(t, ok)
