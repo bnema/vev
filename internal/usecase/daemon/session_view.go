@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"time"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
@@ -18,6 +20,7 @@ type tabView struct {
 	name         string
 	focusedTitle string
 	attention    bool
+	attentionAt  time.Time
 }
 
 // sessionView is an immutable, value-only description of a session. It
@@ -38,6 +41,7 @@ type sessionView struct {
 	hasAttention      bool
 	tabs              []tabView
 	cannotAcceptMoves bool
+	expired           bool
 }
 
 // snapshotView reads session fields under s.mu and samples the independently
@@ -76,9 +80,10 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 			continue
 		}
 		entry := tabView{
-			id:        domain.TabStableID(tb.stableID),
-			name:      tabDisplayName(tb, i),
-			attention: tb.attention,
+			id:          domain.TabStableID(tb.stableID),
+			name:        tabDisplayName(tb, i),
+			attention:   tb.attention,
+			attentionAt: tb.attentionAt,
 		}
 		if opts.focusedTitles {
 			entry.focusedTitle = tb.focusedPaneTitle(opts.terminalTitle)

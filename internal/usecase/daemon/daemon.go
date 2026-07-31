@@ -73,7 +73,10 @@ type Daemon struct {
 	stopped  map[string]stoppedSession
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
-	nextID   uint64
+	// proxyConstructions serializes remote IntentAttach handshakes by structured
+	// key. Entries are guarded by mu and never retain it across dial or link I/O.
+	proxyConstructions map[domain.RemoteSessionKey]*proxyConstruction
+	nextID             uint64
 	// lastAllocatedCreatedAt is the named-session lifecycle timestamp high-water
 	// mark. It is guarded by mu and prevents a wall-clock regression from
 	// reusing a lifecycle identity.
