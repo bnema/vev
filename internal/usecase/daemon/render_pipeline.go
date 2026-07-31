@@ -417,18 +417,25 @@ func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte
 // the next transaction.
 func commitDamageReceipts(receipts []damageReceipt) {
 	for _, receipt := range receipts {
-		if receipt.pane == nil {
+		if receipt.pane != nil {
+			receipt.pane.mu.Lock()
+			receipt.pane.screen.AcknowledgeDamage(receipt.generation)
+			receipt.pane.mu.Unlock()
 			continue
 		}
-		receipt.pane.mu.Lock()
-		receipt.pane.screen.AcknowledgeDamage(receipt.generation)
-		receipt.pane.mu.Unlock()
+		if receipt.proxy != nil {
+			receipt.proxy.mu.Lock()
+			if receipt.proxy.screen == receipt.proxyScreen {
+				receipt.proxy.screen.AcknowledgeDamage(receipt.generation)
+			}
+			receipt.proxy.mu.Unlock()
+		}
 	}
 }
 
 // emitFrame is the sole side-effecting half of the pipeline. The caller holds
 // sendMu for the complete capture/compose/emit transaction.
-func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
+func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
 	var ownedMarks runtimeMarkBatch
 	var marks *runtimeMarkBatch
 	if len(batches) != 0 {
@@ -440,21 +447,21 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		// follows emitFrame's release of attachment ownership.
 		defer marks.flush()
 	}
-	if sess == nil || ac == nil || state == nil {
+	if entry == nil || entry.core() == nil || ac == nil || state == nil {
 		if ac != nil {
 			ac.sendMu.Unlock()
 		}
 		return false
 	}
-	sess.mu.Lock()
-	owned := sess.client == ac
-	sess.mu.Unlock()
-	if !owned || state.attachment != ac || ac.currentSession() != sess {
+	entry.core().mu.Lock()
+	owned := entry.core().client == ac
+	entry.core().mu.Unlock()
+	if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
 		return false
 	}
 	if state.lease != nil {
-		rc := sess.renderCoordinator()
+		rc := attachmentRenderCoordinator(entry)
 		if rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
 			ac.sendMu.Unlock()
 			return false
@@ -465,20 +472,25 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	endDiff(0, err == nil)
 	if err != nil {
 		ac.sendMu.Unlock()
-		d.log.Error("render draw failed", "err", err, "session", sess.name)
+		d.log.Error("render draw failed", "err", err, "session", entry.core().name)
 		// Without a coordinator reportError repaints synchronously. Suppress only
 		// that nested notice repaint; leave the guard before returning so a later,
 		// independent failed transaction can still notify the user.
-		if sess.renderCoordinator() == nil {
-			if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
+		if sess, ok := localSession(entry); ok {
+			if sess.renderCoordinator() == nil {
+				if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
+					return true
+				}
+				d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
+				ac.prepareFailureFallback.Store(false)
 				return true
 			}
 			d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
-			ac.prepareFailureFallback.Store(false)
-			return true
 		}
-		d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
-		d.invalidateRender(sess, ac, true, "render_pipeline.go:prepare-failed")
+		// Notices are session-scoped, but the repaint is not: a proxy attachment
+		// has no local session to report through and still needs its chrome
+		// redrawn after a failed transaction.
+		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
 		return true
 	}
 	data := append([]byte(nil), prepared.data...)
@@ -491,7 +503,9 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		sendTransport := ac.transportSnapshot()
 		sendTr = sendTransport.transport
 		if ac.proxied {
-			sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.roleEffect)
+			if sess, ok := localSession(entry); ok {
+				sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.roleEffect)
+			}
 		}
 		if len(data) > 0 {
 			endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
@@ -538,7 +552,11 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		// admission first. Detachment freezes the gate and therefore cannot mutate
 		// ownership until any enclosing admitted operation has also ended.
 		if marks.roleEffect == nil {
-			d.detachOnSendError(sess, ac, sendTr)
+			if sess, ok := localSession(entry); ok {
+				d.detachOnSendError(sess, ac, sendTr)
+			} else if proxy, ok := entry.(*proxySession); ok {
+				d.detachProxyOnSendError(proxy, ac, sendTr)
+			}
 		} else {
 			// Capture the exact admitted capability, including its coordinator
 			// lease, before End permits a replacement publication. Reserve cleanup

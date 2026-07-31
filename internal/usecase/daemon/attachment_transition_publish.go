@@ -120,9 +120,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 
 	var targetCoordinator *renderCoordinator
 	if req.targetRole == attachmentActive {
-		if target, ok := localSession(req.target); ok {
-			targetCoordinator = d.ensureRenderCoordinatorPrelocked(target)
-		}
+		targetCoordinator = d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
 	}
 	sourceCoordinator := sourceCore.coordinator.Load()
 	if attachmentSessionRoleLocked(source, req.next) != req.expectedRole ||
@@ -289,19 +287,24 @@ func validAttachmentTransitionRole(role attachmentRole, expected bool) bool {
 // lockAttachmentSessions gives every two-session transition one stable order.
 // Session IDs are immutable and unique while their lifecycles are registered.
 func lockAttachmentSessions(a, b attachmentSession) func() {
-	if a == b {
-		a.core().mu.Lock()
-		return a.core().mu.Unlock
+	aCore := attachmentSessionCore(a)
+	bCore := attachmentSessionCore(b)
+	if aCore == nil || bCore == nil {
+		return func() {}
 	}
-	first, second := a, b
-	if first.core().id > second.core().id {
+	if aCore == bCore {
+		aCore.mu.Lock()
+		return aCore.mu.Unlock
+	}
+	first, second := aCore, bCore
+	if first.id > second.id {
 		first, second = second, first
 	}
-	first.core().mu.Lock()
-	second.core().mu.Lock()
+	first.mu.Lock()
+	second.mu.Lock()
 	return func() {
-		second.core().mu.Unlock()
-		first.core().mu.Unlock()
+		second.mu.Unlock()
+		first.mu.Unlock()
 	}
 }
 

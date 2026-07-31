@@ -107,6 +107,34 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
 }
 
+// detachProxyOnSendError is detachOnSendError for an attachment that has no
+// local session behind it. Proxy attachments own no resumable parking
+// lifecycle, so the remote link is retained as a warm headless session instead
+// of being parked for the same client to resume.
+func (d *Daemon) detachProxyOnSendError(p *proxySession, ac *attachedClient, failed ports.Transport) {
+	if d == nil || p == nil || ac == nil {
+		return
+	}
+	expected := transportSnapshot{}
+	if failed != nil {
+		expected = ac.transportSnapshot()
+		if expected.transport != failed {
+			return
+		}
+	}
+	if !d.detachProxyIfCurrentTransport(p, ac, expected) {
+		return
+	}
+	if rc := p.coordinator.Load(); rc != nil {
+		rc.noteDetach(ac)
+	}
+	d.unregisterPreview(ac)
+	ac.clearPreviousSession()
+	_ = ac.closeCapturedTransport(failed)
+	d.armProxyWarm(p)
+	d.log.Warn("detached proxy client after send error", "host", p.key.Host, "session", p.key.Name)
+}
+
 func (d *Daemon) detachOnRoleSendError(token attachmentRoleToken, failed ports.Transport) {
 	d.detachOnRoleSendErrorUntil(token, failed, nil)
 }

@@ -4,6 +4,15 @@ import "github.com/bnema/vev/internal/ports"
 
 type attachmentRole uint8
 
+// attachmentSessionCore normalizes nil interfaces, typed-nil implementations,
+// and implementations that deliberately expose no attachment core.
+func attachmentSessionCore(entry attachmentSession) *sessionCore {
+	if entry == nil {
+		return nil
+	}
+	return entry.core()
+}
+
 const (
 	attachmentDetached attachmentRole = iota
 	attachmentActive
