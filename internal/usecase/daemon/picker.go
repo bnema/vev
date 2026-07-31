@@ -587,6 +587,12 @@ func (d *Daemon) switchActiveTargetForRoleGuarded(token attachmentRoleToken, tar
 	}
 	d.mu.Lock()
 	targetSess, ok := localSession(d.sessions[target.Session])
+	if ok {
+		targetSess.mu.Lock()
+		ok = targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) &&
+			(target.Incarnation == (domain.IncarnationID{}) || target.Incarnation == targetSess.incarnation)
+		targetSess.mu.Unlock()
+	}
 	d.mu.Unlock()
 	if !ok || targetSess == token.sess {
 		return nil

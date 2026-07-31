@@ -13,7 +13,12 @@ func (d *Daemon) backSessionForRole(token attachmentRoleToken) error {
 		token.ac.clearPreviousSessionIf(target)
 		return nil
 	}
-	return d.switchToTargetForRole(token, picker.Target{Session: target.core().id, TabIndex: -1}, sessionHandoffGuard{}, "back-session")
+	pickerTarget := picker.Target{Session: target.core().id, TabIndex: -1}
+	if proxy, ok := target.(*proxySession); ok {
+		key := proxy.key
+		pickerTarget.RemoteKey = &key
+	}
+	return d.switchToTargetForRole(token, pickerTarget, sessionHandoffGuard{}, "back-session")
 }
 
 func (d *Daemon) backSession(current *session, ac *attachedClient) {

@@ -153,6 +153,9 @@ type Daemon struct {
 	// afterSnatchedEscapeAttempt reports whether that callback acquired its exact
 	// role capability after revalidation.
 	afterSnatchedEscapeAttempt func(bool)
+	// afterConnectionSessionSnapshot is a deterministic test seam after the
+	// connection loop reads its current session and before it captures that role.
+	afterConnectionSessionSnapshot func(attachmentSession)
 	// afterActiveFrameDispatch is a deterministic test seam after the connection
 	// loop's first role check and before a decoded active frame takes effect.
 	afterActiveFrameDispatch func(attachmentRoleToken)
