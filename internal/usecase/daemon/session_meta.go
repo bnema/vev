@@ -6,6 +6,8 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+var errSessionMetaUnavailable = errors.New("session metadata is unavailable")
+
 // sessionMetaSnapshot captures the authoritative tab order while session.mu
 // owns every field represented on the wire.
 func (s *session) sessionMetaSnapshot() (ports.SessionMeta, bool) {
@@ -67,7 +69,7 @@ func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected trans
 	}
 	meta, ok := sess.sessionMetaSnapshot()
 	if !ok {
-		return errors.New("session metadata is unavailable")
+		return errSessionMetaUnavailable
 	}
 	if ac.sessionMetaSent && sameSessionMeta(ac.sessionMeta, meta) {
 		return nil
@@ -76,11 +78,8 @@ func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected trans
 	if err != nil {
 		return err
 	}
-	if expected.transport == nil || !ac.transportSnapshotCurrent(expected) {
-		return errTransportReplaced
-	}
-	if ticket != nil && (ticket.ended.Load() || !ticket.beginTransportSend(expected)) {
-		return errAttachmentTransition
+	if err := ac.beginExpectedTransportSendLocked(expected, ticket); err != nil {
+		return err
 	}
 	send := expected.transport.Send
 	if async, ok := expected.transport.(ports.AsyncTransport); ok {

@@ -485,31 +485,35 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	data = append(data, ac.encodeCursorTail(composed.cursor, len(data) > 0)...)
 	var sendTr ports.Transport
 	var sendErr error
-	if len(data) > 0 {
+	// Metadata precedes any output bytes and is published on its own when the
+	// terminal frame is empty, so a proxied client never keeps a stale snapshot.
+	if len(data) > 0 || ac.proxied {
 		sendTransport := ac.transportSnapshot()
 		sendTr = sendTransport.transport
 		if ac.proxied {
 			sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.roleEffect)
 		}
-		endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
-		if sendErr == nil && sendTr == nil {
-			sendErr = errors.New("client transport is nil")
-		}
-		if sendErr == nil {
-			send := sendTr.Send
-			if async, ok := sendTr.(ports.AsyncTransport); ok {
-				send = async.SendAsync
+		if len(data) > 0 {
+			endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
+			if sendErr == nil && sendTr == nil {
+				sendErr = errors.New("client transport is nil")
 			}
-			interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
-			sendErr = prepared.send(data, ac.echoAck.Load(), send)
-			if interruptible {
-				if sendErr != nil {
-					marks.roleEffect.reportTransportFailure(sendTransport)
+			if sendErr == nil {
+				send := sendTr.Send
+				if async, ok := sendTr.(ports.AsyncTransport); ok {
+					send = async.SendAsync
 				}
-				marks.roleEffect.endTransportSend()
+				interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
+				sendErr = prepared.send(data, ac.echoAck.Load(), send)
+				if interruptible {
+					if sendErr != nil {
+						marks.roleEffect.reportTransportFailure(sendTransport)
+					}
+					marks.roleEffect.endTransportSend()
+				}
 			}
+			endEmit(uint64(len(data)), sendErr == nil)
 		}
-		endEmit(uint64(len(data)), sendErr == nil)
 	}
 	if sendErr == nil {
 		// Publish only after output preparation and transport emission both

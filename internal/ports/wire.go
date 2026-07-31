@@ -254,6 +254,16 @@ func (w *payloadWriter) putUint8(v uint8) {
 	w.b = append(w.b, v)
 }
 
+// putBool writes the single byte payloadReader.getBool accepts: 1 for true and
+// 0 for false.
+func (w *payloadWriter) putBool(v bool) {
+	if v {
+		w.putUint8(1)
+		return
+	}
+	w.putUint8(0)
+}
+
 func (w *payloadWriter) putUint16(v uint16) {
 	var tmp [2]byte
 	binary.BigEndian.PutUint16(tmp[:], v)
@@ -403,11 +413,7 @@ func MarshalHello(h Hello) []byte {
 	w := payloadWriter{}
 	w.putUint16(h.Version)
 	w.putUint8(h.Intent)
-	if h.Proxied {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
+	w.putBool(h.Proxied)
 	w.putBytes(h.ClientID[:])
 	w.putUint64(h.ResumeToken)
 	w.putString(h.Name)
@@ -415,11 +421,7 @@ func MarshalHello(h Hello) []byte {
 	w.putUint16(uint16(h.Size.Rows))
 	w.putString(h.TermEnv)
 	w.putString(h.Cwd)
-	if h.TrueColor {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
+	w.putBool(h.TrueColor)
 	w.putUint8(h.MaxOutputInFlight)
 	w.putUint32(uint32(len(h.Env)))
 	for _, entry := range h.Env {
@@ -926,11 +928,7 @@ func MarshalSessionMeta(m SessionMeta) ([]byte, error) {
 	for _, tab := range m.Tabs {
 		w.putUint16(tab.Index)
 		w.putString(tab.Name)
-		if tab.Attention {
-			w.putUint8(1)
-		} else {
-			w.putUint8(0)
-		}
+		w.putBool(tab.Attention)
 	}
 	return w.b, nil
 }

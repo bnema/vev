@@ -49,6 +49,37 @@ func TestProxiedMetadataPrecedesChangedOutput(t *testing.T) {
 	require.Equal(t, "renamed", changedMeta.Tabs[0].Name)
 }
 
+func TestProxiedMetadataSendsWithoutOutputBytes(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
+	ac.proxied = true
+
+	emit := func(reset bool) {
+		state := cacheBarState("steady", reset)
+		state.attachment = ac
+		composed := composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
+		ac.sendMu.Lock()
+		require.True(t, d.emitFrame(sess, ac, &state, composed))
+	}
+
+	emit(true)
+	require.Equal(t, ports.MsgSessionMeta, (<-sends).Type)
+	require.Equal(t, ports.MsgOutput, (<-sends).Type)
+
+	sess.mu.Lock()
+	sess.tabs[0].name = "renamed"
+	sess.mu.Unlock()
+	// The recomposed frame is identical, so this transaction carries metadata
+	// only: a zero-byte terminal frame must still refresh the proxied snapshot.
+	emit(false)
+
+	metaFrame := awaitTestValue(t, sends, "a zero-byte frame did not publish changed metadata")
+	require.Equal(t, ports.MsgSessionMeta, metaFrame.Type)
+	meta, err := ports.UnmarshalSessionMeta(metaFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, "renamed", meta.Tabs[0].Name)
+	requireNoOutputFrame(t, sends)
+}
+
 func TestSessionMetaSnapshotIsImmutable(t *testing.T) {
 	_, sess, _, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	meta, ok := sess.sessionMetaSnapshot()
@@ -77,26 +108,34 @@ func TestSessionMetaShadowUpdatesOnlyAfterSuccessfulSend(t *testing.T) {
 
 func TestProxiedAttachedCommandRejectionPreservesRequestID(t *testing.T) {
 	tests := []struct {
-		name    string
-		request ports.CommandRequest
+		name     string
+		request  ports.CommandRequest
+		wantCode uint16
+		wantText string
 	}{
 		{
 			name: "valid attached command",
 			request: ports.CommandRequest{
 				Version: ports.ProtocolVersion, RequestID: 41, Attached: true, Slug: "new-tab",
 			},
+			wantCode: ports.ErrNotScriptable,
+			wantText: "attached command relay is not enabled",
 		},
 		{
 			name: "target override is rejected",
 			request: ports.CommandRequest{
 				Version: ports.ProtocolVersion, RequestID: 42, Attached: true, Slug: "new-tab", TargetSession: "other",
 			},
+			wantCode: ports.ErrNotScriptable,
+			wantText: "attached command relay is not enabled",
 		},
 		{
 			name: "missing attached flag is rejected",
 			request: ports.CommandRequest{
 				Version: ports.ProtocolVersion, RequestID: 43, Slug: "new-tab",
 			},
+			wantCode: ports.ErrNotScriptable,
+			wantText: "attached command relay is not enabled",
 		},
 	}
 	for _, tt := range tests {
@@ -116,8 +155,8 @@ func TestProxiedAttachedCommandRejectionPreservesRequestID(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.request.RequestID, result.RequestID)
 			require.False(t, result.OK)
-			require.Equal(t, ports.ErrNotScriptable, result.Code)
-			require.Equal(t, "attached command relay is not enabled", result.Text)
+			require.Equal(t, tt.wantCode, result.Code)
+			require.Equal(t, tt.wantText, result.Text)
 		})
 	}
 }

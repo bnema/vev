@@ -51,16 +51,8 @@ func MarshalCommandRequest(m CommandRequest) ([]byte, error) {
 	w := payloadWriter{}
 	w.putUint16(m.Version)
 	w.putUint64(m.RequestID)
-	if m.Attached {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
-	if m.Self {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
+	w.putBool(m.Attached)
+	w.putBool(m.Self)
 	w.putString(m.Slug)
 	w.putUint16(uint16(len(m.Args)))
 	for _, arg := range m.Args {
@@ -69,11 +61,7 @@ func MarshalCommandRequest(m CommandRequest) ([]byte, error) {
 	w.putString(m.TargetSession)
 	w.putString(m.TargetTab)
 	w.putString(m.TargetPane)
-	if m.JSON {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
+	w.putBool(m.JSON)
 	return w.b, nil
 }
 
@@ -139,11 +127,7 @@ func UnmarshalCommandRequest(b []byte) (CommandRequest, error) {
 func MarshalCommandResult(m CommandResult) []byte {
 	w := payloadWriter{}
 	w.putUint64(m.RequestID)
-	if m.OK {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
+	w.putBool(m.OK)
 	w.putUint16(m.Code)
 	w.putString(m.Text)
 	w.putLongString(m.Output)

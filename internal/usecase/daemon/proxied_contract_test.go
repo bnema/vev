@@ -79,7 +79,9 @@ func TestOrdinaryHandshakeRetainsChromeAndNoMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ports.CapabilityResume, welcome.Capabilities)
 
-	outputFrame := awaitFrame(t, sends, ports.MsgOutput)
+	outputFrame := awaitTestValue(t, sends, "ordinary handshake produced no post-welcome frame")
+	require.NotEqual(t, ports.MsgSessionMeta, outputFrame.Type, "an ordinary attachment must never receive session metadata")
+	require.Equal(t, ports.MsgOutput, outputFrame.Type)
 	output, err := ports.UnmarshalOutput(outputFrame.Payload)
 	require.NoError(t, err)
 	require.Zero(t, output.BaseStateNum)
@@ -146,31 +148,44 @@ func TestProxiedTransactionalResizeUsesReceivedContentGeometry(t *testing.T) {
 }
 
 func TestProxiedModeCannotChangeAcrossResume(t *testing.T) {
-	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
-	var clientID [16]byte
-	clientID[0] = 1
-	originalTransport := &closeTrackingTransport{}
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentNew, Proxied: true,
-		ClientID: clientID, Name: "immutable", Size: domain.Size{Cols: 40, Rows: 8},
+	tests := []struct {
+		name           string
+		initialProxied bool
+		resumedProxied bool
+	}{
+		{name: "proxied attachment cannot resume as ordinary", initialProxied: true, resumedProxied: false},
+		{name: "ordinary attachment cannot resume as proxied", initialProxied: false, resumedProxied: true},
 	}
-	sess, ac, err := d.route(hello, originalTransport)
-	require.NoError(t, err)
-	token := ac.resumeToken
-	d.clientGone(sess, ac, originalTransport, false)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+			var clientID [16]byte
+			clientID[0] = 1
+			originalTransport := &closeTrackingTransport{}
+			hello := ports.Hello{
+				Version: ports.ProtocolVersion, Intent: ports.IntentNew, Proxied: tt.initialProxied,
+				ClientID: clientID, Name: "immutable", Size: domain.Size{Cols: 40, Rows: 8},
+			}
+			sess, ac, err := d.route(hello, originalTransport)
+			require.NoError(t, err)
+			token := ac.resumeToken
+			d.clientGone(sess, ac, originalTransport, false)
 
-	resume := hello
-	resume.Intent = ports.IntentResume
-	resume.ResumeToken = token
-	resume.Proxied = false
-	_, resumed, ok, err := d.resumeParked(resume, &closeTrackingTransport{}, resume.Size)
-	require.Error(t, err)
-	require.False(t, ok)
-	require.Nil(t, resumed)
-	require.True(t, ac.proxied)
-	d.mu.Lock()
-	require.NotNil(t, d.parked[token], "a mode-mismatched resume must leave the original attachment parked")
-	d.mu.Unlock()
+			resume := hello
+			resume.Intent = ports.IntentResume
+			resume.ResumeToken = token
+			resume.Proxied = tt.resumedProxied
+			_, resumed, ok, err := d.resumeParked(resume, &closeTrackingTransport{}, resume.Size)
+			require.Error(t, err)
+			require.False(t, ok)
+			require.Nil(t, resumed)
+			require.Equal(t, tt.initialProxied, ac.proxied)
+			d.mu.Lock()
+			parked := d.parked[token]
+			d.mu.Unlock()
+			require.NotNil(t, parked, "a mode-mismatched resume must leave the original attachment parked")
+		})
+	}
 }
 
 func TestOutputResetRebasesFullWindowAndSchedulesBaseZeroPaint(t *testing.T) {
@@ -218,14 +233,19 @@ func TestOutputResetRequiresProxiedActiveRoleAndStrictPayload(t *testing.T) {
 			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 			ac.proxied = tt.proxied
 			d.attachCoordinator(sess, nil, ac, true)
+			ac.sendMu.Lock()
 			ac.output.next, ac.output.acked = 4, 0
+			ac.sendMu.Unlock()
 
 			token := sess.attachmentToken(ac, ac.transport())
 			if tt.staleRole {
 				token.role = attachmentSnatched
 			}
 			require.False(t, d.handleActiveClientFrame(token, ports.Frame{Type: ports.MsgOutputResetRequest, Payload: tt.payload}))
-			require.Zero(t, ac.output.acked)
+			ac.sendMu.Lock()
+			acked := ac.output.acked
+			ac.sendMu.Unlock()
+			require.Zero(t, acked)
 		})
 	}
 }
@@ -234,7 +254,9 @@ func TestOutputResetRevalidatesTransportUnderSendLock(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
 	d.attachCoordinator(sess, nil, ac, true)
+	ac.sendMu.Lock()
 	ac.output.next, ac.output.acked = 4, 0
+	ac.sendMu.Unlock()
 	token := sess.attachmentToken(ac, ac.transport())
 
 	admitted := make(chan struct{})
