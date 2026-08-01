@@ -233,6 +233,21 @@ func TestProxyANSIBenchmarkFixtures(t *testing.T) {
 	}
 }
 
+func TestProxyANSIBenchmarkGeometry(t *testing.T) {
+	newProxyANSIBenchmarkSession(t)
+}
+
+func newProxyANSIBenchmarkSession(t testing.TB) *proxySession {
+	t.Helper()
+	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "benchmark", Name: "ansi"}, domain.Size{Cols: 120, Rows: 40 + tabChromeRows})
+	require.NoError(t, err)
+	proxy.mu.Lock()
+	contentSize := proxy.contentSize
+	proxy.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, contentSize)
+	return proxy
+}
+
 type proxyANSIBenchmarkFixture struct {
 	name string
 	data []byte
@@ -428,10 +443,7 @@ var daemonSnapshotTopologies = []daemonHistoryTopology{
 func BenchmarkProxyANSIApply(b *testing.B) {
 	for _, fixture := range proxyANSIBenchmarkFixtures() {
 		b.Run(fixture.name, func(b *testing.B) {
-			proxy, err := newProxySession(domain.RemoteSessionKey{Host: "benchmark", Name: "ansi"}, domain.Size{Cols: 120, Rows: 40})
-			if err != nil {
-				b.Fatal(err)
-			}
+			proxy := newProxyANSIBenchmarkSession(b)
 			generation := proxy.linkGeneration
 			state := uint64(0)
 			b.ReportAllocs()
