@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
@@ -277,6 +279,17 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 			t.Fatalf("insufficient span summary: %+v", s)
 		}
 	}
+}
+
+func TestTraceRecordRetainsTransportDiagnostics(t *testing.T) {
+	line := []byte(`{"process_id":"p","component":"udp","scenario":"s","run":1,"sequence":1,"request_id":1,"epoch":1,"kind":"transport_diagnostic","tick":2,"bytes":3,"fragments":4,"retransmits":5,"pending":6,"ack_rtt_nanos":7,"valid":true}`)
+	var got traceRecord
+	require.NoError(t, json.Unmarshal(line, &got))
+	require.Equal(t, uint64(3), got.Bytes)
+	require.Equal(t, uint64(4), got.Fragments)
+	require.Equal(t, uint64(5), got.Retransmits)
+	require.Equal(t, uint64(6), got.Pending)
+	require.Equal(t, int64(7), got.AckRTTNanos)
 }
 
 func TestHarnessAcceptsConcurrentProductionTraceInterleaving(t *testing.T) {

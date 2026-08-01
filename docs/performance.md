@@ -42,30 +42,97 @@ marks are paired within one process and summarized by component/adapter with
 raw records, counts, p50/p95/p99, and max. Diagnostic fields (bytes, fragments,
 retransmits, pending, ACK RTT) remain separate from duration calculations.
 
-### Baseline procedure and validity
+### Proxy ANSI baseline
 
-Use the public CLI harness (not internal packages):
+The current proxy path transports ANSI and applies it through the local proxy
+VT parser. Build the fixed baseline binary and harness, then verify the harness
+and parser fixtures:
 
 ```sh
-go build -o /tmp/vev-perf ./
-rm -rf testdata/perf/results
-go run ./cmd/vev-perf-harness --vev-bin /tmp/vev-perf \
-  --manifest testdata/perf/manifest.json --out testdata/perf/results \
+go build -o /tmp/vev-proxy-baseline .
+go build -o /tmp/vev-perf-harness ./cmd/vev-perf-harness
+go test ./cmd/vev-perf-harness -count=1
+go test ./internal/usecase/daemon -run '^TestProxyANSIBenchmarkFixtures$' -count=1
+go test ./internal/usecase/daemon -run '^$' \
+  -bench '^BenchmarkProxyANSIApply$' -benchmem -count=10
+```
+
+The pre-change parser results below are medians of ten repetitions on
+Linux/amd64 with an AMD Ryzen 9 7900X3D. The runtime source was commit
+`919bcd18c428`; the benchmark command above ran with Go 1.26.5.
+
+| ANSI workload | ns/op | B/op | allocs/op | ANSI bytes/op |
+| --- | ---: | ---: | ---: | ---: |
+| absolute-position one-cell | 91.06 | 16 | 1 | 9 |
+| 120-column full line | 4,659.5 | 129 | 1 | 126 |
+| fragmented truecolor styled line | 5,861 | 450 | 1 | 419 |
+| full-width 40-row scroll | 233,271.5 | 5,472 | 1 | 4,880 |
+
+Keep the ordinary local ANSI renderer as a separate guardrail:
+
+```sh
+go test ./pkg/renderer -run '^$' -bench '^BenchmarkRenderer' -benchmem -count=10
+```
+
+### Public-CLI transport runs
+
+Use a 10-second warmup, a 30-second measured interval, and ten independent
+repetitions. This representative matrix covers one-cell active output,
+120-column full-line output, fragmented truecolor-styled output, sustained
+interactive flood, resize sweep, snapshot/output/resize, and attach/tab-switch
+across local, SSH stdio, UDP baseline, UDP 25 ms, and UDP 1% loss (35
+scenarios):
+
+```sh
+rm -rf /tmp/vev-proxy-selected
+mkdir -m 700 /tmp/vev-proxy-selected
+for workload in \
+  active_output all_output inactive_output interactive_flood resize_sweep \
+  snapshot_output_resize attach_restore_tab_switch
+do
+  for transport in local ssh_stdio udp_baseline udp_25ms udp_loss_1pct
+  do
+    scenario="1x4-${workload}-${transport}"
+    /tmp/vev-perf-harness --vev-bin /tmp/vev-proxy-baseline \
+      --manifest testdata/perf/manifest.json --scenario "$scenario" \
+      --out "/tmp/vev-proxy-selected/$scenario" \
+      --warmup 10s --duration 30s --repetitions 10
+  done
+done
+```
+
+`all_output` and `inactive_output` provide full-line and styled payload shapes;
+these runs do not claim to activate every pane in their manifest topologies.
+Run the complete canonical matrix only when full-matrix evidence is required:
+
+```sh
+rm -rf /tmp/vev-proxy-matrix
+/tmp/vev-perf-harness --vev-bin /tmp/vev-proxy-baseline \
+  --manifest testdata/perf/manifest.json --out /tmp/vev-proxy-matrix \
   --warmup 10s --duration 30s --repetitions 10
 ```
 
-The minimums are 30 seconds measured and 10 independent repetitions; warmup is
-excluded. During the measured interval the harness injects at most one event per
-second. At least 10 complete event pairs are required: both injection and
-successful terminal flush must fall inside the measured interval; straddling or
-failed events are retained only as raw diagnostics and are not samples. Each run must contain `manifest.json`, `raw-harness.jsonl`, per-process
-JSONL, `runs.json`, and `summary.json`. Reject results with missing input/flush
-boundaries, unmatched IDs, bad correlation, nonmonotonic same-process sequence,
-negative same-domain spans, fewer than 10 complete in-interval event pairs,
-invalid denominators,
-any cross-process tick arithmetic, or unmet duration/repetition minima. Raw
-JSONL and run manifests are the evidence files; no result authorizes a policy
-or optimization change.
+Warmup is excluded. During the measured interval the harness injects at most
+one event per second. At least 10 complete event pairs are required: both input
+injection and successful terminal flush must fall inside the interval.
+Straddling or failed events remain raw diagnostics, not samples. Each run must
+contain `manifest.json`, `raw-harness.jsonl`, per-process JSONL, `runs.json`, and
+`summary.json`.
+
+`summary.json` records the source `git_sha` and measurement parameters;
+`runs.json`, run manifests, and JSONL identify scenario, run, process, component,
+and correlation IDs. Preserve those files with the benchmark output and record
+`go version -m /tmp/vev-proxy-baseline`; do not commit result directories. CPU
+and allocation evidence comes from Go microbenchmarks and process-local span
+durations. End-to-end latency, terminal flush, and byte evidence comes from the
+public-CLI harness. Reset, snapshot, and span counters for structured output are
+candidate-only until that output exists.
+
+Reject results with missing input/flush boundaries, unmatched IDs, bad
+correlation, nonmonotonic same-process sequence, negative same-domain spans,
+fewer than 10 complete in-interval event pairs, invalid denominators, any
+cross-process tick arithmetic, or unmet duration/repetition minima. Raw JSONL
+and run manifests are evidence; no result alone authorizes an optimization.
 
 ## Existing in-process smoke checks
 
@@ -75,5 +142,5 @@ results:
 ```sh
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
 go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -run '^$' -bench=. -benchmem
-go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkComposeFloatingFrameCached$' -benchmem
+go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkComposeCapturedFloatingFrameCached$' -benchmem
 ```

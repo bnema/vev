@@ -134,16 +134,21 @@ func pairedSamples(marks []harnessMark) ([]int64, error) {
 // traceRecord is intentionally local to the command. It mirrors JSONL fields
 // needed for correlation but never exposes a clock to any production component.
 type traceRecord struct {
-	ProcessID string `json:"process_id"`
-	Component string `json:"component"`
-	Scenario  string `json:"scenario"`
-	Run       uint64 `json:"run"`
-	Sequence  uint64 `json:"sequence"`
-	RequestID uint64 `json:"request_id"`
-	Epoch     uint64 `json:"epoch"`
-	Kind      string `json:"kind"`
-	Tick      int64  `json:"tick"`
-	Valid     bool   `json:"valid"`
+	ProcessID   string `json:"process_id"`
+	Component   string `json:"component"`
+	Scenario    string `json:"scenario"`
+	Run         uint64 `json:"run"`
+	Sequence    uint64 `json:"sequence"`
+	RequestID   uint64 `json:"request_id"`
+	Epoch       uint64 `json:"epoch"`
+	Kind        string `json:"kind"`
+	Tick        int64  `json:"tick"`
+	Bytes       uint64 `json:"bytes"`
+	Fragments   uint64 `json:"fragments"`
+	Retransmits uint64 `json:"retransmits"`
+	Pending     uint64 `json:"pending"`
+	AckRTTNanos int64  `json:"ack_rtt_nanos"`
+	Valid       bool   `json:"valid"`
 }
 
 type spanPair struct{ start, end, name string }
