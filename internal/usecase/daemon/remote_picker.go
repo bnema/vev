@@ -151,6 +151,7 @@ func remoteProxyPickerView(key domain.RemoteSessionKey, snap sessionView) picker
 		view.Name += " [expired]"
 	}
 	view.TargetName = ""
+	view.ExpectedCreatedAt = nil
 	view.RemoteKey = &key
 	view.RemoteAvailability = picker.RemoteFresh
 	view.RemoteDetail = remotePickerDetail(uint16(snap.tabCount))

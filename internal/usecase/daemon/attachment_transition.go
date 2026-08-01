@@ -1,8 +1,23 @@
 package daemon
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/bnema/vev/internal/domain"
+)
 
 var errAttachmentTransition = errors.New("attachment transition is no longer valid")
+
+type attachmentLifecycleFence struct {
+	name             string
+	createdAt        int64
+	checkCreatedAt   bool
+	incarnation      domain.IncarnationID
+	checkIncarnation bool
+	tabID            domain.TabStableID
+	tabIndex         int
+	checkTab         bool
+}
 
 type attachmentTransitionRequest struct {
 	source                attachmentSession
@@ -29,6 +44,7 @@ type attachmentTransitionRequest struct {
 	ready                              bool
 	expectedTargetCurrent              *attachedClient
 	expectedTargetTransport            transportSnapshot
+	expectedTargetLifecycle            *attachmentLifecycleFence
 	preflighted                        bool
 	roleEffectsFrozen                  bool
 	expectedTargetTransportInterrupted bool

@@ -578,21 +578,55 @@ type sessionHandoffGuard struct {
 // and revalidates the exact initiating token before changing target focus or
 // attachment ownership.
 func (d *Daemon) switchActiveTargetForRole(token attachmentRoleToken, target picker.Target) error {
+	return d.switchActiveTargetForRoleGuarded(token, target, sessionHandoffGuard{}, "jump-attention")
+}
+
+func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence {
+	fence := &attachmentLifecycleFence{}
+	if target.ExpectedCreatedAt != nil {
+		fence.name = target.Name
+		fence.createdAt = *target.ExpectedCreatedAt
+		fence.checkCreatedAt = true
+	}
+	if target.Incarnation != (domain.IncarnationID{}) {
+		fence.incarnation = target.Incarnation
+		fence.checkIncarnation = true
+	}
+	if target.TabID != "" {
+		fence.tabID = target.TabID
+		fence.tabIndex = target.TabIndex
+		fence.checkTab = true
+	}
+	if !fence.checkCreatedAt && !fence.checkIncarnation && !fence.checkTab {
+		return nil
+	}
+	return fence
+}
+
+func (d *Daemon) switchActiveTargetForRoleGuarded(token attachmentRoleToken, target picker.Target, guard sessionHandoffGuard, action string) error {
 	if token.sess == nil || token.ac == nil || token.role != attachmentActive {
 		return nil
 	}
 	d.mu.Lock()
-	targetSess := d.sessions[target.Session]
+	targetSess, ok := localSession(d.sessions[target.Session])
 	d.mu.Unlock()
-	if targetSess == nil || targetSess == token.sess {
+	if !ok {
+		if !token.activeCurrent() {
+			return nil
+		}
+		d.invalidateRender(token.sess, token.ac, true, "picker.go")
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", nil)
+	}
+	if targetSess == token.sess {
 		return nil
 	}
 
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: token.sess, target: targetSess, next: token.ac,
 		expectedRole: attachmentActive, targetRole: attachmentActive,
-		expectedTransport: token.transport, sourceToken: &token, action: "jump-attention",
-		activateTargetTab: true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
+		expectedTransport: token.transport, sourceToken: &token, action: action,
+		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
+		activateTargetTab:       true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
 	})
 	if err != nil {
 		// Losing the exact source role is a benign stale action, not a notice for
@@ -602,12 +636,15 @@ func (d *Daemon) switchActiveTargetForRole(token attachmentRoleToken, target pic
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", err)
 	}
-	if target, ok := localSession(targetSess); ok {
-		d.touchMRU(target)
+	if guard.closePicker {
+		fresh, admitted := token.ac.beginRoleEffect(transition.published)
+		if admitted {
+			d.closePicker(token.ac)
+			fresh.End()
+		}
 	}
-	if source, ok := localSession(token.sess); ok {
-		token.ac.recordPreviousSession(source)
-	}
+	d.touchMRU(targetSess)
+	token.ac.recordPreviousSession(token.sess)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
 	return nil
@@ -632,6 +669,9 @@ func (d *Daemon) switchToTargetForRole(token attachmentRoleToken, target picker.
 	token.effect.End()
 	if target.RemoteKey != nil {
 		return d.switchToRemoteTargetForRole(token, target, *target.RemoteKey, guard, action)
+	}
+	if token.sess.isProxy() && !target.Stopped {
+		return d.switchActiveTargetForRoleGuarded(token, target, guard, action)
 	}
 	sess, ok := localSession(token.sess)
 	if !ok {

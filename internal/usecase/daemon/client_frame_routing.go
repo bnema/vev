@@ -2,10 +2,38 @@ package daemon
 
 import (
 	"errors"
+	"runtime"
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 )
+
+const connectionRoleAttempts = 8
+
+// currentConnectionRole retries the lock-free session-to-role snapshot when a
+// handoff lands between those reads. The role gate still performs the final
+// mutation admission after this function returns.
+func (d *Daemon) currentConnectionRole(ac *attachedClient, tr ports.Transport) (attachmentSession, attachmentRoleToken, bool) {
+	for range connectionRoleAttempts {
+		if !ac.currentTransportIs(tr) {
+			break
+		}
+		sess := ac.currentAttachmentSession()
+		if sess == nil {
+			return nil, attachmentRoleToken{}, false
+		}
+		if d.afterConnectionSessionSnapshot != nil {
+			d.afterConnectionSessionSnapshot(sess)
+		}
+		token := attachmentToken(sess, ac, tr)
+		if token.role == attachmentDetached || ac.currentAttachmentSession() != sess {
+			runtime.Gosched()
+			continue
+		}
+		return sess, token, true
+	}
+	return nil, attachmentRoleToken{}, false
+}
 
 // runConnLoop is the per-connection input router: it pumps client messages
 // until detach, EOF, or a transport error. Role is resolved after every Recv so
@@ -17,31 +45,36 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		return
 	}
 	for {
-		if !ac.currentTransportIs(tr) {
-			return
-		}
-		sess := ac.currentSession()
-		if sess == nil {
+		if !ac.currentTransportIs(tr) || ac.currentAttachmentSession() == nil {
 			return
 		}
 		f, err := tr.Recv()
 		if err != nil {
-			token := sess.attachmentToken(ac, tr)
-			if token.role == attachmentSnatched {
-				d.parkOrDropSnatchedAttachment(token)
-			} else {
-				d.clientGone(sess, ac, tr, false)
+			for range connectionRoleAttempts {
+				sess, token, ok := d.currentConnectionRole(ac, tr)
+				if !ok {
+					return
+				}
+				if token.role == attachmentSnatched {
+					d.parkOrDropSnatchedAttachment(token)
+				} else if proxy, ok := sess.(*proxySession); ok {
+					d.detachProxyOnSendError(proxy, ac, tr)
+				} else if local, ok := localSession(sess); ok {
+					d.clientGone(local, ac, tr, false)
+				} else {
+					return
+				}
+				current := ac.currentAttachmentSession()
+				if current == sess || !ac.currentTransportIs(tr) || current == nil {
+					return
+				}
 			}
 			return
 		}
-		if !ac.currentTransportIs(tr) {
+		_, token, ok := d.currentConnectionRole(ac, tr)
+		if !ok {
 			return
 		}
-		sess = ac.currentSession()
-		if sess == nil {
-			return
-		}
-		token := sess.attachmentToken(ac, tr)
 		switch token.role {
 		case attachmentActive:
 			if d.handleActiveClientFrame(token, f) {
@@ -51,8 +84,6 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			if d.handleSnatchedClientFrame(token, f) {
 				return
 			}
-		default:
-			return
 		}
 	}
 }
