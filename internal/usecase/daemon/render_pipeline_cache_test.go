@@ -15,9 +15,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type cacheFailTransport struct{}
+type cacheFailTransport struct {
+	err error
+}
 
-func (cacheFailTransport) Send(ports.Frame) error     { return errors.New("send failed") }
+func (t cacheFailTransport) Send(ports.Frame) error {
+	if t.err != nil {
+		return t.err
+	}
+	return errors.New("send failed")
+}
 func (cacheFailTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
 func (cacheFailTransport) Close() error               { return nil }
 

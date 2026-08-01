@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -119,16 +120,31 @@ func (d *Daemon) sendSnatchedPanel(ac *attachedClient, expected transportSnapsho
 		if err != nil {
 			return err
 		}
-		data := append(append([]byte(nil), prepared.data...), ac.encodeCursorTail(cursorOut{hidden: true}, true)...)
+		cursor := ac.prepareCursorTail(cursorOut{hidden: true}, true)
+		data := append(append([]byte(nil), prepared.data...), cursor.data...)
 		if effect != nil && !effect.beginTransportSend(expected) {
 			return errAttachmentTransition
 		}
-		err = prepared.send(data, ac.echoAck.Load(), expected.transport.Send)
-		if effect != nil {
+		effectActive := effect != nil
+		err = prepared.send(data, ac.echoAck.Load(), func(frame ports.Frame) error {
+			err := expected.transport.Send(frame)
+			if effectActive {
+				if err != nil {
+					effect.reportTransportFailure(expected)
+				}
+				effect.endTransportSend()
+				effectActive = false
+			}
+			return err
+		})
+		if effectActive {
 			if err != nil {
 				effect.reportTransportFailure(expected)
 			}
 			effect.endTransportSend()
+		}
+		if err == nil {
+			ac.lastCursor = cursor.next
 		}
 		return err
 	})

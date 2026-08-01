@@ -198,6 +198,16 @@ func (t *roleEffectTicket) endTransportSend() {
 // beginRoleEffect is the sole role-bound effect admission point. The gate is
 // held only long enough to reserve the capability; the effect itself must run
 // without the gate mutex.
+func (ac *attachedClient) transportEffectActive() bool {
+	if ac == nil {
+		return false
+	}
+	g := &ac.roleEffects
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.transportEffects) != 0
+}
+
 func (ac *attachedClient) beginRoleEffect(token attachmentRoleToken) (*roleEffectTicket, bool) {
 	if ac == nil || token.ac != ac {
 		return nil, false

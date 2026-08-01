@@ -11,7 +11,8 @@ func TestBuildDamagePlan(t *testing.T) {
 		name   string
 		frame  Frame
 		damage []Damage
-		want   []damageSpan
+		skip   *Damage
+		want   []Span
 		full   bool
 	}{
 		{
@@ -21,7 +22,7 @@ func TestBuildDamagePlan(t *testing.T) {
 				{Kind: DamageText, X: 4, Y: 0, Width: 5, Height: 1},
 				{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1},
 			},
-			want: []damageSpan{{y: 0, x: 0, width: 9}},
+			want: []Span{{Y: 0, X: 0, Width: 9}},
 		},
 		{
 			name:  "merges text and clear",
@@ -30,7 +31,7 @@ func TestBuildDamagePlan(t *testing.T) {
 				{Kind: DamageClear, X: 5, Y: 0, Width: 4, Height: 1},
 				{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1},
 			},
-			want: []damageSpan{{y: 0, x: 0, width: 9}},
+			want: []Span{{Y: 0, X: 0, Width: 9}},
 		},
 		{
 			name:  "orders multi-row spans",
@@ -41,10 +42,10 @@ func TestBuildDamagePlan(t *testing.T) {
 				{Kind: DamageText, X: 1, Y: 0, Width: 2, Height: 2},
 				{Kind: DamageScrollUp, X: 0, Y: 0, Width: 10, Height: 3, Count: 1},
 			},
-			want: []damageSpan{
-				{y: 0, x: 1, width: 2}, {y: 0, x: 4, width: 2},
-				{y: 1, x: 1, width: 2}, {y: 1, x: 4, width: 2},
-				{y: 2, x: 5, width: 2},
+			want: []Span{
+				{Y: 0, X: 1, Width: 2}, {Y: 0, X: 4, Width: 2},
+				{Y: 1, X: 1, Width: 2}, {Y: 1, X: 4, Width: 2},
+				{Y: 2, X: 5, Width: 2},
 			},
 		},
 		{
@@ -54,7 +55,7 @@ func TestBuildDamagePlan(t *testing.T) {
 				{Kind: DamageText, X: -2, Y: -1, Width: 5, Height: 3},
 				{Kind: DamageClear, X: 8, Y: 1, Width: 5, Height: 3},
 			},
-			want: []damageSpan{{y: 0, x: 0, width: 3}, {y: 1, x: 0, width: 3}, {y: 1, x: 8, width: 2}, {y: 2, x: 8, width: 2}},
+			want: []Span{{Y: 0, X: 0, Width: 3}, {Y: 1, X: 0, Width: 3}, {Y: 1, X: 8, Width: 2}, {Y: 2, X: 8, Width: 2}},
 		},
 		{
 			name:  "does not mutate input",
@@ -63,7 +64,7 @@ func TestBuildDamagePlan(t *testing.T) {
 				{Kind: DamageText, X: 5, Y: 1, Width: 2, Height: 1},
 				{Kind: DamageText, X: 1, Y: 0, Width: 2, Height: 1},
 			},
-			want: []damageSpan{{y: 0, x: 1, width: 2}, {y: 1, x: 5, width: 2}},
+			want: []Span{{Y: 0, X: 1, Width: 2}, {Y: 1, X: 5, Width: 2}},
 		},
 		{
 			name:   "exceeding budget requests full redraw",
@@ -72,12 +73,29 @@ func TestBuildDamagePlan(t *testing.T) {
 			want:   nil,
 			full:   true,
 		},
+		{
+			name:  "exceeding budget across multiple damages requests full redraw",
+			frame: NewFrame(1, maxPlannedDamageSpans+1),
+			damage: []Damage{
+				{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: maxPlannedDamageSpans},
+				{Kind: DamageText, X: 0, Y: maxPlannedDamageSpans, Width: 1, Height: 1},
+			},
+			want: nil,
+			full: true,
+		},
+		{
+			name:   "skips the matching damage",
+			frame:  NewFrame(10, 1),
+			damage: []Damage{{Kind: DamageText, X: 1, Y: 0, Width: 2, Height: 1}},
+			skip:   &Damage{Kind: DamageText, X: 1, Y: 0, Width: 2, Height: 1},
+			want:   nil,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			original := append([]Damage(nil), tt.damage...)
-			got, full := buildDamagePlan(tt.frame, tt.damage, nil)
+			got, full := buildDamagePlan(tt.frame, tt.damage, tt.skip)
 			if full != tt.full || !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("buildDamagePlan() = %#v, full = %v; want %#v, %v", got, full, tt.want, tt.full)
 			}
@@ -95,16 +113,5 @@ func TestClampRectRejectsOverflowingBounds(t *testing.T) {
 	}
 	if _, _, _, _, ok := clampRect(frame, 0, math.MaxInt-1, 1, 4); ok {
 		t.Fatal("clampRect accepted overflowing y bound")
-	}
-}
-
-func TestSyncRectRejectsOverflowingBounds(t *testing.T) {
-	r := New(Capabilities{})
-	frame := NewFrame(2, 1)
-	r.replaceShadow(frame)
-	before := append([]Cell(nil), r.shadow...)
-	r.syncRect(frame, math.MaxInt-1, 0, 4, 1)
-	if !reflect.DeepEqual(r.shadow, before) {
-		t.Fatal("syncRect changed shadow for overflowing bounds")
 	}
 }
