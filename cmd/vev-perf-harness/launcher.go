@@ -198,6 +198,11 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		if err != nil {
 			return nil, err
 		}
+		if err := setPTYWinsize(int(master.Fd()), 120, 40); err != nil {
+			_ = master.Close()
+			_ = slave.Close()
+			return nil, fmt.Errorf("set canonical client PTY geometry: %w", err)
+		}
 		output, err := os.OpenFile(filepath.Join(filepath.Dir(m.TracePath), "terminal-output"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 		if err != nil {
 			_ = master.Close()

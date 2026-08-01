@@ -99,6 +99,7 @@ type runResult struct {
 type summary struct {
 	Schema           uint16        `json:"schema"`
 	GitSHA           string        `json:"git_sha"`
+	VevGitSHA        string        `json:"vev_git_sha"`
 	Warmup           string        `json:"warmup"`
 	Duration         string        `json:"duration"`
 	Repetitions      int           `json:"repetitions"`

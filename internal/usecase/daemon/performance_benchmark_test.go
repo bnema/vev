@@ -214,8 +214,7 @@ func TestProxyANSIBenchmarkFixtures(t *testing.T) {
 
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
-			proxy, err := newProxySession(domain.RemoteSessionKey{Host: "benchmark", Name: "ansi"}, domain.Size{Cols: 120, Rows: 40 + tabChromeRows})
-			require.NoError(t, err)
+			proxy := newProxyANSIBenchmarkSession(t)
 
 			ack, reset, changed := proxy.applyOutputForGeneration(proxy.linkGeneration, ports.Output{
 				BaseStateNum: 0,
@@ -231,10 +230,6 @@ func TestProxyANSIBenchmarkFixtures(t *testing.T) {
 			proxy.mu.Unlock()
 		})
 	}
-}
-
-func TestProxyANSIBenchmarkGeometry(t *testing.T) {
-	newProxyANSIBenchmarkSession(t)
 }
 
 func newProxyANSIBenchmarkSession(t testing.TB) *proxySession {

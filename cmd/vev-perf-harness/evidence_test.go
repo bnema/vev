@@ -254,7 +254,13 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	h := defaultHarness()
 	h.clock = &fakeClock{}
 	h.launcher = l
-	h.gitSHA = func() string { return "test-sha" }
+	h.gitSHA = func() string { return "harness-sha" }
+	h.vevGitSHA = func(path string) string {
+		if !filepath.IsAbs(path) {
+			t.Fatalf("measured binary path is not resolved: %q", path)
+		}
+		return "measured-vev-sha"
+	}
 	if err := run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", filepath.Join(dir, "out"), "--warmup", "1s", "--duration", "30s", "--repetitions", "10"}, h); err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +276,9 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	}
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
+	}
+	if got.GitSHA != "harness-sha" || got.VevGitSHA != "measured-vev-sha" {
+		t.Fatalf("summary provenance = harness %q measured vev %q", got.GitSHA, got.VevGitSHA)
 	}
 	if got.EndToEnd.Count < 10*minimumInIntervalEventSamples || got.Repetitions != 10 || got.RunP50Dispersion.Count != 10 || got.Cadence.Count == 0 || got.MaxGap == 0 || len(got.Spans) == 0 {
 		t.Fatalf("summary=%+v", got)

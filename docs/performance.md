@@ -123,7 +123,8 @@ Straddling or failed events remain raw diagnostics, not samples. Each run must
 contain `manifest.json`, `raw-harness.jsonl`, per-process JSONL, `runs.json`, and
 `summary.json`.
 
-`summary.json` records the source `git_sha` and measurement parameters;
+`summary.json` records the harness source as `git_sha`, the measured vev binary
+source as `vev_git_sha`, and the measurement parameters;
 `runs.json`, run manifests, and JSONL identify scenario, run, process, component,
 and correlation IDs. Preserve those files with the benchmark output and record
 `go version -m /tmp/vev-proxy-baseline`; do not commit result directories. CPU
