@@ -10,6 +10,12 @@ func markBenchmarkFrame(f *Frame) {
 	}
 }
 
+func setBenchmarkShadow(r *Renderer, frame Frame) {
+	committed := r.committedFrame()
+	replaceFrame(&committed, frame)
+	r.setCommittedFrame(committed)
+}
+
 func BenchmarkRendererFullFrameDraw(b *testing.B) {
 	frame := NewFrame(120, 40)
 	markBenchmarkFrame(&frame)
@@ -63,7 +69,128 @@ func BenchmarkRendererFragmentedDamage(b *testing.B) {
 	var outBytes int64
 	for b.Loop() {
 		// Each iteration starts with the identical pre-update terminal shadow.
-		r.replaceShadow(baseline)
+		setBenchmarkShadow(r, baseline)
+		out, err := r.Draw(frame, damage)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(out) == 0 {
+			b.Fatal("expected renderer output")
+		}
+		outBytes += int64(len(out))
+	}
+	b.ReportMetric(float64(outBytes)/float64(b.N), "outbytes/op")
+}
+
+func BenchmarkRendererIncrementalOneCellPrepareCommit(b *testing.B) {
+	frame := NewFrame(120, 40)
+	markBenchmarkFrame(&frame)
+	r := New(Capabilities{})
+	initial, err := r.Prepare(frame, []Damage{FullRedraw()}, false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	initial.Commit()
+	damage := []Damage{{Kind: DamageText, X: 60, Y: 20, Width: 1, Height: 1}}
+
+	b.ReportAllocs()
+	var outBytes int64
+	changed := false
+	for b.Loop() {
+		changed = !changed
+		cell := Cell{Rune: 'X', Style: DefaultStyle()}
+		if changed {
+			cell.Rune = 'Y'
+		}
+		frame.Set(60, 20, cell)
+		prepared, err := r.Prepare(frame, damage, false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(prepared.Bytes()) == 0 {
+			b.Fatal("expected renderer output")
+		}
+		outBytes += int64(len(prepared.Bytes()))
+		prepared.Commit()
+	}
+	b.ReportMetric(float64(outBytes)/float64(b.N), "outbytes/op")
+}
+
+func BenchmarkRendererIncrementalOneCellDraw(b *testing.B) {
+	frame := NewFrame(120, 40)
+	markBenchmarkFrame(&frame)
+	r := New(Capabilities{})
+	if _, err := r.Draw(frame, []Damage{FullRedraw()}); err != nil {
+		b.Fatal(err)
+	}
+	damage := []Damage{{Kind: DamageText, X: 60, Y: 20, Width: 1, Height: 1}}
+
+	b.ReportAllocs()
+	var outBytes int64
+	changed := false
+	for b.Loop() {
+		changed = !changed
+		cell := Cell{Rune: 'X', Style: DefaultStyle()}
+		if changed {
+			cell.Rune = 'Y'
+		}
+		frame.Set(60, 20, cell)
+		out, err := r.Draw(frame, damage)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(out) == 0 {
+			b.Fatal("expected renderer output")
+		}
+		outBytes += int64(len(out))
+	}
+	b.ReportMetric(float64(outBytes)/float64(b.N), "outbytes/op")
+}
+
+func BenchmarkRendererIncrementalNoBytePrepareCommit(b *testing.B) {
+	frame := NewFrame(120, 40)
+	markBenchmarkFrame(&frame)
+	r := New(Capabilities{})
+	initial, err := r.Prepare(frame, []Damage{FullRedraw()}, false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	initial.Commit()
+
+	b.ReportAllocs()
+	for b.Loop() {
+		prepared, err := r.Prepare(frame, nil, false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(prepared.Bytes()) != 0 {
+			b.Fatal("expected no output")
+		}
+		prepared.Commit()
+	}
+}
+
+func BenchmarkRendererBroadRegularDamage(b *testing.B) {
+	const (
+		width  = 120
+		height = 40
+	)
+	baseline := NewFrame(width, height)
+	markBenchmarkFrame(&baseline)
+	frame := baseline.Clone()
+	for y := range height {
+		frame.Set(0, y, Cell{Rune: 'z', Style: DefaultStyle()})
+	}
+	damage := make([]Damage, height)
+	for y := range height {
+		damage[y] = Damage{Kind: DamageText, X: 0, Y: y, Width: width, Height: 1}
+	}
+
+	r := New(Capabilities{})
+	b.ReportAllocs()
+	var outBytes int64
+	for b.Loop() {
+		setBenchmarkShadow(r, baseline)
 		out, err := r.Draw(frame, damage)
 		if err != nil {
 			b.Fatal(err)
@@ -100,7 +227,7 @@ func BenchmarkRendererScrollFastPath(b *testing.B) {
 	b.ReportAllocs()
 	var outBytes int64
 	for b.Loop() {
-		r.replaceShadow(frame)
+		setBenchmarkShadow(r, frame)
 		out, err := r.Draw(scrolled, damage)
 		if err != nil {
 			b.Fatal(err)

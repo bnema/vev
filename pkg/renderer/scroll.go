@@ -42,28 +42,22 @@ func emitScrollUp(out *bytes.Buffer, d Damage) {
 	out.WriteString("\x1b[r")
 }
 
-func (r *Renderer) canApplyScroll(frame Frame, scroll Damage, damage []Damage) bool {
+func canApplyScrollAgainst(frame Frame, scroll Damage, damage []Damage, committed Frame) bool {
 	for y := scroll.Y; y < scroll.Y+scroll.Height-scroll.Count; y++ {
 		frameRow := frame.Row(y)
-		shadowStart := (y+scroll.Count)*r.width + scroll.X
+		committedRow := committed.Row(y + scroll.Count)
 		for x := range scroll.Width {
-			if r.shadow[shadowStart+x].Equal(frameRow[scroll.X+x]) {
+			column := scroll.X + x
+			committedCell, frameCell := committedRow[column], frameRow[column]
+			if committedCell == frameCell || committedCell.Equal(frameCell) {
 				continue
 			}
-			if !damageCoversCell(damage, scroll.X+x, y) {
+			if !damageCoversCell(damage, column, y) {
 				return false
 			}
 		}
 	}
 	return true
-}
-
-func (r *Renderer) applyScroll(scroll Damage) {
-	for y := scroll.Y; y < scroll.Y+scroll.Height-scroll.Count; y++ {
-		dst := y*r.width + scroll.X
-		src := (y+scroll.Count)*r.width + scroll.X
-		copy(r.shadow[dst:dst+scroll.Width], r.shadow[src:src+scroll.Width])
-	}
 }
 
 func damageCoversCell(damage []Damage, x, y int) bool {

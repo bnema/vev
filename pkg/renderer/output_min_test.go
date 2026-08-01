@@ -264,9 +264,8 @@ func TestRightEdgeRunInvalidatesTracking(t *testing.T) {
 func TestWideRunCursorTrackingAndEL(t *testing.T) {
 	t.Run("cursor advances two columns per wide rune", func(t *testing.T) {
 		// Rect A ends with a wide pair (not at the edge); rect B starts one
-		// column later. The gap between them must be crossed with the cursor
-		// position that reflects the terminal advancing two columns for the
-		// wide rune — otherwise the relative move would be wrong.
+		// column later. The literal space in the expected output bridges the
+		// damaged regions.
 		r := New(Capabilities{})
 		base := NewFrame(8, 1)
 		if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
@@ -286,8 +285,8 @@ func TestWideRunCursorTrackingAndEL(t *testing.T) {
 			{Kind: DamageText, X: 5, Y: 0, Width: 3, Height: 1, Count: 1},
 		}
 		got := drawGolden(t, r, frame, damage)
-		// After 你AB the cursor is at col 4; moving to col 5 is a one-column CUF.
-		want := "\x1b[1;1H你AB\x1b[CCDE\x1b[0m"
+		// The literal space bridges the undamaged gap between the two regions.
+		want := "\x1b[1;1H你AB CDE\x1b[0m"
 		if got != want {
 			t.Fatalf("output = %q, want %q", got, want)
 		}
@@ -295,9 +294,8 @@ func TestWideRunCursorTrackingAndEL(t *testing.T) {
 
 	t.Run("rect splitting a wide pair invalidates tracking", func(t *testing.T) {
 		// A damage rect that ends on a wide head whose continuation lies
-		// outside the rect makes the terminal advance one column further than
-		// the rect width accounts for. Tracking must be dropped: the next
-		// rect must be positioned with absolute CUP, not a relative move.
+		// outside the rect is followed by a literal space that bridges the
+		// damaged regions. The trailing erase sequence clears the row tail.
 		r := New(Capabilities{})
 		base := NewFrame(8, 1)
 		if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
@@ -314,9 +312,9 @@ func TestWideRunCursorTrackingAndEL(t *testing.T) {
 			{Kind: DamageText, X: 4, Y: 0, Width: 1, Height: 1, Count: 1},
 		}
 		got := drawGolden(t, r, frame, damage)
-		// After A你 the real cursor is at col 3, not col 2: a relative CUF
-		// would be off by one, so the second rect must use absolute CUP.
-		want := "\x1b[1;1HA你\x1b[1;5HB\x1b[0m"
+		// The expected output preserves the literal-space bridge and trailing
+		// erase sequence for this split wide pair.
+		want := "\x1b[1;1HA你 B\x1b[K\x1b[0m"
 		if got != want {
 			t.Fatalf("output = %q, want %q", got, want)
 		}
@@ -425,7 +423,7 @@ func TestCanonicalDamagePreservesWideHeadTracking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(out), "\x1b[1;1HA你\x1b[1;5HB\x1b[0m"; got != want {
+	if got, want := string(out), "\x1b[1;1HA你 B\x1b[K\x1b[0m"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }

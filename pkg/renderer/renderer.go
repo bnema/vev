@@ -17,10 +17,20 @@ type Capabilities struct {
 }
 
 type Renderer struct {
-	caps   Capabilities
-	width  int
-	height int
-	shadow []Cell
+	caps       Capabilities
+	width      int
+	height     int
+	shadow     []Cell
+	lineOffset []int
+}
+
+// PreparedDraw owns encoded output and its transactional delta until Commit.
+// It is returned by value so ordinary prepared draws do not allocate.
+type PreparedDraw struct {
+	renderer  *Renderer
+	candidate DeltaCandidate
+	data      []byte
+	committed bool
 }
 
 func New(caps Capabilities) *Renderer { return &Renderer{caps: caps} }
@@ -29,102 +39,98 @@ func (r *Renderer) Reset() {
 	r.width = 0
 	r.height = 0
 	r.shadow = nil
+	r.lineOffset = nil
 }
 
-func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
-	if err := frame.Validate(); err != nil {
-		return nil, err
+// Bytes returns the prepared ANSI output. The returned bytes remain valid after
+// another draw.
+func (p PreparedDraw) Bytes() []byte { return p.data }
+
+// Commit applies the prepared delta exactly once. Discarding it leaves the
+// renderer's committed state unchanged.
+func (p *PreparedDraw) Commit() {
+	if p == nil || p.renderer == nil || p.committed {
+		return
+	}
+	committed := p.renderer.committedFrame()
+	p.candidate.Commit(&committed)
+	p.renderer.setCommittedFrame(committed)
+	p.committed = true
+}
+
+// Prepare plans and encodes a transactional draw. The renderer advances only
+// when the returned draw is committed.
+func (r *Renderer) Prepare(frame Frame, damage []Damage, reset bool) (PreparedDraw, error) {
+	var candidate DeltaCandidate
+	var err error
+	if !reset && len(r.shadow) != 0 && r.width == frame.Width && r.height == frame.Height && len(damage) == 1 && (damage[0].Kind == DamageText || damage[0].Kind == DamageClear) {
+		if err = frame.Validate(); err == nil {
+			candidate = DeltaCandidate{Plan: planSingleDamage(frame, damage[0]), frame: frame}
+		}
+	} else {
+		candidate, err = PlanDelta(frame, damage, r.committedFrame(), reset || len(r.shadow) == 0)
+	}
+	if err != nil {
+		return PreparedDraw{}, err
+	}
+	prepared := PreparedDraw{renderer: r, candidate: candidate}
+	plan := candidate.Plan
+	if !plan.Snapshot && plan.Scroll.Height == 0 && len(plan.Spans) == 0 {
+		return prepared, nil
 	}
 
-	knownSameDimensions := r.width == frame.Width && r.height == frame.Height && len(r.shadow) == len(frame.Cells)
-
-	// Unchanged frame no-op: same dimensions, shadow populated, and either no
-	// damage or a structural redraw request that can be satisfied from the
-	// known terminal shadow.
-	if knownSameDimensions {
-		if len(damage) == 0 && !r.hasDirtyLines(frame) {
-			return nil, nil
-		}
-		if needsFull(damage) && !r.hasDirtyLines(frame) {
-			return nil, nil
-		}
+	buf, ok := bufferPool.Get().(*bytes.Buffer)
+	if !ok {
+		buf = new(bytes.Buffer)
 	}
-
-	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer putBuffer(buf)
-
 	if r.caps.SynchronizedOutput {
 		buf.WriteString(SyncStartCSI)
 	}
 
-	// Per-Draw terminal state model shared by every emission path so cursor
-	// tracking and the SGR pen persist across all rects within one Draw.
 	st := newDrawState()
-
-	if !knownSameDimensions {
-		r.writeFull(buf, frame, &st)
-		r.advanceShadow(frame)
-		if r.caps.SynchronizedOutput {
-			buf.WriteString(SyncEndCSI)
-		}
-		return copyBytes(buf), nil
-	}
-
-	if needsFull(damage) {
-		r.writeDamage(buf, frame, nil, nil, &st)
-		r.advanceShadow(frame)
-		if r.caps.SynchronizedOutput {
-			buf.WriteString(SyncEndCSI)
-		}
-		return copyBytes(buf), nil
-	}
-
-	if scroll, ok := findSafeScroll(frame, damage); ok && r.canApplyScroll(frame, scroll, damage) {
-		spans, full := buildDamagePlan(frame, damage, &scroll)
-		if full {
+	if plan.Snapshot {
+		if len(plan.Spans) > 0 {
+			r.emitDamageSpans(buf, frame, plan.Spans, &st)
+		} else {
 			r.writeFull(buf, frame, &st)
-			r.advanceShadow(frame)
-			if r.caps.SynchronizedOutput {
-				buf.WriteString(SyncEndCSI)
-			}
-			return copyBytes(buf), nil
 		}
-
-		emitScrollUp(buf, scroll)
-		// emitScrollUp resets the SGR pen to default (matching st's initial
-		// pen) but leaves the cursor wherever the DECSTBM restore put it —
-		// terminal-dependent, so cursor tracking stays invalidated.
-		r.applyScroll(scroll)
-		r.emitDamageSpans(buf, frame, spans, &st)
-		r.advanceDamage(frame, damage, &scroll)
-		if r.caps.SynchronizedOutput {
-			buf.WriteString(SyncEndCSI)
-		}
-		return copyBytes(buf), nil
-	}
-
-	// Scroll damage changes rows outside the explicit text/clear rectangles.
-	// If the fast path is not safe, redraw the frame instead of applying
-	// partial damage and leaving the terminal/shadow stale.
-	if hasScrollDamage(damage) {
-		r.writeFull(buf, frame, &st)
-		r.advanceShadow(frame)
-		if r.caps.SynchronizedOutput {
-			buf.WriteString(SyncEndCSI)
-		}
-		return copyBytes(buf), nil
-	}
-
-	if r.writeDamage(buf, frame, damage, nil, &st) {
-		r.advanceShadow(frame)
 	} else {
-		r.advanceDamage(frame, damage, nil)
+		if plan.Scroll.Height != 0 {
+			scroll := plan.Scroll
+			emitScrollUp(buf, Damage{Kind: DamageScrollUp, X: 0, Y: scroll.Y, Width: frame.Width, Height: scroll.Height, Count: scroll.Count})
+		}
+		for _, span := range plan.Spans {
+			r.emitSpan(buf, frame, span.Y, span.X, span.Width, &st)
+		}
+		buf.WriteString("\x1b[0m")
 	}
 	if r.caps.SynchronizedOutput {
 		buf.WriteString(SyncEndCSI)
 	}
-	return copyBytes(buf), nil
+	prepared.data = copyBytes(buf)
+	return prepared, nil
+}
+
+func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
+	prepared, err := r.Prepare(frame, damage, false)
+	if err != nil {
+		return nil, err
+	}
+	prepared.Commit()
+	return prepared.Bytes(), nil
+}
+
+func (r *Renderer) committedFrame() Frame {
+	return Frame{Width: r.width, Height: r.height, Cells: r.shadow, lineOffset: r.lineOffset}
+}
+
+func (r *Renderer) setCommittedFrame(frame Frame) {
+	r.width = frame.Width
+	r.height = frame.Height
+	r.shadow = frame.Cells
+	r.lineOffset = frame.lineOffset
 }
 
 // copyBytes copies the buffer contents into a fresh byte slice and is used
@@ -141,15 +147,6 @@ func putBuffer(buf *bytes.Buffer) {
 		return
 	}
 	bufferPool.Put(buf)
-}
-
-func (r *Renderer) hasDirtyLines(frame Frame) bool {
-	for y := range frame.Height {
-		if r.lineDirty(frame, y) {
-			return true
-		}
-	}
-	return false
 }
 
 func needsFull(damage []Damage) bool {
@@ -180,100 +177,12 @@ func (r *Renderer) writeFull(out *bytes.Buffer, frame Frame, st *drawState) {
 	out.WriteString("\x1b[0m")
 }
 
-// writeDamage emits a canonical, bounded view of text and clear damage. It
-// reports whether the planner exceeded its budget and emitted a full redraw.
-func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, skip *Damage, st *drawState) bool {
-	if len(damage) == 0 {
-		for y := range frame.Height {
-			if r.lineDirty(frame, y) {
-				r.emitSpan(out, frame, y, 0, frame.Width, st)
-			}
-		}
-		out.WriteString("\x1b[0m")
-		return false
-	}
-
-	spans, full := buildDamagePlan(frame, damage, skip)
-	if full {
-		r.writeFull(out, frame, st)
-		return true
-	}
-	r.emitDamageSpans(out, frame, spans, st)
-	return false
-}
-
-func (r *Renderer) emitDamageSpans(out *bytes.Buffer, frame Frame, spans []damageSpan, st *drawState) {
+func (r *Renderer) emitDamageSpans(out *bytes.Buffer, frame Frame, spans []Span, st *drawState) {
 	for _, span := range spans {
-		r.emitSpan(out, frame, span.y, span.x, span.width, st)
+		r.emitSpan(out, frame, span.Y, span.X, span.Width, st)
 	}
 	out.WriteString("\x1b[0m")
 }
-
-func (r *Renderer) lineDirty(frame Frame, y int) bool {
-	// The shadow is stored in canonical (logical) row order; the frame is read
-	// through its logical accessor so the frame's physical layout is invisible.
-	start := y * frame.Width
-	row := frame.Row(y)
-	for i := range frame.Width {
-		if !r.shadow[start+i].Equal(row[i]) {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Renderer) advanceShadow(frame Frame) {
-	r.replaceShadow(frame)
-}
-
-func (r *Renderer) advanceDamage(frame Frame, damage []Damage, scroll *Damage) {
-	r.syncDamage(frame, damage, scroll)
-}
-
-func (r *Renderer) replaceShadow(frame Frame) {
-	r.width = frame.Width
-	r.height = frame.Height
-	n := len(frame.Cells)
-	if cap(r.shadow) >= n {
-		r.shadow = r.shadow[:n]
-	} else {
-		r.shadow = make([]Cell, n)
-	}
-	// Copy logical rows into canonical shadow order so the frame's line-offset
-	// rotation never leaks into the renderer's own buffer.
-	for y := range frame.Height {
-		copy(r.shadow[y*frame.Width:], frame.Row(y))
-	}
-}
-
-func (r *Renderer) syncDamage(frame Frame, damage []Damage, scroll *Damage) {
-	if len(damage) == 0 {
-		r.replaceShadow(frame)
-		return
-	}
-	if scroll != nil {
-		r.syncRect(frame, scroll.X, scroll.Y+scroll.Height-scroll.Count, scroll.Width, scroll.Count)
-	}
-	for _, d := range damage {
-		switch d.Kind {
-		case DamageText, DamageClear:
-			r.syncRect(frame, d.X, d.Y, d.Width, d.Height)
-		}
-	}
-}
-
-func (r *Renderer) syncRect(frame Frame, x, y, width, height int) {
-	x, y, width, height, ok := clampRect(frame, x, y, width, height)
-	if !ok {
-		return
-	}
-	for row := y; row < y+height; row++ {
-		start := row*frame.Width + x
-		frameRow := frame.Row(row)
-		copy(r.shadow[start:start+width], frameRow[x:x+width])
-	}
-}
-
 func clampRect(frame Frame, x, y, width, height int) (int, int, int, int, bool) {
 	x, width, okX := clampRange(x, width, frame.Width)
 	y, height, okY := clampRange(y, height, frame.Height)
@@ -303,10 +212,7 @@ func clampRange(pos, size, limit int) (int, int, bool) {
 	}
 
 	available := limit - pos
-	if size > available {
-		size = available
-	}
-	return pos, size, true
+	return pos, min(size, available), true
 }
 
 // writeCursor emits a cursor-positioning CSI sequence without fmt.Fprintf

@@ -18,6 +18,7 @@ type outputStateStream struct {
 	next           uint64
 	acked          uint64
 	maxOutstanding uint64
+	forceSnapshot  bool
 }
 
 func newOutputStateStream(windowSize ...uint8) *outputStateStream {
@@ -31,46 +32,62 @@ func newOutputStateStream(windowSize ...uint8) *outputStateStream {
 	}
 }
 
-func (s *outputStateStream) render(frame renderer.Frame, damage []renderer.Damage, reset bool) ([]byte, error) {
-	if reset {
-		s.renderer.Reset()
-	}
-	return s.renderer.Draw(frame, damage)
-}
-
 type preparedOutput struct {
-	stream *outputStateStream
-	next   uint64
-	data   []byte
-	reset  bool
+	stream    *outputStateStream
+	draw      renderer.PreparedDraw
+	next      uint64
+	data      []byte
+	reset     bool
+	completed bool
 }
 
 func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
-	data, err := s.render(frame, damage, reset)
+	reset = reset || s.forceSnapshot
+	draw, err := s.renderer.Prepare(frame, damage, reset)
 	if err != nil {
 		return nil, err
 	}
-	return &preparedOutput{stream: s, next: s.next, data: data, reset: reset}, nil
+	return &preparedOutput{
+		stream: s,
+		draw:   draw,
+		next:   s.next + 1,
+		data:   draw.Bytes(),
+		reset:  reset,
+	}, nil
 }
 
 func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame) error) error {
-	out := p.stream.frame(data, p.reset, echoAck)
+	if p.completed {
+		return nil
+	}
+	p.completed = true
+	base := p.stream.next
+	if p.reset {
+		base = 0
+	}
+	out := frameOutputState(data, base, p.next, echoAck)
 	if err := send(out); err != nil {
-		p.stream.renderer.Reset()
-		p.stream.next = p.next
+		p.stream.forceSnapshot = true
 		return err
 	}
+	p.commit()
+	p.stream.next = p.next
 	return nil
 }
 
-func (s *outputStateStream) frame(data []byte, reset bool, echoAck uint64) ports.Frame {
-	s.next++
-	base := s.next - 1
-	if reset {
-		base = 0
+func (p *preparedOutput) commitNoSend() {
+	if p.completed {
+		return
 	}
-	frame := frameOutputState(data, base, s.next, echoAck)
-	return frame
+	p.completed = true
+	p.commit()
+}
+
+func (p *preparedOutput) commit() {
+	p.draw.Commit()
+	if p.reset {
+		p.stream.forceSnapshot = false
+	}
 }
 
 func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) ports.Frame {
@@ -87,6 +104,7 @@ func (s *outputStateStream) ack(state uint64) {
 func (s *outputStateStream) rebase() {
 	s.acked = s.next
 	s.renderer.Reset()
+	s.forceSnapshot = true
 }
 
 func (s *outputStateStream) atCapacity() bool {

@@ -384,30 +384,35 @@ func noticeStylesFrom(styles themeui.Styles) ui.NoticeStyles {
 	}
 }
 
-func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {
-	changed := force || !ac.lastCursor.valid || ac.lastCursor.hidden != desired.hidden || ac.lastCursor.row != desired.row || ac.lastCursor.col != desired.col || ac.lastCursor.style != desired.style || ac.lastCursor.hasStyle != desired.hasStyle
-	if !changed {
-		return nil
-	}
+type cursorCandidate struct {
+	data []byte
+	next cursorOut
+}
+
+func (ac *attachedClient) prepareCursorTail(desired cursorOut, force bool) cursorCandidate {
+	candidate := cursorCandidate{next: desired}
+	candidate.next.valid = true
 	prev := ac.lastCursor
-	ac.lastCursor = desired
-	ac.lastCursor.valid = true
+	changed := force || !prev.valid || prev.hidden != desired.hidden || prev.row != desired.row || prev.col != desired.col || prev.style != desired.style || prev.hasStyle != desired.hasStyle
+	if !changed {
+		return candidate
+	}
 	if desired.hidden {
-		return []byte("\x1b[?25l")
+		candidate.data = []byte("\x1b[?25l")
+		return candidate
 	}
-	var b []byte
-	b = append(b, "\x1b["...)
-	b = strconv.AppendInt(b, int64(desired.row+1), 10)
-	b = append(b, ';')
-	b = strconv.AppendInt(b, int64(desired.col+1), 10)
-	b = append(b, 'H')
+	candidate.data = append(candidate.data, "\x1b["...)
+	candidate.data = strconv.AppendInt(candidate.data, int64(desired.row+1), 10)
+	candidate.data = append(candidate.data, ';')
+	candidate.data = strconv.AppendInt(candidate.data, int64(desired.col+1), 10)
+	candidate.data = append(candidate.data, 'H')
 	if !prev.valid || prev.hidden || prev.style != desired.style || prev.hasStyle != desired.hasStyle {
-		b = append(b, "\x1b["...)
-		b = strconv.AppendInt(b, int64(desired.style), 10)
-		b = append(b, " q"...)
+		candidate.data = append(candidate.data, "\x1b["...)
+		candidate.data = strconv.AppendInt(candidate.data, int64(desired.style), 10)
+		candidate.data = append(candidate.data, " q"...)
 	}
-	b = append(b, "\x1b[?25h"...)
-	return b
+	candidate.data = append(candidate.data, "\x1b[?25h"...)
+	return candidate
 }
 
 // commitDamageReceipts acknowledges only snapshots that reached the client.
@@ -493,8 +498,9 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
 		return true
 	}
+	cursor := ac.prepareCursorTail(composed.cursor, len(prepared.data) > 0)
 	data := append([]byte(nil), prepared.data...)
-	data = append(data, ac.encodeCursorTail(composed.cursor, len(data) > 0)...)
+	data = append(data, cursor.data...)
 	var sendTr ports.Transport
 	var sendErr error
 	// Metadata precedes any output bytes and is published on its own when the
@@ -518,7 +524,17 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 					send = async.SendAsync
 				}
 				interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
-				sendErr = prepared.send(data, ac.echoAck.Load(), send)
+				sendErr = prepared.send(data, ac.echoAck.Load(), func(frame ports.Frame) error {
+					err := send(frame)
+					if interruptible {
+						if err != nil {
+							marks.roleEffect.reportTransportFailure(sendTransport)
+						}
+						marks.roleEffect.endTransportSend()
+						interruptible = false
+					}
+					return err
+				})
 				if interruptible {
 					if sendErr != nil {
 						marks.roleEffect.reportTransportFailure(sendTransport)
@@ -530,14 +546,17 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		}
 	}
 	if sendErr == nil {
+		if len(data) == 0 {
+			prepared.commitNoSend()
+		}
 		// Publish only after output preparation and transport emission both
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this
 		// completed output transaction.
+		ac.lastCursor = cursor.next
 		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
-	}
-	if sendErr == nil {
+
 		// A successful no-byte emission also commits: its renderer shadow still
 		// represents the captured frame. Lock panes only under sendMu and with no
 		// session guard held.

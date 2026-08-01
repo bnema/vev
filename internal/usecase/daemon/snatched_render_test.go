@@ -138,6 +138,43 @@ func TestSendSnatchedPanelRebasesOutput(t *testing.T) {
 	require.True(t, strings.HasSuffix(string(out.Data), "\x1b[?25l"), "panel must force the cursor hidden")
 }
 
+func TestSendSnatchedPanelPublishesCursorOnlyAfterSendSuccess(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sendErr := errors.New("send failed")
+	failed := cacheFailTransport{err: sendErr}
+	ac := &attachedClient{
+		tr:         failed,
+		output:     newOutputStateStream(),
+		size:       domain.Size{Cols: 80, Rows: 24},
+		lastCursor: cursorOut{valid: true, row: 2, col: 3, style: 1, hasStyle: true},
+	}
+	ac.output.next = 7
+	ac.setAppliedTheme(appliedTheme{Resolved: themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})})
+	ac.roleGeneration.Store(1)
+	beforeCursor := ac.lastCursor
+
+	require.ErrorIs(t, d.sendSnatchedPanel(ac, ac.transportSnapshot(), 1, ""), sendErr)
+	require.Equal(t, beforeCursor, ac.lastCursor)
+	require.Equal(t, uint64(7), ac.output.next)
+	require.True(t, ac.output.forceSnapshot, "failed snatched send must force the next output to be a snapshot")
+	probeFrame := snatchedPanelFrame(ac.size, ac.getAppliedTheme().Resolved.Styles, "")
+	probe, err := ac.output.renderer.Prepare(probeFrame, nil, false)
+	require.NoError(t, err)
+	require.NotEmpty(t, probe.Bytes(), "failed snatched send must not commit the renderer shadow")
+
+	healthy := &closeTrackingTransport{}
+	ac.replaceTransport(healthy)
+	require.NoError(t, d.sendSnatchedPanel(ac, ac.transportSnapshot(), 1, ""))
+	require.Equal(t, cursorOut{valid: true, hidden: true}, ac.lastCursor)
+	require.Equal(t, uint64(8), ac.output.next)
+	frames := healthy.Sends()
+	require.Len(t, frames, 1)
+	out, err := ports.UnmarshalOutput(frames[0].Payload)
+	require.NoError(t, err)
+	require.Zero(t, out.BaseStateNum)
+	require.Equal(t, uint64(8), out.NewStateNum)
+}
+
 func TestSendSnatchedPanelTimeoutClosesCapturedTransportOnly(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, nil, clock)
