@@ -58,8 +58,12 @@ go test ./internal/usecase/daemon -run '^$' \
 ```
 
 The pre-change parser results below are medians of ten repetitions on
-Linux/amd64 with an AMD Ryzen 9 7900X3D. The runtime source was commit
-`919bcd18c428`; the benchmark command above ran with Go 1.26.5.
+Linux/amd64 with an AMD Ryzen 9 7900X3D. The fixed
+`/tmp/vev-proxy-baseline` binary was built from exact Phase 1 commit
+`1f2c802d0707785cab979134db6a95645250a82c`. Runtime production code remains
+based on `919bcd18c428ef90abfda6c2381ba1cfbb06b0dd` because Phase 1 changes
+only benchmarks, harness code, tests, and documentation. The benchmark command
+above ran with Go 1.26.5.
 
 | ANSI workload | ns/op | B/op | allocs/op | ANSI bytes/op |
 | --- | ---: | ---: | ---: | ---: |
