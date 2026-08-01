@@ -310,8 +310,9 @@ func TestAttachReplaceKeepsOldClientSnatched(t *testing.T) {
 	sess.mu.Lock()
 	require.NotNil(t, sess.client)
 	require.NotSame(t, acA, sess.client)
-	require.Contains(t, sess.snatched, acA)
+	_, oldSnatched := sess.snatched[acA]
 	sess.mu.Unlock()
+	require.True(t, oldSnatched)
 	require.Same(t, sess, acA.currentSession())
 
 	releaseA()
