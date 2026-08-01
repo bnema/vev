@@ -307,6 +307,15 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 				flushedRecorded = true
 				return nil
 			}
+			if cols, rows, resize := workloadResize(s, sequence); resize {
+				resizer, ok := p.process.(processResizer)
+				if !ok {
+					return res, errors.New("client process does not support resize workload")
+				}
+				if resizeErr := resizer.Resize(cols, rows); resizeErr != nil {
+					return res, fmt.Errorf("resize client PTY: %w", resizeErr)
+				}
+			}
 			if measureErr := p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); measureErr != nil {
 				if injectedRecorded && !flushedRecorded {
 					diagnosticErr := recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "terminal_flushed", Tick: h.clock.Now(), Valid: false})
@@ -418,6 +427,20 @@ func launchOrder(mappings []processMapping) []processMapping {
 	return out
 }
 
+type processResizer interface {
+	Resize(cols, rows uint16) error
+}
+
+func workloadResize(s scenario, sequence uint64) (uint16, uint16, bool) {
+	if s.Workload != "resize_sweep" && s.Workload != "snapshot_output_resize" {
+		return 0, 0, false
+	}
+	if sequence%2 == 1 {
+		return 119, 40, true
+	}
+	return 120, 40, true
+}
+
 // workloadInput is shell input delivered through the client PTY. It avoids any
 // private daemon API and makes every topology/workload/transport manifest row
 // execute a real terminal workload. The marker is the output boundary awaited
@@ -426,16 +449,25 @@ func workloadInput(s scenario, run int, phase string) []byte {
 	marker := fmt.Sprintf("__VEV_HARNESS_%s_r%d_%s__", safeName(s.ID), run, safeName(phase))
 	body := "printf 'vev perf %s\\n'"
 	switch s.Workload {
-	case "active_output", "all_output", "inactive_output", "interactive_flood":
+	case "active_output":
+		body = `printf '\033[10;20HX'; : '%s'`
+	case "all_output":
+		body = `printf '%%-120s' 'vev perf line %s'`
+	case "inactive_output":
+		body = `printf '\033[38;2;20;120;220mred'; printf '\033[38;2;220;80;40mgreen'; printf '\033[38;2;80;220;120m%s'; printf '\033[0m'`
+	case "interactive_flood":
 		body = "i=0; while [ $i -lt 128 ]; do printf 'vev perf output %s\\n'; i=$((i+1)); done"
 	case "resize_sweep":
 		body = "printf 'vev perf resize-sweep %s\\n'"
 	case "copy_search":
 		body = "printf 'vev perf copy-search %s\\n'"
 	case "snapshot_output_resize":
-		body = "printf 'vev perf snapshot-output-resize %s\\n'"
+		body = `printf '\033[2J\033[Hvev perf snapshot-output-resize %s\n'`
 	case "attach_restore_tab_switch":
-		body = "printf 'vev perf attach-restore-tab-switch %s\\n'"
+		body = `"$VEV_PERF_BIN" cmd next-tab; "$VEV_PERF_BIN" cmd previous-tab; printf 'vev perf attach-restore-tab-switch %s\n'`
+		if phase == "warmup" {
+			body = `"$VEV_PERF_BIN" cmd new-tab; "$VEV_PERF_BIN" cmd previous-tab; printf 'vev perf attach-restore-tab-switch %s\n'`
+		}
 	}
 	return []byte(fmt.Sprintf(body+"; printf '%s\\n'\n", s.ID, marker))
 }

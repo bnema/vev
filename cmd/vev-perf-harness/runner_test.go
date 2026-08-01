@@ -309,6 +309,82 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 	}
 }
 
+func TestWorkloadInputShapes(t *testing.T) {
+	tests := []struct {
+		workload string
+		contains []string
+	}{
+		{"active_output", []string{`printf '\033[10;20HX'`}},
+		{"all_output", []string{"120", "vev perf line"}},
+		{"inactive_output", []string{
+			`printf '\033[38;2;20;120;220mred'`,
+			`printf '\033[38;2;220;80;40mgreen'`,
+			`printf '\033[38;2;80;220;120ms'`,
+		}},
+		{"interactive_flood", []string{"while [ $i -lt 128 ]"}},
+		{"snapshot_output_resize", []string{`\033[2J`, "vev perf snapshot-output-resize"}},
+		{"attach_restore_tab_switch", []string{`"$VEV_PERF_BIN" cmd next-tab`, `"$VEV_PERF_BIN" cmd previous-tab`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.workload, func(t *testing.T) {
+			got := string(workloadInput(scenario{ID: "s", Workload: tt.workload}, 1, "measured-1"))
+			for _, want := range tt.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("workload input %q does not contain %q", got, want)
+				}
+			}
+			if !strings.Contains(got, "__VEV_HARNESS_s_r1_measured-1__") {
+				t.Errorf("workload input has no terminal marker: %q", got)
+			}
+		})
+	}
+
+	active := string(workloadInput(scenario{ID: "s", Workload: "active_output"}, 1, "measured-1"))
+	if strings.Contains(active, `\r`) || strings.Contains(active, "vev perf") {
+		t.Fatalf("active output is not an absolute-cursor one-cell write: %q", active)
+	}
+	inactive := string(workloadInput(scenario{ID: "s", Workload: "inactive_output"}, 1, "measured-1"))
+	if count := strings.Count(inactive, `\033[38;2;`); count != 3 {
+		t.Fatalf("inactive output truecolor runs = %d, want 3: %q", count, inactive)
+	}
+
+	warmup := string(workloadInput(scenario{ID: "s", Workload: "attach_restore_tab_switch"}, 1, "warmup"))
+	if count := strings.Count(warmup, `"$VEV_PERF_BIN" cmd new-tab`); count != 1 {
+		t.Fatalf("attach warmup new-tab commands = %d, want 1: %q", count, warmup)
+	}
+	if strings.Contains(warmup, "cmd next-tab") || !strings.Contains(warmup, `cmd previous-tab; printf 'vev perf attach`) {
+		t.Fatalf("attach warmup does not return to the marker-producing tab: %q", warmup)
+	}
+	measured := string(workloadInput(scenario{ID: "s", Workload: "attach_restore_tab_switch"}, 1, "measured-1"))
+	if strings.Contains(measured, "cmd new-tab") {
+		t.Fatalf("measured attach workload creates another tab: %q", measured)
+	}
+}
+
+func TestWorkloadResize(t *testing.T) {
+	for _, tt := range []struct {
+		workload string
+		sequence uint64
+		wantCols uint16
+		wantOK   bool
+	}{
+		{"active_output", 1, 0, false},
+		{"resize_sweep", 1, 119, true},
+		{"resize_sweep", 2, 120, true},
+		{"snapshot_output_resize", 1, 119, true},
+	} {
+		t.Run(fmt.Sprintf("%s-%d", tt.workload, tt.sequence), func(t *testing.T) {
+			cols, rows, ok := workloadResize(scenario{Workload: tt.workload}, tt.sequence)
+			if ok != tt.wantOK || cols != tt.wantCols {
+				t.Fatalf("workloadResize() = (%d, %d, %t), want cols=%d ok=%t", cols, rows, ok, tt.wantCols, tt.wantOK)
+			}
+			if ok && rows != 40 {
+				t.Fatalf("workloadResize() rows = %d, want 40", rows)
+			}
+		})
+	}
+}
+
 func TestHarnessAggregatesRawEventsSeparatelyFromRunDispersion(t *testing.T) {
 	first := append([]int64(nil), make([]int64, minimumInIntervalEventSamples+5)...)
 	for i := range first {

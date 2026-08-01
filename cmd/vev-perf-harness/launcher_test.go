@@ -24,6 +24,36 @@ func (discardTerminalOutput) Write(p []byte) (int, error) { return len(p), nil }
 func (discardTerminalOutput) Sync() error                 { return nil }
 func (discardTerminalOutput) Close() error                { return nil }
 
+type fakeFDPTY struct {
+	*fakePTY
+	fd uintptr
+}
+
+func (p *fakeFDPTY) Fd() uintptr { return p.fd }
+
+func TestCLIProcessResize(t *testing.T) {
+	original := setPTYWinsize
+	t.Cleanup(func() { setPTYWinsize = original })
+
+	var gotFD int
+	var gotCols, gotRows uint16
+	setPTYWinsize = func(fd int, cols, rows uint16) error {
+		gotFD, gotCols, gotRows = fd, cols, rows
+		return nil
+	}
+	p := &cliProcess{pty: &fakeFDPTY{fakePTY: &fakePTY{}, fd: 42}}
+	if err := p.Resize(119, 40); err != nil {
+		t.Fatal(err)
+	}
+	if gotFD != 42 || gotCols != 119 || gotRows != 40 {
+		t.Fatalf("winsize setter got fd=%d cols=%d rows=%d", gotFD, gotCols, gotRows)
+	}
+
+	if err := (&cliProcess{pty: &fakePTY{}}).Resize(119, 40); err == nil || !strings.Contains(err.Error(), "file descriptor") {
+		t.Fatalf("Resize without FD error = %v", err)
+	}
+}
+
 func TestCLIProcessCloseDrainsQueuedTerminalOutputBeforeClientExit(t *testing.T) {
 	harnessPTY, clientPTY := net.Pipe()
 	t.Cleanup(func() { _ = clientPTY.Close() })
