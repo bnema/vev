@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
@@ -252,7 +254,13 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	h := defaultHarness()
 	h.clock = &fakeClock{}
 	h.launcher = l
-	h.gitSHA = func() string { return "test-sha" }
+	h.gitSHA = func() string { return "harness-sha" }
+	h.vevGitSHA = func(path string) string {
+		if !filepath.IsAbs(path) {
+			t.Fatalf("measured binary path is not resolved: %q", path)
+		}
+		return "measured-vev-sha"
+	}
 	if err := run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", filepath.Join(dir, "out"), "--warmup", "1s", "--duration", "30s", "--repetitions", "10"}, h); err != nil {
 		t.Fatal(err)
 	}
@@ -269,6 +277,9 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
+	if got.GitSHA != "harness-sha" || got.VevGitSHA != "measured-vev-sha" {
+		t.Fatalf("summary provenance = harness %q measured vev %q", got.GitSHA, got.VevGitSHA)
+	}
 	if got.EndToEnd.Count < 10*minimumInIntervalEventSamples || got.Repetitions != 10 || got.RunP50Dispersion.Count != 10 || got.Cadence.Count == 0 || got.MaxGap == 0 || len(got.Spans) == 0 {
 		t.Fatalf("summary=%+v", got)
 	}
@@ -277,6 +288,17 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 			t.Fatalf("insufficient span summary: %+v", s)
 		}
 	}
+}
+
+func TestTraceRecordRetainsTransportDiagnostics(t *testing.T) {
+	line := []byte(`{"process_id":"p","component":"udp","scenario":"s","run":1,"sequence":1,"request_id":1,"epoch":1,"kind":"transport_diagnostic","tick":2,"bytes":3,"fragments":4,"retransmits":5,"pending":6,"ack_rtt_nanos":7,"valid":true}`)
+	var got traceRecord
+	require.NoError(t, json.Unmarshal(line, &got))
+	require.Equal(t, uint64(3), got.Bytes)
+	require.Equal(t, uint64(4), got.Fragments)
+	require.Equal(t, uint64(5), got.Retransmits)
+	require.Equal(t, uint64(6), got.Pending)
+	require.Equal(t, int64(7), got.AckRTTNanos)
 }
 
 func TestHarnessAcceptsConcurrentProductionTraceInterleaving(t *testing.T) {

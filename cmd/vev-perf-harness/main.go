@@ -18,5 +18,5 @@ func main() {
 }
 
 func defaultHarness() *harness {
-	return &harness{clock: systemClock{time.Now()}, mkdir: safedir.EnsurePrivate, createRunDir: createExclusiveRunDir, create: func(p string) (*os.File, error) { return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) }, removeAll: os.RemoveAll, gitSHA: recordedGitSHA}
+	return &harness{clock: systemClock{time.Now()}, mkdir: safedir.EnsurePrivate, createRunDir: createExclusiveRunDir, create: func(p string) (*os.File, error) { return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) }, removeAll: os.RemoveAll, gitSHA: recordedGitSHA, vevGitSHA: recordedBinaryGitSHA}
 }

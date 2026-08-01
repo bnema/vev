@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +53,7 @@ type harness struct {
 	create          func(string) (*os.File, error)
 	removeAll       func(string) error
 	gitSHA          func() string
+	vevGitSHA       func(string) string
 	selectScenarios func(manifest) []scenario // test-only bounded fixture seam
 }
 
@@ -70,6 +73,19 @@ func createExclusiveRunDir(path string) error {
 // not depend on its launch directory being a checkout. The git fallback keeps
 // go run evidence attributable as well.
 const gitSHACommandTimeout = time.Second
+
+func recordedBinaryGitSHA(path string) string {
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return "unknown"
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" && setting.Value != "" {
+			return setting.Value
+		}
+	}
+	return "unknown"
+}
 
 func recordedGitSHA() string {
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -148,7 +164,7 @@ func run(args []string, h *harness) (err error) {
 	if err := writeJSON(filepath.Join(opt.out, "runs.json"), results); err != nil {
 		return err
 	}
-	return writeJSON(filepath.Join(opt.out, "summary.json"), summary{Schema: 1, GitSHA: h.gitSHA(), Warmup: opt.warmup.String(), Duration: opt.duration.String(), Repetitions: opt.repetitions, EndToEnd: percentiles(all), Cadence: percentiles(cadence), MaxGap: maxGap, RunP50Dispersion: percentiles(runP50s), Spans: summarizeSpans(localSpans), Runs: len(results)})
+	return writeJSON(filepath.Join(opt.out, "summary.json"), summary{Schema: 1, GitSHA: h.gitSHA(), VevGitSHA: h.vevGitSHA(opt.vevBin), Warmup: opt.warmup.String(), Duration: opt.duration.String(), Repetitions: opt.repetitions, EndToEnd: percentiles(all), Cadence: percentiles(cadence), MaxGap: maxGap, RunP50Dispersion: percentiles(runP50s), Spans: summarizeSpans(localSpans), Runs: len(results)})
 }
 
 // aggregateEventResults deliberately preserves raw event latencies for
@@ -307,7 +323,22 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 				flushedRecorded = true
 				return nil
 			}
-			if measureErr := p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); measureErr != nil {
+			measureInjected := injected
+			if cols, rows, resize := workloadResize(s, sequence); resize {
+				resizer, ok := p.process.(processResizer)
+				if !ok {
+					return res, errors.New("client process does not support resize workload")
+				}
+				if err := injected(); err != nil {
+					return res, err
+				}
+				measureInjected = func() error { return nil }
+				if resizeErr := resizer.Resize(cols, rows); resizeErr != nil {
+					diagnosticErr := recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "terminal_flushed", Tick: h.clock.Now(), Valid: false})
+					return res, errors.Join(fmt.Errorf("resize client PTY: %w", resizeErr), diagnosticErr)
+				}
+			}
+			if measureErr := p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), measureInjected, flushed); measureErr != nil {
 				if injectedRecorded && !flushedRecorded {
 					diagnosticErr := recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "terminal_flushed", Tick: h.clock.Now(), Valid: false})
 					return res, errors.Join(measureErr, diagnosticErr)
@@ -418,6 +449,20 @@ func launchOrder(mappings []processMapping) []processMapping {
 	return out
 }
 
+type processResizer interface {
+	Resize(cols, rows uint16) error
+}
+
+func workloadResize(s scenario, sequence uint64) (uint16, uint16, bool) {
+	if s.Workload != "resize_sweep" && s.Workload != "snapshot_output_resize" {
+		return 0, 0, false
+	}
+	if sequence%2 == 1 {
+		return 119, 40, true
+	}
+	return 120, 40, true
+}
+
 // workloadInput is shell input delivered through the client PTY. It avoids any
 // private daemon API and makes every topology/workload/transport manifest row
 // execute a real terminal workload. The marker is the output boundary awaited
@@ -425,17 +470,44 @@ func launchOrder(mappings []processMapping) []processMapping {
 func workloadInput(s scenario, run int, phase string) []byte {
 	marker := fmt.Sprintf("__VEV_HARNESS_%s_r%d_%s__", safeName(s.ID), run, safeName(phase))
 	body := "printf 'vev perf %s\\n'"
+	markerSeparator := "; "
 	switch s.Workload {
-	case "active_output", "all_output", "inactive_output", "interactive_flood":
+	case "active_output":
+		cell := byte('X')
+		if sequence, err := strconv.ParseUint(strings.TrimPrefix(phase, "measured-"), 10, 64); err == nil && strings.HasPrefix(phase, "measured-") {
+			cell = '0' + byte(sequence%2)
+		}
+		body = fmt.Sprintf(`printf '\033[10;20H%c'; : '%%s'`, cell)
+	case "all_output":
+		body = `printf '%%-120s' 'vev perf line %s'`
+	case "inactive_output":
+		body = `printf '\033[38;2;20;120;220mred'; printf '\033[38;2;220;80;40mgreen'; printf '\033[38;2;80;220;120m%s'; printf '\033[0m'`
+	case "interactive_flood":
 		body = "i=0; while [ $i -lt 128 ]; do printf 'vev perf output %s\\n'; i=$((i+1)); done"
 	case "resize_sweep":
-		body = "printf 'vev perf resize-sweep %s\\n'"
+		cols, _ := resizeWorkloadGeometry(s, phase)
+		body = fmt.Sprintf(`i=0; while [ "$i" -lt 100 ]; do set -- $(stty size); [ "$2" = "%d" ] && break; i=$((i+1)); sleep 0.01; done; set -- $(stty size); [ "$2" = "%d" ] && printf 'vev perf resize-sweep %%s\n'`, cols, cols)
+		markerSeparator = " && "
 	case "copy_search":
 		body = "printf 'vev perf copy-search %s\\n'"
 	case "snapshot_output_resize":
-		body = "printf 'vev perf snapshot-output-resize %s\\n'"
+		cols, _ := resizeWorkloadGeometry(s, phase)
+		body = fmt.Sprintf(`i=0; while [ "$i" -lt 100 ]; do set -- $(stty size); [ "$2" = "%d" ] && break; i=$((i+1)); sleep 0.01; done; set -- $(stty size); [ "$2" = "%d" ] && printf '\033[2J\033[Hvev perf snapshot-output-resize %%s\n'`, cols, cols)
+		markerSeparator = " && "
 	case "attach_restore_tab_switch":
-		body = "printf 'vev perf attach-restore-tab-switch %s\\n'"
+		body = `"$VEV_PERF_BIN" cmd next-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch %s\n'`
+		if phase == "warmup" {
+			body = `"$VEV_PERF_BIN" cmd new-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch %s\n'`
+		}
+		markerSeparator = " && "
 	}
-	return []byte(fmt.Sprintf(body+"; printf '%s\\n'\n", s.ID, marker))
+	return []byte(fmt.Sprintf(body+markerSeparator+"printf '%s\\n'\n", s.ID, marker))
+}
+
+func resizeWorkloadGeometry(s scenario, phase string) (uint16, uint16) {
+	if sequence, err := strconv.ParseUint(strings.TrimPrefix(phase, "measured-"), 10, 64); err == nil && strings.HasPrefix(phase, "measured-") {
+		cols, rows, _ := workloadResize(s, sequence)
+		return cols, rows
+	}
+	return 120, 40
 }

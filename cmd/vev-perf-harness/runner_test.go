@@ -309,6 +309,183 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 	}
 }
 
+func TestWorkloadInputShapes(t *testing.T) {
+	tests := []struct {
+		workload string
+		contains []string
+	}{
+		{"active_output", []string{`printf '\033[10;20H1'`}},
+		{"all_output", []string{"120", "vev perf line"}},
+		{"inactive_output", []string{
+			`printf '\033[38;2;20;120;220mred'`,
+			`printf '\033[38;2;220;80;40mgreen'`,
+			`printf '\033[38;2;80;220;120ms'`,
+		}},
+		{"interactive_flood", []string{"while [ $i -lt 128 ]"}},
+		{"snapshot_output_resize", []string{`\033[2J`, "vev perf snapshot-output-resize"}},
+		{"attach_restore_tab_switch", []string{`"$VEV_PERF_BIN" cmd next-tab`, `"$VEV_PERF_BIN" cmd previous-tab`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.workload, func(t *testing.T) {
+			got := string(workloadInput(scenario{ID: "s", Workload: tt.workload}, 1, "measured-1"))
+			for _, want := range tt.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("workload input %q does not contain %q", got, want)
+				}
+			}
+			if !strings.Contains(got, "__VEV_HARNESS_s_r1_measured-1__") {
+				t.Errorf("workload input has no terminal marker: %q", got)
+			}
+		})
+	}
+
+	activeWarmup := string(workloadInput(scenario{ID: "s", Workload: "active_output"}, 1, "warmup"))
+	activeOne := string(workloadInput(scenario{ID: "s", Workload: "active_output"}, 1, "measured-1"))
+	activeTwo := string(workloadInput(scenario{ID: "s", Workload: "active_output"}, 1, "measured-2"))
+	for phase, got := range map[string]string{"warmup": activeWarmup, "measured-1": activeOne, "measured-2": activeTwo} {
+		marker := fmt.Sprintf("__VEV_HARNESS_s_r1_%s__", phase)
+		wantByte := map[string]byte{"warmup": 'X', "measured-1": '1', "measured-2": '0'}[phase]
+		want := fmt.Sprintf("printf '\\033[10;20H%c'; : 's'; printf '%s\\n'\n", wantByte, marker)
+		if got != want {
+			t.Errorf("active %s input = %q, want exactly one changing cell write %q", phase, got, want)
+		}
+	}
+	if activeWarmup == activeOne || activeOne == activeTwo {
+		t.Fatalf("active one-cell payload did not change by sequence: %q %q %q", activeWarmup, activeOne, activeTwo)
+	}
+	inactive := string(workloadInput(scenario{ID: "s", Workload: "inactive_output"}, 1, "measured-1"))
+	if count := strings.Count(inactive, `\033[38;2;`); count != 3 {
+		t.Fatalf("inactive output truecolor runs = %d, want 3: %q", count, inactive)
+	}
+
+	warmup := string(workloadInput(scenario{ID: "s", Workload: "attach_restore_tab_switch"}, 1, "warmup"))
+	if count := strings.Count(warmup, `"$VEV_PERF_BIN" cmd new-tab`); count != 1 {
+		t.Fatalf("attach warmup new-tab commands = %d, want 1: %q", count, warmup)
+	}
+	wantWarmup := `"$VEV_PERF_BIN" cmd new-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch s\n' && printf '__VEV_HARNESS_s_r1_warmup__\n'` + "\n"
+	if warmup != wantWarmup {
+		t.Fatalf("attach warmup success marker is not gated by every command:\n got %q\nwant %q", warmup, wantWarmup)
+	}
+	measured := string(workloadInput(scenario{ID: "s", Workload: "attach_restore_tab_switch"}, 1, "measured-1"))
+	wantMeasured := `"$VEV_PERF_BIN" cmd next-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch s\n' && printf '__VEV_HARNESS_s_r1_measured-1__\n'` + "\n"
+	if measured != wantMeasured {
+		t.Fatalf("attach measured success marker is not gated by every command:\n got %q\nwant %q", measured, wantMeasured)
+	}
+}
+
+func TestWorkloadResize(t *testing.T) {
+	for _, tt := range []struct {
+		workload string
+		sequence uint64
+		wantCols uint16
+		wantOK   bool
+	}{
+		{"active_output", 1, 0, false},
+		{"resize_sweep", 1, 119, true},
+		{"resize_sweep", 2, 120, true},
+		{"snapshot_output_resize", 1, 119, true},
+	} {
+		t.Run(fmt.Sprintf("%s-%d", tt.workload, tt.sequence), func(t *testing.T) {
+			cols, rows, ok := workloadResize(scenario{Workload: tt.workload}, tt.sequence)
+			if ok != tt.wantOK || cols != tt.wantCols {
+				t.Fatalf("workloadResize() = (%d, %d, %t), want cols=%d ok=%t", cols, rows, ok, tt.wantCols, tt.wantOK)
+			}
+			if ok && rows != 40 {
+				t.Fatalf("workloadResize() rows = %d, want 40", rows)
+			}
+		})
+	}
+}
+
+type resizeOrderingWriter struct {
+	bytes.Buffer
+	order *[]string
+}
+
+func (w *resizeOrderingWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`"sequence":2`)) {
+		switch {
+		case bytes.Contains(p, []byte(`"kind":"input_injected"`)):
+			*w.order = append(*w.order, "injected")
+		case bytes.Contains(p, []byte(`"kind":"terminal_flushed"`)):
+			*w.order = append(*w.order, "terminal_flushed")
+		}
+	}
+	return w.Buffer.Write(p)
+}
+
+type resizeOrderingProcess struct {
+	order    *[]string
+	inputs   [][]byte
+	resizes  int
+	measures int
+}
+
+func (*resizeOrderingProcess) Warmup([]byte) error { return nil }
+
+func (p *resizeOrderingProcess) Resize(cols, rows uint16) error {
+	p.resizes++
+	if p.resizes == 1 {
+		*p.order = append(*p.order, fmt.Sprintf("resize:%dx%d", cols, rows))
+	}
+	return nil
+}
+
+func (p *resizeOrderingProcess) Measure(input []byte, injected, flushed func() error) error {
+	p.measures++
+	p.inputs = append(p.inputs, append([]byte(nil), input...))
+	if p.measures == 1 {
+		*p.order = append(*p.order, "workload_write")
+	}
+	if err := injected(); err != nil {
+		return err
+	}
+	if p.measures == 1 {
+		*p.order = append(*p.order, "workload_flush")
+	}
+	return flushed()
+}
+
+func (*resizeOrderingProcess) Close() error { return nil }
+
+type resizeOrderingLauncher struct{ client *resizeOrderingProcess }
+
+func (l resizeOrderingLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
+	if m.Role == "client" {
+		return l.client, nil
+	}
+	return &fakeProcess{}, nil
+}
+
+func TestResizeBoundaryPrecedesResizeAndMarkerWaitsForShellGeometry(t *testing.T) {
+	dir := t.TempDir()
+	order := []string{}
+	client := &resizeOrderingProcess{order: &order}
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, resizeOrderingLauncher{client: client}
+	raw := &resizeOrderingWriter{order: &order}
+	_, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "resize", Workload: "resize_sweep", Roles: []string{"daemon", "client"}}, 1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := []string{"injected", "resize:120x40", "workload_write", "workload_flush", "terminal_flushed"}
+	if len(order) < len(wantOrder) {
+		t.Fatalf("resize event order = %q, want prefix %q", order, wantOrder)
+	}
+	if !equalStrings(order[:len(wantOrder)], wantOrder) {
+		t.Fatalf("first resize event order = %q, want %q", order[:len(wantOrder)], wantOrder)
+	}
+	first := string(client.inputs[0])
+	for _, want := range []string{`set -- $(stty size)`, `[ "$2" = "120" ]`, `sleep 0.01`, `&& printf '__VEV_HARNESS_resize_r1_measured-2__\n'`} {
+		if !strings.Contains(first, want) {
+			t.Errorf("resize input has no bounded expected-column gate %q: %q", want, first)
+		}
+	}
+	if strings.Contains(first, `"40 120"`) {
+		t.Fatalf("resize input incorrectly gates on client rows that shell chrome does not expose: %q", first)
+	}
+}
+
 func TestHarnessAggregatesRawEventsSeparatelyFromRunDispersion(t *testing.T) {
 	first := append([]int64(nil), make([]int64, minimumInIntervalEventSamples+5)...)
 	for i := range first {

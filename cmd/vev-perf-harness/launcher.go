@@ -116,6 +116,8 @@ type terminalOutput interface {
 	Close() error
 }
 
+var setPTYWinsize = rawterm.SetWinsize
+
 type cliProcess struct {
 	cmd              *exec.Cmd
 	pty              io.ReadWriteCloser
@@ -135,19 +137,31 @@ type cliProcess struct {
 	closeResult      error
 }
 
+func (p *cliProcess) Resize(cols, rows uint16) error {
+	fd, ok := p.pty.(interface{ Fd() uintptr })
+	if !ok {
+		return errors.New("client PTY does not expose a file descriptor")
+	}
+	return setPTYWinsize(int(fd.Fd()), cols, rows)
+}
+
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
 	if len(role.Args) == 0 {
 		return nil, errors.New("public CLI role has no arguments")
 	}
-	if info, err := os.Stat(l.bin); err != nil {
+	bin, err := filepath.Abs(l.bin)
+	if err != nil {
+		return nil, err
+	}
+	if info, err := os.Stat(bin); err != nil {
 		return nil, err
 	} else if info.IsDir() {
-		return nil, fmt.Errorf("public CLI binary %q is a directory", l.bin)
+		return nil, fmt.Errorf("public CLI binary %q is a directory", bin)
 	}
 	if m.Role == "ssh_stdio_peer" || m.Role == "udp_peer" {
 		return l.preparePeer(m, role)
 	}
-	cmd := exec.Command(l.bin, role.Args...)
+	cmd := exec.Command(bin, role.Args...)
 	runDir := filepath.Dir(m.TracePath)
 	runtimeDir, err := l.runtimeDir(runDir)
 	if err != nil {
@@ -157,9 +171,9 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	// a role working directory: daemon-owned subprocess cleanup may otherwise
 	// treat the evidence directory as its working tree and remove a preallocated
 	// trace while a later repetition is being merged.
-	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_REMOTE_TRANSPORT", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"), traceEnvironment(m)...)
+	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_PERF_BIN", "VEV_REMOTE_TRANSPORT", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"), traceEnvironment(m)...)
 	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+runtimeDir,
-		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color")
+		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color", "VEV_PERF_BIN="+bin)
 	if m.Role == "client" {
 		l.mu.Lock()
 		peer, routed := l.peers[runDir]
@@ -183,6 +197,11 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		master, slave, err := openPTY()
 		if err != nil {
 			return nil, err
+		}
+		if err := setPTYWinsize(int(master.Fd()), 120, 40); err != nil {
+			_ = master.Close()
+			_ = slave.Close()
+			return nil, fmt.Errorf("set canonical client PTY geometry: %w", err)
 		}
 		output, err := os.OpenFile(filepath.Join(filepath.Dir(m.TracePath), "terminal-output"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 		if err != nil {
@@ -236,7 +255,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		p.shutdown = func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			shutdown := exec.CommandContext(ctx, l.bin, "kill", "--daemon")
+			shutdown := exec.CommandContext(ctx, bin, "kill", "--daemon")
 			shutdown.Env = withoutEnv(cmd.Env, "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN")
 			return shutdown.Run()
 		}

@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +25,118 @@ type discardTerminalOutput struct{}
 func (discardTerminalOutput) Write(p []byte) (int, error) { return len(p), nil }
 func (discardTerminalOutput) Sync() error                 { return nil }
 func (discardTerminalOutput) Close() error                { return nil }
+
+type fakeFDPTY struct {
+	*fakePTY
+	fd uintptr
+}
+
+func (p *fakeFDPTY) Fd() uintptr { return p.fd }
+
+func TestCLILauncherSetsCanonicalClientGeometryBeforeStart(t *testing.T) {
+	original := setPTYWinsize
+	t.Cleanup(func() { setPTYWinsize = original })
+
+	for _, tt := range []struct {
+		name    string
+		setSize func(started string, fd int, cols, rows uint16) error
+		wantErr bool
+	}{
+		{
+			name: "starts after canonical geometry",
+			setSize: func(started string, _ int, cols, rows uint16) error {
+				if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("client started before geometry was set: %w", err)
+				}
+				if cols != 120 || rows != 40 {
+					return fmt.Errorf("geometry = %dx%d, want 120x40", cols, rows)
+				}
+				return nil
+			},
+		},
+		{
+			name: "winsize failure closes PTY before returning",
+			setSize: func(started string, fd int, _, _ uint16) error {
+				if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("client started after winsize failure: %w", err)
+				}
+				return errTestWinsize
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			started := filepath.Join(t.TempDir(), "started")
+			t.Setenv("STARTED", started)
+			bin := filepath.Join(t.TempDir(), "client")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch \"$STARTED\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runDir := filepath.Join(t.TempDir(), "run")
+			if err := safedir.EnsurePrivate(runDir); err != nil {
+				t.Fatal(err)
+			}
+			setFD := -1
+			setPTYWinsize = func(fd int, cols, rows uint16) error {
+				setFD = fd
+				return tt.setSize(started, fd, cols, rows)
+			}
+			launcher := &cliLauncher{bin: bin}
+			t.Cleanup(func() {
+				if err := launcher.releaseRuntime(runDir); err != nil {
+					t.Error(err)
+				}
+			})
+			p, err := launcher.Launch(processMapping{Role: "client", TracePath: filepath.Join(runDir, "client.jsonl")}, roleCommand{Args: []string{"test"}})
+			if tt.wantErr {
+				if !errors.Is(err, errTestWinsize) || p != nil {
+					t.Fatalf("Launch() = (%T, %v), want winsize error", p, err)
+				}
+				if setFD < 0 {
+					t.Fatal("winsize setter was not called")
+				}
+				if closeErr := syscall.Close(setFD); !errors.Is(closeErr, syscall.EBADF) {
+					t.Fatalf("winsize failure left PTY fd %d open: close error %v", setFD, closeErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if setFD < 0 {
+				t.Fatal("winsize setter was not called before successful launch")
+			}
+			if err := p.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+var errTestWinsize = errors.New("test winsize failure")
+
+func TestCLIProcessResize(t *testing.T) {
+	original := setPTYWinsize
+	t.Cleanup(func() { setPTYWinsize = original })
+
+	var gotFD int
+	var gotCols, gotRows uint16
+	setPTYWinsize = func(fd int, cols, rows uint16) error {
+		gotFD, gotCols, gotRows = fd, cols, rows
+		return nil
+	}
+	p := &cliProcess{pty: &fakeFDPTY{fakePTY: &fakePTY{}, fd: 42}}
+	if err := p.Resize(119, 40); err != nil {
+		t.Fatal(err)
+	}
+	if gotFD != 42 || gotCols != 119 || gotRows != 40 {
+		t.Fatalf("winsize setter got fd=%d cols=%d rows=%d", gotFD, gotCols, gotRows)
+	}
+
+	if err := (&cliProcess{pty: &fakePTY{}}).Resize(119, 40); err == nil || !strings.Contains(err.Error(), "file descriptor") {
+		t.Fatalf("Resize without FD error = %v", err)
+	}
+}
 
 func TestCLIProcessCloseDrainsQueuedTerminalOutputBeforeClientExit(t *testing.T) {
 	harnessPTY, clientPTY := net.Pipe()

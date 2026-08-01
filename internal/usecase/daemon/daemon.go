@@ -835,6 +835,9 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 			}
 		}
 	}
+	// Signal Serve even when a concurrent role transition made this initial
+	// pass abort; Serve owns the bounded defensive teardown passes.
+	d.doneOnce.Do(func() { close(d.done) })
 	return checkpointIncomplete
 }
 
