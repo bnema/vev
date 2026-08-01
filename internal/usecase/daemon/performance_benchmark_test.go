@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -196,6 +197,71 @@ func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *tes
 	require.Equal(t, payload, transport.lastPayload(), "the counting transport must retain the payload slice header, not copy it")
 }
 
+func TestProxyANSIBenchmarkFixtures(t *testing.T) {
+	fixtures := proxyANSIBenchmarkFixtures()
+	require.Len(t, fixtures, 4)
+	require.Equal(t, []string{
+		"absolute-position-one-cell",
+		"120-column-full-line",
+		"fragmented-truecolor-styled-line",
+		"full-width-40-row-scroll",
+	}, []string{fixtures[0].name, fixtures[1].name, fixtures[2].name, fixtures[3].name})
+	require.Equal(t, fixtures, proxyANSIBenchmarkFixtures(), "fixtures must be deterministic")
+	require.Equal(t, []byte("\x1b[20;60HX"), fixtures[0].data)
+	require.Equal(t, append([]byte("\x1b[1;1H"), bytes.Repeat([]byte("l"), 120)...), fixtures[1].data)
+	require.Equal(t, 12, bytes.Count(fixtures[2].data, []byte("\x1b[38;2;")))
+	require.Equal(t, 40, bytes.Count(fixtures[3].data, []byte("\r\n")))
+
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			proxy, err := newProxySession(domain.RemoteSessionKey{Host: "benchmark", Name: "ansi"}, domain.Size{Cols: 120, Rows: 40 + tabChromeRows})
+			require.NoError(t, err)
+
+			ack, reset, changed := proxy.applyOutputForGeneration(proxy.linkGeneration, ports.Output{
+				BaseStateNum: 0,
+				NewStateNum:  1,
+				Data:         fixture.data,
+			})
+
+			require.Equal(t, uint64(1), ack)
+			require.False(t, reset)
+			require.True(t, changed)
+			proxy.mu.Lock()
+			require.Equal(t, domain.Size{Cols: 120, Rows: 40}, proxy.contentSize)
+			proxy.mu.Unlock()
+		})
+	}
+}
+
+type proxyANSIBenchmarkFixture struct {
+	name string
+	data []byte
+}
+
+func proxyANSIBenchmarkFixtures() []proxyANSIBenchmarkFixture {
+	fullLine := append([]byte("\x1b[1;1H"), bytes.Repeat([]byte("l"), 120)...)
+
+	var styledLine []byte
+	for fragment := range 12 {
+		styledLine = fmt.Appendf(styledLine, "\x1b[12;%dH\x1b[38;2;%d;%d;%dm", fragment*10+1, fragment*17, fragment*13, fragment*7)
+		styledLine = append(styledLine, bytes.Repeat([]byte{byte('a' + fragment)}, 10)...)
+	}
+	styledLine = append(styledLine, "\x1b[0m"...)
+
+	scroll := make([]byte, 0, 40*122)
+	for row := range 40 {
+		scroll = append(scroll, performanceFullWidthRow(120, 0, row)...)
+		scroll = append(scroll, '\r', '\n')
+	}
+
+	return []proxyANSIBenchmarkFixture{
+		{name: "absolute-position-one-cell", data: []byte("\x1b[20;60HX")},
+		{name: "120-column-full-line", data: fullLine},
+		{name: "fragmented-truecolor-styled-line", data: styledLine},
+		{name: "full-width-40-row-scroll", data: scroll},
+	}
+}
+
 func TestPerformanceFixtureCounters(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{})
 
@@ -357,6 +423,34 @@ var daemonHistoryTopologies = []daemonHistoryTopology{
 var daemonSnapshotTopologies = []daemonHistoryTopology{
 	{name: "1tab-1pane-control", tabs: 1, panes: 1},
 	{name: "1tab-4panes", tabs: 1, panes: 4},
+}
+
+func BenchmarkProxyANSIApply(b *testing.B) {
+	for _, fixture := range proxyANSIBenchmarkFixtures() {
+		b.Run(fixture.name, func(b *testing.B) {
+			proxy, err := newProxySession(domain.RemoteSessionKey{Host: "benchmark", Name: "ansi"}, domain.Size{Cols: 120, Rows: 40})
+			if err != nil {
+				b.Fatal(err)
+			}
+			generation := proxy.linkGeneration
+			state := uint64(0)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(fixture.data)))
+			for b.Loop() {
+				next := state + 1
+				ack, reset, changed := proxy.applyOutputForGeneration(generation, ports.Output{
+					BaseStateNum: state,
+					NewStateNum:  next,
+					Data:         fixture.data,
+				})
+				if ack != next || reset || !changed {
+					b.Fatalf("apply output = ack %d, reset %t, changed %t; want ack %d, reset false, changed true", ack, reset, changed, next)
+				}
+				state = next
+			}
+			b.ReportMetric(float64(len(fixture.data)), "ansibytes/op")
+		})
+	}
 }
 
 func BenchmarkDaemonHistoryLivePaint(b *testing.B) {
