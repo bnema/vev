@@ -353,6 +353,36 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 	requireRoleGateRetired(t, ac)
 }
 
+func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T) {
+	d, sess, active, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	transport := &closeTrackingTransport{}
+	active.replaceTransport(transport)
+	d.attachCoordinator(sess, nil, active, true)
+	active.publishRoleCapability(sess.attachmentToken(active, transport))
+
+	owner := freezeRoleEffectGates(active)
+	require.True(t, owner.acquired)
+	defer owner.unfreeze()
+
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clock
+	shutdownDone := make(chan bool, 1)
+	go func() { shutdownDone <- d.shutdownAll(ports.ReasonServerShutdown) }()
+
+	deadline := awaitTestValue(t, clock.timers, "shutdown did not arm the gate acquisition deadline")
+	deadline.ch <- time.Now()
+	require.False(t, awaitTestValue(t, shutdownDone, "shutdown did not return after its gate acquisition deadline"))
+
+	d.mu.Lock()
+	require.Same(t, sess, d.sessions[sess.id], "timed-out initial teardown should leave the session for Serve's shutdown pass")
+	d.mu.Unlock()
+	select {
+	case <-d.done:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown request did not signal Serve after the initial teardown pass timed out")
+	}
+}
+
 func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 	d, sess, active, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
 	blocked := newTeardownBlockingTransport()
