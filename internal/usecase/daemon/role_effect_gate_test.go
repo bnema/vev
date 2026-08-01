@@ -370,12 +370,13 @@ func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T
 	go func() { shutdownDone <- d.shutdownAll(ports.ReasonServerShutdown) }()
 
 	deadline := awaitTestValue(t, clock.timers, "shutdown did not arm the gate acquisition deadline")
-	deadline.ch <- time.Now()
+	deadline.ch <- clock.Now()
 	require.False(t, awaitTestValue(t, shutdownDone, "shutdown did not return after its gate acquisition deadline"))
 
 	d.mu.Lock()
-	require.Same(t, sess, d.sessions[sess.id], "timed-out initial teardown should leave the session for Serve's shutdown pass")
+	registered := d.sessions[sess.id]
 	d.mu.Unlock()
+	require.Same(t, sess, registered, "timed-out initial teardown should leave the session for Serve's shutdown pass")
 	select {
 	case <-d.done:
 	case <-time.After(time.Second):
