@@ -46,7 +46,7 @@ func TestCLILauncherSetsCanonicalClientGeometryBeforeStart(t *testing.T) {
 			name: "starts after canonical geometry",
 			setSize: func(started string, _ int, cols, rows uint16) error {
 				if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("client started before geometry was set: %v", err)
+					return fmt.Errorf("client started before geometry was set: %w", err)
 				}
 				if cols != 120 || rows != 40 {
 					return fmt.Errorf("geometry = %dx%d, want 120x40", cols, rows)
@@ -58,7 +58,7 @@ func TestCLILauncherSetsCanonicalClientGeometryBeforeStart(t *testing.T) {
 			name: "winsize failure closes PTY before returning",
 			setSize: func(started string, fd int, _, _ uint16) error {
 				if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("client started after winsize failure: %v", err)
+					return fmt.Errorf("client started after winsize failure: %w", err)
 				}
 				return errTestWinsize
 			},
