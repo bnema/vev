@@ -27,6 +27,8 @@ type proxySession struct {
 	transport      ports.Transport
 	resumeToken    uint64
 	appliedState   uint64
+	// screenReady is true only after a moving snapshot establishes the
+	// dependency required by subsequent deltas.
 	screenReady    bool
 	resetRequested bool
 	screen         *proxyScreenState

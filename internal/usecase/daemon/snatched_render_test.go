@@ -142,6 +142,7 @@ func TestSendSnatchedPanelUsesStructuredSnapshotForProxied(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr := &closeTrackingTransport{}
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), proxied: true, size: domain.Size{Cols: 80, Rows: 24}}
+	ac.output.next = 7
 	ac.setAppliedTheme(appliedTheme{Resolved: themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})})
 	ac.roleGeneration.Store(1)
 
@@ -153,6 +154,7 @@ func TestSendSnatchedPanelUsesStructuredSnapshotForProxied(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ports.ScreenUpdateSnapshot, update.Kind)
 	require.Zero(t, update.BaseStateNum)
+	require.Equal(t, uint64(8), update.NewStateNum, "snatched panel must advance the shared output state")
 	require.False(t, update.Cursor.Visible, "structured snatched panel must hide the cursor semantically")
 	require.Len(t, update.Spans, ac.size.Rows, "structured snapshots must carry every full row")
 }

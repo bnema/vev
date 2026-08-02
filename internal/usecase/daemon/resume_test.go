@@ -1399,7 +1399,7 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	reset := false
 	require.False(t, reset, "reliable output ack lag alone must not force dependency-free full repaint")
 
-	f := ac.output.frame([]byte("incremental while reliable backlog drains"), reset, 0)
+	f := outputStateFrame(ac.output, []byte("incremental while reliable backlog drains"), reset, 0)
 	ac.sendMu.Unlock()
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -1409,7 +1409,7 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	ac.sendMu.Lock()
 	reset = true
 	require.True(t, reset, "explicit reset should still force full repaint")
-	full := ac.output.frame([]byte("explicit full repaint"), reset, 0)
+	full := outputStateFrame(ac.output, []byte("explicit full repaint"), reset, 0)
 	ac.sendMu.Unlock()
 	fullOut, err := ports.UnmarshalOutput(full.Payload)
 	require.NoError(t, err)

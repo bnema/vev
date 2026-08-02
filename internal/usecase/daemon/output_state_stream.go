@@ -38,7 +38,7 @@ type preparedOutput struct {
 	next      uint64
 	data      []byte
 	reset     bool
-	completed bool
+	attempted bool
 }
 
 func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
@@ -57,10 +57,10 @@ func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Dama
 }
 
 func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame) error) error {
-	if p.completed {
+	if p.attempted {
 		return nil
 	}
-	p.completed = true
+	p.attempted = true
 	base := p.stream.next
 	if p.reset {
 		base = 0
@@ -76,25 +76,16 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame
 }
 
 func (p *preparedOutput) commitNoSend() {
-	if p.completed {
+	if p == nil || p.attempted || len(p.data) != 0 {
 		return
 	}
-	p.completed = true
+	p.attempted = true
 	p.commit()
 }
 
 func (p *preparedOutput) commit() {
 	p.draw.Commit()
 	p.stream.forceSnapshot = false
-}
-
-func (s *outputStateStream) frame(data []byte, reset bool, echoAck uint64) ports.Frame {
-	s.next++
-	base := s.next - 1
-	if reset {
-		base = 0
-	}
-	return frameOutputState(data, base, s.next, echoAck)
 }
 
 func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) ports.Frame {

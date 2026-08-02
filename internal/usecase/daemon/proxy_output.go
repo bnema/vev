@@ -32,14 +32,13 @@ func (p *proxySession) applyScreenUpdateForGeneration(generation uint64, update 
 		if update.NewStateNum <= p.appliedState {
 			return 0, p.requestScreenResetLocked(), false
 		}
-		before := p.screen.cursorOut
 		if err := p.screen.Apply(update); err != nil {
 			return 0, p.requestScreenResetLocked(), false
 		}
 		p.appliedState = update.NewStateNum
 		p.screenReady = true
 		p.resetRequested = false
-		return update.NewStateNum, false, update.Kind == ports.ScreenUpdateSnapshot || before != update.Cursor || len(update.Spans) != 0
+		return update.NewStateNum, false, true
 	}
 
 	if !p.screenReady || p.resetRequested || update.BaseStateNum != p.appliedState || update.NewStateNum != update.BaseStateNum+1 {

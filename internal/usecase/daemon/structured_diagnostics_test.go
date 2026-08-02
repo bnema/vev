@@ -40,7 +40,7 @@ func TestP4StructuredRuntimeDiagnosticsRecordAcceptedSnapshotAndDelta(t *testing
 	}
 
 	snapshot := emit(true)
-	marks := structuredScreenMarks(observer)
+	marks := structuredScreenMarks(t, observer)
 	require.Len(t, marks, 1)
 	require.Equal(t, ports.RuntimeScreenSnapshot, marks[0].Kind)
 	require.Equal(t, uint64(len(mustMarshalScreenUpdate(t, snapshot))), marks[0].Bytes)
@@ -57,7 +57,7 @@ func TestP4StructuredRuntimeDiagnosticsRecordAcceptedSnapshotAndDelta(t *testing
 	observer.marks = nil
 
 	delta := emit(false)
-	marks = structuredScreenMarks(observer)
+	marks = structuredScreenMarks(t, observer)
 	require.Len(t, marks, 1)
 	require.Equal(t, ports.RuntimeScreenDelta, marks[0].Kind)
 	require.Equal(t, uint64(len(mustMarshalScreenUpdate(t, delta))), marks[0].Bytes)
@@ -79,7 +79,7 @@ func TestP4StructuredRuntimeDiagnosticsDoNotRecordFailedSend(t *testing.T) {
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.True(t, d.emitFrame(proxy, ac, state, composed))
-	require.Empty(t, structuredScreenMarks(observer))
+	require.Empty(t, structuredScreenMarks(t, observer))
 }
 
 func TestP4StructuredRuntimeDiagnosticsResetOnlyAfterAcceptedRequest(t *testing.T) {
@@ -91,7 +91,7 @@ func TestP4StructuredRuntimeDiagnosticsResetOnlyAfterAcceptedRequest(t *testing.
 		Size: domain.Size{Cols: 80, Rows: 22},
 	}
 	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, invalid))
-	marks := structuredScreenMarks(observer)
+	marks := structuredScreenMarks(t, observer)
 	require.Len(t, marks, 1)
 	require.Equal(t, ports.RuntimeScreenResetRequested, marks[0].Kind)
 	require.Zero(t, marks[0].Bytes)
@@ -100,13 +100,13 @@ func TestP4StructuredRuntimeDiagnosticsResetOnlyAfterAcceptedRequest(t *testing.
 
 	// The already-requested reset is not sent or measured a second time.
 	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, invalid))
-	require.Len(t, structuredScreenMarks(observer), 1)
+	require.Len(t, structuredScreenMarks(t, observer), 1)
 
 	d, proxy, transport, generation = newProxyOutputSession(t)
 	d.runtimeObserver = &daemonRuntimeObserver{}
 	transport.sendFails.Store(true)
 	require.Error(t, d.handleProxyScreenUpdate(proxy, generation, invalid))
-	require.Empty(t, structuredScreenMarks(d.runtimeObserver.(*daemonRuntimeObserver)))
+	require.Empty(t, structuredScreenMarks(t, d.runtimeObserver))
 }
 
 func TestP4StructuredRuntimeDiagnosticsObserverRunsOutsideAttachmentAndProxyLocks(t *testing.T) {
@@ -155,11 +155,10 @@ func TestP4StructuredRuntimeDiagnosticsObserverRunsOutsideAttachmentAndProxyLock
 	awaitDaemonObserver(t, done, "structured render")
 }
 
-func structuredScreenMarks(observer ports.RuntimeObserver) []ports.RuntimeMark {
+func structuredScreenMarks(t *testing.T, observer ports.RuntimeObserver) []ports.RuntimeMark {
+	t.Helper()
 	collector, ok := observer.(*daemonRuntimeObserver)
-	if !ok {
-		return nil
-	}
+	require.True(t, ok, "runtime observer must be the daemon test collector")
 	var marks []ports.RuntimeMark
 	for _, mark := range collector.marks {
 		switch mark.Kind {

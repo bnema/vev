@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"unicode/utf8"
@@ -40,19 +41,20 @@ func newProxyScreenState(size domain.Size) *proxyScreenState {
 	if !validProxyScreenSize(size) {
 		return &proxyScreenState{}
 	}
-	return &proxyScreenState{
+	state := &proxyScreenState{
 		frame:      renderer.NewFrame(size.Cols, size.Rows),
 		scratch:    renderer.NewFrame(size.Cols, size.Rows),
 		cursorOut:  ports.ScreenCursor{Visible: true},
-		damage:     []renderer.Damage{renderer.FullRedraw()},
 		generation: 1,
 	}
+	state.setFullRedraw()
+	return state
 }
 
 // Apply validates the complete semantic update before mutating either frame.
 func (s *proxyScreenState) Apply(update ports.ScreenUpdate) error {
 	if s == nil {
-		return fmt.Errorf("proxy screen state is nil")
+		return errors.New("proxy screen state is nil")
 	}
 	if err := s.validateUpdate(update); err != nil {
 		return err
@@ -173,7 +175,7 @@ func (s *proxyScreenState) validateStateNumbers(update ports.ScreenUpdate) error
 func applyScreenUpdate(frame *renderer.Frame, update ports.ScreenUpdate) {
 	if update.Scroll != nil {
 		scroll := update.Scroll
-		frame.ScrollUp(int(scroll.Top), int(scroll.Top+scroll.Height-1), int(scroll.Count))
+		frame.ScrollUp(int(scroll.Top), int(scroll.Top)+int(scroll.Height)-1, int(scroll.Count))
 	}
 	for _, span := range update.Spans {
 		copy(frame.Row(int(span.Y))[int(span.X):], span.Cells)
@@ -266,7 +268,7 @@ func (s *proxyScreenState) AcknowledgeDamage(generation uint64) bool {
 // replayed incrementally; snapshots, uncertain damage, and dimensions use a
 // complete clone.
 func (s *proxyScreenState) CaptureInto(dst *renderer.Frame) {
-	if s == nil || dst == nil || !validProxyFrame(*s) {
+	if s == nil || dst == nil || !validProxyFrame(s) {
 		return
 	}
 	if dst.Width != s.frame.Width || dst.Height != s.frame.Height || dst.Validate() != nil {
@@ -326,15 +328,9 @@ func (s *proxyScreenState) ResizePlaceholder(size domain.Size) bool {
 }
 
 func copyFrameOverlap(dst *renderer.Frame, src renderer.Frame) {
-	width := src.Width
-	if dst.Width < width {
-		width = dst.Width
-	}
-	height := src.Height
-	if dst.Height < height {
-		height = dst.Height
-	}
-	for y := 0; y < height; y++ {
+	width := min(src.Width, dst.Width)
+	height := min(src.Height, dst.Height)
+	for y := range height {
 		copy(dst.Row(y)[:width], src.Row(y)[:width])
 	}
 }
@@ -346,8 +342,8 @@ func validProxyScreenSize(size domain.Size) bool {
 	return size.Rows <= maxProxyScreenCells/size.Cols
 }
 
-func validProxyFrame(s proxyScreenState) bool {
-	return s.frame.Validate() == nil && s.scratch.Validate() == nil
+func validProxyFrame(s *proxyScreenState) bool {
+	return s != nil && s.frame.Validate() == nil && s.scratch.Validate() == nil
 }
 
 func validProxyScreenStyle(style renderer.Style) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -182,11 +183,7 @@ func newProxyTestDaemon(t *testing.T, factory ports.RemoteDialerFactory, clk por
 func proxySessionSnapshot(d *Daemon) map[domain.SessionID]attachmentSession {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	clone := make(map[domain.SessionID]attachmentSession, len(d.sessions))
-	for id, entry := range d.sessions {
-		clone[id] = entry
-	}
-	return clone
+	return maps.Clone(d.sessions)
 }
 
 func proxyFactoryFor(t *testing.T, key domain.RemoteSessionKey, transports ...ports.Transport) ports.RemoteDialerFactory {
@@ -246,7 +243,7 @@ func TestProxyHandshakePublishesOnlyAfterWelcomeAndMetadata(t *testing.T) {
 	require.Equal(t, ports.IntentAttach, hello.Intent)
 	require.True(t, hello.Proxied)
 	require.Equal(t, key.Name, hello.Name)
-	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, hello.Size)
+	require.Equal(t, contentSize(domain.Size{Cols: 80, Rows: 24}, false), hello.Size)
 	require.Equal(t, uint8(maxUnackedOutputStates), hello.MaxOutputInFlight)
 	require.Empty(t, proxySessionSnapshot(d), "Hello alone must not publish a proxy")
 
@@ -457,11 +454,9 @@ func TestProxySenderSerializesAllTransportWrites(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs <- proxy.sendCurrent(ports.Frame{Type: ports.MsgPing, Payload: ports.MarshalPing(ports.Ping{})})
-		}()
+		})
 	}
 	// Once the first sender enters Send, the others must remain behind sendMu.
 	awaitTestCompletion(t, entered, "proxy sender did not enter transport")
@@ -669,6 +664,15 @@ func screenSnapshotForProxy(t *testing.T, proxy *proxySession, state uint64) por
 	return snapshot
 }
 
+func TestProxyScreenSnapshotReportsChanged(t *testing.T) {
+	_, proxy, _, generation := newProxyOutputSession(t)
+	snapshot := screenSnapshotForProxy(t, proxy, 1)
+	ack, reset, changed := proxy.applyScreenUpdateForGeneration(generation, snapshot)
+	require.Equal(t, uint64(1), ack)
+	require.False(t, reset)
+	require.True(t, changed, "every accepted snapshot invalidates the composed frame")
+}
+
 func TestProxyScreenUpdate(t *testing.T) {
 	t.Run("initial snapshot", func(t *testing.T) {
 		d, proxy, transport, generation := newProxyOutputSession(t)
@@ -812,19 +816,20 @@ func TestProxyScreenUpdate(t *testing.T) {
 		}()
 		awaitTestCompletion(t, entered, "screen ACK sender did not enter transport")
 
-		unlocked := make(chan struct{})
+		unlocked := make(chan ports.Transport, 1)
 		go func() {
 			proxy.mu.Lock()
 			currentTransport := proxy.transport
 			proxy.mu.Unlock()
-			require.Same(t, transport, currentTransport)
-			close(unlocked)
+			unlocked <- currentTransport
 		}()
+		var currentTransport ports.Transport
 		select {
-		case <-unlocked:
+		case currentTransport = <-unlocked:
 		case <-time.After(time.Second):
 			t.Fatal("proxy.mu was held while screen send was blocked")
 		}
+		require.Same(t, transport, currentTransport)
 		require.NoError(t, transport.Close())
 		require.Error(t, awaitTestValue(t, result, "blocked screen send did not return"))
 	})

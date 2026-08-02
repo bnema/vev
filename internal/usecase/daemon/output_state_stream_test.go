@@ -141,17 +141,44 @@ func (s *outputStateStream) render(frame renderer.Frame, damage []renderer.Damag
 	if err != nil {
 		return nil, err
 	}
-	prepared.commitNoSend()
+	if len(prepared.data) == 0 {
+		prepared.commitNoSend()
+		return nil, nil
+	}
+	// This helper tests renderer replay bytes without publishing a wire frame.
+	// Production state advancement happens only through preparedOutput.send.
+	prepared.draw.Commit()
+	s.forceSnapshot = false
 	return prepared.data, nil
+}
+
+func outputStateFrame(stream *outputStateStream, data []byte, reset bool, echoAck uint64) ports.Frame {
+	stream.next++
+	base := stream.next - 1
+	if reset {
+		base = 0
+	}
+	return frameOutputState(data, base, stream.next, echoAck)
 }
 
 func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Frame, damage []renderer.Damage, reset bool, echoAck uint64) (ports.Frame, bool, error) {
 	t.Helper()
-	data, err := stream.render(frame, damage, reset)
-	if err != nil || len(data) == 0 {
+	prepared, err := stream.prepare(frame, damage, reset)
+	if err != nil || len(prepared.data) == 0 {
+		if prepared != nil {
+			prepared.commitNoSend()
+		}
 		return ports.Frame{}, false, err
 	}
-	return stream.frame(data, reset, echoAck), true, nil
+	var output ports.Frame
+	err = prepared.send(prepared.data, echoAck, func(frame ports.Frame) error {
+		output = frame
+		return nil
+	})
+	if err != nil {
+		return ports.Frame{}, false, err
+	}
+	return output, true, nil
 }
 
 // A resize is a state reset, but it must not turn subsequent idle or damaged

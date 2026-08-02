@@ -80,15 +80,20 @@ func TestProxyScreenStateInvalidUpdateIsAtomic(t *testing.T) {
 }
 
 func TestProxyScreenStateScreenAreaLimitIsAtomic(t *testing.T) {
-	boundary := newProxyScreenState(domain.Size{Cols: 512, Rows: 512})
-	if boundary.frame.Width != 512 || boundary.frame.Height != 512 || boundary.scratch.Width != 512 || boundary.scratch.Height != 512 {
+	const boundaryCols = 512
+	boundaryRows := maxProxyScreenCells / boundaryCols
+	boundary := newProxyScreenState(domain.Size{Cols: boundaryCols, Rows: boundaryRows})
+	if boundary.frame.Width != boundaryCols || boundary.frame.Height != boundaryRows || boundary.scratch.Width != boundaryCols || boundary.scratch.Height != boundaryRows {
 		t.Fatalf("boundary state dimensions = %dx%d and %dx%d", boundary.frame.Width, boundary.frame.Height, boundary.scratch.Width, boundary.scratch.Height)
 	}
-	if boundary.ResizePlaceholder(domain.Size{Cols: 513, Rows: 512}) {
+	if boundary.ResizePlaceholder(domain.Size{Cols: boundaryCols, Rows: boundaryRows + 1}) {
 		t.Fatal("over-cap resize was accepted")
 	}
-	if boundary.frame.Width != 512 || boundary.frame.Height != 512 || boundary.scratch.Width != 512 || boundary.scratch.Height != 512 {
+	if boundary.frame.Width != boundaryCols || boundary.frame.Height != boundaryRows || boundary.scratch.Width != boundaryCols || boundary.scratch.Height != boundaryRows {
 		t.Fatal("over-cap resize changed boundary state")
+	}
+	if !boundary.damageFullRedrawSticky {
+		t.Fatal("initial full redraw must remain sticky until acknowledged")
 	}
 
 	s := newProxyScreenState(domain.Size{Cols: 2, Rows: 2})
@@ -337,7 +342,7 @@ func TestProxyScreenStateCursorOnlyAndDamageBound(t *testing.T) {
 	if s.cursorOut.Row != 1 || s.cursorOut.Col != 1 || len(s.damage) != 0 {
 		t.Fatalf("cursor-only update = cursor=%+v damage=%+v", s.cursorOut, s.damage)
 	}
-	for i := 0; i < maxProxyScreenDamage; i++ {
+	for range maxProxyScreenDamage {
 		applyProxyDelta(t, s, ports.ScreenUpdate{
 			Size:  domain.Size{Cols: 2, Rows: 2},
 			Spans: []ports.ScreenSpan{{Y: 0, Cells: cells("x")}},
@@ -384,7 +389,7 @@ func BenchmarkProxyScreenStateApply(b *testing.B) {
 			b.ResetTimer()
 			b.ReportMetric(float64(tc.cells), "cells/op")
 			b.ReportMetric(float64(tc.spans), "spans/op")
-			for range b.N {
+			for b.Loop() {
 				if err := s.Apply(nextProxyDelta(s, tc.update)); err != nil {
 					b.Fatal(err)
 				}

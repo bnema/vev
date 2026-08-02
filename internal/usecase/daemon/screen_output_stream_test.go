@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
@@ -26,6 +27,10 @@ func TestStructuredOutputStreamSnapshotsThenDeltas(t *testing.T) {
 		require.Equal(t, uint16(y), span.Y)
 		require.Zero(t, span.X)
 		require.Len(t, span.Cells, frame.Width)
+		for x, cell := range span.Cells {
+			require.Equal(t, frame.At(x, y).Rune, cell.Rune)
+			require.Equal(t, frame.At(x, y).Continuation, cell.Continuation)
+		}
 	}
 	require.NoError(t, first.send(func(got ports.Frame) error {
 		require.Equal(t, ports.MsgScreenUpdate, got.Type)
@@ -210,6 +215,27 @@ func TestStructuredOutputStreamComparesCursorValidityAndHidden(t *testing.T) {
 	require.Empty(t, noop.data)
 }
 
+func TestStructuredOutputStreamRejectsInvalidCursorAndGeometry(t *testing.T) {
+	cases := []struct {
+		name   string
+		frame  renderer.Frame
+		cursor cursorOut
+	}{
+		{name: "cursor row outside frame", frame: structuredTestFrame("a"), cursor: cursorOut{valid: true, row: 1}},
+		{name: "cursor col outside frame", frame: structuredTestFrame("a"), cursor: cursorOut{valid: true, col: 1}},
+		{name: "screen cell cap", frame: renderer.NewFrame(513, 512), cursor: cursorOut{valid: true}},
+		{name: "uint16 dimension cap", frame: renderer.NewFrame(math.MaxUint16+1, 1), cursor: cursorOut{valid: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := newStructuredOutputStream(newOutputStateStream())
+			_, err := stream.prepare(tc.frame, nil, tc.cursor, true, 0)
+			require.Error(t, err)
+			require.Zero(t, stream.state.next, "rejected geometry must not advance state")
+		})
+	}
+}
+
 func TestStructuredOutputStreamPreservesExplicitZeroCursorStyle(t *testing.T) {
 	state := newOutputStateStream()
 	stream := newStructuredOutputStream(state)
@@ -308,10 +334,11 @@ func BenchmarkStructuredOutputPrepare(b *testing.B) {
 			if err := initial.send(func(ports.Frame) error { return nil }); err != nil {
 				b.Fatal(err)
 			}
-			var wireBytes, spans, snapshots int
+			var wireBytes, spans, snapshots, mutation int
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				fixture.mutate(fixture.frame, i)
+			for b.Loop() {
+				fixture.mutate(fixture.frame, mutation)
+				mutation++
 				prepared, err := stream.prepare(fixture.frame, fixture.damage, cursor, false, 0)
 				if err != nil {
 					b.Fatal(err)

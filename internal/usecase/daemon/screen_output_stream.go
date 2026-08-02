@@ -35,6 +35,10 @@ func (s *structuredOutputStream) prepare(frame renderer.Frame, damage []renderer
 	if err := frame.Validate(); err != nil {
 		return nil, err
 	}
+	size := frameSize(frame)
+	if !validProxyScreenSize(size) {
+		return nil, errors.New("structured output: frame geometry is outside wire limits")
+	}
 
 	reset = reset || s.forceSnapshot || s.state.next == 0 || s.shadow.Validate() != nil ||
 		s.shadow.Width != frame.Width || s.shadow.Height != frame.Height
@@ -91,7 +95,7 @@ func (s *structuredOutputStream) prepare(frame renderer.Frame, damage []renderer
 		}
 		update.Spans = make([]ports.ScreenSpan, 0, len(plan.Spans))
 		for _, span := range plan.Spans {
-			if span.Y < 0 || span.X < 0 || span.Width <= 0 || span.Y >= frame.Height || span.X+span.Width > frame.Width {
+			if span.Y < 0 || span.X < 0 || span.Width <= 0 || span.Y >= frame.Height || span.X > frame.Width-span.Width {
 				return nil, errors.New("structured output: invalid planned span")
 			}
 			update.Spans = append(update.Spans, ports.ScreenSpan{
@@ -156,43 +160,41 @@ type preparedStructuredOutput struct {
 	echoAck   uint64
 	data      []byte
 	snapshot  bool
-	completed bool
+	attempted bool
 	committed bool
 }
 
 func (p *preparedStructuredOutput) send(sender func(ports.Frame) error) error {
-	if p == nil || p.completed {
+	if p == nil || p.attempted {
 		return nil
 	}
 	if len(p.data) == 0 {
-		p.completed = true
+		p.attempted = true
 		p.commit()
 		return nil
 	}
+	p.attempted = true
 	if sender == nil {
-		p.completed = true
 		p.stream.forceSnapshot = true
 		return errors.New("structured output: nil sender")
 	}
 	if err := sender(ports.Frame{Type: ports.MsgScreenUpdate, Payload: p.data}); err != nil {
-		p.completed = true
 		p.stream.forceSnapshot = true
 		return err
 	}
-	p.completed = true
 	p.commit()
 	p.stream.state.next = p.next
 	return nil
 }
 
 // commitNoSend commits a prepared noop without adding a state-bearing frame.
-// A failed send is already completed, so it cannot accidentally commit after
+// A failed send is already attempted, so it cannot accidentally commit after
 // the failure and thereby destroy the required snapshot retry.
 func (p *preparedStructuredOutput) commitNoSend() {
-	if p == nil || p.completed {
+	if p == nil || p.attempted || len(p.data) != 0 {
 		return
 	}
-	p.completed = true
+	p.attempted = true
 	p.commit()
 }
 
