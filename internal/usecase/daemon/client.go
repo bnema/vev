@@ -83,13 +83,18 @@ type attachedClient struct {
 	initialSnatchedAttempt    *initialSnatchedPanelAttempt
 	size                      domain.Size
 	keys                      *keys.Router
-	sess                      Guarded[attachmentSession]
-	mouseScan                 mouse.Scanner
-	themeMu                   sync.Mutex
-	clientTheme               themeui.Theme
-	appliedTheme              appliedTheme
-	lastCursor                cursorOut
-	renderStages              renderStageHooks // optional render and handoff observability hooks
+	// view is attachment-local navigation state. It is never inferred from a
+	// session-wide active tab, so multiple attachments can observe different
+	// tabs and panes without changing shared session ownership.
+	viewMu       sync.Mutex
+	view         attachmentView
+	sess         Guarded[attachmentSession]
+	mouseScan    mouse.Scanner
+	themeMu      sync.Mutex
+	clientTheme  themeui.Theme
+	appliedTheme appliedTheme
+	lastCursor   cursorOut
+	renderStages renderStageHooks // optional render and handoff observability hooks
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[attachmentSession]

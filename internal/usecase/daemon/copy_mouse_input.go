@@ -179,7 +179,7 @@ func (d *Daemon) handleFreshCopyPointer(sess *session, ac *attachedClient, ev mo
 	if !ok {
 		return true
 	}
-	if !d.publishCopyMode(sess, ac, sess.activeTab(), pointer.pane, pointer.document, func(mode *scopy.Mode) {
+	if !d.publishCopyMode(sess, ac, sess.tabForAttachmentOrActive(ac), pointer.pane, pointer.document, func(mode *scopy.Mode) {
 		mode.StartCharacterSelection(pointer.press)
 		mode.ExtendCharacterSelection(mapped.pos)
 	}, func(runtime *overlayRuntime, mode *scopy.Mode) {

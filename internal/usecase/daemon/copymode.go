@@ -63,7 +63,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	d.invalidateRender(sess, ac, true, "copymode.go")
 }
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
-	tb := sess.activeTab()
+	tb := sess.tabForAttachmentOrActive(ac)
 	if tb == nil {
 		return
 	}
@@ -114,7 +114,7 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	if d.beforeCopyModeRevalidate != nil {
 		d.beforeCopyModeRevalidate()
 	}
-	valid := sess.activeTab() == tb
+	valid := sess.tabForAttachmentOrActive(ac) == tb
 	if valid {
 		tb.mu.Lock()
 		valid = tb.panes[p.id] == p || (tb.floating.state == floatingVisible && tb.floating.pane == p)

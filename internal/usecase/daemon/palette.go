@@ -501,7 +501,7 @@ type paletteExec struct {
 
 func (e paletteExec) runAction(request daemonActionRequest) error {
 	if request.target.session == nil {
-		request.target = resolveDaemonActionTarget(e.sess)
+		request.target = resolveDaemonActionTargetForAttachment(e.sess, e.ac)
 	}
 	runner := e.actions
 	if runner == nil {
@@ -580,7 +580,7 @@ func (e paletteExec) ClosePane() error {
 }
 
 func (e paletteExec) OpenMovePanePicker() error {
-	target := resolveDaemonActionTarget(e.sess)
+	target := resolveDaemonActionTargetForAttachment(e.sess, e.ac)
 	if target.tab == nil || target.pane == nil {
 		return errMovePaneInvalid
 	}
@@ -593,7 +593,7 @@ func (e paletteExec) OpenMovePanePicker() error {
 }
 
 func (e paletteExec) OpenMoveTabPicker() error {
-	target := resolveDaemonActionTarget(e.sess)
+	target := resolveDaemonActionTargetForAttachment(e.sess, e.ac)
 	if target.tab == nil {
 		return errMovePaneInvalid
 	}
@@ -672,12 +672,19 @@ func (e paletteExec) RenameSession() error {
 }
 
 func (e paletteExec) RenameTab() error {
-	tb := e.sess.activeTab()
+	tb := e.sess.tabForAttachmentOrActive(e.ac)
 	if tb == nil {
 		return nil
 	}
 	e.sess.mu.Lock()
-	currentName := tabDisplayName(tb, e.sess.active)
+	index := 0
+	for i, candidate := range e.sess.tabs {
+		if candidate == tb {
+			index = i
+			break
+		}
+	}
+	currentName := tabDisplayName(tb, index)
 	e.sess.mu.Unlock()
 	e.d.enterPrompt(e.sess, e.ac, " Rename tab ", currentName, func(name string) error {
 		return e.runAction(daemonActionRequest{kind: daemonActionRenameTab, target: daemonActionTarget{session: e.sess, tab: tb}, name: name})

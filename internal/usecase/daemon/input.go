@@ -93,7 +93,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		invalidateRejectedLeftPointer(rt, ev)
 		return
 	}
-	tb := sess.activeTab()
+	tb := sess.tabForAttachmentOrActive(ac)
 	if tb == nil {
 		invalidateRejectedLeftPointer(rt, ev)
 		return
@@ -364,7 +364,7 @@ func (h daemonKeyHandler) Forward(data []byte) {
 	if owned {
 		defer effect.End()
 	}
-	tb := sess.activeTab()
+	tb := sess.tabForAttachmentOrActive(h.ac)
 	if tb == nil {
 		return
 	}
@@ -383,7 +383,7 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		defer effect.End()
 	}
 	runAction := func(request daemonActionRequest) {
-		request.target = resolveDaemonActionTarget(sess)
+		request.target = resolveDaemonActionTargetForAttachment(sess, h.ac)
 		runner := h.actions
 		if runner == nil {
 			runner = daemonActions{d: h.d}
@@ -408,8 +408,8 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
 		if !proxiedJumpSearchesOtherSessions(h.ac.proxied) {
-			if idx, ok := oldestAttentionTab(sess); ok && sess.switchTab(idx) {
-				h.d.activateTab(sess, sess.activeTab())
+			if idx, ok := oldestAttentionTab(sess); ok && sess.switchAttachmentTab(h.ac, idx) {
+				h.d.activateTabAfterResizeForLease(sess, sess.tabForAttachmentOrActive(h.ac), false, h.ac, nil)
 				h.d.invalidateRender(sess, h.ac, true, "input.go")
 			}
 			return
@@ -457,8 +457,8 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:
 		idx := int(action - keys.ActionSwitchTab1)
-		if sess.switchTab(idx) {
-			h.d.activateTab(sess, sess.activeTab())
+		if sess.switchAttachmentTab(h.ac, idx) {
+			h.d.activateTabAfterResizeForLease(sess, sess.tabForAttachmentOrActive(h.ac), false, h.ac, nil)
 			h.d.invalidateRender(sess, h.ac, true, "input.go")
 		}
 	}

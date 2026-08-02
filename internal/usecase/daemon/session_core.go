@@ -24,16 +24,22 @@ type attachmentSession interface {
 type sessionCore struct {
 	mu sync.Mutex
 
-	id          domain.SessionID
-	name        string
-	ephemeral   bool
-	caps        sessionCapabilities
-	client      *attachedClient
-	snatched    map[*attachedClient]struct{}
-	createdAt   int64
-	incarnation domain.IncarnationID
-	mruAt       atomic.Uint64
-	coordinator atomic.Pointer[renderCoordinator]
+	id        domain.SessionID
+	name      string
+	ephemeral bool
+	caps      sessionCapabilities
+	// attachments is the session-owned membership registry. Role transition
+	// metadata below is separate from membership; admission and view code use
+	// this collection as their membership source.
+	attachments      map[*attachedClient]struct{}
+	attachmentOrder  map[*attachedClient]uint64
+	nextAttachmentID uint64
+	client           *attachedClient
+	snatched         map[*attachedClient]struct{}
+	createdAt        int64
+	incarnation      domain.IncarnationID
+	mruAt            atomic.Uint64
+	coordinator      atomic.Pointer[renderCoordinator]
 }
 
 func (s *session) core() *sessionCore {

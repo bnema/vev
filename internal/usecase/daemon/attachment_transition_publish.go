@@ -196,6 +196,14 @@ func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool
 // generations, and currentSession while all role gates remain frozen.
 func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	req := publication.req
+	// Membership is collection-owned and is published before role metadata. A
+	// second attachment therefore coexists with the first even when the legacy
+	// active/snatched handoff state is also updated for older render paths.
+	registerAttachmentSessionLocked(publication.source, req.next)
+	registerAttachmentSessionLocked(req.target, req.next)
+	if publication.old != nil && publication.old != req.next {
+		registerAttachmentSessionLocked(req.target, publication.old)
+	}
 	if req.targetRole == attachmentActive && publication.old != nil && publication.old != req.next {
 		publication.displacedTransport = publication.old.transportSnapshot()
 		// A proxied daemon attachment has no local snatched UI and must never
@@ -214,6 +222,7 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 		if publication.old != nil && publication.old != req.next {
 			if publication.terminalDisplaced {
 				delete(req.target.core().snatched, publication.old)
+				req.target.core().unregisterAttachmentLocked(publication.old)
 			} else {
 				addSnatchedLocked(req.target, publication.old)
 			}

@@ -10,7 +10,7 @@ import (
 )
 
 func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Direction) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	err := d.splitPaneAt(sess, target.tab, target.pane, dir)
 	if err == nil && ac != nil {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
@@ -131,7 +131,7 @@ func placementContent(placements []layout.Placement, id layout.PaneID) domain.Re
 func rectSize(r domain.Rect) domain.Size { return domain.Size{Cols: r.Width, Rows: r.Height} }
 
 func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	err := d.stackPaneAt(sess, target.tab, target.pane)
 	if err == nil && ac != nil {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
@@ -146,7 +146,7 @@ func (d *Daemon) stackPaneAt(sess *session, tb *tab, target *pane) error {
 }
 
 func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	err := d.toggleStackAt(sess, target.tab, target.pane)
 	if err == nil && ac != nil {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
@@ -360,7 +360,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 }
 
 func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction, effect *roleEffectTicket) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	oldFocus := layout.PaneID("")
 	if target.pane != nil {
 		oldFocus = target.pane.id

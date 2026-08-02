@@ -212,12 +212,21 @@ func captureLocalPrimaryRenderState(
 		return nil, false
 	}
 	sess.mu.Lock()
-	if sess.client != ac || sess.active < 0 || sess.active >= len(sess.tabs) {
-		sess.mu.Unlock()
+	owned := sess.client == ac
+	if !owned && sess.attachments != nil {
+		_, owned = sess.attachments[ac]
+	}
+	sess.mu.Unlock()
+	if !owned {
 		return nil, false
 	}
-	tb := sess.tabs[sess.active]
-	sess.mu.Unlock()
+	tb, _ := sess.paneForAttachment(ac)
+	if tb == nil {
+		tb = sess.activeTab()
+	}
+	if tb == nil {
+		return nil, false
+	}
 
 	scratch := &ac.renderScratch
 	scratch.statusTabs = append(scratch.statusTabs[:0], bars.status.tabs...)

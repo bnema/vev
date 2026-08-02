@@ -227,7 +227,7 @@ func proxiedJumpSearchesOtherSessions(proxied bool) bool { return !proxied }
 // but never follows OverflowSessions. The local proxy daemon is the only owner
 // allowed to change the selected session.
 func (d *Daemon) focusDirProxied(sess *session, ac *attachedClient, dir layout.Direction) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	oldFocus := layout.PaneID("")
 	if target.pane != nil {
 		oldFocus = target.pane.id

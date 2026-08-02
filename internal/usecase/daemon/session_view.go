@@ -53,7 +53,6 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		opts.tabDetails = true
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	view := sessionView{
 		id:                s.id,
 		incarnation:       s.incarnation,
@@ -62,7 +61,7 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		createdAt:         s.createdAt,
 		active:            s.active,
 		mruAt:             s.mruAt.Load(),
-		attached:          s.client != nil,
+		attached:          len(s.attachments) != 0 || s.client != nil,
 		tabCount:          len(s.tabs),
 		cannotAcceptMoves: s.capabilities().cannotAcceptMoves,
 	}
@@ -89,6 +88,10 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 			entry.focusedTitle = tb.focusedPaneTitle(opts.terminalTitle)
 		}
 		view.tabs = append(view.tabs, entry)
+	}
+	s.mu.Unlock()
+	if !view.attached {
+		view.attached = len(s.snapshotAttachmentViews()) != 0
 	}
 	return view
 }

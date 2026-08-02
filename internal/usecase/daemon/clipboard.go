@@ -143,7 +143,11 @@ func (d *Daemon) injectClipboardPathForRole(token attachmentRoleToken, path stri
 }
 
 func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, token *attachmentRoleToken) {
-	tb := sess.activeTab()
+	var ac *attachedClient
+	if token != nil {
+		ac = token.ac
+	}
+	tb := sess.tabForAttachmentOrActive(ac)
 	if tb == nil {
 		return
 	}

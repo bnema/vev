@@ -269,10 +269,14 @@ type daemonActionRunner interface {
 }
 
 func resolveDaemonActionTarget(sess *session) daemonActionTarget {
+	return resolveDaemonActionTargetForAttachment(sess, nil)
+}
+
+func resolveDaemonActionTargetForAttachment(sess *session, ac *attachedClient) daemonActionTarget {
 	if sess == nil {
 		return daemonActionTarget{}
 	}
-	tb := sess.activeTab()
+	tb := sess.tabForAttachmentOrActive(ac)
 	if tb == nil {
 		return daemonActionTarget{session: sess}
 	}

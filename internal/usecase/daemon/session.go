@@ -717,6 +717,7 @@ func (s *session) detachIfCurrent(ac *attachedClient) bool {
 	defer s.mu.Unlock()
 	if s.client == ac {
 		s.client = nil
+		s.unregisterAttachmentLocked(ac)
 		ac.setSession(nil)
 		return true
 	}
@@ -749,6 +750,7 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	}
 	if current {
 		sess.client = nil
+		sess.unregisterAttachmentLocked(ac)
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenRoleCapability()
@@ -779,6 +781,7 @@ func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClie
 	}
 	if current {
 		p.client = nil
+		unregisterAttachmentSessionLocked(attachmentSession(p), ac)
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenRoleCapability()
@@ -829,6 +832,7 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 	current := coordinator != nil && transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
 	if current {
 		core.client = nil
+		unregisterAttachmentSessionLocked(token.sess, token.ac)
 		token.ac.roleGeneration.Add(1)
 		token.ac.setSession(nil)
 		token.ac.invalidateFrozenRoleCapability()

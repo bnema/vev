@@ -24,6 +24,9 @@ func (d *Daemon) unrouteSnatchedAttachment(token attachmentRoleToken, terminal b
 		token.ac.transportSnapshotCurrent(token.transport)
 	if current {
 		delete(core.snatched, token.ac)
+		if terminal {
+			core.unregisterAttachmentLocked(token.ac)
+		}
 		token.ac.roleGeneration.Add(1)
 		token.ac.invalidateFrozenRoleCapability()
 	}

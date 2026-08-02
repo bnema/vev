@@ -153,6 +153,7 @@ func retireEmptyMoveSessionLocked(sess *session, retirement frozenMoveAttachment
 	for _, ac := range retirement.clients {
 		retired = append(retired, detachedAttachmentSnapshot{ac: ac, transport: ac.transportSnapshot()})
 		delete(sess.snatched, ac)
+		sess.unregisterAttachmentLocked(ac)
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenRoleCapability()
