@@ -95,7 +95,7 @@ func TestResizeReflowCarriesSourceRowIDsIntoHistoryAndViewport(t *testing.T) {
 func TestHistoryRowIDsRemainStableAcrossViewsAndEviction(t *testing.T) {
 	h := NewHistory(HistoryConfig{MaxRows: 3, ChunkRows: 2})
 	for i, text := range []string{"one", "two"} {
-		if err := h.Append(historyRow(text), LineBound{End: len(text)}, RowID(i+1)); err != nil {
+		if err := h.AppendWithID(historyRow(text), LineBound{End: len(text)}, RowID(i+1)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -104,7 +104,7 @@ func TestHistoryRowIDsRemainStableAcrossViewsAndEviction(t *testing.T) {
 		t.Fatalf("sealed row ID = %d, want %d", got, want)
 	}
 
-	if err := h.Append(historyRow("three"), LineBound{End: 5}, RowID(3)); err != nil {
+	if err := h.AppendWithID(historyRow("three"), LineBound{End: 5}, RowID(3)); err != nil {
 		t.Fatal(err)
 	}
 	if got := before.FindRowID(2); got != 1 {
@@ -115,7 +115,7 @@ func TestHistoryRowIDsRemainStableAcrossViewsAndEviction(t *testing.T) {
 		t.Fatalf("new view FindRowID(3) = %d, want 2", got)
 	}
 
-	if err := h.Append(historyRow("four"), LineBound{End: 4}, RowID(4)); err != nil {
+	if err := h.AppendWithID(historyRow("four"), LineBound{End: 4}, RowID(4)); err != nil {
 		t.Fatal(err)
 	}
 	if got := before.FindRowID(1); got != 0 {

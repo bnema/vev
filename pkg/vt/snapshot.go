@@ -179,7 +179,7 @@ func NewScreenWithRecoveryTranscript(width, height int, config HistoryConfig, se
 			if remainingRows == 0 {
 				bound.Soft = false
 			}
-			if err := history.appendRestored(row, bound, chunk.rowIDs[i]); err != nil {
+			if err := history.AppendWithID(row, bound, chunk.rowIDs[i]); err != nil {
 				return nil, fmt.Errorf("restore recovery transcript: %w", err)
 			}
 		}

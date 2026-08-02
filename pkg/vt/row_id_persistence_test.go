@@ -43,6 +43,31 @@ func TestHistoryAppendRejectsExhaustedRowIDCounter(t *testing.T) {
 	require.Error(t, history.Append(historyRow("row"), LineBound{End: 3}))
 }
 
+func TestHistoryAppendWithIDRejectsMalformedIDs(t *testing.T) {
+	const maxPersistedRowID = ^RowID(0) - 2
+	for _, test := range []struct {
+		name     string
+		id       RowID
+		existing bool
+	}{
+		{name: "zero", id: 0},
+		{name: "duplicate", id: 7, existing: true},
+		{name: "first unpersistable", id: maxPersistedRowID + 1},
+		{name: "maximum", id: ^RowID(0)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			history := NewHistory(HistoryConfig{MaxRows: 2, ChunkRows: 2})
+			if test.existing {
+				require.NoError(t, history.AppendWithID(historyRow("existing"), LineBound{End: 8}, test.id))
+			}
+			before := history.View()
+			require.Error(t, history.AppendWithID(historyRow("row"), LineBound{End: 3}, test.id))
+			require.Equal(t, before.Len(), history.Len())
+			require.Equal(t, before.NextRowID(), history.NextRowID())
+		})
+	}
+}
+
 func TestScreenRowIDBoundaryMatchesHistoryPersistence(t *testing.T) {
 	const maxPersistedRowID = ^RowID(0) - 2
 	for _, test := range []struct {
@@ -78,7 +103,7 @@ func TestScreenRowIDBoundaryMatchesHistoryPersistence(t *testing.T) {
 			require.Equal(t, test.want+1, view.NextRowID())
 
 			history := NewHistory(HistoryConfig{MaxRows: 1, ChunkRows: 1})
-			require.NoError(t, history.Append(row, LineBound{End: 1}, screen.RowID(0)))
+			require.NoError(t, history.AppendWithID(row, LineBound{End: 1}, screen.RowID(0)))
 			_, err = MarshalHistory(history.SealAndView())
 			require.NoError(t, err)
 		})
@@ -95,7 +120,7 @@ func TestHistoryCodecRejectsMissingRowIDsOnMarshal(t *testing.T) {
 
 func TestRestoredScreenAllocatesAbovePersistedRowIDs(t *testing.T) {
 	history := NewHistory(HistoryConfig{MaxRows: 4, ChunkRows: 1})
-	require.NoError(t, history.Append(historyRow("old"), LineBound{End: 3}, RowID(40)))
+	require.NoError(t, history.AppendWithID(historyRow("old"), LineBound{End: 3}, RowID(40)))
 	sealed, tail, err := MarshalSealedHistory(history.SealAndView())
 	require.NoError(t, err)
 	transcript, err := MarshalHistory(HistoryView{
@@ -141,8 +166,8 @@ func TestHistoryRestoreRejectsDuplicateIDsAcrossEvictedHistoryAndTranscript(t *t
 func TestHistoryRestoreRejectsDuplicateIDsAcrossBlobs(t *testing.T) {
 	first := NewHistory(HistoryConfig{MaxRows: 2, ChunkRows: 1})
 	second := NewHistory(HistoryConfig{MaxRows: 2, ChunkRows: 1})
-	require.NoError(t, first.Append(historyRow("one"), LineBound{End: 3}, RowID(7)))
-	require.NoError(t, second.Append(historyRow("two"), LineBound{End: 3}, RowID(7)))
+	require.NoError(t, first.AppendWithID(historyRow("one"), LineBound{End: 3}, RowID(7)))
+	require.NoError(t, second.AppendWithID(historyRow("two"), LineBound{End: 3}, RowID(7)))
 	firstBlob, err := MarshalHistoryChunk(first.SealAndView().Chunk(0))
 	require.NoError(t, err)
 	secondBlob, err := MarshalHistoryChunk(second.SealAndView().Chunk(0))

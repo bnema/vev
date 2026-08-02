@@ -101,7 +101,7 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	sess.client = ac
 	ac.setSession(sess)
 	closing.mu.Lock()
-	document := scopy.NewDocument(scopy.NewSnapshot(closing.history, closing.screen.Frame, closing.screen.LineBounds()), domain.DefaultWordSeparators)
+	document := scopy.NewDocument(scopy.NewSnapshot(closing.history, closing.screen.Frame, closing.screen.LineBounds(), nil), domain.DefaultWordSeparators)
 	closing.mu.Unlock()
 	ac.overlays.copyMu.Lock()
 	ac.overlays.copyPane = closing
@@ -146,7 +146,7 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	tb := sess.activeTab()
 	p := tb.focusedPane()
 	p.mu.Lock()
-	document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds()), domain.DefaultWordSeparators)
+	document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil), domain.DefaultWordSeparators)
 	p.mu.Unlock()
 
 	// Pause after candidate publication, then make the captured target stale.
@@ -370,7 +370,7 @@ func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.
 			tb := sess.activeTab()
 			p := tb.focusedPane()
 			p.mu.Lock()
-			document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds()), domain.DefaultWordSeparators)
+			document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil), domain.DefaultWordSeparators)
 			p.mu.Unlock()
 			tc.invalidate(sess, tb, p)
 

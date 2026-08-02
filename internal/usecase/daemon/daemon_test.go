@@ -458,7 +458,7 @@ func testRow(text string) []renderer.Cell {
 // wrapped out of. Tests that care about wrapped extents build the bound instead.
 func appendHistoryRow(tb testing.TB, history *vt.History, row []renderer.Cell) {
 	tb.Helper()
-	require.NoError(tb, history.Append(row, vt.LineBound{End: len(row)}, vt.RowID(1_000_000+history.Len()+1)))
+	require.NoError(tb, history.AppendWithID(row, vt.LineBound{End: len(row)}, vt.RowID(1_000_000+history.Len()+1)))
 }
 
 func tabCount(sess *session) int {

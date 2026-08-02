@@ -24,20 +24,18 @@ type Snapshot struct {
 	Width, Height int
 }
 
-func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, rowIDs ...[]vt.RowID) Snapshot {
-	var screenRowIDs []vt.RowID
-	if len(rowIDs) > 0 {
-		screenRowIDs = append([]vt.RowID(nil), rowIDs[0]...)
-	}
-	return newSnapshot(historySource, screen, bounds, screenRowIDs)
+func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, rowIDs []vt.RowID) Snapshot {
+	return newSnapshot(historySource, screen, bounds, append([]vt.RowID(nil), rowIDs...))
 }
 
 // NewSnapshotFromScreen captures a screen while its owner holds the Screen
-// lock. Screen.RowIDs already returns owned storage, so the snapshot can take
-// that copy directly without allocating a duplicate metadata slice.
+// lock. Screen.RowIDs returns the one owned copy required for immutable
+// snapshot state; newSnapshot takes that slice directly without duplicating
+// it. The live screen's rowIDs cannot be transferred or shared because later
+// scroll, resize, and clear mutations update that storage.
 func NewSnapshotFromScreen(historySource *vt.History, screen *vt.Screen) Snapshot {
 	if screen == nil {
-		return NewSnapshot(historySource, renderer.Frame{}, nil)
+		return NewSnapshot(historySource, renderer.Frame{}, nil, nil)
 	}
 	return newSnapshot(historySource, screen.Frame, screen.LineBounds(), screen.RowIDs())
 }

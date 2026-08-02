@@ -92,38 +92,37 @@ func defaultHistoryMaxCells(maxRows int) int {
 	return maxRows * 160
 }
 
-// Append records a copy of row along with its logical extent and optional row
-// identity. Calls without an identity receive a history-owned nonzero ID.
-// Once a chunk is full it is sealed forever. Rows wider than the total cell
-// capacity are rejected without mutation.
-func (h *History) Append(row []renderer.Cell, bound LineBound, ids ...RowID) error {
+// Append records a copy of row along with its logical extent and an
+// automatically allocated nonzero ID. Once a chunk is full it is sealed
+// forever. Rows wider than the total cell capacity are rejected without
+// mutation.
+func (h *History) Append(row []renderer.Cell, bound LineBound) error {
 	if h == nil || h.maxRows == 0 {
 		return nil
 	}
 	if len(row) > h.maxCells {
 		return ErrHistoryRowTooWide
 	}
-	id := RowID(0)
-	if len(ids) > 0 {
-		id = ids[0]
-	}
-	if id == 0 || h.hasRowID(id) {
-		var err error
-		id, err = h.allocateRowID()
-		if err != nil {
-			return err
-		}
+	id, err := h.allocateRowID()
+	if err != nil {
+		return err
 	}
 	return h.appendRow(row, bound, id)
 }
 
-// appendRestored appends a persisted row without synthesizing an identity.
-// The caller validates IDs across all persisted blobs before invoking it.
-func (h *History) appendRestored(row []renderer.Cell, bound LineBound, id RowID) error {
+// AppendWithID records a copy of row with an explicit persisted identity.
+// Unlike Append, malformed identities are rejected rather than synthesized.
+func (h *History) AppendWithID(row []renderer.Cell, bound LineBound, id RowID) error {
+	if id == 0 || id >= ^RowID(0)-1 {
+		return errInvalidHistoryRowID
+	}
 	if h == nil || h.maxRows == 0 {
 		return nil
 	}
-	if id == 0 || id >= ^RowID(0)-1 || h.hasRowID(id) {
+	if len(row) > h.maxCells {
+		return ErrHistoryRowTooWide
+	}
+	if h.hasRowID(id) {
 		return errInvalidHistoryRowID
 	}
 	return h.appendRow(row, bound, id)

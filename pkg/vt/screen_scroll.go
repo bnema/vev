@@ -107,7 +107,7 @@ func (s *Screen) emitLineEvicted(top, n int) {
 
 func (s *Screen) recordEvicted(row []renderer.Cell, bound LineBound, id RowID) {
 	if s.history != nil {
-		err := s.history.Append(row, bound, id)
+		err := s.history.AppendWithID(row, bound, id)
 		if err != nil && !errors.Is(err, ErrHistoryRowTooWide) {
 			panic(err)
 		}
