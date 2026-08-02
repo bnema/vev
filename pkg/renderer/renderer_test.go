@@ -134,6 +134,24 @@ func TestNoOp(t *testing.T) {
 	}
 }
 
+func TestPrepareNoOpDoesNotCloneFrame(t *testing.T) {
+	r := New(Capabilities{})
+	frame := NewFrame(3, 2)
+	markFrame(&frame)
+	if _, err := r.Draw(frame, []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 3, Height: 2}}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := r.Prepare(frame, []Damage{{Kind: DamageText, X: frame.Width, Y: 0, Width: 1, Height: 1}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.candidate.frame.Cells != nil || prepared.candidate.frame.lineOffset != nil {
+		t.Fatal("no-op prepared draw owns frame storage")
+	}
+	prepared.Commit()
+}
+
 // ---------------------------------------------------------------------------
 // Style reset discipline
 // ---------------------------------------------------------------------------
@@ -1305,6 +1323,17 @@ func TestRendererPrepare(t *testing.T) {
 						return prepared
 					},
 					want: "\x1b[1;1HABC\x1b[2;1HDEF\x1b[0m",
+				},
+				{
+					name: "synchronized full draw",
+					prepare: func(t *testing.T) PreparedDraw {
+						prepared, err := New(Capabilities{SynchronizedOutput: true}).Prepare(fullFrame, fullDamage, false)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return prepared
+					},
+					want: SyncStartCSI + "\x1b[1;1HABC\x1b[2;1HDEF\x1b[0m" + SyncEndCSI,
 				},
 				{
 					name: "fragmented damage",

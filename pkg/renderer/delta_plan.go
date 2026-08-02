@@ -23,10 +23,19 @@ type DeltaPlan struct {
 	Spans    []Span
 }
 
-// DeltaCandidate holds a plan and owns a source frame snapshot until Commit.
+// DeltaCandidate holds a plan and owns a source frame snapshot when the plan
+// has work to commit. Empty candidates are true no-ops.
 type DeltaCandidate struct {
 	Plan  DeltaPlan
 	frame Frame
+}
+
+func newDeltaCandidate(frame Frame, plan DeltaPlan) DeltaCandidate {
+	candidate := DeltaCandidate{Plan: plan}
+	if plan.Snapshot || plan.Scroll.Height != 0 || len(plan.Spans) != 0 {
+		candidate.frame = frame.Clone()
+	}
+	return candidate
 }
 
 // PlanDelta prepares a non-mutating update from committed to frame.
@@ -35,36 +44,32 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 		return DeltaCandidate{}, err
 	}
 
-	candidate := DeltaCandidate{frame: frame.Clone()}
 	if reset || frame.Width != committed.Width || frame.Height != committed.Height {
-		candidate.Plan.Snapshot = true
-		return candidate, nil
+		return newDeltaCandidate(frame, DeltaPlan{Snapshot: true}), nil
 	}
 	if err := committed.Validate(); err != nil {
 		return DeltaCandidate{}, err
 	}
 
 	if len(damage) == 1 && (damage[0].Kind == DamageText || damage[0].Kind == DamageClear) {
-		candidate.Plan = planSingleDamage(frame, damage[0])
-		return candidate, nil
+		return newDeltaCandidate(frame, planSingleDamage(frame, damage[0])), nil
 	}
 
 	if needsFull(damage) {
 		dirty, full := buildDirtyLinePlan(frame, committed)
 		if len(dirty) > 0 || full {
-			candidate.Plan.Snapshot = true
-			candidate.Plan.Spans = dirty
+			return newDeltaCandidate(frame, DeltaPlan{Snapshot: true, Spans: dirty}), nil
 		}
-		return candidate, nil
+		return DeltaCandidate{}, nil
 	}
 
+	var plan DeltaPlan
 	var skip *Damage
 	if scroll, ok := findSafeScroll(frame, damage); ok && canApplyScrollAgainst(frame, scroll, damage, committed) {
-		candidate.Plan.Scroll = Scroll{Y: scroll.Y, Height: scroll.Height, Count: scroll.Count}
+		plan.Scroll = Scroll{Y: scroll.Y, Height: scroll.Height, Count: scroll.Count}
 		skip = &scroll
 	} else if hasScrollDamage(damage) {
-		candidate.Plan.Snapshot = true
-		return candidate, nil
+		return newDeltaCandidate(frame, DeltaPlan{Snapshot: true}), nil
 	}
 
 	var spans []Span
@@ -75,20 +80,16 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 		spans, full = buildDamagePlan(frame, damage, skip)
 	}
 	if full {
-		candidate.Plan = DeltaPlan{Snapshot: true}
-		return candidate, nil
+		return newDeltaCandidate(frame, DeltaPlan{Snapshot: true}), nil
 	}
-	if deltaCostsSnapshot(frame, spans, candidate.Plan.Scroll.Height != 0) {
-		if candidate.Plan.Scroll.Height != 0 {
-			candidate.Plan = DeltaPlan{Snapshot: true}
-		} else {
-			candidate.Plan.Snapshot = true
-			candidate.Plan.Spans = spans
+	if deltaCostsSnapshot(frame, spans, plan.Scroll.Height != 0) {
+		if plan.Scroll.Height != 0 {
+			return newDeltaCandidate(frame, DeltaPlan{Snapshot: true}), nil
 		}
-		return candidate, nil
+		return newDeltaCandidate(frame, DeltaPlan{Snapshot: true, Spans: spans}), nil
 	}
-	candidate.Plan.Spans = spans
-	return candidate, nil
+	plan.Spans = spans
+	return newDeltaCandidate(frame, plan), nil
 }
 
 func planSingleDamage(frame Frame, d Damage) DeltaPlan {
@@ -191,6 +192,9 @@ func styleRunCount(cells []Cell) int {
 
 // Commit advances dst to the frame snapshot owned by the candidate.
 func (c DeltaCandidate) Commit(dst *Frame) {
+	if !c.Plan.Snapshot && c.Plan.Scroll.Height == 0 && len(c.Plan.Spans) == 0 {
+		return
+	}
 	if c.Plan.Snapshot || dst.Width != c.frame.Width || dst.Height != c.frame.Height {
 		replaceFrame(dst, c.frame)
 		return

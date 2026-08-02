@@ -163,6 +163,24 @@ func TestPlanDelta(t *testing.T) {
 	}
 }
 
+func TestNoOpDeltaCandidateDoesNotCloneFrame(t *testing.T) {
+	frame := testFrame("abcd", "efgh")
+	candidate, err := PlanDelta(frame, nil, frame, false)
+	if err != nil {
+		t.Fatalf("PlanDelta() error = %v", err)
+	}
+	if candidate.frame.Cells != nil || candidate.frame.lineOffset != nil {
+		t.Fatal("no-op candidate owns frame storage")
+	}
+
+	committed := frame.Clone()
+	before := committed.Clone()
+	candidate.Commit(&committed)
+	if !reflect.DeepEqual(committed, before) {
+		t.Fatal("no-op candidate changed committed frame")
+	}
+}
+
 func TestPlanDeltaDoesNotMutateCommitted(t *testing.T) {
 	committed := testFrame("0000", "1111", "2222", "3333", "4444")
 	committed.ScrollUp(1, 3, 1)

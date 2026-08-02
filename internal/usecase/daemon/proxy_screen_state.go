@@ -199,7 +199,7 @@ func (s *proxyScreenState) recordUpdate(update ports.ScreenUpdate) {
 	if s.damageFullRedrawSticky {
 		return
 	}
-	if update.Scroll != nil && len(s.damage) > 0 && !(len(s.damage) == 1 && s.damage[0].Kind == renderer.DamageFullRedraw) {
+	if update.Scroll != nil && len(s.damage) > 0 && (len(s.damage) != 1 || s.damage[0].Kind != renderer.DamageFullRedraw) {
 		s.setFullRedraw()
 		return
 	}

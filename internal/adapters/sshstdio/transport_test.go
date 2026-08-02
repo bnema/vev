@@ -183,6 +183,9 @@ func TestTransportUsesCanonicalFrameMaximum(t *testing.T) {
 	if boundaryFrame.Type != ports.MsgOutput || len(boundaryFrame.Payload) != len(boundaryPayload) {
 		t.Fatalf("boundary frame = type %d, payload %d bytes; want type %d, payload %d bytes", boundaryFrame.Type, len(boundaryFrame.Payload), ports.MsgOutput, len(boundaryPayload))
 	}
+	if !bytes.Equal(boundaryFrame.Payload, boundaryPayload) {
+		t.Fatal("boundary payload was corrupted")
+	}
 
 	send := NewTransport(nil, io.Discard, nil)
 	err = send.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, ports.MaxFrameLen)})

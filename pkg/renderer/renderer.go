@@ -67,7 +67,11 @@ func (r *Renderer) Prepare(frame Frame, damage []Damage, reset bool) (PreparedDr
 	var err error
 	if !reset && len(r.shadow) != 0 && r.width == frame.Width && r.height == frame.Height && len(damage) == 1 && (damage[0].Kind == DamageText || damage[0].Kind == DamageClear) {
 		if err = frame.Validate(); err == nil {
-			candidate = DeltaCandidate{Plan: planSingleDamage(frame, damage[0]), frame: frame.Clone()}
+			plan := planSingleDamage(frame, damage[0])
+			candidate = DeltaCandidate{Plan: plan}
+			if plan.Snapshot || plan.Scroll.Height != 0 || len(plan.Spans) != 0 {
+				candidate.frame = frame.Clone()
+			}
 		}
 	} else {
 		candidate, err = PlanDelta(frame, damage, r.committedFrame(), reset || len(r.shadow) == 0)

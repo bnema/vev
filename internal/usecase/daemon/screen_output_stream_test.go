@@ -201,6 +201,12 @@ func TestStructuredOutputStreamNonNoopCommitForcesSnapshotRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, pending.data)
 	pending.commitNoSend()
+	var senderCalled bool
+	require.NoError(t, pending.send(func(ports.Frame) error {
+		senderCalled = true
+		return nil
+	}))
+	require.False(t, senderCalled)
 	require.Equal(t, before, stream.shadow, "non-noop commit must not publish its candidate")
 	require.Equal(t, uint64(1), state.next)
 	require.True(t, stream.forceSnapshot)
