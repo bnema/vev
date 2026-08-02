@@ -43,6 +43,48 @@ func TestHistoryAppendRejectsExhaustedRowIDCounter(t *testing.T) {
 	require.Error(t, history.Append(historyRow("row"), LineBound{End: 3}))
 }
 
+func TestScreenRowIDBoundaryMatchesHistoryPersistence(t *testing.T) {
+	const maxPersistedRowID = ^RowID(0) - 2
+	for _, test := range []struct {
+		name    string
+		current RowID
+		want    RowID
+		persist bool
+	}{
+		{name: "last persistable ID", current: maxPersistedRowID - 1, want: maxPersistedRowID, persist: true},
+		{name: "first non-persistable ID", current: maxPersistedRowID, want: maxPersistedRowID + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			screen := NewScreen(1, 1)
+			screen.nextRowID = test.current
+			allocate := func() {
+				require.Equal(t, test.want, screen.nextRowIDValue())
+			}
+			if !test.persist {
+				require.Panics(t, allocate)
+				return
+			}
+
+			allocate()
+			row := historyRow("x")
+			screen.buffer.rowIDs[0] = test.want
+			screen.buffer.frame.Row(0)[0] = row[0]
+			screen.buffer.boundaries[0] = LineBound{End: 1}
+			transcript, err := screen.RecoveryTranscriptSnapshot().Marshal()
+			require.NoError(t, err)
+			view, err := UnmarshalHistory(transcript)
+			require.NoError(t, err)
+			require.Equal(t, test.want, view.RowID(0))
+			require.Equal(t, test.want+1, view.NextRowID())
+
+			history := NewHistory(HistoryConfig{MaxRows: 1, ChunkRows: 1})
+			require.NoError(t, history.Append(row, LineBound{End: 1}, screen.RowID(0)))
+			_, err = MarshalHistory(history.SealAndView())
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestHistoryCodecRejectsMissingRowIDsOnMarshal(t *testing.T) {
 	_, err := MarshalHistory(HistoryView{
 		chunks: []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("row")}, bounds: []LineBound{{End: 3}}}},
