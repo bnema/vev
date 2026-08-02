@@ -1,7 +1,11 @@
 package ports
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 20
+const ProtocolVersion uint16 = 21
+
+// MaxFrameLen is the largest permitted frame length, including the type byte
+// and excluding the four-byte length prefix.
+const MaxFrameLen = 16 << 20
 
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8
@@ -32,6 +36,7 @@ const (
 	MsgSessions      MsgType = 21
 	MsgCommandResult MsgType = 22
 	MsgSessionMeta   MsgType = 23
+	MsgScreenUpdate  MsgType = 24
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

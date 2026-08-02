@@ -3,8 +3,17 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 20 {
-		t.Fatalf("ProtocolVersion = %d, want 20", ProtocolVersion)
+	if ProtocolVersion != 21 {
+		t.Fatalf("ProtocolVersion = %d, want 21", ProtocolVersion)
+	}
+}
+
+func TestScreenUpdateMessageType(t *testing.T) {
+	if MsgScreenUpdate != 24 {
+		t.Fatalf("MsgScreenUpdate = %d, want 24", MsgScreenUpdate)
+	}
+	if MaxFrameLen != 16<<20 {
+		t.Fatalf("MaxFrameLen = %d, want %d", MaxFrameLen, 16<<20)
 	}
 }
 
@@ -52,6 +61,7 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgSessions", MsgSessions},
 		{"MsgCommandResult", MsgCommandResult},
 		{"MsgSessionMeta", MsgSessionMeta},
+		{"MsgScreenUpdate", MsgScreenUpdate},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

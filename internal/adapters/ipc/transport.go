@@ -10,11 +10,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// maxFrameLen is the largest permitted frame length (the length field
-// covers the type byte plus payload, not including the 4-byte length
-// prefix itself).
-const maxFrameLen = 16 << 20 // 16 MiB
-
 // frameHeaderLen is the size, in bytes, of the length prefix that precedes
 // every frame on the wire.
 const frameHeaderLen = 4
@@ -24,7 +19,7 @@ const frameHeaderLen = 4
 var ErrZeroLengthFrame = errors.New("ipc: zero-length frame")
 
 // ErrFrameTooLarge is returned by Recv when a frame's length field exceeds
-// maxFrameLen, and by Send when a payload is too large to encode.
+// ports.MaxFrameLen, and by Send when a payload is too large to encode.
 var ErrFrameTooLarge = errors.New("ipc: frame exceeds maximum length")
 
 // ErrBackpressure means the bounded IPC egress queue is full. Callers using
@@ -144,7 +139,7 @@ func (t *unixTransport) SendAsync(f ports.Frame) error {
 
 func marshalFrame(f ports.Frame) ([]byte, error) {
 	n := 1 + len(f.Payload) // type + payload
-	if n > maxFrameLen {
+	if n > ports.MaxFrameLen {
 		return nil, ErrFrameTooLarge
 	}
 	buf := make([]byte, frameHeaderLen+n)
@@ -274,7 +269,7 @@ func (t *unixTransport) Recv() (ports.Frame, error) {
 		end(false)
 		return ports.Frame{}, ErrZeroLengthFrame
 	}
-	if n > maxFrameLen {
+	if n > ports.MaxFrameLen {
 		end(false)
 		return ports.Frame{}, ErrFrameTooLarge
 	}

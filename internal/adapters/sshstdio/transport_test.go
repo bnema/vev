@@ -3,6 +3,7 @@ package sshstdio
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -161,6 +162,22 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 	_, err := tr.Recv()
 	if !errors.Is(err, ErrZeroLengthFrame) {
 		t.Fatalf("Recv error = %v, want ErrZeroLengthFrame", err)
+	}
+}
+
+func TestTransportRejectsFramesOverSharedMaximum(t *testing.T) {
+	send := NewTransport(nil, io.Discard, nil)
+	err := send.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, ports.MaxFrameLen)})
+	if !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("Send error = %v, want ErrFrameTooLarge", err)
+	}
+
+	var header [frameHeaderLen]byte
+	binary.BigEndian.PutUint32(header[:], ports.MaxFrameLen+1)
+	recv := NewTransport(bytes.NewReader(header[:]), io.Discard, nil)
+	_, err = recv.Recv()
+	if !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("Recv error = %v, want ErrFrameTooLarge", err)
 	}
 }
 
