@@ -67,6 +67,20 @@ func TestProxyScreenStateInvalidUpdateIsAtomic(t *testing.T) {
 		Kind:         ports.ScreenUpdateDelta,
 		BaseStateNum: 1,
 		NewStateNum:  2,
+		Size:         domain.Size{Cols: 3, Rows: 2},
+		Cursor:       ports.ScreenCursor{Row: 1, Col: 1, Visible: true},
+	}
+	if err := s.Apply(invalid); err == nil {
+		t.Fatal("delta with mismatched dimensions was accepted")
+	}
+	if !reflect.DeepEqual(s.frame, beforeFrame) || !reflect.DeepEqual(s.scratch, beforeScratch) || s.cursorOut != beforeCursor || s.generation != beforeGeneration || s.stateNum != beforeState {
+		t.Fatal("mismatched-dimension update mutated state")
+	}
+
+	invalid = ports.ScreenUpdate{
+		Kind:         ports.ScreenUpdateDelta,
+		BaseStateNum: 1,
+		NewStateNum:  2,
 		Size:         domain.Size{Cols: 4, Rows: 2},
 		Scroll:       &ports.ScreenScroll{Top: 0, Height: 2, Count: 2},
 		Cursor:       ports.ScreenCursor{Row: 1, Col: 1, Visible: true},

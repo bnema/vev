@@ -183,9 +183,11 @@ func (s *proxyScreenState) AcknowledgeDamage(generation uint64) bool {
 	return true
 }
 
-// CaptureInto updates dst from the live frame. Safe scroll/span damage is
-// replayed incrementally; snapshots, uncertain damage, and dimensions use a
-// complete clone.
+// CaptureInto updates dst from the live frame. dst must already contain the
+// previous synchronized generation before incremental damage can be replayed;
+// callers should initialize it with a full clone or equivalent first capture.
+// Safe scroll/span damage is replayed incrementally; snapshots, uncertain
+// damage, and dimensions use a complete clone.
 func (s *proxyScreenState) CaptureInto(dst *renderer.Frame) {
 	if s == nil || dst == nil || !validProxyFrame(*s) {
 		return
