@@ -8,10 +8,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/layout"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
@@ -213,6 +215,7 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: map[string]ports.SnapshotGeneration{snapshot.Name: generation}}
 	pty, release := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d.baseEnv = []string{"TERM=xterm-kitty", "COLORTERM=truecolor"}
 	checkpoint := domain.CheckpointRef{Generation: generation.Generation, ManifestDigest: snapcodec.ManifestDigest(generation.Manifest)}
 	record := domain.CatalogueRecord{Name: snapshot.Name, IncarnationID: generation.IncarnationID, Cwd: "/snapshot/cwd", CreatedAt: int64(snapshot.CreatedAt), Committed: &checkpoint}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
@@ -229,6 +232,7 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	require.NotNil(t, restored)
 	require.False(t, restored.snapDirty.Load(), "a loaded generation must begin clean")
 	require.Equal(t, uint64(9), restored.snapshotPublishedGeneration, "the loaded manifest is the repository generation head")
+	require.True(t, restored.terminal.TrueColor, "restored sessions must retain startup terminal capability for future panes")
 	require.Equal(t, 0, restored.active)
 	require.Equal(t, "/snapshot/cwd", restored.cwd)
 	require.Len(t, restored.tabs, 1)
@@ -299,6 +303,37 @@ func TestSnapshotRuntimeRestorePreservesConsumedAndExpelledPaneLayout(t *testing
 	assertConsumedAndExpelledColumns(t, restored.tree)
 	require.Equal(t, fixture.tree, restored.tree, "runtime restore must preserve the complete rearranged tree")
 	require.Equal(t, fixture.paneStableIDs, restored.paneStableIDs, "runtime restore must preserve every pane stable ID")
+}
+
+func TestSnapshotRestoreUsesDaemonTerminalCapabilities(t *testing.T) {
+	snapshot := restoreAcceptanceSession(t, "restored")
+	pty, release := newBlockingPTY(t)
+	defer release()
+
+	var gotEnv []string
+	factory := portsmocks.NewMockPTYFactory(t)
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			gotEnv = append([]string(nil), env...)
+			return pty, nil
+		}).Once()
+
+	d := newTestDaemon(t, factory, stubClock{})
+	d.baseEnv = []string{
+		"TERM=xterm-kitty",
+		"COLORTERM=truecolor",
+		"XDG_RUNTIME_DIR=/run/user/1000",
+		"WAYLAND_DISPLAY=wayland-1",
+	}
+
+	tabs, err := d.restoreSnapshotTabs(context.Background(), d.serveCtx, snapshot)
+	require.NoError(t, err)
+	defer closeRestoredTabs(tabs)
+
+	require.Contains(t, gotEnv, "TERM=xterm-direct")
+	require.Contains(t, gotEnv, "COLORTERM=truecolor")
+	require.Contains(t, gotEnv, "XDG_RUNTIME_DIR=/run/user/1000")
+	require.Contains(t, gotEnv, "WAYLAND_DISPLAY=wayland-1")
 }
 
 func captureConsumedAndExpelledPaneLayout(t *testing.T) paneLayoutSnapshotFixture {

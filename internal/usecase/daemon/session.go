@@ -1807,6 +1807,23 @@ func environmentEntry(entry string) (name, value string, ok bool) {
 	return name, value, ok
 }
 
+func terminalEnvFromEnvironment(env []string) terminalEnv {
+	var term, colorTerm string
+	for _, entry := range env {
+		name, value, ok := environmentEntry(entry)
+		if !ok {
+			continue
+		}
+		switch name {
+		case "TERM":
+			term = value
+		case "COLORTERM":
+			colorTerm = value
+		}
+	}
+	return terminalEnv{TrueColor: ports.DetectTrueColor(term, colorTerm)}
+}
+
 func (d *Daemon) ptyCommand(env []string) (string, []string) {
 	if d.shellOverride {
 		return d.shell, append([]string(nil), d.shellArgs...)
