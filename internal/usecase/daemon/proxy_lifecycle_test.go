@@ -370,6 +370,8 @@ func TestProxyResumeBackoffIsFakeClockBoundedAndParksOffline(t *testing.T) {
 		require.Equal(t, proxyResumeBackoff(attempt), timer.delay)
 		timer.fire()
 		require.Equal(t, attempt+1, awaitTestValue(t, factory.calls, "proxy resume dial was not attempted"))
+		handshakeTimer := awaitTestValue(t, clock.timers, "proxy resume handshake did not arm its timeout")
+		require.Equal(t, proxyHandshakeTimeout, handshakeTimer.delay)
 	}
 	awaitTestCompletion(t, proxy.done, "proxy resume did not stop after its attempt cap")
 
@@ -418,6 +420,8 @@ func TestProxyResumeBackoffResetsAfterStableConnection(t *testing.T) {
 	require.Equal(t, proxyResumeInitialBackoff, first.delay)
 	first.fire()
 	_ = awaitTestValue(t, factory.calls, "stable resume did not dial")
+	handshakeTimer := awaitTestValue(t, clock.timers, "stable resume handshake did not arm its timeout")
+	require.Equal(t, proxyHandshakeTimeout, handshakeTimer.delay)
 	_ = requireProxyHello(t, resumed)
 	resumed.recv <- proxyRecv{frame: proxyWelcome(proxy.key.Name, 2, ports.CapabilityResume|ports.CapabilityProxied)}
 	resumed.recv <- proxyRecv{frame: proxyMeta(proxy.key.Name)}
