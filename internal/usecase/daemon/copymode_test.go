@@ -113,6 +113,7 @@ func TestCopyModeDocumentCarriesPaneRowIDs(t *testing.T) {
 	pane.screen.Write([]byte("live"))
 	historyID := pane.history.View().RowID(0)
 	liveID := pane.screen.RowID(0)
+	require.NotEqual(t, historyID, liveID)
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)

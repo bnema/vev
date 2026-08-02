@@ -458,7 +458,8 @@ func testRow(text string) []renderer.Cell {
 // wrapped out of. Tests that care about wrapped extents build the bound instead.
 func appendHistoryRow(tb testing.TB, history *vt.History, row []renderer.Cell) {
 	tb.Helper()
-	require.NoError(tb, history.Append(row, vt.LineBound{End: len(row)}))
+	id := max(vt.RowID(1_000_000), history.NextRowID())
+	require.NoError(tb, history.AppendWithID(row, vt.LineBound{End: len(row)}, id))
 }
 
 func TestAppendHistoryRowAllocatesUniqueIDsAfterEviction(t *testing.T) {

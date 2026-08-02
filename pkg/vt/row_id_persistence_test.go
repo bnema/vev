@@ -68,6 +68,48 @@ func TestHistoryAppendWithIDRejectsMalformedIDs(t *testing.T) {
 	}
 }
 
+func TestHistoryAppendWithIDValidatesOutOfOrderDuplicates(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: 4, ChunkRows: 1})
+	require.NoError(t, history.AppendWithID(historyRow("high"), LineBound{End: 4}, RowID(100)))
+	require.NoError(t, history.AppendWithID(historyRow("low"), LineBound{End: 3}, RowID(7)))
+	require.Equal(t, RowID(101), history.NextRowID())
+
+	before := history.View()
+	require.Error(t, history.AppendWithID(historyRow("duplicate"), LineBound{End: 9}, RowID(7)))
+	require.Equal(t, before.Len(), history.Len())
+	require.Equal(t, before.NextRowID(), history.NextRowID())
+}
+
+func TestHistoryAutomaticAllocationStaysAboveAcceptedIDsAfterEviction(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	require.NoError(t, history.AppendWithID(historyRow("high"), LineBound{End: 4}, RowID(100)))
+	require.NoError(t, history.AppendWithID(historyRow("low"), LineBound{End: 3}, RowID(7)))
+	require.NoError(t, history.AppendWithID(historyRow("next-low"), LineBound{End: 8}, RowID(8)))
+	require.NoError(t, history.AppendWithID(historyRow("evict"), LineBound{End: 5}, RowID(9)))
+	require.Equal(t, RowID(101), history.NextRowID())
+
+	require.NoError(t, history.Append(historyRow("automatic"), LineBound{End: 9}))
+	view := history.View()
+	require.Equal(t, RowID(101), view.RowID(view.Len()-1))
+	require.Equal(t, RowID(102), history.NextRowID())
+	for i := range view.Len() {
+		require.Less(t, view.RowID(i), history.NextRowID())
+	}
+}
+
+func TestHistoryAutomaticAllocationBoundary(t *testing.T) {
+	lastPersistableID := ^RowID(0) - 2
+	history := NewHistory(HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	history.nextRowID = lastPersistableID
+
+	require.NoError(t, history.Append(historyRow("last"), LineBound{End: 4}))
+	require.Equal(t, lastPersistableID+1, history.NextRowID())
+	before := history.View()
+	require.Error(t, history.Append(historyRow("exhausted"), LineBound{End: 9}))
+	require.Equal(t, before.Len(), history.Len())
+	require.Equal(t, before.NextRowID(), history.NextRowID())
+}
+
 func TestScreenRowIDBoundaryMatchesHistoryPersistence(t *testing.T) {
 	const maxPersistedRowID = ^RowID(0) - 2
 	for _, test := range []struct {

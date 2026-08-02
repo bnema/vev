@@ -155,20 +155,16 @@ func (h *History) appendRow(row []renderer.Cell, bound LineBound, id RowID) erro
 	return nil
 }
 
+// allocateRowID relies on appendRow advancing nextRowID above every accepted
+// explicit ID; automatic IDs therefore never need to scan retained rows.
 func (h *History) allocateRowID() (RowID, error) {
 	if h.nextRowID == 0 {
 		h.nextRowID = 1
 	}
-	for h.hasRowID(h.nextRowID) {
-		if h.nextRowID >= ^RowID(0)-1 {
-			return 0, errInvalidHistoryRowID
-		}
-		h.nextRowID++
-	}
-	id := h.nextRowID
 	if h.nextRowID >= ^RowID(0)-1 {
 		return 0, errInvalidHistoryRowID
 	}
+	id := h.nextRowID
 	h.nextRowID++
 	return id, nil
 }
