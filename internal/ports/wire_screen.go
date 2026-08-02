@@ -66,10 +66,6 @@ const (
 	screenStyleLen  = 18
 	screenSpanLimit = 4096
 
-	// The frame length includes MsgScreenUpdate's type byte. The codec takes
-	// only the payload, so one byte is reserved here.
-	screenPayloadLimit = MaxFrameLen - 1
-
 	screenFlagCursorVisible  = 1 << 0
 	screenFlagCursorStyleSet = 1 << 1
 	screenKnownCursorFlags   = screenFlagCursorVisible | screenFlagCursorStyleSet
@@ -87,6 +83,10 @@ const (
 	styleUnderlineColorRGBBit = 1 << 10
 	styleKnownBits            = (1 << 11) - 1
 )
+
+// The frame length includes MsgScreenUpdate's type byte. The codec takes
+// only the payload, so one byte is reserved here.
+var screenPayloadLimit = MaxFrameLen - 1
 
 // MarshalScreenUpdate encodes a canonical structured screen update.
 func MarshalScreenUpdate(m ScreenUpdate) ([]byte, error) {
@@ -223,7 +223,7 @@ func UnmarshalScreenUpdate(data []byte) (ScreenUpdate, error) {
 	}
 	m.Cursor.Visible = cursorFlags&screenFlagCursorVisible != 0
 	m.Cursor.StyleSet = cursorFlags&screenFlagCursorStyleSet != 0
-	if !m.Cursor.StyleSet && m.Cursor.Style != 0 || m.Cursor.StyleSet && m.Cursor.Style > 6 {
+	if (!m.Cursor.StyleSet && m.Cursor.Style != 0) || (m.Cursor.StyleSet && m.Cursor.Style > 6) {
 		return ScreenUpdate{}, ErrInvalidScreenUpdate
 	}
 	scrollPresent, err := r.u8()
@@ -353,15 +353,16 @@ func UnmarshalScreenUpdate(data []byte) (ScreenUpdate, error) {
 }
 
 func validateScreenUpdate(m ScreenUpdate) error {
-	if m.Kind == ScreenUpdateSnapshot {
+	switch m.Kind {
+	case ScreenUpdateSnapshot:
 		if m.BaseStateNum != 0 || m.NewStateNum == 0 {
 			return ErrInvalidScreenUpdate
 		}
-	} else if m.Kind == ScreenUpdateDelta {
+	case ScreenUpdateDelta:
 		if m.BaseStateNum == 0 || m.BaseStateNum == math.MaxUint64 || m.NewStateNum != m.BaseStateNum+1 {
 			return ErrInvalidScreenUpdate
 		}
-	} else {
+	default:
 		return ErrInvalidScreenUpdate
 	}
 	if (m.Kind != ScreenUpdateSnapshot && m.Kind != ScreenUpdateDelta) ||
@@ -369,7 +370,7 @@ func validateScreenUpdate(m ScreenUpdate) error {
 		!screenAreaWithinLimit(m.Size) || m.Cursor.Row >= uint16(m.Size.Rows) || m.Cursor.Col >= uint16(m.Size.Cols) {
 		return ErrInvalidScreenUpdate
 	}
-	if !m.Cursor.StyleSet && m.Cursor.Style != 0 || m.Cursor.StyleSet && m.Cursor.Style > 6 {
+	if (!m.Cursor.StyleSet && m.Cursor.Style != 0) || (m.Cursor.StyleSet && m.Cursor.Style > 6) {
 		return ErrInvalidScreenUpdate
 	}
 	if m.Kind == ScreenUpdateSnapshot && m.Scroll != nil {
@@ -405,7 +406,7 @@ func validateScreenSpans(m ScreenUpdate) error {
 			return ErrInvalidScreenUpdate
 		}
 		for _, cell := range span.Cells {
-			if cell.Continuation && cell.Rune != 0 || !cell.Continuation && !utf8.ValidRune(cell.Rune) {
+			if (cell.Continuation && cell.Rune != 0) || (!cell.Continuation && !utf8.ValidRune(cell.Rune)) {
 				return ErrInvalidScreenUpdate
 			}
 			if err := validateScreenStyle(cell.Style); err != nil {
@@ -614,7 +615,7 @@ func readScreenStyle(r *screenReader) (renderer.Style, bool) {
 			return renderer.Style{}, false
 		}
 		style.Foreground = -1
-	} else if foregroundIndex != math.MaxUint16 && foregroundIndex > math.MaxUint8 || fgRGB != (renderer.RGB{}) {
+	} else if (foregroundIndex != math.MaxUint16 && foregroundIndex > math.MaxUint8) || fgRGB != (renderer.RGB{}) {
 		return renderer.Style{}, false
 	}
 	if style.HasBackgroundRGB {
@@ -622,7 +623,7 @@ func readScreenStyle(r *screenReader) (renderer.Style, bool) {
 			return renderer.Style{}, false
 		}
 		style.Background = -1
-	} else if backgroundIndex != math.MaxUint16 && backgroundIndex > math.MaxUint8 || bgRGB != (renderer.RGB{}) {
+	} else if (backgroundIndex != math.MaxUint16 && backgroundIndex > math.MaxUint8) || bgRGB != (renderer.RGB{}) {
 		return renderer.Style{}, false
 	}
 	if style.HasUnderlineColorRGB {

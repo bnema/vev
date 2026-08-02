@@ -146,10 +146,7 @@ func TestScreenUpdateStateNumbers(t *testing.T) {
 func TestScreenUpdateGoldens(t *testing.T) {
 	for _, tt := range screenGoldenMessages() {
 		t.Run(tt.name, func(t *testing.T) {
-			want, err := hex.DecodeString(tt.hex)
-			if err != nil {
-				t.Fatal(err)
-			}
+			want := mustDecodeHex(t, tt.hex)
 			got, err := MarshalScreenUpdate(tt.msg)
 			if err != nil {
 				t.Fatal(err)
@@ -188,10 +185,7 @@ func assertScreenEqual(t *testing.T, want, got ScreenUpdate) {
 
 func TestScreenUpdateStrictTruncationAndTrailing(t *testing.T) {
 	for _, tt := range screenGoldenMessages() {
-		data, err := hex.DecodeString(tt.hex)
-		if err != nil {
-			t.Fatal(err)
-		}
+		data := mustDecodeHex(t, tt.hex)
 		for n := 0; n < len(data); n++ {
 			if _, err := UnmarshalScreenUpdate(data[:n]); !errors.Is(err, ErrInvalidScreenUpdate) {
 				t.Fatalf("%s prefix %d: err = %v", tt.name, n, err)
@@ -205,7 +199,7 @@ func TestScreenUpdateStrictTruncationAndTrailing(t *testing.T) {
 }
 
 func TestScreenUpdateHostileFields(t *testing.T) {
-	golden, _ := hex.DecodeString(screenGoldenMessages()[0].hex)
+	golden := mustDecodeHex(t, screenGoldenMessages()[0].hex)
 	tests := []struct {
 		name string
 		mut  func([]byte)
@@ -289,7 +283,7 @@ func TestScreenUpdateSpanAndShapeValidation(t *testing.T) {
 }
 
 func TestScreenUpdateOwnership(t *testing.T) {
-	golden, _ := hex.DecodeString(screenGoldenMessages()[0].hex)
+	golden := mustDecodeHex(t, screenGoldenMessages()[0].hex)
 	decoded, err := UnmarshalScreenUpdate(golden)
 	if err != nil {
 		t.Fatal(err)
@@ -308,6 +302,12 @@ func TestScreenUpdateOwnership(t *testing.T) {
 func TestScreenUpdateLimits(t *testing.T) {
 	if _, err := UnmarshalScreenUpdate(make([]byte, MaxFrameLen)); !errors.Is(err, ErrScreenUpdateTooLarge) {
 		t.Fatalf("oversize err = %v", err)
+	}
+	previousLimit := screenPayloadLimit
+	t.Cleanup(func() { screenPayloadLimit = previousLimit })
+	screenPayloadLimit = screenHeaderLen
+	if _, err := MarshalScreenUpdate(screenGoldenMessages()[0].msg); !errors.Is(err, ErrScreenUpdateTooLarge) {
+		t.Fatalf("marshal oversize err = %v", err)
 	}
 	tooMany := screenGoldenMessages()[0].msg
 	tooMany.Spans = make([]ScreenSpan, screenSpanLimit+1)
@@ -363,7 +363,7 @@ func TestScreenUpdateScreenAreaLimit(t *testing.T) {
 	}
 }
 
-func mustDecodeHex(t *testing.T, s string) []byte {
+func mustDecodeHex(t testing.TB, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
 	if err != nil {
@@ -374,10 +374,7 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 
 func FuzzScreenUpdate(f *testing.F) {
 	for _, tt := range screenGoldenMessages() {
-		b, err := hex.DecodeString(tt.hex)
-		if err != nil {
-			f.Fatalf("seed %s: %v", tt.name, err)
-		}
+		b := mustDecodeHex(f, tt.hex)
 		f.Add(b)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
