@@ -110,7 +110,7 @@ func TestStructuredOutputStreamDeltaCommitReusesShadowStorage(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, delta.send(func(ports.Frame) error { return nil }))
 
-	require.Equal(t, shadowStart, &stream.shadow.Cells[0])
+	require.Same(t, shadowStart, &stream.shadow.Cells[0])
 	require.Equal(t, shadowCap, cap(stream.shadow.Cells))
 	require.Equal(t, changed.At(1, 0), stream.shadow.At(1, 0))
 	require.Equal(t, uint64(2), state.next)
@@ -184,6 +184,36 @@ func TestStructuredOutputStreamFailedSendRetainsTransactionAndRetriesSnapshot(t 
 	}))
 }
 
+func TestStructuredOutputStreamNonNoopCommitForcesSnapshotRetry(t *testing.T) {
+	state := newOutputStateStream()
+	stream := newStructuredOutputStream(state)
+	cursor := cursorOut{valid: true}
+	frame := structuredTestFrame("abc")
+
+	first, err := stream.prepare(frame, nil, cursor, true, 0)
+	require.NoError(t, err)
+	require.NoError(t, first.send(func(ports.Frame) error { return nil }))
+	before := stream.shadow.Clone()
+
+	changed := frame.Clone()
+	changed.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
+	pending, err := stream.prepare(changed, nil, cursor, false, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, pending.data)
+	pending.commitNoSend()
+	require.Equal(t, before, stream.shadow, "non-noop commit must not publish its candidate")
+	require.Equal(t, uint64(1), state.next)
+	require.True(t, stream.forceSnapshot)
+
+	retry, err := stream.prepare(changed, nil, cursor, false, 0)
+	require.NoError(t, err)
+	retryUpdate := decodeStructured(t, retry.data)
+	require.Equal(t, ports.ScreenUpdateSnapshot, retryUpdate.Kind)
+	require.Zero(t, retryUpdate.BaseStateNum)
+	require.NoError(t, retry.send(func(ports.Frame) error { return nil }))
+	require.Equal(t, uint64(2), state.next)
+}
+
 func TestStructuredOutputStreamComparesCursorValidityAndHidden(t *testing.T) {
 	state := newOutputStateStream()
 	stream := newStructuredOutputStream(state)
@@ -223,6 +253,7 @@ func TestStructuredOutputStreamRejectsInvalidCursorAndGeometry(t *testing.T) {
 	}{
 		{name: "cursor row outside frame", frame: structuredTestFrame("a"), cursor: cursorOut{valid: true, row: 1}},
 		{name: "cursor col outside frame", frame: structuredTestFrame("a"), cursor: cursorOut{valid: true, col: 1}},
+		{name: "cursor style out of range", frame: structuredTestFrame("a"), cursor: cursorOut{valid: true, hasStyle: true, style: 7}},
 		{name: "screen cell cap", frame: renderer.NewFrame(513, 512), cursor: cursorOut{valid: true}},
 		{name: "uint16 dimension cap", frame: renderer.NewFrame(math.MaxUint16+1, 1), cursor: cursorOut{valid: true}},
 	}

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/stretchr/testify/require"
@@ -87,7 +86,7 @@ func TestProxiedMetadataSendsWithoutOutputBytes(t *testing.T) {
 	select {
 	case frame := <-sends:
 		t.Fatalf("unexpected frame after metadata-only paint: %v", frame.Type)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 }
 

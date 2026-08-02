@@ -329,6 +329,40 @@ func TestProxyScreenStateCaptureFallsBackAfterRepeatedScroll(t *testing.T) {
 	}
 }
 
+func TestProxyScreenStateCursorOnlyPreservesCapturedDamageGeneration(t *testing.T) {
+	s := newProxyScreenState(domain.Size{Cols: 2, Rows: 2})
+	if err := s.Apply(screenSnapshot(2, 2, "  ", "  ")); err != nil {
+		t.Fatal(err)
+	}
+	snapshotDamage := s.CaptureDamage()
+	applyProxyDelta(t, s, ports.ScreenUpdate{
+		Size:   domain.Size{Cols: 2, Rows: 2},
+		Cursor: ports.ScreenCursor{Row: 1, Col: 1, Visible: true},
+	})
+	if s.generation != snapshotDamage.Generation {
+		t.Fatalf("cursor-only update changed damage generation from %d to %d", snapshotDamage.Generation, s.generation)
+	}
+	if !s.AcknowledgeDamage(snapshotDamage.Generation) || len(s.damage) != 0 || s.damageFullRedrawSticky {
+		t.Fatalf("cursor-only interleaving invalidated captured damage: generation=%d damage=%+v sticky=%v", s.generation, s.damage, s.damageFullRedrawSticky)
+	}
+
+	applyProxyDelta(t, s, ports.ScreenUpdate{
+		Size:  domain.Size{Cols: 2, Rows: 2},
+		Spans: []ports.ScreenSpan{{Y: 0, Cells: cells("x")}},
+	})
+	actualDamage := s.CaptureDamage()
+	if actualDamage.Generation <= snapshotDamage.Generation {
+		t.Fatalf("actual damage did not advance generation: snapshot=%d actual=%d", snapshotDamage.Generation, actualDamage.Generation)
+	}
+	applyProxyDelta(t, s, ports.ScreenUpdate{
+		Size:   domain.Size{Cols: 2, Rows: 2},
+		Cursor: ports.ScreenCursor{Row: 0, Col: 1, Visible: true},
+	})
+	if s.generation != actualDamage.Generation || !s.AcknowledgeDamage(actualDamage.Generation) || len(s.damage) != 0 || s.damageFullRedrawSticky {
+		t.Fatalf("cursor-only update invalidated actual damage: generation=%d want=%d damage=%+v sticky=%v", s.generation, actualDamage.Generation, s.damage, s.damageFullRedrawSticky)
+	}
+}
+
 func TestProxyScreenStateCursorOnlyAndDamageBound(t *testing.T) {
 	s := newProxyScreenState(domain.Size{Cols: 2, Rows: 2})
 	if err := s.Apply(screenSnapshot(2, 2, "  ", "  ")); err != nil {
@@ -357,6 +391,39 @@ func TestProxyScreenStateCursorOnlyAndDamageBound(t *testing.T) {
 	})
 	if len(s.damage) != 1 || s.damage[0].Kind != renderer.DamageFullRedraw {
 		t.Fatalf("saturated damage = %+v", s.damage)
+	}
+}
+
+func TestProxyScreenStateStyleValidationMatchesWireSemantics(t *testing.T) {
+	styles := []struct {
+		name  string
+		style renderer.Style
+	}{
+		{name: "indexed foreground", style: renderer.Style{Foreground: 255, Background: -1}},
+		{name: "indexed foreground out of range", style: renderer.Style{Foreground: 256, Background: -1}},
+		{name: "foreground RGB ignores index", style: renderer.Style{Foreground: 1 << 20, Background: -1, HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 1}}},
+		{name: "background RGB ignores index", style: renderer.Style{Foreground: -1, Background: 1 << 20, HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{G: 2}}},
+		{name: "indexed underline", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColor: true, UnderlineColor: 255}},
+		{name: "indexed underline with RGB", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColor: true, UnderlineColor: 1, UnderlineColorRGB: renderer.RGB{B: 3}}},
+		{name: "underline RGB ignores index", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColorRGB: true, UnderlineColor: 1 << 20, UnderlineColorRGB: renderer.RGB{R: 4}}},
+		{name: "both underline modes", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColor: true, HasUnderlineColorRGB: true}},
+		{name: "unset underline ignores index", style: renderer.Style{Foreground: -1, Background: -1, UnderlineColor: 1 << 20}},
+	}
+	for _, tt := range styles {
+		t.Run(tt.name, func(t *testing.T) {
+			update := ports.ScreenUpdate{
+				NewStateNum: 1,
+				Kind:        ports.ScreenUpdateSnapshot,
+				Size:        domain.Size{Cols: 1, Rows: 1},
+				Cursor:      ports.ScreenCursor{Visible: true},
+				Spans:       []ports.ScreenSpan{{Cells: []renderer.Cell{{Rune: 'x', Style: tt.style}}}},
+			}
+			_, wireErr := ports.MarshalScreenUpdate(update)
+			stateErr := newProxyScreenState(update.Size).Apply(update)
+			if (wireErr == nil) != (stateErr == nil) {
+				t.Fatalf("daemon/wire style acceptance differs: wire=%v daemon=%v", wireErr, stateErr)
+			}
+		})
 	}
 }
 

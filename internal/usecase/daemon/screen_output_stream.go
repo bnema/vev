@@ -191,10 +191,16 @@ func (p *preparedStructuredOutput) send(sender func(ports.Frame) error) error {
 // A failed send is already attempted, so it cannot accidentally commit after
 // the failure and thereby destroy the required snapshot retry.
 func (p *preparedStructuredOutput) commitNoSend() {
-	if p == nil || p.attempted || len(p.data) != 0 {
+	if p == nil || p.attempted {
 		return
 	}
 	p.attempted = true
+	if len(p.data) != 0 {
+		if p.stream != nil {
+			p.stream.forceSnapshot = true
+		}
+		return
+	}
 	p.commit()
 }
 

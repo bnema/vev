@@ -183,15 +183,8 @@ func applyScreenUpdate(frame *renderer.Frame, update ports.ScreenUpdate) {
 }
 
 func (s *proxyScreenState) recordUpdate(update ports.ScreenUpdate) {
-	s.generation++
 	if update.Kind == ports.ScreenUpdateSnapshot {
-		s.setFullRedraw()
-		return
-	}
-	if s.damageFullRedrawSticky {
-		return
-	}
-	if update.Scroll != nil && len(s.damage) > 0 && !(len(s.damage) == 1 && s.damage[0].Kind == renderer.DamageFullRedraw) {
+		s.generation++
 		s.setFullRedraw()
 		return
 	}
@@ -200,6 +193,14 @@ func (s *proxyScreenState) recordUpdate(update ports.ScreenUpdate) {
 		needed++
 	}
 	if needed == 0 {
+		return
+	}
+	s.generation++
+	if s.damageFullRedrawSticky {
+		return
+	}
+	if update.Scroll != nil && len(s.damage) > 0 && !(len(s.damage) == 1 && s.damage[0].Kind == renderer.DamageFullRedraw) {
+		s.setFullRedraw()
 		return
 	}
 	if needed > maxProxyScreenDamage-len(s.damage) {
@@ -346,29 +347,28 @@ func validProxyFrame(s *proxyScreenState) bool {
 	return s != nil && s.frame.Validate() == nil && s.scratch.Validate() == nil
 }
 
+// validProxyScreenStyle mirrors the wire validator without exporting its
+// wire-specific error API; inactive color indices are canonicalized on encode.
 func validProxyScreenStyle(style renderer.Style) bool {
 	if style.Attrs&^(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) != 0 || style.UnderlineStyle > renderer.UnderlineDashed {
 		return false
 	}
-	if style.HasForegroundRGB {
-		if style.Foreground < -1 || style.Foreground > math.MaxInt16 {
-			return false
-		}
-	} else if style.Foreground < -1 || style.Foreground > math.MaxUint8 || style.ForegroundRGB != (renderer.RGB{}) {
+	if !style.HasForegroundRGB && (style.Foreground < -1 || style.Foreground > math.MaxUint8 || style.ForegroundRGB != (renderer.RGB{})) {
 		return false
 	}
-	if style.HasBackgroundRGB {
-		if style.Background < -1 || style.Background > math.MaxInt16 {
-			return false
-		}
-	} else if style.Background < -1 || style.Background > math.MaxUint8 || style.BackgroundRGB != (renderer.RGB{}) {
+	if !style.HasBackgroundRGB && (style.Background < -1 || style.Background > math.MaxUint8 || style.BackgroundRGB != (renderer.RGB{})) {
 		return false
 	}
-	if style.HasUnderlineColorRGB {
-		return !style.HasUnderlineColor && style.UnderlineColor >= -1 && style.UnderlineColor <= math.MaxInt16
+	if style.HasUnderlineColorRGB && style.HasUnderlineColor {
+		return false
+	} else if style.HasUnderlineColorRGB {
+		// The indexed value is inactive when RGB is selected.
+	} else if style.HasUnderlineColor {
+		if style.UnderlineColor < 0 || style.UnderlineColor > math.MaxUint8 || style.UnderlineColorRGB != (renderer.RGB{}) {
+			return false
+		}
+	} else if style.UnderlineColorRGB != (renderer.RGB{}) {
+		return false
 	}
-	if style.HasUnderlineColor {
-		return style.UnderlineColor >= 0 && style.UnderlineColor <= math.MaxUint8 && style.UnderlineColorRGB == (renderer.RGB{})
-	}
-	return (style.UnderlineColor == 0 || style.UnderlineColor == -1) && style.UnderlineColorRGB == (renderer.RGB{})
+	return true
 }

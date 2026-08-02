@@ -12,7 +12,8 @@ import (
 // A reset frame is the only dependency-free output and advertises state 0 as
 // its base.
 //
-// Callers serialize access with attachedClient.sendMu.
+// Callers serialize access with attachedClient.sendMu. A prepared transaction
+// must be sent or committed as a no-op before the next transaction is prepared.
 type outputStateStream struct {
 	renderer       *renderer.Renderer
 	next           uint64
