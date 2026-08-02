@@ -105,6 +105,24 @@ func TestCopySearchModalGeometry(t *testing.T) {
 	require.Equal(t, ui.Margins{Bottom: 1}, copySearchModal.Margins)
 }
 
+func TestCopyModeDocumentCarriesPaneRowIDs(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.activeTab().focusedPane()
+	appendHistoryRow(t, pane.history, testRow("history"))
+	pane.screen.Write([]byte("live"))
+	historyID := pane.history.View().RowID(0)
+	liveID := pane.screen.RowID(0)
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	doc := ac.overlays.copyDocument
+
+	require.Equal(t, 0, doc.FindRowID(historyID))
+	require.Equal(t, pane.history.Len(), doc.FindRowID(liveID))
+	require.Equal(t, liveID, doc.RowID(pane.history.Len()))
+}
+
 func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

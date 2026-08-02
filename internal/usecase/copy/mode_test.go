@@ -42,6 +42,29 @@ func TestNewSnapshotFromRowsPreservesWideRows(t *testing.T) {
 	}
 }
 
+func TestSnapshotCarriesImmutableRowIDsAndDocumentsResolveBookmarks(t *testing.T) {
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	require.NoError(t, history.Append(row("hist"), vt.LineBound{End: 4}, vt.RowID(11)))
+	require.NoError(t, history.Append(row("tail"), vt.LineBound{End: 4}, vt.RowID(12)))
+	screen := renderer.NewFrame(4, 2)
+	copy(screen.Row(0), row("live"))
+	copy(screen.Row(1), row("more"))
+	rowIDs := []vt.RowID{21, 22}
+
+	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 4}}, rowIDs)
+	rowIDs[0] = 99
+	doc := NewDocument(snapshot, "")
+
+	require.Equal(t, []vt.RowID{11, 12, 21, 22}, snapshot.RowIDs())
+	ids := snapshot.RowIDs()
+	ids[0] = 100
+	require.Equal(t, vt.RowID(11), snapshot.RowID(0))
+	require.Equal(t, vt.RowID(21), doc.RowID(2))
+	require.Equal(t, 2, doc.FindRowID(vt.RowID(21)))
+	require.Equal(t, 3, doc.FindRowID(vt.RowID(22)))
+	require.Equal(t, -1, doc.FindRowID(vt.RowID(99)))
+}
+
 func TestSnapshotBoundDispatchesLikeRow(t *testing.T) {
 	row := func(s string) []renderer.Cell {
 		cells := make([]renderer.Cell, 0, len(s))

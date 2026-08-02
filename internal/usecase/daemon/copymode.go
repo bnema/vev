@@ -74,7 +74,7 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 		return
 	}
 	p.mu.Lock()
-	snapshot := scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds())
+	snapshot := scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), p.screen.RowIDs())
 	p.mu.Unlock()
 	cfg := d.currentCopyConfig()
 	document := scopy.NewDocument(snapshot, cfg.WordSeparators)

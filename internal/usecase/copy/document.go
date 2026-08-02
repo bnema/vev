@@ -5,6 +5,7 @@ import (
 	"unicode"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // Pos identifies a terminal display cell in a document. Valid positions are
@@ -40,6 +41,8 @@ func (d *Document) Len() int                    { return d.snapshot.Len() }
 func (d *Document) Width() int                  { return d.snapshot.Width }
 func (d *Document) Height() int                 { return d.snapshot.Height }
 func (d *Document) Row(row int) []renderer.Cell { return d.snapshot.Row(row) }
+func (d *Document) RowID(row int) vt.RowID      { return d.snapshot.RowID(row) }
+func (d *Document) FindRowID(id vt.RowID) int   { return d.snapshot.FindRowID(id) }
 
 // Normalize returns pos as a valid glyph head. Empty physical rows have the
 // stable logical position {row, 0}, which is useful to vertical navigation.
