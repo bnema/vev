@@ -10,9 +10,10 @@ import (
 
 func TestHistoryCodecRejectsMalformedBounds(t *testing.T) {
 	blob, err := MarshalHistory(HistoryView{
-		chunks: []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("abcd")}, bounds: []LineBound{{End: 4, Soft: true}}}},
-		rows:   1,
-		cells:  4,
+		chunks:    []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("abcd")}, bounds: []LineBound{{End: 4, Soft: true}}, rowIDs: []RowID{1}}},
+		rows:      1,
+		cells:     4,
+		nextRowID: 2,
 	})
 	require.NoError(t, err)
 	boundOffset := len(blob) - historyBoundBytes

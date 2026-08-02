@@ -25,11 +25,13 @@ type ModeSnapshot struct {
 // terminal viewport. Row returns caller-owned storage; BorrowedRow must not be
 // mutated and remains valid while the snapshot is retained.
 type ScreenSnapshot struct {
-	frame  renderer.Frame
-	bounds []LineBound
-	cursor CursorSnapshot
-	modes  ModeSnapshot
-	title  string
+	frame     renderer.Frame
+	bounds    []LineBound
+	rowIDs    []RowID
+	cursor    CursorSnapshot
+	modes     ModeSnapshot
+	title     string
+	nextRowID RowID
 }
 
 // Snapshot captures the active visible viewport without mutating Screen,
@@ -42,8 +44,10 @@ func (s *Screen) Snapshot() ScreenSnapshot {
 	cursorStyle, cursorStyleSet := s.CursorStyle()
 	mouseTracking, mouseSGR := s.MouseMode()
 	return ScreenSnapshot{
-		frame:  s.Frame.Clone(),
-		bounds: s.LineBounds(),
+		frame:     s.Frame.Clone(),
+		bounds:    s.LineBounds(),
+		rowIDs:    s.RowIDs(),
+		nextRowID: s.nextRowID + 1,
 		cursor: CursorSnapshot{
 			Row:      s.CursorRow(),
 			Col:      s.CursorCol(),
@@ -82,6 +86,25 @@ func (s ScreenSnapshot) Bound(y int) LineBound {
 		return LineBound{}
 	}
 	return s.bounds[y]
+}
+
+// RowIDs returns an owned copy of the visible physical-row identities.
+func (s ScreenSnapshot) RowIDs() []RowID { return append([]RowID(nil), s.rowIDs...) }
+
+// RowID returns the identity of visible row y, or zero when out of range.
+func (s ScreenSnapshot) RowID(y int) RowID {
+	if y < 0 || y >= len(s.rowIDs) {
+		return 0
+	}
+	return s.rowIDs[y]
+}
+
+// NextRowID returns the next identity allocated by the captured screen.
+func (s ScreenSnapshot) NextRowID() RowID {
+	if s.nextRowID == 0 {
+		return 1
+	}
+	return s.nextRowID
 }
 
 func (s ScreenSnapshot) Cursor() CursorSnapshot { return s.cursor }

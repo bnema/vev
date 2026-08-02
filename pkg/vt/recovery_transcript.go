@@ -5,12 +5,14 @@ import "github.com/bnema/vev/pkg/renderer"
 // RecoveryTranscriptSnapshot is an owned, immutable capture of the viewport
 // rows that should be replayed after retained terminal history during recovery.
 type RecoveryTranscriptSnapshot struct {
-	segments []recoveryTranscriptSegment
+	segments  []recoveryTranscriptSegment
+	nextRowID RowID
 }
 
 type recoveryTranscriptSegment struct {
 	rows   [][]renderer.Cell
 	bounds []LineBound
+	rowIDs []RowID
 }
 
 // RecoveryTranscriptSnapshot captures the active primary viewport, or the
@@ -25,7 +27,11 @@ func (s *Screen) RecoveryTranscriptSnapshot() RecoveryTranscriptSnapshot {
 		buffers = []*buffer{s.alternate.buffer, s.buffer}
 	}
 
-	snapshot := RecoveryTranscriptSnapshot{segments: make([]recoveryTranscriptSegment, 0, len(buffers))}
+	nextRowID := s.nextRowID + 1
+	if nextRowID == 0 {
+		nextRowID = ^RowID(0)
+	}
+	snapshot := RecoveryTranscriptSnapshot{segments: make([]recoveryTranscriptSegment, 0, len(buffers)), nextRowID: nextRowID}
 	for _, b := range buffers {
 		segment := captureRecoveryTranscriptSegment(b)
 		if len(segment.rows) > 0 {
@@ -51,6 +57,7 @@ func captureRecoveryTranscriptSegment(b *buffer) recoveryTranscriptSegment {
 	segment := recoveryTranscriptSegment{
 		rows:   make([][]renderer.Cell, rowCount),
 		bounds: append([]LineBound(nil), b.boundaries[:rowCount]...),
+		rowIDs: append([]RowID(nil), b.rowIDs[:rowCount]...),
 	}
 	cells := make([]renderer.Cell, rowCount*b.frame.Width)
 	for y := range rowCount {
@@ -88,7 +95,7 @@ func (snapshot RecoveryTranscriptSnapshot) Marshal() ([]byte, error) {
 		}
 	}
 
-	view := HistoryView{rows: rows, cells: cells}
+	view := HistoryView{rows: rows, cells: cells, nextRowID: snapshot.nextRowID}
 	for _, segment := range snapshot.segments {
 		for start := 0; start < len(segment.rows); {
 			space := maxHistoryChunkRows
@@ -99,6 +106,7 @@ func (snapshot RecoveryTranscriptSnapshot) Marshal() ([]byte, error) {
 					end := min(start+space, len(segment.rows))
 					last.rows = append(last.rows, segment.rows[start:end]...)
 					last.bounds = append(last.bounds, segment.bounds[start:end]...)
+					last.rowIDs = append(last.rowIDs, segment.rowIDs[start:end]...)
 					start = end
 					continue
 				}
@@ -108,6 +116,7 @@ func (snapshot RecoveryTranscriptSnapshot) Marshal() ([]byte, error) {
 			view.chunks = append(view.chunks, &HistoryChunk{
 				rows:   append([][]renderer.Cell(nil), segment.rows[start:end]...),
 				bounds: append([]LineBound(nil), segment.bounds[start:end]...),
+				rowIDs: append([]RowID(nil), segment.rowIDs[start:end]...),
 			})
 			start = end
 		}

@@ -44,8 +44,9 @@ func TestHistorySnapshotViewDoesNotSealTailAndCopiesIt(t *testing.T) {
 
 func TestHistoryFromBlobsNormalizesFullTailBeforeAppend(t *testing.T) {
 	fullTail, err := MarshalHistory(HistoryView{
-		chunks: []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("AAAA"), historyRow("BBBB")}}},
-		rows:   2,
+		chunks:    []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("AAAA"), historyRow("BBBB")}, rowIDs: []RowID{1, 2}}},
+		rows:      2,
+		nextRowID: 3,
 	})
 	require.NoError(t, err)
 

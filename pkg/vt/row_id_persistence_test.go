@@ -1,0 +1,85 @@
+package vt
+
+import (
+	"encoding/binary"
+	"testing"
+
+	"github.com/bnema/vev/pkg/renderer"
+	"github.com/stretchr/testify/require"
+)
+
+func TestHistoryCodecRejectsMalformedRowIDsAndCounters(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: 4, ChunkRows: 4})
+	require.NoError(t, history.Append(historyRow("a"), LineBound{End: 1}))
+	require.NoError(t, history.Append(historyRow("b"), LineBound{End: 1}))
+	encoded, err := MarshalHistory(history.SealAndView())
+	require.NoError(t, err)
+
+	firstIDOffset := 17 + 4
+	secondIDOffset := firstIDOffset + 8 + 4 + historyCellBytes + historyBoundBytes
+	for _, test := range []struct {
+		name   string
+		mutate func([]byte)
+	}{
+		{name: "zero row ID", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[firstIDOffset:], 0) }},
+		{name: "duplicate row ID", mutate: func(data []byte) { copy(data[secondIDOffset:secondIDOffset+8], data[firstIDOffset:firstIDOffset+8]) }},
+		{name: "counter does not exceed IDs", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[9:17], 2) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := append([]byte(nil), encoded...)
+			test.mutate(data)
+			_, unmarshalErr := UnmarshalHistory(data)
+			require.Error(t, unmarshalErr)
+			_, preflightErr := PreflightHistoryBlob(data)
+			require.Error(t, preflightErr)
+		})
+	}
+}
+
+func TestHistoryCodecRejectsMissingRowIDsOnMarshal(t *testing.T) {
+	_, err := MarshalHistory(HistoryView{
+		chunks: []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("row")}, bounds: []LineBound{{End: 3}}}},
+		rows:   1,
+	})
+	require.Error(t, err)
+}
+
+func TestRestoredScreenAllocatesAbovePersistedRowIDs(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: 4, ChunkRows: 1})
+	require.NoError(t, history.Append(historyRow("old"), LineBound{End: 3}, RowID(40)))
+	sealed, tail, err := MarshalSealedHistory(history.SealAndView())
+	require.NoError(t, err)
+	transcript, err := MarshalHistory(HistoryView{
+		chunks:    []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("live")}, bounds: []LineBound{{End: 4}}, rowIDs: []RowID{50}}},
+		rows:      1,
+		nextRowID: 51,
+	})
+	require.NoError(t, err)
+
+	screen, err := NewScreenWithRecoveryTranscript(3, 1, HistoryConfig{MaxRows: 8, ChunkRows: 2}, sealed, tail, transcript)
+	require.NoError(t, err)
+	require.Equal(t, RowID(40), screen.History().View().RowID(0))
+	require.Equal(t, RowID(50), screen.History().View().RowID(1))
+	require.Equal(t, RowID(51), screen.History().NextRowID())
+	require.Greater(t, screen.RowID(0), RowID(50))
+
+	before := screen.RowID(0)
+	screen.Write([]byte("\x1b[2J"))
+	require.Greater(t, screen.RowID(0), before)
+}
+
+func TestHistoryRestoreRejectsDuplicateIDsAcrossBlobs(t *testing.T) {
+	first := NewHistory(HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	second := NewHistory(HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	require.NoError(t, first.Append(historyRow("one"), LineBound{End: 3}, RowID(7)))
+	require.NoError(t, second.Append(historyRow("two"), LineBound{End: 3}, RowID(7)))
+	firstBlob, err := MarshalHistoryChunk(first.SealAndView().Chunk(0))
+	require.NoError(t, err)
+	secondBlob, err := MarshalHistoryChunk(second.SealAndView().Chunk(0))
+	require.NoError(t, err)
+	tail, err := MarshalEmptyHistoryTail()
+	require.NoError(t, err)
+
+	_, err = HistoryFromBlobs(HistoryConfig{MaxRows: 4, ChunkRows: 1}, [][]byte{firstBlob, secondBlob}, tail)
+	require.Error(t, err)
+}

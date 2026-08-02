@@ -11,6 +11,8 @@ import (
 // cell budget. The history is not modified when this error is returned.
 var ErrHistoryRowTooWide = errors.New("history row exceeds cell capacity")
 
+var errInvalidHistoryRowID = errors.New("invalid history row ID")
+
 // HistoryConfig controls the bounded terminal history retained by a Screen.
 type HistoryConfig struct {
 	MaxRows   int
@@ -46,9 +48,10 @@ type HistoryChunk struct {
 // HistoryView is an immutable snapshot of history. Row returns a copy so the
 // storage behind a sealed chunk remains owned by VT.
 type HistoryView struct {
-	chunks []*HistoryChunk
-	rows   int
-	cells  int
+	chunks    []*HistoryChunk
+	rows      int
+	cells     int
+	nextRowID RowID
 }
 
 // HistorySnapshotView captures sealed history chunks and the mutable tail
@@ -61,6 +64,7 @@ type HistorySnapshotView struct {
 	tailIDs    []RowID
 	rows       int
 	cells      int
+	nextRowID  RowID
 }
 
 func NewHistory(config HistoryConfig) *History {
@@ -104,7 +108,30 @@ func (h *History) Append(row []renderer.Cell, bound LineBound, ids ...RowID) err
 	}
 	if id == 0 || h.hasRowID(id) {
 		id = h.allocateRowID()
-	} else if id >= h.nextRowID {
+	}
+	return h.appendRow(row, bound, id)
+}
+
+// appendRestored appends a persisted row without synthesizing an identity.
+// The caller validates IDs across all persisted blobs before invoking it.
+func (h *History) appendRestored(row []renderer.Cell, bound LineBound, id RowID) error {
+	if h == nil || h.maxRows == 0 {
+		return nil
+	}
+	if id == 0 || id == ^RowID(0) || h.hasRowID(id) {
+		return errInvalidHistoryRowID
+	}
+	return h.appendRow(row, bound, id)
+}
+
+func (h *History) appendRow(row []renderer.Cell, bound LineBound, id RowID) error {
+	if len(row) > h.maxCells {
+		return ErrHistoryRowTooWide
+	}
+	if id == ^RowID(0) {
+		return errInvalidHistoryRowID
+	}
+	if id >= h.nextRowID {
 		h.nextRowID = id + 1
 	}
 	// Make room before adding so Cells cannot overflow even when the default
@@ -137,20 +164,6 @@ func (h *History) allocateRowID() RowID {
 	}
 	h.nextRowID++
 	return id
-}
-
-func (h *History) assignChunkIDs(chunk *HistoryChunk) {
-	if chunk == nil {
-		return
-	}
-	chunk.rowIDs = growRowIDs(chunk.rowIDs, len(chunk.rows))
-	for i := range chunk.rows {
-		if chunk.rowIDs[i] == 0 || h.hasRowID(chunk.rowIDs[i]) {
-			chunk.rowIDs[i] = h.allocateRowID()
-		} else if chunk.rowIDs[i] >= h.nextRowID {
-			h.nextRowID = chunk.rowIDs[i] + 1
-		}
-	}
 }
 
 func (h *History) hasRowID(id RowID) bool {
@@ -288,8 +301,11 @@ func (h *History) SealAndView() HistoryView {
 // View captures the current history. Sealed chunks are shared by identity; a
 // partially-filled tail is copied into a new immutable chunk for this view.
 func (h *History) View() HistoryView {
-	if h == nil || h.rows == 0 {
+	if h == nil {
 		return HistoryView{}
+	}
+	if h.rows == 0 {
+		return HistoryView{nextRowID: h.nextRowID}
 	}
 	chunks := append([]*HistoryChunk(nil), h.chunks...)
 	if len(h.tail) > 0 {
@@ -299,14 +315,17 @@ func (h *History) View() HistoryView {
 			rowIDs: growRowIDs(h.tailIDs, len(h.tail)),
 		})
 	}
-	return HistoryView{chunks: chunks, rows: h.rows, cells: h.cells}
+	return HistoryView{chunks: chunks, rows: h.rows, cells: h.cells, nextRowID: h.nextRowID}
 }
 
 // SnapshotView captures history for persistence without sealing the mutable
 // tail. Sealed chunks are shared by identity and the tail is deeply copied.
 func (h *History) SnapshotView() HistorySnapshotView {
-	if h == nil || h.rows == 0 {
+	if h == nil {
 		return HistorySnapshotView{}
+	}
+	if h.rows == 0 {
+		return HistorySnapshotView{nextRowID: h.nextRowID}
 	}
 	return HistorySnapshotView{
 		chunks:     append([]*HistoryChunk(nil), h.chunks...),
@@ -315,6 +334,7 @@ func (h *History) SnapshotView() HistorySnapshotView {
 		tailIDs:    growRowIDs(h.tailIDs, len(h.tail)),
 		rows:       h.rows,
 		cells:      h.cells,
+		nextRowID:  h.nextRowID,
 	}
 }
 
@@ -345,6 +365,14 @@ func (h *History) Cells() int {
 	return h.cells
 }
 
+// NextRowID returns the next identity allocated by this history.
+func (h *History) NextRowID() RowID {
+	if h == nil || h.nextRowID == 0 {
+		return 1
+	}
+	return h.nextRowID
+}
+
 // Cap returns the configured bounded row capacity.
 func (h *History) Cap() int {
 	if h == nil {
@@ -364,6 +392,18 @@ func (h *History) CellCap() int {
 func (v HistoryView) Len() int        { return v.rows }
 func (v HistoryView) Cells() int      { return v.cells }
 func (v HistoryView) ChunkCount() int { return len(v.chunks) }
+
+// NextRowID returns the next identity recorded by this view.
+func (v HistoryView) NextRowID() RowID {
+	if v.nextRowID == 0 {
+		next, ok := historyViewNextRowID(v)
+		if !ok {
+			return 1
+		}
+		return next
+	}
+	return v.nextRowID
+}
 
 // Chunk returns the immutable chunk at i, or nil when i is out of range.
 func (v HistoryView) Chunk(i int) *HistoryChunk {
@@ -470,6 +510,14 @@ func (v HistorySnapshotView) Len() int        { return v.rows }
 func (v HistorySnapshotView) Cells() int      { return v.cells }
 func (v HistorySnapshotView) ChunkCount() int { return len(v.chunks) }
 
+// NextRowID returns the next identity recorded by this snapshot.
+func (v HistorySnapshotView) NextRowID() RowID {
+	if v.nextRowID == 0 {
+		return v.Tail().NextRowID()
+	}
+	return v.nextRowID
+}
+
 // Chunk returns a sealed immutable chunk at i, or nil when i is out of range.
 func (v HistorySnapshotView) Chunk(i int) *HistoryChunk {
 	if i < 0 || i >= len(v.chunks) {
@@ -481,12 +529,13 @@ func (v HistorySnapshotView) Chunk(i int) *HistoryChunk {
 // Tail returns an immutable view of the copied mutable tail.
 func (v HistorySnapshotView) Tail() HistoryView {
 	if len(v.tail) == 0 {
-		return HistoryView{}
+		return HistoryView{nextRowID: v.nextRowID}
 	}
 	return HistoryView{
-		chunks: []*HistoryChunk{{rows: v.tail, bounds: growBounds(v.tailBounds, len(v.tail)), rowIDs: growRowIDs(v.tailIDs, len(v.tail))}},
-		rows:   len(v.tail),
-		cells:  historyRowsCells(v.tail),
+		chunks:    []*HistoryChunk{{rows: v.tail, bounds: growBounds(v.tailBounds, len(v.tail)), rowIDs: growRowIDs(v.tailIDs, len(v.tail))}},
+		rows:      len(v.tail),
+		cells:     historyRowsCells(v.tail),
+		nextRowID: v.nextRowID,
 	}
 }
 

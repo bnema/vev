@@ -12,7 +12,7 @@ import (
 
 const (
 	historyMagic        = "VTH1"
-	historyVersion      = 2
+	historyVersion      = 3
 	historyCellBytes    = 41
 	historyBoundBytes   = 5
 	maxHistoryChunkRows = 256
@@ -37,13 +37,29 @@ func MarshalHistory(view HistoryView) ([]byte, error) {
 	if view.rows < 0 || view.rows != historyViewRowCount(view) || uint64(len(view.chunks)) > math.MaxUint32 || uint64(len(view.chunks)) > maxHistoryChunks {
 		return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 	}
+	nextRowID, ok := historyViewNextRowID(view)
+	if !ok {
+		return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+	}
 	stats := historyDecodeStats{}
+	seen := make(map[RowID]struct{}, view.rows)
 	for _, chunk := range view.chunks {
-		if chunk == nil || len(chunk.rows) == 0 || len(chunk.rows) > maxHistoryChunkRows ||
+		if chunk == nil || len(chunk.rows) == 0 || len(chunk.rows) != len(chunk.rowIDs) || len(chunk.rows) > maxHistoryChunkRows ||
 			!addHistoryDecodeBudget(&stats.rows, uint64(len(chunk.rows)), maxHistoryRows) {
 			return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 		}
-		for _, row := range chunk.rows {
+		for i, row := range chunk.rows {
+			if uint64(len(row)) > math.MaxUint32 {
+				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+			}
+			id := chunk.rowIDs[i]
+			if id == 0 || id == ^RowID(0) {
+				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+			}
+			if _, duplicate := seen[id]; duplicate {
+				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+			}
+			seen[id] = struct{}{}
 			cellCount := uint64(len(row))
 			cellBytes, ok := historyCellByteCount(cellCount)
 			if !ok ||
@@ -52,37 +68,78 @@ func MarshalHistory(view HistoryView) ([]byte, error) {
 				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) {
 				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 			}
-		}
-	}
-
-	out := make([]byte, 0, 9)
-	out = append(out, historyMagic...)
-	out = append(out, historyVersion)
-	out = appendUint32(out, uint32(len(view.chunks)))
-	for _, chunk := range view.chunks {
-		if chunk == nil || len(chunk.rows) == 0 || len(chunk.rows) > maxHistoryChunkRows {
-			return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
-		}
-		out = appendUint32(out, uint32(len(chunk.rows)))
-		for i, row := range chunk.rows {
-			if uint64(len(row)) > math.MaxUint32 {
-				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
-			}
 			bound := chunkBound(chunk, i)
 			if !validHistoryBound(bound, len(row)) {
 				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 			}
-			out = appendUint32(out, uint32(len(row)))
 			for _, cell := range row {
 				if !validHistoryCell(cell) {
 					return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 				}
+			}
+		}
+	}
+	if nextRowID <= maxHistoryRowID(seen) {
+		return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+	}
+
+	out := make([]byte, 0, 17)
+	out = append(out, historyMagic...)
+	out = append(out, historyVersion)
+	out = appendUint32(out, uint32(len(view.chunks)))
+	out = binary.BigEndian.AppendUint64(out, uint64(nextRowID))
+	for _, chunk := range view.chunks {
+		out = appendUint32(out, uint32(len(chunk.rows)))
+		for i, row := range chunk.rows {
+			out = binary.BigEndian.AppendUint64(out, uint64(chunk.rowIDs[i]))
+			out = appendUint32(out, uint32(len(row)))
+			for _, cell := range row {
 				out = appendHistoryCell(out, cell)
 			}
-			out = appendHistoryBound(out, bound)
+			out = appendHistoryBound(out, chunkBound(chunk, i))
 		}
 	}
 	return out, nil
+}
+
+func historyViewNextRowID(view HistoryView) (RowID, bool) {
+	seen := make(map[RowID]struct{}, view.rows)
+	for _, chunk := range view.chunks {
+		if chunk == nil || len(chunk.rows) != len(chunk.rowIDs) {
+			return 0, false
+		}
+		for _, id := range chunk.rowIDs {
+			if id == 0 || id == ^RowID(0) {
+				return 0, false
+			}
+			if _, duplicate := seen[id]; duplicate {
+				return 0, false
+			}
+			seen[id] = struct{}{}
+		}
+	}
+	next := view.nextRowID
+	if next == 0 {
+		maxID := maxHistoryRowID(seen)
+		if maxID == ^RowID(0) {
+			return 0, false
+		}
+		next = maxID + 1
+	}
+	if next == 0 || next == ^RowID(0) || next <= maxHistoryRowID(seen) {
+		return 0, false
+	}
+	return next, true
+}
+
+func maxHistoryRowID(ids map[RowID]struct{}) RowID {
+	var max RowID
+	for id := range ids {
+		if id > max {
+			max = id
+		}
+	}
+	return max
 }
 
 func historyViewRowCount(view HistoryView) int {
@@ -189,7 +246,7 @@ func preflightHistory(data []byte) (historyDecodeStats, bool) {
 // parseHistory is the authoritative history payload validation path. populate
 // controls whether validated cells are retained in a HistoryView.
 func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, bool) {
-	if len(data) < 9 || string(data[:4]) != historyMagic || data[4] != historyVersion {
+	if len(data) < 17 || string(data[:4]) != historyMagic || data[4] != historyVersion {
 		return HistoryView{}, historyDecodeStats{}, false
 	}
 
@@ -198,16 +255,22 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 	if !ok || uint64(chunkCount) > maxHistoryChunks || uint64(chunkCount) > uint64(len(p.data))/4 {
 		return HistoryView{}, historyDecodeStats{}, false
 	}
+	nextRowID, ok := p.uint64()
+	if !ok || nextRowID == 0 || nextRowID == uint64(^RowID(0)) {
+		return HistoryView{}, historyDecodeStats{}, false
+	}
 	stats := historyDecodeStats{chunks: uint64(chunkCount)}
+	var seenIDs [maxHistoryRows]RowID
+	seenCount := 0
+	var maxID RowID
 	var chunks []*HistoryChunk
-	var nextRowID RowID = 1
 	if populate {
 		chunks = make([]*HistoryChunk, 0, chunkCount)
 	}
 	for range chunkCount {
 		rowCount, ok := p.uint32()
 		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows ||
-			uint64(rowCount) > uint64(len(p.data))/(4+historyBoundBytes) ||
+			uint64(rowCount) > uint64(len(p.data))/(8+4+historyBoundBytes) ||
 			!addHistoryDecodeBudget(&stats.rows, uint64(rowCount), maxHistoryRows) {
 			return HistoryView{}, historyDecodeStats{}, false
 		}
@@ -221,6 +284,21 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 			rowIDs = make([]RowID, 0, rowCount)
 		}
 		for range rowCount {
+			id, ok := p.uint64()
+			if !ok || id == 0 || id == ^uint64(0) {
+				return HistoryView{}, historyDecodeStats{}, false
+			}
+			rowID := RowID(id)
+			for i := 0; i < seenCount; i++ {
+				if seenIDs[i] == rowID {
+					return HistoryView{}, historyDecodeStats{}, false
+				}
+			}
+			seenIDs[seenCount] = rowID
+			seenCount++
+			if rowID > maxID {
+				maxID = rowID
+			}
 			cellCount, ok := p.uint32()
 			cellBytes, validCellBytes := historyCellByteCount(uint64(cellCount))
 			if !ok || !validCellBytes ||
@@ -251,18 +329,17 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 			if populate {
 				rows = append(rows, row)
 				bounds = append(bounds, bound)
-				rowIDs = append(rowIDs, nextRowID)
-				nextRowID++
+				rowIDs = append(rowIDs, rowID)
 			}
 		}
 		if populate {
 			chunks = append(chunks, &HistoryChunk{rows: rows, bounds: bounds, rowIDs: rowIDs})
 		}
 	}
-	if len(p.data) != 0 {
+	if len(p.data) != 0 || RowID(nextRowID) <= maxID {
 		return HistoryView{}, historyDecodeStats{}, false
 	}
-	return HistoryView{chunks: chunks, rows: int(stats.rows), cells: int(stats.cells)}, stats, true
+	return HistoryView{chunks: chunks, rows: int(stats.rows), cells: int(stats.cells), nextRowID: RowID(nextRowID)}, stats, true
 }
 
 func historyCellByteCount(cellCount uint64) (uint64, bool) {
@@ -288,6 +365,15 @@ func (p *historyParser) uint32() (uint32, bool) {
 	}
 	v := binary.BigEndian.Uint32(p.data)
 	p.data = p.data[4:]
+	return v, true
+}
+
+func (p *historyParser) uint64() (uint64, bool) {
+	if len(p.data) < 8 {
+		return 0, false
+	}
+	v := binary.BigEndian.Uint64(p.data)
+	p.data = p.data[8:]
 	return v, true
 }
 

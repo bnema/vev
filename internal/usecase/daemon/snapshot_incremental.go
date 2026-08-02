@@ -169,9 +169,6 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 // general history encoding. An empty tail is represented by its dedicated
 // canonical blob; a non-empty copied tail retains its rows.
 func marshalSnapshotTail(tail vt.HistoryView) ([]byte, error) {
-	if tail.Len() == 0 {
-		return vt.MarshalEmptyHistoryTail()
-	}
 	return vt.MarshalHistory(tail)
 }
 
