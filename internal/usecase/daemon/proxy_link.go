@@ -59,6 +59,7 @@ const (
 // by valid authoritative metadata. The candidate is never registry-visible.
 func (d *Daemon) dialProxyHandshake(parent context.Context, p *proxySession, intent uint8) (err error) {
 	if parent == nil {
+		//nolint:contextcheck // nil is intentionally supported for direct internal callers; Background is the root fallback.
 		parent = context.Background()
 	}
 	ctx, timedOut, stop := d.proxyHandshakeContext(parent)
@@ -115,6 +116,8 @@ func (d *Daemon) dialProxyHandshake(parent context.Context, p *proxySession, int
 			_ = transport.Close()
 		}
 	}()
+	stopTransport := watchProxyHandshakeTransport(ctx, transport)
+	defer stopTransport()
 	hello := ports.Hello{
 		Version:           ports.ProtocolVersion,
 		Intent:            intent,
@@ -171,16 +174,13 @@ func proxyOutputWindow(transport ports.Transport) uint8 {
 func (d *Daemon) proxyHandshakeContext(parent context.Context) (context.Context, <-chan struct{}, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	timedOut := make(chan struct{})
-	if d == nil || d.clock == nil {
-		close(timedOut)
-		cancel()
-		return ctx, timedOut, func() {}
+	clock := ports.Clock(systemClock{})
+	if d != nil && d.clock != nil {
+		clock = d.clock
 	}
-	timer := d.clock.NewTimer(proxyHandshakeTimeout)
+	timer := clock.NewTimer(proxyHandshakeTimeout)
 	if timer == nil {
-		close(timedOut)
-		cancel()
-		return ctx, timedOut, func() {}
+		timer = systemClock{}.NewTimer(proxyHandshakeTimeout)
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -198,6 +198,23 @@ func (d *Daemon) proxyHandshakeContext(parent context.Context) (context.Context,
 		close(stop)
 		<-done
 		cancel()
+	}
+}
+
+func watchProxyHandshakeTransport(ctx context.Context, transport ports.Transport) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+			_ = transport.Close()
+		case <-stop:
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
 	}
 }
 

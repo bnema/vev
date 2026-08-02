@@ -431,6 +431,8 @@ func TestProxyResumeBackoffResetsAfterStableConnection(t *testing.T) {
 		defer proxy.mu.Unlock()
 		return proxy.transport == resumed && proxy.resumeToken == 2
 	}, time.Second, time.Millisecond)
+	resumed.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgPing, Payload: ports.MarshalPing(ports.Ping{})}}
+	_ = awaitFrame(t, resumed.sent, ports.MsgPong)
 
 	clock.Advance(proxyResumeStableDuration)
 	resumed.recv <- proxyRecv{err: io.EOF}
