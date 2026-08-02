@@ -28,8 +28,10 @@ type History struct {
 	chunks     []*HistoryChunk
 	tail       [][]renderer.Cell
 	tailBounds []LineBound
+	tailIDs    []RowID
 	rows       int
 	cells      int
+	nextRowID  RowID
 }
 
 // HistoryChunk is an immutable group of history rows. Its identity is stable
@@ -38,6 +40,7 @@ type History struct {
 type HistoryChunk struct {
 	rows   [][]renderer.Cell
 	bounds []LineBound
+	rowIDs []RowID
 }
 
 // HistoryView is an immutable snapshot of history. Row returns a copy so the
@@ -55,6 +58,7 @@ type HistorySnapshotView struct {
 	chunks     []*HistoryChunk
 	tail       [][]renderer.Cell
 	tailBounds []LineBound
+	tailIDs    []RowID
 	rows       int
 	cells      int
 }
@@ -73,7 +77,7 @@ func NewHistory(config HistoryConfig) *History {
 	if maxCells <= 0 {
 		maxCells = defaultHistoryMaxCells(config.MaxRows)
 	}
-	return &History{maxRows: config.MaxRows, maxCells: maxCells, chunkRows: chunkRows}
+	return &History{maxRows: config.MaxRows, maxCells: maxCells, chunkRows: chunkRows, nextRowID: 1}
 }
 
 func defaultHistoryMaxCells(maxRows int) int {
@@ -83,27 +87,86 @@ func defaultHistoryMaxCells(maxRows int) int {
 	return maxRows * 160
 }
 
-// Append records a copy of row along with its logical extent. Once a chunk is
-// full it is sealed forever. Rows wider than the total cell capacity are
-// rejected without mutation.
-func (h *History) Append(row []renderer.Cell, bound LineBound) error {
+// Append records a copy of row along with its logical extent and optional row
+// identity. Calls without an identity receive a history-owned nonzero ID.
+// Once a chunk is full it is sealed forever. Rows wider than the total cell
+// capacity are rejected without mutation.
+func (h *History) Append(row []renderer.Cell, bound LineBound, ids ...RowID) error {
 	if h == nil || h.maxRows == 0 {
 		return nil
 	}
 	if len(row) > h.maxCells {
 		return ErrHistoryRowTooWide
 	}
+	id := RowID(0)
+	if len(ids) > 0 {
+		id = ids[0]
+	}
+	if id == 0 || h.hasRowID(id) {
+		id = h.allocateRowID()
+	} else if id >= h.nextRowID {
+		h.nextRowID = id + 1
+	}
 	// Make room before adding so Cells cannot overflow even when the default
 	// capacity is MaxInt.
 	h.evictFor(len(row))
 	h.tail = append(h.tail, append([]renderer.Cell(nil), row...))
 	h.tailBounds = append(h.tailBounds, clampBound(bound, len(row)))
+	h.tailIDs = append(h.tailIDs, id)
 	h.rows++
 	h.cells += len(row)
 	if len(h.tail) == h.chunkRows {
 		h.sealTail()
 	}
 	return nil
+}
+
+func (h *History) allocateRowID() RowID {
+	if h.nextRowID == 0 {
+		h.nextRowID = 1
+	}
+	for h.hasRowID(h.nextRowID) {
+		if h.nextRowID == ^RowID(0) {
+			panic("vt: history row ID space exhausted")
+		}
+		h.nextRowID++
+	}
+	id := h.nextRowID
+	if h.nextRowID == ^RowID(0) {
+		panic("vt: history row ID space exhausted")
+	}
+	h.nextRowID++
+	return id
+}
+
+func (h *History) assignChunkIDs(chunk *HistoryChunk) {
+	if chunk == nil {
+		return
+	}
+	chunk.rowIDs = growRowIDs(chunk.rowIDs, len(chunk.rows))
+	for i := range chunk.rows {
+		if chunk.rowIDs[i] == 0 || h.hasRowID(chunk.rowIDs[i]) {
+			chunk.rowIDs[i] = h.allocateRowID()
+		} else if chunk.rowIDs[i] >= h.nextRowID {
+			h.nextRowID = chunk.rowIDs[i] + 1
+		}
+	}
+}
+
+func (h *History) hasRowID(id RowID) bool {
+	for _, chunk := range h.chunks {
+		for _, candidate := range chunk.rowIDs {
+			if candidate == id {
+				return true
+			}
+		}
+	}
+	for _, candidate := range h.tailIDs {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
 }
 
 // clampBound keeps End inside the row it describes so a persisted bound can be
@@ -124,26 +187,44 @@ func growBounds(bounds []LineBound, rows int) []LineBound {
 	return out
 }
 
+func growRowIDs(ids []RowID, rows int) []RowID {
+	if len(ids) == rows {
+		return ids
+	}
+	out := make([]RowID, rows)
+	copy(out, ids)
+	return out
+}
+
 func (h *History) sealTail() {
 	if len(h.tail) == 0 {
 		return
 	}
-	h.chunks = append(h.chunks, &HistoryChunk{rows: h.tail, bounds: growBounds(h.tailBounds, len(h.tail))})
+	h.chunks = append(h.chunks, &HistoryChunk{
+		rows:   h.tail,
+		bounds: growBounds(h.tailBounds, len(h.tail)),
+		rowIDs: h.tailIDs,
+	})
 	h.tail = nil
 	h.tailBounds = nil
+	h.tailIDs = nil
 }
 
 // normalizeTail seals complete chunks so the mutable tail remains shorter than
 // chunkRows. Restored snapshots may have been written with a different chunk
 // size than the current history configuration.
 func (h *History) normalizeTail() {
+	h.tailIDs = growRowIDs(h.tailIDs, len(h.tail))
 	for h.chunkRows > 0 && len(h.tail) >= h.chunkRows {
+		bounds := growBounds(h.tailBounds, len(h.tail))
 		h.chunks = append(h.chunks, &HistoryChunk{
 			rows:   h.tail[:h.chunkRows],
-			bounds: growBounds(h.tailBounds, len(h.tail))[:h.chunkRows],
+			bounds: bounds[:h.chunkRows],
+			rowIDs: h.tailIDs[:h.chunkRows],
 		})
 		h.tail = h.tail[h.chunkRows:]
-		h.tailBounds = growBounds(h.tailBounds, len(h.tail)+h.chunkRows)[h.chunkRows:]
+		h.tailBounds = bounds[h.chunkRows:]
+		h.tailIDs = h.tailIDs[h.chunkRows:]
 	}
 }
 
@@ -172,7 +253,13 @@ func (h *History) evictUntil(rowCount, cellCount int) {
 			} else {
 				// Preserve cell storage while replacing only the chunk wrapper: a
 				// retained view may still refer to the original immutable chunk.
-				h.chunks[0] = &HistoryChunk{rows: chunk.rows[1:], bounds: growBounds(chunk.bounds, len(chunk.rows))[1:]}
+				bounds := growBounds(chunk.bounds, len(chunk.rows))
+				rowIDs := growRowIDs(chunk.rowIDs, len(chunk.rows))
+				h.chunks[0] = &HistoryChunk{
+					rows:   chunk.rows[1:],
+					bounds: bounds[1:],
+					rowIDs: rowIDs[1:],
+				}
 			}
 			continue
 		}
@@ -185,6 +272,7 @@ func (h *History) evictUntil(rowCount, cellCount int) {
 		h.tail[0] = nil
 		h.tail = h.tail[1:]
 		h.tailBounds = growBounds(h.tailBounds, len(h.tail)+1)[1:]
+		h.tailIDs = growRowIDs(h.tailIDs, len(h.tail)+1)[1:]
 	}
 }
 
@@ -208,6 +296,7 @@ func (h *History) View() HistoryView {
 		chunks = append(chunks, &HistoryChunk{
 			rows:   cloneHistoryRows(h.tail),
 			bounds: append([]LineBound(nil), growBounds(h.tailBounds, len(h.tail))...),
+			rowIDs: growRowIDs(h.tailIDs, len(h.tail)),
 		})
 	}
 	return HistoryView{chunks: chunks, rows: h.rows, cells: h.cells}
@@ -223,6 +312,7 @@ func (h *History) SnapshotView() HistorySnapshotView {
 		chunks:     append([]*HistoryChunk(nil), h.chunks...),
 		tail:       cloneHistoryRows(h.tail),
 		tailBounds: append([]LineBound(nil), growBounds(h.tailBounds, len(h.tail))...),
+		tailIDs:    growRowIDs(h.tailIDs, len(h.tail)),
 		rows:       h.rows,
 		cells:      h.cells,
 	}
@@ -316,6 +406,48 @@ func (v HistoryView) BorrowedRow(i int) []renderer.Cell {
 	return nil
 }
 
+// RowID returns the identity of the row at i, or zero when i is out of range.
+func (v HistoryView) RowID(i int) RowID {
+	if i < 0 {
+		return 0
+	}
+	for _, chunk := range v.chunks {
+		if i < len(chunk.rows) {
+			if i < len(chunk.rowIDs) {
+				return chunk.rowIDs[i]
+			}
+			return 0
+		}
+		i -= len(chunk.rows)
+	}
+	return 0
+}
+
+// FindRowID returns the oldest-first index of id, or -1 when id is absent.
+func (v HistoryView) FindRowID(id RowID) int {
+	if id == 0 {
+		return -1
+	}
+	index := 0
+	for _, chunk := range v.chunks {
+		for row := range chunk.rows {
+			if row < len(chunk.rowIDs) && chunk.rowIDs[row] == id {
+				return index
+			}
+			index++
+		}
+	}
+	return -1
+}
+
+// RowID returns the identity of the row within an immutable chunk.
+func (c *HistoryChunk) RowID(i int) RowID {
+	if c == nil || i < 0 || i >= len(c.rowIDs) {
+		return 0
+	}
+	return c.rowIDs[i]
+}
+
 // Bound returns the logical extent of the row at i, or the zero value when i is
 // out of range. A zero value describes a hard row whose End is not meaningful.
 func (v HistoryView) Bound(i int) LineBound {
@@ -352,7 +484,7 @@ func (v HistorySnapshotView) Tail() HistoryView {
 		return HistoryView{}
 	}
 	return HistoryView{
-		chunks: []*HistoryChunk{{rows: v.tail, bounds: growBounds(v.tailBounds, len(v.tail))}},
+		chunks: []*HistoryChunk{{rows: v.tail, bounds: growBounds(v.tailBounds, len(v.tail)), rowIDs: growRowIDs(v.tailIDs, len(v.tail))}},
 		rows:   len(v.tail),
 		cells:  historyRowsCells(v.tail),
 	}

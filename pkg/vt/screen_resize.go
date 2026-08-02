@@ -10,10 +10,10 @@ func (s *Screen) Resize(width, height int) {
 		// renderer.Frame permits a collapsed geometry. There is no layout to
 		// preserve until a usable viewport is supplied again.
 		width, height = max(width, 0), max(height, 0)
-		s.buffer = newBuffer(width, height)
+		s.buffer = s.newBuffer(width, height)
 		s.Row, s.Col = 0, 0
 		if state := s.alternate; state != nil {
-			state.buffer = newBuffer(width, height)
+			state.buffer = s.newBuffer(width, height)
 			state.frame = state.buffer.frame
 			state.row, state.col = 0, 0
 			state.scrollTop, state.scrollBottom = 0, height-1
@@ -25,10 +25,16 @@ func (s *Screen) Resize(width, height int) {
 			if saved != nil && saved.saved {
 				savedPoint = &bufferCursor{row: saved.row, col: saved.col}
 			}
-			evicted, evictedBounds := b.resize(width, height, active, savedPoint)
+			evicted, evictedBounds, evictedIDs := b.resize(width, height, active, savedPoint)
+			for i := range evictedIDs {
+				if evictedIDs[i] == 0 {
+					evictedIDs[i] = s.nextRowIDValue()
+				}
+			}
+			s.fillMissingRowIDs(b)
 			if evict {
 				for i, line := range evicted {
-					s.recordEvicted(line, evictedBounds[i])
+					s.recordEvicted(line, evictedBounds[i], evictedIDs[i])
 				}
 			}
 			if savedPoint != nil {
@@ -44,6 +50,7 @@ func (s *Screen) Resize(width, height int) {
 			state := s.alternate
 			if state.buffer == nil {
 				state.buffer = bufferFromFrame(state.frame)
+				s.fillMissingRowIDs(state.buffer)
 			}
 			state.row, state.col = resize(state.buffer, state.row, state.col, &state.savedCursor, true)
 			state.frame = state.buffer.frame

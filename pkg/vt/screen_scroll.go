@@ -86,6 +86,7 @@ func (s *Screen) scrollUpRegion(top, bottom, n int) (shifted bool) {
 	s.emitLineEvicted(top, n)
 	s.Frame.ScrollUp(top, bottom, n)
 	s.buffer.scrollUp(top, bottom, n)
+	s.fillMissingRowIDs(s.buffer)
 	s.record(renderer.Damage{Kind: renderer.DamageScrollUp, X: 0, Y: top, Width: w, Height: height, Count: n})
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: bottom - n + 1, Width: w, Height: n, Count: 1})
 	return bottom-n >= top
@@ -97,16 +98,16 @@ func (s *Screen) emitLineEvicted(top, n int) {
 	if s.alternate != nil || top != 0 {
 		return
 	}
-	// Read boundaries before the caller rotates the frame: a soft link belongs
-	// to the row it follows, and rotation reassigns row indices.
+	// Read boundaries and IDs before the caller rotates the frame: a soft link
+	// belongs to the row it follows, and rotation reassigns row indices.
 	for y := top; y < top+n; y++ {
-		s.recordEvicted(s.Frame.Row(y), s.buffer.bound(y))
+		s.recordEvicted(s.Frame.Row(y), s.buffer.bound(y), s.buffer.rowIDs[y])
 	}
 }
 
-func (s *Screen) recordEvicted(row []renderer.Cell, bound LineBound) {
+func (s *Screen) recordEvicted(row []renderer.Cell, bound LineBound, id RowID) {
 	if s.history != nil {
-		err := s.history.Append(row, bound)
+		err := s.history.Append(row, bound, id)
 		if err != nil && !errors.Is(err, ErrHistoryRowTooWide) {
 			panic(err)
 		}
@@ -134,6 +135,7 @@ func (s *Screen) scrollDownRegion(top, bottom, n int) {
 	// Full-width region: rotate line offsets instead of copying cells.
 	s.Frame.ScrollDown(top, bottom, n)
 	s.buffer.scrollDown(top, bottom, n)
+	s.fillMissingRowIDs(s.buffer)
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: top, Width: w, Height: height, Count: 1})
 }
 

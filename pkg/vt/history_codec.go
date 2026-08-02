@@ -200,6 +200,7 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 	}
 	stats := historyDecodeStats{chunks: uint64(chunkCount)}
 	var chunks []*HistoryChunk
+	var nextRowID RowID = 1
 	if populate {
 		chunks = make([]*HistoryChunk, 0, chunkCount)
 	}
@@ -213,9 +214,11 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 
 		var rows [][]renderer.Cell
 		var bounds []LineBound
+		var rowIDs []RowID
 		if populate {
 			rows = make([][]renderer.Cell, 0, rowCount)
 			bounds = make([]LineBound, 0, rowCount)
+			rowIDs = make([]RowID, 0, rowCount)
 		}
 		for range rowCount {
 			cellCount, ok := p.uint32()
@@ -248,10 +251,12 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 			if populate {
 				rows = append(rows, row)
 				bounds = append(bounds, bound)
+				rowIDs = append(rowIDs, nextRowID)
+				nextRowID++
 			}
 		}
 		if populate {
-			chunks = append(chunks, &HistoryChunk{rows: rows, bounds: bounds})
+			chunks = append(chunks, &HistoryChunk{rows: rows, bounds: bounds, rowIDs: rowIDs})
 		}
 	}
 	if len(p.data) != 0 {

@@ -184,6 +184,7 @@ func (s *Screen) clearRow(y, x0, x1 int) (start, width int) {
 	if y < 0 || y >= s.Frame.Height {
 		return x0, 0
 	}
+	fullRow := x0 <= 0 && x1 >= s.Frame.Width
 	if x0 < 0 {
 		x0 = 0
 	}
@@ -207,6 +208,9 @@ func (s *Screen) clearRow(y, x0, x1 int) (start, width int) {
 		s.Frame.Set(x, y, blank)
 	}
 	s.buffer.clear(y, x0, x1)
+	if fullRow {
+		s.buffer.rowIDs[y] = s.nextRowIDValue()
+	}
 	return x0, x1 - x0
 }
 

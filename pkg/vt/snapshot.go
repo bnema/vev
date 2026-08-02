@@ -83,6 +83,7 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 			return nil, fmt.Errorf("restore sealed history: %w", errInvalidHistory)
 		}
 		h.evictUntil(len(view.chunks[0].rows), view.Cells())
+		h.assignChunkIDs(view.chunks[0])
 		h.chunks = append(h.chunks, view.chunks[0])
 		h.rows += len(view.chunks[0].rows)
 		h.cells += view.Cells()
@@ -95,6 +96,14 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 		h.evictUntil(len(view.chunks[0].rows), view.Cells())
 		h.tail = view.chunks[0].rows
 		h.tailBounds = growBounds(view.chunks[0].bounds, len(h.tail))
+		h.tailIDs = growRowIDs(view.chunks[0].rowIDs, len(h.tail))
+		for i := range h.tailIDs {
+			if h.tailIDs[i] == 0 || h.hasRowID(h.tailIDs[i]) {
+				h.tailIDs[i] = h.allocateRowID()
+			} else if h.tailIDs[i] >= h.nextRowID {
+				h.nextRowID = h.tailIDs[i] + 1
+			}
+		}
 		h.rows += len(h.tail)
 		h.cells += view.Cells()
 	}
