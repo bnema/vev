@@ -260,6 +260,101 @@ func TestProxyHandshakePublishesOnlyAfterWelcomeAndMetadata(t *testing.T) {
 	stopProxy(t, created.proxy)
 }
 
+func TestProxyHandshakeTimesOutBeforePublication(t *testing.T) {
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	tr := newProxyTestTransport()
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), clock)
+
+	result := make(chan struct {
+		proxy *proxySession
+		err   error
+	}, 1)
+	go func() {
+		proxy, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
+		result <- struct {
+			proxy *proxySession
+			err   error
+		}{proxy: proxy, err: err}
+	}()
+
+	requireProxyHello(t, tr)
+	timer := awaitTestValue(t, clock.timers, "proxy handshake did not arm its timeout")
+	require.Equal(t, proxyHandshakeTimeout, timer.duration)
+	tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
+	tr.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	timer.ch <- time.Time{}
+
+	opened := awaitTestValue(t, result, "proxy handshake timeout did not finish")
+	require.ErrorIs(t, opened.err, errProxyHandshakeTimeout)
+	require.Nil(t, opened.proxy)
+	require.Empty(t, proxySessionSnapshot(d), "timed-out handshake must not publish a proxy")
+	select {
+	case <-tr.closed:
+	default:
+		t.Fatal("timed-out handshake transport was not closed")
+	}
+	require.Zero(t, tr.receiving.Load(), "timed-out handshake receive pump outlived transport cleanup")
+}
+
+func TestProxyHandshakeTimeoutClosesBlockedSends(t *testing.T) {
+	tests := []struct {
+		name           string
+		ungatedSends   int32
+		queueHandshake bool
+	}{
+		{name: "hello", queueHandshake: false},
+		{name: "initial ACK", ungatedSends: 1, queueHandshake: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+			entered := make(chan struct{}, 1)
+			tr := newProxyTestTransportWithSendGate(make(chan struct{}), entered, tt.ungatedSends)
+			if tt.queueHandshake {
+				tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
+				tr.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+				tr.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+			}
+			clock := &signalClock{timers: make(chan *signalTimer, 1)}
+			d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), clock)
+			result := make(chan error, 1)
+			go func() {
+				_, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
+				result <- err
+			}()
+
+			if tt.queueHandshake {
+				requireProxyHello(t, tr)
+			}
+			awaitTestCompletion(t, entered, "proxy handshake send did not block")
+			timer := awaitTestValue(t, clock.timers, "proxy handshake did not arm its timeout")
+			require.Equal(t, proxyHandshakeTimeout, timer.duration)
+			timer.ch <- time.Time{}
+
+			require.ErrorIs(t, awaitTestValue(t, result, "blocked handshake send did not finish"), errProxyHandshakeTimeout)
+			select {
+			case <-tr.closed:
+			default:
+				t.Fatal("timed-out handshake transport was not closed")
+			}
+			require.Zero(t, tr.receiving.Load(), "timed-out handshake receive pump outlived transport cleanup")
+		})
+	}
+}
+
+func TestProxyHandshakeContextUsesSystemClockWhenClockMissing(t *testing.T) {
+	d := &Daemon{}
+	ctx, timedOut, stop := d.proxyHandshakeContext(context.Background())
+	defer stop()
+	require.NoError(t, ctx.Err())
+	select {
+	case <-timedOut:
+		t.Fatal("missing clock caused an immediate handshake timeout")
+	default:
+	}
+}
+
 func TestProxyHandshakeRejectsInvalidWelcomeWithoutPublication(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -396,6 +491,8 @@ func TestProxyLinkResumesAndReplacementIsTerminal(t *testing.T) {
 	require.NoError(t, err)
 	firstHello := requireProxyHello(t, first)
 	require.Equal(t, ports.IntentAttach, firstHello.Intent)
+	handshakeTimer := awaitTestValue(t, clock.timers, "proxy handshake timeout was not registered")
+	require.Equal(t, proxyHandshakeTimeout, handshakeTimer.duration)
 
 	first.recv <- proxyRecv{err: io.EOF}
 	backoff := awaitTestValue(t, clock.timers, "proxy resume backoff timer was not armed")

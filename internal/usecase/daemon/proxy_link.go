@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	proxyHandshakeTimeout       = 15 * time.Second
 	proxyAttachedCommandTimeout = 10 * time.Second
 	proxyResumeInitialBackoff   = 250 * time.Millisecond
 	proxyResumeMaxBackoff       = 4 * time.Second
@@ -20,6 +21,7 @@ const (
 )
 
 var (
+	errProxyHandshakeTimeout   = errors.New("proxy session: remote handshake timed out")
 	errProxyCommandTimeout     = errors.New("proxy session: attached command timed out")
 	errProxyCommandUnavailable = errors.New("proxy session: attached command link is unavailable")
 	errProxyCommandGeneration  = errors.New("proxy session: attached command link was replaced")
@@ -55,7 +57,18 @@ const (
 // dialProxyHandshake installs a candidate transport, sends the proxied Hello
 // through the session's sole sender, and requires Welcome followed immediately
 // by valid authoritative metadata. The candidate is never registry-visible.
-func (d *Daemon) dialProxyHandshake(ctx context.Context, p *proxySession, intent uint8) error {
+func (d *Daemon) dialProxyHandshake(parent context.Context, p *proxySession, intent uint8) (err error) {
+	if parent == nil {
+		//nolint:contextcheck // nil is intentionally supported for direct internal callers; Background is the root fallback.
+		parent = context.Background()
+	}
+	ctx, timedOut, stop := d.proxyHandshakeContext(parent)
+	defer stop()
+	defer func() {
+		if err != nil {
+			err = proxyHandshakeContextError(parent, timedOut, err)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -103,6 +116,8 @@ func (d *Daemon) dialProxyHandshake(ctx context.Context, p *proxySession, intent
 			_ = transport.Close()
 		}
 	}()
+	stopTransport := watchProxyHandshakeTransport(ctx, transport)
+	defer stopTransport()
 	hello := ports.Hello{
 		Version:           ports.ProtocolVersion,
 		Intent:            intent,
@@ -154,6 +169,65 @@ func proxyOutputWindow(transport ports.Transport) uint8 {
 		return 1
 	}
 	return maxUnackedOutputStates
+}
+
+func (d *Daemon) proxyHandshakeContext(parent context.Context) (context.Context, <-chan struct{}, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	timedOut := make(chan struct{})
+	clock := ports.Clock(systemClock{})
+	if d != nil && d.clock != nil {
+		clock = d.clock
+	}
+	timer := clock.NewTimer(proxyHandshakeTimeout)
+	if timer == nil {
+		timer = systemClock{}.NewTimer(proxyHandshakeTimeout)
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-timer.C():
+			close(timedOut)
+			cancel()
+		case <-stop:
+			timer.Stop()
+		}
+	}()
+	return ctx, timedOut, func() {
+		close(stop)
+		<-done
+		cancel()
+	}
+}
+
+func watchProxyHandshakeTransport(ctx context.Context, transport ports.Transport) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+			_ = transport.Close()
+		case <-stop:
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+func proxyHandshakeContextError(parent context.Context, timedOut <-chan struct{}, fallback error) error {
+	select {
+	case <-timedOut:
+		return errProxyHandshakeTimeout
+	default:
+	}
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	return fallback
 }
 
 func recvProxyHandshake(ctx context.Context, transport ports.Transport, sessionName string, size domain.Size, stateFloor uint64) (ports.Welcome, ports.SessionMeta, ports.ScreenUpdate, error) {
