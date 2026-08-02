@@ -96,8 +96,8 @@ func TestTransportLargeFrameNearCap(t *testing.T) {
 	server := NewTransport(c2)
 
 	// Largest payload whose frame length (1 + len(payload)) still fits
-	// exactly at maxFrameLen.
-	payload := make([]byte, maxFrameLen-1)
+	// exactly at ports.MaxFrameLen.
+	payload := make([]byte, ports.MaxFrameLen-1)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
@@ -177,7 +177,7 @@ func TestTransportRecvOversizeFrame(t *testing.T) {
 
 	go func() {
 		var hdr [4]byte
-		binary.BigEndian.PutUint32(hdr[:], maxFrameLen+1)
+		binary.BigEndian.PutUint32(hdr[:], ports.MaxFrameLen+1)
 		_, _ = c1.Write(hdr[:])
 	}()
 
@@ -227,7 +227,7 @@ func TestTransportSendOversizePayloadRejected(t *testing.T) {
 	defer func() { _ = c2.Close() }()
 
 	client := NewTransport(c1)
-	payload := make([]byte, maxFrameLen) // +1 byte type => exceeds max
+	payload := make([]byte, ports.MaxFrameLen) // +1 byte type => exceeds max
 	err := client.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload})
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("client.Send() error = %v, want ErrFrameTooLarge", err)
