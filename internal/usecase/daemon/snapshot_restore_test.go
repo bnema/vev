@@ -306,34 +306,69 @@ func TestSnapshotRuntimeRestorePreservesConsumedAndExpelledPaneLayout(t *testing
 }
 
 func TestSnapshotRestoreUsesDaemonTerminalCapabilities(t *testing.T) {
-	snapshot := restoreAcceptanceSession(t, "restored")
-	pty, release := newBlockingPTY(t)
-	defer release()
-
-	var gotEnv []string
-	factory := portsmocks.NewMockPTYFactory(t)
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		RunAndReturn(func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
-			gotEnv = append([]string(nil), env...)
-			return pty, nil
-		}).Once()
-
-	d := newTestDaemon(t, factory, stubClock{})
-	d.baseEnv = []string{
-		"TERM=xterm-kitty",
-		"COLORTERM=truecolor",
-		"XDG_RUNTIME_DIR=/run/user/1000",
-		"WAYLAND_DISPLAY=wayland-1",
+	tests := []struct {
+		name           string
+		baseEnv        []string
+		wantTerm       string
+		wantColorTerm  string
+		notWantEntries []string
+	}{
+		{
+			name: "truecolor",
+			baseEnv: []string{
+				"TERM=xterm-kitty",
+				"COLORTERM=truecolor",
+				"XDG_RUNTIME_DIR=/run/user/1000",
+				"WAYLAND_DISPLAY=wayland-1",
+			},
+			wantTerm:       "TERM=xterm-direct",
+			wantColorTerm:  "COLORTERM=truecolor",
+			notWantEntries: []string{"TERM=xterm-kitty"},
+		},
+		{
+			name: "256-color fallback",
+			baseEnv: []string{
+				"TERM=xterm-256color",
+				"COLORTERM=old",
+				"XDG_RUNTIME_DIR=/run/user/1000",
+				"WAYLAND_DISPLAY=wayland-1",
+			},
+			wantTerm:       "TERM=xterm-256color",
+			notWantEntries: []string{"COLORTERM=old", "COLORTERM=truecolor"},
+		},
 	}
 
-	tabs, err := d.restoreSnapshotTabs(context.Background(), d.serveCtx, snapshot)
-	require.NoError(t, err)
-	defer closeRestoredTabs(tabs)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := restoreAcceptanceSession(t, "restored")
+			pty, release := newBlockingPTY(t)
+			defer release()
 
-	require.Contains(t, gotEnv, "TERM=xterm-direct")
-	require.Contains(t, gotEnv, "COLORTERM=truecolor")
-	require.Contains(t, gotEnv, "XDG_RUNTIME_DIR=/run/user/1000")
-	require.Contains(t, gotEnv, "WAYLAND_DISPLAY=wayland-1")
+			var gotEnv []string
+			factory := portsmocks.NewMockPTYFactory(t)
+			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				RunAndReturn(func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+					gotEnv = append([]string(nil), env...)
+					return pty, nil
+				}).Once()
+
+			d := newTestDaemon(t, factory, stubClock{})
+			d.baseEnv = tt.baseEnv
+			tabs, err := d.restoreSnapshotTabs(context.Background(), d.serveCtx, snapshot)
+			require.NoError(t, err)
+			defer closeRestoredTabs(tabs)
+
+			require.Contains(t, gotEnv, tt.wantTerm)
+			if tt.wantColorTerm != "" {
+				require.Contains(t, gotEnv, tt.wantColorTerm)
+			}
+			require.Contains(t, gotEnv, "XDG_RUNTIME_DIR=/run/user/1000")
+			require.Contains(t, gotEnv, "WAYLAND_DISPLAY=wayland-1")
+			for _, notWant := range tt.notWantEntries {
+				require.NotContains(t, gotEnv, notWant)
+			}
+		})
+	}
 }
 
 func captureConsumedAndExpelledPaneLayout(t *testing.T) paneLayoutSnapshotFixture {
