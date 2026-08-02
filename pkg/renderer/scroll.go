@@ -15,7 +15,7 @@ func findSafeScroll(frame Frame, damage []Damage) (Damage, bool) {
 }
 
 func isSafeScroll(frame Frame, d Damage) bool {
-	return d.X == 0 && d.Width == frame.Width && d.Y >= 0 && d.Height > 0 && d.Count > 0 && d.Count < d.Height && d.Y+d.Height <= frame.Height
+	return d.X == 0 && d.Width == frame.Width && d.Y >= 0 && d.Y <= frame.Height && d.Height > 0 && d.Height <= frame.Height-d.Y && d.Count > 0 && d.Count < d.Height
 }
 
 func emitScrollUp(out *bytes.Buffer, d Damage) {

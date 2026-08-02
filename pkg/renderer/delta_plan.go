@@ -89,19 +89,12 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 }
 
 func planSingleDamage(frame Frame, d Damage) DeltaPlan {
-	x, y, width, height, ok := clampRect(frame, d.X, d.Y, d.Width, d.Height)
-	if !ok {
-		return DeltaPlan{}
-	}
-	if height > maxPlannedDamageSpans {
+	spans, full := buildSingleDamageSpans(frame, d)
+	if full {
 		return DeltaPlan{Snapshot: true}
 	}
-	spans := make([]Span, height)
-	for row := range height {
-		spans[row] = Span{Y: y + row, X: x, Width: width}
-	}
 	plan := DeltaPlan{Spans: spans}
-	if (frame.Height == 1 || len(spans) > 1) && deltaCostsSnapshot(frame, spans, false) {
+	if deltaCostsSnapshot(frame, spans, false) {
 		plan.Snapshot = true
 	}
 	return plan

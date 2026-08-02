@@ -86,6 +86,16 @@ func TestPlanDelta(t *testing.T) {
 			},
 		},
 		{
+			name:  "safe full width scroll with expensive delta snapshots",
+			frame: testFrame("1111", "new!"),
+			damage: []Damage{
+				{Kind: DamageScrollUp, X: 0, Y: 0, Width: 4, Height: 2, Count: 1},
+				{Kind: DamageText, X: 0, Y: 0, Width: 4, Height: 2},
+			},
+			committed: testFrame("0000", "1111"),
+			want:      DeltaPlan{Snapshot: true},
+		},
+		{
 			name:  "rectangular scroll snapshots",
 			frame: scrolled,
 			damage: []Damage{

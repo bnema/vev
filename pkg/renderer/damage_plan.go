@@ -19,18 +19,7 @@ func buildDamagePlan(frame Frame, damage []Damage, skip *Damage) ([]Span, bool) 
 		if d.Kind != DamageText && d.Kind != DamageClear {
 			return nil, false
 		}
-		x, y, width, height, ok := clampRect(frame, d.X, d.Y, d.Width, d.Height)
-		if !ok {
-			return nil, false
-		}
-		if height > maxPlannedDamageSpans {
-			return nil, true
-		}
-		spans := make([]Span, height)
-		for row := range height {
-			spans[row] = Span{Y: y + row, X: x, Width: width}
-		}
-		return spans, false
+		return buildSingleDamageSpans(frame, d)
 	}
 
 	spans := make([]Span, 0)
@@ -61,6 +50,21 @@ func buildDamagePlan(frame Frame, damage []Damage, skip *Damage) ([]Span, bool) 
 	})
 
 	return mergeDamageSpans(spans), false
+}
+
+func buildSingleDamageSpans(frame Frame, d Damage) ([]Span, bool) {
+	x, y, width, height, ok := clampRect(frame, d.X, d.Y, d.Width, d.Height)
+	if !ok {
+		return nil, false
+	}
+	if height > maxPlannedDamageSpans {
+		return nil, true
+	}
+	spans := make([]Span, height)
+	for row := range height {
+		spans[row] = Span{Y: y + row, X: x, Width: width}
+	}
+	return spans, false
 }
 
 func mergeDamageSpans(spans []Span) []Span {
