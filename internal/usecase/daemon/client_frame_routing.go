@@ -265,7 +265,7 @@ func (d *Daemon) resetActiveOutput(token attachmentRoleToken) bool {
 		ac.sendMu.Unlock()
 		return false
 	}
-	ac.output.rebase()
+	ac.rebaseOutput()
 	ac.sendMu.Unlock()
 
 	rc := token.sess.core().coordinator.Load()

@@ -299,6 +299,12 @@ func TestAttachReplaceKeepsOldClientSnatched(t *testing.T) {
 	acA := sess.client
 	sess.mu.Unlock()
 	require.NotNil(t, acA)
+	// The transport observes Send before the render transaction releases sendMu.
+	// Wait for that contract boundary before replacing A; otherwise the test can
+	// intentionally classify the in-flight first paint as an interrupted render.
+	acA.sendMu.Lock()
+	require.Same(t, trA, acA.transportSnapshot().transport)
+	acA.sendMu.Unlock()
 
 	// Client B attaches to the same session, displacing A.
 	trB, sendsB, releaseB := newConn(t, mustHello(ports.IntentAttach, "0", domain.Size{Cols: 80, Rows: 24}))

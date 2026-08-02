@@ -253,8 +253,8 @@ func TestHarnessRoutesEveryRemoteFixtureThroughItsDeclaredPeer(t *testing.T) {
 			s := scenario{ID: "route", Transport: tc.transport.ID}
 			client := routeRoleArgs(s, processMapping{Role: "client", Run: 2}, tc.transport)
 			peer := routeRoleArgs(s, processMapping{Role: tc.peer, Run: 2}, tc.transport)
-			if !equalStrings(client.Args, []string{"attach", "harness@127.0.0.1:perf-route-002"}) {
-				t.Fatalf("client did not use public remote attach: %q", client.Args)
+			if !equalStrings(client.Args, []string{"attach", "harness@127.0.0.1"}) {
+				t.Fatalf("client did not use ephemeral public remote attach: %q", client.Args)
 			}
 			if tc.peer == "ssh_stdio_peer" && !equalStrings(peer.Args, []string{"_stdio", "perf-route-002"}) {
 				t.Fatalf("ssh peer command=%q", peer.Args)
@@ -321,7 +321,7 @@ func TestWorkloadInputShapes(t *testing.T) {
 			`printf '\033[38;2;220;80;40mgreen'`,
 			`printf '\033[38;2;80;220;120ms'`,
 		}},
-		{"interactive_flood", []string{"while [ $i -lt 128 ]"}},
+		{"interactive_flood", []string{"printf 'vev perf output\\n'"}},
 		{"snapshot_output_resize", []string{`\033[2J`, "vev perf snapshot-output-resize"}},
 		{"attach_restore_tab_switch", []string{`"$VEV_PERF_BIN" cmd next-tab`, `"$VEV_PERF_BIN" cmd previous-tab`}},
 	}
@@ -358,6 +358,14 @@ func TestWorkloadInputShapes(t *testing.T) {
 		t.Fatalf("inactive output truecolor runs = %d, want 3: %q", count, inactive)
 	}
 
+	interactive := string(workloadInput(scenario{ID: "s", Workload: "interactive_flood"}, 1, "measured-1"))
+	if count := strings.Count(interactive, `printf 'vev perf output\n'`); count != 128 {
+		t.Fatalf("interactive flood printf commands = %d, want 128: %q", count, interactive)
+	}
+	if strings.Contains(interactive, "i=0") || strings.Contains(interactive, "while [") {
+		t.Fatalf("interactive flood uses shell-specific loop syntax: %q", interactive)
+	}
+
 	warmup := string(workloadInput(scenario{ID: "s", Workload: "attach_restore_tab_switch"}, 1, "warmup"))
 	if count := strings.Count(warmup, `"$VEV_PERF_BIN" cmd new-tab`); count != 1 {
 		t.Fatalf("attach warmup new-tab commands = %d, want 1: %q", count, warmup)
@@ -370,6 +378,26 @@ func TestWorkloadInputShapes(t *testing.T) {
 	wantMeasured := `"$VEV_PERF_BIN" cmd next-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch s\n' && printf '__VEV_HARNESS_s_r1_measured-1__\n'` + "\n"
 	if measured != wantMeasured {
 		t.Fatalf("attach measured success marker is not gated by every command:\n got %q\nwant %q", measured, wantMeasured)
+	}
+}
+
+func TestWorkloadInputResizeCommandsAreComplete(t *testing.T) {
+	for _, tt := range []struct {
+		workload string
+		want     string
+	}{
+		{"resize_sweep", `printf 'vev perf resize-sweep s\n'; printf '__VEV_HARNESS_s_r1_measured-1__\n'` + "\n"},
+		{"snapshot_output_resize", `printf '\033[2J\033[Hvev perf snapshot-output-resize s\n'; printf '__VEV_HARNESS_s_r1_measured-1__\n'` + "\n"},
+	} {
+		t.Run(tt.workload, func(t *testing.T) {
+			got := string(workloadInput(scenario{ID: "s", Workload: tt.workload}, 1, "measured-1"))
+			if got != tt.want {
+				t.Fatalf("workload input = %q, want complete command %q", got, tt.want)
+			}
+			if strings.Contains(got, "%!") {
+				t.Fatalf("workload input contains fmt diagnostic: %q", got)
+			}
+		})
 	}
 }
 
@@ -457,7 +485,7 @@ func (l resizeOrderingLauncher) Launch(m processMapping, _ roleCommand) (launche
 	return &fakeProcess{}, nil
 }
 
-func TestResizeBoundaryPrecedesResizeAndMarkerWaitsForShellGeometry(t *testing.T) {
+func TestResizeBoundaryPrecedesWorkloadWriteAndMarker(t *testing.T) {
 	dir := t.TempDir()
 	order := []string{}
 	client := &resizeOrderingProcess{order: &order}
@@ -476,13 +504,13 @@ func TestResizeBoundaryPrecedesResizeAndMarkerWaitsForShellGeometry(t *testing.T
 		t.Fatalf("first resize event order = %q, want %q", order[:len(wantOrder)], wantOrder)
 	}
 	first := string(client.inputs[0])
-	for _, want := range []string{`set -- $(stty size)`, `[ "$2" = "120" ]`, `sleep 0.01`, `&& printf '__VEV_HARNESS_resize_r1_measured-2__\n'`} {
+	for _, want := range []string{`printf 'vev perf resize-sweep resize\n'`, `printf '__VEV_HARNESS_resize_r1_measured-2__\n'`} {
 		if !strings.Contains(first, want) {
-			t.Errorf("resize input has no bounded expected-column gate %q: %q", want, first)
+			t.Errorf("resize input has no observable workload or marker %q: %q", want, first)
 		}
 	}
-	if strings.Contains(first, `"40 120"`) {
-		t.Fatalf("resize input incorrectly gates on client rows that shell chrome does not expose: %q", first)
+	if strings.Contains(first, "while [") || strings.Contains(first, "%!") {
+		t.Fatalf("resize input contains unsupported loop or fmt diagnostic: %q", first)
 	}
 }
 

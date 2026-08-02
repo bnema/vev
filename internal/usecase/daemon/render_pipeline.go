@@ -215,7 +215,7 @@ func desiredCapturedCursor(c capturedCursorInputs, contentY int) cursorOut {
 	if !c.hasStyle {
 		style = 1
 	}
-	return cursorOut{row: c.content.Y + contentY + c.row, col: c.content.X + c.col, style: style, hasStyle: true}
+	return cursorOut{valid: true, row: c.content.Y + contentY + c.row, col: c.content.X + c.col, style: style, hasStyle: true}
 }
 
 func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapshot, paletteCfg domain.PaletteConfig) {
@@ -430,7 +430,7 @@ func commitDamageReceipts(receipts []damageReceipt) {
 		}
 		if receipt.proxy != nil {
 			receipt.proxy.mu.Lock()
-			if receipt.proxy.screen == receipt.proxyScreen {
+			if receipt.proxy.screen != nil && receipt.proxy.screen == receipt.proxyScreen {
 				receipt.proxy.screen.AcknowledgeDamage(receipt.generation)
 			}
 			receipt.proxy.mu.Unlock()
@@ -473,9 +473,34 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		}
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
-	prepared, err := ac.output.prepare(composed.frame, composed.damage, composed.reset)
+	var (
+		preparedANSI   *preparedOutput
+		preparedScreen *preparedStructuredOutput
+		err            error
+		cursor         cursorCandidate
+		data           []byte
+	)
+	if ac.proxied {
+		screenOutput := ac.ensureScreenOutput()
+		if screenOutput == nil {
+			err = errors.New("proxied attachment has no structured output stream")
+		} else {
+			preparedScreen, err = screenOutput.prepare(composed.frame, composed.damage, composed.cursor, composed.reset, ac.echoAck.Load())
+			if err == nil {
+				data = preparedScreen.data
+			}
+		}
+	} else {
+		preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
+		if err == nil {
+			cursor = ac.prepareCursorTail(composed.cursor, len(preparedANSI.data) > 0)
+			data = append([]byte(nil), preparedANSI.data...)
+			data = append(data, cursor.data...)
+		}
+	}
 	endDiff(0, err == nil)
 	if err != nil {
+		ac.discardProxyCapture()
 		ac.sendMu.Unlock()
 		d.log.Error("render draw failed", "err", err, "session", entry.core().name)
 		// Without a coordinator reportError repaints synchronously. Suppress only
@@ -498,9 +523,6 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
 		return true
 	}
-	cursor := ac.prepareCursorTail(composed.cursor, len(prepared.data) > 0)
-	data := append([]byte(nil), prepared.data...)
-	data = append(data, cursor.data...)
 	var sendTr ports.Transport
 	var sendErr error
 	// Metadata precedes any output bytes and is published on its own when the
@@ -511,6 +533,13 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		if ac.proxied {
 			if sess, ok := localSession(entry); ok {
 				sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.roleEffect)
+			} else if proxy, ok := entry.(*proxySession); ok {
+				meta, metaOK := proxy.sessionMetaSnapshot()
+				if !metaOK {
+					sendErr = errSessionMetaUnavailable
+				} else {
+					sendErr = ac.sendSessionMetaSnapshot(meta, sendTransport, marks.roleEffect)
+				}
 			}
 		}
 		if len(data) > 0 {
@@ -524,17 +553,11 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 					send = async.SendAsync
 				}
 				interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
-				sendErr = prepared.send(data, ac.echoAck.Load(), func(frame ports.Frame) error {
-					err := send(frame)
-					if interruptible {
-						if err != nil {
-							marks.roleEffect.reportTransportFailure(sendTransport)
-						}
-						marks.roleEffect.endTransportSend()
-						interruptible = false
-					}
-					return err
-				})
+				if ac.proxied {
+					sendErr = preparedScreen.send(send)
+				} else {
+					sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
+				}
 				if interruptible {
 					if sendErr != nil {
 						marks.roleEffect.reportTransportFailure(sendTransport)
@@ -543,17 +566,32 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 				}
 			}
 			endEmit(uint64(len(data)), sendErr == nil)
+			if sendErr == nil && ac.proxied {
+				kind := ports.RuntimeScreenDelta
+				if preparedScreen.update.Kind == ports.ScreenUpdateSnapshot {
+					kind = ports.RuntimeScreenSnapshot
+				}
+				marks.diagnostic(kind, uint64(len(preparedScreen.data)), uint64(len(preparedScreen.update.Spans)))
+			}
 		}
 	}
 	if sendErr == nil {
 		if len(data) == 0 {
-			prepared.commitNoSend()
+			if ac.proxied {
+				preparedScreen.commitNoSend()
+			} else {
+				preparedANSI.commitNoSend()
+			}
 		}
 		// Publish only after output preparation and transport emission both
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this
 		// completed output transaction.
-		ac.lastCursor = cursor.next
+		if ac.proxied {
+			ac.lastCursor = composed.cursor
+		} else {
+			ac.lastCursor = cursor.next
+		}
 		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
 
@@ -564,6 +602,9 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		if ac.renderStages.emit != nil {
 			ac.renderStages.emit()
 		}
+	}
+	if sendErr != nil {
+		ac.discardProxyCapture()
 	}
 	ac.sendMu.Unlock()
 	if sendErr != nil {

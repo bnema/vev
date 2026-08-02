@@ -165,7 +165,7 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 	}
 }
 
-func TestTransportRejectsFramesOverSharedMaximum(t *testing.T) {
+func TestTransportUsesCanonicalFrameMaximum(t *testing.T) {
 	boundaryPayload := make([]byte, ports.MaxFrameLen-1)
 	boundaryWire := &bytes.Buffer{}
 	boundarySend := NewTransport(nil, boundaryWire, nil)
@@ -176,16 +176,19 @@ func TestTransportRejectsFramesOverSharedMaximum(t *testing.T) {
 		t.Fatalf("boundary frame length = %d, want %d", got, ports.MaxFrameLen)
 	}
 	boundaryRecv := NewTransport(bytes.NewReader(boundaryWire.Bytes()), io.Discard, nil)
-	boundaryFrame, boundaryErr := boundaryRecv.Recv()
-	if boundaryErr != nil {
-		t.Fatalf("boundary Recv error = %v", boundaryErr)
+	boundaryFrame, err := boundaryRecv.Recv()
+	if err != nil {
+		t.Fatalf("boundary Recv error = %v", err)
 	}
 	if boundaryFrame.Type != ports.MsgOutput || len(boundaryFrame.Payload) != len(boundaryPayload) {
 		t.Fatalf("boundary frame = type %d, payload %d bytes; want type %d, payload %d bytes", boundaryFrame.Type, len(boundaryFrame.Payload), ports.MsgOutput, len(boundaryPayload))
 	}
+	if !bytes.Equal(boundaryFrame.Payload, boundaryPayload) {
+		t.Fatal("boundary payload was corrupted")
+	}
 
 	send := NewTransport(nil, io.Discard, nil)
-	err := send.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, ports.MaxFrameLen)})
+	err = send.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, ports.MaxFrameLen)})
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("Send error = %v, want ErrFrameTooLarge", err)
 	}

@@ -12,7 +12,8 @@ import (
 // A reset frame is the only dependency-free output and advertises state 0 as
 // its base.
 //
-// Callers serialize access with attachedClient.sendMu.
+// Callers serialize access with attachedClient.sendMu. A prepared transaction
+// must be sent or committed as a no-op before the next transaction is prepared.
 type outputStateStream struct {
 	renderer       *renderer.Renderer
 	next           uint64
@@ -38,7 +39,7 @@ type preparedOutput struct {
 	next      uint64
 	data      []byte
 	reset     bool
-	completed bool
+	attempted bool
 }
 
 func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
@@ -57,10 +58,10 @@ func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Dama
 }
 
 func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame) error) error {
-	if p.completed {
+	if p.attempted {
 		return nil
 	}
-	p.completed = true
+	p.attempted = true
 	base := p.stream.next
 	if p.reset {
 		base = 0
@@ -76,18 +77,16 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame
 }
 
 func (p *preparedOutput) commitNoSend() {
-	if p.completed {
+	if p == nil || p.attempted || len(p.data) != 0 {
 		return
 	}
-	p.completed = true
+	p.attempted = true
 	p.commit()
 }
 
 func (p *preparedOutput) commit() {
 	p.draw.Commit()
-	if p.reset {
-		p.stream.forceSnapshot = false
-	}
+	p.stream.forceSnapshot = false
 }
 
 func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) ports.Frame {

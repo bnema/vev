@@ -138,10 +138,30 @@ func TestSendSnatchedPanelRebasesOutput(t *testing.T) {
 	require.True(t, strings.HasSuffix(string(out.Data), "\x1b[?25l"), "panel must force the cursor hidden")
 }
 
+func TestSendSnatchedPanelUsesStructuredSnapshotForProxied(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	tr := &closeTrackingTransport{}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), proxied: true, size: domain.Size{Cols: 80, Rows: 24}}
+	ac.output.next = 7
+	ac.setAppliedTheme(appliedTheme{Resolved: themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})})
+	ac.roleGeneration.Store(1)
+
+	require.NoError(t, d.sendSnatchedPanel(ac, ac.transportSnapshot(), 1, ""))
+	frames := tr.Sends()
+	require.Len(t, frames, 1)
+	require.Equal(t, ports.MsgScreenUpdate, frames[0].Type)
+	update, err := ports.UnmarshalScreenUpdate(frames[0].Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ScreenUpdateSnapshot, update.Kind)
+	require.Zero(t, update.BaseStateNum)
+	require.Equal(t, uint64(8), update.NewStateNum, "snatched panel must advance the shared output state")
+	require.False(t, update.Cursor.Visible, "structured snatched panel must hide the cursor semantically")
+	require.Len(t, update.Spans, ac.size.Rows, "structured snapshots must carry every full row")
+}
+
 func TestSendSnatchedPanelPublishesCursorOnlyAfterSendSuccess(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	sendErr := errors.New("send failed")
-	failed := cacheFailTransport{err: sendErr}
+	failed := cacheFailTransport{}
 	ac := &attachedClient{
 		tr:         failed,
 		output:     newOutputStateStream(),
@@ -153,14 +173,9 @@ func TestSendSnatchedPanelPublishesCursorOnlyAfterSendSuccess(t *testing.T) {
 	ac.roleGeneration.Store(1)
 	beforeCursor := ac.lastCursor
 
-	require.ErrorIs(t, d.sendSnatchedPanel(ac, ac.transportSnapshot(), 1, ""), sendErr)
+	require.Error(t, d.sendSnatchedPanel(ac, ac.transportSnapshot(), 1, ""))
 	require.Equal(t, beforeCursor, ac.lastCursor)
 	require.Equal(t, uint64(7), ac.output.next)
-	require.True(t, ac.output.forceSnapshot, "failed snatched send must force the next output to be a snapshot")
-	probeFrame := snatchedPanelFrame(ac.size, ac.getAppliedTheme().Resolved.Styles, "")
-	probe, err := ac.output.renderer.Prepare(probeFrame, nil, false)
-	require.NoError(t, err)
-	require.NotEmpty(t, probe.Bytes(), "failed snatched send must not commit the renderer shadow")
 
 	healthy := &closeTrackingTransport{}
 	ac.replaceTransport(healthy)

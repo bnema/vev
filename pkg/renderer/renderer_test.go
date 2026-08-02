@@ -134,6 +134,24 @@ func TestNoOp(t *testing.T) {
 	}
 }
 
+func TestPrepareNoOpDoesNotCloneFrame(t *testing.T) {
+	r := New(Capabilities{})
+	frame := NewFrame(3, 2)
+	markFrame(&frame)
+	if _, err := r.Draw(frame, []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 3, Height: 2}}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := r.Prepare(frame, []Damage{{Kind: DamageText, X: frame.Width, Y: 0, Width: 1, Height: 1}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.candidate.frame.Cells != nil || prepared.candidate.frame.lineOffset != nil {
+		t.Fatal("no-op prepared draw owns frame storage")
+	}
+	prepared.Commit()
+}
+
 // ---------------------------------------------------------------------------
 // Style reset discipline
 // ---------------------------------------------------------------------------
@@ -1082,234 +1100,312 @@ func TestRendererPrepare(t *testing.T) {
 	fullFrame := testFrame("ABC", "DEF")
 	fullDamage := []Damage{FullRedraw()}
 
-	t.Run("zero commit is safe", func(t *testing.T) {
-		var prepared PreparedDraw
-		prepared.Commit()
-	})
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "zero commit is safe", run: func(t *testing.T) {
+			var prepared PreparedDraw
+			prepared.Commit()
+		}},
 
-	t.Run("discard and reprepare returns identical owned bytes", func(t *testing.T) {
-		r := New(Capabilities{})
-		first, err := r.Prepare(fullFrame, fullDamage, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := append([]byte(nil), first.Bytes()...)
+		{name: "discard and reprepare returns identical owned bytes", run: func(t *testing.T) {
+			r := New(Capabilities{})
+			first, err := r.Prepare(fullFrame, fullDamage, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append([]byte(nil), first.Bytes()...)
 
-		second, err := r.Prepare(fullFrame, fullDamage, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(second.Bytes(), want) {
-			t.Fatalf("reprepared bytes = %q, want %q", second.Bytes(), want)
-		}
+			second, err := r.Prepare(fullFrame, fullDamage, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(second.Bytes(), want) {
+				t.Fatalf("reprepared bytes = %q, want %q", second.Bytes(), want)
+			}
 
-		other := testFrame("12345678", "abcdefgh", "ABCDEFGH")
-		if _, err := r.Prepare(other, fullDamage, false); err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(first.Bytes(), want) {
-			t.Fatalf("prepared bytes changed after pooled buffer reuse: got %q, want %q", first.Bytes(), want)
-		}
-	})
+			other := testFrame("12345678", "abcdefgh", "ABCDEFGH")
+			if _, err := r.Prepare(other, fullDamage, false); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(first.Bytes(), want) {
+				t.Fatalf("prepared bytes changed after pooled buffer reuse: got %q, want %q", first.Bytes(), want)
+			}
+		}},
 
-	t.Run("commit then no-op", func(t *testing.T) {
-		r := New(Capabilities{})
-		prepared, err := r.Prepare(fullFrame, fullDamage, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		prepared.Commit()
+		{name: "commit then no-op", run: func(t *testing.T) {
+			r := New(Capabilities{})
+			prepared, err := r.Prepare(fullFrame, fullDamage, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared.Commit()
 
-		next, err := r.Prepare(fullFrame, nil, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(next.Bytes()) != 0 {
-			t.Fatalf("unchanged frame emitted %q", next.Bytes())
-		}
-	})
+			next, err := r.Prepare(fullFrame, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(next.Bytes()) != 0 {
+				t.Fatalf("unchanged frame emitted %q", next.Bytes())
+			}
+		}},
 
-	t.Run("reset preparation is transactional", func(t *testing.T) {
-		r := New(Capabilities{})
-		initial, err := r.Prepare(fullFrame, fullDamage, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		initial.Commit()
+		{name: "reset preparation is transactional", run: func(t *testing.T) {
+			r := New(Capabilities{})
+			initial, err := r.Prepare(fullFrame, fullDamage, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial.Commit()
 
-		resetFrame := testFrame("ABC", "XYZ")
-		resetPrepared, err := r.Prepare(resetFrame, nil, true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want, err := New(Capabilities{}).Draw(resetFrame, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(resetPrepared.Bytes(), want) {
-			t.Fatalf("reset preparation = %q, want full draw %q", resetPrepared.Bytes(), want)
-		}
+			resetFrame := testFrame("ABC", "XYZ")
+			resetPrepared, err := r.Prepare(resetFrame, nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := New(Capabilities{}).Draw(resetFrame, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(resetPrepared.Bytes(), want) {
+				t.Fatalf("reset preparation = %q, want full draw %q", resetPrepared.Bytes(), want)
+			}
 
-		unchanged, err := r.Prepare(fullFrame, nil, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(unchanged.Bytes()) != 0 {
-			t.Fatalf("discarded reset changed committed shadow: %q", unchanged.Bytes())
-		}
+			unchanged, err := r.Prepare(fullFrame, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(unchanged.Bytes()) != 0 {
+				t.Fatalf("discarded reset changed committed shadow: %q", unchanged.Bytes())
+			}
 
-		resetPrepared, err = r.Prepare(resetFrame, nil, true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resetPrepared.Commit()
-		afterCommit, err := r.Prepare(resetFrame, nil, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(afterCommit.Bytes()) != 0 {
-			t.Fatalf("committed reset was not retained: %q", afterCommit.Bytes())
-		}
-	})
+			resetPrepared, err = r.Prepare(resetFrame, nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resetPrepared.Commit()
+			afterCommit, err := r.Prepare(resetFrame, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(afterCommit.Bytes()) != 0 {
+				t.Fatalf("committed reset was not retained: %q", afterCommit.Bytes())
+			}
+		}},
 
-	t.Run("successful no-byte commit", func(t *testing.T) {
-		r := New(Capabilities{})
-		initial, err := r.Prepare(fullFrame, fullDamage, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		initial.Commit()
+		{name: "successful no-byte commit", run: func(t *testing.T) {
+			r := New(Capabilities{})
+			initial, err := r.Prepare(fullFrame, fullDamage, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial.Commit()
 
-		noOp, err := r.Prepare(fullFrame, nil, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(noOp.Bytes()) != 0 {
-			t.Fatalf("no-op emitted %q", noOp.Bytes())
-		}
-		noOp.Commit()
+			noOp, err := r.Prepare(fullFrame, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(noOp.Bytes()) != 0 {
+				t.Fatalf("no-op emitted %q", noOp.Bytes())
+			}
+			noOp.Commit()
 
-		again, err := r.Prepare(fullFrame, nil, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(again.Bytes()) != 0 {
-			t.Fatalf("committed no-op changed renderer state: %q", again.Bytes())
-		}
-	})
+			again, err := r.Prepare(fullFrame, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(again.Bytes()) != 0 {
+				t.Fatalf("committed no-op changed renderer state: %q", again.Bytes())
+			}
+		}},
 
-	t.Run("double commit is idempotent", func(t *testing.T) {
-		base := testFrame("0000", "1111", "2222", "3333")
-		scrolled := testFrame("1111", "2222", "3333", "new!")
-		damage := []Damage{
-			{Kind: DamageScrollUp, X: 0, Y: 0, Width: 4, Height: 4, Count: 1},
-			{Kind: DamageText, X: 0, Y: 3, Width: 4, Height: 1},
-		}
-		r := New(Capabilities{})
-		if _, err := r.Draw(base, fullDamage); err != nil {
-			t.Fatal(err)
-		}
+		{name: "double commit is idempotent", run: func(t *testing.T) {
+			base := testFrame("0000", "1111", "2222", "3333")
+			scrolled := testFrame("1111", "2222", "3333", "new!")
+			damage := []Damage{
+				{Kind: DamageScrollUp, X: 0, Y: 0, Width: 4, Height: 4, Count: 1},
+				{Kind: DamageText, X: 0, Y: 3, Width: 4, Height: 1},
+			}
+			r := New(Capabilities{})
+			if _, err := r.Draw(base, fullDamage); err != nil {
+				t.Fatal(err)
+			}
 
-		prepared, err := r.Prepare(scrolled, damage, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		prepared.Commit()
-		prepared.Commit()
+			prepared, err := r.Prepare(scrolled, damage, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared.Commit()
+			prepared.Commit()
 
-		next, err := r.Prepare(scrolled, nil, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(next.Bytes()) != 0 {
-			t.Fatalf("double commit advanced state twice: %q", next.Bytes())
-		}
-	})
+			next, err := r.Prepare(scrolled, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(next.Bytes()) != 0 {
+				t.Fatalf("double commit advanced state twice: %q", next.Bytes())
+			}
+		}},
 
-	t.Run("matches concrete ANSI fixtures", func(t *testing.T) {
-		tests := []struct {
-			name    string
-			prepare func(t *testing.T) PreparedDraw
-			want    string
-		}{
-			{
-				name: "full draw",
-				prepare: func(t *testing.T) PreparedDraw {
-					prepared, err := New(Capabilities{}).Prepare(fullFrame, fullDamage, false)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return prepared
+		{name: "copied prepared draw commits scroll once", run: func(t *testing.T) {
+			base := testFrame("0000", "1111", "2222", "3333")
+			scrolled := testFrame("1111", "2222", "3333", "new!")
+			damage := []Damage{
+				{Kind: DamageScrollUp, X: 0, Y: 0, Width: 4, Height: 4, Count: 1},
+				{Kind: DamageText, X: 0, Y: 3, Width: 4, Height: 1},
+			}
+			r := New(Capabilities{})
+			if _, err := r.Draw(base, fullDamage); err != nil {
+				t.Fatal(err)
+			}
+
+			prepared, err := r.Prepare(scrolled, damage, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			copied := prepared
+			prepared.Commit()
+			copied.Commit()
+
+			next, err := r.Prepare(scrolled, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(next.Bytes()) != 0 {
+				t.Fatalf("copied commit advanced state twice: %q", next.Bytes())
+			}
+		}},
+
+		{name: "commit uses immutable frame snapshot", run: func(t *testing.T) {
+			r := New(Capabilities{})
+			base := testFrame("ABC", "DEF")
+			if _, err := r.Draw(base, fullDamage); err != nil {
+				t.Fatal(err)
+			}
+
+			changed := base.Clone()
+			changed.Set(1, 1, Cell{Rune: 'X', Style: DefaultStyle()})
+			want := changed.Clone()
+			prepared, err := r.Prepare(changed, []Damage{{Kind: DamageText, X: 1, Y: 1, Width: 1, Height: 1}}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(prepared.Bytes()), "X") {
+				t.Fatalf("prepared output = %q, want changed cell", prepared.Bytes())
+			}
+
+			changed.Set(1, 1, Cell{Rune: 'Y', Style: DefaultStyle()})
+			prepared.Commit()
+
+			next, err := r.Prepare(want, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(next.Bytes()) != 0 {
+				t.Fatalf("snapshot did not preserve prepared frame: %q", next.Bytes())
+			}
+		}},
+
+		{name: "matches concrete ANSI fixtures", run: func(t *testing.T) {
+			tests := []struct {
+				name    string
+				prepare func(t *testing.T) PreparedDraw
+				want    string
+			}{
+				{
+					name: "full draw",
+					prepare: func(t *testing.T) PreparedDraw {
+						prepared, err := New(Capabilities{}).Prepare(fullFrame, fullDamage, false)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return prepared
+					},
+					want: "\x1b[1;1HABC\x1b[2;1HDEF\x1b[0m",
 				},
-				want: "\x1b[1;1HABC\x1b[2;1HDEF\x1b[0m",
-			},
-			{
-				name: "fragmented damage",
-				prepare: func(t *testing.T) PreparedDraw {
-					base := testFrame("abcdefgh", "ijklmnop", "qrstuvwx")
-					frame := base.Clone()
-					frame.Set(1, 0, Cell{Rune: 'X', Style: DefaultStyle()})
-					frame.Set(5, 0, Cell{Rune: 'Y', Style: DefaultStyle()})
-					frame.Set(2, 2, Cell{Rune: 'Z', Style: DefaultStyle()})
-					damage := []Damage{
-						{Kind: DamageText, X: 5, Y: 0, Width: 1, Height: 1},
-						{Kind: DamageText, X: 1, Y: 0, Width: 1, Height: 1},
-						{Kind: DamageText, X: 2, Y: 2, Width: 1, Height: 1},
-					}
-					r := New(Capabilities{})
-					if _, err := r.Draw(base, fullDamage); err != nil {
-						t.Fatal(err)
-					}
-					prepared, err := r.Prepare(frame, damage, false)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return prepared
+				{
+					name: "synchronized full draw",
+					prepare: func(t *testing.T) PreparedDraw {
+						prepared, err := New(Capabilities{SynchronizedOutput: true}).Prepare(fullFrame, fullDamage, false)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return prepared
+					},
+					want: SyncStartCSI + "\x1b[1;1HABC\x1b[2;1HDEF\x1b[0m" + SyncEndCSI,
 				},
-				want: "\x1b[1;2HX\x1b[3CY\x1b[3;3HZ\x1b[0m",
-			},
-			{
-				name: "scroll",
-				prepare: func(t *testing.T) PreparedDraw {
-					base := testFrame("00000", "11111", "22222", "33333")
-					frame := testFrame("11111", "22222", "33333", "new!!")
-					damage := []Damage{
-						{Kind: DamageScrollUp, X: 0, Y: 0, Width: 5, Height: 4, Count: 1},
-						{Kind: DamageText, X: 0, Y: 3, Width: 5, Height: 1},
-					}
-					r := New(Capabilities{})
-					if _, err := r.Draw(base, fullDamage); err != nil {
-						t.Fatal(err)
-					}
-					prepared, err := r.Prepare(frame, damage, false)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return prepared
+				{
+					name: "fragmented damage",
+					prepare: func(t *testing.T) PreparedDraw {
+						base := testFrame("abcdefgh", "ijklmnop", "qrstuvwx")
+						frame := base.Clone()
+						frame.Set(1, 0, Cell{Rune: 'X', Style: DefaultStyle()})
+						frame.Set(5, 0, Cell{Rune: 'Y', Style: DefaultStyle()})
+						frame.Set(2, 2, Cell{Rune: 'Z', Style: DefaultStyle()})
+						damage := []Damage{
+							{Kind: DamageText, X: 5, Y: 0, Width: 1, Height: 1},
+							{Kind: DamageText, X: 1, Y: 0, Width: 1, Height: 1},
+							{Kind: DamageText, X: 2, Y: 2, Width: 1, Height: 1},
+						}
+						r := New(Capabilities{})
+						if _, err := r.Draw(base, fullDamage); err != nil {
+							t.Fatal(err)
+						}
+						prepared, err := r.Prepare(frame, damage, false)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return prepared
+					},
+					want: "\x1b[1;2HX\x1b[3CY\x1b[3;3HZ\x1b[0m",
 				},
-				want: "\x1b[0m\x1b[1;4r\x1b[4;1H\n\x1b[r\x1b[4;1Hnew!!\x1b[0m",
-			},
-			{
-				name: "synchronized output framing",
-				prepare: func(t *testing.T) PreparedDraw {
-					prepared, err := New(Capabilities{SynchronizedOutput: true}).Prepare(fullFrame, fullDamage, false)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return prepared
+				{
+					name: "scroll",
+					prepare: func(t *testing.T) PreparedDraw {
+						base := testFrame("00000", "11111", "22222", "33333")
+						frame := testFrame("11111", "22222", "33333", "new!!")
+						damage := []Damage{
+							{Kind: DamageScrollUp, X: 0, Y: 0, Width: 5, Height: 4, Count: 1},
+							{Kind: DamageText, X: 0, Y: 3, Width: 5, Height: 1},
+						}
+						r := New(Capabilities{})
+						if _, err := r.Draw(base, fullDamage); err != nil {
+							t.Fatal(err)
+						}
+						prepared, err := r.Prepare(frame, damage, false)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return prepared
+					},
+					want: "\x1b[0m\x1b[1;4r\x1b[4;1H\n\x1b[r\x1b[4;1Hnew!!\x1b[0m",
 				},
-				want: SyncStartCSI + "\x1b[1;1HABC\x1b[2;1HDEF\x1b[0m" + SyncEndCSI,
-			},
-		}
+			}
 
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				if got := string(tt.prepare(t).Bytes()); got != tt.want {
-					t.Fatalf("prepared ANSI = %q, want %q", got, tt.want)
-				}
-			})
-		}
-	})
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					if got := string(tt.prepare(t).Bytes()); got != tt.want {
+						t.Fatalf("prepared ANSI = %q, want %q", got, tt.want)
+					}
+				})
+			}
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestPlanDeltaRejectsInvalidCommittedFrame(t *testing.T) {
+	frame := NewFrame(2, 1)
+	committed := NewFrame(2, 1)
+	committed.lineOffset = nil
+
+	if _, err := PlanDelta(frame, nil, committed, false); err == nil {
+		t.Fatal("PlanDelta accepted an invalid committed frame")
+	}
 }
 
 func TestWideCharDamageEmission(t *testing.T) {

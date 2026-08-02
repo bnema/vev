@@ -29,9 +29,12 @@ func TestProxiedMetadataPrecedesChangedOutput(t *testing.T) {
 
 	emit("initial")
 	firstMetaFrame := <-sends
-	firstOutputFrame := <-sends
+	firstScreenFrame := <-sends
 	require.Equal(t, ports.MsgSessionMeta, firstMetaFrame.Type)
-	require.Equal(t, ports.MsgOutput, firstOutputFrame.Type)
+	require.Equal(t, ports.MsgScreenUpdate, firstScreenFrame.Type)
+	firstScreen, err := ports.UnmarshalScreenUpdate(firstScreenFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ScreenUpdateSnapshot, firstScreen.Kind)
 	firstMeta, err := ports.UnmarshalSessionMeta(firstMetaFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, "work", firstMeta.SessionName)
@@ -41,9 +44,12 @@ func TestProxiedMetadataPrecedesChangedOutput(t *testing.T) {
 	sess.mu.Unlock()
 	emit("changed")
 	changedMetaFrame := <-sends
-	changedOutputFrame := <-sends
+	changedScreenFrame := <-sends
 	require.Equal(t, ports.MsgSessionMeta, changedMetaFrame.Type)
-	require.Equal(t, ports.MsgOutput, changedOutputFrame.Type)
+	require.Equal(t, ports.MsgScreenUpdate, changedScreenFrame.Type)
+	changedScreen, err := ports.UnmarshalScreenUpdate(changedScreenFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ScreenUpdateSnapshot, changedScreen.Kind)
 	changedMeta, err := ports.UnmarshalSessionMeta(changedMetaFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, "renamed", changedMeta.Tabs[0].Name)
@@ -63,7 +69,7 @@ func TestProxiedMetadataSendsWithoutOutputBytes(t *testing.T) {
 
 	emit(true)
 	require.Equal(t, ports.MsgSessionMeta, (<-sends).Type)
-	require.Equal(t, ports.MsgOutput, (<-sends).Type)
+	require.Equal(t, ports.MsgScreenUpdate, (<-sends).Type)
 
 	sess.mu.Lock()
 	sess.tabs[0].name = "renamed"
@@ -77,7 +83,11 @@ func TestProxiedMetadataSendsWithoutOutputBytes(t *testing.T) {
 	meta, err := ports.UnmarshalSessionMeta(metaFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, "renamed", meta.Tabs[0].Name)
-	requireNoOutputFrame(t, sends)
+	select {
+	case frame := <-sends:
+		t.Fatalf("unexpected frame after metadata-only paint: %v", frame.Type)
+	default:
+	}
 }
 
 func TestSessionMetaSnapshotIsImmutable(t *testing.T) {

@@ -146,6 +146,30 @@ func newRegisteredLifecycleProxy(t *testing.T, clock ports.Clock) (*Daemon, *pro
 	return d, proxy, transport
 }
 
+func TestNewProxySessionUsesProxyScreenSizeLimit(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		size  domain.Size
+		valid bool
+	}{
+		{name: "largest valid content", size: domain.Size{Cols: 512, Rows: 514}, valid: true},
+		{name: "one cell over content limit", size: domain.Size{Cols: 512, Rows: 515}},
+		{name: "1000x1000", size: domain.Size{Cols: 1000, Rows: 1000}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, test.size)
+			if !test.valid {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, contentSize(test.size, false), proxy.contentSize)
+			require.Equal(t, test.size.Cols, proxy.screen.frame.Width)
+			require.Equal(t, test.size.Rows-tabChromeRows, proxy.screen.frame.Height)
+		})
+	}
+}
+
 func TestProxyWarmLifecycleFollowsAttachmentTransitions(t *testing.T) {
 	clock := newProxyLifecycleClock()
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
@@ -397,6 +421,7 @@ func TestProxyResumeBackoffResetsAfterStableConnection(t *testing.T) {
 	_ = requireProxyHello(t, resumed)
 	resumed.recv <- proxyRecv{frame: proxyWelcome(proxy.key.Name, 2, ports.CapabilityResume|ports.CapabilityProxied)}
 	resumed.recv <- proxyRecv{frame: proxyMeta(proxy.key.Name)}
+	resumed.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	require.Eventually(t, func() bool {
 		proxy.mu.Lock()
 		defer proxy.mu.Unlock()
@@ -1160,6 +1185,7 @@ func TestOpenProxySessionSerializesSameKeyAttachConstruction(t *testing.T) {
 	second := newProxyTestTransport()
 	second.recv <- proxyRecv{frame: proxyWelcome(key.Name, 2, ports.CapabilityProxied)}
 	second.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	second.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	factory := newProxyConstructionFactory(first, second)
 	d := newProxyTestDaemon(t, factory, nil)
 
@@ -1186,6 +1212,7 @@ func TestOpenProxySessionSerializesSameKeyAttachConstruction(t *testing.T) {
 
 	first.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
 	first.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	first.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	leaderResult := awaitTestValue(t, leader, "leader construction did not finish")
 	waiterResult := awaitTestValue(t, waiter, "waiter construction did not finish")
 	require.NoError(t, leaderResult.err)
@@ -1227,6 +1254,7 @@ func TestOpenProxySessionSameKeyWaiterCanCancel(t *testing.T) {
 
 	first.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
 	first.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	first.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	leaderResult := awaitTestValue(t, leader, "leader construction did not finish")
 	require.NoError(t, leaderResult.err)
 	stopProxy(t, leaderResult.proxy)
@@ -1408,7 +1436,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, clock := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport)
+		generation, _ := p.installTransport(transport, false)
 		token, timer := armWarmTimer(t, d, p, clock)
 
 		require.True(t, d.markProxyReplaced(p, generation, transport))
@@ -1432,7 +1460,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, clock := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport)
+		generation, _ := p.installTransport(transport, false)
 
 		require.True(t, d.markProxyReplaced(p, generation, transport))
 		timer := awaitTestValue(t, clock.timers, "replacement did not arm a warm timer")
@@ -1449,7 +1477,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, _ := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport)
+		generation, _ := p.installTransport(transport, false)
 
 		require.False(t, d.markProxyReplaced(p, generation-1, transport))
 		require.False(t, proxyExpired(p))

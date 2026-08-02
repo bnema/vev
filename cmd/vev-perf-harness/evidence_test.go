@@ -364,6 +364,61 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 	}
 }
 
+func TestHarnessObserverGapSuppressesOnlyDiscardedSpanKeys(t *testing.T) {
+	base := func(kind string, sequence, requestID, epoch uint64, tick int64) traceRecord {
+		return traceRecord{ProcessID: "one", Component: "ipc", Scenario: "s", Run: 1, Sequence: sequence, RequestID: requestID, Epoch: epoch, Kind: kind, Tick: tick, Valid: true}
+	}
+	gap := traceRecord{ProcessID: "one", Component: "observer", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: "transport_diagnostic", Valid: false}
+	for _, tc := range []struct {
+		name    string
+		records []traceRecord
+		wantErr bool
+	}{
+		{
+			name: "discarded span end is suppressed",
+			records: []traceRecord{
+				base("adapter_receive_start", 2, 2, 2, 10),
+				gap,
+				base("adapter_receive_end", 2, 2, 2, 20),
+			},
+		},
+		{
+			name: "unrelated unmatched end remains an error",
+			records: []traceRecord{
+				base("adapter_receive_start", 2, 2, 2, 10),
+				gap,
+				base("adapter_receive_end", 2, 2, 2, 20),
+				base("adapter_receive_end", 3, 3, 3, 30),
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "trace.jsonl")
+			var lines []string
+			for _, record := range tc.records {
+				lines = append(lines, mustJSON(record))
+			}
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			spans, err := mergeProcessTraces([]processMapping{{ProcessID: "one", ClockDomain: "one", TracePath: path, Scenario: "s", Run: 1}})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("unrelated unmatched end accepted: spans=%+v", spans)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("discarded span end was rejected: %v", err)
+			}
+			if len(spans) != 0 {
+				t.Fatalf("spans=%+v, want no sample after observer gap", spans)
+			}
+		})
+	}
+}
+
 func TestHarnessExcludesFailedSpanDurationsWhileValidatingPairing(t *testing.T) {
 	base := func(kind string, tick int64, valid bool) traceRecord {
 		return traceRecord{ProcessID: "one", Component: "adapter", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: kind, Tick: tick, Valid: valid}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -80,7 +81,18 @@ func (d *Daemon) dialProxyHandshake(ctx context.Context, p *proxySession, intent
 		return err
 	}
 
-	generation, previous := p.installTransport(transport)
+	p.mu.Lock()
+	resumeToken := p.resumeToken
+	clientID := p.clientID
+	size := p.contentSize
+	stateFloor := p.appliedState
+	p.mu.Unlock()
+	resume := intent == ports.IntentResume
+	if !resume {
+		resumeToken = 0
+		stateFloor = 0
+	}
+	generation, previous := p.installTransport(transport, resume)
 	if previous != nil && previous != transport {
 		_ = previous.Close()
 	}
@@ -91,15 +103,6 @@ func (d *Daemon) dialProxyHandshake(ctx context.Context, p *proxySession, intent
 			_ = transport.Close()
 		}
 	}()
-
-	p.mu.Lock()
-	resumeToken := p.resumeToken
-	clientID := p.clientID
-	size := p.contentSize
-	p.mu.Unlock()
-	if intent != ports.IntentResume {
-		resumeToken = 0
-	}
 	hello := ports.Hello{
 		Version:           ports.ProtocolVersion,
 		Intent:            intent,
@@ -114,12 +117,22 @@ func (d *Daemon) dialProxyHandshake(ctx context.Context, p *proxySession, intent
 		return fmt.Errorf("proxy session: send hello: %w", err)
 	}
 
-	welcome, meta, err := recvProxyHandshake(ctx, transport, p.key.Name)
+	welcome, meta, snapshot, err := recvProxyHandshake(ctx, transport, p.key.Name, size, stateFloor)
 	if err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	ack, reset, _ := p.applyScreenUpdateForGeneration(generation, snapshot)
+	if reset || ack != snapshot.NewStateNum {
+		return errors.New("proxy session: initial screen snapshot was not applied")
+	}
+	if err := p.sendGeneration(generation, ports.Frame{
+		Type:    ports.MsgAck,
+		Payload: ports.MarshalAck(ports.Ack{AckedStateNum: ack}),
+	}); err != nil {
+		return fmt.Errorf("proxy session: send initial screen ACK: %w", err)
 	}
 
 	p.mu.Lock()
@@ -143,25 +156,43 @@ func proxyOutputWindow(transport ports.Transport) uint8 {
 	return maxUnackedOutputStates
 }
 
-func recvProxyHandshake(ctx context.Context, transport ports.Transport, sessionName string) (ports.Welcome, ports.SessionMeta, error) {
+func recvProxyHandshake(ctx context.Context, transport ports.Transport, sessionName string, size domain.Size, stateFloor uint64) (ports.Welcome, ports.SessionMeta, ports.ScreenUpdate, error) {
 	frame, err := recvProxyHandshakeFrame(ctx, transport)
 	if err != nil {
-		return ports.Welcome{}, ports.SessionMeta{}, fmt.Errorf("proxy session: receive welcome: %w", err)
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, fmt.Errorf("proxy session: receive welcome: %w", err)
 	}
 	welcome, err := validateProxyWelcome(frame, sessionName)
 	if err != nil {
-		return ports.Welcome{}, ports.SessionMeta{}, err
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, err
 	}
 
 	frame, err = recvProxyHandshakeFrame(ctx, transport)
 	if err != nil {
-		return ports.Welcome{}, ports.SessionMeta{}, fmt.Errorf("proxy session: receive initial metadata: %w", err)
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, fmt.Errorf("proxy session: receive initial metadata: %w", err)
 	}
 	meta, err := validateProxyInitialMeta(frame, sessionName)
 	if err != nil {
-		return ports.Welcome{}, ports.SessionMeta{}, err
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, err
 	}
-	return welcome, meta, nil
+
+	frame, err = recvProxyHandshakeFrame(ctx, transport)
+	if err != nil {
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, fmt.Errorf("proxy session: receive initial screen snapshot: %w", err)
+	}
+	if frame.Type != ports.MsgScreenUpdate {
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, fmt.Errorf("proxy session: third server frame is %d, want ScreenUpdate", frame.Type)
+	}
+	snapshot, err := ports.UnmarshalScreenUpdate(frame.Payload)
+	if err != nil {
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, fmt.Errorf("proxy session: decode initial screen snapshot: %w", err)
+	}
+	if snapshot.Kind != ports.ScreenUpdateSnapshot || snapshot.BaseStateNum != 0 || snapshot.NewStateNum <= stateFloor {
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, errors.New("proxy session: initial screen frame is not a moving base-zero snapshot")
+	}
+	if snapshot.Size != size {
+		return ports.Welcome{}, ports.SessionMeta{}, ports.ScreenUpdate{}, fmt.Errorf("proxy session: initial screen geometry mismatch: got %dx%d, want %dx%d", snapshot.Size.Cols, snapshot.Size.Rows, size.Cols, size.Rows)
+	}
+	return welcome, meta, snapshot, nil
 }
 
 func validateProxyWelcome(frame ports.Frame, sessionName string) (ports.Welcome, error) {
@@ -221,7 +252,7 @@ func recvProxyHandshakeFrame(ctx context.Context, transport ports.Transport) (po
 	}
 }
 
-func (p *proxySession) installTransport(transport ports.Transport) (uint64, ports.Transport) {
+func (p *proxySession) installTransport(transport ports.Transport, resume bool) (uint64, ports.Transport) {
 	// Link replacement participates in the same sender serialization as every
 	// frame. A request can therefore only be published wholly before the
 	// generation changes or wholly after it.
@@ -231,12 +262,18 @@ func (p *proxySession) installTransport(transport ports.Transport) (uint64, port
 	previous := p.transport
 	p.linkGeneration++
 	generation := p.linkGeneration
-	// State numbers belong to one remote output stream. A replacement link
-	// must prove its state with a base-zero paint before an incremental frame
-	// can advance this proxy.
-	p.resetOutputStateLocked()
+	if resume {
+		// Resume keeps the applied remote state as the handshake floor, but the
+		// replacement must prove that state with a fresh base-zero snapshot.
+		p.screenReady = false
+		p.resetRequested = false
+	} else {
+		p.resetOutputStateLocked()
+	}
 	p.transport = transport
-	p.linkState = ports.LinkStateConnected
+	// Authentication is not complete until the authoritative screen snapshot
+	// has been applied and acknowledged.
+	p.linkState = ports.LinkStateProbing
 	p.mu.Unlock()
 	p.failPendingCommandsLocked(errProxyCommandGeneration)
 	return generation, previous
@@ -540,6 +577,46 @@ func (d *Daemon) runProxyTransport(ctx context.Context, p *proxySession, generat
 	}
 }
 
+// handleProxySideEffect forwards a stateless remote effect to the exact local
+// attachment that currently owns this proxy. Role admission and transport
+// incarnation checks make a stale handoff a harmless drop rather than a send
+// to the client's next session.
+func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out ports.Output) error {
+	if p == nil || !p.currentLinkGeneration(generation) {
+		return nil
+	}
+	p.sessionCore.mu.Lock()
+	ac := p.client
+	p.sessionCore.mu.Unlock()
+	if ac == nil || ac.output == nil {
+		return nil
+	}
+	expected := ac.transportSnapshot()
+	if expected.transport == nil {
+		return nil
+	}
+	token := attachmentToken(p, ac, expected.transport)
+	if token.role != attachmentActive || token.sess != p {
+		return nil
+	}
+	ticket, admitted := ac.beginRoleEffect(token)
+	if !admitted {
+		return nil
+	}
+	defer ticket.End()
+	if !p.currentLinkGeneration(generation) {
+		return nil
+	}
+	frame := ac.output.sideEffect(out.Data, ac.echoAck.Load())
+	if err := ac.sendExpectedTransportForRole(expected, frame, ticket); err != nil {
+		if errors.Is(err, errAttachmentTransition) {
+			return nil
+		}
+		return fmt.Errorf("proxy session: side-effect send: %w: %w", errProxyLinkSend, err)
+	}
+	return nil
+}
+
 // handleLinkFrame returns proxyLinkResume to mean "continue this transport";
 // the other values are terminal actions.
 func (d *Daemon) handleLinkFrame(p *proxySession, generation uint64, frame ports.Frame) (proxyLinkResult, error) {
@@ -549,7 +626,19 @@ func (d *Daemon) handleLinkFrame(p *proxySession, generation uint64, frame ports
 		if err != nil {
 			return proxyLinkStop, err
 		}
-		if err := d.handleProxyOutput(p, generation, out); err != nil {
+		if out.BaseStateNum != 0 || out.NewStateNum != 0 {
+			return proxyLinkStop, fmt.Errorf("proxy session: state-bearing MsgOutput is not valid on a proxied link")
+		}
+		if err := d.handleProxySideEffect(p, generation, out); err != nil {
+			return proxyLinkStop, err
+		}
+		return proxyLinkResume, nil
+	case ports.MsgScreenUpdate:
+		update, err := ports.UnmarshalScreenUpdate(frame.Payload)
+		if err != nil {
+			return proxyLinkStop, err
+		}
+		if err := d.handleProxyScreenUpdate(p, generation, update); err != nil {
 			return proxyLinkStop, err
 		}
 		return proxyLinkResume, nil

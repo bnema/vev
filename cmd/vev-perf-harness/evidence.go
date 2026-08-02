@@ -200,11 +200,23 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 		// and exact correlation domain may pair, and each pair's ticks must retain
 		// its own start-before-end ordering.
 		starts := map[string]traceRecord{}
+		discarded := map[string]struct{}{}
 		for _, r := range records {
+			if r.Component == "observer" && r.Kind == "transport_diagnostic" && !r.Valid {
+				// A bounded producer queue reports dropped marks explicitly. Any
+				// in-flight span may have lost either endpoint, so discard those
+				// partial samples; only their exact keys may be missing an end.
+				for key := range starts {
+					discarded[key] = struct{}{}
+				}
+				starts = map[string]traceRecord{}
+				continue
+			}
 			for _, pair := range spanPairs {
 				key := fmt.Sprintf("%s/%s/%s/%d/%d/%d/%d", r.ProcessID, r.Component, m.Scenario, m.Run, r.Sequence, r.RequestID, r.Epoch)
 				if r.Kind == pair.start {
 					k := pair.name + "/" + key
+					delete(discarded, k)
 					if _, exists := starts[k]; exists {
 						return nil, errors.New("duplicate process-local span start")
 					}
@@ -214,6 +226,10 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 					k := pair.name + "/" + key
 					start, ok := starts[k]
 					if !ok {
+						if _, ok := discarded[k]; ok {
+							delete(discarded, k)
+							continue
+						}
 						return nil, errors.New("span end without same-process start")
 					}
 					if r.Tick < start.Tick {

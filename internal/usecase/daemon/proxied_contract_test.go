@@ -41,16 +41,18 @@ func TestProxiedHandshakeOrdersWelcomeMetadataAndBaseZeroContent(t *testing.T) {
 	require.Equal(t, uint16(0), meta.Active)
 	require.Equal(t, []ports.SessionTabMeta{{Index: 0}}, meta.Tabs)
 
-	outputFrame := awaitFrame(t, sends, ports.MsgOutput)
-	output, err := ports.UnmarshalOutput(outputFrame.Payload)
+	screenFrame := awaitFrame(t, sends, ports.MsgScreenUpdate)
+	update, err := ports.UnmarshalScreenUpdate(screenFrame.Payload)
 	require.NoError(t, err)
-	require.Zero(t, output.BaseStateNum)
-
-	client := vt.NewScreen(contentSize.Cols, contentSize.Rows)
-	client.Write(output.Data)
-	require.Equal(t, contentSize.Rows, client.Frame.Height)
-	for _, row := range frameRows(client.Frame) {
-		require.NotContains(t, row, "remote-work", "proxied output must not contain remote session chrome")
+	require.Equal(t, ports.ScreenUpdateSnapshot, update.Kind)
+	require.Zero(t, update.BaseStateNum)
+	require.Equal(t, contentSize, update.Size)
+	require.Len(t, update.Spans, contentSize.Rows, "structured snapshots must carry every full row")
+	for y, span := range update.Spans {
+		require.Equal(t, uint16(y), span.Y)
+		require.Zero(t, span.X)
+		require.Len(t, span.Cells, contentSize.Cols)
+		require.NotContains(t, rowText(span.Cells), "remote-work", "proxied screen must not contain remote session chrome")
 	}
 
 	sess := firstSession(d)
@@ -102,6 +104,64 @@ func TestOrdinaryHandshakeRetainsChromeAndNoMetadata(t *testing.T) {
 	handlers.Wait()
 }
 
+func TestDesiredCapturedCursorPublishesVisibleAbsoluteCursor(t *testing.T) {
+	visible := desiredCapturedCursor(capturedCursorInputs{
+		row: 2, col: 3, style: 0, visible: true, renderable: true,
+		content: domain.Rect{X: 4, Y: 5, Width: 8, Height: 4},
+	}, 1)
+	require.Equal(t, cursorOut{valid: true, row: 8, col: 7, style: 1, hasStyle: true}, visible)
+
+	hidden := desiredCapturedCursor(capturedCursorInputs{
+		row: 2, col: 3, visible: false, renderable: true,
+		content: domain.Rect{X: 4, Y: 5, Width: 8, Height: 4},
+	}, 1)
+	require.Equal(t, cursorOut{hidden: true}, hidden)
+}
+
+func TestProxiedRemotePaintSendsMetadataBeforeScreen(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	client, sends := newCapturingTransport(t)
+	proxy, ac := newAttachedProxyFixture(t, d, client, newProxyTestTransport())
+	ac.proxied = true
+	ac.screenOutput = newStructuredOutputStream(ac.output)
+	require.True(t, applyTestScreenText(proxy, 0, 0, "remote"))
+
+	ac.sendMu.Lock()
+	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+	require.True(t, ok)
+	composed := composeFrame(*state, composeCacheInput{})
+	require.True(t, d.emitFrame(proxy, ac, state, composed))
+
+	metadata := awaitTestValue(t, sends, "proxied remote metadata was not sent")
+	require.Equal(t, ports.MsgSessionMeta, metadata.Type)
+	meta, err := ports.UnmarshalSessionMeta(metadata.Payload)
+	require.NoError(t, err)
+	require.Equal(t, "work", meta.SessionName)
+	require.Equal(t, ports.MsgScreenUpdate, awaitTestValue(t, sends, "proxied remote screen was not sent").Type)
+}
+
+func TestProxiedPaintPublishesAbsoluteVisibleCursorStyle(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
+	ac.proxied = true
+	pane := sess.activeTab().focusedPane()
+	pane.mu.Lock()
+	pane.screen.Write([]byte("\x1b[3;6H\x1b[0 q"))
+	pane.mu.Unlock()
+
+	d.paint(sess, ac, true, nil)
+	require.Equal(t, ports.MsgSessionMeta, awaitTestValue(t, sends, "proxied paint did not emit session metadata").Type)
+	frame := awaitTestValue(t, sends, "proxied paint did not emit structured screen update")
+	require.Equal(t, ports.MsgScreenUpdate, frame.Type)
+	update, err := ports.UnmarshalScreenUpdate(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ScreenUpdateSnapshot, update.Kind)
+	require.True(t, update.Cursor.Visible)
+	require.Equal(t, uint16(2), update.Cursor.Row)
+	require.Equal(t, uint16(5), update.Cursor.Col)
+	require.True(t, update.Cursor.StyleSet)
+	require.Zero(t, update.Cursor.Style)
+}
+
 func TestComposeFrameProxiedContentOnlyOmitsBothChromeRows(t *testing.T) {
 	paneFrame := renderer.NewFrame(8, 2)
 	fillOutputStateRows(paneFrame, []string{"CONTENT1", "CONTENT2"})
@@ -129,6 +189,15 @@ func TestComposeFrameProxiedContentOnlyOmitsBothChromeRows(t *testing.T) {
 	require.Equal(t, "CONTENT1", rowText(ordinary.frame.Row(1)))
 	require.Contains(t, rowText(ordinary.frame.Row(3)), "REMOTE-")
 	require.Equal(t, 1, ordinary.cursor.row)
+}
+
+func TestProxyResizeUpdatesAttachmentViewport(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	client, _ := newCapturingTransport(t)
+	proxy, ac := newAttachedProxyFixture(t, d, client, newProxyTestTransport())
+
+	d.resizeProxyForLease(proxy, ac, nil, domain.Size{Cols: 24, Rows: 10})
+	require.Equal(t, domain.Size{Cols: 24, Rows: 10}, ac.size)
 }
 
 func TestProxiedTransactionalResizeUsesReceivedContentGeometry(t *testing.T) {
@@ -206,9 +275,10 @@ func TestOutputResetRebasesFullWindowAndSchedulesBaseZeroPaint(t *testing.T) {
 		Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 	}))
 
-	frame := awaitFrame(t, sends, ports.MsgOutput)
-	out, err := ports.UnmarshalOutput(frame.Payload)
+	frame := awaitFrame(t, sends, ports.MsgScreenUpdate)
+	out, err := ports.UnmarshalScreenUpdate(frame.Payload)
 	require.NoError(t, err)
+	require.Equal(t, ports.ScreenUpdateSnapshot, out.Kind)
 	require.Zero(t, out.BaseStateNum)
 	ac.sendMu.Lock()
 	require.Equal(t, ac.output.maxOutstanding, ac.output.acked, "reset must retire the previously full output window")

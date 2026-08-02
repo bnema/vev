@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -115,38 +114,53 @@ func (d *Daemon) sendSnatchedPanel(ac *attachedClient, expected transportSnapsho
 
 		applied := ac.getAppliedTheme()
 		frame := snatchedPanelFrame(ac.size, applied.Resolved.Styles, feedback)
-		ac.output.rebase()
-		prepared, err := ac.output.prepare(frame, []renderer.Damage{renderer.FullRedraw()}, true)
-		if err != nil {
-			return err
+		ac.rebaseOutput()
+		var data []byte
+		var cursor cursorCandidate
+		var preparedANSI *preparedOutput
+		var preparedScreen *preparedStructuredOutput
+		var sendErr error
+		if ac.proxied {
+			screenOutput := ac.ensureScreenOutput()
+			if screenOutput == nil {
+				return errors.New("proxied attachment has no structured output stream")
+			}
+			preparedScreen, sendErr = screenOutput.prepare(frame, []renderer.Damage{renderer.FullRedraw()}, cursorOut{hidden: true}, true, ac.echoAck.Load())
+			if sendErr == nil {
+				data = preparedScreen.data
+			}
+		} else {
+			preparedANSI, sendErr = ac.output.prepare(frame, []renderer.Damage{renderer.FullRedraw()}, true)
+			if sendErr == nil {
+				cursor = ac.prepareCursorTail(cursorOut{hidden: true}, true)
+				data = append(append([]byte(nil), preparedANSI.data...), cursor.data...)
+			}
 		}
-		cursor := ac.prepareCursorTail(cursorOut{hidden: true}, true)
-		data := append(append([]byte(nil), prepared.data...), cursor.data...)
+		if sendErr != nil {
+			return sendErr
+		}
 		if effect != nil && !effect.beginTransportSend(expected) {
 			return errAttachmentTransition
 		}
-		effectActive := effect != nil
-		err = prepared.send(data, ac.echoAck.Load(), func(frame ports.Frame) error {
-			err := expected.transport.Send(frame)
-			if effectActive {
-				if err != nil {
-					effect.reportTransportFailure(expected)
-				}
-				effect.endTransportSend()
-				effectActive = false
-			}
-			return err
-		})
-		if effectActive {
-			if err != nil {
+		if ac.proxied {
+			sendErr = preparedScreen.send(expected.transport.Send)
+		} else {
+			sendErr = preparedANSI.send(data, ac.echoAck.Load(), expected.transport.Send)
+		}
+		if effect != nil {
+			if sendErr != nil {
 				effect.reportTransportFailure(expected)
 			}
 			effect.endTransportSend()
 		}
-		if err == nil {
-			ac.lastCursor = cursor.next
+		if sendErr == nil {
+			if ac.proxied {
+				ac.lastCursor = cursorOut{hidden: true}
+			} else {
+				ac.lastCursor = cursor.next
+			}
 		}
-		return err
+		return sendErr
 	})
 	if errors.Is(err, errSendTimedOut) {
 		_ = ac.closeCapturedTransport(tr)

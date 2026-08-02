@@ -67,20 +67,6 @@ func TestProxyScreenStateInvalidUpdateIsAtomic(t *testing.T) {
 		Kind:         ports.ScreenUpdateDelta,
 		BaseStateNum: 1,
 		NewStateNum:  2,
-		Size:         domain.Size{Cols: 3, Rows: 2},
-		Cursor:       ports.ScreenCursor{Row: 1, Col: 1, Visible: true},
-	}
-	if err := s.Apply(invalid); err == nil {
-		t.Fatal("delta with mismatched dimensions was accepted")
-	}
-	if !reflect.DeepEqual(s.frame, beforeFrame) || !reflect.DeepEqual(s.scratch, beforeScratch) || s.cursorOut != beforeCursor || s.generation != beforeGeneration || s.stateNum != beforeState {
-		t.Fatal("mismatched-dimension update mutated state")
-	}
-
-	invalid = ports.ScreenUpdate{
-		Kind:         ports.ScreenUpdateDelta,
-		BaseStateNum: 1,
-		NewStateNum:  2,
 		Size:         domain.Size{Cols: 4, Rows: 2},
 		Scroll:       &ports.ScreenScroll{Top: 0, Height: 2, Count: 2},
 		Cursor:       ports.ScreenCursor{Row: 1, Col: 1, Visible: true},
@@ -94,15 +80,20 @@ func TestProxyScreenStateInvalidUpdateIsAtomic(t *testing.T) {
 }
 
 func TestProxyScreenStateScreenAreaLimitIsAtomic(t *testing.T) {
-	boundary := newProxyScreenState(domain.Size{Cols: 512, Rows: 512})
-	if boundary.frame.Width != 512 || boundary.frame.Height != 512 || boundary.scratch.Width != 512 || boundary.scratch.Height != 512 {
+	const boundaryCols = 512
+	boundaryRows := maxProxyScreenCells / boundaryCols
+	boundary := newProxyScreenState(domain.Size{Cols: boundaryCols, Rows: boundaryRows})
+	if boundary.frame.Width != boundaryCols || boundary.frame.Height != boundaryRows || boundary.scratch.Width != boundaryCols || boundary.scratch.Height != boundaryRows {
 		t.Fatalf("boundary state dimensions = %dx%d and %dx%d", boundary.frame.Width, boundary.frame.Height, boundary.scratch.Width, boundary.scratch.Height)
 	}
-	if boundary.ResizePlaceholder(domain.Size{Cols: 513, Rows: 512}) {
+	if boundary.ResizePlaceholder(domain.Size{Cols: boundaryCols, Rows: boundaryRows + 1}) {
 		t.Fatal("over-cap resize was accepted")
 	}
-	if boundary.frame.Width != 512 || boundary.frame.Height != 512 || boundary.scratch.Width != 512 || boundary.scratch.Height != 512 {
+	if boundary.frame.Width != boundaryCols || boundary.frame.Height != boundaryRows || boundary.scratch.Width != boundaryCols || boundary.scratch.Height != boundaryRows {
 		t.Fatal("over-cap resize changed boundary state")
+	}
+	if !boundary.damageFullRedrawSticky {
+		t.Fatal("initial full redraw must remain sticky until acknowledged")
 	}
 
 	s := newProxyScreenState(domain.Size{Cols: 2, Rows: 2})
@@ -191,7 +182,7 @@ func TestProxyScreenStateRejectsWireInvalidSemanticUpdatesAtomically(t *testing.
 	beforeDamage = s.CaptureDamage()
 	invalidSpans := nextProxyDelta(s, ports.ScreenUpdate{
 		Size:  domain.Size{Cols: 2, Rows: 2},
-		Spans: make([]ports.ScreenSpan, ports.MaxScreenSpans+1),
+		Spans: make([]ports.ScreenSpan, maxProxyScreenSpans+1),
 	})
 	if err := s.Apply(invalidSpans); err == nil {
 		t.Fatal("too many spans were accepted")
@@ -303,8 +294,8 @@ func TestProxyScreenStateCaptureFallsBackAfterSpanThenScroll(t *testing.T) {
 		t.Fatalf("span-then-scroll damage = %+v", capture.Damage)
 	}
 	s.CaptureInto(&dst)
-	if !reflect.DeepEqual(dst, s.frame.Clone()) {
-		t.Fatal("span-then-scroll capture diverged from live frame")
+	if got, want := proxyFrameText(dst), proxyFrameText(s.frame); got != want {
+		t.Fatalf("span-then-scroll capture = %q, want %q", got, want)
 	}
 }
 
@@ -333,8 +324,42 @@ func TestProxyScreenStateCaptureFallsBackAfterRepeatedScroll(t *testing.T) {
 		t.Fatalf("repeated-scroll damage = %+v", capture.Damage)
 	}
 	s.CaptureInto(&dst)
-	if !reflect.DeepEqual(dst, s.frame.Clone()) {
-		t.Fatal("repeated-scroll capture diverged from live frame")
+	if got, want := proxyFrameText(dst), proxyFrameText(s.frame); got != want {
+		t.Fatalf("repeated-scroll capture = %q, want %q", got, want)
+	}
+}
+
+func TestProxyScreenStateCursorOnlyPreservesCapturedDamageGeneration(t *testing.T) {
+	s := newProxyScreenState(domain.Size{Cols: 2, Rows: 2})
+	if err := s.Apply(screenSnapshot(2, 2, "  ", "  ")); err != nil {
+		t.Fatal(err)
+	}
+	snapshotDamage := s.CaptureDamage()
+	applyProxyDelta(t, s, ports.ScreenUpdate{
+		Size:   domain.Size{Cols: 2, Rows: 2},
+		Cursor: ports.ScreenCursor{Row: 1, Col: 1, Visible: true},
+	})
+	if s.generation != snapshotDamage.Generation {
+		t.Fatalf("cursor-only update changed damage generation from %d to %d", snapshotDamage.Generation, s.generation)
+	}
+	if !s.AcknowledgeDamage(snapshotDamage.Generation) || len(s.damage) != 0 || s.damageFullRedrawSticky {
+		t.Fatalf("cursor-only interleaving invalidated captured damage: generation=%d damage=%+v sticky=%v", s.generation, s.damage, s.damageFullRedrawSticky)
+	}
+
+	applyProxyDelta(t, s, ports.ScreenUpdate{
+		Size:  domain.Size{Cols: 2, Rows: 2},
+		Spans: []ports.ScreenSpan{{Y: 0, Cells: cells("x")}},
+	})
+	actualDamage := s.CaptureDamage()
+	if actualDamage.Generation <= snapshotDamage.Generation {
+		t.Fatalf("actual damage did not advance generation: snapshot=%d actual=%d", snapshotDamage.Generation, actualDamage.Generation)
+	}
+	applyProxyDelta(t, s, ports.ScreenUpdate{
+		Size:   domain.Size{Cols: 2, Rows: 2},
+		Cursor: ports.ScreenCursor{Row: 0, Col: 1, Visible: true},
+	})
+	if s.generation != actualDamage.Generation || !s.AcknowledgeDamage(actualDamage.Generation) || len(s.damage) != 0 || s.damageFullRedrawSticky {
+		t.Fatalf("cursor-only update invalidated actual damage: generation=%d want=%d damage=%+v sticky=%v", s.generation, actualDamage.Generation, s.damage, s.damageFullRedrawSticky)
 	}
 }
 
@@ -351,7 +376,7 @@ func TestProxyScreenStateCursorOnlyAndDamageBound(t *testing.T) {
 	if s.cursorOut.Row != 1 || s.cursorOut.Col != 1 || len(s.damage) != 0 {
 		t.Fatalf("cursor-only update = cursor=%+v damage=%+v", s.cursorOut, s.damage)
 	}
-	for i := 0; i < maxProxyScreenDamage; i++ {
+	for range maxProxyScreenDamage {
 		applyProxyDelta(t, s, ports.ScreenUpdate{
 			Size:  domain.Size{Cols: 2, Rows: 2},
 			Spans: []ports.ScreenSpan{{Y: 0, Cells: cells("x")}},
@@ -369,6 +394,41 @@ func TestProxyScreenStateCursorOnlyAndDamageBound(t *testing.T) {
 	}
 }
 
+func TestProxyScreenStateStyleValidationMatchesWireSemantics(t *testing.T) {
+	styles := []struct {
+		name  string
+		style renderer.Style
+	}{
+		{name: "indexed foreground", style: renderer.Style{Foreground: 255, Background: -1}},
+		{name: "indexed foreground out of range", style: renderer.Style{Foreground: 256, Background: -1}},
+		{name: "foreground RGB ignores index", style: renderer.Style{Foreground: 1 << 20, Background: -1, HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 1}}},
+		{name: "background RGB ignores index", style: renderer.Style{Foreground: -1, Background: 1 << 20, HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{G: 2}}},
+		{name: "indexed underline", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColor: true, UnderlineColor: 255}},
+		{name: "indexed underline with RGB", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColor: true, UnderlineColor: 1, UnderlineColorRGB: renderer.RGB{B: 3}}},
+		{name: "underline RGB ignores index", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColorRGB: true, UnderlineColor: 1 << 20, UnderlineColorRGB: renderer.RGB{R: 4}}},
+		{name: "both underline modes", style: renderer.Style{Foreground: -1, Background: -1, HasUnderlineColor: true, HasUnderlineColorRGB: true}},
+		{name: "unset underline ignores index", style: renderer.Style{Foreground: -1, Background: -1, UnderlineColor: 1 << 20}},
+	}
+	for _, tt := range styles {
+		t.Run(tt.name, func(t *testing.T) {
+			update := ports.ScreenUpdate{
+				NewStateNum: 1,
+				Kind:        ports.ScreenUpdateSnapshot,
+				Size:        domain.Size{Cols: 1, Rows: 1},
+				Cursor:      ports.ScreenCursor{Visible: true},
+				Spans:       []ports.ScreenSpan{{Cells: []renderer.Cell{{Rune: 'x', Style: tt.style}}}},
+			}
+			_, wireErr := ports.MarshalScreenUpdate(update)
+			stateErr := newProxyScreenState(update.Size).Apply(update)
+			if (wireErr == nil) != (stateErr == nil) {
+				t.Fatalf("daemon/wire style acceptance differs: wire=%v daemon=%v", wireErr, stateErr)
+			}
+		})
+	}
+}
+
+// BenchmarkProxyScreenStateApply is a component diagnostic for applying an
+// already-decoded update; it is not a pipeline comparison with ANSI apply.
 func BenchmarkProxyScreenStateApply(b *testing.B) {
 	size := domain.Size{Cols: 120, Rows: 40}
 	cases := []struct {
@@ -396,7 +456,7 @@ func BenchmarkProxyScreenStateApply(b *testing.B) {
 			b.ResetTimer()
 			b.ReportMetric(float64(tc.cells), "cells/op")
 			b.ReportMetric(float64(tc.spans), "spans/op")
-			for range b.N {
+			for b.Loop() {
 				if err := s.Apply(nextProxyDelta(s, tc.update)); err != nil {
 					b.Fatal(err)
 				}

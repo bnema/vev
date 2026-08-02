@@ -8,7 +8,6 @@ import (
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // capturedRenderState is the immutable hand-off from authoritative daemon
@@ -38,7 +37,7 @@ type renderCaptureScratch struct {
 type damageReceipt struct {
 	pane        *pane
 	proxy       *proxySession
-	proxyScreen *vt.Screen
+	proxyScreen *proxyScreenState
 	generation  uint64
 }
 

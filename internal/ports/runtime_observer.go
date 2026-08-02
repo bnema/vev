@@ -14,27 +14,30 @@ const RuntimeMarkSchema uint16 = 1
 type RuntimeMarkKind string
 
 const (
-	RuntimeInputInjected       RuntimeMarkKind = "input_injected"
-	RuntimeResizeRequested     RuntimeMarkKind = "resize_requested"
-	RuntimeResizeCommitted     RuntimeMarkKind = "resize_committed"
-	RuntimeCaptureStart        RuntimeMarkKind = "capture_start"
-	RuntimeCaptureEnd          RuntimeMarkKind = "capture_end"
-	RuntimeComposeStart        RuntimeMarkKind = "compose_start"
-	RuntimeComposeEnd          RuntimeMarkKind = "compose_end"
-	RuntimeDiffStart           RuntimeMarkKind = "diff_start"
-	RuntimeDiffEnd             RuntimeMarkKind = "diff_end"
-	RuntimeQueueEnqueued       RuntimeMarkKind = "queue_enqueued"
-	RuntimeQueueDequeued       RuntimeMarkKind = "queue_dequeued"
-	RuntimeACKBlockedStart     RuntimeMarkKind = "ack_blocked_start"
-	RuntimeACKBlockedEnd       RuntimeMarkKind = "ack_blocked_end"
-	RuntimeEmitStart           RuntimeMarkKind = "emit_start"
-	RuntimeEmitEnd             RuntimeMarkKind = "emit_end"
-	RuntimeAdapterSendStart    RuntimeMarkKind = "adapter_send_start"
-	RuntimeAdapterSendEnd      RuntimeMarkKind = "adapter_send_end"
-	RuntimeAdapterReceiveStart RuntimeMarkKind = "adapter_receive_start"
-	RuntimeAdapterReceiveEnd   RuntimeMarkKind = "adapter_receive_end"
-	RuntimeTerminalFlushed     RuntimeMarkKind = "terminal_flushed"
-	RuntimeTransportDiagnostic RuntimeMarkKind = "transport_diagnostic"
+	RuntimeInputInjected        RuntimeMarkKind = "input_injected"
+	RuntimeResizeRequested      RuntimeMarkKind = "resize_requested"
+	RuntimeResizeCommitted      RuntimeMarkKind = "resize_committed"
+	RuntimeCaptureStart         RuntimeMarkKind = "capture_start"
+	RuntimeCaptureEnd           RuntimeMarkKind = "capture_end"
+	RuntimeComposeStart         RuntimeMarkKind = "compose_start"
+	RuntimeComposeEnd           RuntimeMarkKind = "compose_end"
+	RuntimeDiffStart            RuntimeMarkKind = "diff_start"
+	RuntimeDiffEnd              RuntimeMarkKind = "diff_end"
+	RuntimeQueueEnqueued        RuntimeMarkKind = "queue_enqueued"
+	RuntimeQueueDequeued        RuntimeMarkKind = "queue_dequeued"
+	RuntimeACKBlockedStart      RuntimeMarkKind = "ack_blocked_start"
+	RuntimeACKBlockedEnd        RuntimeMarkKind = "ack_blocked_end"
+	RuntimeEmitStart            RuntimeMarkKind = "emit_start"
+	RuntimeEmitEnd              RuntimeMarkKind = "emit_end"
+	RuntimeAdapterSendStart     RuntimeMarkKind = "adapter_send_start"
+	RuntimeAdapterSendEnd       RuntimeMarkKind = "adapter_send_end"
+	RuntimeAdapterReceiveStart  RuntimeMarkKind = "adapter_receive_start"
+	RuntimeAdapterReceiveEnd    RuntimeMarkKind = "adapter_receive_end"
+	RuntimeTerminalFlushed      RuntimeMarkKind = "terminal_flushed"
+	RuntimeScreenSnapshot       RuntimeMarkKind = "screen_snapshot"
+	RuntimeScreenDelta          RuntimeMarkKind = "screen_delta"
+	RuntimeScreenResetRequested RuntimeMarkKind = "screen_reset_requested"
+	RuntimeTransportDiagnostic  RuntimeMarkKind = "transport_diagnostic"
 )
 
 // RuntimeMark is a process-local observation record. Tick is intentionally
@@ -221,7 +224,8 @@ func RuntimeMarkValid(mark RuntimeMark) bool {
 		RuntimeDiffStart, RuntimeDiffEnd, RuntimeQueueEnqueued, RuntimeQueueDequeued,
 		RuntimeACKBlockedStart, RuntimeACKBlockedEnd, RuntimeEmitStart, RuntimeEmitEnd,
 		RuntimeAdapterSendStart, RuntimeAdapterSendEnd, RuntimeAdapterReceiveStart,
-		RuntimeAdapterReceiveEnd, RuntimeTerminalFlushed, RuntimeTransportDiagnostic:
+		RuntimeAdapterReceiveEnd, RuntimeTerminalFlushed, RuntimeScreenSnapshot,
+		RuntimeScreenDelta, RuntimeScreenResetRequested, RuntimeTransportDiagnostic:
 		return true
 	default:
 		return false

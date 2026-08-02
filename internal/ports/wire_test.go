@@ -625,10 +625,17 @@ func TestOutputGoldenAndRoundTrip(t *testing.T) {
 	}
 
 	assertAllPrefixesFail(t, got[:24], UnmarshalOutput)
-	withTrailingData := append(append([]byte(nil), got...), 0xff)
-	trailing, err := UnmarshalOutput(withTrailingData)
-	require.NoError(t, err)
-	require.Equal(t, append(append([]byte(nil), msg.Data...), 0xff), trailing.Data)
+
+	extra := []byte{0x00, 0xff, 0x7f}
+	withTrailing := append(append([]byte(nil), got...), extra...)
+	back, err = UnmarshalOutput(withTrailing)
+	if err != nil {
+		t.Fatalf("UnmarshalOutput() with trailing payload error = %v", err)
+	}
+	wantData := append(append([]byte(nil), msg.Data...), extra...)
+	if !bytes.Equal(back.Data, wantData) {
+		t.Fatalf("trailing payload data = %#v, want %#v", back.Data, wantData)
+	}
 }
 
 func TestAckGoldenAndRoundTrip(t *testing.T) {

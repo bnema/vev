@@ -187,7 +187,7 @@ func (d *Daemon) deferAttachmentTransitionCleanups(result attachmentTransitionRe
 	}
 	if token := result.displaced; token.ac != nil && token.transport.transport != nil {
 		blockedRender := result.displacedInterrupted
-		if !blockedRender && !token.ac.initialSnatchedPanelClaimed(token.generation) && token.ac.transportEffectActive() {
+		if !blockedRender && !token.ac.initialSnatchedPanelClaimed(token.generation) {
 			blockedRender = !token.ac.sendMu.TryLock()
 			if !blockedRender {
 				token.ac.sendMu.Unlock()

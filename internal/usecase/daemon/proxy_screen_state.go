@@ -1,15 +1,21 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-const maxProxyScreenDamage = 1024
+const (
+	maxProxyScreenCells  = 1 << 18
+	maxProxyScreenDamage = 1024
+	maxProxyScreenSpans  = 4096
+)
 
 type proxyScreenDamageCapture struct {
 	Damage     []renderer.Damage
@@ -35,19 +41,20 @@ func newProxyScreenState(size domain.Size) *proxyScreenState {
 	if !validProxyScreenSize(size) {
 		return &proxyScreenState{}
 	}
-	return &proxyScreenState{
+	state := &proxyScreenState{
 		frame:      renderer.NewFrame(size.Cols, size.Rows),
 		scratch:    renderer.NewFrame(size.Cols, size.Rows),
 		cursorOut:  ports.ScreenCursor{Visible: true},
-		damage:     []renderer.Damage{renderer.FullRedraw()},
 		generation: 1,
 	}
+	state.setFullRedraw()
+	return state
 }
 
 // Apply validates the complete semantic update before mutating either frame.
 func (s *proxyScreenState) Apply(update ports.ScreenUpdate) error {
 	if s == nil {
-		return fmt.Errorf("proxy screen state is nil")
+		return errors.New("proxy screen state is nil")
 	}
 	if err := s.validateUpdate(update); err != nil {
 		return err
@@ -73,19 +80,93 @@ func (s *proxyScreenState) Apply(update ports.ScreenUpdate) error {
 }
 
 func (s *proxyScreenState) validateUpdate(update ports.ScreenUpdate) error {
-	if err := ports.ValidateScreenUpdate(update); err != nil {
-		return fmt.Errorf("proxy screen: %w", err)
+	if update.Kind != ports.ScreenUpdateSnapshot && update.Kind != ports.ScreenUpdateDelta {
+		return fmt.Errorf("proxy screen: unknown update kind %d", update.Kind)
+	}
+	if !validProxyScreenSize(update.Size) {
+		return fmt.Errorf("proxy screen: invalid size %dx%d", update.Size.Cols, update.Size.Rows)
 	}
 	if update.Kind == ports.ScreenUpdateDelta {
 		if s.frame.Width != update.Size.Cols || s.frame.Height != update.Size.Rows {
 			return fmt.Errorf("proxy screen: delta size %dx%d does not match %dx%d", update.Size.Cols, update.Size.Rows, s.frame.Width, s.frame.Height)
 		}
+	} else if update.Scroll != nil {
+		return fmt.Errorf("proxy screen: snapshot cannot contain scroll")
 	}
-	return s.validateStateNumbers(update)
+	if update.Cursor.Row >= uint16(update.Size.Rows) || update.Cursor.Col >= uint16(update.Size.Cols) {
+		return fmt.Errorf("proxy screen: cursor %d,%d outside %dx%d", update.Cursor.Col, update.Cursor.Row, update.Size.Cols, update.Size.Rows)
+	}
+	if !update.Cursor.StyleSet && update.Cursor.Style != 0 {
+		return fmt.Errorf("proxy screen: cursor style is not set")
+	}
+	if update.Cursor.StyleSet && update.Cursor.Style > 6 {
+		return fmt.Errorf("proxy screen: cursor style is out of range")
+	}
+	if len(update.Spans) > maxProxyScreenSpans {
+		return fmt.Errorf("proxy screen: too many spans")
+	}
+	if update.Kind == ports.ScreenUpdateSnapshot {
+		if len(update.Spans) != update.Size.Rows {
+			return fmt.Errorf("proxy screen: snapshot must cover every row")
+		}
+		for y, span := range update.Spans {
+			if int(span.Y) != y || span.X != 0 || len(span.Cells) != update.Size.Cols {
+				return fmt.Errorf("proxy screen: snapshot span %d is not a complete row", y)
+			}
+		}
+	}
+	if err := s.validateStateNumbers(update); err != nil {
+		return err
+	}
+	if scroll := update.Scroll; scroll != nil {
+		if scroll.Height == 0 || scroll.Count == 0 || scroll.Count >= scroll.Height {
+			return fmt.Errorf("proxy screen: invalid scroll %d,%d,%d", scroll.Top, scroll.Height, scroll.Count)
+		}
+		if uint64(scroll.Top)+uint64(scroll.Height) > uint64(update.Size.Rows) {
+			return fmt.Errorf("proxy screen: scroll outside screen")
+		}
+	}
+	var previousY uint16
+	var previousEnd uint32
+	for i, span := range update.Spans {
+		if len(span.Cells) == 0 {
+			return fmt.Errorf("proxy screen: span %d is empty", i)
+		}
+		if uint64(span.Y) >= uint64(update.Size.Rows) || uint64(span.X) >= uint64(update.Size.Cols) ||
+			uint64(span.X)+uint64(len(span.Cells)) > uint64(update.Size.Cols) {
+			return fmt.Errorf("proxy screen: span %d outside screen", i)
+		}
+		if i > 0 && (span.Y < previousY || (span.Y == previousY && uint32(span.X) < previousEnd)) {
+			return fmt.Errorf("proxy screen: spans overlap or are out of order")
+		}
+		for _, cell := range span.Cells {
+			if cell.Continuation && cell.Rune != 0 || !cell.Continuation && !utf8.ValidRune(cell.Rune) {
+				return fmt.Errorf("proxy screen: invalid cell rune")
+			}
+			if !validProxyScreenStyle(cell.Style) {
+				return fmt.Errorf("proxy screen: invalid cell style")
+			}
+		}
+		previousY = span.Y
+		previousEnd = uint32(span.X) + uint32(len(span.Cells))
+	}
+	return nil
 }
 
 func (s *proxyScreenState) validateStateNumbers(update ports.ScreenUpdate) error {
-	if update.Kind == ports.ScreenUpdateDelta && (s.stateNum == 0 || update.BaseStateNum != s.stateNum) {
+	if update.NewStateNum == 0 || update.NewStateNum <= update.BaseStateNum {
+		return fmt.Errorf("proxy screen: invalid state transition %d to %d", update.BaseStateNum, update.NewStateNum)
+	}
+	if update.Kind == ports.ScreenUpdateSnapshot {
+		if update.BaseStateNum != 0 {
+			return fmt.Errorf("proxy screen: snapshot base state must be zero")
+		}
+		return nil
+	}
+	if update.BaseStateNum == 0 || update.NewStateNum != update.BaseStateNum+1 {
+		return fmt.Errorf("proxy screen: delta state transition %d to %d is not consecutive", update.BaseStateNum, update.NewStateNum)
+	}
+	if s.stateNum == 0 || update.BaseStateNum != s.stateNum {
 		return fmt.Errorf("proxy screen: delta base state %d does not match %d", update.BaseStateNum, s.stateNum)
 	}
 	return nil
@@ -94,7 +175,7 @@ func (s *proxyScreenState) validateStateNumbers(update ports.ScreenUpdate) error
 func applyScreenUpdate(frame *renderer.Frame, update ports.ScreenUpdate) {
 	if update.Scroll != nil {
 		scroll := update.Scroll
-		frame.ScrollUp(int(scroll.Top), int(scroll.Top+scroll.Height-1), int(scroll.Count))
+		frame.ScrollUp(int(scroll.Top), int(scroll.Top)+int(scroll.Height)-1, int(scroll.Count))
 	}
 	for _, span := range update.Spans {
 		copy(frame.Row(int(span.Y))[int(span.X):], span.Cells)
@@ -102,15 +183,8 @@ func applyScreenUpdate(frame *renderer.Frame, update ports.ScreenUpdate) {
 }
 
 func (s *proxyScreenState) recordUpdate(update ports.ScreenUpdate) {
-	s.generation++
 	if update.Kind == ports.ScreenUpdateSnapshot {
-		s.setFullRedraw()
-		return
-	}
-	if s.damageFullRedrawSticky {
-		return
-	}
-	if update.Scroll != nil && len(s.damage) > 0 && !(len(s.damage) == 1 && s.damage[0].Kind == renderer.DamageFullRedraw) {
+		s.generation++
 		s.setFullRedraw()
 		return
 	}
@@ -119,6 +193,14 @@ func (s *proxyScreenState) recordUpdate(update ports.ScreenUpdate) {
 		needed++
 	}
 	if needed == 0 {
+		return
+	}
+	s.generation++
+	if s.damageFullRedrawSticky {
+		return
+	}
+	if update.Scroll != nil && len(s.damage) > 0 && (len(s.damage) != 1 || s.damage[0].Kind != renderer.DamageFullRedraw) {
+		s.setFullRedraw()
 		return
 	}
 	if needed > maxProxyScreenDamage-len(s.damage) {
@@ -183,13 +265,11 @@ func (s *proxyScreenState) AcknowledgeDamage(generation uint64) bool {
 	return true
 }
 
-// CaptureInto updates dst from the live frame. dst must already contain the
-// previous synchronized generation before incremental damage can be replayed;
-// callers should initialize it with a full clone or equivalent first capture.
-// Safe scroll/span damage is replayed incrementally; snapshots, uncertain
-// damage, and dimensions use a complete clone.
+// CaptureInto updates dst from the live frame. Safe scroll/span damage is
+// replayed incrementally; snapshots, uncertain damage, and dimensions use a
+// complete clone.
 func (s *proxyScreenState) CaptureInto(dst *renderer.Frame) {
-	if s == nil || dst == nil || !validProxyFrame(*s) {
+	if s == nil || dst == nil || !validProxyFrame(s) {
 		return
 	}
 	if dst.Width != s.frame.Width || dst.Height != s.frame.Height || dst.Validate() != nil {
@@ -249,15 +329,9 @@ func (s *proxyScreenState) ResizePlaceholder(size domain.Size) bool {
 }
 
 func copyFrameOverlap(dst *renderer.Frame, src renderer.Frame) {
-	width := src.Width
-	if dst.Width < width {
-		width = dst.Width
-	}
-	height := src.Height
-	if dst.Height < height {
-		height = dst.Height
-	}
-	for y := 0; y < height; y++ {
+	width := min(src.Width, dst.Width)
+	height := min(src.Height, dst.Height)
+	for y := range height {
 		copy(dst.Row(y)[:width], src.Row(y)[:width])
 	}
 }
@@ -266,9 +340,35 @@ func validProxyScreenSize(size domain.Size) bool {
 	if size.Cols <= 0 || size.Rows <= 0 || size.Cols > math.MaxUint16 || size.Rows > math.MaxUint16 {
 		return false
 	}
-	return size.Rows <= ports.MaxScreenCells/size.Cols
+	return size.Rows <= maxProxyScreenCells/size.Cols
 }
 
-func validProxyFrame(s proxyScreenState) bool {
-	return s.frame.Validate() == nil && s.scratch.Validate() == nil
+func validProxyFrame(s *proxyScreenState) bool {
+	return s != nil && s.frame.Validate() == nil && s.scratch.Validate() == nil
+}
+
+// validProxyScreenStyle mirrors the wire validator without exporting its
+// wire-specific error API; inactive color indices are canonicalized on encode.
+func validProxyScreenStyle(style renderer.Style) bool {
+	if style.Attrs&^(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) != 0 || style.UnderlineStyle > renderer.UnderlineDashed {
+		return false
+	}
+	if !style.HasForegroundRGB && (style.Foreground < -1 || style.Foreground > math.MaxUint8 || style.ForegroundRGB != (renderer.RGB{})) {
+		return false
+	}
+	if !style.HasBackgroundRGB && (style.Background < -1 || style.Background > math.MaxUint8 || style.BackgroundRGB != (renderer.RGB{})) {
+		return false
+	}
+	if style.HasUnderlineColorRGB && style.HasUnderlineColor {
+		return false
+	} else if style.HasUnderlineColorRGB {
+		// The indexed value is inactive when RGB is selected.
+	} else if style.HasUnderlineColor {
+		if style.UnderlineColor < 0 || style.UnderlineColor > math.MaxUint8 || style.UnderlineColorRGB != (renderer.RGB{}) {
+			return false
+		}
+	} else if style.UnderlineColorRGB != (renderer.RGB{}) {
+		return false
+	}
+	return true
 }

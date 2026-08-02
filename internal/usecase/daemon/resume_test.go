@@ -16,7 +16,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
 
@@ -1397,22 +1396,10 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 
 	ac.sendMu.Lock()
 	ac.output.next = 5
-	baseFrame := renderer.NewFrame(1, 1)
-	baseFrame.Set(0, 0, renderer.Cell{Rune: 'a', Style: renderer.DefaultStyle()})
-	_, err := ac.output.renderer.Draw(baseFrame, nil)
-	require.NoError(t, err)
-
 	reset := false
 	require.False(t, reset, "reliable output ack lag alone must not force dependency-free full repaint")
-	incrementalFrame := baseFrame.Clone()
-	incrementalFrame.Set(0, 0, renderer.Cell{Rune: 'i', Style: renderer.DefaultStyle()})
-	prepared, err := ac.output.prepare(incrementalFrame, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, reset)
-	require.NoError(t, err)
-	var f ports.Frame
-	require.NoError(t, prepared.send(prepared.data, 0, func(frame ports.Frame) error {
-		f = frame
-		return nil
-	}))
+
+	f := outputStateFrame(ac.output, []byte("incremental while reliable backlog drains"), reset, 0)
 	ac.sendMu.Unlock()
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -1422,16 +1409,9 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	ac.sendMu.Lock()
 	reset = true
 	require.True(t, reset, "explicit reset should still force full repaint")
-	fullFrame := incrementalFrame.Clone()
-	full, err := ac.output.prepare(fullFrame, nil, reset)
-	require.NoError(t, err)
-	var fullOutput ports.Frame
-	require.NoError(t, full.send(full.data, 0, func(frame ports.Frame) error {
-		fullOutput = frame
-		return nil
-	}))
+	full := outputStateFrame(ac.output, []byte("explicit full repaint"), reset, 0)
 	ac.sendMu.Unlock()
-	fullOut, err := ports.UnmarshalOutput(fullOutput.Payload)
+	fullOut, err := ports.UnmarshalOutput(full.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), fullOut.BaseStateNum)
 	require.Equal(t, uint64(7), fullOut.NewStateNum)

@@ -195,9 +195,7 @@ func (d *Daemon) publishAttachmentTransition(req attachmentTransitionRequest) (a
 // still owns the activation barrier (and therefore sendMu).
 func (d *Daemon) prepareActivatedAttachment(result *attachmentTransitionResult) {
 	ac := result.published.ac
-	if ac.output != nil {
-		ac.output.rebase()
-	}
+	ac.rebaseOutput()
 	ac.captureFrames = nil
 	if sess, ok := localSession(result.published.sess); ok {
 		d.applyHostThemeSendLocked(sess, ac, ac.getClientTheme(), false)

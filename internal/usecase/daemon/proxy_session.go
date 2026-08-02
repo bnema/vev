@@ -11,7 +11,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // proxySession is the local attachment identity for one structured remote
@@ -28,8 +27,11 @@ type proxySession struct {
 	transport      ports.Transport
 	resumeToken    uint64
 	appliedState   uint64
-	awaitingReset  bool
-	screen         *vt.Screen
+	// screenReady is true only after a moving snapshot establishes the
+	// dependency required by subsequent deltas.
+	screenReady    bool
+	resetRequested bool
+	screen         *proxyScreenState
 	meta           ports.SessionMeta
 	attentionAt    []time.Time
 	linkState      ports.LinkState
@@ -58,6 +60,18 @@ func (p *proxySession) core() *sessionCore {
 }
 
 func (p *proxySession) isProxy() bool { return true }
+
+func (p *proxySession) sessionMetaSnapshot() (ports.SessionMeta, bool) {
+	if p == nil {
+		return ports.SessionMeta{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.meta.Tabs) == 0 || int(p.meta.Active) >= len(p.meta.Tabs) {
+		return ports.SessionMeta{}, false
+	}
+	return cloneSessionMeta(p.meta), true
+}
 
 // replaceSessionMetaLocked atomically replaces the relayed snapshot while
 // preserving the first-observed timestamp of tabs that remain attentive.
@@ -194,6 +208,9 @@ func newProxySession(key domain.RemoteSessionKey, size domain.Size) (*proxySessi
 		return nil, fmt.Errorf("proxy session key: %w", err)
 	}
 	content := contentSize(size, false)
+	if size.Valid() && !validProxyScreenSize(content) {
+		return nil, fmt.Errorf("proxy session size: invalid content size %dx%d", content.Cols, content.Rows)
+	}
 	var clientID [16]byte
 	if _, err := io.ReadFull(rand.Reader, clientID[:]); err != nil {
 		return nil, fmt.Errorf("generate proxy client id: %w", err)
@@ -206,7 +223,7 @@ func newProxySession(key domain.RemoteSessionKey, size domain.Size) (*proxySessi
 		},
 		key:            key,
 		generation:     1,
-		screen:         vt.NewScreen(content.Cols, content.Rows),
+		screen:         newProxyScreenState(content),
 		linkState:      ports.LinkStateConnected,
 		done:           make(chan struct{}),
 		clientID:       clientID,

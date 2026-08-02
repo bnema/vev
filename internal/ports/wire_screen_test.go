@@ -11,17 +11,19 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-type screenGoldenFixture struct {
+func screenGoldenMessages() []struct {
 	name string
 	msg  ScreenUpdate
 	hex  string
-}
-
-func screenGoldenMessages() []screenGoldenFixture {
+} {
 	defaultCell := func(r rune) renderer.Cell {
 		return renderer.Cell{Rune: r, Style: renderer.DefaultStyle()}
 	}
-	return []screenGoldenFixture{
+	return []struct {
+		name string
+		msg  ScreenUpdate
+		hex  string
+	}{
 		{
 			name: "initial 1x1 snapshot",
 			msg: ScreenUpdate{
@@ -78,18 +80,9 @@ func screenGoldenMessages() []screenGoldenFixture {
 	}
 }
 
-func screenGoldenMessage(name string) screenGoldenFixture {
-	for _, fixture := range screenGoldenMessages() {
-		if fixture.name == name {
-			return fixture
-		}
-	}
-	panic("unknown screen golden fixture: " + name)
-}
-
 func TestScreenUpdateStateNumbers(t *testing.T) {
-	snapshot := screenGoldenMessage("initial 1x1 snapshot").msg
-	delta := screenGoldenMessage("cursor-only delta").msg
+	snapshot := screenGoldenMessages()[0].msg
+	delta := screenGoldenMessages()[3].msg
 	valid := []ScreenUpdate{
 		snapshot,
 		func() ScreenUpdate {
@@ -153,10 +146,7 @@ func TestScreenUpdateStateNumbers(t *testing.T) {
 func TestScreenUpdateGoldens(t *testing.T) {
 	for _, tt := range screenGoldenMessages() {
 		t.Run(tt.name, func(t *testing.T) {
-			want, err := hex.DecodeString(tt.hex)
-			if err != nil {
-				t.Fatal(err)
-			}
+			want := mustDecodeHex(t, tt.hex)
 			got, err := MarshalScreenUpdate(tt.msg)
 			if err != nil {
 				t.Fatal(err)
@@ -195,10 +185,7 @@ func assertScreenEqual(t *testing.T, want, got ScreenUpdate) {
 
 func TestScreenUpdateStrictTruncationAndTrailing(t *testing.T) {
 	for _, tt := range screenGoldenMessages() {
-		data, err := hex.DecodeString(tt.hex)
-		if err != nil {
-			t.Fatal(err)
-		}
+		data := mustDecodeHex(t, tt.hex)
 		for n := 0; n < len(data); n++ {
 			if _, err := UnmarshalScreenUpdate(data[:n]); !errors.Is(err, ErrInvalidScreenUpdate) {
 				t.Fatalf("%s prefix %d: err = %v", tt.name, n, err)
@@ -212,7 +199,7 @@ func TestScreenUpdateStrictTruncationAndTrailing(t *testing.T) {
 }
 
 func TestScreenUpdateHostileFields(t *testing.T) {
-	golden := mustDecodeHex(t, screenGoldenMessage("initial 1x1 snapshot").hex)
+	golden := mustDecodeHex(t, screenGoldenMessages()[0].hex)
 	tests := []struct {
 		name string
 		mut  func([]byte)
@@ -225,7 +212,7 @@ func TestScreenUpdateHostileFields(t *testing.T) {
 		{"style ID mismatch", func(b []byte) { b[66], b[67] = 0, 1 }},
 		{"run cell mismatch", func(b []byte) { b[68], b[69] = 0, 2 }},
 		{"invalid Unicode", func(b []byte) { b[len(b)-1] = 0x81 }},
-		{"truncated final varint", func(b []byte) { b[len(b)-1] = 0x80 }},
+		{"overflow varint", func(b []byte) { b[len(b)-1] = 0x80 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -255,12 +242,8 @@ func TestScreenUpdateHostileFields(t *testing.T) {
 func TestScreenUpdateSpanAndShapeValidation(t *testing.T) {
 	cell := renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()}
 	base := ScreenUpdate{
-		BaseStateNum: 1, NewStateNum: 2,
 		Kind: ScreenUpdateDelta, Size: domain.Size{Cols: 3, Rows: 2}, Cursor: ScreenCursor{Visible: true},
 		Spans: []ScreenSpan{{Y: 0, X: 0, Cells: []renderer.Cell{cell}}, {Y: 1, X: 0, Cells: []renderer.Cell{cell}}},
-	}
-	if err := ValidateScreenUpdate(base); err != nil {
-		t.Fatalf("test base is invalid: %v", err)
 	}
 	tests := []struct {
 		name string
@@ -288,19 +271,19 @@ func TestScreenUpdateSpanAndShapeValidation(t *testing.T) {
 	if _, err := MarshalScreenUpdate(tooWide); !errors.Is(err, ErrInvalidScreenUpdate) {
 		t.Fatalf("out-of-bounds span err = %v", err)
 	}
-	if _, err := MarshalScreenUpdate(ScreenUpdate{BaseStateNum: 1, NewStateNum: 2, Kind: ScreenUpdateDelta, Size: domain.Size{Cols: 1, Rows: 1}, Cursor: ScreenCursor{}, Spans: []ScreenSpan{{Cells: []renderer.Cell{{Rune: rune(0xd800)}}}}}); !errors.Is(err, ErrInvalidScreenUpdate) {
+	if _, err := MarshalScreenUpdate(ScreenUpdate{Kind: ScreenUpdateDelta, Size: domain.Size{Cols: 1, Rows: 1}, Cursor: ScreenCursor{}, Spans: []ScreenSpan{{Cells: []renderer.Cell{{Rune: rune(0xd800)}}}}}); !errors.Is(err, ErrInvalidScreenUpdate) {
 		t.Fatalf("invalid rune err = %v", err)
 	}
-	if _, err := MarshalScreenUpdate(ScreenUpdate{NewStateNum: 1, Kind: ScreenUpdateSnapshot, Size: domain.Size{Cols: 2, Rows: 2}, Cursor: ScreenCursor{}, Spans: []ScreenSpan{{Cells: []renderer.Cell{cell, cell}}}}); !errors.Is(err, ErrInvalidScreenUpdate) {
+	if _, err := MarshalScreenUpdate(ScreenUpdate{Kind: ScreenUpdateSnapshot, Size: domain.Size{Cols: 2, Rows: 2}, Cursor: ScreenCursor{}, Spans: []ScreenSpan{{Cells: []renderer.Cell{cell, cell}}}}); !errors.Is(err, ErrInvalidScreenUpdate) {
 		t.Fatalf("incomplete snapshot err = %v", err)
 	}
-	if _, err := MarshalScreenUpdate(ScreenUpdate{BaseStateNum: 1, NewStateNum: 2, Kind: ScreenUpdateDelta, Size: domain.Size{Cols: 1, Rows: 1}, Cursor: ScreenCursor{StyleSet: true, Style: 7}, Spans: []ScreenSpan{{Cells: []renderer.Cell{cell}}}}); !errors.Is(err, ErrInvalidScreenUpdate) {
+	if _, err := MarshalScreenUpdate(ScreenUpdate{Kind: ScreenUpdateDelta, Size: domain.Size{Cols: 1, Rows: 1}, Cursor: ScreenCursor{StyleSet: true, Style: 7}, Spans: []ScreenSpan{{Cells: []renderer.Cell{cell}}}}); !errors.Is(err, ErrInvalidScreenUpdate) {
 		t.Fatalf("cursor style err = %v", err)
 	}
 }
 
 func TestScreenUpdateOwnership(t *testing.T) {
-	golden := mustDecodeHex(t, screenGoldenMessage("initial 1x1 snapshot").hex)
+	golden := mustDecodeHex(t, screenGoldenMessages()[0].hex)
 	decoded, err := UnmarshalScreenUpdate(golden)
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +294,7 @@ func TestScreenUpdateOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(want, mustDecodeHex(t, screenGoldenMessage("initial 1x1 snapshot").hex)) {
+	if !bytes.Equal(want, mustDecodeHex(t, screenGoldenMessages()[0].hex)) {
 		t.Fatal("decoded screen retained transport payload")
 	}
 }
@@ -320,8 +303,14 @@ func TestScreenUpdateLimits(t *testing.T) {
 	if _, err := UnmarshalScreenUpdate(make([]byte, MaxFrameLen)); !errors.Is(err, ErrScreenUpdateTooLarge) {
 		t.Fatalf("oversize err = %v", err)
 	}
-	tooMany := screenGoldenMessage("initial 1x1 snapshot").msg
-	tooMany.Spans = make([]ScreenSpan, MaxScreenSpans+1)
+	previousLimit := screenPayloadLimit
+	t.Cleanup(func() { screenPayloadLimit = previousLimit })
+	screenPayloadLimit = screenHeaderLen
+	if _, err := MarshalScreenUpdate(screenGoldenMessages()[0].msg); !errors.Is(err, ErrScreenUpdateTooLarge) {
+		t.Fatalf("marshal oversize err = %v", err)
+	}
+	tooMany := screenGoldenMessages()[0].msg
+	tooMany.Spans = make([]ScreenSpan, screenSpanLimit+1)
 	if _, err := MarshalScreenUpdate(tooMany); !errors.Is(err, ErrInvalidScreenUpdate) {
 		t.Fatalf("span limit err = %v", err)
 	}
@@ -374,7 +363,7 @@ func TestScreenUpdateScreenAreaLimit(t *testing.T) {
 	}
 }
 
-func mustDecodeHex(t *testing.T, s string) []byte {
+func mustDecodeHex(t testing.TB, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
 	if err != nil {
@@ -385,10 +374,7 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 
 func FuzzScreenUpdate(f *testing.F) {
 	for _, tt := range screenGoldenMessages() {
-		b, err := hex.DecodeString(tt.hex)
-		if err != nil {
-			f.Fatalf("seed %s: %v", tt.name, err)
-		}
+		b := mustDecodeHex(f, tt.hex)
 		f.Add(b)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -401,7 +387,7 @@ func FuzzScreenUpdate(f *testing.F) {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(encoded, data) {
-			t.Fatalf("re-encoded accepted input = %x, want %x", encoded, data)
+			t.Fatalf("accepted data is not canonical: got %x, want %x", encoded, data)
 		}
 		roundtrip, err := UnmarshalScreenUpdate(encoded)
 		if err != nil {
