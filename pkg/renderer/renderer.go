@@ -65,7 +65,24 @@ func (r *Renderer) Prepare(frame Frame, damage []Damage, reset bool) (PreparedDr
 	var err error
 	if !reset && len(r.shadow) != 0 && r.width == frame.Width && r.height == frame.Height && len(damage) == 1 && (damage[0].Kind == DamageText || damage[0].Kind == DamageClear) {
 		if err = frame.Validate(); err == nil {
-			candidate = DeltaCandidate{Plan: planSingleDamage(frame, damage[0]), frame: frame}
+			d := damage[0]
+			x, y, width, height, ok := clampRect(frame, d.X, d.Y, d.Width, d.Height)
+			plan := DeltaPlan{}
+			if ok {
+				if height > maxPlannedDamageSpans {
+					plan.Snapshot = true
+				} else {
+					spans := make([]Span, height)
+					for row := range height {
+						spans[row] = Span{Y: y + row, X: x, Width: width}
+					}
+					if (frame.Height == 1 || len(spans) > 1) && deltaCostsSnapshot(frame, spans, false) {
+						plan.Snapshot = true
+					}
+					plan.Spans = spans
+				}
+			}
+			candidate = DeltaCandidate{Plan: plan, frame: frame}
 		}
 	} else {
 		candidate, err = PlanDelta(frame, damage, r.committedFrame(), reset || len(r.shadow) == 0)
@@ -79,10 +96,7 @@ func (r *Renderer) Prepare(frame Frame, damage []Damage, reset bool) (PreparedDr
 		return prepared, nil
 	}
 
-	buf, ok := bufferPool.Get().(*bytes.Buffer)
-	if !ok {
-		buf = new(bytes.Buffer)
-	}
+	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer putBuffer(buf)
 	if r.caps.SynchronizedOutput {

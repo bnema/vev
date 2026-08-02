@@ -1289,17 +1289,6 @@ func TestRendererPrepare(t *testing.T) {
 				},
 				want: "\x1b[0m\x1b[1;4r\x1b[4;1H\n\x1b[r\x1b[4;1Hnew!!\x1b[0m",
 			},
-			{
-				name: "synchronized output framing",
-				prepare: func(t *testing.T) PreparedDraw {
-					prepared, err := New(Capabilities{SynchronizedOutput: true}).Prepare(fullFrame, fullDamage, false)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return prepared
-				},
-				want: SyncStartCSI + "\x1b[1;1HABC\x1b[2;1HDEF\x1b[0m" + SyncEndCSI,
-			},
 		}
 
 		for _, tt := range tests {

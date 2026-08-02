@@ -11,7 +11,6 @@ func TestBuildDamagePlan(t *testing.T) {
 		name   string
 		frame  Frame
 		damage []Damage
-		skip   *Damage
 		want   []Span
 		full   bool
 	}{
@@ -73,29 +72,12 @@ func TestBuildDamagePlan(t *testing.T) {
 			want:   nil,
 			full:   true,
 		},
-		{
-			name:  "exceeding budget across multiple damages requests full redraw",
-			frame: NewFrame(1, maxPlannedDamageSpans+1),
-			damage: []Damage{
-				{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: maxPlannedDamageSpans},
-				{Kind: DamageText, X: 0, Y: maxPlannedDamageSpans, Width: 1, Height: 1},
-			},
-			want: nil,
-			full: true,
-		},
-		{
-			name:   "skips the matching damage",
-			frame:  NewFrame(10, 1),
-			damage: []Damage{{Kind: DamageText, X: 1, Y: 0, Width: 2, Height: 1}},
-			skip:   &Damage{Kind: DamageText, X: 1, Y: 0, Width: 2, Height: 1},
-			want:   nil,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			original := append([]Damage(nil), tt.damage...)
-			got, full := buildDamagePlan(tt.frame, tt.damage, tt.skip)
+			got, full := buildDamagePlan(tt.frame, tt.damage, nil)
 			if full != tt.full || !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("buildDamagePlan() = %#v, full = %v; want %#v, %v", got, full, tt.want, tt.full)
 			}

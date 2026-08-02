@@ -40,9 +40,6 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 		candidate.Plan.Snapshot = true
 		return candidate, nil
 	}
-	if err := committed.Validate(); err != nil {
-		return DeltaCandidate{}, err
-	}
 
 	if len(damage) == 1 && (damage[0].Kind == DamageText || damage[0].Kind == DamageClear) {
 		candidate.Plan = planSingleDamage(frame, damage[0])
@@ -50,7 +47,7 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 	}
 
 	if needsFull(damage) {
-		dirty, full := buildDirtyLinePlan(frame, committed, nil)
+		dirty, full := buildDirtyLinePlan(frame, committed)
 		if len(dirty) > 0 || full {
 			candidate.Plan.Snapshot = true
 			candidate.Plan.Spans = dirty
@@ -70,7 +67,7 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 	var spans []Span
 	var full bool
 	if len(damage) == 0 {
-		spans, full = buildDirtyLinePlan(frame, committed, nil)
+		spans, full = buildDirtyLinePlan(frame, committed)
 	} else {
 		spans, full = buildDamagePlan(frame, damage, skip)
 	}
@@ -82,13 +79,8 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 		if candidate.Plan.Scroll.Height != 0 {
 			candidate.Plan = DeltaPlan{Snapshot: true}
 		} else {
-			dirty, full := buildDirtyLinePlan(frame, committed, spans[:0])
-			if full || len(dirty) == 0 {
-				candidate.Plan = DeltaPlan{Snapshot: true}
-			} else {
-				candidate.Plan.Snapshot = true
-				candidate.Plan.Spans = dirty
-			}
+			candidate.Plan.Snapshot = true
+			candidate.Plan.Spans = spans
 		}
 		return candidate, nil
 	}
@@ -110,13 +102,13 @@ func planSingleDamage(frame Frame, d Damage) DeltaPlan {
 	}
 	plan := DeltaPlan{Spans: spans}
 	if (frame.Height == 1 || len(spans) > 1) && deltaCostsSnapshot(frame, spans, false) {
-		return DeltaPlan{Snapshot: true}
+		plan.Snapshot = true
 	}
 	return plan
 }
 
-func buildDirtyLinePlan(frame, committed Frame, spans []Span) ([]Span, bool) {
-	spans = spans[:0]
+func buildDirtyLinePlan(frame, committed Frame) ([]Span, bool) {
+	var spans []Span
 	for y := range frame.Height {
 		frameRow := frame.Row(y)
 		committedRow := committed.Row(y)

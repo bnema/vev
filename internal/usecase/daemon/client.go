@@ -36,9 +36,12 @@ type attachedClient struct {
 	tr                   ports.Transport
 	transportIncarnation uint64
 	output               *outputStateStream
-	overlays             *overlayRuntime
-	overlayOnce          sync.Once
-	clientID             [16]byte
+	// screenOutput is allocated only for proxied attachments and shares output's
+	// state-number/ACK window. Both streams are serialized by sendMu.
+	screenOutput *structuredOutputStream
+	overlays     *overlayRuntime
+	overlayOnce  sync.Once
+	clientID     [16]byte
 	// roleGeneration is the wire-facing capability generation. roleEffects is
 	// the linearization gate for every role-bound observable operation. A role
 	// transition freezes and drains this gate before changing either generation
@@ -62,6 +65,9 @@ type attachedClient struct {
 	pipelineCache   composeCacheInput
 	pipelineScratch composeCacheInput
 	renderScratch   renderCaptureScratch // only touched while sendMu is held
+	// proxyCapture retains the last captured proxy frame for damage-aware
+	// updates. It is attachment-owned and only touched while sendMu is held.
+	proxyCapture proxyCapture
 	// sessionMeta is the last authoritative metadata snapshot successfully sent
 	// on a proxied attachment. It is only read or written while sendMu is held.
 	sessionMeta     ports.SessionMeta
@@ -289,6 +295,46 @@ func (ac *attachedClient) ackOutputState(state uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	ac.output.ack(state)
+}
+
+// ensureScreenOutput is called while sendMu owns the attachment. Production
+// constructors allocate this at attachment creation; the lazy path keeps
+// hand-built test attachments faithful when they set proxied after creation.
+func (ac *attachedClient) ensureScreenOutput() *structuredOutputStream {
+	if ac == nil || !ac.proxied || ac.output == nil {
+		return nil
+	}
+	if ac.screenOutput == nil {
+		ac.screenOutput = newStructuredOutputStream(ac.output)
+	}
+	return ac.screenOutput
+}
+
+// discardProxyCapture abandons a candidate that was not emitted. The next
+// capture clones the authoritative screen once, avoiding replaying pending
+// scroll damage onto an already-captured failed candidate.
+func (ac *attachedClient) discardProxyCapture() {
+	if ac != nil && ac.proxied {
+		ac.proxyCapture = proxyCapture{}
+	}
+}
+
+// rebaseOutput resets both wire representations while retaining the shared
+// state-number chain. Callers hold sendMu (or the activation barrier).
+func (ac *attachedClient) rebaseOutput() {
+	if ac == nil {
+		return
+	}
+	if ac.proxied {
+		ac.ensureScreenOutput()
+	}
+	if ac.output != nil {
+		ac.output.rebase()
+	}
+	if ac.screenOutput != nil {
+		ac.screenOutput.rebase()
+	}
+	ac.proxyCapture = proxyCapture{}
 }
 
 var errTransportReplaced = errors.New("client transport was replaced")
@@ -519,14 +565,18 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
 	}
+	output := newOutputStateStream(opts.maxOutputInFlight)
 	ac := &attachedClient{
 		tr:            tr,
-		output:        newOutputStateStream(opts.maxOutputInFlight),
+		output:        output,
 		size:          sz,
 		clientID:      opts.clientID,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
 		proxied:       opts.proxied,
+	}
+	if opts.proxied {
+		ac.screenOutput = newStructuredOutputStream(output)
 	}
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
@@ -642,9 +692,7 @@ func (d *Daemon) firstPaintForTransition(token attachmentRoleToken) bool {
 		if token.ac.renderStages.handoffRebase != nil {
 			token.ac.renderStages.handoffRebase()
 		}
-		if token.ac.output != nil {
-			token.ac.output.rebase()
-		}
+		token.ac.rebaseOutput()
 		// Captures belong to the old session even when pane-local IDs happen
 		// to be reused by the destination.
 		token.ac.captureFrames = nil

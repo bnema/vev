@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"io"
 	"testing"
 
@@ -12,13 +13,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestProxyCaptureRetainsOwnedFrameAcrossSafeDamage(t *testing.T) {
+	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 4, Rows: 3})
+	require.NoError(t, err)
+	proxy.mu.Lock()
+	generation := proxy.linkGeneration
+	snapshot := screenSnapshot(4, 3, "abcd", "efgh", "ijkl")
+	require.NoError(t, proxy.screen.Apply(snapshot))
+	proxy.screenReady = true
+	proxy.appliedState = snapshot.NewStateNum
+	proxy.mu.Unlock()
+
+	ac := &attachedClient{}
+	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{})
+	require.True(t, ok)
+	require.Equal(t, "abcdefghijkl", proxyFrameText(state.panes[0].frame))
+	commitDamageReceipts(state.receipts)
+
+	proxy.mu.Lock()
+	delta := ports.ScreenUpdate{
+		Kind:         ports.ScreenUpdateDelta,
+		BaseStateNum: 1,
+		NewStateNum:  2,
+		Size:         domain.Size{Cols: 4, Rows: 3},
+		Spans:        []ports.ScreenSpan{{Y: 1, X: 1, Cells: cells("Z")}},
+		Cursor:       ports.ScreenCursor{Visible: true},
+	}
+	require.NoError(t, proxy.screen.Apply(delta))
+	proxy.mu.Unlock()
+
+	cellsBefore := &ac.proxyCapture.frame.Cells[0]
+	state, ok = proxy.capturePrimary(ac, primaryCaptureRequest{})
+	require.True(t, ok)
+	require.Equal(t, "abcdeZghijkl", proxyFrameText(state.panes[0].frame))
+	require.Equal(t, cellsBefore, &ac.proxyCapture.frame.Cells[0], "safe span damage must update the retained frame")
+	require.Equal(t, generation, proxy.linkGeneration)
+}
+
 func TestProxyRenderComposesRemoteVTUnderExactlyOneLocalChrome(t *testing.T) {
 	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 16, Rows: 6})
 	require.NoError(t, err)
 	proxy.mu.Lock()
 	proxy.meta = ports.SessionMeta{SessionName: "work", Tabs: []ports.SessionTabMeta{{Index: 0, Name: "shell"}}}
 	proxy.mu.Unlock()
-	_, _, changed := proxy.applyOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("\x1b[2;3Hremote")})
+	changed := applyTestScreenText(proxy, 1, 2, "remote")
 	require.True(t, changed)
 
 	state, ok := proxy.capturePrimary(&attachedClient{}, primaryCaptureRequest{
@@ -45,7 +83,7 @@ func TestProxyRenderPaintsAfterLocalToRemoteHandoff(t *testing.T) {
 	proxy.mu.Lock()
 	proxy.meta = ports.SessionMeta{SessionName: "work", Tabs: []ports.SessionTabMeta{{Index: 0, Name: "shell"}}}
 	proxy.mu.Unlock()
-	_, _, changed := proxy.applyOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("remote")})
+	changed := applyTestScreenText(proxy, 0, 0, "remote")
 	require.True(t, changed)
 
 	d := newTestDaemon(t, nil, stubClock{})
@@ -72,7 +110,7 @@ func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 	proxy.mu.Lock()
 	proxy.meta = ports.SessionMeta{SessionName: "work", Tabs: []ports.SessionTabMeta{{Index: 0, Name: "shell"}}}
 	proxy.mu.Unlock()
-	_, _, changed := proxy.applyOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("remote")})
+	changed := applyTestScreenText(proxy, 0, 0, "remote")
 	require.True(t, changed)
 	d.mu.Lock()
 	require.True(t, d.registerSessionLocked(proxy))
@@ -100,6 +138,113 @@ func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 	require.Equal(t, ports.MsgOutput, awaitTestValue(t, sent, "transition to local session did not paint").Type)
 }
 
+func TestProxyResizeRejectsOversizedGeometryBeforeMutationOrForwarding(t *testing.T) {
+	for _, size := range []domain.Size{
+		{Cols: 512, Rows: 515},
+		{Cols: 1000, Rows: 1000},
+	} {
+		t.Run(fmt.Sprintf("%dx%d", size.Cols, size.Rows), func(t *testing.T) {
+			proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 80, Rows: 24})
+			require.NoError(t, err)
+			transport := newProxyTestTransport()
+			proxy.mu.Lock()
+			proxy.transport = transport
+			proxy.linkGeneration = 1
+			initial := proxy.contentSize
+			proxy.mu.Unlock()
+
+			changed, sent := proxy.resize(size)
+			require.False(t, changed)
+			require.False(t, sent)
+			proxy.mu.Lock()
+			require.Equal(t, initial, proxy.contentSize)
+			proxy.mu.Unlock()
+			select {
+			case frame := <-transport.sent:
+				t.Fatalf("oversized resize was forwarded: %#v", frame)
+			default:
+			}
+		})
+	}
+}
+
+func TestProxyResizeForLeaseRejectsOversizedGeometryBeforeMutationOrPaint(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	client, clientSent := newCapturingTransport(t)
+	remote := newProxyTestTransport()
+	proxy, ac := newAttachedProxyFixture(t, d, client, remote)
+	initialContent := proxy.contentSize
+	initialViewport := ac.size
+
+	d.resizeProxyForLease(proxy, ac, nil, domain.Size{Cols: 1000, Rows: 1000})
+
+	proxy.mu.Lock()
+	require.Equal(t, initialContent, proxy.contentSize)
+	proxy.mu.Unlock()
+	require.Equal(t, initialViewport, ac.size)
+	select {
+	case frame := <-clientSent:
+		t.Fatalf("oversized resize painted the client: %#v", frame)
+	default:
+	}
+	select {
+	case frame := <-remote.sent:
+		t.Fatalf("oversized resize was forwarded: %#v", frame)
+	default:
+	}
+}
+
+func TestProxyResizeKeepsPlaceholderUntilSnapshot(t *testing.T) {
+	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 4, Rows: 4})
+	require.NoError(t, err)
+	transport := newProxyTestTransport()
+	proxy.mu.Lock()
+	initial := screenSnapshot(4, 2, "abcd", "efgh")
+	initial.NewStateNum = 7
+	require.NoError(t, proxy.screen.Apply(initial))
+	proxy.transport = transport
+	proxy.linkGeneration = 1
+	proxy.screenReady = true
+	proxy.appliedState = initial.NewStateNum
+	proxy.mu.Unlock()
+
+	changed, sent := proxy.resize(domain.Size{Cols: 3, Rows: 5})
+	require.True(t, changed)
+	require.True(t, sent)
+	awaitTestValue(t, transport.sent, "proxy resize did not reach remote transport")
+
+	proxy.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 3, Rows: 3}, proxy.contentSize)
+	require.Equal(t, "abcefg   ", proxyFrameText(proxy.screen.frame))
+	require.Equal(t, uint64(7), proxy.appliedState, "resize must preserve the moving snapshot floor")
+	require.False(t, proxy.screenReady)
+	require.False(t, proxy.resetRequested)
+	require.Zero(t, proxy.screen.stateNum)
+	proxy.mu.Unlock()
+
+	_, requestReset, changed := proxy.applyScreenUpdateForGeneration(1, ports.ScreenUpdate{
+		Kind:         ports.ScreenUpdateDelta,
+		BaseStateNum: 7,
+		NewStateNum:  8,
+		Size:         domain.Size{Cols: 3, Rows: 3},
+		Cursor:       ports.ScreenCursor{Visible: true},
+	})
+	require.True(t, requestReset)
+	require.False(t, changed)
+
+	moving := screenSnapshot(3, 3, "123", "456", "789")
+	moving.NewStateNum = 8
+	_, requestReset, changed = proxy.applyScreenUpdateForGeneration(1, moving)
+	require.False(t, requestReset)
+	require.True(t, changed)
+	proxy.mu.Lock()
+	require.Equal(t, uint64(8), proxy.appliedState)
+	require.Greater(t, proxy.appliedState, uint64(7))
+	require.True(t, proxy.screenReady)
+	require.False(t, proxy.resetRequested)
+	proxy.mu.Unlock()
+}
+
 func TestProxyResizeUsesReducedRemoteGeometryOnce(t *testing.T) {
 	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 12, Rows: 8})
 	require.NoError(t, err)
@@ -107,6 +252,7 @@ func TestProxyResizeUsesReducedRemoteGeometryOnce(t *testing.T) {
 	proxy.mu.Lock()
 	proxy.transport = transport
 	proxy.linkGeneration = 1
+	proxy.screenReady = true
 	proxy.mu.Unlock()
 
 	changed, sent := proxy.resize(domain.Size{Cols: 20, Rows: 10})
@@ -141,6 +287,7 @@ func newAttachedProxyFixture(t *testing.T, d *Daemon, clientTr ports.Transport, 
 	proxy.meta = ports.SessionMeta{SessionName: "work", Tabs: []ports.SessionTabMeta{{Index: 0, Name: "shell"}}}
 	proxy.transport = remoteTr
 	proxy.linkGeneration = 1
+	proxy.screenReady = true
 	proxy.mu.Unlock()
 	d.mu.Lock()
 	require.True(t, d.registerSessionLocked(proxy))
@@ -160,6 +307,26 @@ func newFailingTransport(t *testing.T) *portsmocks.MockTransport {
 	tr.EXPECT().Send(mock.Anything).Return(io.ErrClosedPipe).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 	return tr
+}
+
+func TestProxyStructuredSendFailureRetainsProxyDamage(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	clientTr := newFailingTransport(t)
+	proxy, ac := newAttachedProxyFixture(t, d, clientTr, newProxyTestTransport())
+	ac.proxied = true
+	ac.screenOutput = newStructuredOutputStream(ac.output)
+	require.True(t, applyTestScreenText(proxy, 0, 0, "pending"))
+
+	ac.sendMu.Lock()
+	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+	require.True(t, ok)
+	composed := composeFrame(*state, composeCacheInput{})
+	require.True(t, d.emitFrame(proxy, ac, state, composed))
+
+	proxy.mu.Lock()
+	damage := proxy.screen.CaptureDamage()
+	proxy.mu.Unlock()
+	require.NotEmpty(t, damage.Damage, "a failed structured send must leave proxy damage pending")
 }
 
 // TestProxyResizeRepaintsLocalChromeWhenRemoteSendFails covers the split

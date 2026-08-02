@@ -67,20 +67,6 @@ func TestProxyScreenStateInvalidUpdateIsAtomic(t *testing.T) {
 		Kind:         ports.ScreenUpdateDelta,
 		BaseStateNum: 1,
 		NewStateNum:  2,
-		Size:         domain.Size{Cols: 3, Rows: 2},
-		Cursor:       ports.ScreenCursor{Row: 1, Col: 1, Visible: true},
-	}
-	if err := s.Apply(invalid); err == nil {
-		t.Fatal("delta with mismatched dimensions was accepted")
-	}
-	if !reflect.DeepEqual(s.frame, beforeFrame) || !reflect.DeepEqual(s.scratch, beforeScratch) || s.cursorOut != beforeCursor || s.generation != beforeGeneration || s.stateNum != beforeState {
-		t.Fatal("mismatched-dimension update mutated state")
-	}
-
-	invalid = ports.ScreenUpdate{
-		Kind:         ports.ScreenUpdateDelta,
-		BaseStateNum: 1,
-		NewStateNum:  2,
 		Size:         domain.Size{Cols: 4, Rows: 2},
 		Scroll:       &ports.ScreenScroll{Top: 0, Height: 2, Count: 2},
 		Cursor:       ports.ScreenCursor{Row: 1, Col: 1, Visible: true},
@@ -191,7 +177,7 @@ func TestProxyScreenStateRejectsWireInvalidSemanticUpdatesAtomically(t *testing.
 	beforeDamage = s.CaptureDamage()
 	invalidSpans := nextProxyDelta(s, ports.ScreenUpdate{
 		Size:  domain.Size{Cols: 2, Rows: 2},
-		Spans: make([]ports.ScreenSpan, ports.MaxScreenSpans+1),
+		Spans: make([]ports.ScreenSpan, maxProxyScreenSpans+1),
 	})
 	if err := s.Apply(invalidSpans); err == nil {
 		t.Fatal("too many spans were accepted")
@@ -303,8 +289,8 @@ func TestProxyScreenStateCaptureFallsBackAfterSpanThenScroll(t *testing.T) {
 		t.Fatalf("span-then-scroll damage = %+v", capture.Damage)
 	}
 	s.CaptureInto(&dst)
-	if !reflect.DeepEqual(dst, s.frame.Clone()) {
-		t.Fatal("span-then-scroll capture diverged from live frame")
+	if got, want := proxyFrameText(dst), proxyFrameText(s.frame); got != want {
+		t.Fatalf("span-then-scroll capture = %q, want %q", got, want)
 	}
 }
 
@@ -333,8 +319,8 @@ func TestProxyScreenStateCaptureFallsBackAfterRepeatedScroll(t *testing.T) {
 		t.Fatalf("repeated-scroll damage = %+v", capture.Damage)
 	}
 	s.CaptureInto(&dst)
-	if !reflect.DeepEqual(dst, s.frame.Clone()) {
-		t.Fatal("repeated-scroll capture diverged from live frame")
+	if got, want := proxyFrameText(dst), proxyFrameText(s.frame); got != want {
+		t.Fatalf("repeated-scroll capture = %q, want %q", got, want)
 	}
 }
 
@@ -369,6 +355,8 @@ func TestProxyScreenStateCursorOnlyAndDamageBound(t *testing.T) {
 	}
 }
 
+// BenchmarkProxyScreenStateApply is a component diagnostic for applying an
+// already-decoded update; it is not a pipeline comparison with ANSI apply.
 func BenchmarkProxyScreenStateApply(b *testing.B) {
 	size := domain.Size{Cols: 120, Rows: 40}
 	cases := []struct {

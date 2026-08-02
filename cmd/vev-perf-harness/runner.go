@@ -381,7 +381,10 @@ func roleArgs(s scenario, m processMapping) roleCommand {
 
 func routeRoleArgs(s scenario, m processMapping, selected transport) roleCommand {
 	session := "perf-" + safeName(s.ID) + fmt.Sprintf("-%03d", m.Run)
-	remote := []string{"attach", "harness@127.0.0.1:" + session}
+	// Remote benchmark sessions are created by the first Hello on the peer
+	// daemon. Omitting the session suffix keeps that Hello ephemeral; a named
+	// attach would fail because the fresh per-run daemon has no session yet.
+	remote := []string{"attach", "harness@127.0.0.1"}
 	switch m.Role {
 	case "daemon":
 		return roleCommand{Args: []string{"--daemon"}}
@@ -469,7 +472,7 @@ func workloadResize(s scenario, sequence uint64) (uint16, uint16, bool) {
 // by cliProcess; it is not a synthetic timestamp.
 func workloadInput(s scenario, run int, phase string) []byte {
 	marker := fmt.Sprintf("__VEV_HARNESS_%s_r%d_%s__", safeName(s.ID), run, safeName(phase))
-	body := "printf 'vev perf %s\\n'"
+	body := fmt.Sprintf("printf 'vev perf %s\\n'", s.ID)
 	markerSeparator := "; "
 	switch s.Workload {
 	case "active_output":
@@ -477,37 +480,25 @@ func workloadInput(s scenario, run int, phase string) []byte {
 		if sequence, err := strconv.ParseUint(strings.TrimPrefix(phase, "measured-"), 10, 64); err == nil && strings.HasPrefix(phase, "measured-") {
 			cell = '0' + byte(sequence%2)
 		}
-		body = fmt.Sprintf(`printf '\033[10;20H%c'; : '%%s'`, cell)
+		body = fmt.Sprintf(`printf '\033[10;20H%c'; : '%s'`, cell, s.ID)
 	case "all_output":
-		body = `printf '%%-120s' 'vev perf line %s'`
+		body = fmt.Sprintf(`printf '%%-120s' 'vev perf line %s'`, s.ID)
 	case "inactive_output":
-		body = `printf '\033[38;2;20;120;220mred'; printf '\033[38;2;220;80;40mgreen'; printf '\033[38;2;80;220;120m%s'; printf '\033[0m'`
+		body = fmt.Sprintf(`printf '\033[38;2;20;120;220mred'; printf '\033[38;2;220;80;40mgreen'; printf '\033[38;2;80;220;120m%s'; printf '\033[0m'`, s.ID)
 	case "interactive_flood":
-		body = "i=0; while [ $i -lt 128 ]; do printf 'vev perf output %s\\n'; i=$((i+1)); done"
+		body = strings.TrimSuffix(strings.Repeat("printf 'vev perf output\\n'; ", 128), "; ")
 	case "resize_sweep":
-		cols, _ := resizeWorkloadGeometry(s, phase)
-		body = fmt.Sprintf(`i=0; while [ "$i" -lt 100 ]; do set -- $(stty size); [ "$2" = "%d" ] && break; i=$((i+1)); sleep 0.01; done; set -- $(stty size); [ "$2" = "%d" ] && printf 'vev perf resize-sweep %%s\n'`, cols, cols)
-		markerSeparator = " && "
+		body = fmt.Sprintf("printf 'vev perf resize-sweep %s\\n'", s.ID)
 	case "copy_search":
-		body = "printf 'vev perf copy-search %s\\n'"
+		body = fmt.Sprintf("printf 'vev perf copy-search %s\\n'", s.ID)
 	case "snapshot_output_resize":
-		cols, _ := resizeWorkloadGeometry(s, phase)
-		body = fmt.Sprintf(`i=0; while [ "$i" -lt 100 ]; do set -- $(stty size); [ "$2" = "%d" ] && break; i=$((i+1)); sleep 0.01; done; set -- $(stty size); [ "$2" = "%d" ] && printf '\033[2J\033[Hvev perf snapshot-output-resize %%s\n'`, cols, cols)
-		markerSeparator = " && "
+		body = fmt.Sprintf(`printf '\033[2J\033[Hvev perf snapshot-output-resize %s\n'`, s.ID)
 	case "attach_restore_tab_switch":
-		body = `"$VEV_PERF_BIN" cmd next-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch %s\n'`
+		body = fmt.Sprintf(`"$VEV_PERF_BIN" cmd next-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch %s\n'`, s.ID)
 		if phase == "warmup" {
-			body = `"$VEV_PERF_BIN" cmd new-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch %s\n'`
+			body = fmt.Sprintf(`"$VEV_PERF_BIN" cmd new-tab && "$VEV_PERF_BIN" cmd previous-tab && printf 'vev perf attach-restore-tab-switch %s\n'`, s.ID)
 		}
 		markerSeparator = " && "
 	}
-	return []byte(fmt.Sprintf(body+markerSeparator+"printf '%s\\n'\n", s.ID, marker))
-}
-
-func resizeWorkloadGeometry(s scenario, phase string) (uint16, uint16) {
-	if sequence, err := strconv.ParseUint(strings.TrimPrefix(phase, "measured-"), 10, 64); err == nil && strings.HasPrefix(phase, "measured-") {
-		cols, rows, _ := workloadResize(s, sequence)
-		return cols, rows
-	}
-	return 120, 40
+	return []byte(body + markerSeparator + fmt.Sprintf("printf '%s\\n'\n", marker))
 }

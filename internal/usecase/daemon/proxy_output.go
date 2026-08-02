@@ -4,78 +4,76 @@ import (
 	"fmt"
 
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/vt"
 )
 
-// applyOutput applies one decoded remote output frame for the current link.
-// Link readers use applyOutputForGeneration to bind processing to the exact
-// transport generation that received the frame.
-func (p *proxySession) applyOutput(out ports.Output) (ack uint64, requestReset, changed bool) {
-	p.mu.Lock()
-	generation := p.linkGeneration
-	p.mu.Unlock()
-	return p.applyOutputForGeneration(generation, out)
-}
-
-// applyOutputForGeneration applies one decoded remote output frame while
-// holding only the proxy leaf lock. The supplied link generation prevents a
-// receive goroutine from an old transport advancing the replacement link's VT
-// state.
-func (p *proxySession) applyOutputForGeneration(generation uint64, out ports.Output) (ack uint64, requestReset, changed bool) {
-	// Screen.Write may retain a partial escape sequence, so do not retain a
-	// transport-owned payload.
-	data := append([]byte(nil), out.Data...)
-
+// applyScreenUpdateForGeneration applies one semantic screen update while
+// holding only the proxy leaf lock. A link generation fence prevents a stale
+// receive goroutine from advancing a replacement link's screen.
+func (p *proxySession) applyScreenUpdateForGeneration(generation uint64, update ports.ScreenUpdate) (ack uint64, requestReset, changed bool) {
+	if p == nil {
+		return 0, false, false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.linkGeneration != generation {
+	if p.linkGeneration != generation || p.screen == nil {
 		return 0, false, false
 	}
-	if p.screen == nil {
-		return 0, false, false
+
+	// The wire codec validates all semantic bounds. Geometry is still checked
+	// here because it is attachment state, not merely a wire property: a
+	// remote paint for the wrong content rectangle cannot be applied locally.
+	if update.Size != p.contentSize {
+		return 0, p.requestScreenResetLocked(), false
 	}
-	if out.NewStateNum == 0 {
-		p.screen.Write(data)
-		return 0, false, len(data) != 0
-	}
-	if out.BaseStateNum == 0 {
-		// A retransmitted full paint must not clobber a newer screen or regress
-		// the applied state. Only a reset this proxy actually asked for may
-		// replay a state it has already applied.
-		if !p.awaitingReset && out.NewStateNum <= p.appliedState {
-			return 0, false, false
+	if update.Kind == ports.ScreenUpdateSnapshot {
+		// A base-zero paint may only move the consumer forward. This floor is
+		// retained across resume and resize, so resetRequested never authorizes
+		// replaying a stale snapshot.
+		if update.NewStateNum <= p.appliedState {
+			return 0, p.requestScreenResetLocked(), false
 		}
-		p.screen = vt.NewScreen(p.screen.Frame.Width, p.screen.Frame.Height)
-		p.screen.Write(data)
-		p.appliedState = out.NewStateNum
-		p.awaitingReset = false
-		return out.NewStateNum, false, true
-	}
-	// Stateful frames are consecutive by construction. A duplicate or an
-	// otherwise non-monotonic state is invalid just like a missing dependency.
-	if p.awaitingReset || out.BaseStateNum != p.appliedState || out.NewStateNum != out.BaseStateNum+1 {
-		if !p.awaitingReset {
-			p.awaitingReset = true
-			requestReset = true
+		before := p.screen.cursorOut
+		if err := p.screen.Apply(update); err != nil {
+			return 0, p.requestScreenResetLocked(), false
 		}
-		return 0, requestReset, false
+		p.appliedState = update.NewStateNum
+		p.screenReady = true
+		p.resetRequested = false
+		return update.NewStateNum, false, update.Kind == ports.ScreenUpdateSnapshot || before != update.Cursor || len(update.Spans) != 0
 	}
-	p.screen.Write(data)
-	p.appliedState = out.NewStateNum
-	return out.NewStateNum, false, len(data) != 0
+
+	if !p.screenReady || p.resetRequested || update.BaseStateNum != p.appliedState || update.NewStateNum != update.BaseStateNum+1 {
+		return 0, p.requestScreenResetLocked(), false
+	}
+	before := p.screen.cursorOut
+	if err := p.screen.Apply(update); err != nil {
+		return 0, p.requestScreenResetLocked(), false
+	}
+	p.appliedState = update.NewStateNum
+	return update.NewStateNum, false, update.Scroll != nil || len(update.Spans) != 0 || before != update.Cursor
 }
 
-// handleProxyOutput completes output handling after applyOutputForGeneration
-// has released proxy.mu. In particular, transport I/O and local render
-// invalidation must never run under the VT lock.
-func (d *Daemon) handleProxyOutput(p *proxySession, generation uint64, out ports.Output) error {
-	ack, requestReset, changed := p.applyOutputForGeneration(generation, out)
+func (p *proxySession) requestScreenResetLocked() bool {
+	if p.resetRequested {
+		p.screenReady = false
+		return false
+	}
+	p.screenReady = false
+	p.resetRequested = true
+	return true
+}
+
+// handleProxyScreenUpdate completes screen handling after apply has released
+// proxy.mu. Transport I/O and render invalidation never run under that lock.
+func (d *Daemon) handleProxyScreenUpdate(p *proxySession, generation uint64, update ports.ScreenUpdate) error {
+	marks := d.newRuntimeMarkBatch()
+	ack, requestReset, changed := p.applyScreenUpdateForGeneration(generation, update)
 	if ack != 0 {
 		if err := p.sendGeneration(generation, ports.Frame{
 			Type:    ports.MsgAck,
 			Payload: ports.MarshalAck(ports.Ack{AckedStateNum: ack}),
 		}); err != nil {
-			return fmt.Errorf("proxy output ACK: %w: %w", errProxyLinkSend, err)
+			return fmt.Errorf("proxy screen ACK: %w: %w", errProxyLinkSend, err)
 		}
 	}
 	if requestReset {
@@ -83,9 +81,13 @@ func (d *Daemon) handleProxyOutput(p *proxySession, generation uint64, out ports
 			Type:    ports.MsgOutputResetRequest,
 			Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 		}); err != nil {
-			return fmt.Errorf("proxy output reset request: %w: %w", errProxyLinkSend, err)
+			return fmt.Errorf("proxy screen reset request: %w: %w", errProxyLinkSend, err)
 		}
+		marks.diagnostic(ports.RuntimeScreenResetRequested, 0, 0)
 	}
+	// The reset send released proxy sendMu and apply released proxy.mu before
+	// observer I/O; a blocked sink cannot hold either protocol ownership lock.
+	marks.flush()
 	if !changed || !p.currentLinkGeneration(generation) {
 		return nil
 	}
@@ -97,18 +99,13 @@ func (d *Daemon) handleProxyOutput(p *proxySession, generation uint64, out ports
 	return nil
 }
 
-// resetOutputState discards the dependency chain after a local content resize.
-// The next incremental remote frame is rejected and triggers a request for an
-// authoritative base-zero paint.
-func (p *proxySession) resetOutputState() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.resetOutputStateLocked()
-}
-
 func (p *proxySession) resetOutputStateLocked() {
 	p.appliedState = 0
-	p.awaitingReset = false
+	p.screenReady = false
+	p.resetRequested = false
+	if p.screen != nil {
+		p.screen.stateNum = 0
+	}
 }
 
 func (p *proxySession) currentLinkGeneration(generation uint64) bool {

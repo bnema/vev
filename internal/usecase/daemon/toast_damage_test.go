@@ -33,7 +33,7 @@ func TestComposeFrameToastDamageIsIncrementalAndRestoresOldFootprints(t *testing
 	require.Contains(t, updated.damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 1, Width: 1, Height: 1})
 	requireToastFootprintsDamaged(t, updated.damage, shown.cache.toastFootprints)
 	requireToastFootprintsDamaged(t, updated.damage, updated.cache.toastFootprints)
-	incremental, err := renderCommitted(stream, updated.frame, updated.damage, updated.reset)
+	incremental, err := stream.render(updated.frame, updated.damage, updated.reset)
 	require.NoError(t, err)
 	fullRenderer := renderer.New(renderer.Capabilities{})
 	full, err := fullRenderer.Draw(updated.frame, []renderer.Damage{renderer.FullRedraw()})
@@ -126,7 +126,7 @@ func toastDamageState(notices []domain.Notification, damage []renderer.Damage, r
 
 func replayToastFrame(t *testing.T, stream *outputStateStream, terminal *vt.Screen, composed composedRenderFrame) {
 	t.Helper()
-	data, err := renderCommitted(stream, composed.frame, composed.damage, composed.reset)
+	data, err := stream.render(composed.frame, composed.damage, composed.reset)
 	require.NoError(t, err)
 	terminal.Write(data)
 	require.Equal(t, frameRows(composed.frame), frameRows(terminal.Frame))

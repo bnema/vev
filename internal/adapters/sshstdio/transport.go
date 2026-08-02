@@ -21,6 +21,7 @@ import (
 )
 
 const (
+	maxFrameLen     = 16 << 20
 	frameHeaderLen  = 4
 	sshCloseTimeout = 3 * time.Second
 )
@@ -77,7 +78,7 @@ type transport struct {
 func (t *transport) Send(f ports.Frame) error {
 	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	n := 1 + len(f.Payload)
-	if n > ports.MaxFrameLen {
+	if n > maxFrameLen {
 		end(false)
 		return ErrFrameTooLarge
 	}
@@ -108,7 +109,7 @@ func (t *transport) Recv() (ports.Frame, error) {
 		end(false)
 		return ports.Frame{}, ErrZeroLengthFrame
 	}
-	if n > ports.MaxFrameLen {
+	if n > maxFrameLen {
 		end(false)
 		return ports.Frame{}, ErrFrameTooLarge
 	}

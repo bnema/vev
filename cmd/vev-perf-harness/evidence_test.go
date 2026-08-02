@@ -364,6 +364,28 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 	}
 }
 
+func TestHarnessSkipsUnpairedEndAfterObserverGap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trace.jsonl")
+	records := []traceRecord{
+		{ProcessID: "one", Component: "observer", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: "transport_diagnostic", Valid: false},
+		{ProcessID: "one", Component: "ipc", Scenario: "s", Run: 1, Sequence: 2, RequestID: 2, Epoch: 2, Kind: "adapter_receive_end", Tick: 20, Valid: true},
+	}
+	var lines []string
+	for _, record := range records {
+		lines = append(lines, mustJSON(record))
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spans, err := mergeProcessTraces([]processMapping{{ProcessID: "one", ClockDomain: "one", TracePath: path, Scenario: "s", Run: 1}})
+	if err != nil {
+		t.Fatalf("observer gap did not invalidate the dropped span: %v", err)
+	}
+	if len(spans) != 0 {
+		t.Fatalf("spans=%+v, want no sample after observer gap", spans)
+	}
+}
+
 func TestHarnessExcludesFailedSpanDurationsWhileValidatingPairing(t *testing.T) {
 	base := func(kind string, tick int64, valid bool) traceRecord {
 		return traceRecord{ProcessID: "one", Component: "adapter", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: kind, Tick: tick, Valid: valid}

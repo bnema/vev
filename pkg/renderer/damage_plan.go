@@ -11,6 +11,28 @@ const maxPlannedDamageSpans = 4096
 // used for terminal emission. The source damage remains untouched because the
 // scroll and shadow paths need its original structural information.
 func buildDamagePlan(frame Frame, damage []Damage, skip *Damage) ([]Span, bool) {
+	if len(damage) == 1 {
+		d := damage[0]
+		if skip != nil && sameDamage(d, *skip) {
+			return nil, false
+		}
+		if d.Kind != DamageText && d.Kind != DamageClear {
+			return nil, false
+		}
+		x, y, width, height, ok := clampRect(frame, d.X, d.Y, d.Width, d.Height)
+		if !ok {
+			return nil, false
+		}
+		if height > maxPlannedDamageSpans {
+			return nil, true
+		}
+		spans := make([]Span, height)
+		for row := range height {
+			spans[row] = Span{Y: y + row, X: x, Width: width}
+		}
+		return spans, false
+	}
+
 	spans := make([]Span, 0)
 	for _, d := range damage {
 		if skip != nil && sameDamage(d, *skip) {
@@ -29,9 +51,6 @@ func buildDamagePlan(frame Frame, damage []Damage, skip *Damage) ([]Span, bool) 
 			}
 			spans = append(spans, Span{Y: row, X: x, Width: width})
 		}
-	}
-	if len(spans) == 0 {
-		return nil, false
 	}
 
 	slices.SortFunc(spans, func(a, b Span) int {

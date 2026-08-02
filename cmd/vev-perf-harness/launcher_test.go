@@ -625,7 +625,7 @@ func TestHarnessUsesPublicRoleCommandsAndPTYWorkloads(t *testing.T) {
 		})
 	}
 	input := string(workloadInput(scenario{ID: "s", Workload: "interactive_flood"}, 1, "measured-1"))
-	if string(inputMarker([]byte(input))) != "__VEV_HARNESS_s_r1_measured-1__" || !bytes.Contains([]byte(input), []byte("while [ $i -lt 128 ]")) || !strings.HasSuffix(input, "printf '__VEV_HARNESS_s_r1_measured-1__\\n'\n") {
+	if string(inputMarker([]byte(input))) != "__VEV_HARNESS_s_r1_measured-1__" || strings.Count(input, "printf 'vev perf output\\n'") != 128 || strings.Contains(input, "while [ $i -lt 128 ]") || !strings.HasSuffix(input, "printf '__VEV_HARNESS_s_r1_measured-1__\\n'\n") {
 		t.Fatalf("workload is not real PTY shell input with an observable marker: %q", input)
 	}
 }

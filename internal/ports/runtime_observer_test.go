@@ -108,6 +108,28 @@ func TestSerializedRuntimeObserverReportsBoundedQueueLoss(t *testing.T) {
 	}
 }
 
+func TestP4RuntimeScreenMarkKindsValidateSchema1(t *testing.T) {
+	if RuntimeMarkSchema != 1 {
+		t.Fatalf("RuntimeMarkSchema = %d, want 1", RuntimeMarkSchema)
+	}
+	for _, tc := range []struct {
+		kind RuntimeMarkKind
+		want string
+	}{
+		{RuntimeScreenSnapshot, "screen_snapshot"},
+		{RuntimeScreenDelta, "screen_delta"},
+		{RuntimeScreenResetRequested, "screen_reset_requested"},
+	} {
+		if string(tc.kind) != tc.want {
+			t.Fatalf("screen mark kind = %q, want %q", tc.kind, tc.want)
+		}
+		mark := NewRuntimeMark("daemon", tc.kind, 17, true)
+		if !RuntimeMarkValid(mark) {
+			t.Fatalf("screen mark kind %q did not validate: %+v", tc.kind, mark)
+		}
+	}
+}
+
 func TestRuntimeObserverRequiredSpanKinds(t *testing.T) {
 	pairs := []struct {
 		start RuntimeMarkKind

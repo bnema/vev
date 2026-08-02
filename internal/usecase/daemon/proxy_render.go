@@ -9,6 +9,14 @@ import (
 
 const proxyRenderPaneID layout.PaneID = "proxy-content"
 
+type proxyCapture struct {
+	screen     *proxyScreenState
+	frame      renderer.Frame
+	damage     []renderer.Damage
+	generation uint64
+	cursor     capturedCursorInputs
+}
+
 // capturePrimary snapshots the remote VT while holding only proxy.mu. The
 // snapshot is then composed by the ordinary local frame pipeline, which owns
 // the bars, overlays, cursor, and renderer shadow. Remote ANSI is therefore
@@ -24,22 +32,33 @@ func (p *proxySession) capturePrimary(ac *attachedClient, request primaryCapture
 		return nil, false
 	}
 	screen := p.screen
-	frame := screen.Frame.Clone()
+	capture := &ac.proxyCapture
 	damage := screen.CaptureDamage()
-	cursorStyle, hasCursorStyle := screen.CursorStyle()
-	cursor := capturedCursorInputs{
-		row:        screen.CursorRow(),
-		col:        screen.CursorCol(),
-		style:      cursorStyle,
-		hasStyle:   hasCursorStyle,
-		visible:    screen.CursorVisible(),
+	if capture.screen != screen {
+		// A replacement screen has no relationship to the retained frame.
+		capture.frame = renderer.Frame{}
+	}
+	if capture.screen != screen || capture.generation != damage.Generation || capture.frame.Validate() != nil {
+		screen.CaptureInto(&capture.frame)
+	}
+	capture.screen = screen
+	capture.generation = damage.Generation
+	capture.damage = append(capture.damage[:0], damage.Damage...)
+	frame := capture.frame
+	capture.cursor = capturedCursorInputs{
+		row:        int(screen.cursorOut.Row),
+		col:        int(screen.cursorOut.Col),
+		style:      int(screen.cursorOut.Style),
+		hasStyle:   screen.cursorOut.StyleSet,
+		visible:    screen.cursorOut.Visible,
 		renderable: frame.Width > 0 && frame.Height > 0,
 		content:    domain.Rect{Width: frame.Width, Height: frame.Height},
 	}
+	cursor := capture.cursor
+	paneDamage := append([]renderer.Damage(nil), capture.damage...)
 	p.mu.Unlock()
 
 	content := domain.Rect{Width: frame.Width, Height: frame.Height}
-	paneDamage := append([]renderer.Damage(nil), damage.Damage...)
 	if uncertainDamage(paneDamage, frame.Width, frame.Height) {
 		paneDamage = []renderer.Damage{renderer.FullRedraw()}
 	}
@@ -98,6 +117,9 @@ func (d *Daemon) resizeProxyForLease(p *proxySession, ac *attachedClient, lease 
 	if changed, _ := p.resize(size); !changed {
 		return
 	}
+	ac.sendMu.Lock()
+	ac.size = size
+	ac.sendMu.Unlock()
 	if rc := attachmentRenderCoordinator(p); rc != nil {
 		rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "proxy_render.go"})
 		return
@@ -118,15 +140,22 @@ func (p *proxySession) resize(size domain.Size) (changed, sent bool) {
 		return false, false
 	}
 	content := contentSize(size, false)
+	if !validProxyScreenSize(content) {
+		return false, false
+	}
 	p.mu.Lock()
 	if p.screen == nil || p.contentSize == content {
 		available := p.screen != nil
 		p.mu.Unlock()
 		return false, available
 	}
-	p.screen.Resize(content.Cols, content.Rows)
+	p.screen.ResizePlaceholder(content)
 	p.contentSize = content
-	p.resetOutputStateLocked()
+	// A resize invalidates the local replay chain, but the last applied state
+	// remains the moving snapshot floor for the replacement geometry.
+	p.screenReady = false
+	p.resetRequested = false
+	p.screen.stateNum = 0
 	generation := p.linkGeneration
 	p.mu.Unlock()
 

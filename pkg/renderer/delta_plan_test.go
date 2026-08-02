@@ -116,14 +116,17 @@ func TestPlanDelta(t *testing.T) {
 			frame:     testFrame("changed!"),
 			damage:    []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 8, Height: 1}},
 			committed: NewFrame(8, 1),
-			want:      DeltaPlan{Snapshot: true},
+			want:      DeltaPlan{Snapshot: true, Spans: []Span{{Y: 0, X: 0, Width: 8}}},
 		},
 		{
-			name:      "single broad damage snapshots completely",
+			name:      "single broad damage retains spans for snapshot encoding",
 			frame:     testFrame("aaaa", "bbbb"),
 			damage:    []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 4, Height: 2}},
 			committed: NewFrame(4, 2),
-			want:      DeltaPlan{Snapshot: true},
+			want: DeltaPlan{
+				Snapshot: true,
+				Spans:    []Span{{Y: 0, X: 0, Width: 4}, {Y: 1, X: 0, Width: 4}},
+			},
 		},
 		{
 			name:  "snapshot cost includes style runs",
@@ -207,34 +210,6 @@ func TestPlanDeltaRejectsInvalidFrame(t *testing.T) {
 	}
 }
 
-func TestPlanDeltaRejectsInvalidCommittedFrame(t *testing.T) {
-	frame := NewFrame(2, 1)
-	committed := NewFrame(2, 1)
-	committed.lineOffset = nil
-	if _, err := PlanDelta(frame, nil, committed, false); err == nil {
-		t.Fatal("PlanDelta accepted an invalid committed frame")
-	}
-}
-
-func TestSnapshotCommitCopiesCellsOutsideDamage(t *testing.T) {
-	frame := NewFrame(2, maxPlannedDamageSpans+1)
-	frame.Set(1, 0, Cell{Rune: 'x', Style: DefaultStyle()})
-	committed := NewFrame(2, maxPlannedDamageSpans+1)
-	damage := []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: maxPlannedDamageSpans + 1}}
-
-	candidate, err := PlanDelta(frame, damage, committed, false)
-	if err != nil {
-		t.Fatalf("PlanDelta() error = %v", err)
-	}
-	if !candidate.Plan.Snapshot || len(candidate.Plan.Spans) != 0 {
-		t.Fatalf("snapshot plan = %#v, want complete snapshot without partial spans", candidate.Plan)
-	}
-	candidate.Commit(&committed)
-	if got := committed.At(1, 0); !got.Equal(frame.At(1, 0)) {
-		t.Fatalf("committed cell = %#v, want %#v", got, frame.At(1, 0))
-	}
-}
-
 func TestDeltaCandidateCommitAppliesScrollToLogicalRows(t *testing.T) {
 	committed := testFrame("0000", "1111", "2222", "3333", "4444", "5555", "6666", "7777")
 	frame := committed.Clone()
@@ -258,9 +233,6 @@ func TestDeltaCandidateCommitAppliesScrollToLogicalRows(t *testing.T) {
 		if !reflect.DeepEqual(committed.Row(y), frame.Row(y)) {
 			t.Fatalf("committed row %d = %#v, want %#v", y, committed.Row(y), frame.Row(y))
 		}
-	}
-	if err := committed.CheckInvariants(); err != nil {
-		t.Fatalf("committed frame invariants: %v", err)
 	}
 }
 

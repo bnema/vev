@@ -85,9 +85,16 @@ func (p *preparedOutput) commitNoSend() {
 
 func (p *preparedOutput) commit() {
 	p.draw.Commit()
-	if p.reset {
-		p.stream.forceSnapshot = false
+	p.stream.forceSnapshot = false
+}
+
+func (s *outputStateStream) frame(data []byte, reset bool, echoAck uint64) ports.Frame {
+	s.next++
+	base := s.next - 1
+	if reset {
+		base = 0
 	}
+	return frameOutputState(data, base, s.next, echoAck)
 }
 
 func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) ports.Frame {

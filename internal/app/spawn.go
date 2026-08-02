@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -269,6 +270,7 @@ func realSpawn() error {
 
 	var stderr bytes.Buffer
 	cmd := exec.Command(exePath, "--daemon-launcher")
+	cmd.Env = withoutPerformanceTraceEnv(os.Environ())
 	cmd.Dir = platform.DirOrHome("")
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
@@ -281,6 +283,19 @@ func realSpawn() error {
 	}
 	slog.Info("daemon process detached")
 	return nil
+}
+
+func withoutPerformanceTraceEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		switch name {
+		case "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN":
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 // runDaemonLauncher is the intermediate half of the double-fork. It starts
@@ -299,6 +314,7 @@ func runDaemonLauncher() error {
 	defer func() { _ = devNull.Close() }()
 
 	cmd := exec.Command(exePath, "--daemon")
+	cmd.Env = withoutPerformanceTraceEnv(os.Environ())
 	cmd.Dir = platform.DirOrHome("")
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull

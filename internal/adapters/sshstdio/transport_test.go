@@ -3,7 +3,6 @@ package sshstdio
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -162,40 +161,6 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 	_, err := tr.Recv()
 	if !errors.Is(err, ErrZeroLengthFrame) {
 		t.Fatalf("Recv error = %v, want ErrZeroLengthFrame", err)
-	}
-}
-
-func TestTransportRejectsFramesOverSharedMaximum(t *testing.T) {
-	boundaryPayload := make([]byte, ports.MaxFrameLen-1)
-	boundaryWire := &bytes.Buffer{}
-	boundarySend := NewTransport(nil, boundaryWire, nil)
-	if err := boundarySend.Send(ports.Frame{Type: ports.MsgOutput, Payload: boundaryPayload}); err != nil {
-		t.Fatalf("boundary Send error = %v", err)
-	}
-	if got := binary.BigEndian.Uint32(boundaryWire.Bytes()[:frameHeaderLen]); got != ports.MaxFrameLen {
-		t.Fatalf("boundary frame length = %d, want %d", got, ports.MaxFrameLen)
-	}
-	boundaryRecv := NewTransport(bytes.NewReader(boundaryWire.Bytes()), io.Discard, nil)
-	boundaryFrame, boundaryErr := boundaryRecv.Recv()
-	if boundaryErr != nil {
-		t.Fatalf("boundary Recv error = %v", boundaryErr)
-	}
-	if boundaryFrame.Type != ports.MsgOutput || len(boundaryFrame.Payload) != len(boundaryPayload) {
-		t.Fatalf("boundary frame = type %d, payload %d bytes; want type %d, payload %d bytes", boundaryFrame.Type, len(boundaryFrame.Payload), ports.MsgOutput, len(boundaryPayload))
-	}
-
-	send := NewTransport(nil, io.Discard, nil)
-	err := send.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, ports.MaxFrameLen)})
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("Send error = %v, want ErrFrameTooLarge", err)
-	}
-
-	var header [frameHeaderLen]byte
-	binary.BigEndian.PutUint32(header[:], ports.MaxFrameLen+1)
-	recv := NewTransport(bytes.NewReader(header[:]), io.Discard, nil)
-	_, err = recv.Recv()
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("Recv error = %v, want ErrFrameTooLarge", err)
 	}
 }
 

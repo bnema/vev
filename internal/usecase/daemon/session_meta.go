@@ -71,6 +71,15 @@ func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected trans
 	if !ok {
 		return errSessionMetaUnavailable
 	}
+	return ac.sendSessionMetaSnapshot(meta, expected, ticket)
+}
+
+// sendSessionMetaSnapshot sends an already captured metadata snapshot while
+// the caller holds ac.sendMu.
+func (ac *attachedClient) sendSessionMetaSnapshot(meta ports.SessionMeta, expected transportSnapshot, ticket *roleEffectTicket) error {
+	if ac == nil || !ac.proxied {
+		return nil
+	}
 	if ac.sessionMetaSent && sameSessionMeta(ac.sessionMeta, meta) {
 		return nil
 	}

@@ -23,6 +23,7 @@ const (
 	spawnTestChildFileEnv    = "VEV_SPAWN_TEST_CHILD_FILE"
 	spawnTestLauncherFileEnv = "VEV_SPAWN_TEST_LAUNCHER_FILE"
 	spawnTestReleaseFileEnv  = "VEV_SPAWN_TEST_RELEASE_FILE"
+	spawnTestTraceFileEnv    = "VEV_SPAWN_TEST_TRACE_FILE"
 )
 
 func TestMain(m *testing.M) {
@@ -55,6 +56,11 @@ func TestMain(m *testing.M) {
 			if path == "" {
 				os.Exit(2)
 			}
+			if tracePath := os.Getenv(spawnTestTraceFileEnv); tracePath != "" {
+				if err := os.WriteFile(tracePath, []byte(os.Getenv("VEV_PERF_TRACE")), 0o600); err != nil {
+					os.Exit(2)
+				}
+			}
 			if err := writeProcessRecord(path); err != nil {
 				os.Exit(2)
 			}
@@ -66,14 +72,17 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestRealSpawnWaitsForLauncherExit(t *testing.T) {
+func TestRealSpawnWaitsForLauncherExitAndDoesNotPropagateTrace(t *testing.T) {
 	dir := t.TempDir()
 	childFile := filepath.Join(dir, "daemon.pid")
 	launcherFile := filepath.Join(dir, "launcher.pid")
 	releaseFile := filepath.Join(dir, "release-launcher")
+	traceFile := filepath.Join(dir, "daemon.trace-env")
 	t.Setenv(spawnTestChildFileEnv, childFile)
 	t.Setenv(spawnTestLauncherFileEnv, launcherFile)
 	t.Setenv(spawnTestReleaseFileEnv, releaseFile)
+	t.Setenv(spawnTestTraceFileEnv, traceFile)
+	t.Setenv("VEV_PERF_TRACE", "parent-trace.jsonl")
 
 	// Register cleanup before starting either subprocess. The release marker
 	// unblocks a launcher even when setup or an assertion fails, and PID files
@@ -121,6 +130,13 @@ func TestRealSpawnWaitsForLauncherExit(t *testing.T) {
 	}
 	if err := syscall.Kill(daemonPID, 0); err != nil {
 		t.Fatalf("daemon exited with its launcher: %v", err)
+	}
+	traceEnv, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("read daemon trace environment: %v", err)
+	}
+	if got := string(traceEnv); got != "" {
+		t.Fatalf("daemon inherited VEV_PERF_TRACE=%q", got)
 	}
 }
 

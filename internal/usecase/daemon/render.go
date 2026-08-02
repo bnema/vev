@@ -282,6 +282,17 @@ func (b *runtimeMarkBatch) span(start, end ports.RuntimeMarkKind, bytes uint64) 
 	}
 }
 
+// diagnostic records a completed measurement for observer I/O after the
+// render transaction releases attachment ownership.
+func (b *runtimeMarkBatch) diagnostic(kind ports.RuntimeMarkKind, bytes, fragments uint64) {
+	if b == nil || b.observer == nil {
+		return
+	}
+	mark := ports.NewRuntimeMark("daemon", kind, bytes, true)
+	mark.Fragments = fragments
+	b.marks = append(b.marks, mark)
+}
+
 func (b *runtimeMarkBatch) flush() {
 	if b == nil || b.observer == nil {
 		return

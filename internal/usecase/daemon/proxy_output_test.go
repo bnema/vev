@@ -12,9 +12,12 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+var proxyHandshakeState atomic.Uint64
 
 type proxyRecv struct {
 	frame ports.Frame
@@ -95,6 +98,28 @@ func (t *proxyTestTransport) Recv() (ports.Frame, error) {
 	}
 }
 
+func applyTestScreenText(p *proxySession, row, col int, text string) bool {
+	p.mu.Lock()
+	generation := p.linkGeneration
+	size := p.contentSize
+	p.mu.Unlock()
+	frame := renderer.NewFrame(size.Cols, size.Rows)
+	for x, r := range []rune(text) {
+		if col+x < frame.Width {
+			frame.Set(col+x, row, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+		}
+	}
+	spans := make([]ports.ScreenSpan, size.Rows)
+	for y := range size.Rows {
+		spans[y] = ports.ScreenSpan{Y: uint16(y), Cells: append([]renderer.Cell(nil), frame.Row(y)...)}
+	}
+	_, _, changed := p.applyScreenUpdateForGeneration(generation, ports.ScreenUpdate{
+		NewStateNum: 1, Kind: ports.ScreenUpdateSnapshot, Size: size,
+		Cursor: ports.ScreenCursor{Row: uint16(row), Col: uint16(col), Visible: true}, Spans: spans,
+	})
+	return changed
+}
+
 func (t *proxyTestTransport) Close() error {
 	t.closeOnce.Do(func() { close(t.closed) })
 	return nil
@@ -107,6 +132,26 @@ func proxyWelcome(name string, token uint64, capabilities uint32) ports.Frame {
 		ResumeToken:  token,
 		Capabilities: capabilities,
 	})}
+}
+
+func proxyHandshakeSnapshot() ports.Frame {
+	const cols, rows = 80, 22
+	spans := make([]ports.ScreenSpan, rows)
+	for y := range rows {
+		cells := make([]renderer.Cell, cols)
+		for x := range cells {
+			cells[x] = renderer.BlankCell()
+		}
+		spans[y] = ports.ScreenSpan{Y: uint16(y), Cells: cells}
+	}
+	payload, err := ports.MarshalScreenUpdate(ports.ScreenUpdate{
+		NewStateNum: proxyHandshakeState.Add(1), Kind: ports.ScreenUpdateSnapshot, Size: domain.Size{Cols: cols, Rows: rows},
+		Cursor: ports.ScreenCursor{Visible: true}, Spans: spans,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return ports.Frame{Type: ports.MsgScreenUpdate, Payload: payload}
 }
 
 func proxyMeta(name string) ports.Frame {
@@ -208,6 +253,7 @@ func TestProxyHandshakePublishesOnlyAfterWelcomeAndMetadata(t *testing.T) {
 	tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 44, ports.CapabilityResume|ports.CapabilityProxied)}
 	require.Empty(t, proxySessionSnapshot(d), "Welcome alone must not publish a proxy")
 	tr.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	tr.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 
 	created := awaitTestValue(t, result, "proxy handshake did not complete")
 	require.NoError(t, created.err)
@@ -252,9 +298,11 @@ func TestProxyRegistryDedupesByExactStructuredKey(t *testing.T) {
 	firstTransport := newProxyTestTransport()
 	firstTransport.recv <- proxyRecv{frame: proxyWelcome(firstKey.Name, 1, ports.CapabilityProxied)}
 	firstTransport.recv <- proxyRecv{frame: proxyMeta(firstKey.Name)}
+	firstTransport.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	secondTransport := newProxyTestTransport()
 	secondTransport.recv <- proxyRecv{frame: proxyWelcome(secondKey.Name, 2, ports.CapabilityProxied)}
 	secondTransport.recv <- proxyRecv{frame: proxyMeta(secondKey.Name)}
+	secondTransport.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	for key, transport := range map[domain.RemoteSessionKey]ports.Transport{firstKey: firstTransport, secondKey: secondTransport} {
 		dialer := portsmocks.NewMockDialer(t)
@@ -339,6 +387,7 @@ func TestProxyLinkResumesAndReplacementIsTerminal(t *testing.T) {
 	first := newProxyTestTransport()
 	first.recv <- proxyRecv{frame: proxyWelcome(key.Name, 55, ports.CapabilityResume|ports.CapabilityProxied)}
 	first.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	first.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	second := newProxyTestTransport()
 	factory := proxyFactoryFor(t, key, first, second)
 	// The resume backoff is a ports.Clock deadline, so it is fired rather than
@@ -361,6 +410,7 @@ func TestProxyLinkResumesAndReplacementIsTerminal(t *testing.T) {
 	require.Equal(t, firstHello.ClientID, resumeHello.ClientID)
 	second.recv <- proxyRecv{frame: proxyWelcome(key.Name, 66, ports.CapabilityResume|ports.CapabilityProxied)}
 	second.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	second.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	second.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonReplaced})}}
 
 	select {
@@ -396,9 +446,10 @@ func TestProxySenderSerializesAllTransportWrites(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	tr := newProxyTestTransportWithSendGate(gate, entered, 1)
+	tr := newProxyTestTransportWithSendGate(gate, entered, 2)
 	tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
 	tr.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	tr.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
 	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), stubClock{})
 	proxy, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
@@ -422,6 +473,20 @@ func TestProxySenderSerializesAllTransportWrites(t *testing.T) {
 	}
 	require.False(t, tr.concurrent.Load(), "Transport.Send calls overlapped")
 	stopProxy(t, proxy)
+}
+
+func TestProxyHandshakeRejectsMissingInitialScreenSnapshotWithoutPublication(t *testing.T) {
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	tr := newProxyTestTransport()
+	tr.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
+	tr.recv <- proxyRecv{frame: proxyMeta(key.Name)}
+	tr.recv <- proxyRecv{err: io.EOF}
+	d := newProxyTestDaemon(t, proxyFactoryFor(t, key, tr), stubClock{})
+
+	proxy, err := d.openProxySession(context.Background(), key, domain.Size{Cols: 80, Rows: 24})
+	require.Error(t, err)
+	require.Nil(t, proxy)
+	require.Empty(t, proxySessionSnapshot(d))
 }
 
 func TestProxyHandshakeRejectsInvalidInitialMetadata(t *testing.T) {
@@ -454,164 +519,319 @@ func newProxyOutputSession(t *testing.T) (*Daemon, *proxySession, *proxyTestTran
 	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	transport := newProxyTestTransport()
-	generation, _ := proxy.installTransport(transport)
+	generation, _ := proxy.installTransport(transport, false)
 	return newProxyTestDaemon(t, nil, stubClock{}), proxy, transport, generation
 }
 
-func proxyScreenText(p *proxySession) string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return string([]rune{p.screen.Frame.At(0, 0).Rune, p.screen.Frame.At(1, 0).Rune})
+func TestProxyScreenResumeAndFreshLinksRequireMovingSnapshots(t *testing.T) {
+	d, proxy, first, generation := newProxyOutputSession(t)
+	snapshot, err := ports.UnmarshalScreenUpdate(proxyHandshakeSnapshot().Payload)
+	require.NoError(t, err)
+	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, snapshot))
+	_ = awaitTestValue(t, first.sent, "initial screen was not acknowledged")
+	proxy.mu.Lock()
+	applied := proxy.appliedState
+	proxy.mu.Unlock()
+
+	second := newProxyTestTransport()
+	generation, _ = proxy.installTransport(second, true)
+	proxy.mu.Lock()
+	require.Equal(t, applied, proxy.appliedState, "resume must preserve the applied state floor")
+	require.False(t, proxy.screenReady, "resume must wait for its replacement snapshot")
+	proxy.mu.Unlock()
+	gap := snapshot
+	gap.Kind = ports.ScreenUpdateDelta
+	gap.BaseStateNum, gap.NewStateNum = applied, applied+1
+	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, gap))
+	require.Equal(t, ports.MsgOutputResetRequest, awaitTestValue(t, second.sent, "resume delta did not request a reset").Type)
+	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, gap))
+	select {
+	case frame := <-second.sent:
+		t.Fatalf("duplicate resume gap sent %v", frame.Type)
+	default:
+	}
+	moving := snapshot
+	moving.NewStateNum = applied + 1
+	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, moving))
+	require.Equal(t, ports.MsgAck, awaitTestValue(t, second.sent, "resume snapshot was not acknowledged").Type)
+
+	third := newProxyTestTransport()
+	generation, _ = proxy.installTransport(third, false)
+	proxy.mu.Lock()
+	require.Zero(t, proxy.appliedState, "fresh link must clear the state floor")
+	require.False(t, proxy.screenReady)
+	proxy.mu.Unlock()
+	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, gap))
+	require.Equal(t, ports.MsgOutputResetRequest, awaitTestValue(t, third.sent, "fresh delta did not request a reset").Type)
+	fresh := snapshot
+	fresh.NewStateNum = 1
+	require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, fresh))
+	require.Equal(t, ports.MsgAck, awaitTestValue(t, third.sent, "fresh state-one snapshot was not acknowledged").Type)
+	proxy.mu.Lock()
+	require.Equal(t, uint64(1), proxy.appliedState)
+	proxy.mu.Unlock()
 }
 
-func proxyOutputState(p *proxySession) (uint64, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.appliedState, p.awaitingReset
+func TestProxyScreenStaleSnapshotsAndApplyFailuresRequestOneResetWithoutMutation(t *testing.T) {
+	newProxy := func(t *testing.T) (*Daemon, *proxySession, uint64) {
+		t.Helper()
+		d, proxy, _, generation := newProxyOutputSession(t)
+		return d, proxy, generation
+	}
+
+	t.Run("stale snapshot while not ready", func(t *testing.T) {
+		d, proxy, generation := newProxy(t)
+		snapshot := screenSnapshotForProxy(t, proxy, 7)
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, snapshot))
+		proxy.mu.Lock()
+		before := proxy.screen.frame.Clone()
+		proxy.screenReady = false
+		proxy.resetRequested = false
+		proxy.mu.Unlock()
+
+		stale := snapshot
+		stale.NewStateNum = 7
+		ack, reset, changed := proxy.applyScreenUpdateForGeneration(generation, stale)
+		require.Zero(t, ack)
+		require.True(t, reset, "a stale snapshot must request a reset while not ready")
+		require.False(t, changed)
+		proxy.mu.Lock()
+		require.Equal(t, uint64(7), proxy.appliedState)
+		require.False(t, proxy.screenReady)
+		require.True(t, proxy.resetRequested)
+		require.Equal(t, before, proxy.screen.frame)
+		proxy.mu.Unlock()
+
+		ack, reset, changed = proxy.applyScreenUpdateForGeneration(generation, stale)
+		require.Zero(t, ack)
+		require.False(t, reset, "an already-requested reset must be deduplicated")
+		require.False(t, changed)
+	})
+
+	t.Run("snapshot apply failure", func(t *testing.T) {
+		d, proxy, generation := newProxy(t)
+		initial := screenSnapshotForProxy(t, proxy, 7)
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, initial))
+		proxy.mu.Lock()
+		before := proxy.screen.frame.Clone()
+		proxy.mu.Unlock()
+		invalid := initial
+		invalid.NewStateNum = 8
+		invalid.Spans = invalid.Spans[:len(invalid.Spans)-1]
+		ack, reset, changed := proxy.applyScreenUpdateForGeneration(generation, invalid)
+		require.Zero(t, ack)
+		require.True(t, reset)
+		require.False(t, changed)
+		proxy.mu.Lock()
+		require.Equal(t, uint64(7), proxy.appliedState)
+		require.False(t, proxy.screenReady)
+		require.True(t, proxy.resetRequested)
+		require.Equal(t, before, proxy.screen.frame)
+		proxy.mu.Unlock()
+		_, reset, _ = proxy.applyScreenUpdateForGeneration(generation, invalid)
+		require.False(t, reset, "snapshot Apply failure reset was not deduplicated")
+	})
+
+	t.Run("delta apply failure", func(t *testing.T) {
+		d, proxy, generation := newProxy(t)
+		initial := screenSnapshotForProxy(t, proxy, 7)
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, initial))
+		proxy.mu.Lock()
+		before := proxy.screen.frame.Clone()
+		size := proxy.contentSize
+		proxy.mu.Unlock()
+		invalid := ports.ScreenUpdate{
+			Kind: ports.ScreenUpdateDelta, BaseStateNum: 7, NewStateNum: 8, Size: size,
+			Spans: []ports.ScreenSpan{{Y: uint16(size.Rows), Cells: []renderer.Cell{{Rune: 'x'}}}},
+		}
+		ack, reset, changed := proxy.applyScreenUpdateForGeneration(generation, invalid)
+		require.Zero(t, ack)
+		require.True(t, reset)
+		require.False(t, changed)
+		proxy.mu.Lock()
+		require.Equal(t, uint64(7), proxy.appliedState)
+		require.False(t, proxy.screenReady)
+		require.True(t, proxy.resetRequested)
+		require.Equal(t, before, proxy.screen.frame)
+		proxy.mu.Unlock()
+		_, reset, _ = proxy.applyScreenUpdateForGeneration(generation, invalid)
+		require.False(t, reset, "delta Apply failure reset was not deduplicated")
+	})
 }
 
-func TestProxyOutputStateMachine(t *testing.T) {
-	tests := []struct {
-		name         string
-		initial      *ports.Output
-		output       ports.Output
-		wantAck      uint64
-		wantReset    bool
-		wantChanged  bool
-		wantState    uint64
-		wantAwaiting bool
-		wantScreen   string
+func screenSnapshotForProxy(t *testing.T, proxy *proxySession, state uint64) ports.ScreenUpdate {
+	t.Helper()
+	proxy.mu.Lock()
+	size := proxy.contentSize
+	proxy.mu.Unlock()
+	snapshot := blankSnapshot(size)
+	snapshot.NewStateNum = state
+	return snapshot
+}
+
+func TestProxyScreenUpdate(t *testing.T) {
+	t.Run("initial snapshot", func(t *testing.T) {
+		d, proxy, transport, generation := newProxyOutputSession(t)
+		snapshot := screenSnapshotForProxy(t, proxy, 1)
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, snapshot))
+		require.Equal(t, ports.MsgAck, awaitTestValue(t, transport.sent, "initial screen was not acknowledged").Type)
+		proxy.mu.Lock()
+		require.Equal(t, uint64(1), proxy.appliedState)
+		require.True(t, proxy.screenReady)
+		require.False(t, proxy.resetRequested)
+		proxy.mu.Unlock()
+	})
+
+	t.Run("matching delta", func(t *testing.T) {
+		d, proxy, transport, generation := newProxyOutputSession(t)
+		snapshot := screenSnapshotForProxy(t, proxy, 1)
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, snapshot))
+		_ = awaitTestValue(t, transport.sent, "initial screen was not acknowledged")
+
+		delta := ports.ScreenUpdate{
+			Kind: ports.ScreenUpdateDelta, BaseStateNum: 1, NewStateNum: 2,
+			Size: snapshot.Size, Spans: []ports.ScreenSpan{{Y: 0, Cells: cells("delta")}},
+		}
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, delta))
+		require.Equal(t, ports.MsgAck, awaitTestValue(t, transport.sent, "screen delta was not acknowledged").Type)
+		proxy.mu.Lock()
+		require.Equal(t, uint64(2), proxy.appliedState)
+		require.Equal(t, 'd', proxy.screen.frame.At(0, 0).Rune)
+		proxy.mu.Unlock()
+	})
+
+	for _, tc := range []struct {
+		name string
+		base uint64
+		new  uint64
 	}{
-		{
-			name:        "base zero initial reset",
-			output:      ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")},
-			wantAck:     1,
-			wantChanged: true,
-			wantState:   1,
-			wantScreen:  "A ",
-		},
-		{
-			name:        "matching increment",
-			initial:     &ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")},
-			output:      ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("B")},
-			wantAck:     2,
-			wantChanged: true,
-			wantState:   2,
-			wantScreen:  "AB",
-		},
-		{
-			name:         "duplicate old state requests reset",
-			initial:      &ports.Output{BaseStateNum: 0, NewStateNum: 2, Data: []byte("A")},
-			output:       ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("B")},
-			wantReset:    true,
-			wantState:    2,
-			wantAwaiting: true,
-			wantScreen:   "A ",
-		},
-		{
-			name:         "gap requests reset",
-			initial:      &ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")},
-			output:       ports.Output{BaseStateNum: 3, NewStateNum: 4, Data: []byte("B")},
-			wantReset:    true,
-			wantState:    1,
-			wantAwaiting: true,
-			wantScreen:   "A ",
-		},
-		{
-			name:        "stateless side effect does not advance state",
-			output:      ports.Output{NewStateNum: 0, Data: []byte("!")},
-			wantChanged: true,
-			wantScreen:  "! ",
-		},
-		{
-			name:       "stale base zero is ignored",
-			initial:    &ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("A")},
-			output:     ports.Output{BaseStateNum: 0, NewStateNum: 3, Data: []byte("B")},
-			wantState:  5,
-			wantScreen: "A ",
-		},
-		{
-			name:       "duplicate base zero is ignored",
-			initial:    &ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("A")},
-			output:     ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("B")},
-			wantState:  5,
-			wantScreen: "A ",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, proxy, _, generation := newProxyOutputSession(t)
-			if tt.initial != nil {
-				_, _, _ = proxy.applyOutputForGeneration(generation, *tt.initial)
-			}
-
-			ack, reset, changed := proxy.applyOutput(tt.output)
-			require.Equal(t, tt.wantAck, ack)
-			require.Equal(t, tt.wantReset, reset)
-			require.Equal(t, tt.wantChanged, changed)
-			state, awaiting := proxyOutputState(proxy)
-			require.Equal(t, tt.wantState, state)
-			require.Equal(t, tt.wantAwaiting, awaiting)
-			require.Equal(t, tt.wantScreen, proxyScreenText(proxy))
-		})
-	}
-}
-
-// TestProxyOutputAwaitedResetAcceptsReplayedState fences the stale base-zero
-// guard: a reset this proxy asked for must still be applied even when the
-// remote numbers it at or below the state already applied.
-func TestProxyOutputAwaitedResetAcceptsReplayedState(t *testing.T) {
-	_, proxy, _, generation := newProxyOutputSession(t)
-	_, _, _ = proxy.applyOutputForGeneration(generation, ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("A")})
-	_, requestReset, _ := proxy.applyOutputForGeneration(generation, ports.Output{BaseStateNum: 9, NewStateNum: 10, Data: []byte("x")})
-	require.True(t, requestReset)
-
-	ack, reset, changed := proxy.applyOutputForGeneration(generation, ports.Output{BaseStateNum: 0, NewStateNum: 3, Data: []byte("B")})
-	require.Equal(t, uint64(3), ack)
-	require.False(t, reset)
-	require.True(t, changed)
-	state, awaiting := proxyOutputState(proxy)
-	require.Equal(t, uint64(3), state)
-	require.False(t, awaiting)
-	require.Equal(t, "B ", proxyScreenText(proxy))
-}
-
-// TestProxyLinkReplySendFailureResumesInsteadOfStopping separates a broken
-// write from a broken remote: the frame was well formed, so the proxy link is
-// resumable and only this transport incarnation is retired.
-func TestProxyLinkReplySendFailureResumesInsteadOfStopping(t *testing.T) {
-	tests := []struct {
-		name  string
-		frame ports.Frame
-	}{
-		{
-			name:  "pong reply",
-			frame: ports.Frame{Type: ports.MsgPing, Payload: ports.MarshalPing(ports.Ping{})},
-		},
-		{
-			name:  "output ack",
-			frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")})},
-		},
-		{
-			name:  "output reset request",
-			frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 7, NewStateNum: 8, Data: []byte("A")})},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		{name: "duplicate", base: 0, new: 1},
+		{name: "gap", base: 3, new: 4},
+	} {
+		t.Run(tc.name+" requests exactly one reset", func(t *testing.T) {
 			d, proxy, transport, generation := newProxyOutputSession(t)
-			t.Cleanup(func() { _ = transport.Close() })
-			transport.sendFails.Store(true)
-			transport.recv <- proxyRecv{frame: tt.frame}
+			snapshot := screenSnapshotForProxy(t, proxy, 1)
+			require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, snapshot))
+			_ = awaitTestValue(t, transport.sent, "initial screen was not acknowledged")
 
-			result := d.runProxyTransport(context.Background(), proxy, generation, transport)
-			require.Equal(t, proxyLinkResume, result, "a failed reply must retire the transport, not the proxy link")
+			update := ports.ScreenUpdate{
+				Kind: ports.ScreenUpdateDelta, BaseStateNum: tc.base, NewStateNum: tc.new,
+				Size: snapshot.Size,
+			}
+			require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, update))
+			require.Equal(t, ports.MsgOutputResetRequest, awaitTestValue(t, transport.sent, "screen mismatch did not request reset").Type)
+			require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, update))
+			select {
+			case frame := <-transport.sent:
+				t.Fatalf("duplicate %s sent %v", tc.name, frame.Type)
+			default:
+			}
+			proxy.mu.Lock()
+			require.Equal(t, uint64(1), proxy.appliedState)
+			require.False(t, proxy.screenReady)
+			require.True(t, proxy.resetRequested)
+			proxy.mu.Unlock()
 		})
 	}
+
+	t.Run("awaited base-zero snapshot advances the floor", func(t *testing.T) {
+		d, proxy, transport, generation := newProxyOutputSession(t)
+		initial := screenSnapshotForProxy(t, proxy, 5)
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, initial))
+		_ = awaitTestValue(t, transport.sent, "initial screen was not acknowledged")
+
+		gap := ports.ScreenUpdate{Kind: ports.ScreenUpdateDelta, BaseStateNum: 9, NewStateNum: 10, Size: initial.Size}
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, gap))
+		require.Equal(t, ports.MsgOutputResetRequest, awaitTestValue(t, transport.sent, "screen gap did not request reset").Type)
+
+		moving := initial
+		moving.NewStateNum = 6
+		require.NoError(t, d.handleProxyScreenUpdate(proxy, generation, moving))
+		require.Equal(t, ports.MsgAck, awaitTestValue(t, transport.sent, "awaited snapshot was not acknowledged").Type)
+		proxy.mu.Lock()
+		require.Equal(t, uint64(6), proxy.appliedState)
+		require.True(t, proxy.screenReady)
+		require.False(t, proxy.resetRequested)
+		proxy.mu.Unlock()
+	})
+
+	t.Run("stale generation is ignored", func(t *testing.T) {
+		_, proxy, transport, oldGeneration := newProxyOutputSession(t)
+		replacement := newProxyTestTransport()
+		newGeneration, _ := proxy.installTransport(replacement, false)
+		require.NotEqual(t, oldGeneration, newGeneration)
+		ack, reset, changed := proxy.applyScreenUpdateForGeneration(oldGeneration, screenSnapshotForProxy(t, proxy, 1))
+		require.Zero(t, ack)
+		require.False(t, reset)
+		require.False(t, changed)
+		proxy.mu.Lock()
+		require.Zero(t, proxy.appliedState)
+		proxy.mu.Unlock()
+		select {
+		case frame := <-transport.sent:
+			t.Fatalf("stale screen update sent %v", frame.Type)
+		default:
+		}
+	})
+
+	t.Run("ACK and reset send failures are resumable", func(t *testing.T) {
+		t.Run("ACK", func(t *testing.T) {
+			d, proxy, transport, generation := newProxyOutputSession(t)
+			transport.sendFails.Store(true)
+			snapshot := screenSnapshotForProxy(t, proxy, 1)
+			payload, err := ports.MarshalScreenUpdate(snapshot)
+			require.NoError(t, err)
+			transport.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgScreenUpdate, Payload: payload}}
+			require.Equal(t, proxyLinkResume, d.runProxyTransport(context.Background(), proxy, generation, transport))
+		})
+
+		t.Run("reset", func(t *testing.T) {
+			d, proxy, transport, generation := newProxyOutputSession(t)
+			transport.sendFails.Store(true)
+			proxy.mu.Lock()
+			size := proxy.contentSize
+			proxy.mu.Unlock()
+			gap := ports.ScreenUpdate{Kind: ports.ScreenUpdateDelta, BaseStateNum: 1, NewStateNum: 2, Size: size}
+			payload, err := ports.MarshalScreenUpdate(gap)
+			require.NoError(t, err)
+			transport.recv <- proxyRecv{frame: ports.Frame{Type: ports.MsgScreenUpdate, Payload: payload}}
+			require.Equal(t, proxyLinkResume, d.runProxyTransport(context.Background(), proxy, generation, transport))
+		})
+	})
+
+	t.Run("blocked send releases proxy.mu", func(t *testing.T) {
+		d, proxy, transport, generation := newProxyOutputSession(t)
+		gate := make(chan struct{})
+		entered := make(chan struct{}, 1)
+		transport.sendGate = gate
+		transport.sendEntered = entered
+		snapshot := screenSnapshotForProxy(t, proxy, 1)
+		result := make(chan error, 1)
+		go func() {
+			result <- d.handleProxyScreenUpdate(proxy, generation, snapshot)
+		}()
+		awaitTestCompletion(t, entered, "screen ACK sender did not enter transport")
+
+		unlocked := make(chan struct{})
+		go func() {
+			proxy.mu.Lock()
+			currentTransport := proxy.transport
+			proxy.mu.Unlock()
+			require.Same(t, transport, currentTransport)
+			close(unlocked)
+		}()
+		select {
+		case <-unlocked:
+		case <-time.After(time.Second):
+			t.Fatal("proxy.mu was held while screen send was blocked")
+		}
+		require.NoError(t, transport.Close())
+		require.Error(t, awaitTestValue(t, result, "blocked screen send did not return"))
+	})
 }
 
-// TestProxyLinkProtocolErrorStillStops fences the sentinel so it cannot widen
-// into "every error is resumable".
+// TestProxyLinkProtocolErrorStillStops fences malformed MsgOutput rejection
+// separately from resumable structured screen reply failures.
 func TestProxyLinkProtocolErrorStillStops(t *testing.T) {
 	d, proxy, transport, generation := newProxyOutputSession(t)
 	t.Cleanup(func() { _ = transport.Close() })
@@ -620,130 +840,118 @@ func TestProxyLinkProtocolErrorStillStops(t *testing.T) {
 	require.Equal(t, proxyLinkStop, d.runProxyTransport(context.Background(), proxy, generation, transport))
 }
 
-func TestProxyOutputMismatchSendsOneResetUntilBaseZero(t *testing.T) {
-	d, proxy, transport, generation := newProxyOutputSession(t)
-	require.NoError(t, d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")}))
-	require.Equal(t, ports.MsgAck, awaitTestValue(t, transport.sent, "initial output was not acknowledged").Type)
+func proxySideEffectFrame(data []byte) ports.Frame {
+	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
+		BaseStateNum: 0,
+		NewStateNum:  0,
+		Data:         data,
+	})}
+}
 
-	mismatch := ports.Output{BaseStateNum: 3, NewStateNum: 4, Data: []byte("discard")}
-	require.NoError(t, d.handleProxyOutput(proxy, generation, mismatch))
-	reset := awaitTestValue(t, transport.sent, "output mismatch did not request reset")
-	require.Equal(t, ports.MsgOutputResetRequest, reset.Type)
-	require.NoError(t, d.handleProxyOutput(proxy, generation, mismatch))
+func TestProxySideEffectForwardsOSC52ToCurrentThinClient(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	remote := newProxyTestTransport()
+	thin := newProxyTestTransport()
+	proxy, ac := newAttachedProxyFixture(t, d, thin, remote)
+	ac.echoAck.Store(17)
+
+	const osc52 = "\x1b]52;c;YQ==\a"
+	result, err := d.handleLinkFrame(proxy, 1, proxySideEffectFrame([]byte(osc52)))
+	require.Equal(t, proxyLinkResume, result)
+	require.NoError(t, err)
+
+	forwarded := awaitTestValue(t, thin.sent, "proxy OSC52 side effect was not forwarded")
+	require.Equal(t, ports.MsgOutput, forwarded.Type)
+	out, err := ports.UnmarshalOutput(forwarded.Payload)
+	require.NoError(t, err)
+	require.Zero(t, out.BaseStateNum)
+	require.Zero(t, out.NewStateNum)
+	require.Equal(t, uint64(17), out.EchoAck)
+	require.Equal(t, []byte(osc52), out.Data)
 	select {
-	case frame := <-transport.sent:
-		t.Fatalf("second mismatch sent %v, want no frame", frame.Type)
+	case frame := <-thin.sent:
+		t.Fatalf("proxy OSC52 side effect forwarded more than once: %v", frame.Type)
+	default:
+	}
+	proxy.mu.Lock()
+	require.Zero(t, proxy.appliedState)
+	require.False(t, proxy.resetRequested)
+	require.True(t, proxy.screenReady, "side effect must not alter proxy screen readiness")
+	proxy.mu.Unlock()
+	select {
+	case frame := <-remote.sent:
+		t.Fatalf("side effect unexpectedly replied on proxy link: %v", frame.Type)
+	default:
+	}
+}
+
+func TestProxySideEffectRejectsStateBearingAndMalformedMsgOutput(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame ports.Frame
+	}{
+		{name: "state bearing", frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("screen")})}},
+		{name: "malformed", frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{1}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			remote := newProxyTestTransport()
+			thin := newProxyTestTransport()
+			proxy, _ := newAttachedProxyFixture(t, d, thin, remote)
+
+			result, err := d.handleLinkFrame(proxy, 1, tt.frame)
+			require.Equal(t, proxyLinkStop, result)
+			require.Error(t, err)
+			select {
+			case frame := <-thin.sent:
+				t.Fatalf("invalid proxy output forwarded: %v", frame.Type)
+			default:
+			}
+		})
+	}
+}
+
+func TestProxySideEffectDropsStaleGenerationAndRole(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	remote := newProxyTestTransport()
+	thin := newProxyTestTransport()
+	proxy, ac := newAttachedProxyFixture(t, d, thin, remote)
+	frame := proxySideEffectFrame([]byte("effect"))
+
+	result, err := d.handleLinkFrame(proxy, 0, frame)
+	require.Equal(t, proxyLinkResume, result)
+	require.NoError(t, err)
+	select {
+	case forwarded := <-thin.sent:
+		t.Fatalf("stale proxy generation forwarded side effect: %v", forwarded.Type)
 	default:
 	}
 
-	require.NoError(t, d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 0, NewStateNum: 5, Data: []byte("R")}))
-	ack := awaitTestValue(t, transport.sent, "reset output was not acknowledged")
-	require.Equal(t, ports.MsgAck, ack.Type)
-	state, awaiting := proxyOutputState(proxy)
-	require.Equal(t, uint64(5), state)
-	require.False(t, awaiting)
-	require.Equal(t, "R ", proxyScreenText(proxy))
-}
-
-func TestProxyOutputMalformedOrStaleCannotAdvanceState(t *testing.T) {
-	t.Run("malformed", func(t *testing.T) {
-		d, proxy, _, generation := newProxyOutputSession(t)
-		result, err := d.handleLinkFrame(proxy, generation, ports.Frame{Type: ports.MsgOutput, Payload: []byte{1}})
-		require.Equal(t, proxyLinkStop, result)
-		require.Error(t, err)
-		state, awaiting := proxyOutputState(proxy)
-		require.Zero(t, state)
-		require.False(t, awaiting)
-	})
-
-	t.Run("stale generation", func(t *testing.T) {
-		d, proxy, transport, oldGeneration := newProxyOutputSession(t)
-		newGeneration, _ := proxy.installTransport(newProxyTestTransport())
-		require.NotEqual(t, oldGeneration, newGeneration)
-		require.NoError(t, d.handleProxyOutput(proxy, oldGeneration, ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")}))
-		state, awaiting := proxyOutputState(proxy)
-		require.Zero(t, state)
-		require.False(t, awaiting)
-		require.Equal(t, "  ", proxyScreenText(proxy))
-		select {
-		case frame := <-transport.sent:
-			t.Fatalf("stale output sent %v", frame.Type)
-		default:
-		}
-	})
-}
-
-func TestProxyOutputAckFailureStillDoesNotApplyStaleState(t *testing.T) {
-	d, proxy, transport, generation := newProxyOutputSession(t)
-	transport.sendGate = make(chan struct{})
-	require.NoError(t, transport.Close())
-	err := d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")})
-	require.Error(t, err)
-	state, _ := proxyOutputState(proxy)
-	require.Equal(t, uint64(1), state, "ACK failure follows a successfully applied state")
-}
-
-func TestProxyOutputReconnectRequiresBaseZero(t *testing.T) {
-	d, proxy, first, generation := newProxyOutputSession(t)
-	require.NoError(t, d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")}))
-	_ = awaitTestValue(t, first.sent, "initial output was not acknowledged") // ACK
-
-	second := newProxyTestTransport()
-	generation, _ = proxy.installTransport(second)
-	require.NoError(t, d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("B")}))
-	frame := awaitTestValue(t, second.sent, "reconnected output did not request reset")
-	require.Equal(t, ports.MsgOutputResetRequest, frame.Type)
-	state, awaiting := proxyOutputState(proxy)
-	require.Zero(t, state)
-	require.True(t, awaiting)
-	require.Equal(t, "A ", proxyScreenText(proxy))
-
-	require.NoError(t, d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 0, NewStateNum: 7, Data: []byte("R")}))
-	frame = awaitTestValue(t, second.sent, "reset reconnected output was not acknowledged")
-	require.Equal(t, ports.MsgAck, frame.Type)
-	state, awaiting = proxyOutputState(proxy)
-	require.Equal(t, uint64(7), state)
-	require.False(t, awaiting)
-}
-
-func TestProxyOutputResizeRequiresBaseZero(t *testing.T) {
-	d, proxy, transport, generation := newProxyOutputSession(t)
-	require.NoError(t, d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")}))
-	_ = awaitTestValue(t, transport.sent, "initial output was not acknowledged") // ACK
-
-	proxy.resetOutputState()
-	require.NoError(t, d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("B")}))
-	frame := awaitTestValue(t, transport.sent, "resize mismatch did not request reset")
-	require.Equal(t, ports.MsgOutputResetRequest, frame.Type)
-	state, awaiting := proxyOutputState(proxy)
-	require.Zero(t, state)
-	require.True(t, awaiting)
-	require.Equal(t, "A ", proxyScreenText(proxy))
-}
-
-func TestProxyOutputConcurrentCancelDoesNotHoldProxyLockDuringSend(t *testing.T) {
-	d, proxy, transport, generation := newProxyOutputSession(t)
-	gate := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	transport.sendGate = gate
-	transport.sendEntered = entered
-
-	result := make(chan error, 1)
-	go func() {
-		result <- d.handleProxyOutput(proxy, generation, ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("A")})
-	}()
-	awaitTestCompletion(t, entered, "output sender did not enter transport")
-
-	locked := make(chan struct{})
-	go func() {
-		_, _ = proxyOutputState(proxy)
-		close(locked)
-	}()
+	token := attachmentToken(proxy, ac, ac.transport())
+	ticket, admitted := ac.beginRoleEffect(token)
+	require.True(t, admitted)
+	ticket.End()
+	ac.roleGeneration.Add(1)
+	result, err = d.handleLinkFrame(proxy, 1, frame)
+	require.Equal(t, proxyLinkResume, result)
+	require.NoError(t, err)
 	select {
-	case <-locked:
-	case <-time.After(time.Second):
-		t.Fatal("proxy.mu was held while transport Send was blocked")
+	case forwarded := <-thin.sent:
+		t.Fatalf("stale attachment role forwarded side effect: %v", forwarded.Type)
+	default:
 	}
-	require.NoError(t, transport.Close())
-	require.Error(t, awaitTestValue(t, result, "blocked output send did not return"))
+}
+
+func TestProxySideEffectSendFailureResumesLink(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	remote := newProxyTestTransport()
+	thin := newProxyTestTransport()
+	thin.sendFails.Store(true)
+	proxy, _ := newAttachedProxyFixture(t, d, thin, remote)
+	err := d.handleProxySideEffect(proxy, 1, ports.Output{Data: []byte("effect")})
+	require.ErrorContains(t, err, "link reply send failed")
+	remote.recv <- proxyRecv{frame: proxySideEffectFrame([]byte("effect"))}
+
+	require.Equal(t, proxyLinkResume, d.runProxyTransport(context.Background(), proxy, 1, remote))
 }

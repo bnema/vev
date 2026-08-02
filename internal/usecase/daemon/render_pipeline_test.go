@@ -371,13 +371,13 @@ func TestComposeEmitExactReplaySafeAndUnsafeScroll(t *testing.T) {
 			}
 			stream := newOutputStateStream()
 			first := composeFrame(makeState(tt.initial, []renderer.Damage{renderer.FullRedraw()}, true), composeCacheInput{})
-			firstBytes, err := renderCommitted(stream, first.frame, first.damage, first.reset)
+			firstBytes, err := stream.render(first.frame, first.damage, first.reset)
 			require.NoError(t, err)
 			client := vt.NewScreen(4, 5)
 			client.Write(firstBytes)
 
 			second := composeFrame(makeState(tt.scrolled, tt.damage, false), first.cache)
-			secondBytes, err := renderCommitted(stream, second.frame, second.damage, second.reset)
+			secondBytes, err := stream.render(second.frame, second.damage, second.reset)
 			require.NoError(t, err)
 			require.Equal(t, tt.wantBytes, string(secondBytes))
 			client.Write(secondBytes)
