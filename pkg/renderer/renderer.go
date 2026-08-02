@@ -27,10 +27,10 @@ type Renderer struct {
 // PreparedDraw owns encoded output and its transactional delta until Commit.
 // It is returned by value so ordinary prepared draws do not allocate.
 type PreparedDraw struct {
-	renderer  *Renderer
-	candidate DeltaCandidate
-	data      []byte
-	committed bool
+	renderer   *Renderer
+	candidate  DeltaCandidate
+	data       []byte
+	commitOnce *sync.Once
 }
 
 func New(caps Capabilities) *Renderer { return &Renderer{caps: caps} }
@@ -49,13 +49,14 @@ func (p PreparedDraw) Bytes() []byte { return p.data }
 // Commit applies the prepared delta exactly once. Discarding it leaves the
 // renderer's committed state unchanged.
 func (p *PreparedDraw) Commit() {
-	if p == nil || p.renderer == nil || p.committed {
+	if p == nil || p.renderer == nil || p.commitOnce == nil {
 		return
 	}
-	committed := p.renderer.committedFrame()
-	p.candidate.Commit(&committed)
-	p.renderer.setCommittedFrame(committed)
-	p.committed = true
+	p.commitOnce.Do(func() {
+		committed := p.renderer.committedFrame()
+		p.candidate.Commit(&committed)
+		p.renderer.setCommittedFrame(committed)
+	})
 }
 
 // Prepare plans and encodes a transactional draw. The renderer advances only
@@ -66,7 +67,7 @@ func (r *Renderer) Prepare(frame Frame, damage []Damage, reset bool) (PreparedDr
 	var err error
 	if !reset && len(r.shadow) != 0 && r.width == frame.Width && r.height == frame.Height && len(damage) == 1 && (damage[0].Kind == DamageText || damage[0].Kind == DamageClear) {
 		if err = frame.Validate(); err == nil {
-			candidate = DeltaCandidate{Plan: planSingleDamage(frame, damage[0]), frame: frame}
+			candidate = DeltaCandidate{Plan: planSingleDamage(frame, damage[0]), frame: frame.Clone()}
 		}
 	} else {
 		candidate, err = PlanDelta(frame, damage, r.committedFrame(), reset || len(r.shadow) == 0)
@@ -74,7 +75,7 @@ func (r *Renderer) Prepare(frame Frame, damage []Damage, reset bool) (PreparedDr
 	if err != nil {
 		return PreparedDraw{}, err
 	}
-	prepared := PreparedDraw{renderer: r, candidate: candidate}
+	prepared := PreparedDraw{renderer: r, candidate: candidate, commitOnce: new(sync.Once)}
 	plan := candidate.Plan
 	if !plan.Snapshot && plan.Scroll.Height == 0 && len(plan.Spans) == 0 {
 		return prepared, nil

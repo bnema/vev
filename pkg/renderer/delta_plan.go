@@ -23,7 +23,7 @@ type DeltaPlan struct {
 	Spans    []Span
 }
 
-// DeltaCandidate holds a plan and borrows its source frame until Commit.
+// DeltaCandidate holds a plan and owns a source frame snapshot until Commit.
 type DeltaCandidate struct {
 	Plan  DeltaPlan
 	frame Frame
@@ -35,10 +35,13 @@ func PlanDelta(frame Frame, damage []Damage, committed Frame, reset bool) (Delta
 		return DeltaCandidate{}, err
 	}
 
-	candidate := DeltaCandidate{frame: frame}
+	candidate := DeltaCandidate{frame: frame.Clone()}
 	if reset || frame.Width != committed.Width || frame.Height != committed.Height {
 		candidate.Plan.Snapshot = true
 		return candidate, nil
+	}
+	if err := committed.Validate(); err != nil {
+		return DeltaCandidate{}, err
 	}
 
 	if len(damage) == 1 && (damage[0].Kind == DamageText || damage[0].Kind == DamageClear) {
@@ -186,7 +189,7 @@ func styleRunCount(cells []Cell) int {
 	return runs
 }
 
-// Commit advances dst to the frame borrowed by the candidate.
+// Commit advances dst to the frame snapshot owned by the candidate.
 func (c DeltaCandidate) Commit(dst *Frame) {
 	if c.Plan.Snapshot || dst.Width != c.frame.Width || dst.Height != c.frame.Height {
 		replaceFrame(dst, c.frame)
