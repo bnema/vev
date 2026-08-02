@@ -142,7 +142,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, rep
 		}
 	}()
 
-	sess := d.newRestoredSession(snap, sctx, cancel, opened)
+	sess := d.newRestoredSession(snap, sctx, cancel, opened, terminalEnvFromEnvironment(d.baseEnv))
 	// The loaded manifest is the repository head for this name. Future dirty
 	// checkpoints must continue from it rather than reuse generation one.
 	sess.snapshotPublishedGeneration = repositoryGeneration
@@ -165,10 +165,10 @@ func (d *Daemon) restoredSessionAlreadyExists(name string) bool {
 }
 
 func (d *Daemon) restoreSnapshotTabs(ctx, sctx context.Context, snap snapcodec.Session) ([]*tab, error) {
-	// Restore runs before client Hello. Future panes therefore inherit the
-	// daemon's startup environment until an attach supplies terminal capability.
-	restoreTerm := terminalEnv{}
+	// Restore runs before client Hello. Use the daemon's startup environment,
+	// including its terminal capability, until an attach supplies a fresher one.
 	restoreEnv := copyEnvironment(d.baseEnv)
+	restoreTerm := terminalEnvFromEnvironment(restoreEnv)
 	allowlist := d.restoreProcessAllowlistSnapshot()
 	stoppedTabNames := d.restoredSessionTabNames(snap.Name)
 	opened := make([]*tab, 0, len(snap.Tabs))
@@ -289,8 +289,8 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 	return p, nil
 }
 
-func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab) *session {
-	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, active: int(snap.Active), terminal: terminalEnv{}, env: copyEnvironment(d.baseEnv), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
+func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab, term terminalEnv) *session {
+	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, active: int(snap.Active), terminal: term, env: copyEnvironment(d.baseEnv), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
 	// Restored tabs remain private until persistAndRegisterRestoredSession.
 	// Initialize owners now so registration and reader startup cannot expose an
 	// ownerless pane.

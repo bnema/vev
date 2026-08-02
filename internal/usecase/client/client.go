@@ -15,7 +15,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -592,13 +591,7 @@ func paletteSlot(slot int) (uint8, bool) {
 
 // DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
 func DetectTrueColor(termEnv, colorTerm string) bool {
-	switch strings.ToLower(strings.TrimSpace(colorTerm)) {
-	case "truecolor", "24bit":
-		return true
-	}
-
-	termEnv = strings.ToLower(strings.TrimSpace(termEnv))
-	return termEnv == "xterm-direct" || strings.HasSuffix(termEnv, "-direct")
+	return ports.DetectTrueColor(termEnv, colorTerm)
 }
 
 func requestedOutputWindow(transport ports.Transport) uint8 {
