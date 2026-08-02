@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	maxFrameLen     = 16 << 20
+	maxFrameLen     = ports.MaxFrameLen
 	frameHeaderLen  = 4
 	sshCloseTimeout = 3 * time.Second
 )

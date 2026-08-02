@@ -386,6 +386,9 @@ func FuzzScreenUpdate(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if !bytes.Equal(encoded, data) {
+			t.Fatalf("accepted data is not canonical: got %x, want %x", encoded, data)
+		}
 		roundtrip, err := UnmarshalScreenUpdate(encoded)
 		if err != nil {
 			t.Fatal(err)
