@@ -39,7 +39,10 @@ func attachmentSessionRoleLocked(entry attachmentSession, ac *attachedClient) at
 		return attachmentDetached
 	}
 	core := entry.core()
-	if core.client == ac {
+	// Membership is the lifecycle authority. Keep the primary pointer as a
+	// narrow construction-time fallback for older headless fixtures; attached
+	// routes always publish into the collection.
+	if _, ok := core.attachments[ac]; ok || core.client == ac {
 		return attachmentActive
 	}
 	if _, ok := core.snatched[ac]; ok {
@@ -156,8 +159,14 @@ func (t attachmentRoleToken) current() bool {
 // activeCurrent admits post-transition effects only for the exact published
 // role, transport incarnation, current-session link, and coordinator lease.
 func (t attachmentRoleToken) activeCurrent() bool {
-	if t.role != attachmentActive || t.lease == nil || !t.current() || t.ac.currentAttachmentSession() != t.sess {
+	if t.role != attachmentActive || !t.current() || t.ac.currentAttachmentSession() != t.sess {
 		return false
+	}
+	// Membership grants each attachment its own protocol capability. The
+	// session coordinator may still have a primary render lease while a second
+	// attachment is joining; that attachment must not be treated as displaced.
+	if t.lease == nil {
+		return true
 	}
 	rc := t.sess.core().coordinator.Load()
 	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)
@@ -196,10 +205,13 @@ func (t attachmentRoleToken) activeEffectSessionLocked() bool {
 	if t.effect != nil && !t.effect.ended.Load() {
 		return true
 	}
-	if t.role != attachmentActive || t.lease == nil || t.sess == nil || t.ac == nil ||
+	if t.role != attachmentActive || t.sess == nil || t.ac == nil ||
 		t.ac.roleGeneration.Load() != t.generation || !t.ac.transportSnapshotCurrent(t.transport) ||
 		t.ac.currentAttachmentSession() != t.sess || attachmentSessionRoleLocked(t.sess, t.ac) != attachmentActive {
 		return false
+	}
+	if t.lease == nil {
+		return true
 	}
 	rc := t.sess.core().coordinator.Load()
 	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)

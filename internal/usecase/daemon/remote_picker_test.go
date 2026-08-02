@@ -861,40 +861,6 @@ func TestRemoteRefreshCannotStartAfterLastPickerCloseWins(t *testing.T) {
 	}
 }
 
-func TestRemotePickerPublishCannotRegisterAfterSnatchClear(t *testing.T) {
-	d := newRemotePickerDaemon(nil)
-	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	ac.roleGeneration.Store(1)
-	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-	registrationReached := make(chan struct{})
-	allowRegistration := make(chan struct{})
-	registrationWait := make(chan error, 1)
-	ac.overlays.beforeRemotePickerRegistration = func() {
-		close(registrationReached)
-		registrationWait <- waitRemotePickerClose(allowRegistration, "picker registration release")
-	}
-	published := make(chan struct{})
-	go func() {
-		d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
-		close(published)
-	}()
-	receiveRemotePickerClose(t, registrationReached, "picker registration")
-
-	token := attachmentRoleToken{
-		sess: sess, ac: ac, role: attachmentSnatched,
-		generation: 1, transport: ac.transportSnapshot(),
-	}
-	require.True(t, d.clearForSnatch(token))
-	close(allowRegistration)
-	require.NoError(t, receiveRemotePicker(t, registrationWait, "picker registration release"))
-	receiveRemotePickerClose(t, published, "picker publication")
-
-	d.remoteCatalog.mu.Lock()
-	_, registered := d.remoteCatalog.pickers[ac]
-	d.remoteCatalog.mu.Unlock()
-	require.False(t, registered, "a picker cleared before delayed registration must not become a refresh owner")
-}
-
 func TestRemotePickerStaleAfterCloseCannotRemoveReopenedPicker(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")

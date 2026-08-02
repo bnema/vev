@@ -350,7 +350,7 @@ func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool
 		return sess, effect, true
 	}
 	sess := h.ac.currentSession()
-	if sess == nil || sess.attachmentRole(h.ac) == attachmentSnatched {
+	if sess == nil {
 		return nil, nil, false
 	}
 	return sess, nil, false

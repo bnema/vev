@@ -744,13 +744,22 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	}
 	d.notices.routingMu.Lock()
 	sess.mu.Lock()
-	current := sess.client == ac && ac.currentSession() == sess
+	_, registered := sess.attachments[ac]
+	current := (registered || sess.client == ac) && ac.currentSession() == sess
 	if current && expected.transport != nil && !ac.transportSnapshotCurrent(expected) {
 		current = false
 	}
 	if current {
-		sess.client = nil
+		if sess.client == ac {
+			sess.client = nil
+		}
 		sess.unregisterAttachmentLocked(ac)
+		if sess.client == nil {
+			for candidate := range sess.attachments {
+				sess.client = candidate
+				break
+			}
+		}
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenRoleCapability()
@@ -803,6 +812,18 @@ func (d *Daemon) detachIfRoleCurrent(token attachmentRoleToken) bool {
 
 func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func() <-chan struct{}) bool {
 	if token.sess == nil || token.ac == nil || token.role != attachmentActive || token.transport.transport == nil {
+		return false
+	}
+	// Attachments without the session's optional primary render lease still
+	// own an independent connection lifecycle and detach through the same exact
+	// transport/generation fence.
+	if token.lease == nil {
+		if sess, ok := localSession(token.sess); ok {
+			return d.detachIfCurrentTransport(sess, token.ac, token.transport)
+		}
+		if proxy, ok := token.sess.(*proxySession); ok {
+			return d.detachProxyIfCurrentTransport(proxy, token.ac, token.transport)
+		}
 		return false
 	}
 	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{done: done}, token.ac)
@@ -1170,6 +1191,7 @@ type sessionKillAdmission struct {
 
 type sessionKillParticipants struct {
 	active      *attachedClient
+	attachments map[*attachedClient]struct{}
 	snatched    map[*attachedClient]struct{}
 	transports  map[*attachedClient]transportSnapshot
 	roleGates   []*attachedClient
@@ -1214,8 +1236,13 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 	}
 	unlockSessions := lockAttachmentSessions(source, target)
 	snapshot.active = target.client
+	snapshot.attachments = make(map[*attachedClient]struct{}, len(target.attachments))
 	snapshot.snatched = make(map[*attachedClient]struct{}, len(target.snatched))
-	snapshot.transports = make(map[*attachedClient]transportSnapshot, 1+len(target.snatched))
+	snapshot.transports = make(map[*attachedClient]transportSnapshot, 1+len(target.attachments)+len(target.snatched))
+	for ac := range target.attachments {
+		snapshot.attachments[ac] = struct{}{}
+		snapshot.transports[ac] = ac.transportSnapshot()
+	}
 	if snapshot.active != nil {
 		snapshot.transports[snapshot.active] = snapshot.active.transportSnapshot()
 	}
@@ -1227,7 +1254,7 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
 
-	seen := make(map[*attachedClient]struct{}, 2+len(snapshot.snatched))
+	seen := make(map[*attachedClient]struct{}, 2+len(snapshot.attachments)+len(snapshot.snatched))
 	add := func(ac *attachedClient) {
 		if ac == nil {
 			return
@@ -1242,6 +1269,9 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		add(admission.token.ac)
 	}
 	add(snapshot.active)
+	for ac := range snapshot.attachments {
+		add(ac)
+	}
 	for ac := range snapshot.snatched {
 		add(ac)
 	}
@@ -1281,8 +1311,13 @@ func (d *Daemon) sessionKillParticipantsCurrent(snapshot sessionKillParticipants
 // session and coordinator locks.
 func sessionKillParticipantsCurrentLocked(snapshot sessionKillParticipants, sourceCoordinator *renderCoordinator) bool {
 	target := snapshot.target
-	if target.client != snapshot.active || len(target.snatched) != len(snapshot.snatched) {
+	if target.client != snapshot.active || len(target.attachments) != len(snapshot.attachments) || len(target.snatched) != len(snapshot.snatched) {
 		return false
+	}
+	for ac := range snapshot.attachments {
+		if _, current := target.attachments[ac]; !current {
+			return false
+		}
 	}
 	for ac := range snapshot.snatched {
 		if _, current := target.snatched[ac]; !current {
@@ -1593,11 +1628,15 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		attached.setSession(nil)
 		attached.invalidateFrozenRoleCapability()
 	}
-	capture(sess.client)
+	for attached := range sess.attachments {
+		capture(attached)
+	}
 	for snatched := range sess.snatched {
 		capture(snatched)
 	}
+	capture(sess.client)
 	sess.client = nil
+	clear(sess.attachments)
 	clear(sess.snatched)
 	stoppedName := sess.name
 	stoppedCwd := sess.cwd

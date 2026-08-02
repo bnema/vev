@@ -144,15 +144,6 @@ type Daemon struct {
 	// after publishResizeCommit acquires attachment sendMu and before it acquires
 	// owner fences. Tests must not perform external work from this callback.
 	afterResizeCommitSendLocked func()
-	// afterSnatchOverlayFamily is a deterministic structural lock seam. It runs
-	// after one overlay-family mutex is released and before the next is taken.
-	afterSnatchOverlayFamily func(string)
-	// afterSnatchedEscapeAccepted observes a standalone ESC after parser state
-	// is consumed and before its captured role and transport are revalidated.
-	afterSnatchedEscapeAccepted func()
-	// afterSnatchedEscapeAttempt reports whether that callback acquired its exact
-	// role capability after revalidation.
-	afterSnatchedEscapeAttempt func(bool)
 	// afterConnectionSessionSnapshot is a deterministic test seam after the
 	// connection loop reads its current session and before it captures that role.
 	afterConnectionSessionSnapshot func(attachmentSession)
@@ -200,21 +191,10 @@ type Daemon struct {
 	// afterParkingWaitArmed observes waitParkingInFlight after it has resolved a
 	// matching in-flight entry and before it blocks on done.
 	afterParkingWaitArmed func()
-	// afterSnatchedUnrouteBeforePark pauses parkSnatchedAttachment and
-	// cleanupInterruptedSnatchedAttachment after exact snatched ownership is
-	// removed and before parkAttachmentAs. The parking-in-flight marker must
-	// already be published so a concurrent same-token resume can wait the gap.
-	afterSnatchedUnrouteBeforePark func()
 	// beforeResumeParkedSendMu pauses resumeParked after the initial parked
 	// lookup and before the attachment send lock, so tests can consume or
 	// replace the credential while the handshake waits.
 	beforeResumeParkedSendMu func()
-	// afterDisplacedCleanupStarted observes deferred displaced cleanup before it
-	// synchronizes with the attachment gate.
-	afterDisplacedCleanupStarted func()
-	// beforeReclaimFirstPaint observes a committed reclaim after displaced cleanup
-	// is queued and before its generation-bound reset first paint is admitted.
-	beforeReclaimFirstPaint func(attachmentRoleToken)
 	// afterRoleEffectAdmitted is a deterministic test seam after a frame/paint
 	// reserves its exact capability and before its first observable mutation.
 	afterRoleEffectAdmitted func(attachmentRoleToken)
@@ -339,9 +319,9 @@ type Daemon struct {
 type parkedAttachment struct {
 	sess             *session
 	ac               *attachedClient
-	role             attachmentRole
 	pickerGeneration uint64
 	timer            ports.Timer
+	claimed          bool
 	done             chan struct{}
 	doneOnce         sync.Once
 }
@@ -1120,23 +1100,26 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	welcomeToken := sess.attachmentToken(ac, tr)
 	welcomeToken.lease = lease
 	welcomeTicket, admitted := ac.beginRoleEffect(welcomeToken)
-	validRole := welcomeToken.role == attachmentSnatched || welcomeToken.role == attachmentActive && lease != nil
+	validRole := welcomeToken.role == attachmentActive
 	if expected.transport != tr || !admitted || !validRole {
 		if admitted {
 			welcomeTicket.End()
 		}
-		if welcomeToken.role == attachmentSnatched {
-			d.parkOrDropSnatchedAttachment(welcomeToken)
-		} else {
+		if !d.abortResumeClaim(ac) {
 			d.clientGone(sess, ac, tr, false)
 		}
 		return
 	}
 	if err := ac.sendExpectedTransportForRole(expected, frameWelcome(sess, ac), welcomeTicket); err != nil {
 		welcomeTicket.End()
-		if welcomeToken.role == attachmentSnatched {
-			d.parkOrDropSnatchedAttachment(welcomeToken)
-		} else {
+		if !d.abortResumeClaim(ac) {
+			d.clientGone(sess, ac, tr, false)
+		}
+		return
+	}
+	if !d.commitResumeClaim(ac) {
+		welcomeTicket.End()
+		if !d.abortResumeClaim(ac) {
 			d.clientGone(sess, ac, tr, false)
 		}
 		return
@@ -1150,19 +1133,8 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	if postWelcomeToken.role == attachmentSnatched {
-		if err := d.sendInitialSnatchedPanel(postWelcomeToken, postWelcomeTicket); err != nil {
-			postWelcomeTicket.End()
-			d.parkOrDropSnatchedAttachment(postWelcomeToken)
-			return
-		}
-		postWelcomeTicket.End()
-		d.runConnLoop(ac)
-		_ = tr.Close()
-		return
-	}
 	postWelcomeLease := postWelcomeToken.lease
-	if postWelcomeToken.role != attachmentActive || rc == nil || postWelcomeLease == nil {
+	if postWelcomeToken.role != attachmentActive {
 		postWelcomeTicket.End()
 		d.clientGone(sess, ac, tr, false)
 		return
@@ -1177,10 +1149,10 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		}
 		ac.markSessionMetaSent(meta)
 	}
-	if !rc.markAttachmentReady(postWelcomeLease) {
+	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
 		postWelcomeTicket.End()
-		// The attachment was displaced or detached while Welcome was in flight;
-		// never let this stale handshake emit an Output frame.
+		// The attachment was detached while Welcome was in flight; never let
+		// this stale handshake emit an Output frame.
 		d.clientGone(sess, ac, tr, false)
 		return
 	}

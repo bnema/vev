@@ -48,10 +48,6 @@ type attachmentTransitionRequest struct {
 	preflighted                        bool
 	roleEffectsFrozen                  bool
 	expectedTargetTransportInterrupted bool
-	// activationBarrier is used when promoting an already connected snatched
-	// attachment. Its role gate is deadline-drained before sendMu is acquired,
-	// preserving the gate -> sendMu -> daemon/routing/session publication order.
-	activationBarrier bool
 }
 
 func transitionSourceTokenMatchesRequest(token attachmentRoleToken, source attachmentSession, req attachmentTransitionRequest) bool {
@@ -110,9 +106,7 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 		targetCore = req.target.core()
 	}
 	if sourceCore == nil || req.target != nil && targetCore == nil || req.next == nil || d.closing ||
-		d.sessions[sourceCore.id] != source || req.target != nil && d.sessions[targetCore.id] != req.target ||
-		req.activationBarrier && (req.sourceToken == nil || source != req.target ||
-			req.expectedRole != attachmentSnatched || req.targetRole != attachmentActive) {
+		d.sessions[sourceCore.id] != source || req.target != nil && d.sessions[targetCore.id] != req.target {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
 	if req.target != nil {
@@ -127,12 +121,17 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
 	req.preflighted = true
-	return req, attachmentTransitionParticipants{
-		clients: []*attachedClient{req.next, req.expectedTargetCurrent},
-		interrupts: []roleTransportInterrupt{{
+	participants := attachmentTransitionParticipants{clients: []*attachedClient{req.next}}
+	// A new attachment joins a session; it does not displace or interrupt an
+	// existing attachment. Handoff callers provide sourceToken and retain the
+	// legacy target participant set for their cross-session publication.
+	if req.source != nil || req.action != "" {
+		participants.clients = append(participants.clients, req.expectedTargetCurrent)
+		participants.interrupts = append(participants.interrupts, roleTransportInterrupt{
 			ac: req.expectedTargetCurrent, transport: req.expectedTargetTransport,
-		}},
-	}, nil
+		})
+	}
+	return req, participants, nil
 }
 
 // freezeAttachmentTransition drains the snapshotted participants without any
@@ -142,25 +141,12 @@ func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, par
 	if d.afterRoleEffectParticipantsSnapshotted != nil {
 		d.afterRoleEffectParticipantsSnapshotted(req.action, participants.clients)
 	}
-	var drainDeadline *roleEffectDrainDeadline
-	var drainDone func() <-chan struct{}
-	if req.activationBarrier {
-		drainDeadline = newRoleEffectDrainDeadline(d.clock)
-		drainDone = drainDeadline.Done
-	}
-	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, done: drainDone, afterFrozen: func(ac *attachedClient) {
+	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, afterFrozen: func(ac *attachedClient) {
 		if d.afterRoleEffectGateFrozen != nil {
 			d.afterRoleEffectGateFrozen(req.action, ac)
 		}
 	}}, participants.clients...)
-	if drainDeadline != nil {
-		drainDeadline.stop()
-	}
 	if !frozen.acquired || !frozen.drained {
-		if req.activationBarrier {
-			_ = req.next.closeCapturedTransport(req.expectedTransport.transport)
-			return frozen, false, errSendTimedOut
-		}
 		return frozen, false, errAttachmentTransition
 	}
 	interrupted := frozen.interrupted(req.expectedTargetCurrent, req.expectedTargetTransport)
@@ -191,20 +177,6 @@ func (d *Daemon) publishAttachmentTransition(req attachmentTransitionRequest) (a
 	return d.transitionAttachmentLocked(req)
 }
 
-// prepareActivatedAttachment rebases the first active paint while the caller
-// still owns the activation barrier (and therefore sendMu).
-func (d *Daemon) prepareActivatedAttachment(result *attachmentTransitionResult) {
-	ac := result.published.ac
-	ac.rebaseOutput()
-	ac.captureFrames = nil
-	if sess, ok := localSession(result.published.sess); ok {
-		d.applyHostThemeSendLocked(sess, ac, ac.getClientTheme(), false)
-	}
-	// The first paint still requests a reset, but the old panel dependency chain
-	// has already been rebased atomically under the activation barrier.
-	result.published.rebase = false
-}
-
 func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachmentTransitionResult, error) {
 	req, participants, err := d.snapshotAttachmentTransition(req)
 	if err != nil {
@@ -221,36 +193,19 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	}
 	req.expectedTargetTransportInterrupted = interrupted
 
-	var releaseActivation func()
-	if req.activationBarrier {
-		releaseActivation, err = d.acquireActivationBarrier(*req.sourceToken)
-		if err != nil {
-			return attachmentTransitionResult{}, err
-		}
-		defer func() {
-			if releaseActivation != nil {
-				releaseActivation()
-			}
-		}()
-	}
-
 	result, err := d.publishAttachmentTransition(req)
 	if err != nil {
 		return result, err
-	}
-	if req.activationBarrier && result.published.role == attachmentActive {
-		d.prepareActivatedAttachment(&result)
-	}
-	if releaseActivation != nil {
-		releaseActivation()
-		releaseActivation = nil
-	}
-	if result.published.role == attachmentActive {
-		result.published.ac.clearSnatchedInput()
 	}
 	// Warm-proxy timers are external clock operations. Apply them only after
 	// frozen ownership publication and every architecture lock have completed;
 	// the lifecycle helper revalidates exact registry pointers and clients.
 	d.proxyAttachmentTransitionCommitted(req.source, req.target, req.next, req.preserveRole)
 	return result, nil
+}
+
+func (d *Daemon) deferAttachmentTransitionCleanups(result attachmentTransitionResult) {
+	for _, cleanup := range result.cleanups {
+		d.attachmentCleanupWg.Go(cleanup.finish)
+	}
 }

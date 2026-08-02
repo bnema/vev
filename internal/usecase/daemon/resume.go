@@ -204,10 +204,6 @@ func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
 }
 
 func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
-	return d.parkAttachmentAs(sess, ac, attachmentActive)
-}
-
-func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attachmentRole) bool {
 	if !d.prepareParkAttachment(sess, ac) {
 		return false
 	}
@@ -228,13 +224,6 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 		d.mu.Unlock()
 		return false
 	}
-	if role == attachmentActive {
-		sess.mu.Lock()
-		if sess.client != nil {
-			role = attachmentSnatched
-		}
-		sess.mu.Unlock()
-	}
 	token := ac.resumeToken
 	var (
 		oldRetirement *parkedAttachmentRetirement
@@ -250,7 +239,7 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 	}
 	grace := d.resumeParkGrace
 	timer := d.clock.NewTimer(grace)
-	parked := &parkedAttachment{sess: sess, ac: ac, role: role, pickerGeneration: pickerGeneration, timer: timer, done: make(chan struct{})}
+	parked := &parkedAttachment{sess: sess, ac: ac, pickerGeneration: pickerGeneration, timer: timer, done: make(chan struct{})}
 	ac.parked = true
 	d.parked[token] = parked
 	d.clearParkingInFlightLocked(token, ac)
@@ -279,6 +268,10 @@ func (d *Daemon) parkAttachmentAs(sess *session, ac *attachedClient, role attach
 func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 	d.mu.Lock()
 	if d.parked[token] == parked {
+		if parked.claimed {
+			d.mu.Unlock()
+			return
+		}
 		d.removeParkedLocked(token, parked)
 		d.mu.Unlock()
 		d.closePickerIfCurrent(parked.ac, nil, parked.pickerGeneration)
@@ -308,14 +301,65 @@ func (p *parkedAttachment) closeDone() {
 	p.doneOnce.Do(func() { close(p.done) })
 }
 
-// demoteParkedActiveForSessionLocked preserves resumable predecessors when a
-// new active owner is published. Caller holds d.mu.
-func (d *Daemon) demoteParkedActiveForSessionLocked(sess *session) {
-	for _, parked := range d.parked {
-		if parked.sess == sess && parked.role == attachmentActive {
-			parked.role = attachmentSnatched
-		}
+// commitResumeClaim consumes the old credential only after Welcome has been
+// written successfully. The claim itself is serialized by d.mu, so a racing
+// resume cannot acquire the same parked attachment.
+func (d *Daemon) commitResumeClaim(ac *attachedClient) bool {
+	if d == nil || ac == nil {
+		return false
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	token := ac.resumeClaimToken
+	parked := d.parked[token]
+	if token == 0 || parked == nil || parked.ac != ac || !parked.claimed {
+		return token == 0
+	}
+	delete(d.parked, token)
+	parked.claimed = false
+	if parked.timer != nil {
+		parked.timer.Stop()
+	}
+	parked.closeDone()
+	ac.resumeClaimToken = 0
+	return true
+}
+
+// abortResumeClaim restores a parked credential when the transport could not
+// complete the pre-claim Welcome handshake. It invalidates the claimed link
+// generation before making the credential available to another winner.
+func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
+	if d == nil || ac == nil {
+		return false
+	}
+	d.mu.Lock()
+	token := ac.resumeClaimToken
+	parked := d.parked[token]
+	if token == 0 || parked == nil || parked.ac != ac || !parked.claimed {
+		d.mu.Unlock()
+		return false
+	}
+	parked.claimed = false
+	ac.resumeClaimToken = 0
+	ac.resumeToken = token
+	ac.parked = true
+	ac.roleGeneration.Add(1)
+	sess := parked.sess
+	if sess != nil {
+		sess.mu.Lock()
+		if sess.client == ac {
+			sess.client = nil
+		}
+		sess.unregisterAttachmentLocked(ac)
+		sess.mu.Unlock()
+	}
+	captured := ac.transportSnapshot().transport
+	ac.setSession(nil)
+	d.mu.Unlock()
+	if captured != nil {
+		_ = ac.closeCapturedTransport(ac.revokeTransport(captured))
+	}
+	return true
 }
 
 type parkedAttachmentRetirement struct {
@@ -494,19 +538,29 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 		d.beforeResumeParkedSendMu()
 	}
 	ac.sendMu.Lock()
-	defer ac.sendMu.Unlock()
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.closing {
+		d.mu.Unlock()
+		ac.sendMu.Unlock()
 		return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 	}
-	if d.parked[h.ResumeToken] != parked {
+	if d.parked[h.ResumeToken] != parked || parked.claimed {
 		if d.sessions[parked.sess.id] == parked.sess {
+			d.mu.Unlock()
+			ac.sendMu.Unlock()
 			return nil, nil, false, errResumeTokenLifecycleRace
 		}
+		d.mu.Unlock()
+		ac.sendMu.Unlock()
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
-	return d.resumeParkedLocked(h, tr, sz)
+	sess, resumed, ok, err := d.resumeParkedLocked(h, tr, sz)
+	d.mu.Unlock()
+	ac.sendMu.Unlock()
+	if err != nil && resumed != nil {
+		d.abortResumeClaim(resumed)
+	}
+	return sess, resumed, ok, err
 }
 
 // resumeParkedLocked completes a validated resume. Caller holds both ac.sendMu
@@ -523,13 +577,10 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 		d.log.Warn("resume rejected", "session", sess.name, "registered", false)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
-	sess.mu.Lock()
-	active := sess.client != nil
-	sess.mu.Unlock()
-	if active && parked.role == attachmentActive {
-		parked.role = attachmentSnatched
-	}
 	ac := parked.ac
+	if parked.claimed {
+		return nil, nil, false, errResumeTokenLifecycleRace
+	}
 	if ac.clientID != h.ClientID || ac.proxied != h.Proxied {
 		reason := "client id mismatch"
 		if ac.proxied != h.Proxied {
@@ -538,9 +589,11 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 		d.log.Warn("resume rejected", "session", sess.name, "err", reason)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
-	delete(d.parked, h.ResumeToken)
-	parked.timer.Stop()
-	parked.closeDone()
+	// Claim the attachment while retaining the old credential until Welcome is
+	// accepted. A failed handshake can therefore restore this exact parked
+	// entry; another resume sees claimed and loses atomically.
+	parked.claimed = true
+	ac.resumeClaimToken = h.ResumeToken
 	// The parked attachment has no session owner and cannot paint. Retire the
 	// abandoned transport's output chain before binding the replacement so the
 	// mandatory first paint cannot be blocked by ACKs that died with the link.
@@ -565,14 +618,14 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 		target:            sess,
 		next:              ac,
 		expectedRole:      attachmentDetached,
-		targetRole:        parked.role,
+		targetRole:        attachmentActive,
 		expectedTransport: ac.transportSnapshot(),
 		ready:             false,
 	})
 	ac.sendMu.Lock()
 	d.mu.Lock()
 	if err != nil {
-		return nil, nil, false, &protoErr{ports.ErrInternal, "resume attachment transition failed"}
+		return sess, ac, false, &protoErr{ports.ErrInternal, "resume attachment transition failed"}
 	}
 	d.deferAttachmentTransitionCleanups(transition)
 	d.touchMRU(sess)

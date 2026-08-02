@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -277,42 +276,6 @@ func TestMovePickerSourceClientReplacementInvalidatesAction(t *testing.T) {
 	history := d.notices.history()
 	require.NotEmpty(t, history)
 	require.Equal(t, "Source client is no longer active.", history[0].Message)
-}
-
-func TestMovePickerFinalSourceClosesBeforeSnatchFinalization(t *testing.T) {
-	d, source, follower, destination, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-	follower.replaceTransport(&closeTrackingTransport{})
-	require.NotNil(t, d.attachCoordinator(source, nil, follower, true))
-
-	displacedTransport := &closeTrackingTransport{}
-	displaced := &attachedClient{tr: displacedTransport, output: newOutputStateStream(), size: follower.size}
-	displaced.initOverlays()
-	displaced.setSession(destination)
-	destination.mu.Lock()
-	destination.client = displaced
-	destination.mu.Unlock()
-	require.NotNil(t, d.attachCoordinator(destination, nil, displaced, true))
-
-	var pickerClosed atomic.Bool
-	d.afterDisplacedCleanupStarted = func() {
-		require.False(t, follower.overlays.pickerActive(), "picker must close before snatch finalization")
-		pickerClosed.Store(true)
-	}
-	defer func() { d.afterDisplacedCleanupStarted = nil }()
-
-	require.NoError(t, d.enterPickerForIntent(source, follower, pickerMovePane, moveSourceLocator{
-		Session: moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name},
-		TabID:   "source-tab", PaneID: "source-pane",
-	}))
-	d.handlePickerInput(follower, []byte("\r"))
-	d.attachmentCleanupWg.Wait()
-
-	require.True(t, pickerClosed.Load())
-	require.False(t, follower.overlays.pickerActive())
-	frames := displacedTransport.Sends()
-	require.NotEmpty(t, frames)
-	require.Equal(t, ports.MsgOutput, frames[0].Type)
 }
 
 func TestMovePickerRefreshCloseKeepsReplacementPicker(t *testing.T) {

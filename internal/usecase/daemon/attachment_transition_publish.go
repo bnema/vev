@@ -141,7 +141,14 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 
 	var targetCoordinator *renderCoordinator
 	if req.targetRole == attachmentActive {
-		targetCoordinator = d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
+		// The coordinator remains session-owned while attachments join the
+		// session. Only the first attachment claims its primary render lease;
+		// later attachments must not replace or invalidate it.
+		if targetCore.client == nil {
+			targetCoordinator = d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
+		} else {
+			targetCoordinator = targetCore.coordinator.Load()
+		}
 	}
 	sourceCoordinator := sourceCore.coordinator.Load()
 	if attachmentSessionRoleLocked(source, req.next) != req.expectedRole ||
@@ -160,7 +167,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	}
 	invalid := req.sourceToken != nil && (!transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) ||
 		!transitionSourceTabCurrentForRequestLocked(source, req.expectedSourceTab, req.transferExpectedSourceTab))
-	invalid = invalid || targetCoordinator != nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next)
+	invalid = invalid || targetCoordinator != nil && old == nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next)
 	invalid = invalid || req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
 		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next)
 	invalid = invalid || !attachmentLifecycleCurrentLocked(req.target, req.expectedTargetLifecycle)
@@ -176,11 +183,6 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 // part of the same locked publication. It reports role-preserving transitions.
 func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool {
 	req := publication.req
-	if req.targetRole == attachmentActive {
-		if target, ok := localSession(req.target); ok {
-			d.demoteParkedActiveForSessionLocked(target)
-		}
-	}
 	if req.copySourceEnvironment {
 		source, sourceOK := localSession(publication.source)
 		target, targetOK := localSession(req.target)
@@ -202,43 +204,24 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	registerAttachmentSessionLocked(publication.source, req.next)
 	registerAttachmentSessionLocked(req.target, req.next)
 	if publication.old != nil && publication.old != req.next {
+		// Existing attachments remain registered and retain their transport and
+		// generation. A new attach is a collection insertion, never a
+		// replacement handoff.
 		registerAttachmentSessionLocked(req.target, publication.old)
 	}
-	if req.targetRole == attachmentActive && publication.old != nil && publication.old != req.next {
-		publication.displacedTransport = publication.old.transportSnapshot()
-		// A proxied daemon attachment has no local snatched UI and must never
-		// linger in that role. Replacing it is terminal so its owning local proxy
-		// receives ReasonReplaced and cannot kick the direct user back later.
-		publication.terminalDisplaced = publication.old.proxied
+	if publication.source != req.target && publication.source.core().client == req.next {
+		publication.source.core().client = nil
 	}
-	if publication.source != req.target {
-		if publication.source.core().client == req.next {
-			publication.source.core().client = nil
-		}
-		delete(publication.source.core().snatched, req.next)
-	}
+	delete(publication.source.core().snatched, req.next)
 	if req.targetRole == attachmentActive {
 		delete(req.target.core().snatched, req.next)
-		if publication.old != nil && publication.old != req.next {
-			if publication.terminalDisplaced {
-				delete(req.target.core().snatched, publication.old)
-				req.target.core().unregisterAttachmentLocked(publication.old)
-			} else {
-				addSnatchedLocked(req.target, publication.old)
-			}
+		if req.target.core().client == nil {
+			req.target.core().client = req.next
 		}
-		req.target.core().client = req.next
 	} else {
 		addSnatchedLocked(req.target, req.next)
 	}
 	publication.nextGeneration = req.next.roleGeneration.Add(1)
-	if publication.old != nil && publication.old != req.next && req.targetRole == attachmentActive {
-		publication.displacedGeneration = publication.old.roleGeneration.Add(1)
-		if publication.terminalDisplaced {
-			publication.old.setSession(nil)
-			publication.old.invalidateFrozenRoleCapability()
-		}
-	}
 	req.next.setSession(req.target)
 }
 
@@ -251,7 +234,7 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 		result.cleanups = append(result.cleanups, publication.sourceCoordinator.beginDetachLocked(req.next))
 	}
 	var lease *attachmentLease
-	if publication.targetCoordinator != nil {
+	if publication.targetCoordinator != nil && publication.old == nil {
 		var cleanup renderLifecycleCleanup
 		cleanup, lease = publication.targetCoordinator.beginReplaceLocked(publication.old, req.next, req.ready)
 		result.cleanups = append(result.cleanups, cleanup)

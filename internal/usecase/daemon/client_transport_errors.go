@@ -64,6 +64,12 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	}
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
+		sess.mu.Lock()
+		primary := sess.client
+		sess.mu.Unlock()
+		if primary != nil {
+			d.attachCoordinator(sess, ac, primary, true)
+		}
 	}
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral

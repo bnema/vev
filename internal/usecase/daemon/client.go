@@ -50,7 +50,11 @@ type attachedClient struct {
 	roleEffects    roleEffectGate
 	resumeCapable  bool
 	resumeToken    uint64
-	parked         bool
+	// resumeClaimToken is non-zero only between a parked resume claim and its
+	// successful Welcome. It lets a failed pre-claim handshake restore the old
+	// credential instead of consuming it.
+	resumeClaimToken uint64
+	parked           bool
 	// proxied is negotiated once by Hello and remains immutable for this
 	// attachment, including across transport resume.
 	proxied bool
@@ -75,14 +79,8 @@ type attachedClient struct {
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
-	// initialSnatchedMu elects exactly one reset-panel sender per role generation.
-	// A Welcome handshake and displaced-client cleanup may both discover the
-	// same post-transition snatched role; the loser waits for the elected send.
-	initialSnatchedMu         sync.Mutex
-	initialSnatchedGeneration uint64
-	initialSnatchedAttempt    *initialSnatchedPanelAttempt
-	size                      domain.Size
-	keys                      *keys.Router
+	size          domain.Size
+	keys          *keys.Router
 	// view is attachment-local navigation state. It is never inferred from a
 	// session-wide active tab, so multiple attachments can observe different
 	// tabs and panes without changing shared session ownership.
@@ -98,15 +96,8 @@ type attachedClient struct {
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[attachmentSession]
-	// snatchedInputMu serializes the restricted input parser with its delayed
-	// standalone-ESC callback. It is independent of routing and transport locks;
-	// role activation and terminal close clear it only after releasing those locks.
-	snatchedInputMu      sync.Mutex
-	snatchedInputPending []byte
-	snatchedInputDrain   bool
-	snatchedInputESC     pendingByteTimer
-	linkMu               sync.Mutex
-	sendMu               sync.Mutex
+	linkMu          sync.Mutex
+	sendMu          sync.Mutex
 }
 
 type cursorOut struct {
@@ -261,7 +252,6 @@ func (ac *attachedClient) revokeTransport(tr ports.Transport) ports.Transport {
 	ac.tr = nil
 	ac.transportIncarnation++
 	ac.linkMu.Unlock()
-	ac.clearSnatchedInput()
 	return tr
 }
 
