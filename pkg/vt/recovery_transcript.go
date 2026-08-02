@@ -27,9 +27,9 @@ func (s *Screen) RecoveryTranscriptSnapshot() RecoveryTranscriptSnapshot {
 		buffers = []*buffer{s.alternate.buffer, s.buffer}
 	}
 
-	nextRowID := s.nextRowID + 1
-	if nextRowID == 0 {
-		nextRowID = ^RowID(0)
+	nextRowID := s.nextRowID
+	if nextRowID < ^RowID(0) {
+		nextRowID++
 	}
 	snapshot := RecoveryTranscriptSnapshot{segments: make([]recoveryTranscriptSegment, 0, len(buffers)), nextRowID: nextRowID}
 	for _, b := range buffers {

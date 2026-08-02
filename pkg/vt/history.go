@@ -3,6 +3,7 @@ package vt
 import (
 	"errors"
 	"math"
+	"slices"
 
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -107,7 +108,11 @@ func (h *History) Append(row []renderer.Cell, bound LineBound, ids ...RowID) err
 		id = ids[0]
 	}
 	if id == 0 || h.hasRowID(id) {
-		id = h.allocateRowID()
+		var err error
+		id, err = h.allocateRowID()
+		if err != nil {
+			return err
+		}
 	}
 	return h.appendRow(row, bound, id)
 }
@@ -118,17 +123,20 @@ func (h *History) appendRestored(row []renderer.Cell, bound LineBound, id RowID)
 	if h == nil || h.maxRows == 0 {
 		return nil
 	}
-	if id == 0 || id == ^RowID(0) || h.hasRowID(id) {
+	if id == 0 || id >= ^RowID(0)-1 || h.hasRowID(id) {
 		return errInvalidHistoryRowID
 	}
 	return h.appendRow(row, bound, id)
 }
 
 func (h *History) appendRow(row []renderer.Cell, bound LineBound, id RowID) error {
+	if h.nextRowID == ^RowID(0) {
+		return errInvalidHistoryRowID
+	}
 	if len(row) > h.maxCells {
 		return ErrHistoryRowTooWide
 	}
-	if id == ^RowID(0) {
+	if id >= ^RowID(0)-1 {
 		return errInvalidHistoryRowID
 	}
 	if id >= h.nextRowID {
@@ -148,38 +156,31 @@ func (h *History) appendRow(row []renderer.Cell, bound LineBound, id RowID) erro
 	return nil
 }
 
-func (h *History) allocateRowID() RowID {
+func (h *History) allocateRowID() (RowID, error) {
 	if h.nextRowID == 0 {
 		h.nextRowID = 1
 	}
 	for h.hasRowID(h.nextRowID) {
-		if h.nextRowID == ^RowID(0) {
-			panic("vt: history row ID space exhausted")
+		if h.nextRowID >= ^RowID(0)-1 {
+			return 0, errInvalidHistoryRowID
 		}
 		h.nextRowID++
 	}
 	id := h.nextRowID
-	if h.nextRowID == ^RowID(0) {
-		panic("vt: history row ID space exhausted")
+	if h.nextRowID >= ^RowID(0)-1 {
+		return 0, errInvalidHistoryRowID
 	}
 	h.nextRowID++
-	return id
+	return id, nil
 }
 
 func (h *History) hasRowID(id RowID) bool {
 	for _, chunk := range h.chunks {
-		for _, candidate := range chunk.rowIDs {
-			if candidate == id {
-				return true
-			}
-		}
-	}
-	for _, candidate := range h.tailIDs {
-		if candidate == id {
+		if slices.Contains(chunk.rowIDs, id) {
 			return true
 		}
 	}
-	return false
+	return slices.Contains(h.tailIDs, id)
 }
 
 // clampBound keeps End inside the row it describes so a persisted bound can be
@@ -204,6 +205,12 @@ func growRowIDs(ids []RowID, rows int) []RowID {
 	if len(ids) == rows {
 		return ids
 	}
+	out := make([]RowID, rows)
+	copy(out, ids)
+	return out
+}
+
+func cloneRowIDs(ids []RowID, rows int) []RowID {
 	out := make([]RowID, rows)
 	copy(out, ids)
 	return out
@@ -307,12 +314,13 @@ func (h *History) View() HistoryView {
 	if h.rows == 0 {
 		return HistoryView{nextRowID: h.nextRowID}
 	}
-	chunks := append([]*HistoryChunk(nil), h.chunks...)
+	chunks := make([]*HistoryChunk, len(h.chunks), len(h.chunks)+1)
+	copy(chunks, h.chunks)
 	if len(h.tail) > 0 {
 		chunks = append(chunks, &HistoryChunk{
 			rows:   cloneHistoryRows(h.tail),
 			bounds: append([]LineBound(nil), growBounds(h.tailBounds, len(h.tail))...),
-			rowIDs: growRowIDs(h.tailIDs, len(h.tail)),
+			rowIDs: cloneRowIDs(h.tailIDs, len(h.tail)),
 		})
 	}
 	return HistoryView{chunks: chunks, rows: h.rows, cells: h.cells, nextRowID: h.nextRowID}
@@ -331,7 +339,7 @@ func (h *History) SnapshotView() HistorySnapshotView {
 		chunks:     append([]*HistoryChunk(nil), h.chunks...),
 		tail:       cloneHistoryRows(h.tail),
 		tailBounds: append([]LineBound(nil), growBounds(h.tailBounds, len(h.tail))...),
-		tailIDs:    growRowIDs(h.tailIDs, len(h.tail)),
+		tailIDs:    cloneRowIDs(h.tailIDs, len(h.tail)),
 		rows:       h.rows,
 		cells:      h.cells,
 		nextRowID:  h.nextRowID,

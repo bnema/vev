@@ -53,7 +53,7 @@ func MarshalHistory(view HistoryView) ([]byte, error) {
 				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 			}
 			id := chunk.rowIDs[i]
-			if id == 0 || id == ^RowID(0) {
+			if id == 0 || id >= ^RowID(0)-1 {
 				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 			}
 			if _, duplicate := seen[id]; duplicate {
@@ -109,7 +109,7 @@ func historyViewNextRowID(view HistoryView) (RowID, bool) {
 			return 0, false
 		}
 		for _, id := range chunk.rowIDs {
-			if id == 0 || id == ^RowID(0) {
+			if id == 0 || id >= ^RowID(0)-1 {
 				return 0, false
 			}
 			if _, duplicate := seen[id]; duplicate {
@@ -285,7 +285,7 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 		}
 		for range rowCount {
 			id, ok := p.uint64()
-			if !ok || id == 0 || id == ^uint64(0) {
+			if !ok || id == 0 || id >= uint64(^RowID(0)-1) {
 				return HistoryView{}, historyDecodeStats{}, false
 			}
 			rowID := RowID(id)

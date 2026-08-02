@@ -43,11 +43,15 @@ func (s *Screen) Snapshot() ScreenSnapshot {
 	}
 	cursorStyle, cursorStyleSet := s.CursorStyle()
 	mouseTracking, mouseSGR := s.MouseMode()
+	nextRowID := s.nextRowID
+	if nextRowID < ^RowID(0) {
+		nextRowID++
+	}
 	return ScreenSnapshot{
 		frame:     s.Frame.Clone(),
 		bounds:    s.LineBounds(),
 		rowIDs:    s.RowIDs(),
-		nextRowID: s.nextRowID + 1,
+		nextRowID: nextRowID,
 		cursor: CursorSnapshot{
 			Row:      s.CursorRow(),
 			Col:      s.CursorCol(),

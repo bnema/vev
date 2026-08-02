@@ -5,7 +5,7 @@ package vt
 type RowID uint64
 
 func (s *Screen) nextRowIDValue() RowID {
-	if s.nextRowID == ^RowID(0) {
+	if s.nextRowID >= ^RowID(0)-1 {
 		panic("vt: row ID space exhausted")
 	}
 	s.nextRowID++

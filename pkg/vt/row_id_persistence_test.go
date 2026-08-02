@@ -24,6 +24,7 @@ func TestHistoryCodecRejectsMalformedRowIDsAndCounters(t *testing.T) {
 		{name: "zero row ID", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[firstIDOffset:], 0) }},
 		{name: "duplicate row ID", mutate: func(data []byte) { copy(data[secondIDOffset:secondIDOffset+8], data[firstIDOffset:firstIDOffset+8]) }},
 		{name: "counter does not exceed IDs", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[9:17], 2) }},
+		{name: "max counter", mutate: func(data []byte) { binary.BigEndian.PutUint64(data[9:17], ^uint64(0)) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			data := append([]byte(nil), encoded...)
@@ -34,6 +35,12 @@ func TestHistoryCodecRejectsMalformedRowIDsAndCounters(t *testing.T) {
 			require.Error(t, preflightErr)
 		})
 	}
+}
+
+func TestHistoryAppendRejectsExhaustedRowIDCounter(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: 1, ChunkRows: 1})
+	history.nextRowID = ^RowID(0)
+	require.Error(t, history.Append(historyRow("row"), LineBound{End: 3}))
 }
 
 func TestHistoryCodecRejectsMissingRowIDsOnMarshal(t *testing.T) {
@@ -66,6 +73,27 @@ func TestRestoredScreenAllocatesAbovePersistedRowIDs(t *testing.T) {
 	before := screen.RowID(0)
 	screen.Write([]byte("\x1b[2J"))
 	require.Greater(t, screen.RowID(0), before)
+}
+
+func TestHistoryRestoreRejectsDuplicateIDsAcrossEvictedHistoryAndTranscript(t *testing.T) {
+	sealedView := HistoryView{
+		chunks:    []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("old")}, bounds: []LineBound{{End: 3}}, rowIDs: []RowID{7}}},
+		rows:      1,
+		nextRowID: 8,
+	}
+	sealed, err := MarshalHistoryChunk(sealedView.Chunk(0))
+	require.NoError(t, err)
+	tail, err := MarshalEmptyHistoryTail()
+	require.NoError(t, err)
+	transcript, err := MarshalHistory(HistoryView{
+		chunks:    []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("live")}, bounds: []LineBound{{End: 4}}, rowIDs: []RowID{7}}},
+		rows:      1,
+		nextRowID: 8,
+	})
+	require.NoError(t, err)
+
+	_, err = NewScreenWithRecoveryTranscript(4, 1, HistoryConfig{MaxRows: 1, ChunkRows: 1}, [][]byte{sealed}, tail, transcript)
+	require.Error(t, err)
 }
 
 func TestHistoryRestoreRejectsDuplicateIDsAcrossBlobs(t *testing.T) {

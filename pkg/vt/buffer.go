@@ -260,7 +260,7 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]ren
 	}
 
 	points := b.cursorReflowPoints(active, saved)
-	rows := b.layoutReflow(width, &points, nil, 0, nil, nil)
+	rows := b.layoutReflow(width, &points, nil, 0, nil, nil, nil, nil)
 	anchor := 0
 	if active != nil {
 		anchor = points[0].row
@@ -283,7 +283,7 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]ren
 			evicted[y] = evictedCells[y*width : (y+1)*width]
 		}
 	}
-	b.layoutReflow(width, &points, next, shift, evictedCells, evictedBounds)
+	b.layoutReflow(width, &points, next, shift, b.rowIDs, evictedCells, evictedBounds, evictedIDs)
 	for i, cur := range [2]*bufferCursor{active, saved} {
 		if cur != nil {
 			cur.row = clamp(points[i].row-shift, 0, height-1)
@@ -297,8 +297,21 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]ren
 // layoutReflow maps source offsets and, when dst is non-nil, emits only rows in
 // [shift, shift+dst.height). Rows before shift are written straight into the
 // contiguous eviction backing store. The return is the logical output height.
-func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, shift int, evicted []renderer.Cell, evictedBounds []LineBound) int {
+func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, shift int, sourceIDs []RowID, evicted []renderer.Cell, evictedBounds []LineBound, evictedIDs []RowID) int {
 	row, col := 0, 0
+	setRowID := func(outputRow int, id RowID) {
+		if id == 0 {
+			return
+		}
+		switch {
+		case outputRow < shift:
+			if outputRow < len(evictedIDs) {
+				evictedIDs[outputRow] = id
+			}
+		case dst != nil && outputRow < shift+dst.frame.Height:
+			dst.rowIDs[outputRow-shift] = id
+		}
+	}
 	blankEvicted := func(outputRow int) []renderer.Cell {
 		if outputRow < shift {
 			out := evicted[outputRow*width : (outputRow+1)*width]
@@ -356,6 +369,16 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 		}
 		reflow := end > start
 		offset := 0
+		sourceID := RowID(0)
+		if start < len(sourceIDs) {
+			sourceID = sourceIDs[start]
+		}
+		// A source row that starts in a partially filled output row has already
+		// inherited that row's identity. Continuation rows created by wrapping
+		// receive fresh IDs from the owning Screen after this pass.
+		if col == 0 {
+			setRowID(row, sourceID)
+		}
 		truncated := false
 		for y := start; y <= end && !truncated; y++ {
 			cells := b.frame.Row(y)

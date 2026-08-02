@@ -25,13 +25,27 @@ type Snapshot struct {
 }
 
 func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, rowIDs ...[]vt.RowID) Snapshot {
-	var history vt.HistoryView
-	if historySource != nil {
-		history = historySource.SealAndView()
-	}
 	var screenRowIDs []vt.RowID
 	if len(rowIDs) > 0 {
 		screenRowIDs = append([]vt.RowID(nil), rowIDs[0]...)
+	}
+	return newSnapshot(historySource, screen, bounds, screenRowIDs)
+}
+
+// NewSnapshotFromScreen captures a screen while its owner holds the Screen
+// lock. Screen.RowIDs already returns owned storage, so the snapshot can take
+// that copy directly without allocating a duplicate metadata slice.
+func NewSnapshotFromScreen(historySource *vt.History, screen *vt.Screen) Snapshot {
+	if screen == nil {
+		return NewSnapshot(historySource, renderer.Frame{}, nil)
+	}
+	return newSnapshot(historySource, screen.Frame, screen.LineBounds(), screen.RowIDs())
+}
+
+func newSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, screenRowIDs []vt.RowID) Snapshot {
+	var history vt.HistoryView
+	if historySource != nil {
+		history = historySource.SealAndView()
 	}
 	return Snapshot{
 		history:      history,

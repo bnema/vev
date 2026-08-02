@@ -71,6 +71,27 @@ func TestScreenRowIDsRefreshOnClearResetAndAlternateClone(t *testing.T) {
 	}
 }
 
+func TestResizeReflowCarriesSourceRowIDsIntoHistoryAndViewport(t *testing.T) {
+	b := newBuffer(8, 3)
+	copy(b.frame.Row(0), historyRow("abcdefgh"))
+	copy(b.frame.Row(1), historyRow("ijkl"))
+	copy(b.frame.Row(2), historyRow("mnop"))
+	b.boundaries[0] = LineBound{End: 8, Soft: true}
+	b.boundaries[1] = LineBound{End: 4}
+	b.boundaries[2] = LineBound{End: 4}
+	b.rowIDs = []RowID{11, 12, 13}
+
+	active := &bufferCursor{row: 2, col: 4}
+	evicted, bounds, ids := b.resize(4, 2, active, nil)
+
+	if len(evicted) != 2 || bounds[0].End != 4 || ids[0] != 11 || ids[1] != 0 {
+		t.Fatalf("reflow eviction = rows=%d bound=%v IDs=%v, want two rows with source ID 11 then a generated ID", len(evicted), bounds, ids)
+	}
+	if got, want := b.rowIDs, []RowID{0, 13}; got[1] != want[1] || len(got) != len(want) {
+		t.Fatalf("reflow viewport IDs = %v, want generated continuation then source ID %d", got, want[1])
+	}
+}
+
 func TestHistoryRowIDsRemainStableAcrossViewsAndEviction(t *testing.T) {
 	h := NewHistory(HistoryConfig{MaxRows: 3, ChunkRows: 2})
 	for i, text := range []string{"one", "two"} {
