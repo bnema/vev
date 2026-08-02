@@ -632,16 +632,16 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 			}
 		},
 		ackReady: func() bool {
-			entry.core().mu.Lock()
-			attached := entry.core().client
-			entry.core().mu.Unlock()
-			if attached == nil {
-				return false
+			attachments := snapshotAttachmentSession(entry)
+			for _, attached := range attachments {
+				attached.sendMu.Lock()
+				ready := attached.output == nil || !attached.output.atCapacity()
+				attached.sendMu.Unlock()
+				if ready {
+					return true
+				}
 			}
-			attached.sendMu.Lock()
-			ready := attached.output == nil || !attached.output.atCapacity()
-			attached.sendMu.Unlock()
-			return ready
+			return false
 		},
 	})
 	installAttachmentRenderCoordinator(entry, rc)
@@ -655,10 +655,10 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 // next client (with a different terminal theme) may never have reported.
 // Mirrors attachClient's reset loop: snapshot sess.tabs under sess.mu,
 // release it, then take each tb.mu in turn — never holding sess.mu and
-// tb.mu together. Guarded against a race with a newer attach: if sess.client
-// is non-nil by the time sess.mu is taken, a new client has already attached
-// (and run its own attach-time reset), so this call must leave the tabs
-// alone rather than clobbering that client's freshly applied colors.
+// tb.mu together. Guarded against a race with a newer attachment: if the
+// session has gained an attachment by the time sess.mu is taken, that
+// attachment has already run its attach-time reset, so this call must leave
+// the tabs alone rather than clobbering freshly applied colors.
 func (d *Daemon) resetScreenDefaultColors(sess *session) {
 	d.applyHostTheme(sess, nil, themeui.Theme{}, true)
 }
@@ -718,7 +718,7 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 	// Drained before the early return below so a session without an active tab
 	// cannot swallow the queue.
 	d.drainPendingForFirstPaint(sess, ac)
-	tb := sess.activeTab()
+	tb := sess.tabForAttachmentOrActive(ac)
 	if tb == nil {
 		return
 	}
@@ -800,8 +800,8 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 
 // handleClientNotice maps the closed client-event enum to daemon-owned notice
 // content. routingMu makes ownership validation and toast mutation one atomic
-// attachment-routing operation: replacement also takes routingMu before
-// publishing sess.client. Never retain sess.mu while touching notice or overlay
+// attachment-routing operation: attachment publication also takes routingMu
+// before changing membership. Never retain sess.mu while touching notice or overlay
 // state, and retain the routingMu -> sess.mu order used by attachment paths.
 func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) {
 	if sess == nil || ac == nil {
@@ -846,7 +846,7 @@ func (d *Daemon) handleClientNoticeForRole(token attachmentRoleToken, notice por
 func (d *Daemon) handleClientNoticeDirect(sess *session, ac *attachedClient, notice ports.ClientNotice) {
 	d.notices.routingMu.Lock()
 	sess.mu.Lock()
-	current := sess.client == ac
+	_, current := sess.attachments[ac]
 	sess.mu.Unlock()
 	if !current {
 		d.notices.routingMu.Unlock()

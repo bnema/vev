@@ -84,13 +84,17 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	p.unlockDispatch()
 	p.reservation.Release()
 
-	if p.sourceTabWasActive && !moveSessionRetired(d, p.source) {
-		d.activateTab(p.source, p.source.activeTab())
+	// Repair attachment-local stable targets after shared topology publication
+	// and after the move dispatch locks have been released.
+	p.source.repairAttachmentViews()
+	if p.destination != p.source {
+		p.destination.repairAttachmentViews()
 	}
+
 	if !moveSessionRetired(d, p.source) {
 		sourceLayoutTab := p.sourceTab
 		if p.sourceTabRemoved {
-			sourceLayoutTab = p.source.activeTab()
+			sourceLayoutTab = p.source.tabForAttachmentOrActive(nil)
 		}
 		if sourceLayoutTab != nil && sourceLayoutTab != p.destinationTab {
 			d.applyTabLayout(p.source, sourceLayoutTab)
@@ -103,10 +107,10 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	if p.destinationMetadataValid {
 		d.markCatalogueDirty(p.destinationMetadata)
 	}
-	if p.destinationClient != nil && sessionClientIs(p.destination, p.destinationClient) && destinationTabIsActive(p.destination, p.destinationTab) {
-		d.invalidateRender(p.destination, p.destinationClient, true, "move.go")
+	for _, ac := range p.destination.snapshotAttachments() {
+		d.invalidateRender(p.destination, ac, true, "move.go")
 	}
-	if p.sourceCleanupToken.ac != nil && !p.sourceEmpty && p.sourceTabWasActive && sessionClientIs(p.source, p.sourceCleanupToken.ac) {
+	if p.sourceCleanupToken.ac != nil && !p.sourceEmpty && sessionClientIs(p.source, p.sourceCleanupToken.ac) {
 		d.invalidateRender(p.source, p.sourceCleanupToken.ac, true, "move.go")
 	}
 	if p.handoffResult.published.ac != nil {
@@ -146,20 +150,18 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 // were not transferred. It runs inside the move commit, after the moved pane
 // has already acquired its destination owner, and performs no external work.
 func retireEmptyMoveSessionLocked(sess *session, retirement frozenMoveAttachmentRetirement) []detachedAttachmentSnapshot {
-	if sess == nil || sess.client != nil {
+	if sess == nil || len(sess.attachments) != 0 {
 		return nil
 	}
 	retired := make([]detachedAttachmentSnapshot, 0, len(retirement.clients))
 	for _, ac := range retirement.clients {
 		retired = append(retired, detachedAttachmentSnapshot{ac: ac, transport: ac.transportSnapshot()})
-		delete(sess.snatched, ac)
 		sess.unregisterAttachmentLocked(ac)
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenRoleCapability()
 	}
 	sess.tabs = nil
-	sess.active = -1
 	return retired
 }
 
@@ -173,22 +175,14 @@ func moveSessionRetired(d *Daemon, sess *session) bool {
 	return !live
 }
 
-func destinationTabIsActive(sess *session, target *tab) bool {
-	if sess == nil || target == nil {
-		return false
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	return sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == target
-}
-
 func sessionClientIs(sess *session, client *attachedClient) bool {
 	if sess == nil || client == nil {
 		return false
 	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	return sess.client == client
+	_, ok := sess.attachments[client]
+	return ok
 }
 
 // retireEmptySessionAfterMove completes only source-owned lifecycle work. The

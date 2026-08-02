@@ -186,7 +186,6 @@ func (s *session) containsStableIDs(tabID, paneID string) bool {
 func resolveControlTarget(sess *session, kind command.TargetKind, request ports.CommandRequest) (*tab, *pane, uint16, string) {
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
-	active := sess.active
 	sess.mu.Unlock()
 	if request.Self {
 		for _, tb := range tabs {
@@ -204,10 +203,10 @@ func resolveControlTarget(sess *session, kind command.TargetKind, request ports.
 		}
 		return nil, nil, ports.ErrNoSuchTarget, "no such target tab"
 	}
-	if len(tabs) == 0 || active < 0 || active >= len(tabs) {
-		return nil, nil, ports.ErrNoSuchTarget, "target session has no active tab"
+	if len(tabs) == 0 {
+		return nil, nil, ports.ErrNoSuchTarget, "target session has no tabs"
 	}
-	tb := tabs[active]
+	tb := tabs[0]
 	if kind != command.TargetPane {
 		return tb, nil, 0, ""
 	}
@@ -249,9 +248,10 @@ const (
 )
 
 type daemonActionTarget struct {
-	session *session
-	tab     *tab
-	pane    *pane
+	session    *session
+	attachment *attachedClient
+	tab        *tab
+	pane       *pane
 }
 
 type daemonActionRequest struct {
@@ -283,7 +283,7 @@ func resolveDaemonActionTargetForAttachment(sess *session, ac *attachedClient) d
 	tb.mu.Lock()
 	pane := tb.focusedPane()
 	tb.mu.Unlock()
-	return daemonActionTarget{session: sess, tab: tb, pane: pane}
+	return daemonActionTarget{session: sess, attachment: ac, tab: tb, pane: pane}
 }
 
 // daemonActions is the daemon-owned mutation seam shared by palette and
@@ -322,9 +322,9 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		_, err := a.d.focusDirAt(target.session, target.tab, target.pane, request.direction)
 		return err
 	case daemonActionNextTab:
-		return a.switchRelative(target.session, 1)
+		return a.switchRelative(target.session, target.attachment, 1)
 	case daemonActionPreviousTab:
-		return a.switchRelative(target.session, -1)
+		return a.switchRelative(target.session, target.attachment, -1)
 	case daemonActionRenameSession:
 		return a.d.renameSession(target.session, request.name)
 	case daemonActionRenameTab:
@@ -363,9 +363,9 @@ func (d *Daemon) hasDaemonActionPaneTarget(target daemonActionTarget) bool {
 		target.tab.tree != nil && layout.ContainsLeaf(target.tab.tree.Root, target.pane.id)
 }
 
-func (a daemonActions) switchRelative(sess *session, delta int) error {
-	if sess.switchRelative(delta) {
-		a.d.activateTab(sess, sess.activeTab())
+func (a daemonActions) switchRelative(sess *session, ac *attachedClient, delta int) error {
+	if sess.switchAttachmentRelative(ac, delta) {
+		a.d.activateTabAfterResizeForLease(sess, sess.tabForAttachmentOrActive(ac), false, ac, nil)
 	}
 	return nil
 }
@@ -398,10 +398,7 @@ func (e controlExec) runAction(request daemonActionRequest) error {
 		return err
 	}
 	if e.actions == nil {
-		e.sess.mu.Lock()
-		ac := e.sess.client
-		e.sess.mu.Unlock()
-		finishDaemonActionForClient(e.d, request, ac, "control.go")
+		finishDaemonActionForClient(e.d, request, request.target.attachment, "control.go")
 	}
 	return nil
 }
@@ -455,6 +452,7 @@ func (e controlExec) MovePane(destinationSession, destinationTabID string) error
 		return errMovePaneInvalid
 	}
 	return e.d.movePane(movePaneRequest{
+		Client:           e.target.attachment,
 		Source:           sessionMoveLocator(e.sess),
 		SourceTabID:      domain.TabStableID(e.tab.stableID),
 		SourcePaneID:     domain.PaneStableID(e.target.pane.stableID),
@@ -472,6 +470,7 @@ func (e controlExec) MoveTab(destinationSession string) error {
 		return errMovePaneInvalid
 	}
 	return e.d.moveTab(moveTabRequest{
+		Client:      e.target.attachment,
 		Source:      sessionMoveLocator(e.sess),
 		SourceTabID: domain.TabStableID(e.tab.stableID),
 		Destination: sessionMoveLocator(destination),
@@ -661,8 +660,8 @@ func (e controlExec) ListTabs(asJSON bool) (string, error) {
 	}
 	e.sess.mu.Lock()
 	tabs := append([]*tab(nil), e.sess.tabs...)
-	active := e.sess.active
 	e.sess.mu.Unlock()
+	active, _ := e.sess.tabIndexForAttachment(e.target.attachment)
 	rows := make([]row, 0, len(tabs))
 	for i, tb := range tabs {
 		tb.mu.Lock()
@@ -690,7 +689,7 @@ func (e controlExec) ListPanes(asJSON bool) (string, error) {
 	}
 	tb := e.tab
 	if tb == nil {
-		tb = e.sess.activeTab()
+		tb = e.sess.tabForAttachmentOrActive(e.target.attachment)
 	}
 	if tb == nil {
 		return "", errors.New("target session has no active tab")

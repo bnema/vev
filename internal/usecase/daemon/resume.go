@@ -37,8 +37,8 @@ func (d *Daemon) nextResumeTokenLocked() uint64 {
 // can wait out the detach→park gap. Callers must publish this before clearing
 // the live seat so resume never observes both registries empty for a still-valid
 // credential. Under d.mu then sess.mu it advertises only when the daemon still
-// registers the exact session and ac is still the exact active or snatched
-// owner; otherwise it returns 0 and never creates a marker after terminal
+// registers the exact session and ac remains a registered attachment; otherwise
+// it returns 0 and never creates a marker after terminal
 // cleanup. Returns the resume token, or 0 when parking cannot be advertised.
 func (d *Daemon) markParkingInFlight(sess *session, ac *attachedClient) uint64 {
 	if sess == nil || ac == nil || !ac.resumeCapable {
@@ -50,10 +50,9 @@ func (d *Daemon) markParkingInFlight(sess *session, ac *attachedClient) uint64 {
 		return 0
 	}
 	sess.mu.Lock()
-	role := sess.attachmentRoleLocked(ac)
-	owner := role == attachmentActive || role == attachmentSnatched
+	registered := attachmentRegisteredLocked(sess, ac)
 	sess.mu.Unlock()
-	if !owner {
+	if !registered {
 		return 0
 	}
 	if ac.resumeToken == 0 {
@@ -96,8 +95,8 @@ func (d *Daemon) clearParkingInFlight(token uint64, ac *attachedClient) {
 }
 
 // clearParkingInFlightIfAbandoned drops a pre-detach parking marker when this
-// teardown lost the seat while still the live owner (stale transport fence for
-// active or snatched). If another path already detached/unrouted, that path
+// teardown lost the seat while still the live owner (stale transport fence).
+// If another path already detached/unrouted, that path
 // owns park publication.
 func (d *Daemon) clearParkingInFlightIfAbandoned(sess *session, ac *attachedClient, token uint64) {
 	if token == 0 || ac == nil {
@@ -347,9 +346,6 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	sess := parked.sess
 	if sess != nil {
 		sess.mu.Lock()
-		if sess.client == ac {
-			sess.client = nil
-		}
 		sess.unregisterAttachmentLocked(ac)
 		sess.mu.Unlock()
 	}
@@ -442,11 +438,11 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 	)
 	if sess != nil {
 		sess.mu.Lock()
-		ac = sess.client
-		// resumeToken writes run under d.mu; read the live credential here
-		// before releasing the daemon lock, then revalidate via the exact
-		// transport incarnation through detachIfCurrentTransport.
-		if ac != nil && ac.resumeCapable && ac.resumeToken == h.ResumeToken {
+		for candidate := range sess.attachments {
+			if !candidate.resumeCapable || candidate.resumeToken != h.ResumeToken {
+				continue
+			}
+			ac = candidate
 			if ac.clientID != h.ClientID {
 				clientMismatch = true
 			} else if ac.proxied != h.Proxied {
@@ -455,6 +451,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 				oldSnap = ac.transportSnapshot()
 				credentialMatch = oldSnap.transport != nil
 			}
+			break
 		}
 		sess.mu.Unlock()
 	}

@@ -91,10 +91,9 @@ func (d *Daemon) handleProxyScreenUpdate(p *proxySession, generation uint64, upd
 		return nil
 	}
 
-	p.sessionCore.mu.Lock()
-	ac := p.client
-	p.sessionCore.mu.Unlock()
-	d.invalidateRender(p, ac, false, "proxy_output.go")
+	for _, ac := range snapshotAttachmentSession(p) {
+		d.invalidateRender(p, ac, false, "proxy_output.go")
+	}
 	return nil
 }
 

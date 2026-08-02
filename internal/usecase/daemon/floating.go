@@ -182,9 +182,10 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 	// until firstPaint keeps restored tabs cold and avoids launching children
 	// merely because a tab was manipulated during teardown.
 	if ac == nil {
-		sess.mu.Lock()
-		ac = sess.client
-		sess.mu.Unlock()
+		attachments := sess.snapshotAttachments()
+		if len(attachments) != 0 {
+			ac = attachments[0]
+		}
 	}
 	if rc := sess.renderCoordinator(); rc != nil && rc.opts.onActivateTabAfterResize != nil {
 		rc.opts.onActivateTabAfterResize(lease != nil)
@@ -478,13 +479,13 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	d.reapplyThemeSession(sess)
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
+		attachments := sess.snapshotAttachments()
 		tb.mu.Lock()
 		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 		tb.mu.Unlock()
-		d.requestTransactionalResize(sess, ac, size, true)
+		for _, ac := range attachments {
+			d.requestTransactionalResize(sess, ac, size, true)
+		}
 	}
 }
 
@@ -515,15 +516,14 @@ func (d *Daemon) reapInstalledFloating(p *pane) {
 			return
 		}
 		closeFloatingPane(p)
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
-		if ac != nil {
+		attachments := sess.snapshotAttachments()
+		copyCleared := false
+		for _, ac := range attachments {
 			ac.pruneCaptureFrames(p)
-		}
-		copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
-		if ac != nil && (visible || copyCleared) {
-			d.invalidateRender(sess, ac, true, "floating.go")
+			copyCleared = ac.overlays.clearCopyModeForPane(p) || copyCleared
+			if visible || copyCleared {
+				d.invalidateRender(sess, ac, true, "floating.go")
+			}
 		}
 		return
 	}

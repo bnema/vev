@@ -64,12 +64,6 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	}
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
-		sess.mu.Lock()
-		primary := sess.client
-		sess.mu.Unlock()
-		if primary != nil {
-			d.attachCoordinator(sess, ac, primary, true)
-		}
 	}
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral
@@ -150,7 +144,7 @@ func (d *Daemon) detachProxyOnSendError(p *proxySession, ac *attachedClient, fai
 
 // finishProxyClientGone retires external client ownership after the exact proxy
 // role has been unpublished. Warm-timer publication remains with the caller so
-// each detach path can arm once, after p.client is nil.
+// each detach path can arm once, after membership is empty.
 func (d *Daemon) finishProxyClientGone(p *proxySession, ac *attachedClient, failed ports.Transport, explicit bool) {
 	if rc := p.coordinator.Load(); rc != nil {
 		rc.noteDetach(ac)

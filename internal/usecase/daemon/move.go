@@ -10,6 +10,7 @@ import (
 // immutable identity. Session names are advisory; the ID and incarnation are
 // the commit-time authority.
 type movePaneRequest struct {
+	Client           *attachedClient
 	Source           moveSessionLocator
 	SourceTabID      domain.TabStableID
 	SourcePaneID     domain.PaneStableID
@@ -18,6 +19,7 @@ type movePaneRequest struct {
 }
 
 type moveTabRequest struct {
+	Client      *attachedClient
 	Source      moveSessionLocator
 	SourceTabID domain.TabStableID
 	Destination moveSessionLocator

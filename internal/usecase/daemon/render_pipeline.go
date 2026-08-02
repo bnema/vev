@@ -459,7 +459,7 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		return false
 	}
 	entry.core().mu.Lock()
-	owned := entry.core().client == ac
+	_, owned := entry.core().attachments[ac]
 	entry.core().mu.Unlock()
 	if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()

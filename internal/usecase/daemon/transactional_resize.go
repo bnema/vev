@@ -362,10 +362,7 @@ func (d *Daemon) scheduleAcceptedTabLayoutRetry(sess *session, tb *tab) {
 				return
 			}
 			markSnapshotDirty(sess)
-			sess.mu.Lock()
-			ac := sess.client
-			sess.mu.Unlock()
-			if ac != nil {
+			for _, ac := range sess.snapshotAttachments() {
 				d.invalidateRender(sess, ac, true, "transactional_resize.go")
 			}
 		}
@@ -558,7 +555,6 @@ func (d *Daemon) applySessionLayoutWithMode(sess *session, size domain.Size, pro
 		}
 		sess.mu.Lock()
 		tabs := append([]*tab(nil), sess.tabs...)
-		active := sess.active
 		sess.mu.Unlock()
 		plans := make([]*preparedTabLayout, 0, len(tabs))
 		for _, tb := range tabs {
@@ -633,8 +629,8 @@ func (d *Daemon) applySessionLayoutWithMode(sess *session, size domain.Size, pro
 				}
 			}
 		}
-		if active >= 0 && active < len(tabs) {
-			floatingFailed, ok := d.applyVisibleFloatingLayout(sess, tabs[active], current)
+		for _, tb := range tabs {
+			floatingFailed, ok := d.applyVisibleFloatingLayout(sess, tb, current)
 			if !ok {
 				return nil, false
 			}

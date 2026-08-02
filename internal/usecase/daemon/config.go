@@ -345,16 +345,16 @@ func (d *Daemon) reapplyThemeAllSessions() {
 }
 
 func (d *Daemon) reapplyThemeSession(sess *session) {
-	sess.mu.Lock()
-	ac := sess.client
-	sess.mu.Unlock()
-	if ac == nil {
+	attachments := sess.snapshotAttachments()
+	if len(attachments) == 0 {
 		d.applyHostTheme(sess, nil, theme.Theme{}, true)
 		return
 	}
-	ac.sendMu.Lock()
-	defer ac.sendMu.Unlock()
-	sess.themeMu.Lock()
-	defer sess.themeMu.Unlock()
-	d.applyHostThemeLocked(sess, ac, ac.getClientTheme(), false)
+	for _, ac := range attachments {
+		ac.sendMu.Lock()
+		sess.themeMu.Lock()
+		d.applyHostThemeLocked(sess, ac, ac.getClientTheme(), false)
+		sess.themeMu.Unlock()
+		ac.sendMu.Unlock()
+	}
 }

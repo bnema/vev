@@ -7,24 +7,8 @@ type frozenMoveAttachmentRetirement struct {
 	clients []*attachedClient
 }
 
-func snapshotMoveSnatchedLocked(sess *session) []*attachedClient {
-	clients := make([]*attachedClient, 0, len(sess.snatched))
-	for ac := range sess.snatched {
-		clients = append(clients, ac)
-	}
-	return clients
-}
-
 func sameMoveSnatchedLocked(sess *session, admitted []*attachedClient) bool {
-	if sess == nil || len(sess.snatched) != len(admitted) {
-		return false
-	}
-	for _, ac := range admitted {
-		if _, ok := sess.snatched[ac]; !ok {
-			return false
-		}
-	}
-	return true
+	return sess != nil && len(admitted) == 0
 }
 
 func prepareFrozenMoveAttachmentRetirementLocked(sess *session, admitted []*attachedClient, frozen frozenRoleEffectGates) (frozenMoveAttachmentRetirement, bool) {

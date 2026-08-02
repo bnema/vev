@@ -489,9 +489,7 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 			continue
 		}
 		sess.mu.Lock()
-		if sess.client != nil {
-			clients = append(clients, sess.client)
-		}
+		clients = append(clients, sess.snapshotAttachmentsLocked()...)
 		sess.mu.Unlock()
 	}
 	d.mu.Unlock()
@@ -759,7 +757,7 @@ func (d *Daemon) discardUnattachedProxyGeneration(proxy *proxySession, generatio
 		return false
 	}
 	proxy.sessionCore.mu.Lock()
-	if proxy.client != nil {
+	if len(proxy.attachments) != 0 {
 		proxy.sessionCore.mu.Unlock()
 		d.mu.Unlock()
 		return false
@@ -879,12 +877,12 @@ func (d *Daemon) switchToTargetGuardedForRole(from *session, ac *attachedClient,
 		if sourceToken != nil {
 			fresh, admitted := ac.beginRoleEffect(transition.published)
 			if admitted {
-				d.activateTab(from, from.activeTab())
+				d.activateTabAfterResizeForLease(from, from.tabForAttachmentOrActive(ac), false, ac, transition.published.lease)
 				d.invalidateRender(from, ac, true, "picker.go")
 				fresh.End()
 			}
 		} else {
-			d.activateTab(from, from.activeTab())
+			d.activateTabAfterResizeForLease(from, from.tabForAttachmentOrActive(ac), false, ac, nil)
 			d.invalidateRender(from, ac, true, "picker.go")
 		}
 	} else {
@@ -923,10 +921,13 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		if sourceToken == nil {
 			targetSess.mu.Lock()
 			defer targetSess.mu.Unlock()
-			if targetSess.client != ac || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
+			_, attached := targetSess.attachments[ac]
+			if !attached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
 				return nil, attachmentTransitionResult{}, false
 			}
-			targetSess.active = target.TabIndex
+			if !targetSess.activateAttachmentViewLocked(ac, target.TabIndex) {
+				return nil, attachmentTransitionResult{}, false
+			}
 			return targetSess, attachmentTransitionResult{}, true
 		}
 		d.mu.Unlock()
@@ -941,12 +942,14 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 	}
 
 	unlock := lockAttachmentSessions(from, targetSess)
-	if from.client != ac || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) {
+	_, sourceAttached := from.attachments[ac]
+	if !sourceAttached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) {
 		unlock()
 		return nil, attachmentTransitionResult{}, false
 	}
 	if guard.expectedSource != nil {
-		if from.active < 0 || from.active >= len(from.tabs) || from.tabs[from.active] != guard.expectedSource {
+		view := ac.viewSnapshot()
+		if domain.TabStableID(guard.expectedSource.stableID) != view.tabID {
 			unlock()
 			return nil, attachmentTransitionResult{}, false
 		}
@@ -1034,7 +1037,8 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	}
 
 	from.mu.Lock()
-	if from.client != ac {
+	_, attached := from.attachments[ac]
+	if !attached {
 		from.mu.Unlock()
 		return nil, attachmentTransitionResult{}, false, nil
 	}

@@ -659,10 +659,12 @@ func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out p
 	if p == nil || !p.currentLinkGeneration(generation) {
 		return nil
 	}
-	p.sessionCore.mu.Lock()
-	ac := p.client
-	p.sessionCore.mu.Unlock()
-	if ac == nil || ac.output == nil {
+	attachments := snapshotAttachmentSession(p)
+	if len(attachments) == 0 {
+		return nil
+	}
+	ac := attachments[0]
+	if ac.output == nil {
 		return nil
 	}
 	expected := ac.transportSnapshot()

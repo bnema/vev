@@ -53,15 +53,26 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		opts.tabDetails = true
 	}
 	s.mu.Lock()
+	active := 0
+	if len(s.attachments) != 0 {
+		for i, tb := range s.tabs {
+			for ac := range s.attachments {
+				if ac.viewSnapshot().tabID == domain.TabStableID(tb.stableID) {
+					active = i
+					break
+				}
+			}
+		}
+	}
 	view := sessionView{
 		id:                s.id,
 		incarnation:       s.incarnation,
 		name:              s.name,
 		ephemeral:         s.ephemeral,
 		createdAt:         s.createdAt,
-		active:            s.active,
+		active:            active,
 		mruAt:             s.mruAt.Load(),
-		attached:          len(s.attachments) != 0 || s.client != nil,
+		attached:          len(s.attachments) != 0,
 		tabCount:          len(s.tabs),
 		cannotAcceptMoves: s.capabilities().cannotAcceptMoves,
 	}

@@ -122,10 +122,7 @@ func (d *Daemon) applyProxySessionMeta(p *proxySession, generation uint64, meta 
 	p.mu.Unlock()
 
 	d.pokeAttentionTicker()
-	p.sessionCore.mu.Lock()
-	ac := p.client
-	p.sessionCore.mu.Unlock()
-	if ac != nil {
+	for _, ac := range snapshotAttachmentSession(p) {
 		d.invalidateRender(p, ac, false, "proxy_session.go")
 	}
 	return true, nil
@@ -156,7 +153,7 @@ func (p *proxySession) snapshotView(opts viewOptions) sessionView {
 		cannotAcceptMoves: true,
 	}
 	p.sessionCore.mu.Lock()
-	view.attached = p.client != nil
+	view.attached = len(p.attachments) != 0
 	p.sessionCore.mu.Unlock()
 	if opts.tabDetails {
 		view.tabs = make([]tabView, len(meta.Tabs))

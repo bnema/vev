@@ -47,7 +47,7 @@ func (d *Daemon) enterResizeMode(sess *session, ac *attachedClient) error {
 	if sess == nil || ac == nil {
 		return layout.ErrNotFound
 	}
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	if target.tab == nil || target.pane == nil {
 		return layout.ErrNotFound
 	}
@@ -131,7 +131,7 @@ func (d *Daemon) handleResizeInput(ac *attachedClient, data []byte) {
 		return
 	}
 	for _, request := range requests {
-		request.target = resolveDaemonActionTarget(sess)
+		request.target = resolveDaemonActionTargetForAttachment(sess, ac)
 		if err := (daemonActions{d: d}).Run(request); err != nil {
 			d.reportError(sess, resizeUserError(err))
 			continue

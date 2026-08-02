@@ -128,10 +128,6 @@ func (c *sessionCore) unregisterAttachmentLocked(ac *attachedClient) bool {
 	}
 	delete(c.attachments, ac)
 	delete(c.attachmentOrder, ac)
-	delete(c.snatched, ac)
-	if c.client == ac {
-		c.client = nil
-	}
 	return true
 }
 
@@ -155,6 +151,17 @@ func (s *session) unregisterAttachment(ac *attachedClient) bool {
 
 // snapshotAttachmentsLocked returns a stable registration-ordered snapshot.
 // Callers hold s.mu; returned attachments may be used after unlocking.
+func (c *sessionCore) snapshotAttachmentsLocked() []*attachedClient {
+	if c == nil || len(c.attachments) == 0 {
+		return nil
+	}
+	out := make([]*attachedClient, 0, len(c.attachments))
+	for ac := range c.attachments {
+		out = append(out, ac)
+	}
+	return out
+}
+
 func (s *session) snapshotAttachmentsLocked() []*attachedClient {
 	if s == nil || len(s.attachments) == 0 {
 		return nil
@@ -172,6 +179,46 @@ func (s *session) snapshotAttachmentsLocked() []*attachedClient {
 		return cmp.Compare(s.attachmentOrder[a], s.attachmentOrder[b])
 	})
 	return out
+}
+
+func attachmentRegisteredLocked(entry attachmentSession, ac *attachedClient) bool {
+	if entry == nil || ac == nil || entry.core() == nil {
+		return false
+	}
+	_, ok := entry.core().attachments[ac]
+	return ok
+}
+
+func attachmentRegistered(entry attachmentSession, ac *attachedClient) bool {
+	if entry == nil || ac == nil || entry.core() == nil {
+		return false
+	}
+	core := entry.core()
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	return attachmentRegisteredLocked(entry, ac)
+}
+
+func (s *session) attachmentViewsTabLocked(tb *tab) bool {
+	if s == nil || tb == nil {
+		return false
+	}
+	for ac := range s.attachments {
+		if ac.viewSnapshot().tabID == domain.TabStableID(tb.stableID) {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotAttachmentSession(entry attachmentSession) []*attachedClient {
+	if entry == nil || entry.core() == nil {
+		return nil
+	}
+	core := entry.core()
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	return core.snapshotAttachmentsLocked()
 }
 
 func (s *session) snapshotAttachments() []*attachedClient {
@@ -335,11 +382,43 @@ func (s *session) tabForAttachment(ac *attachedClient) *tab {
 
 // paneForAttachment resolves both stable IDs and repairs a removed pane before
 // returning it. The tab remains shared; only the attachment's view moves.
+func (s *session) tabIndexForAttachment(ac *attachedClient) (int, int) {
+	if s == nil {
+		return -1, 0
+	}
+	s.mu.Lock()
+	tabs := append([]*tab(nil), s.tabs...)
+	s.mu.Unlock()
+	if len(tabs) == 0 {
+		return -1, 0
+	}
+	if ac == nil {
+		return 0, len(tabs)
+	}
+	view := ac.viewSnapshot()
+	for i, tb := range tabs {
+		if tb != nil && domain.TabStableID(tb.stableID) == view.tabID {
+			return i, len(tabs)
+		}
+	}
+	return 0, len(tabs)
+}
+
 func (s *session) tabForAttachmentOrActive(ac *attachedClient) *tab {
 	if tb := s.tabForAttachment(ac); tb != nil {
 		return tb
 	}
-	return s.activeTab()
+	// Headless/session-wide callers have no attachment view. Use the first
+	// shared tab rather than a session-wide active-tab singleton.
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.tabs) == 0 {
+		return nil
+	}
+	return s.tabs[0]
 }
 
 func (s *session) paneForAttachment(ac *attachedClient) (*tab, *pane) {
@@ -386,6 +465,19 @@ func (s *session) updateAttachmentView(ac *attachedClient, update func(*attachme
 
 // selectAttachmentTab changes only one attachment's target. Shared tab order
 // and PTY ownership are untouched.
+func (s *session) activateAttachmentViewLocked(ac *attachedClient, idx int) bool {
+	if s == nil || ac == nil || idx < 0 || idx >= len(s.tabs) || !attachmentRegisteredLocked(s, ac) {
+		return false
+	}
+	view := ac.viewSnapshot()
+	view.tabID = domain.TabStableID(s.tabs[idx].stableID)
+	view.paneID = ""
+	view = s.repairAttachmentViewLocked(ac, view)
+	view.revision++
+	ac.publishView(view)
+	return true
+}
+
 func (s *session) selectAttachmentTab(ac *attachedClient, tabID domain.TabStableID) bool {
 	if s == nil || ac == nil {
 		return false
@@ -410,6 +502,14 @@ func (s *session) selectAttachmentTab(ac *attachedClient, tabID domain.TabStable
 	return changed
 }
 
+func (s *session) switchAttachmentRelative(ac *attachedClient, delta int) bool {
+	position, count := s.tabIndexForAttachment(ac)
+	if count < 2 {
+		return false
+	}
+	return s.switchAttachmentTab(ac, (position+delta+count)%count)
+}
+
 func (s *session) switchAttachmentTab(ac *attachedClient, idx int) bool {
 	if s == nil || ac == nil {
 		return false
@@ -426,6 +526,22 @@ func (s *session) switchAttachmentTab(ac *attachedClient, idx int) bool {
 	}
 	s.mu.Unlock()
 	return s.switchTab(idx)
+}
+
+// repairAttachmentViews repairs all live attachment targets after a shared
+// topology mutation.
+func (s *session) repairAttachmentViews() []viewInvalidation {
+	if s == nil {
+		return nil
+	}
+	var invalidations []viewInvalidation
+	_ = s.runMutation(func() error {
+		s.mu.Lock()
+		invalidations = s.invalidateViewsLocked()
+		s.mu.Unlock()
+		return nil
+	})
+	return invalidations
 }
 
 // repairAttachmentViewsLocked repairs all live attachment targets after a tab

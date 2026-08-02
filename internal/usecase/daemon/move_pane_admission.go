@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -56,19 +57,24 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 		return nil, errMoveStaleTarget
 	}
 
+	sourceTabWasActive := false
+	if req.Client != nil {
+		view := req.Client.viewSnapshot()
+		sourceTabWasActive = view.tabID == domain.TabStableID(sourceTab.stableID)
+	}
 	return &movePaneAdmission{
 		source:                source,
 		destination:           destination,
 		sourceTab:             sourceTab,
 		destinationTab:        destinationTab,
 		movedPane:             movedPane,
-		sourceClient:          source.client,
-		destinationClient:     destination.client,
-		sourceSnatched:        snapshotMoveSnatchedLocked(source),
+		sourceClient:          req.Client,
+		destinationClient:     nil,
+		sourceSnatched:        nil,
 		sourceGeneration:      sourceTab.layoutGeneration,
 		destinationGeneration: destinationTab.layoutGeneration,
 		finalSourceTab: len(source.tabs) == 1 && source.tabs[0] == sourceTab &&
 			sourceTab.tree != nil && sourceTab.tree.Root != nil && len(layout.LeafIDs(sourceTab.tree.Root)) == 1,
-		sourceTabWasActive: source.active >= 0 && source.active < len(source.tabs) && source.tabs[source.active] == sourceTab,
+		sourceTabWasActive: sourceTabWasActive,
 	}, nil
 }

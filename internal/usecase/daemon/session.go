@@ -416,12 +416,12 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	cwd := from.cwd
 	term := from.terminal
 	env := copyEnvironment(from.env)
-	if from.client != ac {
-		from.mu.Unlock()
+	_, attached := from.attachments[ac]
+	from.mu.Unlock()
+	if !attached {
 		d.mu.Unlock()
 		return errors.New("client detached")
 	}
-	from.mu.Unlock()
 
 	newSess, err := d.createSessionLockedWithMode(name, false, cwd, sz, term, env, ac.proxied)
 	d.mu.Unlock()
@@ -514,11 +514,12 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	sess.mu.Lock()
 	name := sess.name
 	cwd := sess.cwd
-	client := sess.client
 	term := sess.terminal
 	env := copyEnvironment(sess.env)
+	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
-	tbSize := contentSize(sz, client != nil && client.proxied)
+	proxied := len(attachments) != 0 && attachments[0].proxied
+	tbSize := contentSize(sz, proxied)
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err
@@ -535,8 +536,8 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
 	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
-	if client != nil {
-		t := d.effectiveTheme(client.getClientTheme())
+	if len(attachments) != 0 {
+		t := d.effectiveTheme(attachments[0].getClientTheme())
 		tb.mu.Lock()
 		p := tb.focusedPane()
 		tb.mu.Unlock()
@@ -566,8 +567,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	// Publish ownership before appending the tab to the visible session.
 	publishPaneOwner(p, sess, tb, 0)
 	sess.tabs = append(sess.tabs, tb)
-	sess.active = len(sess.tabs) - 1
-	tabIndex := sess.active
+	tabIndex := len(sess.tabs) - 1
 	if !sess.ephemeral {
 		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
@@ -661,8 +661,8 @@ func contentSize(clientSize domain.Size, proxied bool) domain.Size {
 func (s *session) fullViewportSize() domain.Size {
 	s.mu.Lock()
 	var tb *tab
-	if s.active >= 0 && s.active < len(s.tabs) {
-		tb = s.tabs[s.active]
+	if len(s.tabs) != 0 {
+		tb = s.tabs[0]
 	}
 	s.mu.Unlock()
 
@@ -715,13 +715,12 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 func (s *session) detachIfCurrent(ac *attachedClient) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.client == ac {
-		s.client = nil
-		s.unregisterAttachmentLocked(ac)
-		ac.setSession(nil)
-		return true
+	if !attachmentRegisteredLocked(s, ac) || ac.currentAttachmentSession() != s {
+		return false
 	}
-	return false
+	s.unregisterAttachmentLocked(ac)
+	ac.setSession(nil)
+	return true
 }
 
 // detachIfCurrent publishes terminal role invalidation through the attachment
@@ -744,22 +743,12 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	}
 	d.notices.routingMu.Lock()
 	sess.mu.Lock()
-	_, registered := sess.attachments[ac]
-	current := (registered || sess.client == ac) && ac.currentSession() == sess
+	current := attachmentRegisteredLocked(sess, ac) && ac.currentAttachmentSession() == sess
 	if current && expected.transport != nil && !ac.transportSnapshotCurrent(expected) {
 		current = false
 	}
 	if current {
-		if sess.client == ac {
-			sess.client = nil
-		}
 		sess.unregisterAttachmentLocked(ac)
-		if sess.client == nil {
-			for candidate := range sess.attachments {
-				sess.client = candidate
-				break
-			}
-		}
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenRoleCapability()
@@ -784,12 +773,11 @@ func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClie
 	}
 	d.notices.routingMu.Lock()
 	p.sessionCore.mu.Lock()
-	current := p.client == ac && ac.currentAttachmentSession() == attachmentSession(p)
+	current := attachmentRegisteredLocked(attachmentSession(p), ac) && ac.currentAttachmentSession() == attachmentSession(p)
 	if current && expected.transport != nil && !ac.transportSnapshotCurrent(expected) {
 		current = false
 	}
 	if current {
-		p.client = nil
 		unregisterAttachmentSessionLocked(attachmentSession(p), ac)
 		ac.roleGeneration.Add(1)
 		ac.setSession(nil)
@@ -852,7 +840,6 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 	}
 	current := coordinator != nil && transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
 	if current {
-		core.client = nil
 		unregisterAttachmentSessionLocked(token.sess, token.ac)
 		token.ac.roleGeneration.Add(1)
 		token.ac.setSession(nil)
@@ -883,18 +870,6 @@ func (s *session) switchTab(idx int) bool {
 		return false
 	}
 	s.active = idx
-	s.mu.Unlock()
-	markSnapshotDirty(s)
-	return true
-}
-
-func (s *session) switchRelative(delta int) bool {
-	s.mu.Lock()
-	if len(s.tabs) < 2 {
-		s.mu.Unlock()
-		return false
-	}
-	s.active = (s.active + delta + len(s.tabs)) % len(s.tabs)
 	s.mu.Unlock()
 	markSnapshotDirty(s)
 	return true
@@ -1068,15 +1043,8 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 		return nil
 	}
 	ringing := tb.attention
-	wasActive := idx == sess.active
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
-	if sess.active >= len(sess.tabs) {
-		sess.active = len(sess.tabs) - 1
-	} else if idx < sess.active {
-		sess.active--
-	}
-	destination := sess.tabs[sess.active]
-	ac := sess.client
+	attachments := sess.snapshotAttachmentsLocked()
 	name := sess.name
 	if !sess.ephemeral {
 		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
@@ -1090,24 +1058,25 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 	tb.mu.Lock()
 	panes := tb.panesSnapshot()
 	tb.mu.Unlock()
-	if ac != nil {
+	for _, ac := range attachments {
 		ac.pruneCaptureFrames(panes...)
 	}
 	if tb.cancel != nil {
 		tb.cancel()
 	}
-	d.teardownFloating(tb, ac)
+	for _, ac := range attachments {
+		d.teardownFloating(tb, ac)
+	}
 	if rc := sess.renderCoordinator(); rc != nil {
 		for _, p := range panes {
 			rc.noteSyncPaneRemoved(p)
 		}
 	}
 	tb.closeAllPanes()
-	if wasActive {
-		d.activateTab(sess, destination)
-	}
-	if repaint && ac != nil {
-		d.invalidateRender(sess, ac, true, "session.go")
+	if repaint {
+		for _, ac := range attachments {
+			d.invalidateRender(sess, ac, true, "session.go")
+		}
 	}
 	if ringing {
 		d.repaintAllAttachedClients()
@@ -1190,9 +1159,7 @@ type sessionKillAdmission struct {
 }
 
 type sessionKillParticipants struct {
-	active      *attachedClient
 	attachments map[*attachedClient]struct{}
-	snatched    map[*attachedClient]struct{}
 	transports  map[*attachedClient]transportSnapshot
 	roleGates   []*attachedClient
 	interrupts  []roleTransportInterrupt
@@ -1235,26 +1202,18 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		source = target
 	}
 	unlockSessions := lockAttachmentSessions(source, target)
-	snapshot.active = target.client
 	snapshot.attachments = make(map[*attachedClient]struct{}, len(target.attachments))
-	snapshot.snatched = make(map[*attachedClient]struct{}, len(target.snatched))
-	snapshot.transports = make(map[*attachedClient]transportSnapshot, 1+len(target.attachments)+len(target.snatched))
+	snapshot.transports = make(map[*attachedClient]transportSnapshot, len(target.attachments))
 	for ac := range target.attachments {
 		snapshot.attachments[ac] = struct{}{}
 		snapshot.transports[ac] = ac.transportSnapshot()
 	}
-	if snapshot.active != nil {
-		snapshot.transports[snapshot.active] = snapshot.active.transportSnapshot()
-	}
-	for ac := range target.snatched {
-		snapshot.snatched[ac] = struct{}{}
-		snapshot.transports[ac] = ac.transportSnapshot()
-	}
+
 	unlockSessions()
 	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
 
-	seen := make(map[*attachedClient]struct{}, 2+len(snapshot.attachments)+len(snapshot.snatched))
+	seen := make(map[*attachedClient]struct{}, 1+len(snapshot.attachments))
 	add := func(ac *attachedClient) {
 		if ac == nil {
 			return
@@ -1268,11 +1227,7 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 	if admission != nil {
 		add(admission.token.ac)
 	}
-	add(snapshot.active)
 	for ac := range snapshot.attachments {
-		add(ac)
-	}
-	for ac := range snapshot.snatched {
 		add(ac)
 	}
 	for ac, transport := range snapshot.transports {
@@ -1311,7 +1266,7 @@ func (d *Daemon) sessionKillParticipantsCurrent(snapshot sessionKillParticipants
 // session and coordinator locks.
 func sessionKillParticipantsCurrentLocked(snapshot sessionKillParticipants, sourceCoordinator *renderCoordinator) bool {
 	target := snapshot.target
-	if target.client != snapshot.active || len(target.attachments) != len(snapshot.attachments) || len(target.snatched) != len(snapshot.snatched) {
+	if len(target.attachments) != len(snapshot.attachments) {
 		return false
 	}
 	for ac := range snapshot.attachments {
@@ -1319,11 +1274,7 @@ func sessionKillParticipantsCurrentLocked(snapshot sessionKillParticipants, sour
 			return false
 		}
 	}
-	for ac := range snapshot.snatched {
-		if _, current := target.snatched[ac]; !current {
-			return false
-		}
-	}
+
 	for ac, transport := range snapshot.transports {
 		if !ac.transportSnapshotCurrent(transport) {
 			return false
@@ -1617,7 +1568,6 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	d.clearBarScriptsForSession(sess.id)
 	d.purgeParkingForSessionLocked(sess)
 	parkedRetirements := d.purgeParkedForSessionLocked(sess)
-	detachedActive := sess.client
 	attachments := make([]detachedAttachmentSnapshot, 0, len(participants.roleGates))
 	capture := func(attached *attachedClient) {
 		if attached == nil {
@@ -1631,13 +1581,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	for attached := range sess.attachments {
 		capture(attached)
 	}
-	for snatched := range sess.snatched {
-		capture(snatched)
-	}
-	capture(sess.client)
-	sess.client = nil
 	clear(sess.attachments)
-	clear(sess.snatched)
 	stoppedName := sess.name
 	stoppedCwd := sess.cwd
 	createdAt := sess.createdAt
@@ -1688,7 +1632,9 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		d.clearDestroyedTabPreview(tb)
-		d.teardownFloating(tb, detachedActive)
+		for _, attachment := range attachments {
+			d.teardownFloating(tb, attachment.ac)
+		}
 	}
 	for _, path := range clipFiles {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1801,7 +1747,7 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	if d.procCwd == nil {
 		return
 	}
-	tb := sess.activeTab()
+	tb := sess.tabForAttachmentOrActive(nil)
 	if tb == nil {
 		return
 	}

@@ -190,7 +190,8 @@ func (d *Daemon) closeFocusedPane(sess *session, ac *attachedClient) error {
 		}
 		return nil
 	}
-	tb := sess.activeTab()
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
+	tb := target.tab
 	if tb == nil {
 		return layout.ErrNotFound
 	}
@@ -254,7 +255,7 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		sess.mu.Unlock()
 		return true
 	}
-	ac := sess.client
+	attachments := sess.snapshotAttachmentsLocked()
 	sessionName := sess.name
 	tb.mu.Lock()
 	if p.owner.Load() != owner {
@@ -295,7 +296,7 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		return true
 	}
 	d.applyTabLayout(sess, tb)
-	if ac != nil {
+	for _, ac := range attachments {
 		ac.overlays.clearCopyModeForPane(p)
 		ac.pruneCaptureFrames(p)
 	}
@@ -304,7 +305,7 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	}
 	closePaneProcess(p)
 	d.log.Info("pane closed", "session", sessionName, "pane", p.id)
-	if ac != nil {
+	for _, ac := range attachments {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	return true
@@ -314,11 +315,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	if tb == nil {
 		return layout.ErrNotFound
 	}
-	if ac == nil {
-		sess.mu.Lock()
-		ac = sess.client
-		sess.mu.Unlock()
-	}
+	// A nil attachment denotes a session-wide close with an explicit pane target.
 	tb.mu.Lock()
 	p := tb.panes[id]
 	if p == nil || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, id) {
@@ -375,7 +372,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	if !errors.Is(err, errNoNeighbor) || target.tab == nil {
 		return err
 	}
-	if !overflowSourceEligible(sess, target.tab) {
+	if !overflowSourceEligible(sess, ac, target.tab) {
 		return errNoNeighbor
 	}
 
@@ -390,19 +387,17 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 		return d.commitSessionOverflow(sess, ac, target.tab, sessionTarget)
 	}
 
-	sess.mu.Lock()
-	position, count := sess.active, len(sess.tabs)
-	sess.mu.Unlock()
+	position, count := sess.tabIndexForAttachment(ac)
 	step := resolveOverflow(dir, cfg, position, count)
 	if step.kind != overflowTabs {
 		return err
 	}
-	candidate, ok := d.prepareTabOverflow(sess, target.tab, dir, span, step.delta)
-	if !ok || !d.commitTabOverflow(sess, candidate) {
+	candidate, ok := d.prepareTabOverflowForAttachment(sess, ac, target.tab, dir, span, step.delta)
+	if !ok || !d.commitTabOverflowForAttachment(sess, ac, candidate) {
 		return errNoNeighbor
 	}
-	d.activateTab(sess, candidate.target)
 	if ac != nil {
+		sess.selectAttachmentTab(ac, domain.TabStableID(candidate.target.stableID))
 		d.finishPaneFocusForClient(sess, ac, candidate.target, candidate.targetOldFocus, "pane_actions.go")
 	}
 	return nil

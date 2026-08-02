@@ -52,8 +52,8 @@ type renderWake struct {
 	urgent    bool
 	coalesced int
 	// lease is snapshotted under coordinator ownership. The wake consumer must
-	// compose only for this exact active attachment incarnation, never by
-	// rereading session.client after an attach publication.
+	// compose only for this exact attachment incarnation, never by rereading
+	// mutable session membership after attachment publication.
 	lease *attachmentLease
 	// watchdog marks a flush forced by the synchronized-output watchdog.
 	watchdog bool

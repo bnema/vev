@@ -214,10 +214,10 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 		return nil, errMoveStaleTarget
 	}
 	moved := findMoveTabLocked(source, req.SourceTabID)
-	if moved == nil || destination.active < 0 || destination.active >= len(destination.tabs) {
+	if moved == nil || len(destination.tabs) == 0 {
 		return nil, errMoveStaleTarget
 	}
-	destinationActive := destination.tabs[destination.active]
+	destinationActive := destination.tabs[0]
 	destinationActive.mu.Lock()
 	destinationSize := destinationActive.size
 	destinationActive.mu.Unlock()
@@ -242,7 +242,7 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 	idx := indexMoveTabLocked(source, moved)
 	return &moveTabAdmission{
 		tab: moved, sourceIndex: idx,
-		sourceClient: source.client, sourceSnatched: snapshotMoveSnatchedLocked(source),
+		sourceClient: req.Client, sourceSnatched: nil,
 		layoutGeneration: moved.layoutGeneration, floatingState: moved.floating.state,
 		floatingPane: moved.floating.pane, floatingGeneration: moved.floating.generation,
 		panes: panes, destinationActive: destinationActive, destinationSize: destinationSize,
@@ -280,7 +280,7 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 	// precede moved.mu. The resize fences and ordered session locks keep topology
 	// stable until the tab/pane checks below complete.
 	if c.handoffFrozen {
-		if c.source.client != c.admission.sourceClient || !sameMoveSnatchedLocked(c.source, c.admission.sourceSnatched) {
+		if (c.admission.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.admission.sourceClient)) || !sameMoveSnatchedLocked(c.source, c.admission.sourceSnatched) {
 			return false
 		}
 		publication, err := d.validateAttachmentTransitionPrelocked(c.handoffReq)
@@ -293,7 +293,7 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 	}
 	var retirement frozenMoveAttachmentRetirement
 	if c.admission.finalSource {
-		if c.source.client != c.admission.sourceClient || !sameMoveSnatchedLocked(c.source, c.admission.sourceSnatched) ||
+		if (c.admission.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.admission.sourceClient)) || !sameMoveSnatchedLocked(c.source, c.admission.sourceSnatched) ||
 			(c.admission.sourceClient != nil) != c.handoffFrozen {
 			return false
 		}
@@ -303,7 +303,7 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 			return false
 		}
 	}
-	if c.destination.active < 0 || c.destination.active >= len(c.destination.tabs) || c.destination.tabs[c.destination.active] != c.admission.destinationActive {
+	if len(c.destination.tabs) == 0 || c.destination.tabs[0] != c.admission.destinationActive {
 		return false
 	}
 	c.admission.destinationActive.mu.Lock()
@@ -330,16 +330,7 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 
 	idx := c.admission.sourceIndex
 	c.source.tabs = append(c.source.tabs[:idx], c.source.tabs[idx+1:]...)
-	if len(c.source.tabs) == 0 {
-		c.source.active = -1
-	} else if c.source.active > idx {
-		c.source.active--
-	} else if c.source.active == idx {
-		if idx >= len(c.source.tabs) {
-			idx = len(c.source.tabs) - 1
-		}
-		c.source.active = idx
-	}
+
 	c.destination.tabs = append(c.destination.tabs, moved)
 	moved.size = c.admission.destinationSize
 	moved.bumpLayoutGenerationLocked()
@@ -367,7 +358,6 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 		d.beforeMoveTabCommit()
 	}
 	if c.handoffPublication != nil {
-		c.destination.active = len(c.destination.tabs) - 1
 		c.handoffResult = d.publishAttachmentTransitionPrelocked(c.handoffPublication)
 		c.handoffPublication.unlockCoordinators()
 		c.handoffPublication = nil
@@ -380,8 +370,8 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 	}
 	if c.handoffResult.published.ac != nil {
 		c.sourceCleanupToken = c.handoffResult.published
-	} else if c.source.client != nil {
-		c.sourceCleanupToken = c.source.attachmentTokenLocked(c.source.client)
+	} else if c.admission.sourceClient != nil {
+		c.sourceCleanupToken = c.source.attachmentTokenLocked(c.admission.sourceClient)
 	}
 	if len(c.source.tabs) == 0 {
 		d.unregisterSessionLocked(c.source)

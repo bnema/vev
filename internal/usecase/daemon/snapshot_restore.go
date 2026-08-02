@@ -290,7 +290,7 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 }
 
 func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab, term terminalEnv) *session {
-	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, active: int(snap.Active), terminal: term, env: copyEnvironment(d.baseEnv), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
+	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, terminal: term, env: copyEnvironment(d.baseEnv), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
 	// Restored tabs remain private until persistAndRegisterRestoredSession.
 	// Initialize owners now so registration and reader startup cannot expose an
 	// ownerless pane.

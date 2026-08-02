@@ -26,8 +26,8 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 		return false
 	}
 	sess.mu.Lock()
-	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
-	attached := sess.client != nil
+	active := sess.attachmentViewsTabLocked(tb)
+	attached := len(sess.attachments) != 0
 	sess.mu.Unlock()
 
 	// The normal attached render path needs no cross-session picker lookup.
@@ -63,17 +63,16 @@ func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
 	sessions := localSessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 	for _, sess := range sessions {
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
-		if ac == nil || ac.overlays == nil {
-			continue
-		}
-		ac.overlays.pickerMu.Lock()
-		preview := ac.overlays.pickerPreview == tb
-		ac.overlays.pickerMu.Unlock()
-		if preview {
-			return true
+		for _, ac := range sess.snapshotAttachments() {
+			if ac == nil || ac.overlays == nil {
+				continue
+			}
+			ac.overlays.pickerMu.Lock()
+			preview := ac.overlays.pickerPreview == tb
+			ac.overlays.pickerMu.Unlock()
+			if preview {
+				return true
+			}
 		}
 	}
 	return false
@@ -320,7 +319,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	}
 	var tb *tab
 	if local {
-		tb = sess.activeTab()
+		tb = sess.tabForAttachmentOrActive(ac)
 		if tb == nil {
 			return
 		}
@@ -331,7 +330,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	// published identity while holding it so a deadline captured before an
 	// attach/replace cannot emit on either the old or new output chain.
 	entry.core().mu.Lock()
-	owned := entry.core().client == ac
+	_, owned := entry.core().attachments[ac]
 	entry.core().mu.Unlock()
 	if !owned || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
@@ -382,12 +381,12 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	if statusFeedback == "" && overlays.resizeActive {
 		statusFeedback = "resize: h/j/k/l or arrows · = equalize · q/esc/enter exit"
 	}
-	bars := d.barStateForAttachmentPaletteHints(entry, statusFeedback, overlays.paletteHints, overlays.paletteRecent)
+	bars := d.barStateForAttachmentPaletteHintsFor(entry, ac, statusFeedback, overlays.paletteHints, overlays.paletteRecent)
 	applied := ac.getAppliedTheme()
 	bars.theme = applied.Raw
 	if local {
 		attentionVisible := pulseVisible(bars.attentionFrame)
-		repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
+		repaintAttachedClients = sess.ackAttention(tb, ac, attentionVisible)
 	}
 
 	paletteCfg := d.currentPaletteConfig()

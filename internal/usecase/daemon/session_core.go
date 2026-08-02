@@ -55,16 +55,13 @@ func (s *session) capturePrimary(ac *attachedClient, req primaryCaptureRequest) 
 	return captureLocalPrimaryRenderState(s, ac, req)
 }
 
-// activateTargetLocked validates and selects a local tab. Caller holds s.mu.
+// activateTargetLocked validates a legacy session target. Client-facing
+// navigation updates attachment views through selectAttachmentTab.
 func (s *session) activateTargetLocked(tabIndex int) bool {
 	if tabIndex < 0 {
 		return true
 	}
-	if tabIndex >= len(s.tabs) {
-		return false
-	}
-	s.active = tabIndex
-	return true
+	return tabIndex < len(s.tabs)
 }
 
 // localSession narrows an attachment entry for operations that own local PTYs,

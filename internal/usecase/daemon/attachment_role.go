@@ -39,27 +39,20 @@ func attachmentSessionRoleLocked(entry attachmentSession, ac *attachedClient) at
 		return attachmentDetached
 	}
 	core := entry.core()
-	// Membership is the lifecycle authority. Keep the primary pointer as a
-	// narrow construction-time fallback for older headless fixtures; attached
-	// routes always publish into the collection.
-	if _, ok := core.attachments[ac]; ok || core.client == ac {
+	// Membership is the lifecycle authority for every independent attachment.
+	if _, ok := core.attachments[ac]; ok {
 		return attachmentActive
-	}
-	if _, ok := core.snatched[ac]; ok {
-		return attachmentSnatched
 	}
 	return attachmentDetached
 }
 
 func addSnatchedLocked(entry attachmentSession, ac *attachedClient) {
+	// Role-preserving parking is attachment-local. Session membership is enough
+	// to admit the connection; there is no session-wide snatched owner.
 	if entry == nil || ac == nil || entry.core() == nil {
 		return
 	}
-	core := entry.core()
-	if core.snatched == nil {
-		core.snatched = make(map[*attachedClient]struct{})
-	}
-	core.snatched[ac] = struct{}{}
+	entry.core().registerAttachmentLocked(ac)
 }
 
 func (s *session) attachmentRole(ac *attachedClient) attachmentRole {

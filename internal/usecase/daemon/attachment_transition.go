@@ -109,28 +109,16 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 		d.sessions[sourceCore.id] != source || req.target != nil && d.sessions[targetCore.id] != req.target {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
-	if req.target != nil {
-		targetCore.mu.Lock()
-		req.expectedTargetCurrent = targetCore.client
-		if req.expectedTargetCurrent != nil && req.expectedTargetCurrent != req.next && req.targetRole == attachmentActive {
-			req.expectedTargetTransport = req.expectedTargetCurrent.transportSnapshot()
-		}
-		targetCore.mu.Unlock()
-	}
+	// Existing attachments remain independent session members. Transitions only
+	// publish the initiating attachment; there is no singleton target owner to
+	// displace or interrupt.
+	req.expectedTargetCurrent = nil
 	if req.sourceToken != nil && !transitionSourceTokenMatchesRequest(*req.sourceToken, source, req) {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
 	req.preflighted = true
 	participants := attachmentTransitionParticipants{clients: []*attachedClient{req.next}}
-	// A new attachment joins a session; it does not displace or interrupt an
-	// existing attachment. Handoff callers provide sourceToken and retain the
-	// legacy target participant set for their cross-session publication.
-	if req.source != nil || req.action != "" {
-		participants.clients = append(participants.clients, req.expectedTargetCurrent)
-		participants.interrupts = append(participants.interrupts, roleTransportInterrupt{
-			ac: req.expectedTargetCurrent, transport: req.expectedTargetTransport,
-		})
-	}
+	// Every attachment joins without displacing another connection.
 	return req, participants, nil
 }
 

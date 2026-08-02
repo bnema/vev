@@ -992,7 +992,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 			State:     ports.SessionRunning,
 			Ephemeral: s.ephemeral,
 			Tabs:      uint16(len(s.tabs)),
-			Attached:  s.client != nil,
+			Attached:  len(s.attachments) != 0,
 		}
 		liveNames[s.name] = struct{}{}
 		s.mu.Unlock()

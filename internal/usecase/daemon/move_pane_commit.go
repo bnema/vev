@@ -62,7 +62,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 		return false
 	}
 	if c.handoffFrozen {
-		if c.source.client != c.sourceClient || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
+		if (c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient)) || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
 			c.handoffReq.targetTabIndex < 0 || c.handoffReq.targetTabIndex >= len(c.destination.tabs) ||
 			c.destination.tabs[c.handoffReq.targetTabIndex] != c.destinationTab {
 			return false
@@ -102,7 +102,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 
 	sourceWillEmpty := candidate.removeSourceTab && len(c.source.tabs) == 1
 	if sourceWillEmpty && c.source != c.destination {
-		if c.source.client != c.sourceClient || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
+		if (c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient)) || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
 			(c.sourceClient != nil) != c.handoffFrozen {
 			return false
 		}
@@ -122,13 +122,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 		}
 		c.source.tabs = append(c.source.tabs[:idx], c.source.tabs[idx+1:]...)
 		c.sourceTabRemoved = true
-		if len(c.source.tabs) == 0 {
-			c.source.active = -1
-		} else if c.source.active > idx {
-			c.source.active--
-		} else if c.source.active >= len(c.source.tabs) {
-			c.source.active = len(c.source.tabs) - 1
-		}
+
 	} else {
 		c.sourceTab.tree = candidate.sourceTree
 		c.sourceTab.bumpLayoutGenerationLocked()
@@ -151,8 +145,8 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	c.syncCleanup.append(d.migratePaneSyncOwnerLocked(c.movedPane, oldOwner, newOwner))
 	if c.handoffResult.published.ac != nil {
 		c.sourceCleanupToken = c.handoffResult.published
-	} else if c.source.client != nil {
-		c.sourceCleanupToken = c.source.attachmentTokenLocked(c.source.client)
+	} else if c.sourceClient != nil {
+		c.sourceCleanupToken = c.source.attachmentTokenLocked(c.sourceClient)
 	}
 
 	if candidate.removeSourceTab && len(c.source.tabs) == 0 {

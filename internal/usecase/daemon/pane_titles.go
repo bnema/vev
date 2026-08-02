@@ -151,7 +151,7 @@ func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force b
 	if sess == nil {
 		return fallback
 	}
-	tb := sess.activeTab()
+	tb := sess.tabForAttachmentOrActive(nil)
 	if tb == nil {
 		return fallback
 	}

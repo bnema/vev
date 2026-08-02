@@ -212,17 +212,14 @@ func captureLocalPrimaryRenderState(
 		return nil, false
 	}
 	sess.mu.Lock()
-	owned := sess.client == ac
-	if !owned && sess.attachments != nil {
-		_, owned = sess.attachments[ac]
-	}
+	_, owned := sess.attachments[ac]
 	sess.mu.Unlock()
 	if !owned {
 		return nil, false
 	}
 	tb, _ := sess.paneForAttachment(ac)
 	if tb == nil {
-		tb = sess.activeTab()
+		tb = sess.tabForAttachmentOrActive(ac)
 	}
 	if tb == nil {
 		return nil, false

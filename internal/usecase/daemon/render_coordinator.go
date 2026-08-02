@@ -747,7 +747,14 @@ func (c *renderCoordinator) waitForTimerWorkers() { c.supervisor.wait() }
 // compositor; attached sessions always schedule through their coordinator.
 func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
-		rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
+		if rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}) {
+			return
+		}
+		// Secondary attachments do not borrow the coordinator's primary lease;
+		// paint their own attachment-owned view after membership validation.
+		if ac != nil && attachmentRegistered(entry, ac) && ac.currentAttachmentSession() == entry {
+			d.paint(entry, ac, reset, nil)
+		}
 		return
 	}
 	if ac != nil {
@@ -760,8 +767,13 @@ func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, r
 // the required first full frame never depends on a debounce timer.
 func (d *Daemon) invalidateRenderNow(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
-		rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
-		rc.fireCurrent(false)
+		if rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}) {
+			rc.fireCurrent(false)
+			return
+		}
+		if ac != nil && attachmentRegistered(entry, ac) && ac.currentAttachmentSession() == entry {
+			d.paint(entry, ac, reset, nil)
+		}
 		return
 	}
 	if ac != nil {

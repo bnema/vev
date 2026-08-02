@@ -66,7 +66,7 @@ func (d *Daemon) cancelProxyWarmForAttachment(p *proxySession, ac *attachedClien
 		return false
 	}
 	p.sessionCore.mu.Lock()
-	if p.client != ac {
+	if !attachmentRegisteredLocked(attachmentSession(p), ac) {
 		p.sessionCore.mu.Unlock()
 		d.mu.Unlock()
 		return false
@@ -100,7 +100,7 @@ func (d *Daemon) armProxyWarm(p *proxySession) bool {
 		return false
 	}
 	p.sessionCore.mu.Lock()
-	if p.client != nil {
+	if len(p.attachments) != 0 {
 		p.sessionCore.mu.Unlock()
 		d.mu.Unlock()
 		return false
@@ -126,7 +126,7 @@ func (d *Daemon) armProxyWarm(p *proxySession) bool {
 	valid := d.sessions[p.id] == p && !d.closing
 	if valid {
 		p.sessionCore.mu.Lock()
-		valid = p.client == nil
+		valid = len(p.attachments) == 0
 		if valid {
 			p.mu.Lock()
 			valid = p.generation == generation && p.warm == old
@@ -174,7 +174,7 @@ func (d *Daemon) expireWarmProxy(p *proxySession, token *proxyWarmTimer) bool {
 		return false
 	}
 	p.sessionCore.mu.Lock()
-	if p.client != nil {
+	if len(p.attachments) != 0 {
 		p.sessionCore.mu.Unlock()
 		d.mu.Unlock()
 		return false
@@ -245,12 +245,14 @@ func (d *Daemon) withProxyLocked(p *proxySession, update func() bool) bool {
 	p.sessionCore.mu.Lock()
 	p.mu.Lock()
 	current := update()
-	ac := p.client
+	attachments := append([]*attachedClient(nil), p.sessionCore.snapshotAttachmentsLocked()...)
 	p.mu.Unlock()
 	p.sessionCore.mu.Unlock()
 	d.mu.Unlock()
-	if current && ac != nil {
-		d.invalidateRender(p, ac, false, "proxy_lifecycle.go")
+	if current {
+		for _, ac := range attachments {
+			d.invalidateRender(p, ac, false, "proxy_lifecycle.go")
+		}
 	}
 	return current
 }
@@ -317,7 +319,7 @@ func (d *Daemon) markProxyReplaced(p *proxySession, generation uint64, transport
 				p.warm.generation = p.generation
 			}
 		}
-		needsWarm = current && p.client == nil && p.warm == nil
+		needsWarm = current && len(p.attachments) == 0 && p.warm == nil
 		return current
 	})
 	if needsWarm {

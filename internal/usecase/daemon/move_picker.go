@@ -16,8 +16,8 @@ func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
 	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	if source.Client != nil && sess.client != source.Client {
-		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source client is no longer active.", errMovePaneInvalid)
+	if source.Client != nil && !attachmentRegisteredLocked(sess, source.Client) {
+		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source attachment is no longer active.", errMovePaneInvalid)
 	}
 	tb := findMoveTabLocked(sess, source.TabID)
 	if tb == nil {
@@ -90,6 +90,7 @@ func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourc
 			return errMovePaneInvalid
 		}
 		return d.movePane(movePaneRequest{
+			Client:           source.Client,
 			Source:           source.Session,
 			SourceTabID:      source.TabID,
 			SourcePaneID:     source.PaneID,
@@ -98,6 +99,7 @@ func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourc
 		})
 	case pickerMoveTab:
 		return d.moveTab(moveTabRequest{
+			Client:      source.Client,
 			Source:      source.Session,
 			SourceTabID: source.TabID,
 			Destination: destination,
@@ -121,10 +123,10 @@ func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*sess
 		return nil, nil
 	}
 	if intent == pickerMoveTab {
-		if sess.active < 0 || sess.active >= len(sess.tabs) {
+		if len(sess.tabs) == 0 {
 			return nil, nil
 		}
-		return sess, sess.tabs[sess.active]
+		return sess, sess.tabs[0]
 	}
 	if target.TabID != "" {
 		for _, tb := range sess.tabs {

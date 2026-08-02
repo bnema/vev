@@ -226,32 +226,22 @@ func (d *Daemon) forwardClipboardAsync(owner paneEffectLease, b64 string) {
 		default:
 		}
 	}
-	ac := sess.client
+	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
-	if ac == nil {
-		return
-	}
-	transport := ac.transport()
-	token := sess.attachmentToken(ac, transport)
-	if !token.activeCurrent() {
-		return
-	}
 
-	sess.mu.Lock()
-	if sess.ctx != nil {
-		select {
-		case <-sess.ctx.Done():
-			sess.mu.Unlock()
-			return
-		default:
+	items := make([]clipboardForward, 0, len(attachments))
+	for _, ac := range attachments {
+		transport := ac.transport()
+		token := sess.attachmentToken(ac, transport)
+		if token.activeCurrent() {
+			items = append(items, clipboardForward{owner: owner, token: token, seq: seq})
 		}
 	}
-	if sess.client != ac || ac.roleGeneration.Load() != token.generation ||
-		!ac.transportSnapshotCurrent(token.transport) || ac.currentSession() != sess {
-		sess.mu.Unlock()
+	if len(items) == 0 {
 		return
 	}
-	sess.clipboardQueue = append(sess.clipboardQueue, clipboardForward{owner: owner, token: token, seq: seq})
+	sess.mu.Lock()
+	sess.clipboardQueue = append(sess.clipboardQueue, items...)
 	if !sess.clipboardWorkerRunning {
 		sess.clipboardWorkerRunning = true
 		go d.clipboardWorker(sess)

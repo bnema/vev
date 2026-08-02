@@ -413,7 +413,7 @@ func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, regis
 		}
 		tabs = append(tabs, tb)
 	}
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", client: ac}, ctx: sctx, cancel: cancel, tabs: tabs}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", client: ac, attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: tabs}
 	for _, tb := range tabs {
 		publishTiledPaneOwners(sess, tb)
 	}
