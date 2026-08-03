@@ -1202,7 +1202,7 @@ func TestOpenProxySessionSerializesSameKeyAttachConstruction(t *testing.T) {
 	require.Equal(t, 1, awaitTestValue(t, factory.calls, "leader did not dial"))
 	_ = requireProxyHello(t, first)
 
-	waitCtx, cancelWait := context.WithCancel(context.Background())
+	waitCtx, cancelWait := context.WithCancel(t.Context())
 	defer cancelWait()
 	observed := &proxyConstructionWaitContext{Context: waitCtx, observed: make(chan struct{})}
 	waiter := openProxyForTest(d, observed, key)
@@ -1271,32 +1271,16 @@ func TestOpenProxySessionSameKeyWaiterCanCancel(t *testing.T) {
 
 type warmHookClock struct {
 	timers chan *signalTimer
-
-	mu   sync.Mutex
-	hook func()
 }
 
 func (c *warmHookClock) Now() time.Time { return time.Time{} }
 
 func (c *warmHookClock) NewTimer(d time.Duration) ports.Timer {
 	timer := &signalTimer{ch: make(chan time.Time, 1), duration: d}
-	c.mu.Lock()
-	hook := c.hook
-	c.hook = nil
-	c.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
 	if c.timers != nil {
 		c.timers <- timer
 	}
 	return timer
-}
-
-func (c *warmHookClock) setHook(hook func()) {
-	c.mu.Lock()
-	c.hook = hook
-	c.mu.Unlock()
 }
 
 func registerLifecycleProxy(t *testing.T, d *Daemon, key domain.RemoteSessionKey) *proxySession {
@@ -1354,70 +1338,6 @@ func armWarmTimer(t *testing.T, d *Daemon, p *proxySession, clock *warmHookClock
 // a re-arm that loses its revalidation must leave the incumbent timer both
 // installed and current, otherwise a registered proxy is left with no path out
 // of the live registry.
-func TestArmProxyWarmKeepsExpiryPathWhenPublicationFails(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	tests := []struct {
-		name string
-		race func(d *Daemon, p *proxySession)
-		undo func(d *Daemon, p *proxySession)
-	}{
-		{
-			name: "client attaches during arm",
-			race: func(_ *Daemon, p *proxySession) { setProxyLifecycleClient(p, &attachedClient{}) },
-			undo: func(_ *Daemon, p *proxySession) { setProxyLifecycleClient(p, nil) },
-		},
-		{
-			name: "replacement rekeys the lifecycle generation",
-			race: func(_ *Daemon, p *proxySession) {
-				p.mu.Lock()
-				p.expired = true
-				p.generation++
-				if p.warm != nil {
-					p.warm.generation = p.generation
-				}
-				p.mu.Unlock()
-			},
-		},
-		{
-			name: "daemon starts closing during arm",
-			race: func(d *Daemon, _ *proxySession) {
-				d.mu.Lock()
-				d.closing = true
-				d.mu.Unlock()
-			},
-			undo: func(d *Daemon, _ *proxySession) {
-				d.mu.Lock()
-				d.closing = false
-				d.mu.Unlock()
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d, p, clock := newProxyLifecycleFixture(t)
-			token, timer := armWarmTimer(t, d, p, clock)
-
-			clock.setHook(func() { tt.race(d, p) })
-			require.False(t, d.armProxyWarm(p), "raced re-arm must not publish a replacement")
-			awaitTestValue(t, clock.timers, "raced re-arm never reached its clock")
-
-			retained, generation := proxyWarmToken(p)
-			require.NotNil(t, retained, "failed re-arm stripped the proxy of its only expiry path")
-			require.Same(t, token, retained, "failed re-arm replaced the armed expiry timer")
-			require.Equal(t, generation, retained.generation, "retained timer no longer owns the lifecycle generation")
-			require.True(t, proxyRegistered(d, p), "a failed re-arm must not unregister the proxy")
-
-			if tt.undo != nil {
-				tt.undo(d, p)
-			}
-			timer.ch <- time.Time{}
-			awaitTestCompletion(t, token.done, "retained warm timer never ran to completion")
-			require.False(t, proxyRegistered(d, p), "retained warm timer did not expire the dormant proxy")
-			require.True(t, proxyExpired(p), "expiry did not publish terminal lifecycle state")
-			awaitTestCompletion(t, d.done, "last proxy expiry did not complete the daemon")
-		})
-	}
-}
 
 func TestDetachProxyIfCurrentTransportArmsExpiredProxy(t *testing.T) {
 	d, p, clock := newProxyLifecycleFixture(t)

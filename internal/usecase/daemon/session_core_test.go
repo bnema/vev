@@ -147,47 +147,6 @@ func TestSessionCoreLockOrderUsesImmutableIDs(t *testing.T) {
 	second.core().mu.Unlock()
 }
 
-func TestInitialMetadataSkipsInvalidSnapshot(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  ports.IntentNew,
-		Name:    "remote-work",
-		Size:    defaultSize,
-	}
-	tr := newWelcomeBlockingTransport(t)
-	done := make(chan struct{})
-	go func() {
-		d.handleHello(tr.tr, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
-		close(done)
-	}()
-
-	awaitTestCompletion(t, tr.welcomeEntered, "handshake did not send Welcome")
-	sess := firstSession(d)
-	require.NotNil(t, sess)
-	sess.mu.Lock()
-	invalidTabIndex := len(sess.tabs)
-	sess.mu.Unlock()
-	selectTestAttachmentTab(sess, invalidTabIndex)
-	// finish (not just release) also closes recvDone, so runConnLoop's Recv
-	// fails immediately after the first paint and the handshake goroutine
-	// returns instead of blocking on further input.
-	tr.finish()
-	awaitTestCompletion(t, done, "invalid metadata snapshot did not end the handshake")
-
-	welcome := <-tr.sends
-	require.Equal(t, ports.MsgWelcome, welcome.Type)
-	select {
-	case frame := <-tr.sends:
-		t.Fatalf("invalid metadata snapshot was sent as frame type %d", frame.Type)
-	default:
-	}
-
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
-	d.sessWg.Wait()
-}
-
 func mustLocalSession(t *testing.T, entry attachmentSession) *session {
 	t.Helper()
 	sess, ok := localSession(entry)

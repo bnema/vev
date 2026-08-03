@@ -134,12 +134,6 @@ type tabOverflowCandidate struct {
 	targetOldFocus layout.PaneID
 }
 
-// prepareTabOverflow captures tab identities under the session lock and uses
-// EntryPane's pure lookup before any active-tab state is changed.
-func (d *Daemon) prepareTabOverflow(sess *session, expectedSource *tab, dir layout.Direction, span domain.Rect, delta int) (tabOverflowCandidate, bool) {
-	return d.prepareTabOverflowForAttachment(sess, nil, expectedSource, dir, span, delta)
-}
-
 func (d *Daemon) prepareTabOverflowForAttachment(sess *session, ac *attachedClient, expectedSource *tab, dir layout.Direction, span domain.Rect, delta int) (tabOverflowCandidate, bool) {
 	if sess == nil || expectedSource == nil || (delta != -1 && delta != 1) {
 		return tabOverflowCandidate{}, false
@@ -197,13 +191,6 @@ func (d *Daemon) prepareTabOverflowForAttachment(sess *session, ac *attachedClie
 		entryPane:      entryPane,
 		targetOldFocus: oldFocus,
 	}, true
-}
-
-// commitTabOverflow atomically revalidates the source and target tab entries.
-// The target layout and selected pane are revalidated while locked before the
-// focus and active-tab mutations become visible together.
-func (d *Daemon) commitTabOverflow(sess *session, candidate tabOverflowCandidate) bool {
-	return d.commitTabOverflowForAttachment(sess, nil, candidate)
 }
 
 func (d *Daemon) commitTabOverflowForAttachment(sess *session, ac *attachedClient, candidate tabOverflowCandidate) bool {

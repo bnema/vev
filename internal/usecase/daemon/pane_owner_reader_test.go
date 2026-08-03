@@ -51,75 +51,10 @@ func (*ownerRoutingPTY) ForegroundPgid() (int, error) {
 	return 0, nil
 }
 
-func installTiledPaneOwnerForTest(sess *session, tb *tab, p *pane) {
-	tb.mu.Lock()
-	old := tb.panes[layout.PaneID("pane-1")]
-	delete(tb.panes, layout.PaneID("pane-1"))
-	if old != nil {
-		old.clearOwnerForTest()
-	}
-	p.id = layout.PaneID("pane-1")
-	tb.panes[p.id] = p
-	tb.tree = &layout.Tree{Root: layout.NewLeaf(p.id), Focus: p.id}
-	publishPaneOwner(p, sess, tb, 0)
-	tb.mu.Unlock()
-}
-
 func (p *pane) clearOwnerForTest() {
 	p.mu.Lock()
 	p.clearOwnerLocked()
 	p.mu.Unlock()
-}
-
-func TestPTYReaderRoutesEffectsToOwnerPublishedForEachRead(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	pty := newOwnerRoutingPTY()
-	d, source, _, _ := newManualSessionWithPTYs(t, pty)
-	pane := testAttachmentTab(source).focusedPane()
-	pane.onExit = func() {}
-	source.snapEligible.Store(true)
-
-	destinationTab := newTab(nil, domain.Size{Cols: 80, Rows: 23})
-	destinationAttachment := &attachedClient{}
-	destination := &session{sessionCore: sessionCore{id: domain.SessionID("destination"),
-		name:        "destination",
-		attachments: map[*attachedClient]struct{}{destinationAttachment: {}},
-	}, tabs: []*tab{destinationTab}, snapEligible: atomic.Bool{}}
-	destination.snapEligible.Store(true)
-	destinationAttachment.initOverlays()
-	destinationAttachment.setSession(destination)
-	d.sessions[destination.id] = destination
-
-	sourceInvalidations := make(chan renderInvalidation, 2)
-	destinationInvalidations := make(chan renderInvalidation, 2)
-	sourceAttachment := source.snapshotAttachments()[0]
-	sourceCoordinator := d.attachCoordinator(source, nil, sourceAttachment, true)
-	sourceCoordinator.opts.onInvalidate = func(invalidation renderInvalidation) { sourceInvalidations <- invalidation }
-	destinationCoordinator := d.attachCoordinator(destination, nil, destinationAttachment, true)
-	destinationCoordinator.opts.onInvalidate = func(invalidation renderInvalidation) { destinationInvalidations <- invalidation }
-
-	d.startPaneGoroutines(source, testAttachmentTab(source), pane)
-	pty.steps <- channelPTYStep{data: []byte("source\a")}
-	<-pty.processed
-	require.Len(t, sourceInvalidations, 1)
-	require.Empty(t, destinationInvalidations)
-	require.Equal(t, uint64(1), source.snapshotGeneration)
-	require.Zero(t, destination.snapshotGeneration)
-	require.True(t, testAttachmentTab(source).attention)
-
-	installTiledPaneOwnerForTest(destination, destinationTab, pane)
-	pty.steps <- channelPTYStep{data: []byte("destination\a")}
-	<-pty.processed
-
-	require.Len(t, sourceInvalidations, 1, "output after owner publication must not invalidate the source")
-	require.Len(t, destinationInvalidations, 1, "output after owner publication must invalidate the destination")
-	require.Equal(t, uint64(1), source.snapshotGeneration, "source snapshot must not be dirtied after transfer")
-	require.Equal(t, uint64(1), destination.snapshotGeneration)
-	require.True(t, destinationTab.attention)
-	require.Equal(t, int32(1), pty.maxReaders.Load(), "owner publication must not start another PTY reader")
-
-	pty.steps <- channelPTYStep{err: io.EOF}
-	d.sessWg.Wait()
 }
 
 func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {

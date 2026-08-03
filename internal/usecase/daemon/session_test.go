@@ -32,56 +32,6 @@ func expectFloatingPrewarmOpen(factory *portsmocks.MockPTYFactory, normalSize do
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
-func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	sz := domain.Size{Cols: 80, Rows: 24}
-	first, releaseFirst := newBlockingPTY(t)
-	defer releaseFirst()
-	second, releaseSecond := newBlockingPTY(t)
-	defer releaseSecond()
-	f := portsmocks.NewMockPTYFactory(t)
-	var dirs []string
-	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, _ []string, dir string, _ domain.Size) (ports.PTY, error) {
-			dirs = append(dirs, dir)
-			if len(dirs) == 1 {
-				return first, nil
-			}
-			return second, nil
-		},
-	).Twice()
-	floating := newQuietPTY()
-	expectFloatingPrewarmOpen(f, normalSize, floating)
-
-	d := newTestDaemon(t, f, stubClock{})
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
-
-	sess, ac, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  ports.IntentNew,
-		Name:    "work",
-		Size:    sz,
-		TermEnv: "xterm-256color",
-		Cwd:     "/tmp/work",
-	}, tr)
-	require.NoError(t, err)
-	require.NotNil(t, ac)
-	require.Equal(t, "/tmp/work", sess.cwd)
-
-	require.NoError(t, d.createTab(sess, sz))
-	require.Equal(t, []string{"/tmp/work", "/tmp/work"}, dirs)
-	requireFloatingInitialized(t, testAttachmentTab(sess))
-	_ = d.killSession(sess, ports.ReasonSessionKilled, false)
-	releaseFirst()
-	releaseSecond()
-	d.sessWg.Wait()
-	// Teardown may cancel a queued prewarm before it enters Open; an opened
-	// prewarm is closed by teardownFloating.
-}
-
 func TestHandshakeEphemeralHappy(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
@@ -987,30 +937,6 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			require.Equal(t, tt.want, records[0].TabNames)
 		})
 	}
-}
-
-func TestCloseActiveTabActivatesDestinationFloatingPane(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	d, sess, ac, _, releases := newManualTabSession(t, 2)
-	sess.mu.Lock()
-	sess.registerAttachmentLocked(ac)
-	sess.mu.Unlock()
-	d.ptys = newBlockingOpenFactory(t, d)
-	defer releases[0]()
-	defer releases[1]()
-	sess.mu.Lock()
-	first, closing := sess.tabs[0], sess.tabs[1]
-	selectTestAttachmentTabLocked(sess, 1)
-	sess.mu.Unlock()
-	first.mu.Lock()
-	stale := first.takeFloatingLocked()
-	first.mu.Unlock()
-	closeFloatingPane(stale)
-
-	require.NoError(t, d.closeTab(sess, closing, false))
-
-	require.Same(t, first, testAttachmentTab(sess))
-	requireFloatingInitialized(t, first)
 }
 
 func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {

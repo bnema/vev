@@ -160,6 +160,9 @@ type Daemon struct {
 	// afterAttachmentEffectsFrozen observes the lock-free boundary after all affected
 	// attachment gates are frozen and drained, before architecture publication.
 	afterAttachmentEffectsFrozen func()
+	// afterAttachmentTransitionCoordinatorsLocked is a deterministic lock-order
+	// seam used by transition validation tests.
+	afterAttachmentTransitionCoordinatorsLocked func()
 	// afterMoveLifecycleReserved and afterMovePaneSourceSnapshot are test-only
 	// seams. They run before role/fence work and after the pre-fence source
 	// attachment snapshot respectively. beforeMovePaneCommit runs inside the

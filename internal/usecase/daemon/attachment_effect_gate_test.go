@@ -408,25 +408,6 @@ func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 	requireRoleGateRetired(t, active)
 }
 
-type renderFailureTransport struct {
-	mu     sync.Mutex
-	closed bool
-}
-
-func (*renderFailureTransport) Send(ports.Frame) error     { return errors.New("render send failed") }
-func (*renderFailureTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (t *renderFailureTransport) Close() error {
-	t.mu.Lock()
-	t.closed = true
-	t.mu.Unlock()
-	return nil
-}
-func (t *renderFailureTransport) Closed() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.closed
-}
-
 func TestRenderSendFailureCleanupIsDeadlineBoundedWhileRoleGateIsBusy(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
 	transport := &closeTrackingTransport{}

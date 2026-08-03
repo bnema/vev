@@ -379,105 +379,6 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 	})
 }
 
-func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	for _, tc := range []struct {
-		name          string
-		window        uint64
-		exitBeforeACK bool
-		exitSuffix    string
-		overlay       bool
-	}{
-		{name: "datagram output window (1): exit waits for ACK", window: 1},
-		{name: "datagram output window (1): exit and prompt arrive before ACK", window: 1, exitBeforeACK: true, exitSuffix: "PROMPT> "},
-		{name: "local default output window (8): exit waits for ACK", window: maxUnackedOutputStates},
-		{name: "local default output window (8): exit and prompt arrive before ACK", window: maxUnackedOutputStates, exitBeforeACK: true, exitSuffix: "PROMPT> "},
-		{name: "local default output window (8): palette overlay with bars", window: maxUnackedOutputStates, overlay: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pty, steps, processed := newChannelPTY(t)
-			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
-			// Datagram clients use a one-frame window; local clients retain the
-			// default eight-frame window. Both ACK orderings stay deterministic.
-			ac.output.maxOutstanding = tc.window
-			clock := newCoordinatorMockClock(t, 8)
-			d.clock = clock.clock
-			rc := d.attachCoordinator(sess, nil, ac, true)
-			client := vt.NewScreen(80, 25)
-			pane := sess.tabs[0].focusedPane()
-
-			d.sessWg.Add(1)
-			go d.ptyReader(sess, sess.tabs[0], pane)
-			t.Cleanup(func() {
-				steps <- channelPTYStep{err: io.EOF}
-				d.sessWg.Wait()
-				d.waitNotifies()
-			})
-
-			replay := func(data []byte, deadline time.Duration) ports.Output {
-				t.Helper()
-				steps <- channelPTYStep{data: data}
-				awaitPTYReadProcessed(t, processed)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), deadline)
-				return mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-			}
-			acknowledge := func(out ports.Output) {
-				ac.ackOutputState(out.NewStateNum)
-				rc.notifyAck()
-			}
-
-			if tc.overlay {
-				d.enterPalette(sess, ac)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
-				acknowledge(mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends)))
-			}
-			acknowledge(replay([]byte("PRIMARY"), minOutputRenderDeadline))
-			primary := client.Frame.Clone()
-
-			// The reported PTY stream is deliberately split into enter, body, and
-			// exit reads. MATRIX distinguishes alternate cells in the replayed
-			// terminal model from all primary, chrome, and overlay cells.
-			acknowledge(replay([]byte("\x1b[?1049h"), minOutputRenderDeadline))
-			alternate := replay([]byte(strings.Repeat("MATRIX", 300)), minOutputRenderDeadline)
-			pane.mu.Lock()
-			require.Contains(t, strings.Join(frameRows(pane.screen.Frame), "\n"), "MATRIX", "fixture must make alternate cells visible to the production renderer")
-			pane.mu.Unlock()
-
-			exitData := []byte("\x1b[?1049l" + tc.exitSuffix)
-			var exit ports.Output
-			if tc.exitBeforeACK {
-				steps <- channelPTYStep{data: exitData}
-				awaitPTYReadProcessed(t, processed)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-				if tc.window == 1 {
-					requireNoCoordinatorOutputFrame(t, sends)
-					acknowledge(alternate)
-					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-				} else {
-					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-					require.Equal(t, alternate.NewStateNum, exit.BaseStateNum,
-						"local exit must be rendered before the alternate-frame ACK")
-					acknowledge(alternate)
-				}
-			} else {
-				acknowledge(alternate)
-				steps <- channelPTYStep{data: exitData}
-				awaitPTYReadProcessed(t, processed)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-				exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-			}
-			require.NotEmpty(t, exit.Data, "the first post-exit output must actively remove alternate cells")
-			rendered := strings.Join(frameRows(client.Frame), "\n")
-			require.NotContains(t, rendered, "MATRIX", "the first post-exit frame must not retain alternate cells")
-			if tc.exitSuffix == "" {
-				require.Equal(t, frameRows(primary), frameRows(client.Frame), "the first post-exit output must restore the primary screen")
-			} else {
-				require.Contains(t, rendered, tc.exitSuffix, "bytes immediately after DEC 1049 exit must appear in the first post-exit frame")
-			}
-		})
-	}
-}
-
 func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *testing.T) {
 	t.Run("detached target completes cross-session preview without later PTY output", func(t *testing.T) {
 		pty, steps, processed := newChannelPTY(t)
@@ -676,27 +577,6 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
 	})
-}
-
-func TestPTYWriteErrorIsLogged(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	var logs bytes.Buffer
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logs, nil)))
-	errBoom := errors.New("boom")
-	p := portsmocks.NewMockPTY(t)
-	p.EXPECT().Write([]byte("input")).Return(0, errBoom).Once()
-	win := newTab(p, domain.Size{Cols: 80, Rows: 23})
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work"}, tabs: []*tab{win}}
-	ac := &attachedClient{}
-	ac.initOverlays()
-	ac.setSession(sess)
-
-	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("input"))
-
-	got := logs.String()
-	if !strings.Contains(got, "pty write failed") || !strings.Contains(got, "boom") || !strings.Contains(got, "work") {
-		t.Fatalf("log output %q does not contain PTY write failure details", got)
-	}
 }
 
 func TestAltXClosesFinalTabAndDetaches(t *testing.T) {

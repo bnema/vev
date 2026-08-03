@@ -637,12 +637,21 @@ func (d *Daemon) applySessionLayoutWithMode(sess *session, size domain.Size, pro
 			failed = append(failed, floatingFailed...)
 		}
 		failedCurrent := len(failed) == 0 || resizeMembersOwnerCurrent(failed)
+		if current != nil && !current() {
+			return nil, false
+		}
 		if len(failed) != 0 && failedCurrent {
 			d.notify(sess, domain.NoticeWarn, domain.NoticeResizeFailed,
 				"pane resize failed; retrying in background", failed[len(failed)-1].err)
 		}
 		if len(failed) != 0 && !failedCurrent {
 			return nil, false
+		}
+		if current != nil {
+			d.observeBeforeResizeOwnerPostEffect(resizeOwnerPostSnapshotDirty)
+			if !current() {
+				return nil, false
+			}
 		}
 		markSnapshotDirty(sess)
 		d.observeRuntime(ports.RuntimeResizeCommitted, 0, true)
@@ -656,7 +665,13 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 		return false
 	}
 	snap := rc.resizeSnapshot()
-	current := func() bool { return rc.resizeCurrentForLease(epoch, ac, lease, false) }
+	connectionGeneration := ac.connectionGeneration.Load()
+	connection := ac.transportSnapshot()
+	current := func() bool {
+		return ac.connectionGeneration.Load() == connectionGeneration &&
+			ac.transportSnapshotCurrent(connection) &&
+			rc.resizeCurrentForLease(epoch, ac, lease, false)
+	}
 	if !current() {
 		return false
 	}
@@ -667,21 +682,38 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 	if !ok {
 		return false
 	}
+	// Revalidate while holding the attachment output boundary. A lease can be
+	// retired after the layout commit but before this attachment-local size is
+	// published; stale generations must not publish any remaining effects.
+	d.observeBeforeResizeOwnerPostEffect(resizeOwnerPostCommitPublication)
 	ac.sendMu.Lock()
+	if !current() {
+		ac.sendMu.Unlock()
+		return false
+	}
 	ac.size = snap.size
 	ac.sendMu.Unlock()
+	if !current() {
+		return false
+	}
 	if len(failed) != 0 && rc.resizeRetryAvailableForLease(epoch, ac, lease) {
 		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })
+	}
+	if !current() {
+		return false
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	// A successful transaction publishes exactly one full S2 frame. The
 	// coordinator is the only emission route and stale epochs never reach it.
-	if !rc.invalidateForLeaseAtResizeEpoch(ac, lease, epoch, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"}) {
+	if !current() || !rc.invalidateForLeaseAtResizeEpoch(ac, lease, epoch, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"}) {
 		return false
 	}
 	// The resize debounce has already elapsed. Consume this sticky reset now;
 	// fire preserves ACK and synchronized-output gates rather than scheduling a
 	// second urgent deadline.
+	if !current() {
+		return false
+	}
 	rc.fireCurrent(false)
 	return true
 }

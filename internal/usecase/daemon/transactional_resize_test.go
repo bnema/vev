@@ -461,6 +461,47 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}}, second.requested())
 }
 
+func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		effect resizeOwnerPostEffect
+	}{
+		{name: "before snapshot effects", effect: resizeOwnerPostSnapshotDirty},
+		{name: "before attachment size", effect: resizeOwnerPostCommitPublication},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty := &transactionalResizePTY{}
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			rc := d.attachCoordinator(sess, nil, ac, true)
+			lease := rc.attachmentLease(ac)
+			epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease)
+			require.NotZero(t, epoch)
+			initialSize := ac.size
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			d.beforeResizeOwnerPostEffect = func(effect resizeOwnerPostEffect) {
+				if effect != tc.effect {
+					return
+				}
+				close(entered)
+				<-release
+			}
+			done := make(chan bool, 1)
+			go func() { done <- d.runResizeTransaction(sess, ac, lease, epoch) }()
+			<-entered
+			newer := rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 34}, ac, lease)
+			require.NotZero(t, newer)
+			close(release)
+			require.False(t, <-done, "stale resize generation must be rejected")
+			require.Equal(t, initialSize, ac.size, "stale resize must not publish attachment size")
+			if tc.effect == resizeOwnerPostSnapshotDirty {
+				require.False(t, sess.snapDirty.Load(), "stale resize must not publish snapshot dirtiness")
+			}
+		})
+	}
+}
+
 func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)

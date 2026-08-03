@@ -1,6 +1,10 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import (
+	"slices"
+
+	"github.com/bnema/vev/internal/domain"
+)
 
 // transitionSourcePreflightLocked validates an initiating connection while its
 // effect gate is frozen and d.mu is held. No target is created before this
@@ -64,12 +68,7 @@ func transitionSourceTabCurrentForRequestLocked(source attachmentSession, expect
 }
 
 func containsTab(tabs []*tab, want *tab) bool {
-	for _, tb := range tabs {
-		if tb == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tabs, want)
 }
 
 // transitionAttachmentLocked is the publication half of transitionAttachment.
@@ -133,28 +132,40 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 
 	sourceCoordinator := sourceCore.coordinator.Load()
 	targetCoordinator := d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
+	// transitionSourceTokenCurrentLocked also reads the source lease. Hold the
+	// source coordinator lock before calling it, following session -> coordinator
+	// ordering and preventing a lease rebind from racing validation.
+	releaseCoordinators := lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator)
+	if d.afterAttachmentTransitionCoordinatorsLocked != nil {
+		d.afterAttachmentTransitionCoordinatorsLocked()
+	}
 	if req.sourceToken != nil && !transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) {
+		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
 	if source != req.target && !attachmentRegisteredLocked(source, req.next) {
+		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
 	if !req.preserveAttachment && source != req.target && attachmentRegisteredLocked(req.target, req.next) {
+		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
 	if req.preserveAttachment && !attachmentRegisteredLocked(req.target, req.next) {
+		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
 	if !attachmentLifecycleCurrentLocked(req.target, req.expectedTargetLifecycle) ||
 		req.activateTargetTab && !req.target.validTargetTabLocked(req.targetTabIndex) ||
 		req.sourceToken != nil && !transitionSourceTabCurrentForRequestLocked(source, req.expectedSourceTab, req.transferExpectedSourceTab) {
+		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
 
 	publication := &attachmentPublication{
 		req: req, source: source,
 		sourceCoordinator: sourceCoordinator, targetCoordinator: targetCoordinator,
-		releaseCoordinators: lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator),
+		releaseCoordinators: releaseCoordinators,
 	}
 	return publication, nil
 }

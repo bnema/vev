@@ -13,7 +13,6 @@ import (
 )
 
 func TestProxiedHandshakeOrdersWelcomeMetadataAndBaseZeroContent(t *testing.T) {
-	t.Skip("legacy handshake fixture races attachment-local view repair")
 	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	contentSize := domain.Size{Cols: 24, Rows: 4}
 	hello := ports.Hello{
@@ -58,9 +57,10 @@ func TestProxiedHandshakeOrdersWelcomeMetadataAndBaseZeroContent(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	testAttachmentTab(sess).mu.Lock()
-	actualContentSize := testAttachmentTab(sess).size
-	testAttachmentTab(sess).mu.Unlock()
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	actualContentSize := tb.size
+	tb.mu.Unlock()
 	require.Equal(t, contentSize, actualContentSize, "proxied geometry must not subtract chrome a second time")
 
 	release()
@@ -68,7 +68,6 @@ func TestProxiedHandshakeOrdersWelcomeMetadataAndBaseZeroContent(t *testing.T) {
 }
 
 func TestOrdinaryHandshakeRetainsChromeAndNoMetadata(t *testing.T) {
-	t.Skip("legacy handshake fixture races attachment-local view repair")
 	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	viewport := domain.Size{Cols: 24, Rows: 6}
 	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "ordinary", Size: viewport}
@@ -96,9 +95,10 @@ func TestOrdinaryHandshakeRetainsChromeAndNoMetadata(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	testAttachmentTab(sess).mu.Lock()
-	actualContentSize := testAttachmentTab(sess).size
-	testAttachmentTab(sess).mu.Unlock()
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	actualContentSize := tb.size
+	tb.mu.Unlock()
 	require.Equal(t, tabSize(viewport), actualContentSize)
 	requireNoOutputFrame(t, sends)
 

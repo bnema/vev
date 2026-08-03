@@ -27,46 +27,38 @@ type attachmentConnectionToken struct {
 	rebase bool
 }
 
-// attachmentTokenLocked captures the exact registered attachment, transport
-// incarnation, generation, and coordinator lease. Caller holds entry.core().mu.
-func attachmentTokenLocked(entry attachmentSession, ac *attachedClient) attachmentConnectionToken {
-	if entry == nil || entry.core() == nil || ac == nil || !attachmentRegisteredLocked(entry, ac) {
-		return attachmentConnectionToken{}
-	}
-	transport := ac.transportSnapshot()
-	if transport.transport == nil {
-		return attachmentConnectionToken{}
-	}
-	token := attachmentConnectionToken{
-		sess:       entry,
-		ac:         ac,
-		generation: ac.connectionGeneration.Load(),
-		transport:  transport,
-	}
-	if rc := entry.core().coordinator.Load(); rc != nil {
-		token.lease = rc.attachmentLease(ac)
-	}
-	return token
-}
-
-func (s *session) attachmentTokenLocked(ac *attachedClient) attachmentConnectionToken {
-	return attachmentTokenLocked(s, ac)
-}
-
 func attachmentToken(entry attachmentSession, ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
 	if entry == nil || entry.core() == nil || ac == nil || tr == nil {
 		return attachmentConnectionToken{}
 	}
-	core := entry.core()
-	core.mu.Lock()
+	// Capture one concrete link incarnation before taking the session lock. The
+	// same snapshot is revalidated below; do not take a second snapshot and
+	// accidentally bind a replacement link.
 	transport := ac.transportSnapshot()
 	if transport.transport != tr {
+		return attachmentConnectionToken{}
+	}
+	if ac.beforeAttachmentTokenValidation != nil {
+		ac.beforeAttachmentTokenValidation()
+	}
+	core := entry.core()
+	core.mu.Lock()
+	if !attachmentRegisteredLocked(entry, ac) || !ac.transportSnapshotCurrent(transport) {
 		core.mu.Unlock()
 		return attachmentConnectionToken{}
 	}
-	token := attachmentTokenLocked(entry, ac)
+	generation := ac.connectionGeneration.Load()
+	token := attachmentConnectionToken{
+		sess:       entry,
+		ac:         ac,
+		generation: generation,
+		transport:  transport,
+	}
+	if rc := core.coordinator.Load(); rc != nil {
+		token.lease = rc.attachmentLease(ac)
+	}
 	core.mu.Unlock()
-	if token.ac == nil {
+	if !token.current() {
 		return attachmentConnectionToken{}
 	}
 	ac.bootstrapAttachmentCapability(token)

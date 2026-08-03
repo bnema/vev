@@ -268,10 +268,6 @@ type daemonActionRunner interface {
 	Run(daemonActionRequest) error
 }
 
-func resolveDaemonActionTarget(sess *session) daemonActionTarget {
-	return resolveDaemonActionTargetForAttachment(sess, nil)
-}
-
 func resolveDaemonActionTargetForAttachment(sess *session, ac *attachedClient) daemonActionTarget {
 	if sess == nil {
 		return daemonActionTarget{}

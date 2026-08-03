@@ -724,41 +724,6 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	require.Empty(t, got, "OSC 10/11 queries must be swallowed once the client that reported these colors is gone")
 }
 
-func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	p, release := newBlockingPTY(t)
-	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	defer release()
-	d.applyTheme(sess, ac, ports.Theme{
-		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
-		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-	})
-
-	// Simulate the race window inside clientGone/detachOnSendError: the old
-	// client has already been detached (detachIfCurrent succeeded), but
-	// before resetScreenDefaultColors runs a new client attaches and applies
-	// its own theme.
-	require.True(t, sess.detachIfCurrent(ac))
-
-	tr, _ := newCapturingTransport(t)
-	newAC, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
-	require.NoError(t, err)
-	d.applyTheme(sess, newAC, ports.Theme{
-		HasForeground: true, Foreground: renderer.RGB{R: 20, G: 21, B: 22},
-		HasBackground: true, Background: renderer.RGB{R: 23, G: 24, B: 25},
-	})
-
-	// The late reset from the old client's detach path must not wipe the
-	// new client's freshly applied colors.
-	d.resetScreenDefaultColors(sess)
-
-	tb := testAttachmentTab(sess)
-	var got []byte
-	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
-	require.NotEmpty(t, got, "a newer client's screen default colors must survive a stale detach's reset")
-}
-
 func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
@@ -794,27 +759,6 @@ func TestDetachOnSendErrorParkPreservesScreenDefaultColors(t *testing.T) {
 	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
 	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, got, "parked clients resume the same attachment, so screen default colors must be preserved")
-}
-
-func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
-	p, release := newBlockingPTY(t)
-	d, sess, old, _ := newManualSessionWithPTYs(t, p)
-	defer release()
-	tr, _ := newCapturingTransport(t)
-	_, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
-	require.NoError(t, err)
-
-	d.applyTheme(sess, old, ports.Theme{
-		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
-		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-	})
-
-	var got []byte
-	tb := testAttachmentTab(sess)
-	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
-	require.Empty(t, got)
 }
 
 func TestStatusMarksEphemeralSession(t *testing.T) {

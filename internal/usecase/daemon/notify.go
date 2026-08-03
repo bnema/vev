@@ -368,14 +368,6 @@ func (d *Daemon) NotifyGlobal(sev domain.NoticeSeverity, code domain.NoticeCode,
 	d.notify(nil, sev, code, msg, cause)
 }
 
-// showToast publishes a notice into one client's toast stack and repaints only
-// after the state mutation is complete.
-func (d *Daemon) showToast(ac *attachedClient, n domain.Notification) {
-	if d.publishToast(ac, n) {
-		d.repaintForNotice(ac)
-	}
-}
-
 // publishToast durably mutates one client's toast state without repainting.
 // Routing paths call it while routingMu excludes detach, then release routingMu
 // before rendering so a render failure can safely route another notice.

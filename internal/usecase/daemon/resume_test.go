@@ -517,7 +517,6 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 // before parkAttachment. The parking marker must already be published so the
 // loser waits instead of treating the credential as unknown across that gap.
 func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
-	t.Skip("legacy fixture predates attachment-owned state")
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
@@ -609,6 +608,7 @@ func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
 	require.Contains(t, loserErr.Error(), "resume token is no longer valid")
 	require.True(t, loserTr.Closed() || len(loserTr.Sends()) == 0, "losing resume must not complete Welcome")
 
+	require.True(t, d.commitResumeClaim(ac), "successful concurrent resume must consume its parked credential")
 	d.mu.Lock()
 	_, oldTokenParked := d.parked[token]
 	_, stillParking := d.parking[token]

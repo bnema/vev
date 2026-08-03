@@ -98,6 +98,9 @@ type attachedClient struct {
 	previousSession Guarded[attachmentSession]
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
+	// beforeAttachmentTokenValidation is a deterministic lifecycle-race seam
+	// used only by package tests.
+	beforeAttachmentTokenValidation func()
 }
 
 type cursorOut struct {
