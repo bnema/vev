@@ -47,7 +47,6 @@ import (
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 	pdgram "github.com/bnema/vev/pkg/dgram"
@@ -868,70 +867,20 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	if localDialer == nil {
 		localDialer = defaultLocalDialer
 	}
-	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(os.Stdin, os.Stderr),
-		attach: func(ctx context.Context, intent uint8, name string) error {
-			if log != nil {
-				log.Info("attaching to local session", "intent", intent, "name", name)
-			}
-			return runClient(ctx, client.Dependencies{
-				Dialer:          localDialer(),
-				Terminal:        term.New(),
-				Clock:           clock.New(),
-				Logger:          log,
-				RuntimeObserver: deps.runtimeObserver,
-				Remote:          false,
-			}, client.AttachRequest{Intent: intent, SessionName: name})
-		},
-		killDaemon:      requestDaemonStop,
-		settleAfterKill: waitForDaemonStop,
-	})
+	if log != nil {
+		log.Info("attaching to local session", "intent", intent, "name", name)
+	}
+	return runClient(ctx, client.Dependencies{
+		Dialer:          localDialer(),
+		Terminal:        term.New(),
+		Clock:           clock.New(),
+		Logger:          log,
+		RuntimeObserver: deps.runtimeObserver,
+		Remote:          false,
+	}, client.AttachRequest{Intent: intent, SessionName: name})
 }
 
-type attachRecoveryDeps struct {
-	confirmer       confirm.Confirmer
-	attach          func(context.Context, uint8, string) error
-	killDaemon      func(context.Context) error
-	settleAfterKill func(context.Context) error
-}
-
-const (
-	daemonStopTimeout          = 2 * time.Second
-	daemonRestartSettle        = 50 * time.Millisecond
-	legacyMalformedHelloSignal = "malformed hello"
-)
-
-func runLocalAttachWithRecovery(ctx context.Context, intent uint8, name string, deps attachRecoveryDeps) error {
-	err := deps.attach(ctx, intent, name)
-	if !isDaemonVersionDrift(err) {
-		return err
-	}
-
-	ok, promptErr := deps.confirmer.Confirm("Your vev version differs from the running daemon; kill it and restart?")
-	if promptErr != nil {
-		return fmt.Errorf("vev: reading confirmation: %w", promptErr)
-	}
-	if !ok {
-		return err
-	}
-	if killErr := deps.killDaemon(ctx); killErr != nil {
-		return killErr
-	}
-	if deps.settleAfterKill != nil {
-		if settleErr := deps.settleAfterKill(ctx); settleErr != nil {
-			return settleErr
-		}
-	}
-	return deps.attach(ctx, intent, name)
-}
-
-func isDaemonVersionDrift(err error) bool {
-	var protocolErr *client.ProtocolError
-	if !errors.As(err, &protocolErr) {
-		return false
-	}
-	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
-}
+const daemonStopTimeout = 2 * time.Second
 
 type localDaemonDialer struct {
 	dir      string
@@ -1008,17 +957,6 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 		default:
 			return fmt.Errorf("vev: unexpected reply type %d to detached session creation", reply.frame.Type)
 		}
-	}
-}
-
-func waitForDaemonStop(ctx context.Context) error {
-	timer := time.NewTimer(daemonRestartSettle)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 

@@ -945,32 +945,50 @@ func (d *Daemon) sessionsSnapshotLocked() []*session {
 }
 
 // handleConn reads the first frame off a fresh connection and routes it. A
-// context watcher closes the transport on serve-context cancel so a handler
-// parked in Recv (mid-handshake or between input frames) unwinds on shutdown.
+// context watcher closes the transport on serve-context cancel or handshake
+// timeout so blocked transport operations unwind.
 func (d *Daemon) handleConn(tr ports.Transport) {
-	stop := context.AfterFunc(d.hardCtx, func() { _ = tr.Close() })
-	defer stop()
+	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(d.hardCtx)
+	stopTransport := watchHandshakeTransport(handshakeCtx, tr)
+	defer finishHandshake()
+	defer stopTransport()
 
-	first, err := tr.Recv()
+	var first ports.Frame
+	err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
+		var recvErr error
+		first, recvErr = tr.Recv()
+		return recvErr
+	})
 	if err != nil {
+		err = handshakeContextError(d.hardCtx, timedOut, err)
 		d.log.Warn("connection closed before hello", "err", err)
 		_ = tr.Close()
 		return
 	}
 	switch first.Type {
 	case ports.MsgList:
+		stopTransport()
+		finishHandshake()
 		d.handleList(tr)
 	case ports.MsgCommand:
+		stopTransport()
+		finishHandshake()
 		if err := d.handleCommand(tr, first); err != nil {
 			d.log.Warn("command handler failed", "err", err)
 		}
 	case ports.MsgKill:
+		stopTransport()
+		finishHandshake()
 		d.handleKill(tr, first)
 	case ports.MsgHello:
-		d.handleHello(tr, first)
+		d.handleHelloWithContext(handshakeCtx, timedOut, stopTransport, finishHandshake, tr, first)
 	default:
 		d.log.Warn("hello rejected", "err", "expected hello", "type", first.Type)
-		_ = tr.Send(frameError(ports.ErrInternal, "expected hello"))
+		_ = boundedHandshakeOperation(handshakeCtx, tr, func() error {
+			return tr.Send(frameError(ports.ErrInternal, "expected hello"))
+		})
+		stopTransport()
+		finishHandshake()
 		_ = tr.Close()
 	}
 }
@@ -1060,24 +1078,46 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	}
 }
 
-// handleHello runs the attach handshake: version check, intent routing,
-// Welcome, guaranteed first paint, then the per-connection input loop.
+// handleHello runs the attach handshake for direct package callers. Accepted
+// connections use handleHelloWithContext so the deadline also covers the first
+// frame read in handleConn.
 func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
+	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(context.Background())
+	stopTransport := watchHandshakeTransport(handshakeCtx, tr)
+	defer finishHandshake()
+	defer stopTransport()
+	d.handleHelloWithContext(handshakeCtx, timedOut, stopTransport, finishHandshake, tr, f)
+}
+
+// handleHelloWithContext runs the attach handshake: version check, intent
+// routing, Welcome, guaranteed first paint, then the per-connection input loop.
+func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <-chan struct{}, stopHandshakeTransport, finishHandshake func(), tr ports.Transport, f ports.Frame) {
+	if err := handshakeContextError(context.Background(), timedOut, handshakeCtx.Err()); err != nil {
+		_ = tr.Close()
+		return
+	}
+	sendHandshake := func(frame ports.Frame) error {
+		err := boundedHandshakeOperation(handshakeCtx, tr, func() error { return tr.Send(frame) })
+		if err != nil {
+			return handshakeContextError(context.Background(), timedOut, err)
+		}
+		return nil
+	}
 	h, err := ports.UnmarshalHello(f.Payload)
 	if err != nil {
 		if version, ok := ports.PeekHelloVersion(f.Payload); ok && version != ports.ProtocolVersion {
 			d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", version, "expected", ports.ProtocolVersion)
-			_ = tr.Send(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
+			_ = sendHandshake(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
 		} else {
 			d.log.Warn("hello rejected", "err", err)
-			_ = tr.Send(frameError(ports.ErrInternal, "malformed hello"))
+			_ = sendHandshake(frameError(ports.ErrInternal, "malformed hello"))
 		}
 		_ = tr.Close()
 		return
 	}
 	if h.Version != ports.ProtocolVersion {
 		d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", h.Version, "expected", ports.ProtocolVersion, "intent", h.Intent, "session", h.Name)
-		_ = tr.Send(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
+		_ = sendHandshake(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
 		_ = tr.Close()
 		return
 	}
@@ -1086,14 +1126,25 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	if rerr != nil {
 		d.log.Warn("hello rejected", "err", rerr, "intent", h.Intent, "session", h.Name)
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
-			_ = tr.Send(frameError(pe.code, pe.text))
+			_ = sendHandshake(frameError(pe.code, pe.text))
 		} else {
-			_ = tr.Send(frameError(ports.ErrInternal, rerr.Error()))
+			_ = sendHandshake(frameError(ports.ErrInternal, rerr.Error()))
 		}
 		_ = tr.Close()
 		return
 	}
 
+	if err := handshakeCtx.Err(); err != nil {
+		return
+	}
+	failAttachment := func() {
+		if !d.abortResumeClaim(ac) {
+			// A fresh attachment has no credential to park. Explicit teardown
+			// removes the unpublished attachment instead of creating a resumable
+			// entry for a handshake that never committed Welcome.
+			d.clientGone(sess, ac, tr, true)
+		}
+	}
 	rc := sess.renderCoordinator()
 	lease := (*attachmentLease)(nil)
 	if rc != nil {
@@ -1112,18 +1163,16 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		}
 		return
 	}
-	if err := ac.sendExpectedTransportForAttachment(expected, frameWelcome(sess, ac), welcomeTicket); err != nil {
+	if err := handshakeCtx.Err(); err != nil {
 		welcomeTicket.End()
-		if !d.abortResumeClaim(ac) {
-			d.clientGone(sess, ac, tr, false)
-		}
+		failAttachment()
 		return
 	}
-	if !d.commitResumeClaim(ac) {
+	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
+		return ac.sendExpectedTransportForAttachment(expected, frameWelcome(sess, ac), welcomeTicket)
+	}); err != nil {
 		welcomeTicket.End()
-		if !d.abortResumeClaim(ac) {
-			d.clientGone(sess, ac, tr, false)
-		}
+		failAttachment()
 		return
 	}
 	// Release Welcome's effect before discovering post-handshake authority so a
@@ -1131,28 +1180,38 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	welcomeTicket.End()
 	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentAttachmentEffect(sess, tr)
 	if !admitted {
-		d.clientGone(sess, ac, tr, false)
+		failAttachment()
 		return
 	}
 	postWelcomeLease := postWelcomeToken.lease
 	if postWelcomeToken.ac == nil {
 		postWelcomeTicket.End()
-		d.clientGone(sess, ac, tr, false)
+		failAttachment()
 		return
 	}
 	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
 		postWelcomeTicket.End()
 		// The attachment was detached while Welcome was in flight; never let
 		// this stale handshake emit an Output frame.
-		d.clientGone(sess, ac, tr, false)
+		failAttachment()
 		return
 	}
 	postWelcomeTicket.End()
 	paintToken := sess.attachmentToken(ac, tr)
-	if !d.firstPaintForTransition(paintToken) {
-		d.clientGone(sess, ac, tr, false)
+	painted := false
+	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
+		painted = d.firstPaintForTransition(paintToken)
+		return nil
+	}); err != nil || !painted || handshakeCtx.Err() != nil {
+		failAttachment()
 		return
 	}
+	if !d.commitResumeClaim(ac) {
+		failAttachment()
+		return
+	}
+	stopHandshakeTransport()
+	finishHandshake()
 	d.runConnLoop(ac)
 	_ = tr.Close()
 }

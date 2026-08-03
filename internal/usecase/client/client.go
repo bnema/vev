@@ -129,9 +129,9 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
-// preWelcomeTimeout bounds each blocking operation before the daemon has
-// accepted the attach. Mosh uses the same 15-second startup budget.
-const preWelcomeTimeout = 15 * time.Second
+// preWelcomeTimeout remains the focused-test name for the shared handshake
+// budget, which now also covers connect and initial publication.
+const preWelcomeTimeout = ports.HandshakeTimeout
 
 // remoteHostLearnerShutdownTimeout bounds how long Run waits for async remote
 // host learning after terminal restoration. Learning is best-effort; a stalled
@@ -313,8 +313,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	}
 
 	for {
-		transport, err := r.dialer.Dial(ctx)
+		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
+		transport, err := boundedDial(handshakeCtx, r.dialer)
 		if err != nil {
+			err = handshakeContextError(ctx, timedOut, err)
+			finishHandshake()
 			if resumeToken == 0 || ctx.Err() != nil {
 				if clearErr := reconnect.clear(); clearErr != nil {
 					return errors.Join(err, clearErr)
@@ -340,11 +343,18 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			continue
 		}
 		ms.dialed = true
+		if transport == nil {
+			finishHandshake()
+			return errors.New("vev: dialer returned nil transport")
+		}
+		stopHandshakeTransport := watchHandshakeTransport(handshakeCtx, transport)
 		connection, err := NewSessionConnection(transport, SessionTarget{
 			Intent:      attemptRequest.Intent,
 			SessionName: attemptRequest.SessionName,
 		})
 		if err != nil {
+			stopHandshakeTransport()
+			finishHandshake()
 			_ = transport.Close()
 			return err
 		}
@@ -354,22 +364,28 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			linkEvents = reporter.LinkEvents()
 		}
 		result := (&attachAttempt{
-			runner:             r,
-			connection:         connection,
-			remote:             remote,
-			request:            attemptRequest,
-			resumeToken:        resumeToken,
-			clientID:           processClientID,
-			milestones:         &ms,
-			themeState:         themeState,
-			enterRaw:           enterRaw,
-			reconnect:          reconnect,
-			linkEvents:         linkEvents,
-			rememberRemoteHost: rememberRemoteHost,
+			runner:                 r,
+			connection:             connection,
+			remote:                 remote,
+			handshakeCtx:           handshakeCtx,
+			handshakeTimedOut:      timedOut,
+			finishHandshake:        finishHandshake,
+			stopHandshakeTransport: stopHandshakeTransport,
+			request:                attemptRequest,
+			resumeToken:            resumeToken,
+			clientID:               processClientID,
+			milestones:             &ms,
+			themeState:             themeState,
+			enterRaw:               enterRaw,
+			reconnect:              reconnect,
+			linkEvents:             linkEvents,
+			rememberRemoteHost:     rememberRemoteHost,
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
 		}).run(ctx)
+		stopHandshakeTransport()
+		finishHandshake()
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -533,20 +549,24 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 }
 
 type attachAttempt struct {
-	runner             *Runner
-	connection         *SessionConnection
-	remote             bool
-	transport          ports.Transport
-	request            AttachRequest
-	resumeToken        uint64
-	clientID           [16]byte
-	milestones         *milestones
-	themeState         *terminalThemeState
-	enterRaw           func() error
-	reconnect          *reconnectUI
-	linkEvents         <-chan ports.LinkEvent
-	rememberRemoteHost func()
-	terminalInput      func() *terminalInputPump
+	runner                 *Runner
+	connection             *SessionConnection
+	remote                 bool
+	transport              ports.Transport
+	handshakeCtx           context.Context
+	handshakeTimedOut      <-chan struct{}
+	finishHandshake        func()
+	stopHandshakeTransport func()
+	request                AttachRequest
+	resumeToken            uint64
+	clientID               [16]byte
+	milestones             *milestones
+	themeState             *terminalThemeState
+	enterRaw               func() error
+	reconnect              *reconnectUI
+	linkEvents             <-chan ports.LinkEvent
+	rememberRemoteHost     func()
+	terminalInput          func() *terminalInputPump
 }
 
 type attachResult struct {
@@ -569,47 +589,6 @@ func (e *AttachTargetError) Error() string {
 		return "client: attach target handoff"
 	}
 	return fmt.Sprintf("client: attach target %q/%q", e.Target.Endpoint, e.Target.Session)
-}
-
-// boundedPreWelcome runs one blocking handshake operation. Transport methods
-// do not accept a context, so cancellation and expiry close this attempt's
-// transport to interrupt the call, then wait for its goroutine to exit.
-func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Transport, operation func() error) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		_ = transport.Close()
-		return true, err
-	}
-
-	timer := clk.NewTimer(preWelcomeTimeout)
-	defer timer.Stop()
-	completed := make(chan error, 1)
-	go func() { completed <- operation() }()
-
-	select {
-	case err := <-completed:
-		// Prefer a cancellation/expiry observed concurrently with completion.
-		// That event owns the transport lifetime even though the operation has
-		// already returned by the time we observe it here.
-		if ctx.Err() != nil {
-			_ = transport.Close()
-			return true, ctx.Err()
-		}
-		select {
-		case <-timer.C():
-			_ = transport.Close()
-			return true, context.DeadlineExceeded
-		default:
-			return false, err
-		}
-	case <-ctx.Done():
-		_ = transport.Close()
-		<-completed
-		return true, ctx.Err()
-	case <-timer.C():
-		_ = transport.Close()
-		<-completed
-		return true, context.DeadlineExceeded
-	}
 }
 
 // paletteSlot validates the scanner's signed slot before narrowing it for the
@@ -656,6 +635,41 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
+	handshakeCtx := a.handshakeCtx
+	handshakeTimedOut := a.handshakeTimedOut
+	finishHandshake := a.finishHandshake
+	stopHandshakeTransport := a.stopHandshakeTransport
+	if handshakeCtx == nil {
+		handshakeCtx, handshakeTimedOut, finishHandshake = newHandshakeContext(ctx, clk)
+		stopHandshakeTransport = watchHandshakeTransport(handshakeCtx, transport)
+	}
+	handshakeFinished := false
+	endHandshake := func() {
+		if handshakeFinished {
+			return
+		}
+		handshakeFinished = true
+		if stopHandshakeTransport != nil {
+			stopHandshakeTransport()
+		}
+		if finishHandshake != nil {
+			finishHandshake()
+		}
+	}
+	defer endHandshake()
+	handshakeFailure := func(stage string, err error) attachResult {
+		if handshakeTimedOut != nil {
+			err = handshakeContextError(ctx, handshakeTimedOut, err)
+		}
+		return attachResult{transportClosed: handshakeCtx.Err() != nil, err: fmt.Errorf("vev: %s: %w", stage, err)}
+	}
+	sendHandshake := func(operation func() error) error {
+		err := boundedHandshakeOperation(handshakeCtx, transport, operation)
+		if err != nil {
+			return handshakeContextError(ctx, handshakeTimedOut, err)
+		}
+		return nil
+	}
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -682,22 +696,21 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		MaxOutputInFlight: requestedOutputWindow(transport),
 		Env:               os.Environ(),
 	}
-	if closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
+	if err := sendHandshake(func() error {
 		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
 	}); err != nil {
-		return attachResult{transportClosed: closed, err: fmt.Errorf("vev: sending hello: %w", err)}
+		return handshakeFailure("sending hello", err)
 	}
 	ms.helloSent = true
 
 	// 2. Await Welcome or a typed rejection.
 	var reply ports.Frame
-	closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
+	if err := boundedHandshakeOperation(handshakeCtx, transport, func() error {
 		var recvErr error
 		reply, recvErr = transport.Recv()
 		return recvErr
-	})
-	if err != nil {
-		return attachResult{transportClosed: closed, err: fmt.Errorf("vev: awaiting welcome: %w", err)}
+	}); err != nil {
+		return handshakeFailure("awaiting welcome", err)
 	}
 	result := func(welcomed bool, err error) attachResult {
 		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: welcomed, err: err}
@@ -725,6 +738,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return result(false, &ProtocolError{Code: em.Code, Text: em.Text})
 	default:
 		return result(false, fmt.Errorf("vev: unexpected reply type %d before welcome", reply.Type))
+	}
+	if err := handshakeCtx.Err(); err != nil {
+		return handshakeFailure("validating welcome", err)
 	}
 	welcomedResult := func(err error) attachResult { return result(true, err) }
 
@@ -787,7 +803,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		// keeps the generation publication ordered before the first query and
 		// avoids leaving a queued Theme behind an immediate detach.
 		if !senderStarted {
-			if err := transport.Send(frame); err != nil {
+			if err := sendHandshake(func() error { return transport.Send(frame) }); err != nil {
 				return fmt.Errorf("sending initial theme: %w", err)
 			}
 			return nil
@@ -876,7 +892,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if reconnect.remote {
 			// Before the asynchronous sender starts, preserve transport ordering by
 			// requesting the reset synchronously after the initial Theme publication.
-			closed, resetErr := boundedPreWelcome(ctx, clk, transport, func() error {
+			resetErr := sendHandshake(func() error {
 				payload, err := ports.MarshalResize(ports.Resize{Size: size})
 				if err != nil {
 					return err
@@ -884,8 +900,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return transport.Send(ports.Frame{Type: ports.MsgResize, Payload: payload})
 			})
 			if resetErr != nil {
-				resetResult := welcomedResult(fmt.Errorf("requesting reconnect reconciliation: %w", resetErr))
-				resetResult.transportClosed = closed
+				resetErr = handshakeContextError(ctx, handshakeTimedOut, resetErr)
+				resetResult := welcomedResult(fmt.Errorf("vev: requesting reconnect reconciliation: %w", resetErr))
+				resetResult.transportClosed = handshakeCtx.Err() != nil
 				return resetResult
 			}
 			awaitingReconnectReset = true
@@ -1082,6 +1099,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if !ms.firstOutput {
 					ms.firstOutput = true
 					log.Debug("received first output")
+					endHandshake()
 				}
 			case ports.MsgAttachTarget:
 				target, derr := ports.UnmarshalAttachTarget(r.frame.Payload)

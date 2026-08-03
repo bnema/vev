@@ -936,7 +936,7 @@ func TestPreSenderReconnectResetIsBounded(t *testing.T) {
 			trigger: func(_ context.CancelFunc, timer *reconnectResetTimer) {
 				timer.ch <- time.Time{}
 			},
-			wantErr: context.DeadlineExceeded,
+			wantErr: errHandshakeTimeout,
 		},
 		{
 			name: "cancellation",
@@ -961,15 +961,13 @@ func TestPreSenderReconnectResetIsBounded(t *testing.T) {
 			resultCh := make(chan attachResult, 1)
 			go func() { resultCh <- attempt.run(ctx) }()
 
-			<-clock.preWelcome // Hello Send
-			<-clock.preWelcome // Welcome Recv
-			resetTimer := <-clock.preWelcome
+			handshakeTimer := <-clock.preWelcome
 			select {
 			case <-tr.entered:
 			case <-time.After(time.Second):
 				t.Fatal("timed out waiting for synchronous reconnect reset Send")
 			}
-			tt.trigger(cancel, resetTimer)
+			tt.trigger(cancel, handshakeTimer)
 
 			result := requireAttachResult(t, resultCh)
 			require.ErrorIs(t, result.err, tt.wantErr)

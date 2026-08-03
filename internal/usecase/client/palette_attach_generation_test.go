@@ -20,22 +20,33 @@ import (
 
 // attachPaletteClock deliberately exposes each independently-created timer.
 // Tests fire only the deadline they intend to exercise; no wall clock is used.
-type attachPaletteClock struct{ timers chan *attachPaletteTimer }
+type attachPaletteClock struct {
+	timers          chan *attachPaletteTimer
+	handshakeTimers chan *attachPaletteTimer
+}
 
 type attachPaletteTimer struct {
 	ch       chan time.Time
 	stopped  chan struct{}
 	stopOnce sync.Once
+	duration time.Duration
 }
 
 func newAttachPaletteClock() *attachPaletteClock {
-	return &attachPaletteClock{timers: make(chan *attachPaletteTimer, 16)}
+	return &attachPaletteClock{
+		timers:          make(chan *attachPaletteTimer, 16),
+		handshakeTimers: make(chan *attachPaletteTimer, 1),
+	}
 }
 
 func (*attachPaletteClock) Now() time.Time { return time.Time{} }
-func (c *attachPaletteClock) NewTimer(time.Duration) ports.Timer {
-	timer := &attachPaletteTimer{ch: make(chan time.Time, 1), stopped: make(chan struct{})}
-	c.timers <- timer
+func (c *attachPaletteClock) NewTimer(delay time.Duration) ports.Timer {
+	timer := &attachPaletteTimer{ch: make(chan time.Time, 1), stopped: make(chan struct{}), duration: delay}
+	if delay == ports.HandshakeTimeout {
+		c.handshakeTimers <- timer
+	} else {
+		c.timers <- timer
+	}
 	return timer
 }
 func (t *attachPaletteTimer) C() <-chan time.Time    { return t.ch }
@@ -160,11 +171,12 @@ func (t *attachPaletteTransport) snapshots() []ports.Theme {
 }
 
 type attachPaletteHarness struct {
-	clock     *attachPaletteClock
-	reader    *attachPaletteReader
-	writer    *attachPaletteWriter
-	transport *attachPaletteTransport
-	done      chan attachResult
+	clock          *attachPaletteClock
+	handshakeTimer *attachPaletteTimer
+	reader         *attachPaletteReader
+	writer         *attachPaletteWriter
+	transport      *attachPaletteTransport
+	done           chan attachResult
 }
 
 func startAttachPaletteHarness(state *terminalThemeState) *attachPaletteHarness {
@@ -196,13 +208,15 @@ func startAttachPaletteHarnessWithInputAndWriteError(state *terminalThemeState, 
 			return input
 		},
 	}
-	h := &attachPaletteHarness{clock: clock, reader: reader, writer: writer, transport: transport, done: make(chan attachResult, 1)}
+	h := &attachPaletteHarness{
+		clock:     clock,
+		reader:    reader,
+		writer:    writer,
+		transport: transport,
+		done:      make(chan attachResult, 1),
+	}
 	go func() { h.done <- attempt.run(context.Background()) }()
-	// The handshake's two bounded-pre-welcome timers are unrelated to palette
-	// acquisition. Remove them in this harness so every exposed timer is a
-	// generation deadline (or a timer deliberately created by input handling).
-	<-clock.timers
-	<-clock.timers
+	h.handshakeTimer = <-clock.handshakeTimers
 	return h
 }
 
@@ -221,7 +235,13 @@ func (h *attachPaletteHarness) nextTimer(t *testing.T) *attachPaletteTimer {
 func (h *attachPaletteHarness) detach(t *testing.T) {
 	t.Helper()
 	h.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})}
-	require.NoError(t, (<-h.done).err)
+	result := <-h.done
+	require.NoError(t, result.err)
+	select {
+	case <-h.handshakeTimer.stopped:
+	default:
+		t.Fatal("handshake timer was not canceled after initial publication")
+	}
 }
 
 func paletteReply(foreground, background string, slot uint8, color string) string {

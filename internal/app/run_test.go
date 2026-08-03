@@ -23,7 +23,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/bnema/vev/pkg/safedir"
@@ -752,131 +751,6 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("ReadAll stdout error = %v", err)
 	}
 	return string(out)
-}
-
-func TestRunLocalAttachPromptsAndRestartsOnProtocolMismatch(t *testing.T) {
-	var prompts bytes.Buffer
-	answers := strings.NewReader("y\n")
-	attachCalls := 0
-	killCalls := 0
-
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(answers, &prompts),
-		attach: func(context.Context, uint8, string) error {
-			attachCalls++
-			if attachCalls == 1 {
-				return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-			}
-			return nil
-		},
-		killDaemon: func(context.Context) error {
-			killCalls++
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("runLocalAttachWithRecovery returned error: %v", err)
-	}
-	if attachCalls != 2 {
-		t.Fatalf("attach calls = %d, want 2", attachCalls)
-	}
-	if killCalls != 1 {
-		t.Fatalf("kill calls = %d, want 1", killCalls)
-	}
-	if got := prompts.String(); !strings.Contains(got, "Your vev version differs") || !strings.Contains(got, "kill it") {
-		t.Fatalf("prompt = %q, want version/kill prompt", got)
-	}
-}
-
-func TestRunLocalAttachPropagatesPromptError(t *testing.T) {
-	readErr := errors.New("read failed")
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(errorReader{err: readErr}, &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-		},
-		killDaemon: func(context.Context) error {
-			t.Fatal("killDaemon should not be called after prompt error")
-			return nil
-		},
-	})
-	if !errors.Is(err, readErr) {
-		t.Fatalf("error = %v, want wrapped %v", err, readErr)
-	}
-}
-
-func TestRunLocalAttachPropagatesKillError(t *testing.T) {
-	killErr := errors.New("kill failed")
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(strings.NewReader("y\n"), &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-		},
-		killDaemon: func(context.Context) error { return killErr },
-	})
-	if !errors.Is(err, killErr) {
-		t.Fatalf("error = %v, want %v", err, killErr)
-	}
-}
-
-func TestRunLocalAttachSettlesBeforeRetry(t *testing.T) {
-	var order []string
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(strings.NewReader("y\n"), &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			order = append(order, "attach")
-			if len(order) == 1 {
-				return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-			}
-			return nil
-		},
-		killDaemon: func(context.Context) error {
-			order = append(order, "kill")
-			return nil
-		},
-		settleAfterKill: func(context.Context) error {
-			order = append(order, "settle")
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("runLocalAttachWithRecovery returned error: %v", err)
-	}
-	if got, want := strings.Join(order, ","), "attach,kill,settle,attach"; got != want {
-		t.Fatalf("order = %s, want %s", got, want)
-	}
-}
-
-type errorReader struct{ err error }
-
-func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
-
-func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
-	answers := strings.NewReader("n\n")
-	wantErr := &client.ProtocolError{Code: ports.ErrInternal, Text: "malformed hello"}
-	attachCalls := 0
-	killCalls := 0
-
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(answers, &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			attachCalls++
-			return wantErr
-		},
-		killDaemon: func(context.Context) error {
-			killCalls++
-			return nil
-		},
-	})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("error = %v, want original %v", err, wantErr)
-	}
-	if attachCalls != 1 {
-		t.Fatalf("attach calls = %d, want 1", attachCalls)
-	}
-	if killCalls != 0 {
-		t.Fatalf("kill calls = %d, want 0", killCalls)
-	}
 }
 
 func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
