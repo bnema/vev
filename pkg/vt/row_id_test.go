@@ -49,6 +49,18 @@ func TestScreenRowIDsDoNotAppendInteriorOrAlternateScrollHistory(t *testing.T) {
 	}
 }
 
+func TestScreenRowIDRefreshesOnSnapExpandedFullClear(t *testing.T) {
+	s := NewScreen(2, 1)
+	s.Write([]byte("界"))
+	before := s.RowID(0)
+
+	s.clearRow(0, 1, 2)
+
+	if got := s.RowID(0); got == before {
+		t.Fatalf("row ID = %d after snap-expanded full clear, want a fresh ID", got)
+	}
+}
+
 func TestScreenRowIDsRefreshOnClearResetAndAlternateClone(t *testing.T) {
 	s := NewScreen(4, 3)
 	before := s.RowIDs()

@@ -634,8 +634,10 @@ func assertSessionDefaultColors(t *testing.T, sess *session, fg, bg renderer.RGB
 func assertPaneDefaultColors(t *testing.T, p *pane, fg, bg renderer.RGB) {
 	t.Helper()
 	var got []byte
+	p.mu.Lock()
 	p.screen.OnResponse = func(b []byte) { got = append(got, b...) }
 	p.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	p.mu.Unlock()
 	require.True(t, strings.Contains(string(got), formatOSCColor(fg)), string(got))
 	require.True(t, strings.Contains(string(got), formatOSCColor(bg)), string(got))
 }
@@ -654,17 +656,22 @@ func assertPaneColorScheme(t *testing.T, p *pane, light bool) {
 		want = "\x1b[?997;2n"
 	}
 	var got []byte
+	p.mu.Lock()
 	p.screen.OnResponse = func(b []byte) { got = append(got, b...) }
 	p.screen.Write([]byte("\x1b[?996n"))
+	p.mu.Unlock()
 	require.Equal(t, want, string(got))
 }
 
 func assertSessionColorSchemeUnknown(t *testing.T, sess *session) {
 	t.Helper()
 	for _, tb := range sess.tabs {
+		p := tb.focusedPane()
 		var got []byte
-		tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
-		tb.focusedPane().screen.Write([]byte("\x1b[?996n"))
+		p.mu.Lock()
+		p.screen.OnResponse = func(b []byte) { got = append(got, b...) }
+		p.screen.Write([]byte("\x1b[?996n"))
+		p.mu.Unlock()
 		require.Empty(t, got)
 	}
 }

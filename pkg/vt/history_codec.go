@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -133,13 +134,13 @@ func historyViewNextRowID(view HistoryView) (RowID, bool) {
 }
 
 func maxHistoryRowID(ids map[RowID]struct{}) RowID {
-	var max RowID
+	var maxID RowID
 	for id := range ids {
-		if id > max {
-			max = id
+		if id > maxID {
+			maxID = id
 		}
 	}
-	return max
+	return maxID
 }
 
 func historyViewRowCount(view HistoryView) int {
@@ -289,11 +290,6 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 				return HistoryView{}, historyDecodeStats{}, false
 			}
 			rowID := RowID(id)
-			for i := 0; i < seenCount; i++ {
-				if seenIDs[i] == rowID {
-					return HistoryView{}, historyDecodeStats{}, false
-				}
-			}
 			seenIDs[seenCount] = rowID
 			seenCount++
 			if rowID > maxID {
@@ -334,6 +330,12 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 		}
 		if populate {
 			chunks = append(chunks, &HistoryChunk{rows: rows, bounds: bounds, rowIDs: rowIDs})
+		}
+	}
+	slices.Sort(seenIDs[:seenCount])
+	for i := 1; i < seenCount; i++ {
+		if seenIDs[i] == seenIDs[i-1] {
+			return HistoryView{}, historyDecodeStats{}, false
 		}
 	}
 	if len(p.data) != 0 || RowID(nextRowID) <= maxID {

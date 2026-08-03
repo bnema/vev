@@ -67,7 +67,7 @@ func TestHistoryCodecRoundTripsBounds(t *testing.T) {
 	}
 }
 
-func TestHistoryCodecRejectsMalformedAndLegacyPayloads(t *testing.T) {
+func TestHistoryCodecRejectsLegacyPayloads(t *testing.T) {
 	// The previous layouts are deliberately incompatible with stable IDs.
 	legacy := []byte{
 		'V', 'T', 'H', '1', 2,
@@ -87,15 +87,6 @@ func TestHistoryCodecRejectsMalformedAndLegacyPayloads(t *testing.T) {
 		if _, err := UnmarshalHistory(data); err == nil {
 			t.Fatalf("accepted legacy history version %d", version)
 		}
-	}
-
-	for i := 0; i < len(legacy); i++ {
-		if _, err := UnmarshalHistory(legacy[:i]); err == nil {
-			t.Fatalf("accepted truncated prefix of length %d", i)
-		}
-	}
-	if _, err := UnmarshalHistory(append(append([]byte(nil), legacy...), 0xff)); err == nil {
-		t.Fatal("accepted trailing garbage")
 	}
 }
 
@@ -172,21 +163,13 @@ func TestChunkCodecRejectsTruncatedAndTrailingPayloads(t *testing.T) {
 		t.Fatalf("marshal history: %v", err)
 	}
 
-	tests := []struct {
-		name string
-		data []byte
-	}{
-		{name: "empty", data: nil},
-		{name: "truncated prefix", data: encoded[:len(encoded)-1]},
-		{name: "trailing byte", data: append(append([]byte(nil), encoded...), 0)},
+	for i := range len(encoded) {
+		if _, err := UnmarshalHistory(encoded[:i]); err == nil {
+			t.Fatalf("accepted truncated version 3 prefix of length %d", i)
+		}
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := UnmarshalHistory(tt.data); err == nil {
-				t.Fatal("unmarshal accepted malformed history payload")
-			}
-		})
+	if _, err := UnmarshalHistory(append(append([]byte(nil), encoded...), 0)); err == nil {
+		t.Fatal("accepted trailing garbage after version 3 payload")
 	}
 }
 
@@ -335,7 +318,7 @@ func historyPayloadWithDimensions(rowCount, width int) []byte {
 			//nolint:makezero // The header prefix is retained while zeroed cell records are appended.
 			data = append(data, make([]byte, width*historyCellBytes)...)
 			data = binary.BigEndian.AppendUint32(data, uint32(width))
-			data = append(data, 0)
+			data = append(data, 0) //nolint:makezero // The header prefix is retained while the bound is appended.
 		}
 		rowCount -= chunkRows
 	}

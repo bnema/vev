@@ -224,8 +224,8 @@ func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
 
 func TestUnmarshalEnforcesCanonicalHistoryBlobRoles(t *testing.T) {
 	sealed, emptyTail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}})
-	if len(sealed) == 0 {
-		t.Fatal("expected a sealed chunk")
+	if len(sealed) < 2 {
+		t.Fatalf("expected at least two sealed chunks, got %d", len(sealed))
 	}
 	multiChunk := append([]byte(nil), sealed[0][:17]...)
 	binary.BigEndian.PutUint32(multiChunk[5:9], 2)

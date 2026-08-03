@@ -53,7 +53,8 @@ func MarshalHistoryTail(view HistorySnapshotView) ([]byte, error) {
 }
 
 // MarshalSealedHistory serializes a SealAndView result as oldest-first,
-// self-contained sealed blobs plus a mandatory empty canonical tail blob.
+// self-contained sealed blobs plus a mandatory empty tail blob. The empty tail
+// carries NextRowID and is not the canonical default empty encoding.
 func MarshalSealedHistory(view HistoryView) ([][]byte, []byte, error) {
 	if view.rows != historyViewRowCount(view) {
 		return nil, nil, fmt.Errorf("marshal sealed history: %w", errInvalidHistory)
