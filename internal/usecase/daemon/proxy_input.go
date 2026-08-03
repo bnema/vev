@@ -6,7 +6,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/palette"
 )
@@ -222,39 +221,3 @@ func proxiedNavConfig(cfg domain.NavConfig) domain.NavConfig {
 }
 
 func proxiedJumpSearchesOtherSessions(proxied bool) bool { return !proxied }
-
-// focusDirProxied performs ordinary pane and tab overflow on the remote daemon,
-// but never follows OverflowSessions. The local proxy daemon is the only owner
-// allowed to change the selected session.
-func (d *Daemon) focusDirProxied(sess *session, ac *attachedClient, dir layout.Direction) error {
-	target := resolveDaemonActionTargetForAttachment(sess, ac)
-	oldFocus := layout.PaneID("")
-	if target.pane != nil {
-		oldFocus = target.pane.id
-	}
-	span, err := d.focusDirAt(sess, target.tab, target.pane, dir, ac)
-	if err == nil {
-		if ac != nil {
-			d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "proxy_input.go")
-		}
-		return nil
-	}
-	if !errors.Is(err, errNoNeighbor) || target.tab == nil || !overflowSourceEligible(sess, ac, target.tab) {
-		return err
-	}
-
-	position, count := sess.tabIndexForAttachment(ac)
-	step := resolveOverflow(dir, proxiedNavConfig(d.currentNavConfig()), position, count)
-	if step.kind != overflowTabs {
-		return errNoNeighbor
-	}
-	candidate, ok := d.prepareTabOverflowForAttachment(sess, ac, target.tab, dir, span, step.delta)
-	if !ok || !d.commitTabOverflowForAttachment(sess, ac, candidate) {
-		return errNoNeighbor
-	}
-	sess.selectAttachmentTab(ac, domain.TabStableID(candidate.target.stableID))
-	if ac != nil {
-		d.finishPaneFocusForClient(sess, ac, candidate.target, candidate.targetOldFocus, "proxy_input.go")
-	}
-	return nil
-}

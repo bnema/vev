@@ -231,7 +231,7 @@ func TestProxyWarmReattachCancelsAndStaleTimerCannotRemoveProxy(t *testing.T) {
 
 	ac := &attachedClient{}
 	proxy.sessionCore.mu.Lock()
-	proxy.sessionCore.registerAttachmentLocked(ac)
+	proxy.registerAttachmentLocked(ac)
 	proxy.sessionCore.mu.Unlock()
 	d.cancelProxyWarmForAttachment(proxy, ac)
 	awaitTestCompletion(t, firstToken.done, "first proxy warm lifecycle did not complete")
@@ -242,8 +242,8 @@ func TestProxyWarmReattachCancelsAndStaleTimerCannotRemoveProxy(t *testing.T) {
 	d.mu.Unlock()
 
 	proxy.sessionCore.mu.Lock()
-	for _, attachment := range proxy.sessionCore.snapshotAttachmentsLocked() {
-		proxy.sessionCore.unregisterAttachmentLocked(attachment)
+	for _, attachment := range proxy.snapshotAttachmentsLocked() {
+		proxy.unregisterAttachmentLocked(attachment)
 	}
 	proxy.sessionCore.mu.Unlock()
 	d.armProxyWarm(proxy)
@@ -440,7 +440,7 @@ func TestProxyLinkStateDisplayAndExactGeneration(t *testing.T) {
 	require.Equal(t, proxy.name+" [dead]", proxy.statusSegments(false).session)
 }
 
-func TestIncomingDirectAttachPreservesProxiedRemoteAttachment(t *testing.T) {
+func TestIncomingDirectAttachTerminatesRemoteAttachment(t *testing.T) {
 	d := newTestDaemon(t, nil, newProxyLifecycleClock())
 	sess := &session{sessionCore: sessionCore{id: "work", name: "work"}}
 	oldTransport := newProxyTestTransport()
@@ -1293,7 +1293,7 @@ func proxyWarmToken(p *proxySession) (*proxyWarmTimer, uint64) {
 
 func setProxyLifecycleClient(p *proxySession, ac *attachedClient) {
 	p.sessionCore.mu.Lock()
-	p.sessionCore.registerAttachmentLocked(ac)
+	p.registerAttachmentLocked(ac)
 	p.sessionCore.mu.Unlock()
 }
 

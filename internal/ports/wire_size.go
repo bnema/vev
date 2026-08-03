@@ -21,7 +21,3 @@ func ValidateSize(size domain.Size) error {
 	}
 	return nil
 }
-
-func validWireSize(size domain.Size) bool {
-	return ValidateSize(size) == nil
-}

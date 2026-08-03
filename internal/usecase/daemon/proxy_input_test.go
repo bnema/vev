@@ -216,7 +216,7 @@ func TestProxyInputAttentionOwnership(t *testing.T) {
 	})
 }
 
-func TestProxyInputProxiedRemoteOwnershipGuards(t *testing.T) {
+func TestProxyInputRemoteOwnershipGuards(t *testing.T) {
 	_, proxy, _, link, _ := newProxyInputHarness(t)
 	require.True(t, proxy.caps.cannotAcceptMoves, "a proxy must reject move destinations locally")
 	require.True(t, proxy.caps.cannotYieldMoves, "a proxy must reject move sources locally")
