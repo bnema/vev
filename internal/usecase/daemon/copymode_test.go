@@ -105,6 +105,25 @@ func TestCopySearchModalGeometry(t *testing.T) {
 	require.Equal(t, ui.Margins{Bottom: 1}, copySearchModal.Margins)
 }
 
+func TestCopyModeDocumentCarriesPaneRowIDs(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.activeTab().focusedPane()
+	appendHistoryRow(t, pane.history, testRow("history"))
+	pane.screen.Write([]byte("live"))
+	historyID := pane.history.View().RowID(0)
+	liveID := pane.screen.RowID(0)
+	require.NotEqual(t, historyID, liveID)
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	doc := ac.overlays.copyDocument
+
+	require.Equal(t, 0, doc.FindRowID(historyID))
+	require.Equal(t, pane.history.Len(), doc.FindRowID(liveID))
+	require.Equal(t, liveID, doc.RowID(pane.history.Len()))
+}
+
 func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -112,7 +131,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	tb := sess.activeTab()
 	pane := tb.focusedPane()
 	pane.mu.Lock()
-	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds())
+	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds(), nil)
 	pane.mu.Unlock()
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 
@@ -146,7 +165,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	tb := sess.activeTab()
 	tb.focusedPane().screen = vt.NewScreen(12, 3)
 	tb.focusedPane().screen.Write([]byte("live"))
-	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen.Frame, tb.focusedPane().screen.LineBounds())
+	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen.Frame, tb.focusedPane().screen.LineBounds(), nil)
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 
 	bars := barState{status: sess.statusSegments(true)}
@@ -434,7 +453,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds()).Len() >= 12
+		return scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil).Len() >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)
@@ -784,7 +803,7 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 	}
 	fp.screen.Write([]byte("live"))
 	fp.mu.Lock()
-	total := scopy.NewSnapshot(fp.history, fp.screen.Frame, fp.screen.LineBounds()).Len()
+	total := scopy.NewSnapshot(fp.history, fp.screen.Frame, fp.screen.LineBounds(), nil).Len()
 	fp.mu.Unlock()
 
 	d.enterCopyMode(sess, ac)
@@ -895,7 +914,7 @@ func TestComposeCopyClientFrameStylesStatusContentAndSurround(t *testing.T) {
 			base := renderer.NewFrame(20, 8)
 			pane := newPane("split", nil, domain.Size{Cols: 12, Rows: 2})
 			pane.screen.Write([]byte("copy"))
-			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds()), domain.DefaultWordSeparators))
+			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds(), nil), domain.DefaultWordSeparators))
 			if tt.selectMode {
 				mode.ToggleLineSelection()
 			}

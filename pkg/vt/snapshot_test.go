@@ -34,6 +34,11 @@ func TestHistorySnapshotViewDoesNotSealTailAndCopiesIt(t *testing.T) {
 	if got, want := view.Cells(), 12; got != want {
 		t.Fatalf("snapshot cells = %d, want %d", got, want)
 	}
+	wantID := view.Tail().RowID(0)
+	history.tailIDs[0] = 99
+	if got := view.Tail().RowID(0); got != wantID {
+		t.Fatalf("snapshot tail ID = %d after live mutation, want %d", got, wantID)
+	}
 
 	tail, err := MarshalHistoryTail(view)
 	require.NoError(t, err)
@@ -44,8 +49,9 @@ func TestHistorySnapshotViewDoesNotSealTailAndCopiesIt(t *testing.T) {
 
 func TestHistoryFromBlobsNormalizesFullTailBeforeAppend(t *testing.T) {
 	fullTail, err := MarshalHistory(HistoryView{
-		chunks: []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("AAAA"), historyRow("BBBB")}}},
-		rows:   2,
+		chunks:    []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("AAAA"), historyRow("BBBB")}, rowIDs: []RowID{1, 2}}},
+		rows:      2,
+		nextRowID: 3,
 	})
 	require.NoError(t, err)
 

@@ -200,7 +200,7 @@ func TestOverlayRuntimeCopyModeDocumentSurvivesRingOverwrite(t *testing.T) {
 	ac.initOverlays()
 	history := newTestHistory(1)
 	appendHistoryRow(t, history, testRow("before"))
-	document := scopy.NewDocument(scopy.NewSnapshot(history, renderer.NewFrame(6, 1), nil), domain.DefaultWordSeparators)
+	document := scopy.NewDocument(scopy.NewSnapshot(history, renderer.NewFrame(6, 1), nil, nil), domain.DefaultWordSeparators)
 
 	ac.overlays.copyMu.Lock()
 	ac.overlays.copyMode = scopy.NewMode(document)

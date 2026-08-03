@@ -188,7 +188,7 @@ func TestRecoveryTranscriptSnapshotMarshalsCanonicalEmptyHistory(t *testing.T) {
 
 	got, err := s.RecoveryTranscriptSnapshot().Marshal()
 	require.NoError(t, err)
-	want, err := MarshalHistory(HistoryView{})
+	want, err := MarshalHistory(HistoryView{nextRowID: 3})
 	require.NoError(t, err)
 
 	require.Equal(t, want, got)
@@ -396,9 +396,13 @@ func recoveryTranscriptBlob(t testing.TB, texts []string, bounds []LineBound) []
 			bounds[i].End = len(row)
 		}
 	}
-	view := HistoryView{rows: len(rows), cells: cells}
+	rowIDs := make([]RowID, len(rows))
+	for i := range rowIDs {
+		rowIDs[i] = RowID(100 + i)
+	}
+	view := HistoryView{rows: len(rows), cells: cells, nextRowID: RowID(100 + len(rows))}
 	if len(rows) > 0 {
-		view.chunks = []*HistoryChunk{{rows: rows, bounds: bounds}}
+		view.chunks = []*HistoryChunk{{rows: rows, bounds: bounds, rowIDs: rowIDs}}
 	}
 	blob, err := MarshalHistory(view)
 	require.NoError(t, err)

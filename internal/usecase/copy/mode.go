@@ -14,16 +14,33 @@ import (
 const OSC52MaxPayloadBytes = 75_000
 
 // Snapshot is the immutable scrollback document: sealed history plus a cloned
-// screen. screenBounds is parallel to screen rows, exactly as the history view's
-// own bounds are parallel to its chunk rows.
+// screen. screenBounds and screenRowIDs are parallel to screen rows, exactly as
+// the history view's own metadata is parallel to its chunk rows.
 type Snapshot struct {
 	history       vt.HistoryView
 	screen        renderer.Frame
 	screenBounds  []vt.LineBound
+	screenRowIDs  []vt.RowID
 	Width, Height int
 }
 
-func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound) Snapshot {
+func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, rowIDs []vt.RowID) Snapshot {
+	return newSnapshot(historySource, screen, bounds, append([]vt.RowID(nil), rowIDs...))
+}
+
+// NewSnapshotFromScreen captures a screen while its owner holds the Screen
+// lock. Screen.RowIDs returns the one owned copy required for immutable
+// snapshot state; newSnapshot takes that slice directly without duplicating
+// it. The live screen's rowIDs cannot be transferred or shared because later
+// scroll, resize, and clear mutations update that storage.
+func NewSnapshotFromScreen(historySource *vt.History, screen *vt.Screen) Snapshot {
+	if screen == nil {
+		return NewSnapshot(historySource, renderer.Frame{}, nil, nil)
+	}
+	return newSnapshot(historySource, screen.Frame, screen.LineBounds(), screen.RowIDs())
+}
+
+func newSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, screenRowIDs []vt.RowID) Snapshot {
 	var history vt.HistoryView
 	if historySource != nil {
 		history = historySource.SealAndView()
@@ -32,6 +49,7 @@ func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.L
 		history:      history,
 		screen:       screen.Clone(),
 		screenBounds: append([]vt.LineBound(nil), bounds...),
+		screenRowIDs: screenRowIDs,
 		Width:        screen.Width,
 		Height:       screen.Height,
 	}
@@ -104,6 +122,51 @@ func (s Snapshot) Bound(i int) vt.LineBound {
 	}
 	return s.screenBounds[i]
 }
+
+// RowIDs returns an owned copy of physical row identities in document order.
+func (s Snapshot) RowIDs() []vt.RowID {
+	ids := make([]vt.RowID, s.Len())
+	for i := range ids {
+		ids[i] = s.RowID(i)
+	}
+	return ids
+}
+
+// RowID returns the identity of document row i, or zero when it is unavailable.
+func (s Snapshot) RowID(i int) vt.RowID {
+	if i < 0 {
+		return 0
+	}
+	if i < s.history.Len() {
+		return s.history.RowID(i)
+	}
+	i -= s.history.Len()
+	if i >= s.screen.Height || i >= len(s.screenRowIDs) {
+		return 0
+	}
+	return s.screenRowIDs[i]
+}
+
+// FindRowID returns the document row containing id, or -1 when it is absent.
+func (s Snapshot) FindRowID(id vt.RowID) int {
+	if id == 0 {
+		return -1
+	}
+	if row := s.history.FindRowID(id); row >= 0 {
+		return row
+	}
+	offset := s.history.Len()
+	for i, candidate := range s.screenRowIDs {
+		if i >= s.screen.Height {
+			break
+		}
+		if candidate == id {
+			return offset + i
+		}
+	}
+	return -1
+}
+
 func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
 	i := 0
 	stopped := false

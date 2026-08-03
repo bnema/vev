@@ -87,7 +87,7 @@ func (s *Screen) colorSchemeReport() []byte {
 }
 
 func (s *Screen) reset() {
-	s.buffer = newBuffer(s.Frame.Width, s.Frame.Height)
+	s.buffer = s.newBuffer(s.Frame.Width, s.Frame.Height)
 	s.Frame = s.buffer.frame
 	s.Row, s.Col = 0, 0
 	s.Style = renderer.DefaultStyle()
@@ -203,7 +203,7 @@ func (s *Screen) enterAlternateScreen() {
 			insertMode:   s.insertMode,
 		}
 	}
-	s.buffer = newBuffer(s.Frame.Width, s.Frame.Height)
+	s.buffer = s.newBuffer(s.Frame.Width, s.Frame.Height)
 	s.Frame = s.buffer.frame
 	s.Row, s.Col = 0, 0
 	s.Style = renderer.DefaultStyle()
@@ -220,6 +220,7 @@ func (s *Screen) exitAlternateScreen() {
 	s.buffer = state.buffer
 	if s.buffer == nil {
 		s.buffer = bufferFromFrame(cloneFrame(state.frame))
+		s.fillMissingRowIDs(s.buffer)
 	}
 	s.Frame = s.buffer.frame
 	s.Row = clamp(state.row, 0, s.Frame.Height-1)

@@ -8,6 +8,7 @@ import "github.com/bnema/vev/pkg/renderer"
 type buffer struct {
 	frame      renderer.Frame
 	boundaries []LineBound
+	rowIDs     []RowID
 }
 
 // LineBound describes a physical row's logical extent. End is exclusive: it is
@@ -20,15 +21,19 @@ type LineBound struct {
 }
 
 func newBuffer(width, height int) *buffer {
-	return &buffer{frame: renderer.NewFrame(width, height), boundaries: make([]LineBound, height)}
+	return &buffer{frame: renderer.NewFrame(width, height), boundaries: make([]LineBound, height), rowIDs: make([]RowID, height)}
 }
 
 func bufferFromFrame(frame renderer.Frame) *buffer {
-	return &buffer{frame: frame, boundaries: make([]LineBound, frame.Height)}
+	return &buffer{frame: frame, boundaries: make([]LineBound, frame.Height), rowIDs: make([]RowID, frame.Height)}
 }
 
 func (b *buffer) clone() *buffer {
-	out := &buffer{frame: cloneFrame(b.frame), boundaries: append([]LineBound(nil), b.boundaries...)}
+	out := &buffer{
+		frame:      cloneFrame(b.frame),
+		boundaries: append([]LineBound(nil), b.boundaries...),
+		rowIDs:     append([]RowID(nil), b.rowIDs...),
+	}
 	return out
 }
 
@@ -106,8 +111,10 @@ func (b *buffer) scrollUp(top, bottom, n int) {
 	// them.
 	b.hard(top - 1)
 	copy(b.boundaries[top:bottom-n+1], b.boundaries[top+n:bottom+1])
+	copy(b.rowIDs[top:bottom-n+1], b.rowIDs[top+n:bottom+1])
 	for y := bottom - n + 1; y <= bottom; y++ {
 		b.boundaries[y] = LineBound{}
+		b.rowIDs[y] = 0
 	}
 	b.hard(bottom - n)
 }
@@ -117,8 +124,10 @@ func (b *buffer) scrollDown(top, bottom, n int) {
 	// the last moved row no longer precedes the row below it.
 	b.hard(top - 1)
 	copy(b.boundaries[top+n:bottom+1], b.boundaries[top:bottom-n+1])
+	copy(b.rowIDs[top+n:bottom+1], b.rowIDs[top:bottom-n+1])
 	for y := top; y < top+n; y++ {
 		b.boundaries[y] = LineBound{}
+		b.rowIDs[y] = 0
 	}
 	b.hard(bottom)
 }
@@ -150,7 +159,7 @@ func (b *buffer) hasSoft() bool {
 
 // resizeFixed keeps hard physical lines independent. It is the common shell
 // path and avoids constructing logical-line scratch state when nothing wraps.
-func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) ([][]renderer.Cell, []LineBound) {
+func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) ([][]renderer.Cell, []LineBound, []RowID) {
 	anchor := 0
 	if active != nil {
 		anchor = active.row
@@ -158,10 +167,12 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) ([]
 	shift := clamp(anchor-(height-1), 0, max(b.frame.Height-height, 0))
 	evicted := make([][]renderer.Cell, 0, shift)
 	evictedBounds := make([]LineBound, 0, shift)
+	evictedIDs := make([]RowID, 0, shift)
 	for y := range shift {
 		evicted = append(evicted, append([]renderer.Cell(nil), b.frame.Row(y)...))
 		// The evicted row keeps its source width, so its extent needs no clamping.
 		evictedBounds = append(evictedBounds, b.boundaries[y])
+		evictedIDs = append(evictedIDs, b.rowIDs[y])
 	}
 	// Fixed-line resizes can retain the boundary backing store. In particular,
 	// keep its capacity through a short viewport so the common shrink/grow
@@ -172,7 +183,7 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) ([]
 	} else {
 		boundaries = boundaries[:height]
 	}
-	next := buffer{frame: renderer.NewFrame(width, height), boundaries: boundaries}
+	next := buffer{frame: renderer.NewFrame(width, height), boundaries: boundaries, rowIDs: make([]RowID, height)}
 	copied := 0
 	for y := range height {
 		sy := y + shift
@@ -181,6 +192,7 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) ([]
 		}
 		copy(next.frame.Row(y), b.frame.Row(sy))
 		next.boundaries[y] = b.boundaries[sy]
+		next.rowIDs[y] = b.rowIDs[sy]
 		next.boundaries[y].End = min(next.boundaries[y].End, width)
 		repairFrameRow(next.frame, y)
 		copied++
@@ -193,7 +205,7 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) ([]
 		}
 	}
 	*b = next
-	return evicted, evictedBounds
+	return evicted, evictedBounds, evictedIDs
 }
 
 type reflowPoint struct {
@@ -234,7 +246,7 @@ func (b *buffer) cursorReflowPoints(active, saved *bufferCursor) [2]reflowPoint 
 // the first maps both cursors and counts rows; the second writes only the
 // retained viewport (and the rows genuinely evicted to history). It never
 // materializes logical lines, per-cell position maps, or temporary output rows.
-func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]renderer.Cell, []LineBound) {
+func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]renderer.Cell, []LineBound, []RowID) {
 	if !b.hasSoft() {
 		return b.resizeFixed(width, height, active, saved)
 	}
@@ -248,7 +260,7 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]ren
 	}
 
 	points := b.cursorReflowPoints(active, saved)
-	rows := b.layoutReflow(width, &points, nil, 0, nil, nil)
+	rows := b.layoutReflow(width, &points, nil, 0, nil, nil, nil, nil)
 	anchor := 0
 	if active != nil {
 		anchor = points[0].row
@@ -259,17 +271,19 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]ren
 	var evicted [][]renderer.Cell
 	var evictedCells []renderer.Cell
 	var evictedBounds []LineBound
+	var evictedIDs []RowID
 	if shift > 0 {
 		// History needs owned rows. One flat backing store replaces a temporary
 		// allocation per evicted output row.
 		evicted = make([][]renderer.Cell, shift)
 		evictedCells = make([]renderer.Cell, shift*width)
 		evictedBounds = make([]LineBound, shift)
+		evictedIDs = make([]RowID, shift)
 		for y := range evicted {
 			evicted[y] = evictedCells[y*width : (y+1)*width]
 		}
 	}
-	b.layoutReflow(width, &points, next, shift, evictedCells, evictedBounds)
+	b.layoutReflow(width, &points, next, shift, b.rowIDs, evictedCells, evictedBounds, evictedIDs)
 	for i, cur := range [2]*bufferCursor{active, saved} {
 		if cur != nil {
 			cur.row = clamp(points[i].row-shift, 0, height-1)
@@ -277,14 +291,27 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]ren
 		}
 	}
 	*b = *next
-	return evicted, evictedBounds
+	return evicted, evictedBounds, evictedIDs
 }
 
 // layoutReflow maps source offsets and, when dst is non-nil, emits only rows in
 // [shift, shift+dst.height). Rows before shift are written straight into the
 // contiguous eviction backing store. The return is the logical output height.
-func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, shift int, evicted []renderer.Cell, evictedBounds []LineBound) int {
+func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, shift int, sourceIDs []RowID, evicted []renderer.Cell, evictedBounds []LineBound, evictedIDs []RowID) int {
 	row, col := 0, 0
+	setRowID := func(outputRow int, id RowID) {
+		if id == 0 {
+			return
+		}
+		switch {
+		case outputRow < shift:
+			if outputRow < len(evictedIDs) {
+				evictedIDs[outputRow] = id
+			}
+		case dst != nil && outputRow < shift+dst.frame.Height:
+			dst.rowIDs[outputRow-shift] = id
+		}
+	}
 	blankEvicted := func(outputRow int) []renderer.Cell {
 		if outputRow < shift {
 			out := evicted[outputRow*width : (outputRow+1)*width]
@@ -342,6 +369,16 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 		}
 		reflow := end > start
 		offset := 0
+		sourceID := RowID(0)
+		if start < len(sourceIDs) {
+			sourceID = sourceIDs[start]
+		}
+		// A source row that starts in a partially filled output row has already
+		// inherited that row's identity. Continuation rows created by wrapping
+		// receive fresh IDs from the owning Screen after this pass.
+		if col == 0 {
+			setRowID(row, sourceID)
+		}
 		truncated := false
 		for y := start; y <= end && !truncated; y++ {
 			cells := b.frame.Row(y)

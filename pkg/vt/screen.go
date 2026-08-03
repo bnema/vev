@@ -53,6 +53,8 @@ type Screen struct {
 	history *History
 	buffer  *buffer
 
+	nextRowID RowID
+
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
 	defaultColorsKnown bool
@@ -86,15 +88,14 @@ type Screen struct {
 }
 
 func NewScreen(width, height int) *Screen {
-	b := newBuffer(width, height)
 	s := &Screen{
-		Frame:            b.frame,
-		buffer:           b,
 		Style:            renderer.DefaultStyle(),
 		damage:           []renderer.Damage{renderer.FullRedraw()},
 		damageGeneration: 1,
 		cursorVisible:    true,
 	}
+	s.buffer = s.newBuffer(width, height)
+	s.Frame = s.buffer.frame
 	s.resetScrollRegion()
 	return s
 }

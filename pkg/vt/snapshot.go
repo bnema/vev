@@ -53,7 +53,8 @@ func MarshalHistoryTail(view HistorySnapshotView) ([]byte, error) {
 }
 
 // MarshalSealedHistory serializes a SealAndView result as oldest-first,
-// self-contained sealed blobs plus a mandatory empty canonical tail blob.
+// self-contained sealed blobs plus a mandatory empty tail blob. The empty tail
+// carries NextRowID and is not the canonical default empty encoding.
 func MarshalSealedHistory(view HistoryView) ([][]byte, []byte, error) {
 	if view.rows != historyViewRowCount(view) {
 		return nil, nil, fmt.Errorf("marshal sealed history: %w", errInvalidHistory)
@@ -66,7 +67,7 @@ func MarshalSealedHistory(view HistoryView) ([][]byte, []byte, error) {
 		}
 		sealed[i] = blob
 	}
-	tail, err := MarshalEmptyHistoryTail()
+	tail, err := MarshalHistory(HistoryView{nextRowID: view.NextRowID()})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -76,31 +77,85 @@ func MarshalSealedHistory(view HistoryView) ([][]byte, []byte, error) {
 // HistoryFromBlobs restores history directly from sealed, oldest-first blobs
 // and the mandatory tail blob. It never feeds decoded rows through Append.
 func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*History, error) {
-	h := NewHistory(config)
-	for _, blob := range sealed {
+	sealedViews, tailView, err := decodeRestoredHistoryBlobs(sealed, tail)
+	if err != nil {
+		return nil, err
+	}
+	return restoreHistoryViews(config, sealedViews, tailView), nil
+}
+
+func decodeRestoredHistoryBlobs(sealed [][]byte, tail []byte, extra ...HistoryView) ([]HistoryView, HistoryView, error) {
+	seen := make(map[RowID]struct{})
+	sealedViews := make([]HistoryView, len(sealed))
+	for i, blob := range sealed {
 		view, err := UnmarshalHistory(blob)
-		if err != nil || len(view.chunks) != 1 || len(view.chunks[0].rows) == 0 {
-			return nil, fmt.Errorf("restore sealed history: %w", errInvalidHistory)
+		if err != nil || len(view.chunks) != 1 || len(view.chunks[0].rows) == 0 || !validateRestoredHistoryView(view, seen) {
+			return nil, HistoryView{}, fmt.Errorf("restore sealed history: %w", errInvalidHistory)
 		}
-		h.evictUntil(len(view.chunks[0].rows), view.Cells())
-		h.chunks = append(h.chunks, view.chunks[0])
-		h.rows += len(view.chunks[0].rows)
+		sealedViews[i] = view
+	}
+
+	tailView, err := UnmarshalHistory(tail)
+	if err != nil || len(tailView.chunks) > 1 || !validateRestoredHistoryView(tailView, seen) {
+		return nil, HistoryView{}, fmt.Errorf("restore history tail: %w", errInvalidHistory)
+	}
+	for _, view := range extra {
+		if !validateRestoredHistoryView(view, seen) {
+			return nil, HistoryView{}, fmt.Errorf("restore recovery transcript: %w", errInvalidHistory)
+		}
+	}
+	return sealedViews, tailView, nil
+}
+
+func restoreHistoryViews(config HistoryConfig, sealed []HistoryView, tail HistoryView) *History {
+	h := NewHistory(config)
+	for _, view := range sealed {
+		h.nextRowID = max(h.nextRowID, view.nextRowID)
+		if h.maxRows == 0 {
+			continue
+		}
+		chunk := view.chunks[0]
+		h.chunks = append(h.chunks, chunk)
+		h.rows += len(chunk.rows)
 		h.cells += view.Cells()
+		h.evict()
 	}
-	view, err := UnmarshalHistory(tail)
-	if err != nil || len(view.chunks) > 1 {
-		return nil, fmt.Errorf("restore history tail: %w", errInvalidHistory)
+	h.nextRowID = max(h.nextRowID, tail.nextRowID)
+	if h.maxRows == 0 || len(tail.chunks) == 0 {
+		return h
 	}
-	if len(view.chunks) == 1 {
-		h.evictUntil(len(view.chunks[0].rows), view.Cells())
-		h.tail = view.chunks[0].rows
-		h.tailBounds = growBounds(view.chunks[0].bounds, len(h.tail))
-		h.rows += len(h.tail)
-		h.cells += view.Cells()
-	}
+	chunk := tail.chunks[0]
+	h.tail = chunk.rows
+	h.tailBounds = append([]LineBound(nil), chunk.bounds...)
+	h.tailIDs = append([]RowID(nil), chunk.rowIDs...)
+	h.rows += len(h.tail)
+	h.cells += tail.Cells()
 	h.evict()
 	h.normalizeTail()
-	return h, nil
+	return h
+}
+
+func validateRestoredHistoryView(view HistoryView, seen map[RowID]struct{}) bool {
+	if view.nextRowID == 0 || view.nextRowID == ^RowID(0) {
+		return false
+	}
+	var maxID RowID
+	for _, chunk := range view.chunks {
+		if chunk == nil || len(chunk.rows) != len(chunk.rowIDs) || len(chunk.rows) != len(chunk.bounds) {
+			return false
+		}
+		for _, id := range chunk.rowIDs {
+			if id == 0 || id >= ^RowID(0)-1 {
+				return false
+			}
+			if _, duplicate := seen[id]; duplicate {
+				return false
+			}
+			seen[id] = struct{}{}
+			maxID = max(maxID, id)
+		}
+	}
+	return view.nextRowID > maxID
 }
 
 // NewScreenWithRecoveryTranscript constructs a fresh blank screen whose
@@ -112,10 +167,11 @@ func NewScreenWithRecoveryTranscript(width, height int, config HistoryConfig, se
 		return nil, fmt.Errorf("restore recovery transcript: %w", err)
 	}
 
-	history, err := HistoryFromBlobs(config, sealed, tail)
+	sealedViews, tailView, err := decodeRestoredHistoryBlobs(sealed, tail, transcriptView)
 	if err != nil {
 		return nil, err
 	}
+	history := restoreHistoryViews(config, sealedViews, tailView)
 	remainingRows := transcriptView.rows
 	for _, chunk := range transcriptView.chunks {
 		for i, row := range chunk.rows {
@@ -124,7 +180,7 @@ func NewScreenWithRecoveryTranscript(width, height int, config HistoryConfig, se
 			if remainingRows == 0 {
 				bound.Soft = false
 			}
-			if err := history.Append(row, bound); err != nil {
+			if err := history.AppendWithID(row, bound, chunk.rowIDs[i]); err != nil {
 				return nil, fmt.Errorf("restore recovery transcript: %w", err)
 			}
 		}
@@ -132,5 +188,14 @@ func NewScreenWithRecoveryTranscript(width, height int, config HistoryConfig, se
 
 	screen := NewScreenWithHistory(width, height, config)
 	screen.history = history
+	counter := max(history.nextRowID, transcriptView.nextRowID, RowID(1))
+	if counter == 0 || counter >= ^RowID(0) || uint64(height) > uint64(^RowID(0)-1-counter) {
+		return nil, fmt.Errorf("restore recovery transcript: %w", errInvalidHistory)
+	}
+	screen.nextRowID = counter - 1
+	for i := range screen.buffer.rowIDs {
+		screen.buffer.rowIDs[i] = screen.nextRowIDValue()
+	}
+	screen.Frame = screen.buffer.frame
 	return screen, nil
 }

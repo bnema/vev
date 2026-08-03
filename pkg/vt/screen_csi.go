@@ -412,6 +412,7 @@ func (s *Screen) clearScreenMode(mode int) {
 		}
 		for y := range s.buffer.boundaries {
 			s.buffer.boundaries[y] = LineBound{Soft: s.buffer.boundaries[y].Soft}
+			s.buffer.rowIDs[y] = s.nextRowIDValue()
 		}
 		s.record(renderer.Damage{Kind: renderer.DamageClear, X: 0, Y: 0, Width: s.Frame.Width, Height: s.Frame.Height, Count: 1})
 	default:

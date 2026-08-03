@@ -42,6 +42,29 @@ func TestNewSnapshotFromRowsPreservesWideRows(t *testing.T) {
 	}
 }
 
+func TestSnapshotCarriesImmutableRowIDsAndDocumentsResolveBookmarks(t *testing.T) {
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	require.NoError(t, history.AppendWithID(row("hist"), vt.LineBound{End: 4}, vt.RowID(11)))
+	require.NoError(t, history.AppendWithID(row("tail"), vt.LineBound{End: 4}, vt.RowID(12)))
+	screen := renderer.NewFrame(4, 2)
+	copy(screen.Row(0), row("live"))
+	copy(screen.Row(1), row("more"))
+	rowIDs := []vt.RowID{21, 22}
+
+	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 4}}, rowIDs)
+	rowIDs[0] = 99
+	doc := NewDocument(snapshot, "")
+
+	require.Equal(t, []vt.RowID{11, 12, 21, 22}, snapshot.RowIDs())
+	ids := snapshot.RowIDs()
+	ids[0] = 100
+	require.Equal(t, vt.RowID(11), snapshot.RowID(0))
+	require.Equal(t, vt.RowID(21), doc.RowID(2))
+	require.Equal(t, 2, doc.FindRowID(vt.RowID(21)))
+	require.Equal(t, 3, doc.FindRowID(vt.RowID(22)))
+	require.Equal(t, -1, doc.FindRowID(vt.RowID(99)))
+}
+
 func TestSnapshotBoundDispatchesLikeRow(t *testing.T) {
 	row := func(s string) []renderer.Cell {
 		cells := make([]renderer.Cell, 0, len(s))
@@ -58,7 +81,7 @@ func TestSnapshotBoundDispatchesLikeRow(t *testing.T) {
 	screen := renderer.NewFrame(4, 2)
 	copy(screen.Row(0), row("live"))
 
-	snap := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 0, Soft: true}})
+	snap := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 0, Soft: true}}, nil)
 
 	tests := []struct {
 		name string
@@ -232,7 +255,7 @@ func TestFindMatchesUsesSealedScrollbackWithoutGlobalCopy(t *testing.T) {
 		require.NoError(t, history.Append(unmatched, vt.LineBound{End: len(unmatched)}))
 	}
 	require.NoError(t, history.Append(target, vt.LineBound{End: len(target)}))
-	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1), nil)
+	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1), nil, nil)
 	view := history.SealAndView()
 	require.Same(t, view.Chunk(0), snapshot.history.Chunk(0))
 
@@ -345,7 +368,7 @@ func TestSelectedTextJoinsAcrossTheHistoryScreenBoundary(t *testing.T) {
 	copy(screen.Row(0), row("ef", width))
 	copy(screen.Row(1), row("gh", width))
 
-	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 2}, {End: 2}})
+	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 2}, {End: 2}}, nil)
 	doc := NewDocument(snapshot, "")
 
 	ranges := []CellRange{
@@ -414,7 +437,7 @@ func TestSelectedTextJoinsRowsWrappedByTheVT(t *testing.T) {
 			screen := vt.NewScreenWithHistory(width, height, vt.HistoryConfig{MaxRows: 64, MaxCells: 4096})
 			screen.Write([]byte(tc.input))
 
-			snapshot := NewSnapshot(screen.History(), screen.Frame, screen.LineBounds())
+			snapshot := NewSnapshot(screen.History(), screen.Frame, screen.LineBounds(), nil)
 			require.Equal(t, tc.wantHistoryLen, snapshot.history.Len(), "history/screen seam moved")
 			doc := NewDocument(snapshot, domain.DefaultWordSeparators)
 
