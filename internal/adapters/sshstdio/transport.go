@@ -344,10 +344,11 @@ func DialContextWithRuntimeObserver(ctx context.Context, target, session string,
 	return dialContext(ctx, target, session, logger, opts...)
 }
 
-// DialContext is like Dial, but the context is propagated to ssh startup so a
-// canceled attach attempt interrupts the local ssh process. Callers may pass a
-// logger to record ssh start failures and non-clean exits without logging the
-// generated command line.
+// DialContext is like Dial, but the context gates ssh startup. Once the
+// transport is returned, its Close method owns the subprocess lifetime; the
+// handshake context must not kill an already-established carriage. Callers may
+// pass a logger to record ssh start failures and non-clean exits without logging
+// the generated command line.
 func DialContext(ctx context.Context, target, session string, logger ...*slog.Logger) (ports.Transport, error) {
 	var log *slog.Logger
 	if len(logger) > 0 {
@@ -361,7 +362,12 @@ func dialContext(ctx context.Context, target, session string, log *slog.Logger, 
 		return nil, err
 	}
 	spec := BuildCommand(target, session)
-	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
+	// The caller's context is also the bounded protocol-handshake context and is
+	// canceled after the first committed publication. Binding it to the command
+	// would kill a healthy long-lived carriage at that boundary. Transport.Close
+	// owns cancellation after Start; the preflight check above keeps canceled
+	// attempts from starting a process.
+	cmd := exec.Command(spec.Path, spec.Args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("sshstdio: stdin pipe: %w", err)
@@ -381,6 +387,10 @@ func dialContext(ctx context.Context, target, session string, log *slog.Logger, 
 
 	waiter := newProcessWaiter(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)
 	transport := newTransport(stdout, stdin, waiter.close, waiter.eofErr)
+	if err := ctx.Err(); err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(transport)
