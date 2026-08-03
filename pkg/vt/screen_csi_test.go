@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -605,6 +606,75 @@ func TestClearAndErase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestEraseCharacters(t *testing.T) {
+	maxInt := strconv.Itoa(int(^uint(0) >> 1))
+	tests := []struct {
+		name       string
+		width      int
+		row        int
+		initial    string
+		seq        string
+		wantRow    string
+		wantCol    int
+		wantDamage []renderer.Damage
+	}{
+		{
+			name:    "explicit count",
+			width:   50,
+			row:     1,
+			initial: `        // scroll-method "on-button-down"`,
+			seq:     "\x1b[19Gbutton 273\x1b[13X",
+			wantRow: "        // scroll-button 273",
+			wantCol: 28,
+			wantDamage: []renderer.Damage{
+				{Kind: renderer.DamageText, X: 18, Y: 1, Width: 10, Height: 1, Count: 1},
+				{Kind: renderer.DamageClear, X: 28, Y: 1, Width: 13, Height: 1, Count: 1},
+			},
+		},
+		{
+			name:       "omitted count erases exactly one cell",
+			width:      6,
+			row:        1,
+			initial:    "abcdef",
+			seq:        "\x1b[3G\x1b[X",
+			wantRow:    "ab def",
+			wantCol:    2,
+			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 2, Y: 1, Width: 1, Height: 1, Count: 1}},
+		},
+		{
+			name:       "maximum count clips to screen edge",
+			width:      6,
+			row:        1,
+			initial:    "abcdef",
+			seq:        "\x1b[4G\x1b[" + maxInt + "X",
+			wantRow:    "abc",
+			wantCol:    3,
+			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 3, Y: 1, Width: 3, Height: 1, Count: 1}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(tt.width, 2)
+			s.Write([]byte("\x1b[2;1H"))
+			s.Write([]byte(tt.initial))
+			s.ClearDamage()
+			s.Write([]byte(tt.seq))
+
+			for x := range tt.width {
+				want := ' '
+				if x < len(tt.wantRow) {
+					want = rune(tt.wantRow[x])
+				}
+				require.Equal(t, want, cellAt(s, x, tt.row).Rune, "cell(%d,%d)", x, tt.row)
+			}
+			require.Equal(t, tt.row, s.Row)
+			require.Equal(t, tt.wantCol, s.Col)
+			require.Equal(t, tt.wantDamage, s.Damage())
+		})
 	}
 }
 
