@@ -39,7 +39,6 @@ type sessionView struct {
 	tabCount     int
 	hasAttention bool
 	tabs         []tabView
-	expired      bool
 }
 
 // snapshotView reads session fields under s.mu and samples the independently
