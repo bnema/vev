@@ -298,7 +298,7 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 	target := request.target
 	switch request.kind {
 	case daemonActionCreateTab:
-		return a.d.createTab(target.session, request.viewport)
+		return a.d.createTabForAttachment(target.session, target.attachment, request.viewport)
 	case daemonActionCloseTab:
 		return a.d.closeTab(target.session, target.tab, true)
 	case daemonActionSplitPane:

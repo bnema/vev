@@ -624,10 +624,24 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 		clock:    d.clock,
 		observer: d.runtimeObserver,
 		wake: func(w renderWake) {
-			// The wake retains the exact attachment lease. paint repeats this
-			// identity check under sendMu before composing any snapshot.
-			if w.lease != nil && rc.wakeCurrent(w) {
-				d.paint(entry, w.lease.attachment, w.reset, w.lease)
+			// The wake retains the exact primary lease. Paint the primary first,
+			// then fan the same shared-session state out to every live attachment
+			// using each attachment's own output stream and renderer shadow.
+			if w.lease == nil || !rc.wakeCurrent(w) {
+				return
+			}
+			primary := w.lease.attachment
+			d.paint(entry, primary, w.reset, w.lease)
+			if !rc.wakeCurrent(w) {
+				return
+			}
+			attachments := snapshotAttachmentSession(entry)
+			for _, attachment := range attachments {
+				if attachment != primary {
+					// Pane damage is session-shared and the primary capture consumes it.
+					// ponytail: secondary full redraws avoid per-attachment damage tracking; add attachment-scoped damage when fanout cost matters.
+					d.paint(entry, attachment, true, nil)
+				}
 			}
 		},
 		ackReady: func() bool {
@@ -719,6 +733,21 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 	d.drainPendingForFirstPaint(sess, ac)
 	tb := sess.tabForAttachment(ac)
 	if tb == nil {
+		return
+	}
+	// The coordinator lease is only the primary render lifecycle. A secondary
+	// attachment must paint directly: entering the nil-lease resize/activation
+	// path would hand the session coordinator to it and strand the first client.
+	secondary := false
+	if lease == nil {
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.mu.Lock()
+			secondary = rc.lease != nil && rc.lease.active && rc.lease.attachment != ac
+			rc.mu.Unlock()
+		}
+	}
+	if secondary {
+		d.paint(sess, ac, true, nil)
 		return
 	}
 	tb.mu.Lock()

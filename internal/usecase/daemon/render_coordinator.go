@@ -107,8 +107,8 @@ func (c *renderCoordinator) detachSyncTimersLocked() []*timerToken {
 
 // invalidate publishes a coordinator-owned producer transition. Callers that
 // carry an attachment identity must use invalidateForAttachment instead.
-func (c *renderCoordinator) invalidate(inv renderInvalidation) {
-	c.invalidateForAttachment(nil, inv)
+func (c *renderCoordinator) invalidate(inv renderInvalidation) bool {
+	return c.invalidateForAttachment(nil, inv)
 }
 
 // invalidateForAttachment publishes only while source is still the bound
@@ -747,12 +747,17 @@ func (c *renderCoordinator) waitForTimerWorkers() { c.supervisor.wait() }
 // compositor; attached sessions always schedule through their coordinator.
 func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
-		if rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}) {
+		invalidation := renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}
+		if rc.invalidateForAttachment(ac, invalidation) {
 			return
 		}
-		// Secondary attachments do not borrow the coordinator's primary lease;
-		// paint their own attachment-owned view after membership validation.
+		// Secondary attachments do not borrow the coordinator's primary lease.
+		// Their shared mutation still schedules the session wake, whose fanout
+		// paints every live attachment with its own output state.
 		if ac != nil && attachmentRegistered(entry, ac) && ac.currentAttachmentSession() == entry {
+			if rc.invalidate(invalidation) {
+				return
+			}
 			d.paint(entry, ac, reset, nil)
 		}
 		return

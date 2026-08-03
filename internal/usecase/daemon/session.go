@@ -512,6 +512,10 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 }
 
 func (d *Daemon) createTab(sess *session, sz domain.Size) error {
+	return d.createTabForAttachment(sess, nil, sz)
+}
+
+func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, sz domain.Size) error {
 	sess.mu.Lock()
 	name := sess.name
 	cwd := sess.cwd
@@ -571,6 +575,9 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	tabIndex := len(sess.tabs) - 1
 	if !sess.ephemeral {
 		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
+	}
+	if ac != nil {
+		sess.activateAttachmentViewLocked(ac, tabIndex)
 	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
