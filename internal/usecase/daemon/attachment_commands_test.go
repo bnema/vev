@@ -118,6 +118,33 @@ func startAttachedCommand(t *testing.T, ac *attachedClient, clock *attachmentCom
 	return request, awaitAttachedCommandTimer(t, clock), done
 }
 
+func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
+	tracker := NewCommandRequestTracker()
+	clock := newAttachmentCommandTestClock()
+	requestID, outcome := tracker.Publish(4)
+	waitDone := make(chan error, 1)
+	go func() {
+		_, err := tracker.Wait(context.Background(), clock, requestID, 4, outcome)
+		waitDone <- err
+	}()
+	timer := awaitAttachedCommandTimer(t, clock)
+	timer.fire()
+	require.ErrorIs(t, <-waitDone, ErrCommandRequestTimeout)
+	require.Zero(t, tracker.PendingCount())
+
+	tracker.Complete(4, ports.CommandResult{RequestID: requestID, OK: true})
+	secondID, secondOutcome := tracker.Publish(8)
+	tracker.Complete(4, ports.CommandResult{RequestID: secondID, OK: true})
+	select {
+	case <-secondOutcome:
+		t.Fatal("old-generation result completed a newer request")
+	default:
+	}
+	tracker.Complete(8, ports.CommandResult{RequestID: secondID, OK: true})
+	result := <-secondOutcome
+	require.True(t, result.Result.OK)
+}
+
 func TestAttachedCommandWaitReleasesSenderLockAfterPublication(t *testing.T) {
 	transport := newAttachmentCommandTestTransport()
 	gate := make(chan struct{})

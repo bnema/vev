@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"io"
 	"sync"
 	"testing"
@@ -122,12 +123,7 @@ func TestHandshakeTimeoutClosesBlockedWelcomeSend(t *testing.T) {
 	awaitTestCompletion(t, done, "handshake send did not stop after timeout")
 	requireClosedHandshakeTransport(t, tr)
 	d.mu.Lock()
-	require.Len(t, d.sessions, 1)
-	var sess *session
-	for _, entry := range d.sessions {
-		sess, _ = localSession(entry)
-	}
-	require.Empty(t, sess.snapshotAttachments())
+	require.Empty(t, d.sessions, "a timed-out newly-created handshake must not leave an empty session")
 	require.Empty(t, d.parked)
 	d.mu.Unlock()
 }
@@ -139,4 +135,110 @@ func requireClosedHandshakeTransport(t *testing.T, tr *handshakeBlockingTranspor
 	default:
 		t.Fatal("handshake timeout did not close transport")
 	}
+}
+
+func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	restoreDone := make(chan struct{})
+	d.mu.Lock()
+	d.stopped["restoring"] = stoppedSession{name: "restoring", restoreDone: restoreDone}
+	d.mu.Unlock()
+
+	tr := newHandshakeBlockingTransport(false)
+	done := make(chan struct{})
+	go func() {
+		d.handleHello(tr, mustHello(ports.IntentAttach, "restoring", domain.Size{Cols: 80, Rows: 24}))
+		close(done)
+	}()
+
+	timer := <-clock.timers
+	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	timer.ch <- time.Time{}
+	awaitTestCompletion(t, done, "route restore wait did not stop after handshake timeout")
+	requireClosedHandshakeTransport(t, tr)
+	d.mu.Lock()
+	require.Empty(t, d.sessions)
+	require.Empty(t, d.parked)
+	d.mu.Unlock()
+}
+
+func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d.mu.Lock()
+	d.stopped["restored"] = stoppedSession{name: "restored", cwd: "/tmp"}
+	d.mu.Unlock()
+
+	clock := &signalClock{timers: make(chan *signalTimer, 4)}
+	d.clock = clock
+	tr := newHandshakeBlockingTransport(true)
+	done := make(chan struct{})
+	go func() {
+		d.handleHello(tr, mustHello(ports.IntentAttach, "restored", domain.Size{Cols: 80, Rows: 24}))
+		close(done)
+	}()
+
+	timer := <-clock.timers
+	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	<-tr.welcome
+	timer.ch <- time.Time{}
+	awaitTestCompletion(t, done, "timed-out restored attachment cleanup did not finish")
+	requireClosedHandshakeTransport(t, tr)
+	d.mu.Lock()
+	require.Empty(t, d.sessions)
+	_, retained := d.stopped["restored"]
+	d.mu.Unlock()
+	require.True(t, retained, "failed attach must retain the stopped session authority")
+}
+
+func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	oldTransport := &closeTrackingTransport{}
+	sess, old, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "shared", Size: domain.Size{Cols: 80, Rows: 24}}, oldTransport)
+	require.NoError(t, err)
+
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clock
+	tr := newHandshakeBlockingTransport(true)
+	done := make(chan struct{})
+	go func() {
+		d.handleHello(tr, mustHello(ports.IntentAttach, "shared", domain.Size{Cols: 80, Rows: 24}))
+		close(done)
+	}()
+
+	timer := <-clock.timers
+	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	<-tr.welcome
+	timer.ch <- time.Time{}
+	awaitTestCompletion(t, done, "timed-out attachment cleanup did not finish")
+	requireClosedHandshakeTransport(t, tr)
+	require.False(t, oldTransport.Closed(), "cleanup closed an unrelated attachment transport")
+	require.Same(t, sess, old.currentAttachmentSession())
+	require.Equal(t, []*attachedClient{old}, sess.snapshotAttachments())
+	d.mu.Lock()
+	require.Len(t, d.sessions, 1)
+	require.Empty(t, d.parked)
+	d.mu.Unlock()
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+}
+
+func TestSuccessfulRouteOutlivesStoppedHandshakeContext(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	ctx, cancel := context.WithCancel(context.Background())
+	sess, ac, err := d.routeWithContext(ctx, ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, &closeTrackingTransport{})
+	require.NoError(t, err)
+	cancel()
+	select {
+	case <-sess.ctx.Done():
+		t.Fatal("session lifetime was parented to the handshake context")
+	default:
+	}
+	require.NotNil(t, ac)
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
 }

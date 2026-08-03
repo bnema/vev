@@ -795,6 +795,16 @@ func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error)
 	}
 }
 
+func validateRemoteAttachHandoff(target ports.AttachTarget) error {
+	if err := ports.ValidateAttachTarget(target); err != nil {
+		return err
+	}
+	if err := domain.ValidateRemoteHostTarget(target.Endpoint); err != nil {
+		return err
+	}
+	return domain.ValidateSessionName(target.Session)
+}
+
 // remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
 // the same validated transport selection used by direct remote attach.
 func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRuntimeObserver, transport string) (daemon.Option, error) {
@@ -854,8 +864,11 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			if !errors.As(err, &handoff) {
 				return err
 			}
-			if handoff == nil || ports.ValidateAttachTarget(handoff.Target) != nil {
+			if handoff == nil {
 				return fmt.Errorf("vev: invalid remote attach handoff")
+			}
+			if err := validateRemoteAttachHandoff(handoff.Target); err != nil {
+				return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 			}
 			remoteTarget = handoff.Target.Endpoint
 			name = handoff.Target.Session

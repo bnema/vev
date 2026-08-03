@@ -86,6 +86,13 @@ type attachedClient struct {
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
 	commands        attachedCommandTracker
+	// routeCreatedSession marks a session created by this attachment's route.
+	// A handshake that never commits Welcome must tear down that exact empty
+	// session, while an attachment routed to an existing session must not.
+	routeCreatedSession bool
+	// routeSessionPurge distinguishes a brand-new session from a restored
+	// stopped session when failed-handshake cleanup removes the live instance.
+	routeSessionPurge bool
 	// beforeAttachmentTokenValidation is a deterministic lifecycle-race seam
 	// used only by package tests.
 	beforeAttachmentTokenValidation func()

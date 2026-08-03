@@ -124,6 +124,31 @@ func (s *actionRunnerSpy) Run(request daemonActionRequest) error {
 	return s.err
 }
 
+func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
+	factory := &controlPTYFactory{entered: make(chan struct{}), release: make(chan struct{})}
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, factory, clock)
+	addControlSession(d, "work", "t_work", "p_work")
+	tr, sends, releaseConn := newConn(t, commandFrame(t, ports.CommandRequest{
+		RequestID: 17, Slug: "new-tab", TargetSession: "work",
+	}))
+	defer releaseConn()
+	done := make(chan error, 1)
+	go func() {
+		done <- d.handleCommand(tr, commandFrame(t, ports.CommandRequest{RequestID: 17, Slug: "new-tab", TargetSession: "work"}))
+	}()
+	<-factory.entered
+	timer := <-clock.timers
+	require.Equal(t, CommandRequestTimeout, timer.duration)
+	timer.ch <- time.Time{}
+	result := awaitCommandResult(t, sends)
+	require.Equal(t, uint64(17), result.RequestID)
+	require.Equal(t, ports.ErrInternal, result.Code)
+	require.Equal(t, ErrCommandRequestTimeout.Error(), result.Text)
+	require.NoError(t, <-done)
+	close(factory.release)
+}
+
 func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	var logs bytes.Buffer

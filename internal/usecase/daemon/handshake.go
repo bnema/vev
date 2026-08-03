@@ -107,3 +107,38 @@ func handshakeContextError(parent context.Context, timedOut <-chan struct{}, fal
 	}
 	return fallback
 }
+
+// failHandshakeAttachment synchronously retires the exact connection admitted
+// by route. A fresh route-owned session is purged only after its attachment is
+// removed; existing sessions and their unrelated attachments are preserved.
+func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.Transport) {
+	if sess == nil || ac == nil {
+		if tr != nil {
+			_ = tr.Close()
+		}
+		return
+	}
+	if d.abortResumeClaim(ac) {
+		// abortResumeClaim closes the replacement transport and restores the
+		// original parked credential. Closing the exact handshake link again is
+		// harmless for transports and makes this boundary synchronous.
+		if tr != nil {
+			_ = tr.Close()
+		}
+		return
+	}
+	d.clientGone(sess, ac, tr, true)
+	if tr != nil {
+		_ = tr.Close()
+	}
+	if ac.routeCreatedSession {
+		sess.mu.Lock()
+		empty := len(sess.attachments) == 0
+		sess.mu.Unlock()
+		if empty {
+			// killSession revalidates the attachment set under its publication
+			// locks before removing the session.
+			_ = d.killSession(sess, ports.ReasonSessionKilled, ac.routeSessionPurge)
+		}
+	}
+}

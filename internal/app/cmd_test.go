@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/require"
 )
 
@@ -287,6 +289,50 @@ func TestRunCmdRejectsTooManyArgumentsBeforeDialing(t *testing.T) {
 	}
 }
 
+func TestRunCmdTimesOutPendingRequest(t *testing.T) {
+	timer := &cmdTestTimer{ch: make(chan time.Time, 1)}
+	clock := &cmdTestClock{timer: timer}
+	recvStarted := make(chan struct{})
+	recvGate := make(chan struct{})
+	transport := &cmdTestTransport{recvStarted: recvStarted, recvGate: recvGate}
+	done := make(chan error, 1)
+	go func() {
+		done <- runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
+			stdout: io.Discard,
+			getenv: func(string) string { return "" },
+			dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+			clock:  clock,
+		})
+	}()
+	<-recvStarted
+	timer.ch <- time.Time{}
+	err := <-done
+	close(recvGate)
+	if ExitCode(err) != 3 || !errors.Is(err, daemon.ErrCommandRequestTimeout) {
+		t.Fatalf("timeout error=%v code=%d", err, ExitCode(err))
+	}
+	request, decodeErr := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+	if decodeErr != nil || request.RequestID == 0 {
+		t.Fatalf("request=%+v decode=%v, want non-zero request ID", request, decodeErr)
+	}
+}
+
+type cmdTestTimer struct{ ch chan time.Time }
+
+func (t *cmdTestTimer) C() <-chan time.Time      { return t.ch }
+func (t *cmdTestTimer) Reset(time.Duration) bool { return false }
+func (t *cmdTestTimer) Stop() bool               { return true }
+
+type cmdTestClock struct{ timer *cmdTestTimer }
+
+func (c *cmdTestClock) Now() time.Time { return time.Time{} }
+func (c *cmdTestClock) NewTimer(delay time.Duration) ports.Timer {
+	if delay != daemon.CommandRequestTimeout {
+		panic("unexpected command timeout")
+	}
+	return c.timer
+}
+
 func TestRunCmdDoesNotAutostartAndClassifiesDialFailure(t *testing.T) {
 	dials := 0
 	dialErr := errors.New("unreachable")
@@ -349,11 +395,13 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 }
 
 type cmdTestTransport struct {
-	sent       []ports.Frame
-	recv       ports.Frame
-	recvErr    error
-	recvCalls  int
-	closeCalls int
+	sent        []ports.Frame
+	recv        ports.Frame
+	recvErr     error
+	recvCalls   int
+	closeCalls  int
+	recvStarted chan struct{}
+	recvGate    <-chan struct{}
 }
 
 func (t *cmdTestTransport) Send(frame ports.Frame) error {
@@ -363,6 +411,22 @@ func (t *cmdTestTransport) Send(frame ports.Frame) error {
 
 func (t *cmdTestTransport) Recv() (ports.Frame, error) {
 	t.recvCalls++
+	if t.recvStarted != nil {
+		close(t.recvStarted)
+	}
+	if t.recvGate != nil {
+		<-t.recvGate
+	}
+	if t.recv.Type == ports.MsgCommandResult && len(t.sent) != 0 {
+		result, err := ports.UnmarshalCommandResult(t.recv.Payload)
+		if err == nil && result.RequestID == 0 {
+			request, err := ports.UnmarshalCommandRequest(t.sent[0].Payload)
+			if err == nil {
+				result.RequestID = request.RequestID
+				return ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(result)}, t.recvErr
+			}
+		}
+	}
 	return t.recv, t.recvErr
 }
 

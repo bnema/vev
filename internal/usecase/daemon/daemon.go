@@ -1122,7 +1122,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 
-	sess, ac, rerr := d.route(h, tr)
+	sess, ac, rerr := d.routeWithContext(handshakeCtx, h, tr)
 	if rerr != nil {
 		d.log.Warn("hello rejected", "err", rerr, "intent", h.Intent, "session", h.Name)
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
@@ -1134,16 +1134,12 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 
-	if err := handshakeCtx.Err(); err != nil {
-		return
-	}
 	failAttachment := func() {
-		if !d.abortResumeClaim(ac) {
-			// A fresh attachment has no credential to park. Explicit teardown
-			// removes the unpublished attachment instead of creating a resumable
-			// entry for a handshake that never committed Welcome.
-			d.clientGone(sess, ac, tr, true)
-		}
+		d.failHandshakeAttachment(sess, ac, tr)
+	}
+	if err := handshakeCtx.Err(); err != nil {
+		failAttachment()
+		return
 	}
 	rc := sess.renderCoordinator()
 	lease := (*attachmentLease)(nil)
@@ -1309,8 +1305,23 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 }
 
 // route resolves a Hello to a session and a freshly attached client, creating
-// the session for ephemeral/new intents.
+// the session for ephemeral/new intents. Direct package callers retain the
+// daemon lifetime context; inbound handshakes use routeWithContext.
 func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+	ctx := d.serveCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.routeWithContext(ctx, h, tr)
+}
+
+func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	sz := h.Size
 	if !sz.Valid() {
 		return nil, nil, &protoErr{ports.ErrInternal, "invalid terminal size"}
@@ -1355,10 +1366,6 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		}
 	}
 	if h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach {
-		ctx := d.serveCtx
-		if ctx == nil {
-			ctx = context.Background()
-		}
 		if err := d.waitForTargetRestore(ctx, h.Name); err != nil {
 			return nil, nil, err
 		}
@@ -1376,6 +1383,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	case ports.IntentResume:
 		// Resume miss/expiry falls back to normal attach semantics.
 		sess := d.findByNameLocked(h.Name)
+		created := false
 		if sess == nil {
 			stopped, ok := d.stopped[h.Name]
 			if !ok || stopped.purging {
@@ -1389,8 +1397,12 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				d.mu.Unlock()
 				return nil, nil, err
 			}
+			created = true
 		}
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		if err == nil && created {
+			ac.routeCreatedSession = true
+		}
 		return sess, ac, err
 
 	case ports.IntentEphemeral:
@@ -1401,6 +1413,10 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		if err == nil {
+			ac.routeCreatedSession = true
+			ac.routeSessionPurge = true
+		}
 		return sess, ac, err
 
 	case ports.IntentNew:
@@ -1422,10 +1438,15 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		if err == nil {
+			ac.routeCreatedSession = true
+			ac.routeSessionPurge = true
+		}
 		return sess, ac, err
 
 	case ports.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
+		created := false
 		if sess == nil {
 			stopped, ok := d.stopped[h.Name]
 			if !ok || stopped.purging {
@@ -1439,8 +1460,12 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				d.mu.Unlock()
 				return nil, nil, err
 			}
+			created = true
 		}
 		ac, err := d.finishAttach(sess, tr, sz, term, h)
+		if err == nil && created {
+			ac.routeCreatedSession = true
+		}
 		return sess, ac, err
 
 	default:

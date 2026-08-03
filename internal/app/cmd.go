@@ -10,9 +10,11 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
 	commandusecase "github.com/bnema/vev/internal/usecase/command"
+	"github.com/bnema/vev/internal/usecase/daemon"
 )
 
 type cmdInvocation struct {
@@ -126,10 +128,11 @@ type cmdDeps struct {
 	stdout io.Writer
 	getenv func(string) string
 	dial   func(context.Context, string) (ports.Transport, error)
+	clock  ports.Clock
 }
 
 func runCmd(ctx context.Context, invocation cmdInvocation) error {
-	return runCmdWithDeps(ctx, invocation, cmdDeps{stdout: os.Stdout, getenv: os.Getenv, dial: realDial})
+	return runCmdWithDeps(ctx, invocation, cmdDeps{stdout: os.Stdout, getenv: os.Getenv, dial: realDial, clock: clock.New()})
 }
 
 func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps) error {
@@ -157,11 +160,9 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return usagef("--self requires running inside a vev pane")
 	}
 
-	payload, err := ports.MarshalCommandRequest(request)
-	if errors.Is(err, ports.ErrTooManyCommandArgs) {
+	if _, err := ports.MarshalCommandRequest(request); errors.Is(err, ports.ErrTooManyCommandArgs) {
 		return usagef("too many command arguments")
-	}
-	if err != nil {
+	} else if err != nil {
 		return fmt.Errorf("encoding command: %w", err)
 	}
 
@@ -171,20 +172,43 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 	}
 	defer func() { _ = transport.Close() }()
 
-	frame := ports.Frame{Type: ports.MsgCommand, Payload: payload}
-	if err := transport.Send(frame); err != nil {
+	tracker := daemon.NewCommandRequestTracker()
+	const generation = uint64(1)
+	requestID, outcome := tracker.Publish(generation)
+	request.RequestID = requestID
+	payload, err := ports.MarshalCommandRequest(request)
+	if err != nil {
+		tracker.Remove(requestID, generation)
+		return fmt.Errorf("encoding command: %w", err)
+	}
+	if err := transport.Send(ports.Frame{Type: ports.MsgCommand, Payload: payload}); err != nil {
+		tracker.Remove(requestID, generation)
 		return &exitCoded{code: 3, err: fmt.Errorf("sending command: %w", err)}
 	}
-	reply, err := transport.Recv()
-	if err != nil {
-		return &exitCoded{code: 3, err: fmt.Errorf("reading command reply: %w", err)}
+	go func() {
+		reply, recvErr := transport.Recv()
+		if recvErr != nil {
+			tracker.Fail(requestID, generation, fmt.Errorf("reading command reply: %w", recvErr))
+			return
+		}
+		if reply.Type != ports.MsgCommandResult {
+			tracker.Fail(requestID, generation, fmt.Errorf("unexpected command reply type %d", reply.Type))
+			return
+		}
+		result, decodeErr := ports.UnmarshalCommandResult(reply.Payload)
+		if decodeErr != nil {
+			tracker.Fail(requestID, generation, fmt.Errorf("decoding command reply: %w", decodeErr))
+			return
+		}
+		tracker.Complete(generation, result)
+	}()
+	commandClock := deps.clock
+	if commandClock == nil {
+		commandClock = clock.New()
 	}
-	if reply.Type != ports.MsgCommandResult {
-		return fmt.Errorf("unexpected command reply type %d", reply.Type)
-	}
-	result, err := ports.UnmarshalCommandResult(reply.Payload)
+	result, err := tracker.Wait(ctx, commandClock, requestID, generation, outcome)
 	if err != nil {
-		return fmt.Errorf("decoding command reply: %w", err)
+		return &exitCoded{code: 3, err: err}
 	}
 	if !result.OK {
 		if result.Code == ports.ErrInvalidCommandArgs {

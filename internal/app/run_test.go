@@ -502,13 +502,13 @@ func TestParseArgs(t *testing.T) {
 					t.Fatalf("parseArgs(%q) = %+v, want error", tt.args, got)
 				}
 				if tt.nonUsageErr {
-					var ue *usageError
-					if errors.As(err, &ue) {
+					_, usage := errors.AsType[*usageError](err)
+					if usage {
 						t.Fatalf("parseArgs(%q) error = *usageError, want non-usage error", tt.args)
 					}
 				} else {
-					var ue *usageError
-					if !errors.As(err, &ue) {
+					_, usage := errors.AsType[*usageError](err)
+					if !usage {
 						t.Fatalf("parseArgs(%q) error = %T, want *usageError", tt.args, err)
 					}
 				}
@@ -887,6 +887,32 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 	})
 	require.NoError(t, err)
 	require.Equal(t, 2, calls, "a picker handoff must close the old connection and open a fresh direct connection")
+}
+
+func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
+	tests := []struct {
+		name   string
+		target ports.AttachTarget
+	}{
+		{name: "invalid host", target: ports.AttachTarget{Endpoint: "remote host", Session: "work", Intent: ports.IntentAttach}},
+		{name: "invalid session", target: ports.AttachTarget{Endpoint: "remote.example", Session: "bad name", Intent: ports.IntentAttach}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := portsmocks.NewMockRemoteDialerFactory(t)
+			factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+			calls := 0
+			err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+				remoteDialerFactory: factory,
+				runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
+					calls++
+					return &client.AttachTargetError{Target: tt.target}
+				},
+			})
+			require.ErrorContains(t, err, "invalid remote attach handoff")
+			require.Equal(t, 1, calls)
+		})
+	}
 }
 
 func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.T) {

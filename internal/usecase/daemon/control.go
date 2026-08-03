@@ -34,8 +34,47 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 			Text:      "attached command relay is not enabled",
 		})
 	}
-	result := d.dispatchCommand(d.serveCtx, request)
-	result.RequestID = request.RequestID
+
+	tracker := NewCommandRequestTracker()
+	const generation = uint64(1)
+	outcome, ok := tracker.Track(request.RequestID, generation)
+	if !ok {
+		return d.sendCommandResult(tr, ports.CommandResult{
+			RequestID: request.RequestID,
+			Code:      ports.ErrInternal,
+			Text:      "duplicate command request id",
+		})
+	}
+	commandCtx := d.serveCtx
+	if commandCtx == nil {
+		commandCtx = context.Background()
+	}
+	commandCtx, cancel := context.WithCancel(commandCtx)
+	defer cancel()
+	go func() {
+		result := d.dispatchCommand(commandCtx, request)
+		result.RequestID = request.RequestID
+		tracker.Complete(generation, result)
+	}()
+	commandClock := d.clock
+	if commandClock == nil {
+		commandClock = systemClock{}
+	}
+	result, waitErr := tracker.Wait(context.Background(), commandClock, request.RequestID, generation, outcome)
+	if waitErr != nil {
+		if errors.Is(waitErr, ErrCommandRequestTimeout) {
+			return d.sendCommandResult(tr, ports.CommandResult{
+				RequestID: request.RequestID,
+				Code:      ports.ErrInternal,
+				Text:      waitErr.Error(),
+			})
+		}
+		return d.sendCommandResult(tr, ports.CommandResult{
+			RequestID: request.RequestID,
+			Code:      ports.ErrInternal,
+			Text:      waitErr.Error(),
+		})
+	}
 	return d.sendCommandResult(tr, result)
 }
 
