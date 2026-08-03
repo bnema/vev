@@ -301,7 +301,7 @@ func (l *cliLauncher) releaseRuntime(runDir string) error {
 
 // preparePeer installs a per-run ssh command seam. The ordinary public client
 // still executes its documented remote attach command; its ssh child invokes
-// only the parsed public _stdio or _udp-proxy command. This makes the peer
+// only the parsed public _stdio or _udp-proxy entrypoint. This makes the peer
 // carrying client traffic the declared, exclusively traced role rather than a
 // separately launched but unused process.
 func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedProcess, error) {
