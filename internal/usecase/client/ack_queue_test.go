@@ -36,7 +36,7 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 	require.Equal(t, ports.MsgAck, first.Type)
 	ack, err := ports.UnmarshalAck(first.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(maxUnackedOutputStatesForTest), ack.AckedStateNum)
+	require.Equal(t, uint64(maxUnackedOutputStatesForTest), ack.State)
 }
 
 const maxUnackedOutputStatesForTest = 8

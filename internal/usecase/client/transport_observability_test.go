@@ -50,7 +50,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgAck)).Run(func(ports.Frame) { close(acked) }).Return(nil).Once()
 	unblock := scriptRecv(transport,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Data: []byte("flush-before-observe"), NewStateNum: 3}))},
+		recvItem{f: frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Data: []byte("flush-before-observe"), New: 3}))},
 	)
 	defer unblock()
 	transport.EXPECT().Close().Return(nil).Once()
@@ -90,7 +90,7 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	unblock := scriptRecv(transport,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Data: []byte("unchanged-by-observer"), NewStateNum: 3}))},
+		recvItem{f: frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Data: []byte("unchanged-by-observer"), New: 3}))},
 		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
 	)
 	defer unblock()

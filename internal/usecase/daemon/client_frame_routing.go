@@ -132,17 +132,15 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 			d.resetOutput(token)
 		}
 	case ports.MsgCommand:
-		if token.ac.proxied {
-			request, derr := ports.UnmarshalCommandRequest(f.Payload)
-			if derr != nil {
-				return false
-			}
-			result := d.executeAttachedCommand(token, request)
-			if err := token.sendControl(frameCommandResult(result)); err != nil {
-				token.endAttachmentEffect()
-				d.detachOnAttachmentSendError(token, token.transport.transport)
-				return true
-			}
+		request, derr := ports.UnmarshalCommandRequest(f.Payload)
+		if derr != nil {
+			return false
+		}
+		result := d.executeAttachedCommand(token, request)
+		if err := token.sendControl(frameCommandResult(result)); err != nil {
+			token.endAttachmentEffect()
+			d.detachOnAttachmentSendError(token, token.transport.transport)
+			return true
 		}
 	case ports.MsgPing:
 		if err := token.sendControl(framePong()); err != nil {

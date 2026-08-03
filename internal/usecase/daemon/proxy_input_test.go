@@ -355,9 +355,6 @@ func TestProxyAttachedCommandCorrelatesInterleavedWrongAndLateResults(t *testing
 	require.NoError(t, err)
 	require.Equal(t, proxyLinkResume, result)
 	require.Equal(t, ports.MsgAck, awaitTestValue(t, link.sent, "interleaved output was not acknowledged").Type)
-	result, err = d.handleLinkFrame(proxy, generation, proxyMeta(proxy.key.Name))
-	require.NoError(t, err)
-	require.Equal(t, proxyLinkResume, result)
 	result, err = d.handleLinkFrame(proxy, generation, ports.Frame{Type: ports.MsgPong, Payload: ports.MarshalPong(ports.Pong{})})
 	require.NoError(t, err)
 	require.Equal(t, proxyLinkResume, result)
@@ -509,7 +506,6 @@ func TestProxyAttachedCommandTimeoutCancelAndGenerationReplacement(t *testing.T)
 
 func TestProxyAttachedCommandRejectsTargetsAndExecutesExactActiveSession(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
-	ac.proxied = true
 	second := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	publishTiledPaneOwners(sess, second)
 	sess.mu.Lock()
@@ -600,9 +596,7 @@ func TestProxyPickerSelectionDialsOutsideLocksAndRevalidatesExactRoleAndKey(t *t
 	d, source, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	transport := newProxyTestTransport()
-	transport.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	transport.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	transport.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	transport.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	dialer := portsmocks.NewMockDialer(t)
 	var daemonLockAvailable, sourceLockAvailable bool
@@ -659,9 +653,7 @@ func TestRemotePickerEnterRoutesStructuredKeyThroughProxyOwnership(t *testing.T)
 	d.attachCoordinator(local, ac, true)
 	key := domain.RemoteSessionKey{Host: "arch", Name: "enter"}
 	transport := newProxyTestTransport()
-	transport.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	transport.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	transport.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	transport.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	d.remoteDialerFactory = newProxyConstructionFactory(transport)
 	d.remoteTransportMode = ports.RemoteTransportUDP
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
@@ -806,9 +798,7 @@ func TestRemotePickerCanReselectWarmProxyAfterReturningLocal(t *testing.T) {
 	d.attachCoordinator(local, ac, true)
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()
-	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	remote.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	remote.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	d.remoteDialerFactory = newProxyConstructionFactory(remote)
 	d.remoteTransportMode = ports.RemoteTransportUDP
 
@@ -899,9 +889,7 @@ func TestConnectionLoopRetriesRoleResolutionAcrossHandoff(t *testing.T) {
 
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()
-	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	remote.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	remote.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	d.remoteDialerFactory = newProxyConstructionFactory(remote)
 	d.remoteTransportMode = ports.RemoteTransportUDP
 	token := attachmentEffectForTest(t, local.attachmentToken(ac, client))
@@ -938,9 +926,7 @@ func TestConnectionLoopCleansCurrentProxyAfterHandoffReceiveError(t *testing.T) 
 
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()
-	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	remote.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	remote.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	d.remoteDialerFactory = newProxyConstructionFactory(remote)
 	d.remoteTransportMode = ports.RemoteTransportUDP
 
@@ -995,9 +981,7 @@ func TestConnectionLoopFollowsClientFromLocalToRemoteProxy(t *testing.T) {
 
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()
-	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	remote.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	remote.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	d.remoteDialerFactory = newProxyConstructionFactory(remote)
 	d.remoteTransportMode = ports.RemoteTransportUDP
 

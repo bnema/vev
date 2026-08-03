@@ -74,7 +74,7 @@ type Daemon struct {
 	stopped  map[string]stoppedSession
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
-	// proxyConstructions serializes remote IntentAttach handshakes by structured
+	// proxyConstructions serializes remote IntentAttach handshakes by remote
 	// key. Entries are guarded by mu and never retain it across dial or link I/O.
 	proxyConstructions map[domain.RemoteSessionKey]*proxyConstruction
 	nextID             uint64
@@ -1143,16 +1143,6 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	if ac.proxied {
-		meta, ok := sess.sessionMetaSnapshotFor(ac)
-		metaFrame, metaErr := frameSessionMeta(meta)
-		if !ok || metaErr != nil || ac.sendExpectedTransportForAttachment(postWelcomeToken.transport, metaFrame, postWelcomeTicket) != nil {
-			postWelcomeTicket.End()
-			d.clientGone(sess, ac, tr, false)
-			return
-		}
-		ac.markSessionMetaSent(meta)
-	}
 	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
 		postWelcomeTicket.End()
 		// The attachment was detached while Welcome was in flight; never let
@@ -1194,7 +1184,6 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		clientID:          h.ClientID,
 		resumeCapable:     true,
 		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
-		proxied:           h.Proxied,
 	}
 	ac := d.prepareAttachedClientLocked(tr, sz, opts)
 	d.mu.Unlock()
@@ -1340,7 +1329,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, term, h.Env, h.Proxied, stopped.tabNames)
+			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
@@ -1351,7 +1340,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, sz, term, h.Env, h.Proxied)
+		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, sz, term, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -1372,7 +1361,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, sz, term, h.Env, h.Proxied)
+		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, sz, term, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -1390,7 +1379,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, term, h.Env, h.Proxied, stopped.tabNames)
+			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

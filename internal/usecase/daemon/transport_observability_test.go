@@ -36,7 +36,7 @@ func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	if !d.resizeForFirstPaint(sess, ac, domain.Size{Cols: 100, Rows: 26}) {
 		t.Fatal("second resize was not accepted")
 	}
-	ac.ackOutputState(output.NewStateNum)
+	ac.ackOutputState(output.New)
 	rc.notifyAck()
 	second := awaitFrame(t, sends, ports.MsgOutput)
 	if second.Type != ports.MsgOutput {
@@ -123,7 +123,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 	if err != nil {
 		t.Fatalf("decode emitted output: %v", err)
 	}
-	ac.ackOutputState(output.NewStateNum)
+	ac.ackOutputState(output.New)
 
 	pane := testAttachmentTab(sess).focusedPane()
 	for _, lock := range []struct {

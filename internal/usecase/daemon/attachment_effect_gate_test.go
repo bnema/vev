@@ -614,7 +614,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 			setup: func(_ *Daemon, _ *session, ac *attachedClient, _ *transactionalResizePTY) {
 				ac.output.next = 3
 			},
-			frame: ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: 1})},
+			frame: ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{State: 1})},
 			assert: func(t *testing.T, ac *attachedClient, _ *transactionalResizePTY) {
 				ac.sendMu.Lock()
 				defer ac.sendMu.Unlock()

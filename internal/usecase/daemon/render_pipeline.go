@@ -69,7 +69,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	width, rows := state.layout.area.Width, state.layout.area.Height
 	if state.window.Valid() {
-		window := contentSize(state.window, state.contentOnly)
+		window := contentSize(state.window)
 		width, rows = window.Cols, window.Rows
 	}
 	if width <= 0 || rows < 0 {
@@ -79,10 +79,6 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	// copied before incremental drawing so prepare/send failures cannot change it.
 	contentY := 1
 	frameHeight := rows + tabChromeRows
-	if state.contentOnly {
-		contentY = 0
-		frameHeight = rows
-	}
 	canReuseFrame := scratch.frame.Width == width && scratch.frame.Height == frameHeight
 	frame := scratch.frame
 	if !canReuseFrame {
@@ -103,10 +99,8 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	defaultDimmer := themeui.NewDimmer(state.theme)
 	neutralBorder := styles.NeutralBorder
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
-	if !state.contentOnly {
-		drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
-		drawStatusBarState(frame.Row(rows+1), state.bars, styles)
-	}
+	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
+	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
 	content := domain.Rect{Y: contentY, Width: width, Height: rows}
 	if state.layout.valid {
 		drawDividers(frame, state.layout.dividers, content.Y, defaultDimmer.Dim(neutralBorder))
@@ -170,7 +164,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
 		frame, damage = composeCapturedOverlays(state, frame, damage)
 	}
-	if !state.contentOnly && !full {
+	if !full {
 		if !sameCells(in.bars.top, baseFrame.Row(0)) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
 		}
@@ -192,11 +186,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
 	cursor := desiredCapturedCursor(cursorInputs, contentY)
 	outCache := composeCacheInput{valid: !overlaysActive, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
-	if !state.contentOnly {
-		outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
-	} else {
-		outCache.bars.Reset()
-	}
+	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
@@ -242,9 +232,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		styles = fallbackChromeStyles
 	}
 	rows := state.layout.area.Height
-	if !state.contentOnly {
-		rows += tabChromeRows
-	}
+	rows += tabChromeRows
 	size := domain.Size{Cols: state.layout.area.Width, Rows: rows}
 	if snap.copySearchModel != nil {
 		presentation := copySearchModal.Resolve(size)
@@ -435,13 +423,6 @@ func commitDamageReceipts(receipts []damageReceipt) {
 			receipt.pane.mu.Unlock()
 			continue
 		}
-		if receipt.proxy != nil {
-			receipt.proxy.mu.Lock()
-			if receipt.proxy.screen != nil && receipt.proxy.screen == receipt.proxyScreen {
-				receipt.proxy.screen.AcknowledgeDamage(receipt.generation)
-			}
-			receipt.proxy.mu.Unlock()
-		}
 	}
 }
 
@@ -481,33 +462,19 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
 	var (
-		preparedANSI   *preparedOutput
-		preparedScreen *preparedStructuredOutput
-		err            error
-		cursor         cursorCandidate
-		data           []byte
+		preparedANSI *preparedOutput
+		err          error
+		cursor       cursorCandidate
+		data         []byte
 	)
-	if ac.proxied {
-		screenOutput := ac.ensureScreenOutput()
-		if screenOutput == nil {
-			err = errors.New("proxied attachment has no structured output stream")
-		} else {
-			preparedScreen, err = screenOutput.prepare(composed.frame, composed.damage, composed.cursor, composed.reset, ac.echoAck.Load())
-			if err == nil {
-				data = preparedScreen.data
-			}
-		}
-	} else {
-		preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
-		if err == nil {
-			cursor = ac.prepareCursorTail(composed.cursor, len(preparedANSI.data) > 0)
-			data = append([]byte(nil), preparedANSI.data...)
-			data = append(data, cursor.data...)
-		}
+	preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
+	if err == nil {
+		cursor = ac.prepareCursorTail(composed.cursor, len(preparedANSI.data) > 0)
+		data = append([]byte(nil), preparedANSI.data...)
+		data = append(data, cursor.data...)
 	}
 	endDiff(0, err == nil)
 	if err != nil {
-		ac.discardProxyCapture()
 		ac.sendMu.Unlock()
 		d.log.Error("render draw failed", "err", err, "session", entry.core().name)
 		// Without a coordinator reportError repaints synchronously. Suppress only
@@ -532,96 +499,54 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 	}
 	var sendTr ports.Transport
 	var sendErr error
-	// Metadata precedes any output bytes and is published on its own when the
-	// terminal frame is empty, so a proxied client never keeps a stale snapshot.
-	if len(data) > 0 || ac.proxied {
+	if len(data) > 0 {
 		sendTransport := ac.transportSnapshot()
 		sendTr = sendTransport.transport
-		if ac.proxied {
-			if sess, ok := localSession(entry); ok {
-				sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.attachmentEffect)
-			} else if proxy, ok := entry.(*proxySession); ok {
-				meta, metaOK := proxy.sessionMetaSnapshot()
-				if !metaOK {
-					sendErr = errSessionMetaUnavailable
-				} else {
-					sendErr = ac.sendSessionMetaSnapshot(meta, sendTransport, marks.attachmentEffect)
-				}
+		endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
+		if sendTr == nil {
+			sendErr = errors.New("client transport is nil")
+		} else {
+			send := sendTr.Send
+			if async, ok := sendTr.(ports.AsyncTransport); ok {
+				send = async.SendAsync
 			}
-		}
-		if len(data) > 0 {
-			endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
-			if sendErr == nil && sendTr == nil {
-				sendErr = errors.New("client transport is nil")
+			interruptible := false
+			if marks.attachmentEffect != nil {
+				interruptible = marks.attachmentEffect.beginTransportSend(sendTransport)
+				if !interruptible {
+					sendErr = errAttachmentTransition
+				}
 			}
 			if sendErr == nil {
-				interruptible := false
-				if marks.attachmentEffect != nil {
-					interruptible = marks.attachmentEffect.beginTransportSend(sendTransport)
-					if !interruptible {
-						sendErr = errAttachmentTransition
-					}
-				}
-				if sendErr == nil {
-					send := sendTr.Send
-					if async, ok := sendTr.(ports.AsyncTransport); ok {
-						send = async.SendAsync
-					}
-					if ac.proxied {
-						sendErr = preparedScreen.send(send)
-					} else {
-						sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
-					}
-				}
-				if marks.attachmentEffect != nil && interruptible {
-					if sendErr != nil {
-						marks.attachmentEffect.reportTransportFailure(sendTransport)
-					}
-					marks.attachmentEffect.endTransportSend()
-				}
+				sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
 			}
-			emitted := sendErr == nil && ((preparedANSI != nil && preparedANSI.sent) || (preparedScreen != nil && preparedScreen.sent))
-			endEmit(uint64(len(data)), emitted)
-			if sendErr == nil && !emitted {
-				ac.discardProxyCapture()
-				ac.sendMu.Unlock()
-				return true
-			}
-			if sendErr == nil && ac.proxied {
-				kind := ports.RuntimeScreenDelta
-				if preparedScreen.update.Kind == ports.ScreenUpdateSnapshot {
-					kind = ports.RuntimeScreenSnapshot
+			if marks.attachmentEffect != nil && interruptible {
+				if sendErr != nil {
+					marks.attachmentEffect.reportTransportFailure(sendTransport)
 				}
-				marks.diagnostic(kind, uint64(len(preparedScreen.data)), uint64(len(preparedScreen.update.Spans)))
+				marks.attachmentEffect.endTransportSend()
 			}
+		}
+		emitted := sendErr == nil && preparedANSI.sent
+		endEmit(uint64(len(data)), emitted)
+		if sendErr == nil && !emitted {
+			ac.sendMu.Unlock()
+			return true
 		}
 	}
 	if sendErr == nil {
 		if len(data) == 0 {
-			if ac.proxied {
-				preparedScreen.commitNoSend()
-				if !preparedScreen.sent {
-					ac.discardProxyCapture()
-					ac.sendMu.Unlock()
-					return true
-				}
-			} else {
-				preparedANSI.commitNoSend()
-				if !preparedANSI.sent {
-					ac.sendMu.Unlock()
-					return true
-				}
+			preparedANSI.commitNoSend()
+			if !preparedANSI.sent {
+				ac.sendMu.Unlock()
+				return true
 			}
 		}
 		// Publish only after output preparation and transport emission both
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this
 		// completed output transaction.
-		if ac.proxied {
-			ac.lastCursor = composed.cursor
-		} else {
-			ac.lastCursor = cursor.next
-		}
+		ac.lastCursor = cursor.next
 		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
 
@@ -632,9 +557,6 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		if ac.renderStages.emit != nil {
 			ac.renderStages.emit()
 		}
-	}
-	if sendErr != nil {
-		ac.discardProxyCapture()
 	}
 	ac.sendMu.Unlock()
 	if sendErr != nil {

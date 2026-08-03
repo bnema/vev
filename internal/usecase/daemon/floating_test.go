@@ -543,7 +543,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		repaint := awaitFrame(t, sends, ports.MsgOutput)
 		output, err := ports.UnmarshalOutput(repaint.Payload)
 		require.NoError(t, err)
-		require.Zero(t, output.BaseStateNum, "visible EOF must force a dependency-free full repaint")
+		require.Zero(t, output.Base, "visible EOF must force a dependency-free full repaint")
 		require.Contains(t, string(output.Data), "underlying-cell", "repaint must restore cells previously covered by the popup")
 		require.NotNil(t, floating)
 	})

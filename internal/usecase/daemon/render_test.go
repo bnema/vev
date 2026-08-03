@@ -86,7 +86,7 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 			frame := awaitFrame(t, sends, ports.MsgOutput)
 			output, err := ports.UnmarshalOutput(frame.Payload)
 			require.NoError(t, err)
-			require.Zero(t, output.BaseStateNum, "first paint must be a mandatory reset")
+			require.Zero(t, output.Base, "first paint must be a mandatory reset")
 			select {
 			case extra := <-sends:
 				t.Fatalf("first paint emitted duplicate frame after floating activation resize: %#v", extra)

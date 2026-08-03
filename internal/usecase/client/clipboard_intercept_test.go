@@ -198,7 +198,7 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 		}
 	}
 	beforeOutput := out.String()
-	transport.recv <- frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("incremental")}))
+	transport.recv <- frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Base: 0, New: 1, Full: true, Data: []byte("incremental")}))
 	transport.recv <- frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
 
 	select {

@@ -1161,11 +1161,10 @@ func TestProducerInvalidations(t *testing.T) {
 		},
 		{
 			file:     "input.go",
-			name:     "proxied jump attention switches a local tab",
+			name:     "jump attention switches a local tab",
 			tabs:     2,
-			producer: "input.go",
+			producer: "attention.go",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				ac.proxied = true
 				sess.tabs[1].attention = true
 				daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionJumpAttention, nil)
 				require.Equal(t, 1, testAttachmentTabIndex(sess))

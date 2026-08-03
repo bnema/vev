@@ -13,35 +13,32 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// proxySession is the local attachment identity for one structured remote
-// session key. mu is a leaf lock: callers may take it below d.mu or sessionCore
+// proxySession is the local attachment identity for one remote session key. mu is a leaf lock: callers may take it below d.mu or sessionCore
 // locks, but must not acquire another architecture lock or perform transport I/O
 // while holding it. All Transport.Send calls are owned by sendMu.
 type proxySession struct {
 	sessionCore
 	key domain.RemoteSessionKey
 
-	mu             sync.Mutex
-	generation     uint64
-	linkGeneration uint64
-	transport      ports.Transport
-	resumeToken    uint64
-	appliedState   uint64
-	// screenReady is true only after a moving snapshot establishes the
-	// dependency required by subsequent deltas.
-	screenReady    bool
-	resetRequested bool
-	screen         *proxyScreenState
-	meta           ports.SessionMeta
-	attentionAt    []time.Time
-	linkState      ports.LinkState
-	expired        bool
-	warm           *proxyWarmTimer
-	cancel         context.CancelFunc
-	done           chan struct{}
-	doneOnce       sync.Once
-	clientID       [16]byte
-	contentSize    domain.Size
+	mu                   sync.Mutex
+	generation           uint64
+	linkGeneration       uint64
+	transport            ports.Transport
+	resumeToken          uint64
+	outputEpoch          uint64
+	outputState          uint64
+	outputReady          bool
+	outputResetRequested bool
+	meta                 ports.SessionMeta
+	attentionAt          []time.Time
+	linkState            ports.LinkState
+	expired              bool
+	warm                 *proxyWarmTimer
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	doneOnce             sync.Once
+	clientID             [16]byte
+	contentSize          domain.Size
 
 	sendMu    sync.Mutex
 	inputNext uint64
@@ -61,73 +58,40 @@ func (p *proxySession) core() *sessionCore {
 
 func (p *proxySession) isProxy() bool { return true }
 
-func (p *proxySession) sessionMetaSnapshot() (ports.SessionMeta, bool) {
-	if p == nil {
-		return ports.SessionMeta{}, false
+func (p *proxySession) captureRenderState(*attachedClient, renderCaptureRequest) (*capturedRenderState, bool) {
+	return nil, false
+}
+
+func (p *proxySession) resize(size domain.Size) (changed, sent bool) {
+	if p == nil || !size.Valid() {
+		return false, false
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.meta.Tabs) == 0 || int(p.meta.Active) >= len(p.meta.Tabs) {
-		return ports.SessionMeta{}, false
+	if p.contentSize == size {
+		available := p.transport != nil
+		p.mu.Unlock()
+		return false, available
 	}
-	return cloneSessionMeta(p.meta), true
+	p.contentSize = size
+	generation := p.linkGeneration
+	p.mu.Unlock()
+	return true, p.sendGeneration(generation, ports.Frame{
+		Type:    ports.MsgResize,
+		Payload: ports.MarshalResize(ports.Resize{Size: size}),
+	}) == nil
+}
+
+func cloneSessionMeta(meta ports.SessionMeta) ports.SessionMeta {
+	meta.Tabs = append([]ports.SessionTabMeta(nil), meta.Tabs...)
+	return meta
 }
 
 // replaceSessionMetaLocked atomically replaces the relayed snapshot while
 // preserving the first-observed timestamp of tabs that remain attentive.
 // Callers must validate meta and hold p.mu.
-func (p *proxySession) replaceSessionMetaLocked(meta ports.SessionMeta, now time.Time) {
-	attentionAt := make([]time.Time, len(meta.Tabs))
-	for i, tab := range meta.Tabs {
-		if !tab.Attention {
-			continue
-		}
-		if i < len(p.meta.Tabs) && p.meta.Tabs[i].Attention && i < len(p.attentionAt) {
-			attentionAt[i] = p.attentionAt[i]
-			continue
-		}
-		attentionAt[i] = now
-	}
-	p.meta = cloneSessionMeta(meta)
-	p.attentionAt = attentionAt
-}
-
 // applyProxySessionMeta validates and atomically applies relayed metadata only
 // for the exact current link generation. A remote session rename cannot mutate
 // the immutable local identity, so it expires that exact proxy instead.
-func (d *Daemon) applyProxySessionMeta(p *proxySession, generation uint64, meta ports.SessionMeta) (bool, error) {
-	if d == nil || p == nil {
-		return false, errors.New("proxy session: metadata target is unavailable")
-	}
-	if _, err := ports.MarshalSessionMeta(meta); err != nil {
-		return false, fmt.Errorf("proxy session: invalid metadata: %w", err)
-	}
-	meta = cloneSessionMeta(meta)
-	now := d.clock.Now()
-
-	p.mu.Lock()
-	if p.linkGeneration != generation {
-		p.mu.Unlock()
-		return false, nil
-	}
-	if meta.SessionName != p.key.Name {
-		transport := p.transport
-		p.mu.Unlock()
-		if transport != nil {
-			d.markProxyReplaced(p, generation, transport)
-		}
-		return false, fmt.Errorf("proxy session: metadata identity mismatch: got %q", meta.SessionName)
-	}
-	p.replaceSessionMetaLocked(meta, now)
-	p.mu.Unlock()
-
-	d.pokeAttentionTicker()
-	for _, ac := range snapshotAttachmentSession(p) {
-		d.invalidateRender(p, ac, false, "proxy_session.go")
-	}
-	return true, nil
-}
-
 func (p *proxySession) snapshotView(opts viewOptions) sessionView {
 	if p == nil {
 		return sessionView{}
@@ -204,9 +168,8 @@ func newProxySession(key domain.RemoteSessionKey, size domain.Size) (*proxySessi
 	if err := key.Validate(); err != nil {
 		return nil, fmt.Errorf("proxy session key: %w", err)
 	}
-	content := contentSize(size, false)
-	if size.Valid() && !validProxyScreenSize(content) {
-		return nil, fmt.Errorf("proxy session size: invalid content size %dx%d", content.Cols, content.Rows)
+	if !size.Valid() {
+		return nil, fmt.Errorf("proxy session size: invalid size %dx%d", size.Cols, size.Rows)
 	}
 	var clientID [16]byte
 	if _, err := io.ReadFull(rand.Reader, clientID[:]); err != nil {
@@ -220,11 +183,10 @@ func newProxySession(key domain.RemoteSessionKey, size domain.Size) (*proxySessi
 		},
 		key:            key,
 		generation:     1,
-		screen:         newProxyScreenState(content),
 		linkState:      ports.LinkStateConnected,
 		done:           make(chan struct{}),
 		clientID:       clientID,
-		contentSize:    content,
+		contentSize:    size,
 		commandPending: make(map[uint64]proxyCommandPending),
 	}
 	return p, nil
@@ -238,7 +200,7 @@ type proxyConstruction struct {
 var errProxySessionExpired = errors.New("proxy session: remote attachment has expired")
 
 // openProxySession returns the exact already-published proxy for key, or elects
-// one constructor for that structured key. Waiters never dial: they wait
+// one constructor for that remote key. Waiters never dial: they wait
 // cancellably, then revalidate the exact registry winner under d.mu. The
 // reservation itself is held only under d.mu; dial and handshake I/O run after
 // releasing every daemon, core, and proxy architecture lock.

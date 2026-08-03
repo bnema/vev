@@ -7,15 +7,11 @@ import (
 )
 
 func frameWelcome(s *session, ac *attachedClient) ports.Frame {
-	capabilities := ports.CapabilityResume
-	if ac.proxied {
-		capabilities |= ports.CapabilityProxied
-	}
 	w := ports.Welcome{
 		SessionID:    string(s.id),
 		SessionName:  s.name,
 		Ephemeral:    s.ephemeral,
-		Capabilities: capabilities,
+		Capabilities: ports.CapabilityResume,
 		ResumeToken:  ac.resumeToken,
 	}
 	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}

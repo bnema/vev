@@ -252,8 +252,8 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	require.Equal(t, uint64(1), ac.output.next)
 	out, err := ports.UnmarshalOutput((<-sends).Payload)
 	require.NoError(t, err)
-	require.Zero(t, out.BaseStateNum)
-	require.Equal(t, uint64(1), out.NewStateNum)
+	require.Zero(t, out.Base)
+	require.Equal(t, uint64(1), out.New)
 }
 
 func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T) {

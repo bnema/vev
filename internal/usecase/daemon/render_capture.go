@@ -35,10 +35,8 @@ type renderCaptureScratch struct {
 }
 
 type damageReceipt struct {
-	pane        *pane
-	proxy       *proxySession
-	proxyScreen *proxyScreenState
-	generation  uint64
+	pane       *pane
+	generation uint64
 }
 
 type capturedRenderState struct {
@@ -47,7 +45,6 @@ type capturedRenderState struct {
 	view               attachmentView
 	window             domain.Size
 	reset              bool
-	contentOnly        bool
 	layout             capturedTabLayout
 	panes              []capturedPaneRenderState
 	floating           capturedFloatingRenderState
@@ -275,7 +272,7 @@ func captureLocalRenderState(
 	}
 	*state = capturedRenderState{
 		attachment: ac, lease: lease, view: view, window: window,
-		reset: reset, contentOnly: ac.proxied, bars: bars, theme: bars.theme,
+		reset: reset, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
 		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},

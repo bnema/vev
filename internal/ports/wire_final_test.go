@@ -10,8 +10,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 22 {
-		t.Fatalf("ProtocolVersion = %d, want 22", ProtocolVersion)
+	if ProtocolVersion != 23 {
+		t.Fatalf("ProtocolVersion = %d, want 23", ProtocolVersion)
 	}
 	payload := MarshalHello(Hello{Version: 21, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if _, err := UnmarshalHello(payload); err == nil {
@@ -21,7 +21,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 22, 2, 0}, make([]byte, 16+8)...)
+	want := append([]byte{0, 23, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
@@ -137,7 +137,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 		t.Fatalf("Ack bytes = %x, want %x", got, want)
 	}
 	back, err := UnmarshalAck(got)
-	if err != nil || back != (Ack{Epoch: 2, State: 7, AckedStateNum: 7}) {
+	if err != nil || back != (Ack{Epoch: 2, State: 7}) {
 		t.Fatalf("Ack = %+v, error %v", back, err)
 	}
 	assertAllPrefixesFail(t, got, UnmarshalAck)

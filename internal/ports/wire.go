@@ -64,7 +64,6 @@ const (
 	CapabilityResume  uint32 = 1 << 0
 	CapabilityUDP     uint32 = 1 << 1
 	CapabilityPredict uint32 = 1 << 2
-	CapabilityProxied uint32 = 1 << 3
 )
 
 // ErrorMsg codes.
@@ -94,7 +93,6 @@ const (
 type Hello struct {
 	Version     uint16
 	Intent      uint8
-	Proxied     bool
 	ClientID    [16]byte
 	ResumeToken uint64
 	Name        string
@@ -181,11 +179,6 @@ type Pong struct{}
 type Ack struct {
 	Epoch uint64
 	State uint64
-
-	// AckedStateNum is retained for the structured-proxy deletion task. It is
-	// populated from State when decoding and accepted as an input alias only
-	// when the final fields are otherwise unset.
-	AckedStateNum uint64
 }
 
 // Welcome is the daemon's reply to a successful Hello.
@@ -213,13 +206,6 @@ type Output struct {
 	Size         domain.Size
 	Full         bool
 	Data         []byte
-
-	// The old state names remain until the structured-proxy deletion task. They
-	// are input/output aliases for the final fields and are not encoded as
-	// separate wire fields.
-	BaseStateNum uint64
-	NewStateNum  uint64
-	EchoAck      uint64
 }
 
 // AttachTarget identifies the endpoint and session selected for a new
@@ -269,18 +255,17 @@ type Sessions struct {
 	Sessions []SessionInfo
 }
 
-// OutputResetRequest asks a proxied daemon to rebase its output stream.
+// OutputResetRequest asks a remote output stream to rebase.
 type OutputResetRequest struct{}
 
-// SessionTabMeta describes one tab in a proxied session's authoritative
-// metadata snapshot.
+// SessionTabMeta describes one tab in a remote session's metadata snapshot.
 type SessionTabMeta struct {
 	Index     uint16
 	Name      string
 	Attention bool
 }
 
-// SessionMeta is the authoritative tab metadata sent to a proxied client.
+// SessionMeta is authoritative tab metadata for a remote session.
 type SessionMeta struct {
 	SessionName string
 	Active      uint16
@@ -558,7 +543,6 @@ func MarshalHello(h Hello) []byte {
 	w := payloadWriter{}
 	w.putUint16(h.Version)
 	w.putUint8(h.Intent)
-	w.putBool(h.Proxied)
 	w.putBytes(h.ClientID[:])
 	w.putUint64(h.ResumeToken)
 	w.putString(h.Name)
@@ -590,9 +574,6 @@ func preflightHello(b []byte) error {
 	}
 	if intent != IntentEphemeral && intent != IntentNew && intent != IntentAttach && intent != IntentResume {
 		return ErrInvalidHello
-	}
-	if _, err := r.getBool(); err != nil {
-		return err
 	}
 	if len(r.b) < 16 {
 		return errShortPayload
@@ -661,9 +642,6 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, ErrInvalidHello
 	}
 	if h.Intent, err = r.getUint8(); err != nil {
-		return Hello{}, err
-	}
-	if h.Proxied, err = r.getBool(); err != nil {
 		return Hello{}, err
 	}
 	clientID, err := r.getBytes(len(h.ClientID))
@@ -973,13 +951,8 @@ func UnmarshalPong(b []byte) (Pong, error) {
 
 // MarshalAck encodes m into an epoch/state Ack payload.
 func MarshalAck(m Ack) []byte {
-	if m.Epoch == 0 && m.State == 0 {
-		// Keep old in-tree callers source-compatible until the structured proxy
-		// deletion task moves them to the final names.
+	if m.Epoch == 0 {
 		m.Epoch = 1
-		m.State = m.AckedStateNum
-	} else if m.AckedStateNum != 0 && m.State != m.AckedStateNum {
-		return nil
 	}
 	if err := ValidateAck(m); err != nil {
 		return nil
@@ -1007,7 +980,6 @@ func UnmarshalAck(b []byte) (Ack, error) {
 	if err := ValidateAck(m); err != nil {
 		return Ack{}, err
 	}
-	m.AckedStateNum = m.State
 	return m, nil
 }
 
@@ -1081,23 +1053,17 @@ func UnmarshalErrorMsg(b []byte) (ErrorMsg, error) {
 	return m, nil
 }
 
-// MarshalOutput encodes m into the final epoch/base/new/echo/viewRevision/
+// MarshalOutput encodes m into the epoch/base/new/echo/viewRevision/
 // size/full/data message layout.
 func MarshalOutput(m Output) []byte {
-	legacy := m.Epoch == 0 && m.Base == 0 && m.New == 0 && m.Echo == 0 && m.ViewRevision == 0 && m.Size == (domain.Size{}) && !m.Full
-	if legacy {
+	if m.Epoch == 0 {
 		m.Epoch = 1
-		m.Base = m.BaseStateNum
-		m.New = m.NewStateNum
-		m.Echo = m.EchoAck
-		m.Full = m.New != 0 && m.Base == 0
+	}
+	if m.Size == (domain.Size{}) {
 		m.Size = domain.Size{Cols: 1, Rows: 1}
-	} else {
-		if (m.BaseStateNum != 0 && m.BaseStateNum != m.Base) ||
-			(m.NewStateNum != 0 && m.NewStateNum != m.New) ||
-			(m.EchoAck != 0 && m.EchoAck != m.Echo) {
-			return nil
-		}
+	}
+	if m.New != 0 && m.Base == 0 {
+		m.Full = true
 	}
 	if err := ValidateOutput(m); err != nil {
 		return nil
@@ -1176,9 +1142,6 @@ func UnmarshalOutput(b []byte) (Output, error) {
 		return Output{}, err
 	}
 	m.Data = data
-	m.BaseStateNum = m.Base
-	m.NewStateNum = m.New
-	m.EchoAck = m.Echo
 	return m, nil
 }
 

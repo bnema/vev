@@ -651,7 +651,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	output := awaitFrame(t, tr.sends, ports.MsgOutput)
 	first, err := ports.UnmarshalOutput(output.Payload)
 	require.NoError(t, err)
-	require.Zero(t, first.BaseStateNum, "the first post-Welcome frame is full")
+	require.Zero(t, first.Base, "the first post-Welcome frame is full")
 	tr.finish()
 	awaitTestCompletion(t, done, "timed out waiting for Welcome handler completion")
 	requireNoCoordinatorOutputFrame(t, tr.sends)

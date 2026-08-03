@@ -21,9 +21,9 @@ func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
 	require.True(t, ok)
 	firstOut, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(0), firstOut.BaseStateNum)
-	require.Equal(t, uint64(1), firstOut.NewStateNum)
-	require.Equal(t, uint64(7), firstOut.EchoAck)
+	require.Equal(t, uint64(0), firstOut.Base)
+	require.Equal(t, uint64(1), firstOut.New)
+	require.Equal(t, uint64(7), firstOut.Echo)
 
 	secondFrame := firstFrame.Clone()
 	secondFrame.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
@@ -32,8 +32,8 @@ func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
 	require.True(t, ok)
 	secondOut, err := ports.UnmarshalOutput(second.Payload)
 	require.NoError(t, err)
-	require.Equal(t, firstOut.NewStateNum, secondOut.BaseStateNum)
-	require.Equal(t, uint64(2), secondOut.NewStateNum)
+	require.Equal(t, firstOut.New, secondOut.Base)
+	require.Equal(t, uint64(2), secondOut.New)
 	require.Equal(t, uint64(2), stream.outstanding())
 }
 
@@ -232,8 +232,8 @@ func TestOutputStateStreamFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T
 	}))
 	out, err := ports.UnmarshalOutput(sent.Payload)
 	require.NoError(t, err)
-	require.Zero(t, out.BaseStateNum, "retry after ambiguous send failure must be dependency-free")
-	require.Equal(t, uint64(2), out.NewStateNum, "state numbers remain monotonic across rebases")
+	require.Zero(t, out.Base, "retry after ambiguous send failure must be dependency-free")
+	require.Equal(t, uint64(2), out.New, "state numbers remain monotonic across rebases")
 	require.Equal(t, uint64(2), stream.next, "successful retry advances the chain exactly once")
 	require.NoError(t, retry.send(retry.data, 0, func(ports.Frame) error {
 		t.Fatal("completed output sent twice")
@@ -358,7 +358,7 @@ func TestOutputStateStreamResizeFrameThenNoopAndDamageAreDifferential(t *testing
 	require.True(t, ok)
 	resizeOutput, err := ports.UnmarshalOutput(resized.Payload)
 	require.NoError(t, err)
-	require.Zero(t, resizeOutput.BaseStateNum, "resize must emit the one reset frame")
+	require.Zero(t, resizeOutput.Base, "resize must emit the one reset frame")
 	screen.ClearDamage()
 
 	_, ok, err = drawOutputState(t, stream, screen.Frame, screen.Damage(), false, 0)
@@ -371,7 +371,7 @@ func TestOutputStateStreamResizeFrameThenNoopAndDamageAreDifferential(t *testing
 	require.True(t, ok)
 	damageOutput, err := ports.UnmarshalOutput(damaged.Payload)
 	require.NoError(t, err)
-	require.Equal(t, resizeOutput.NewStateNum, damageOutput.BaseStateNum, "later damage must remain incremental")
+	require.Equal(t, resizeOutput.New, damageOutput.Base, "later damage must remain incremental")
 }
 
 func TestOutputStateStreamDefaultsAndNormalizesWindow(t *testing.T) {

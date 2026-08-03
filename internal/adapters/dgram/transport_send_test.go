@@ -113,7 +113,7 @@ func TestOutputPacingSendsAtMostOneOversizedFramePerTick(t *testing.T) {
 	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("prime")}); err != nil {
 		t.Fatal(err)
 	}
-	large := ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: make([]byte, 24*a.mtu)})
+	large := ports.MarshalOutput(ports.Output{Base: 1, New: 2, Data: make([]byte, 24*a.mtu)})
 	for range 2 {
 		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: large}); err != nil {
 			t.Fatal(err)

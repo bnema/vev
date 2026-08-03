@@ -36,12 +36,9 @@ type attachedClient struct {
 	tr                   ports.Transport
 	transportIncarnation uint64
 	output               *outputStateStream
-	// screenOutput is allocated only for proxied attachments and shares output's
-	// state-number/ACK window. Both streams are serialized by sendMu.
-	screenOutput *structuredOutputStream
-	overlays     *overlayRuntime
-	overlayOnce  sync.Once
-	clientID     [16]byte
+	overlays             *overlayRuntime
+	overlayOnce          sync.Once
+	clientID             [16]byte
 	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
 	// the linearization gate for every attachment-bound observable operation. An attachment
 	// transition freezes and drains this gate before changing either generation
@@ -55,10 +52,7 @@ type attachedClient struct {
 	// credential instead of consuming it.
 	resumeClaimToken uint64
 	parked           bool
-	// proxied is negotiated once by Hello and remains immutable for this
-	// attachment, including across transport resume.
-	proxied bool
-	echoAck atomic.Uint64
+	echoAck          atomic.Uint64
 	// prepareFailureFallback prevents a direct fallback paint from recursively
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.
@@ -69,13 +63,6 @@ type attachedClient struct {
 	pipelineCache   composeCacheInput
 	pipelineScratch composeCacheInput
 	renderScratch   renderCaptureScratch // only touched while sendMu is held
-	// proxyCapture retains the last captured proxy frame for damage-aware
-	// updates. It is attachment-owned and only touched while sendMu is held.
-	proxyCapture proxyCapture
-	// sessionMeta is the last authoritative metadata snapshot successfully sent
-	// on a proxied attachment. It is only read or written while sendMu is held.
-	sessionMeta     ports.SessionMeta
-	sessionMetaSent bool
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
@@ -297,44 +284,15 @@ func (ac *attachedClient) ackOutputState(values ...uint64) {
 	}
 }
 
-// ensureScreenOutput is called while sendMu owns the attachment. Production
-// constructors allocate this at attachment creation; the lazy path keeps
-// hand-built test attachments faithful when they set proxied after creation.
-func (ac *attachedClient) ensureScreenOutput() *structuredOutputStream {
-	if ac == nil || !ac.proxied || ac.output == nil {
-		return nil
-	}
-	if ac.screenOutput == nil {
-		ac.screenOutput = newStructuredOutputStream(ac.output)
-	}
-	return ac.screenOutput
-}
-
-// discardProxyCapture abandons a candidate that was not emitted. The next
-// capture clones the authoritative screen once, avoiding replaying pending
-// scroll damage onto an already-captured failed candidate.
-func (ac *attachedClient) discardProxyCapture() {
-	if ac != nil && ac.proxied {
-		ac.proxyCapture = proxyCapture{}
-	}
-}
-
 // rebaseOutput resets only this attachment's output representations. Callers
 // hold sendMu (or the activation barrier).
 func (ac *attachedClient) rebaseOutput() {
 	if ac == nil {
 		return
 	}
-	if ac.proxied {
-		ac.ensureScreenOutput()
-	}
 	if ac.output != nil {
 		ac.output.rebase()
 	}
-	if ac.screenOutput != nil {
-		ac.screenOutput.rebase()
-	}
-	ac.proxyCapture = proxyCapture{}
 }
 
 var errTransportReplaced = errors.New("client transport was replaced")
@@ -525,7 +483,6 @@ type attachClientOptions struct {
 	clientID          [16]byte
 	resumeCapable     bool
 	maxOutputInFlight uint8
-	proxied           bool
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -573,12 +530,8 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		clientID:      opts.clientID,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
-		proxied:       opts.proxied,
 	}
 	output.attachment = ac
-	if opts.proxied {
-		ac.screenOutput = newStructuredOutputStream(output)
-	}
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
 	return ac
@@ -713,8 +666,8 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
 	}
-	if proxy, ok := token.sess.(*proxySession); ok {
-		d.firstProxyPaintWithLease(proxy, token.ac, token.lease)
+	if _, ok := token.sess.(*proxySession); ok {
+		// Remote ordinary output arrives independently after the proxy Welcome.
 		return true
 	}
 	sess, ok := localSession(token.sess)
@@ -835,6 +788,11 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	entry := token.sess
 	// Rendering is attachment-scoped. Run it independently of the connection
 	// reader so a blocked transport cannot hold session dispatch or peers.
+	if _, ok := entry.(*proxySession); ok {
+		proxy := entry.(*proxySession)
+		_, _ = proxy.resize(size)
+		return true
+	}
 	go d.paint(entry, ac, true, token.lease)
 	return true
 }

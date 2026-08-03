@@ -1,7 +1,7 @@
 package ports
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 22
+const ProtocolVersion uint16 = 23
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.
@@ -36,7 +36,6 @@ const (
 	MsgSessions      MsgType = 21
 	MsgCommandResult MsgType = 22
 	MsgSessionMeta   MsgType = 23
-	MsgScreenUpdate  MsgType = 24
 	MsgAttachTarget  MsgType = 25
 )
 
