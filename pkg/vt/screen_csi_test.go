@@ -614,6 +614,7 @@ func TestEraseCharacters(t *testing.T) {
 	tests := []struct {
 		name       string
 		width      int
+		row        int
 		initial    string
 		seq        string
 		wantRow    string
@@ -623,38 +624,42 @@ func TestEraseCharacters(t *testing.T) {
 		{
 			name:    "explicit count",
 			width:   50,
+			row:     1,
 			initial: `        // scroll-method "on-button-down"`,
-			seq:     "\x1b[1;19Hbutton 273\x1b[13X",
+			seq:     "\x1b[19Gbutton 273\x1b[13X",
 			wantRow: "        // scroll-button 273",
 			wantCol: 28,
 			wantDamage: []renderer.Damage{
-				{Kind: renderer.DamageText, X: 18, Y: 0, Width: 10, Height: 1, Count: 1},
-				{Kind: renderer.DamageClear, X: 28, Y: 0, Width: 13, Height: 1, Count: 1},
+				{Kind: renderer.DamageText, X: 18, Y: 1, Width: 10, Height: 1, Count: 1},
+				{Kind: renderer.DamageClear, X: 28, Y: 1, Width: 13, Height: 1, Count: 1},
 			},
 		},
 		{
 			name:       "omitted count erases exactly one cell",
 			width:      6,
+			row:        1,
 			initial:    "abcdef",
-			seq:        "\x1b[1;3H\x1b[X",
+			seq:        "\x1b[3G\x1b[X",
 			wantRow:    "ab def",
 			wantCol:    2,
-			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 2, Y: 0, Width: 1, Height: 1, Count: 1}},
+			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 2, Y: 1, Width: 1, Height: 1, Count: 1}},
 		},
 		{
 			name:       "maximum count clips to screen edge",
 			width:      6,
+			row:        1,
 			initial:    "abcdef",
-			seq:        "\x1b[1;4H\x1b[" + maxInt + "X",
+			seq:        "\x1b[4G\x1b[" + maxInt + "X",
 			wantRow:    "abc",
 			wantCol:    3,
-			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 3, Y: 0, Width: 3, Height: 1, Count: 1}},
+			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 3, Y: 1, Width: 3, Height: 1, Count: 1}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := NewScreen(tt.width, 1)
+			s := NewScreen(tt.width, 2)
+			s.Write([]byte("\x1b[2;1H"))
 			s.Write([]byte(tt.initial))
 			s.ClearDamage()
 			s.Write([]byte(tt.seq))
@@ -664,8 +669,9 @@ func TestEraseCharacters(t *testing.T) {
 				if x < len(tt.wantRow) {
 					want = rune(tt.wantRow[x])
 				}
-				require.Equal(t, want, cellAt(s, x, 0).Rune, "cell(%d,0)", x)
+				require.Equal(t, want, cellAt(s, x, tt.row).Rune, "cell(%d,%d)", x, tt.row)
 			}
+			require.Equal(t, tt.row, s.Row)
 			require.Equal(t, tt.wantCol, s.Col)
 			require.Equal(t, tt.wantDamage, s.Damage())
 		})
