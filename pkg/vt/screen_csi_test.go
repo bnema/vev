@@ -610,33 +610,65 @@ func TestClearAndErase(t *testing.T) {
 }
 
 func TestEraseCharacters(t *testing.T) {
-	s := NewScreen(50, 1)
-	s.Write([]byte(`        // scroll-method "on-button-down"`))
-	s.ClearDamage()
-
-	s.Write([]byte("\x1b[1;19Hbutton 273\x1b[13X"))
-
-	for x := 28; x <= 40; x++ {
-		if c := cellAt(s, x, 0); c.Rune != ' ' {
-			t.Errorf("cell(%d,0) = %q, want space after ECH", x, c.Rune)
-		}
+	maxInt := strconv.Itoa(int(^uint(0) >> 1))
+	tests := []struct {
+		name       string
+		width      int
+		initial    string
+		seq        string
+		wantRow    string
+		wantCol    int
+		wantDamage []renderer.Damage
+	}{
+		{
+			name:    "explicit count",
+			width:   50,
+			initial: `        // scroll-method "on-button-down"`,
+			seq:     "\x1b[1;19Hbutton 273\x1b[13X",
+			wantRow: "        // scroll-button 273",
+			wantCol: 28,
+			wantDamage: []renderer.Damage{
+				{Kind: renderer.DamageText, X: 18, Y: 0, Width: 10, Height: 1, Count: 1},
+				{Kind: renderer.DamageClear, X: 28, Y: 0, Width: 13, Height: 1, Count: 1},
+			},
+		},
+		{
+			name:       "omitted count erases exactly one cell",
+			width:      6,
+			initial:    "abcdef",
+			seq:        "\x1b[1;3H\x1b[X",
+			wantRow:    "ab def",
+			wantCol:    2,
+			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 2, Y: 0, Width: 1, Height: 1, Count: 1}},
+		},
+		{
+			name:       "maximum count clips to screen edge",
+			width:      6,
+			initial:    "abcdef",
+			seq:        "\x1b[1;4H\x1b[" + maxInt + "X",
+			wantRow:    "abc",
+			wantCol:    3,
+			wantDamage: []renderer.Damage{{Kind: renderer.DamageClear, X: 3, Y: 0, Width: 3, Height: 1, Count: 1}},
+		},
 	}
-	if !hasDamageKind(s.Damage(), renderer.DamageClear) {
-		t.Fatal("expected DamageClear after CSI X")
-	}
 
-	// A valid maximum int must clip without overflowing the end calculation,
-	// and ECH must not move the cursor.
-	s = NewScreen(6, 1)
-	s.Write([]byte("abcdef"))
-	s.Write([]byte("\x1b[1;4H\x1b[" + strconv.Itoa(int(^uint(0)>>1)) + "X"))
-	for x := 3; x < 6; x++ {
-		if c := cellAt(s, x, 0); c.Rune != ' ' {
-			t.Errorf("cell(%d,0) = %q, want space after clipped ECH", x, c.Rune)
-		}
-	}
-	if s.Col != 3 {
-		t.Errorf("cursor column = %d, want 3 after ECH", s.Col)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(tt.width, 1)
+			s.Write([]byte(tt.initial))
+			s.ClearDamage()
+			s.Write([]byte(tt.seq))
+
+			for x := range tt.width {
+				want := ' '
+				if x < len(tt.wantRow) {
+					want = rune(tt.wantRow[x])
+				}
+				require.Equal(t, want, cellAt(s, x, 0).Rune, "cell(%d,0)", x)
+			}
+			require.Equal(t, tt.wantCol, s.Col)
+			require.Equal(t, tt.wantDamage, s.Damage())
+		})
 	}
 }
 
