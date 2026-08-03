@@ -208,6 +208,14 @@ func parseArgs(args []string) (command, error) {
 		}
 		cmd := command{kind: kindAttach, intent: ports.IntentAttach, name: args[1]}
 		if target, session, ok := parseRemoteAttachTarget(args[1]); ok {
+			if err := domain.ValidateRemoteHostTarget(target); err != nil {
+				return command{}, err
+			}
+			if session != "" {
+				if err := domain.ValidateSessionName(session); err != nil {
+					return command{}, err
+				}
+			}
 			cmd.remoteTarget = target
 			cmd.name = session
 			if session == "" {
@@ -840,7 +848,8 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			Logger:            log,
 			RuntimeObserver:   deps.runtimeObserver,
 			RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
-		}, client.AttachRequest{Intent: intent, SessionName: name, Remote: true})
+			Remote:            true,
+		}, client.AttachRequest{Intent: intent, SessionName: name})
 	}
 
 	localDialer := deps.localDialer
@@ -859,6 +868,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Clock:           clock.New(),
 				Logger:          log,
 				RuntimeObserver: deps.runtimeObserver,
+				Remote:          false,
 			}, client.AttachRequest{Intent: intent, SessionName: name})
 		},
 		killDaemon:      requestDaemonStop,

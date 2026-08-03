@@ -579,9 +579,12 @@ func TestParseArgs(t *testing.T) {
 		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
 		{name: "attach preserves legacy unsafe name", args: []string{"attach", "my work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "my work"},
 		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
-		{name: "attach remote without session uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
-		{name: "attach remote with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
-		{name: "attach remote with session", args: []string{"attach", "user@example.com:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@example.com"},
+		{name: "attach remote host uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
+		{name: "attach remote host with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
+		{name: "attach remote host with session", args: []string{"attach", "user@example.com:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@example.com"},
+		{name: "attach remote ipv4 with session", args: []string{"attach", "user@192.0.2.10:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@192.0.2.10"},
+		{name: "attach remote ipv6 with session", args: []string{"attach", "user@[2001:db8::1]:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@[2001:db8::1]"},
+		{name: "attach remote invalid session", args: []string{"attach", "user@example.com:my work"}, wantErr: true, nonUsageErr: true},
 		{name: "attach extra arg", args: []string{"attach", "work", "extra"}, wantErr: true},
 		{name: "attach without name", args: []string{"attach"}, wantErr: true},
 		{name: "ls", args: []string{"ls"}, wantKind: kindList},
@@ -686,6 +689,31 @@ func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
 	_, err := parseArgs([]string{"new", "my work"})
 	if !errors.Is(err, domain.ErrInvalidSessionName) {
 		t.Fatalf("parseArgs new unsafe error = %v, want %v", err, domain.ErrInvalidSessionName)
+	}
+}
+
+func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		arg  string
+		want client.AttachRequest
+	}{
+		{name: "local host", arg: "work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "remote host", arg: "user@example.com:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "remote ipv4", arg: "user@192.0.2.10:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "remote ipv6", arg: "user@[2001:db8::1]:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, err := parseArgs([]string{"attach", tt.arg})
+			require.NoError(t, err)
+			connection, err := client.NewSessionConnection(portsmocks.NewMockTransport(t), client.SessionTarget{
+				Intent:      cmd.intent,
+				SessionName: cmd.name,
+			})
+			require.NoError(t, err)
+			require.Equal(t, tt.want, connection.AttachRequest())
+		})
 	}
 }
 
@@ -1073,7 +1101,10 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 						t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
 					}
 					gotDialer = nd.name
-					gotRemote = request.Remote
+					gotRemote = deps.Remote
+					if request.Remote {
+						t.Fatal("remote carriage metadata must not be in the attach request")
+					}
 					gotClipboard = deps.Clipboard
 					if request.Intent != ports.IntentAttach || request.SessionName != "work" {
 						t.Fatalf("intent/name = %d/%q, want attach/work", request.Intent, request.SessionName)
@@ -1153,7 +1184,10 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 				t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
 			}
 			gotDialer = nd.name
-			gotRemote = request.Remote
+			gotRemote = deps.Remote
+			if request.Remote {
+				t.Fatal("local carriage metadata must not be in the attach request")
+			}
 			gotClipboard = deps.Clipboard
 			if request.Intent != ports.IntentEphemeral || request.SessionName != "" {
 				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", request.Intent, request.SessionName)

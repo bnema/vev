@@ -155,9 +155,13 @@ type Dependencies struct {
 	Logger            *slog.Logger
 	RuntimeObserver   ports.SerializedRuntimeObserver
 	RemoteHostLearner ports.RemoteHostLearner
+	// Remote selects client-side carriage presentation only; it never enters
+	// the daemon-facing session request.
+	Remote bool
 }
 
-// AttachRequest identifies the session and transport mode for one client run.
+// AttachRequest identifies the session for one client run. Remote is
+// client-only presentation metadata; it is never serialized into Hello.
 type AttachRequest struct {
 	Intent      uint8
 	SessionName string
@@ -173,6 +177,7 @@ type Runner struct {
 	logger            *slog.Logger
 	runtimeObserver   ports.SerializedRuntimeObserver
 	remoteHostLearner ports.RemoteHostLearner
+	remote            bool
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -192,6 +197,7 @@ func NewRunner(deps Dependencies) *Runner {
 		logger:            log,
 		runtimeObserver:   deps.RuntimeObserver,
 		remoteHostLearner: deps.RemoteHostLearner,
+		remote:            deps.Remote,
 	}
 }
 
@@ -282,9 +288,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 		}
 	}()
+	remote := request.Remote || r.remote
 	reconnect := &reconnectUI{
 		term:       r.term,
-		remote:     request.Remote,
+		remote:     remote,
 		rawEntered: &rawEntered,
 		stage:      reconnectStageOfflineRetrying,
 	}
@@ -333,14 +340,23 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			continue
 		}
 		ms.dialed = true
+		connection, err := NewSessionConnection(transport, SessionTarget{
+			Intent:      attemptRequest.Intent,
+			SessionName: attemptRequest.SessionName,
+		})
+		if err != nil {
+			_ = transport.Close()
+			return err
+		}
 
 		var linkEvents <-chan ports.LinkEvent
-		if reporter, ok := transport.(ports.LinkStateReporter); ok {
+		if reporter, ok := connection.Transport().(ports.LinkStateReporter); ok {
 			linkEvents = reporter.LinkEvents()
 		}
 		result := (&attachAttempt{
 			runner:             r,
-			transport:          transport,
+			connection:         connection,
+			remote:             remote,
 			request:            attemptRequest,
 			resumeToken:        resumeToken,
 			clientID:           processClientID,
@@ -358,7 +374,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			backoff = defaultReconnectBackoff.initial
 		}
 		if !result.transportClosed {
-			_ = transport.Close()
+			_ = connection.Close()
 		}
 		if result.resumeToken != 0 {
 			resumeToken = result.resumeToken
@@ -515,6 +531,8 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 
 type attachAttempt struct {
 	runner             *Runner
+	connection         *SessionConnection
+	remote             bool
 	transport          ports.Transport
 	request            AttachRequest
 	resumeToken        uint64
@@ -601,10 +619,15 @@ func requestedOutputWindow(transport ports.Transport) uint8 {
 
 func (a *attachAttempt) run(ctx context.Context) attachResult {
 	transport := a.transport
+	request := a.request
+	if a.connection != nil {
+		transport = a.connection.Transport()
+		request = a.connection.AttachRequest()
+	}
 	term := a.runner.term
 	clk := a.runner.clock
-	intent := a.request.Intent
-	name := a.request.SessionName
+	intent := request.Intent
+	name := request.SessionName
 	resumeToken := a.resumeToken
 	clientID := a.clientID
 	ms := a.milestones
@@ -612,7 +635,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	enterRaw := a.enterRaw
 	reconnect := a.reconnect
 	linkEvents := a.linkEvents
-	remote := a.request.Remote
+	remote := a.remote || a.request.Remote
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
