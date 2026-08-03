@@ -821,6 +821,12 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 	), nil
 }
 
+type attachHandoffKey struct {
+	endpoint string
+	session  string
+	intent   uint8
+}
+
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == ports.IntentNew {
@@ -833,22 +839,32 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	if runClient == nil {
 		runClient = runClientWithDeps
 	}
+	localDialer := deps.localDialer
+	if localDialer == nil {
+		localDialer = defaultLocalDialer
+	}
+	mode, modeErr := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
+	factory := deps.remoteDialerFactory
+	seenHandoffs := make(map[attachHandoffKey]struct{})
 	if remoteTarget != "" {
-		mode, err := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
-		if err != nil {
-			return err
+		if modeErr != nil {
+			return modeErr
 		}
-		factory := deps.remoteDialerFactory
 		if factory == nil {
 			factory = defaultRemoteDialerFactory()
 		}
-		for {
+		seenHandoffs[attachHandoffKey{endpoint: remoteTarget, session: name, intent: intent}] = struct{}{}
+	}
+
+	for {
+		var err error
+		if remoteTarget != "" {
 			if log != nil {
 				log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
 			}
-			dialer, err := factory.DialerForRemote(remoteTarget, name, mode, log)
-			if err != nil {
-				return err
+			dialer, dialErr := factory.DialerForRemote(remoteTarget, name, mode, log)
+			if dialErr != nil {
+				return dialErr
 			}
 			err = runClient(ctx, client.Dependencies{
 				Dialer:            dialer,
@@ -860,37 +876,45 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
 				Remote:            true,
 			}, client.AttachRequest{Intent: intent, SessionName: name})
-			var handoff *client.AttachTargetError
-			if !errors.As(err, &handoff) {
-				return err
+		} else {
+			if log != nil {
+				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
-			if handoff == nil {
-				return fmt.Errorf("vev: invalid remote attach handoff")
-			}
-			if err := validateRemoteAttachHandoff(handoff.Target); err != nil {
-				return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
-			}
-			remoteTarget = handoff.Target.Endpoint
-			name = handoff.Target.Session
-			intent = handoff.Target.Intent
+			err = runClient(ctx, client.Dependencies{
+				Dialer:          localDialer(),
+				Terminal:        term.New(),
+				Clock:           clock.New(),
+				Logger:          log,
+				RuntimeObserver: deps.runtimeObserver,
+				Remote:          false,
+			}, client.AttachRequest{Intent: intent, SessionName: name})
+		}
+
+		var handoff *client.AttachTargetError
+		if !errors.As(err, &handoff) {
+			return err
+		}
+		if handoff == nil {
+			return fmt.Errorf("vev: invalid remote attach handoff")
+		}
+		if err := validateRemoteAttachHandoff(handoff.Target); err != nil {
+			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
+		}
+		next := attachHandoffKey{endpoint: handoff.Target.Endpoint, session: handoff.Target.Session, intent: handoff.Target.Intent}
+		if _, seen := seenHandoffs[next]; seen {
+			return fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
+		}
+		seenHandoffs[next] = struct{}{}
+		remoteTarget = handoff.Target.Endpoint
+		name = handoff.Target.Session
+		intent = handoff.Target.Intent
+		if modeErr != nil {
+			return modeErr
+		}
+		if factory == nil {
+			factory = defaultRemoteDialerFactory()
 		}
 	}
-
-	localDialer := deps.localDialer
-	if localDialer == nil {
-		localDialer = defaultLocalDialer
-	}
-	if log != nil {
-		log.Info("attaching to local session", "intent", intent, "name", name)
-	}
-	return runClient(ctx, client.Dependencies{
-		Dialer:          localDialer(),
-		Terminal:        term.New(),
-		Clock:           clock.New(),
-		Logger:          log,
-		RuntimeObserver: deps.runtimeObserver,
-		Remote:          false,
-	}, client.AttachRequest{Intent: intent, SessionName: name})
 }
 
 const daemonStopTimeout = 2 * time.Second

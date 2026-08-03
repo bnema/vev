@@ -872,7 +872,7 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.T) {
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
 	var calls int
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
@@ -880,13 +880,53 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 			calls++
 			require.NotNil(t, deps.Dialer)
 			if calls == 1 {
-				return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}}
+				return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
 			}
 			return nil
 		},
 	})
 	require.NoError(t, err)
 	require.Equal(t, 2, calls, "a picker handoff must close the old connection and open a fresh direct connection")
+}
+
+func TestRunAttachWithDepsRejectsHandoffLoop(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+
+	calls := 0
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
+			calls++
+			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}}
+		},
+	})
+	require.ErrorContains(t, err, "attach handoff loop")
+	require.Equal(t, 1, calls)
+}
+
+func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+
+	localCalls, remoteCalls := 0, 0
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "", "", nil, runAttachDeps{
+		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			if deps.Remote {
+				remoteCalls++
+				require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "picked"}, request)
+				return nil
+			}
+			localCalls++
+			require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}, request)
+			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, localCalls, "the failed local picker attach must not retry locally")
+	require.Equal(t, 1, remoteCalls, "the selected target must be dialed and attached exactly once")
 }
 
 func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
