@@ -90,10 +90,7 @@ type attachmentPublication struct {
 	sourceCoordinator   *renderCoordinator
 	targetCoordinator   *renderCoordinator
 	releaseCoordinators func()
-	displacedTransport  transportSnapshot
-	terminalDisplaced   bool
 	nextGeneration      uint64
-	displacedGeneration uint64
 }
 
 func (p *attachmentPublication) unlockCoordinators() {

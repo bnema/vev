@@ -245,7 +245,7 @@ func (d *Daemon) withProxyLocked(p *proxySession, update func() bool) bool {
 	p.sessionCore.mu.Lock()
 	p.mu.Lock()
 	current := update()
-	attachments := append([]*attachedClient(nil), p.sessionCore.snapshotAttachmentsLocked()...)
+	attachments := append([]*attachedClient(nil), p.snapshotAttachmentsLocked()...)
 	p.mu.Unlock()
 	p.sessionCore.mu.Unlock()
 	d.mu.Unlock()

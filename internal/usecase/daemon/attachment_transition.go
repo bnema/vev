@@ -74,11 +74,9 @@ func transitionSourceTokenCurrentLocked(token attachmentRoleToken, source attach
 }
 
 type attachmentTransitionResult struct {
-	published            attachmentRoleToken
-	displaced            attachmentRoleToken
-	terminalDisplaced    detachedAttachmentSnapshot
-	displacedInterrupted bool
-	cleanups             []renderLifecycleCleanup
+	published attachmentRoleToken
+	displaced attachmentRoleToken
+	cleanups  []renderLifecycleCleanup
 }
 
 type attachmentTransitionParticipants struct {
