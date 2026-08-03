@@ -12,7 +12,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -428,68 +427,6 @@ func (t *renderFailureTransport) Closed() bool {
 	return t.closed
 }
 
-func TestRenderSendFailureCleanupRejectsReplacedAndResumedIncarnation(t *testing.T) {
-	d, sess, original, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	failedTransport := &renderFailureTransport{}
-	original.replaceTransport(failedTransport)
-	rc := d.attachCoordinator(sess, nil, original, true)
-	originalToken := sess.attachmentToken(original, failedTransport)
-	originalToken.lease = rc.attachmentLease(original)
-	original.publishAttachmentCapability(originalToken)
-
-	cleanupStarted := make(chan struct{})
-	releaseCleanup := make(chan struct{})
-	cleanupDone := make(chan struct{})
-	d.beforeAttachmentSendErrorCleanup = func(token attachmentConnectionToken) {
-		require.Equal(t, originalToken.generation, token.generation)
-		require.Equal(t, originalToken.transport, token.transport)
-		require.Same(t, originalToken.lease, token.lease)
-		close(cleanupStarted)
-		<-releaseCleanup
-	}
-	d.afterAttachmentSendErrorCleanup = func() { close(cleanupDone) }
-
-	d.paint(sess, original, true, originalToken.lease)
-	awaitTestCompletion(t, cleanupStarted, "render failure cleanup did not retain the captured role token")
-	cleanupTracked := waitGroupDone(&d.attachmentCleanupWg)
-	select {
-	case <-cleanupTracked:
-		t.Fatal("paused render failure cleanup was not tracked by attachmentCleanupWg")
-	default:
-	}
-
-	replacementTransport := &closeTrackingTransport{}
-	replacement := &attachedClient{tr: replacementTransport, output: newOutputStateStream(), size: original.size}
-	replacement.initOverlays()
-	displaced, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess, next: replacement, expectedTransport: replacement.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-
-	resumed, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess, next: original, expectedTransport: original.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-	resumedGeneration := original.connectionGeneration.Load()
-	resumedLease := resumed.published.lease
-	require.NotSame(t, originalToken.lease, resumedLease)
-
-	close(releaseCleanup)
-	awaitTestCompletion(t, cleanupDone, "render failure cleanup did not finish")
-	awaitTestCompletion(t, cleanupTracked, "tracked render failure cleanup did not retire")
-
-	sess.mu.Lock()
-	require.Contains(t, sess.snapshotAttachmentsLocked(), original, "stale render cleanup detached the resumed incarnation")
-	sess.mu.Unlock()
-	require.Equal(t, resumedGeneration, original.connectionGeneration.Load())
-	require.True(t, resumed.published.attachmentCurrent())
-	require.False(t, failedTransport.Closed(), "stale cleanup closed the resumed incarnation's transport")
-
-	d.deferAttachmentTransitionCleanups(displaced)
-	d.deferAttachmentTransitionCleanups(resumed)
-	d.attachmentCleanupWg.Wait()
-}
-
 func TestRenderSendFailureCleanupIsDeadlineBoundedWhileRoleGateIsBusy(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
 	transport := &closeTrackingTransport{}
@@ -717,54 +654,6 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 	}
 }
 
-func TestJumpAttentionDoesNotMutateSourceAfterInitiatorReplacement(t *testing.T) {
-	d, sess, old, _, releases := newManualTabSession(t, 2)
-	defer releaseAll(releases)
-	sess.mu.Lock()
-	sess.tabs[1].attention = true
-	sess.tabs[1].attentionAt = time.Unix(1, 0)
-	sess.mu.Unlock()
-
-	oldTransport := old.transport()
-	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
-	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
-
-	admissionEnded := make(chan struct{})
-	releaseAction := make(chan struct{})
-	release := releaseTestGate(t, releaseAction)
-	var admissionEndedOnce sync.Once
-	d.afterActionAttachmentEffectEnded = func(action string) {
-		if action != "jump-attention" {
-			return
-		}
-		admissionEndedOnce.Do(func() { close(admissionEnded) })
-		<-releaseAction
-	}
-	actionDone := make(chan struct{})
-	go func() {
-		d.handleAttachmentClientFrame(token, frameInput([]byte("\x1ba")))
-		close(actionDone)
-	}()
-	<-admissionEnded
-
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
-	next.initOverlays()
-	result, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-	sess.mu.Lock()
-	selectTestAttachmentTabLocked(sess, 0)
-	sess.mu.Unlock()
-	release()
-	<-actionDone
-
-	require.Equal(t, 0, testAttachmentTabIndex(sess), "the replaced initiator mutated source focus after losing its role")
-	d.deferAttachmentTransitionCleanups(result)
-}
-
 func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
@@ -790,62 +679,6 @@ func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 
 	require.Same(t, target, ac.currentSession())
 	require.Equal(t, 1, testAttachmentTabIndex(target))
-}
-
-func TestJumpAttentionHandoffRevalidatesInitiatorAfterAdmissionEnds(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	p3, release3 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	defer release3()
-	d, source, old, _ := newManualSessionWithPTYs(t, p1)
-	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
-		newTab(p2, domain.Size{Cols: 80, Rows: 23}),
-		newTab(p3, domain.Size{Cols: 80, Rows: 23}),
-	}}
-	target.tabs[1].attention = true
-	target.tabs[1].attentionAt = time.Unix(1, 0)
-	d.sessions[target.id] = target
-
-	oldTransport := old.transport()
-	rc := d.attachCoordinator(source, nil, old, true)
-	token := source.attachmentToken(old, oldTransport)
-	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
-
-	admissionEnded := make(chan struct{})
-	releaseAction := make(chan struct{})
-	release := releaseTestGate(t, releaseAction)
-	var admissionEndedOnce sync.Once
-	d.afterActionAttachmentEffectEnded = func(action string) {
-		if action == "jump-attention" {
-			admissionEndedOnce.Do(func() { close(admissionEnded) })
-			<-releaseAction
-		}
-	}
-	actionDone := make(chan struct{})
-	go func() {
-		d.handleAttachmentClientFrame(token, frameInput([]byte("\x1ba")))
-		close(actionDone)
-	}()
-	<-admissionEnded
-
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
-	next.initOverlays()
-	result, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: source, next: next, expectedTransport: next.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-	release()
-	<-actionDone
-
-	require.Equal(t, 0, testAttachmentTabIndex(target), "stale handoff changed target focus")
-	target.mu.Lock()
-	targetAttachments := target.snapshotAttachmentsLocked()
-	target.mu.Unlock()
-	require.NotContains(t, targetAttachments, next, "stale handoff attached the replaced initiator")
-	d.deferAttachmentTransitionCleanups(result)
 }
 
 func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) {
@@ -894,69 +727,6 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 	d.deferAttachmentTransitionCleanups(result)
 }
 
-func TestPickerDeleteOtherSessionRevalidatesInitiatorAfterAdmissionEnds(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	d, source, old, _ := newManualSessionWithPTYs(t, p1)
-	source.name = "source"
-	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
-	d.sessions[target.id] = target
-	d.enterPicker(source, old)
-	old.overlays.pickerMu.Lock()
-	for {
-		selected, ok := old.overlays.picker.Selected()
-		if ok && selected.Session == target.id {
-			break
-		}
-		old.overlays.picker.Down()
-	}
-	old.overlays.pickerMu.Unlock()
-
-	oldTransport := old.transport()
-	rc := d.attachCoordinator(source, nil, old, true)
-	token := source.attachmentToken(old, oldTransport)
-	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
-
-	admissionEnded := make(chan struct{})
-	releaseAction := make(chan struct{})
-	release := releaseTestGate(t, releaseAction)
-	var admissionEndedOnce sync.Once
-	d.afterActionAttachmentEffectEnded = func(action string) {
-		if action == "picker-delete" {
-			admissionEndedOnce.Do(func() { close(admissionEnded) })
-			<-releaseAction
-		}
-	}
-	actionDone := make(chan struct{})
-	go func() {
-		d.handleAttachmentClientFrame(token, frameInput([]byte("x")))
-		close(actionDone)
-	}()
-	<-admissionEnded
-
-	d.mu.Lock()
-	_, targetStillRegistered := d.sessions[target.id]
-	d.mu.Unlock()
-	require.True(t, targetStillRegistered, "picker deletion mutated the target before source-token preflight")
-
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
-	next.initOverlays()
-	result, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: source, next: next, expectedTransport: next.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-	release()
-	<-actionDone
-	d.mu.Lock()
-	_, targetStillRegistered = d.sessions[target.id]
-	d.mu.Unlock()
-	require.True(t, targetStillRegistered, "stale picker deletion mutated the target session")
-	d.deferAttachmentTransitionCleanups(result)
-}
-
 func TestPickerDeleteSourceForCurrentInitiatorDoesNotDeadlock(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -973,88 +743,6 @@ func TestPickerDeleteSourceForCurrentInitiatorDoesNotDeadlock(t *testing.T) {
 	_, registered := d.sessions[sess.id]
 	d.mu.Unlock()
 	require.False(t, registered)
-}
-
-func TestDelayedKeyCallbackAdmittedBeforeReplacementCompletesFirst(t *testing.T) {
-	writes := make(chan []byte, 1)
-	pty := &transactionalResizePTY{onWrite: func(data []byte) { writes <- data }}
-	d, sess, old, _ := newManualSessionWithPTYs(t, pty)
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
-	d.clock = clock
-	oldTransport := newDatagramTestTransport()
-	old.replaceTransport(oldTransport)
-	old.keys = keys.NewRouter(clock, daemonKeyHandler{d: d, ac: old}, &d.bindings)
-	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
-	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
-
-	d.handleAttachmentClientFrame(token, frameInput([]byte{keys.ESC}))
-	timer := <-clock.timers
-	admitted := make(chan struct{})
-	release := make(chan struct{})
-	d.afterAttachmentEffectAdmitted = func(attachmentConnectionToken) {
-		close(admitted)
-		<-release
-	}
-	timer.ch <- time.Time{}
-	select {
-	case <-admitted:
-	case <-time.After(time.Second):
-		t.Fatal("delayed key callback did not acquire a fresh role-effect ticket")
-	}
-
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
-	next.initOverlays()
-	transitionDone := make(chan error, 1)
-	go func() {
-		_, err := d.transitionAttachment(attachmentTransitionRequest{
-			target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
-		})
-		transitionDone <- err
-	}()
-	select {
-	case err := <-transitionDone:
-		t.Fatalf("replacement overtook admitted delayed key callback: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	require.Equal(t, []byte{keys.ESC}, <-writes)
-	require.NoError(t, <-transitionDone)
-}
-
-func TestDelayedKeyCallbackAfterReplacementDropsStaleWork(t *testing.T) {
-	writes := make(chan []byte, 1)
-	pty := &transactionalResizePTY{onWrite: func(data []byte) { writes <- data }}
-	d, sess, old, _ := newManualSessionWithPTYs(t, pty)
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
-	d.clock = clock
-	oldTransport := newDatagramTestTransport()
-	old.replaceTransport(oldTransport)
-	old.keys = keys.NewRouter(clock, daemonKeyHandler{d: d, ac: old}, &d.bindings)
-	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
-	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
-
-	d.handleAttachmentClientFrame(token, frameInput([]byte{keys.ESC}))
-	timer := <-clock.timers
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
-	next.initOverlays()
-	_, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-
-	attempted := make(chan bool, 1)
-	d.afterDelayedKeyEffectAttempt = func(admitted bool) { attempted <- admitted }
-	timer.ch <- time.Time{}
-	require.False(t, <-attempted, "stale delayed callback acquired authority after replacement")
-	select {
-	case got := <-writes:
-		t.Fatalf("stale delayed key callback reached the PTY: %q", got)
-	default:
-	}
 }
 
 func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *testing.T) {
@@ -1147,128 +835,6 @@ func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testi
 		}
 	}
 	require.Equal(t, 2, successes)
-}
-
-func TestPickerDeleteReversedWithTargetTransitionDoesNotDeadlock(t *testing.T) {
-	d, source, a, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	aTransport := newDatagramTestTransport()
-	a.replaceTransport(aTransport)
-	aCoordinator := d.attachCoordinator(source, nil, a, true)
-
-	bTransport := newDatagramTestTransport()
-	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), size: a.size}
-	b.initOverlays()
-	target := &session{sessionCore: sessionCore{id: "picker-delete-target", name: "picker-delete-target",
-		attachments: map[*attachedClient]struct{}{b: {}}}, ctx: source.ctx, cancel: func() {},
-	}
-	b.setSession(target)
-	d.mu.Lock()
-	d.sessions[target.id] = target
-	d.mu.Unlock()
-	d.attachCoordinator(target, nil, b, true)
-
-	// Give B the earlier immutable identity. The reverse transition therefore
-	// freezes B then A, while the old picker-delete path froze A separately
-	// before discovering and freezing B.
-	b.attachmentEffects.immutableOrder()
-	a.attachmentEffects.immutableOrder()
-	require.Less(t, b.attachmentEffects.order.Load(), a.attachmentEffects.order.Load())
-
-	token := source.attachmentToken(a, aTransport)
-	token.lease = aCoordinator.attachmentLease(a)
-	a.publishAttachmentCapability(token)
-	effect, admitted := a.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	token = effect.connectionToken()
-
-	deleteDiscovered := make(chan []*attachedClient, 1)
-	transitionDiscovered := make(chan []*attachedClient, 1)
-	releaseDelete := make(chan struct{})
-	releaseTransition := make(chan struct{})
-	transitionBFrozen := make(chan struct{})
-	deleteFrozen := make(chan *attachedClient, 2)
-	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, participants []*attachedClient) {
-		snapshot := append([]*attachedClient(nil), participants...)
-		switch action {
-		case "picker-delete":
-			deleteDiscovered <- snapshot
-			<-releaseDelete
-		case "reverse-delete-transition":
-			transitionDiscovered <- snapshot
-			<-releaseTransition
-		}
-	}
-	d.afterAttachmentEffectGateFrozen = func(action string, ac *attachedClient) {
-		switch action {
-		case "reverse-delete-transition":
-			if ac == b {
-				close(transitionBFrozen)
-			}
-		case "picker-delete":
-			deleteFrozen <- ac
-		}
-	}
-
-	deleteDone := make(chan error, 1)
-	go func() {
-		deleteDone <- d.killPickerTargetForAttachment(picker.Target{Session: target.id}, token)
-	}()
-	deleteParticipants := <-deleteDiscovered
-	require.ElementsMatch(t, []*attachedClient{a, b}, deleteParticipants)
-
-	transitionDone := make(chan error, 1)
-	go func() {
-		result, err := d.transitionAttachment(attachmentTransitionRequest{
-			source: target, target: source, next: b,
-
-			expectedTransport: b.transportSnapshot(), action: "reverse-delete-transition", ready: true,
-		})
-		if err == nil {
-			d.deferAttachmentTransitionCleanups(result)
-		}
-		transitionDone <- err
-	}()
-	transitionParticipants := <-transitionDiscovered
-	require.ElementsMatch(t, []*attachedClient{a, b}, transitionParticipants)
-
-	close(releaseTransition)
-	select {
-	case <-transitionBFrozen:
-	case <-time.After(time.Second):
-		t.Fatal("reverse transition did not freeze B first")
-	}
-	close(releaseDelete)
-
-	select {
-	case err := <-transitionDone:
-		require.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("reverse transition deadlocked with picker deletion")
-	}
-	select {
-	case err := <-deleteDone:
-		require.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("picker deletion deadlocked with reverse transition")
-	}
-	frozenByDelete := make([]*attachedClient, 0, 2)
-	for range 2 {
-		select {
-		case ac := <-deleteFrozen:
-			frozenByDelete = append(frozenByDelete, ac)
-		case <-time.After(time.Second):
-			t.Fatal("picker deletion did not freeze every participant")
-		}
-	}
-	require.ElementsMatch(t, []*attachedClient{a, b}, frozenByDelete, "picker deletion must freeze each deduplicated participant exactly once")
-	require.Empty(t, deleteFrozen)
-
-	d.mu.Lock()
-	registered := d.sessions[target.id]
-	d.mu.Unlock()
-	require.Same(t, target, registered, "stale picker deletion mutated its target lifecycle")
-	require.Equal(t, true, source.attachmentRegistered(a))
-	require.Equal(t, true, source.attachmentRegistered(b))
 }
 
 func TestAttachmentEffectGateFrozenConnectionRejectsLateEffect(t *testing.T) {

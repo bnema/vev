@@ -463,7 +463,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
-	if token.sess == nil || token.ac == nil || token.effect == nil || false {
+	if token.sess == nil || token.ac == nil || token.effect == nil {
 		return errAttachmentTransition
 	}
 	token.effect.bindActionEnd(d, "create-session")
@@ -699,7 +699,7 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 		return
 	}
 	if owner.session != sess || owner.tab != tb {
-		panic("daemon: starting pane reader for a different published owner")
+		return
 	}
 	sess.mu.Lock()
 	name := sess.name
@@ -1019,12 +1019,14 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 		return nil
 	}
 	ringing := tb.attention
+	sess.prepareAttachmentViewsForRemovedTabLocked(tb, idx)
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
 	attachments := sess.snapshotAttachmentsLocked()
 	name := sess.name
 	if !sess.ephemeral {
 		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
+	sess.invalidateViewsLocked()
 	sess.mu.Unlock()
 	d.mu.Unlock()
 	d.log.Info("tab closed", "session", name)

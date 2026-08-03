@@ -5,6 +5,9 @@ import "github.com/bnema/vev/internal/ports"
 // clientGone detaches ac if it is still the session's current client. The
 // session remains registered and headless after the client is gone.
 func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	if sess == nil || ac == nil {
+		return
+	}
 	expected := transportSnapshot{}
 	if failed != nil {
 		expected = ac.transportSnapshot()
@@ -59,6 +62,9 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 }
 
 func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	if sess == nil || ac == nil {
+		return
+	}
 	if d.afterClientGoneDetach != nil {
 		d.afterClientGoneDetach()
 	}

@@ -11,8 +11,8 @@ type movePaneAdmission struct {
 	sourceTab             *tab
 	destinationTab        *tab
 	movedPane             *pane
-	sourceClient          *attachedClient
-	destinationClient     *attachedClient
+	sourceAttachments     []*attachedClient
+	sourceTransports      map[*attachedClient]transportSnapshot
 	sourceGeneration      uint64
 	destinationGeneration uint64
 	finalSourceTab        bool
@@ -27,6 +27,12 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 	unlockSessions := lockAttachmentSessions(source, destination)
 	defer unlockSessions()
 	if !moveSessionLocatorCurrentLocked(source, req.Source) || !moveSessionLocatorCurrentLocked(destination, req.Destination) {
+		return nil, errMoveStaleTarget
+	}
+	if req.Attachment != nil && !attachmentRegisteredLocked(source, req.Attachment) {
+		return nil, errMoveStaleTarget
+	}
+	if req.AttachmentToken.ac != nil && (req.AttachmentToken.ac != req.Attachment || !moveAttachmentTokenCurrentLocked(req.AttachmentToken, source)) {
 		return nil, errMoveStaleTarget
 	}
 
@@ -52,23 +58,15 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 		return nil, errMoveStaleTarget
 	}
 
-	sourceClient := req.Client
-	if sourceClient == nil {
-		attachments := source.snapshotAttachmentsLocked()
-		if len(attachments) != 0 {
-			sourceClient = attachments[0]
-		}
+	attachments := source.snapshotAttachmentsLocked()
+	transports := make(map[*attachedClient]transportSnapshot, len(attachments))
+	for _, ac := range attachments {
+		transports[ac] = ac.transportSnapshot()
 	}
 	return &movePaneAdmission{
-		source:                source,
-		destination:           destination,
-		sourceTab:             sourceTab,
-		destinationTab:        destinationTab,
-		movedPane:             movedPane,
-		sourceClient:          sourceClient,
-		destinationClient:     nil,
-		sourceGeneration:      sourceTab.layoutGeneration,
-		destinationGeneration: destinationTab.layoutGeneration,
+		source: source, destination: destination, sourceTab: sourceTab, destinationTab: destinationTab,
+		movedPane: movedPane, sourceAttachments: attachments, sourceTransports: transports,
+		sourceGeneration: sourceTab.layoutGeneration, destinationGeneration: destinationTab.layoutGeneration,
 		finalSourceTab: len(source.tabs) == 1 && source.tabs[0] == sourceTab &&
 			sourceTab.tree != nil && sourceTab.tree.Root != nil && len(layout.LeafIDs(sourceTab.tree.Root)) == 1,
 	}, nil

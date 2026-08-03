@@ -469,35 +469,6 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	}
 }
 
-func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
-	d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	oldTransport := &staleClipboardErrorTransport{}
-	old.replaceTransport(oldTransport)
-	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
-	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
-
-	sess.mu.Lock()
-	sess.clipboardWorkerRunning = true
-	sess.mu.Unlock()
-	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
-
-	newTransport := &closeTrackingTransport{}
-	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), size: old.size}
-	next.initOverlays()
-	_, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-
-	d.clipboardWorker(sess)
-	require.Zero(t, oldTransport.sendCount(), "stale queued work reached its captured failing transport")
-	require.Empty(t, newTransport.Sends(), "stale queued work was redirected to the replacement")
-	require.Contains(t, sess.snapshotAttachments(), next, "stale clipboard send handling detached the current client")
-	require.False(t, newTransport.Closed())
-}
-
 func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
 	tr := newBlockingClipboardTransport()

@@ -290,6 +290,7 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	p.mu.Unlock()
 	tb.mu.Unlock()
 	sess.mu.Unlock()
+	sess.repairAttachmentViews()
 
 	if finalPane {
 		_ = d.closeTab(sess, tb, true)
@@ -297,7 +298,9 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	}
 	d.applyTabLayout(sess, tb)
 	for _, ac := range attachments {
-		ac.overlays.clearCopyModeForPane(p)
+		if ac.overlays != nil {
+			ac.overlays.clearCopyModeForPane(p)
+		}
 		ac.pruneCaptureFrames(p)
 	}
 	if rc := sess.renderCoordinator(); rc != nil {
@@ -316,6 +319,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 		return layout.ErrNotFound
 	}
 	// A nil attachment denotes a session-wide close with an explicit pane target.
+	attachments := sess.snapshotAttachments()
 	tb.mu.Lock()
 	p := tb.panes[id]
 	if p == nil || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, id) {
@@ -324,8 +328,11 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	}
 	if len(layout.LeafIDs(tb.tree.Root)) <= 1 {
 		tb.mu.Unlock()
-		if ac != nil {
-			ac.overlays.clearCopyModeForPane(p)
+		for _, viewer := range attachments {
+			if viewer.overlays != nil {
+				viewer.overlays.clearCopyModeForPane(p)
+			}
+			viewer.pruneCaptureFrames(p)
 		}
 		return d.closeTab(sess, tb, repaint)
 	}
@@ -336,11 +343,16 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	delete(tb.panes, id)
 	tb.bumpLayoutGenerationLocked()
 	tb.mu.Unlock()
+	sess.mu.Lock()
+	sess.invalidateViewsLocked()
+	sess.mu.Unlock()
 	d.applyTabLayout(sess, tb)
 
-	if ac != nil {
-		ac.overlays.clearCopyModeForPane(p)
-		ac.pruneCaptureFrames(p)
+	for _, viewer := range attachments {
+		if viewer.overlays != nil {
+			viewer.overlays.clearCopyModeForPane(p)
+		}
+		viewer.pruneCaptureFrames(p)
 	}
 
 	if rc := sess.renderCoordinator(); rc != nil {

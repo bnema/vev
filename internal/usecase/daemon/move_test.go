@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"os"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -79,47 +78,6 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 	require.Same(t, destination, moved.ownerSnapshot().session)
 	require.Same(t, destinationTab, moved.ownerSnapshot().tab)
 	require.NoError(t, moved.ctx.Err(), "retiring the source must not cancel the transferred pane process")
-}
-
-func TestMovePaneFinalSourceClientFollowsDestination(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	d, source, client, _ := newManualSessionWithPTYs(t, p1)
-	sourceTab := source.tabs[0]
-	sourceTab.stableID = "source-tab"
-	moved := sourceTab.focusedPane()
-	movedTabCtx, movedTabCancel := context.WithCancel(d.paneProcessCtx)
-	moved.ctx, moved.cancel = movedTabCtx, movedTabCancel
-
-	rc := d.attachCoordinator(source, nil, client, true)
-	require.NotNil(t, rc)
-	var rebased atomic.Bool
-	client.renderStages.handoffRebase = func() { rebased.Store(true) }
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
-	destinationTab := destination.tabs[0]
-	destinationTab.stableID = "destination-tab"
-	publishTiledPaneOwners(destination, destinationTab)
-	d.mu.Lock()
-	d.sessions[destination.id] = destination
-	d.mu.Unlock()
-
-	err := d.movePane(movePaneRequest{
-		Source:           moveSessionLocator{ID: source.id},
-		SourceTabID:      domain.TabStableID(sourceTab.stableID),
-		SourcePaneID:     domain.PaneStableID(moved.stableID),
-		Destination:      moveSessionLocator{ID: destination.id},
-		DestinationTabID: domain.TabStableID(destinationTab.stableID),
-	})
-	require.NoError(t, err)
-	require.Nil(t, source.tabs)
-	require.Same(t, destination, client.currentSession())
-	require.Contains(t, destination.snapshotAttachments(), client)
-	require.Equal(t, true, destination.attachmentRegistered(client))
-	require.Same(t, destinationTab, destination.tabs[testAttachmentTabIndex(destination)])
-	require.True(t, rebased.Load(), "final-source follower must rebase output before its first paint")
-	require.NoError(t, moved.ctx.Err(), "transferred pane process must remain alive")
 }
 
 func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing.T) {

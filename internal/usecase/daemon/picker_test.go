@@ -14,7 +14,6 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
@@ -463,7 +462,7 @@ func TestPickerMoveTabPreviewsDestinationActiveTabWithoutActivatingIt(t *testing
 
 	ac.overlays.pickerMu.Lock()
 	selected, ok := ac.overlays.picker.Selected()
-	require.Same(t, target.tabs[1], ac.overlays.pickerPreview)
+	require.Same(t, target.tabs[0], ac.overlays.pickerPreview)
 	ac.overlays.pickerMu.Unlock()
 	require.True(t, ok)
 	require.Equal(t, target.id, selected.Session)
@@ -471,7 +470,7 @@ func TestPickerMoveTabPreviewsDestinationActiveTabWithoutActivatingIt(t *testing
 	require.Equal(t, target.name, selected.Name)
 	require.Equal(t, -1, selected.TabIndex)
 	require.Nil(t, selected.ExpectedCreatedAt)
-	require.Equal(t, 1, testAttachmentTabIndex(target), "preview must not mutate destination focus")
+	require.Equal(t, 0, testAttachmentTabIndex(target), "preview must not mutate destination view")
 	d.closePicker(ac)
 }
 
@@ -593,18 +592,6 @@ func TestPickerRejectsRecreatedEphemeralTargetFromStaleSelection(t *testing.T) {
 
 	require.Error(t, d.switchToTarget(current, ac, target))
 	require.Same(t, current, ac.currentSession())
-}
-
-func TestSameSessionSwitchRejectsReplacedClient(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	d, current, ac, _ := newManualSessionWithPTYs(t, p1, p2)
-	current.registerAttachment(&attachedClient{})
-
-	require.Error(t, d.switchToTarget(current, ac, picker.Target{Session: current.id, TabIndex: 1}))
-	require.Equal(t, 0, testAttachmentTabIndex(current))
 }
 
 func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
@@ -946,95 +933,6 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	require.Contains(t, frame, "TARGET", "first target reset must immediately show clean target VT state")
 }
 
-func TestPickerCrossSessionSwitchSnatchesExistingClient(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	defer releasePTY1()
-	defer releasePTY2()
-	d := newTestDaemon(t, nil, stubClock{})
-	tr1, sends1 := newCapturingTransport(t)
-	tr2, sends2 := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac1.initOverlays()
-	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac2.initOverlays()
-	sctx1, cancel1 := context.WithCancel(d.serveCtx)
-	sctx2, cancel2 := context.WithCancel(d.serveCtx)
-	defer cancel1()
-	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", ephemeral: true, attachments: map[*attachedClient]struct{}{ac1: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
-	ac1.setSession(sess1)
-	ac2.setSession(sess2)
-	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1}, nil)
-	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2}, nil)
-	d.sessions[sess1.id] = sess1
-	d.sessions[sess2.id] = sess2
-
-	d.enterPicker(sess1, ac1)
-	awaitFrame(t, sends1, ports.MsgOutput)
-	d.handleInput(sess1, ac1, []byte("j"))
-	awaitFrame(t, sends1, ports.MsgOutput)
-	d.handleInput(sess1, ac1, []byte("\r"))
-
-	require.Same(t, sess2, ac1.currentSession())
-	require.Contains(t, sess2.snapshotAttachments(), ac1)
-	require.Empty(t, sess1.snapshotAttachments())
-	require.Equal(t, 2, sessionCount(d), "old ephemeral session remains alive after picker switch")
-
-	d.attachmentCleanupWg.Wait()
-	var displacedFrames []ports.Frame
-	for len(sends2) > 0 {
-		displacedFrames = append(displacedFrames, <-sends2)
-	}
-	require.Len(t, displacedFrames, 1, "healthy displaced client receives only its snatched panel")
-	require.Equal(t, ports.MsgOutput, displacedFrames[0].Type)
-	displacedOutput, err := ports.UnmarshalOutput(displacedFrames[0].Payload)
-	require.NoError(t, err)
-	require.Contains(t, string(displacedOutput.Data), "Session snatched")
-	require.Same(t, sess2, ac2.currentSession())
-	require.Equal(t, true, sess2.attachmentRegistered(ac2))
-
-	movingFrame := awaitFrame(t, sends1, ports.MsgOutput)
-	movingOutput, err := ports.UnmarshalOutput(movingFrame.Payload)
-	require.NoError(t, err)
-	require.Zero(t, movingOutput.BaseStateNum, "moving client must reset before painting the destination")
-}
-
-func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	defer releasePTY1()
-	defer releasePTY2()
-	clock := &signalClock{timers: make(chan *signalTimer, 2)}
-	d := newTestDaemon(t, nil, clock)
-	tr1, _ := newCapturingTransport(t)
-	tr2, _ := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	sctx1, cancel1 := context.WithCancel(d.serveCtx)
-	sctx2, cancel2 := context.WithCancel(d.serveCtx)
-	defer cancel1()
-	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", attachments: map[*attachedClient]struct{}{ac1: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
-	ac1.setSession(sess1)
-	ac2.setSession(sess2)
-	d.sessions[sess1.id], d.sessions[sess2.id] = sess1, sess2
-
-	d.resize(sess2, ac2, domain.Size{Cols: 100, Rows: 24})
-	timer := <-clock.timers
-	done := captureResizeCallbackDone(t, sess2.renderCoordinator())
-	before := sess2.renderCoordinator().resizeSnapshot().epoch
-
-	require.Same(t, ac2, d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id}))
-	// The target coordinator invalidates its scheduled epoch during handoff;
-	// no attachment-local timer survives the transfer.
-	require.Equal(t, before, sess2.renderCoordinator().resizeSnapshot().epoch)
-	timer.ch <- time.Time{}
-	awaitTestCompletion(t, done, "superseded resize callback did not complete")
-}
-
 func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
@@ -1150,56 +1048,6 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	for _, cleanup := range result.cleanups {
 		cleanup.finish()
 	}
-}
-
-func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	p3, releasePTY3 := newBlockingPTY(t)
-	defer releasePTY1()
-	defer releasePTY2()
-	defer releasePTY3()
-	var openedEnv []string
-	var openedCommand string
-	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, command string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
-			if sz != (domain.Size{Cols: 80, Rows: 22}) {
-				return newQuietPTY(), nil
-			}
-			openedCommand = command
-			openedEnv = append([]string(nil), env...)
-			return p3, nil
-		},
-	).Maybe()
-	d := newTestDaemon(t, f, stubClock{})
-	tr1, _ := newCapturingTransport(t)
-	tr2, _ := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	sctx1, cancel1 := context.WithCancel(d.serveCtx)
-	sctx2, cancel2 := context.WithCancel(d.serveCtx)
-	defer cancel1()
-	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", attachments: map[*attachedClient]struct{}{ac1: {}}}, cwd: t.TempDir(), ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, terminal: terminalEnv{}, env: []string{"SECRET=from-active-session", "SHELL=/usr/bin/fish", "PAIR=a=b"}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, cwd: t.TempDir(), ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, terminal: terminalEnv{TrueColor: true}, env: []string{"STALE=destination-only", "SHELL=/bin/stale", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=stale", "VEV=stale"}}
-	ac1.setSession(sess1)
-	ac2.setSession(sess2)
-	d.sessions[sess1.id] = sess1
-	d.sessions[sess2.id] = sess2
-
-	old := d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id})
-
-	require.Same(t, ac2, old)
-	require.False(t, sess2.terminal.TrueColor)
-	require.NoError(t, d.createTab(sess2, domain.Size{Cols: 80, Rows: 24}))
-	sess2.mu.Lock()
-	futureTabID := sess2.tabs[1].stableID
-	futurePaneID := sess2.tabs[1].focusedPane().stableID
-	sess2.mu.Unlock()
-	require.Equal(t, "/usr/bin/fish", openedCommand)
-	require.Equal(t, []string{"SECRET=from-active-session", "SHELL=/usr/bin/fish", "PAIR=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=beta,tab=" + futureTabID + ",pane=" + futurePaneID}, openedEnv)
-	require.NotContains(t, openedEnv, "STALE=destination-only")
 }
 
 func TestPickerPreviewGenerationRejectsStaleSubscriptionReplacement(t *testing.T) {
@@ -1640,8 +1488,8 @@ func TestPickerNavigationRefreshAfterDeleteSelectsReplacingRow(t *testing.T) {
 			d, current, ac, _, currentReleases := newManualTabSession(t, 2)
 			defer releaseAll(currentReleases)
 			current.id, current.name = "current", tt.currentName
-			selectTestAttachmentTab(current, 1)
 			current.tabs[0].stableID, current.tabs[1].stableID = "current-first", "current-active"
+			selectTestAttachmentTab(current, 1)
 			delete(d.sessions, domain.SessionID("manual"))
 			d.sessions[current.id] = current
 

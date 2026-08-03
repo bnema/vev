@@ -623,6 +623,8 @@ func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	tr, _ := newCapturingTransport(t)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
 	ac.initOverlays()
+	ac.setSession(sess)
+	require.True(t, sess.registerAttachment(ac))
 	ac.overlays.copyMode = &scopy.Mode{}
 
 	require.NoError(t, d.focusDir(sess, ac, layout.Right, nil))
@@ -785,6 +787,7 @@ func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
 	ac.setSession(sess)
+	require.True(t, sess.registerAttachment(ac))
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("Z"))
 	require.Equal(t, []byte("Z"), <-writes)
 	tb.focusedPane().screen.Write([]byte("survivor"))

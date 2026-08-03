@@ -20,21 +20,19 @@ func firstMovePane(panes []*pane) *pane {
 }
 
 type movePanePostcommitPlan struct {
-	source             *session
-	destination        *session
-	sourceTab          *tab
-	destinationTab     *tab
-	movedPane          *pane
-	movedPanes         []*pane
-	destinationClient  *attachedClient
-	sourceCleanupToken attachmentConnectionToken
-	handoffResult      attachmentTransitionResult
-	syncCleanup        syncTimerCleanup
-	frozenEffects      frozenAttachmentEffectGates
-	effectsFrozen      bool
-	unlockDispatch     func()
-	reservation        *moveLifecycleReservation
-	oldTabCancel       context.CancelFunc
+	source            *session
+	destination       *session
+	sourceTab         *tab
+	destinationTab    *tab
+	movedPane         *pane
+	movedPanes        []*pane
+	sourceAttachments []*attachedClient
+	syncCleanup       syncTimerCleanup
+	frozenEffects     frozenAttachmentEffectGates
+	effectsFrozen     bool
+	unlockDispatch    func()
+	reservation       *moveLifecycleReservation
+	oldTabCancel      context.CancelFunc
 
 	sourceTabRemoved bool
 	sourceEmpty      bool
@@ -56,12 +54,11 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	} else if p.sourceTabRemoved && p.sourceTab != nil && p.sourceTab.cancel != nil {
 		p.sourceTab.cancel()
 	}
-	if p.sourceCleanupToken.current() {
-		cleanupClient := p.sourceCleanupToken.ac
-		panes := p.movedPanes
-		if len(panes) == 0 && p.movedPane != nil {
-			panes = []*pane{p.movedPane}
-		}
+	panes := p.movedPanes
+	if len(panes) == 0 && p.movedPane != nil {
+		panes = []*pane{p.movedPane}
+	}
+	for _, cleanupClient := range p.sourceAttachments {
 		for _, movedPane := range panes {
 			if cleanupClient.overlays != nil {
 				cleanupClient.overlays.clearCopyModeForPane(movedPane)
@@ -109,16 +106,10 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	for _, ac := range p.destination.snapshotAttachments() {
 		d.invalidateRender(p.destination, ac, true, "move.go")
 	}
-	if p.sourceCleanupToken.ac != nil && !p.sourceEmpty && sessionClientIs(p.source, p.sourceCleanupToken.ac) {
-		d.invalidateRender(p.source, p.sourceCleanupToken.ac, true, "move.go")
-	}
-	if p.handoffResult.published.ac != nil {
-		follower := p.handoffResult.published.ac
-		p.destination.selectAttachmentTab(follower, domain.TabStableID(p.destinationTab.stableID))
-		d.applyHostTheme(p.destination, follower, follower.getClientTheme(), false)
-		follower.recordPreviousSession(p.source)
-		d.deferAttachmentTransitionCleanups(p.handoffResult)
-		d.firstPaintForTransition(p.handoffResult.published)
+	if !p.sourceEmpty && p.source != p.destination {
+		for _, ac := range p.source.snapshotAttachments() {
+			d.invalidateRender(p.source, ac, true, "move.go")
+		}
 	}
 	if p.sourceEmpty {
 		retireEmptySessionAfterMove(d, p.source)
@@ -146,17 +137,6 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 }
 
-// retireEmptyMoveSessionLocked clears the empty source session after the exact
-// attachment transfer has committed. It performs no external work.
-func retireEmptyMoveSessionLocked(sess *session, retirement frozenMoveAttachmentRetirement) []detachedAttachmentSnapshot {
-	if sess == nil || len(sess.attachments) != 0 {
-		return nil
-	}
-	_ = retirement
-	sess.tabs = nil
-	return nil
-}
-
 func moveSessionRetired(d *Daemon, sess *session) bool {
 	if d == nil || sess == nil {
 		return true
@@ -165,16 +145,6 @@ func moveSessionRetired(d *Daemon, sess *session) bool {
 	_, live := d.sessions[sess.id]
 	d.mu.Unlock()
 	return !live
-}
-
-func sessionClientIs(sess *session, client *attachedClient) bool {
-	if sess == nil || client == nil {
-		return false
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	_, ok := sess.attachments[client]
-	return ok
 }
 
 // retireEmptySessionAfterMove completes only source-owned lifecycle work. The

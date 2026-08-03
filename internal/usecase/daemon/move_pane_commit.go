@@ -13,18 +13,14 @@ type movePaneCommit struct {
 	source, destination       *session
 	sourceTab, destinationTab *tab
 	movedPane                 *pane
-	sourceClient              *attachedClient
+	sourceAttachments         []*attachedClient
+	sourceTransports          map[*attachedClient]transportSnapshot
 	sourceGeneration          uint64
 	destinationGeneration     uint64
-	handoffFrozen             bool
 	frozenEffects             frozenAttachmentEffectGates
-	handoffReq                attachmentTransitionRequest
-	handoffPublication        *attachmentPublication
 	err                       error
 
-	handoffResult            attachmentTransitionResult
 	syncCleanup              syncTimerCleanup
-	sourceCleanupToken       attachmentConnectionToken
 	sourceEmpty              bool
 	sourceTabRemoved         bool
 	retiredParked            []parkedAttachmentRetirement
@@ -35,16 +31,8 @@ type movePaneCommit struct {
 	destinationMetadataValid bool
 }
 
-func (c *movePaneCommit) releasePublication() {
-	if c != nil && c.handoffPublication != nil {
-		c.handoffPublication.unlockCoordinators()
-		c.handoffPublication = nil
-	}
-}
-
 func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	var candidate *movePaneCandidate
-	var retirement frozenMoveAttachmentRetirement
 	var err error
 	d.mu.Lock()
 	if d.closing || d.sessions[c.source.id] != c.source || d.sessions[c.destination.id] != c.destination {
@@ -60,18 +48,11 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	if !moveSessionLocatorCurrentLocked(c.source, c.req.Source) || !moveSessionLocatorCurrentLocked(c.destination, c.req.Destination) {
 		return false
 	}
-	if c.handoffFrozen {
-		if c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient) ||
-			c.handoffReq.targetTabIndex < 0 || c.handoffReq.targetTabIndex >= len(c.destination.tabs) ||
-			c.destination.tabs[c.handoffReq.targetTabIndex] != c.destinationTab {
-			return false
-		}
-		c.handoffPublication, err = d.validateAttachmentTransitionPrelocked(c.handoffReq)
-		if err != nil {
-			c.err = err
-			return false
-		}
-		defer c.releasePublication()
+	if c.req.Attachment != nil && !attachmentRegisteredLocked(c.source, c.req.Attachment) {
+		return false
+	}
+	if c.req.AttachmentToken.ac != nil && (c.req.AttachmentToken.ac != c.req.Attachment || !moveAttachmentTokenCurrentLocked(c.req.AttachmentToken, c.source)) {
+		return false
 	}
 
 	unlockTabs := lockMoveTabs(c.sourceTab, c.destinationTab)
@@ -100,23 +81,22 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	}
 
 	sourceWillEmpty := candidate.removeSourceTab && len(c.source.tabs) == 1
-	if sourceWillEmpty && c.source != c.destination {
-		if (c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient)) ||
-			(c.sourceClient != nil) != c.handoffFrozen {
-			return false
-		}
+	if sourceWillEmpty && c.source != c.destination && !sameMoveAttachmentsLocked(c.source, c.sourceAttachments) {
+		return false
 	}
 
-	// Everything above is fallible. Topology, owner, lifecycle registry, and
-	// optional attachment roles now become visible under one lock section.
+	// Everything above is fallible. Shared topology and owner publication are
+	// committed once; attachment views are repaired after these locks release.
 	if candidate.removeSourceTab {
 		idx := indexMoveTabLocked(c.source, c.sourceTab)
 		if idx < 0 {
 			return false
 		}
+		if len(c.source.tabs) > 1 {
+			c.source.prepareAttachmentViewsForRemovedTabLocked(c.sourceTab, idx)
+		}
 		c.source.tabs = append(c.source.tabs[:idx], c.source.tabs[idx+1:]...)
 		c.sourceTabRemoved = true
-
 	} else {
 		c.sourceTab.tree = candidate.sourceTree
 		c.sourceTab.bumpLayoutGenerationLocked()
@@ -131,21 +111,12 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	c.destinationTab.bumpLayoutGenerationLocked()
 	c.movedPane.id = candidate.destinationID
 	oldOwner, newOwner := c.movedPane.publishOwnerLocked(c.destination, c.destinationTab, 0)
-	if c.handoffPublication != nil {
-		c.handoffResult = d.publishAttachmentTransitionPrelocked(c.handoffPublication)
-		c.handoffPublication.unlockCoordinators()
-		c.handoffPublication = nil
-	}
 	c.syncCleanup.append(d.migratePaneSyncOwnerLocked(c.movedPane, oldOwner, newOwner))
-	if c.handoffResult.published.ac != nil {
-		c.sourceCleanupToken = c.handoffResult.published
-	} else if c.sourceClient != nil {
-		c.sourceCleanupToken = c.source.attachmentTokenLocked(c.sourceClient)
-	}
 
-	if candidate.removeSourceTab && len(c.source.tabs) == 0 {
+	if sourceWillEmpty {
 		d.unregisterSessionLocked(c.source)
-		c.retiredAttachments = retireEmptyMoveSessionLocked(c.source, retirement)
+		c.retiredAttachments = detachMoveAttachmentsLocked(c.source, c.sourceTransports)
+		c.source.tabs = nil
 		d.purgeParkingForSessionLocked(c.source)
 		c.retiredParked = d.purgeParkedForSessionLocked(c.source)
 	}

@@ -161,10 +161,10 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 	if len(locals) != 1 {
 		return nil, ports.ErrAmbiguousTarget, "several sessions are live; use -s <session> or run from inside a pane"
 	}
-	for _, sess := range locals {
-		return sess, 0, ""
+	if len(locals) != 0 {
+		return locals[0], 0, ""
 	}
-	panic("unreachable")
+	return nil, ports.ErrNoSuchTarget, "no live sessions"
 }
 
 func (s *session) containsStableIDs(tabID, paneID string) bool {
@@ -455,7 +455,7 @@ func (e controlExec) MovePane(destinationSession, destinationTabID string) error
 		return errMovePaneInvalid
 	}
 	return e.d.movePane(movePaneRequest{
-		Client:           e.target.attachment,
+		Attachment:       e.target.attachment,
 		Source:           sessionMoveLocator(e.sess),
 		SourceTabID:      domain.TabStableID(e.tab.stableID),
 		SourcePaneID:     domain.PaneStableID(e.target.pane.stableID),
@@ -473,7 +473,7 @@ func (e controlExec) MoveTab(destinationSession string) error {
 		return errMovePaneInvalid
 	}
 	return e.d.moveTab(moveTabRequest{
-		Client:      e.target.attachment,
+		Attachment:  e.target.attachment,
 		Source:      sessionMoveLocator(e.sess),
 		SourceTabID: domain.TabStableID(e.tab.stableID),
 		Destination: sessionMoveLocator(destination),

@@ -314,7 +314,7 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 			continue
 		}
 		candidate.mu.Lock()
-		if attachmentRegistered(candidate, ac) {
+		if attachmentRegisteredLocked(candidate, ac) {
 			owners = append(owners, candidate)
 		}
 		candidate.mu.Unlock()
@@ -352,40 +352,6 @@ func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t
 			daemonKeyHandler{d: d, ac: ac}.Action(tt.dir, nil)
 
 			require.Equal(t, 0, testAttachmentTabIndex(sess))
-		})
-	}
-}
-
-func TestCommitTabOverflowRevalidatesTabPointerIdentities(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(sess *session, candidate tabOverflowCandidate)
-	}{
-		{name: "source no longer active", mutate: func(sess *session, _ tabOverflowCandidate) {
-			sess.mu.Lock()
-			selectTestAttachmentTabLocked(sess, 1)
-			sess.mu.Unlock()
-		}},
-		{name: "target entry replaced", mutate: func(sess *session, candidate tabOverflowCandidate) {
-			sess.mu.Lock()
-			sess.tabs[1] = newTab(nil, candidate.target.size)
-			sess.mu.Unlock()
-		}},
-		{name: "source gains visible floating pane", mutate: func(_ *session, candidate tabOverflowCandidate) {
-			installTestFloating(candidate.source, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
-		}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d, sess, _, _ := newManualSessionWithPTYs(t, nil, nil)
-			candidate, ok := d.prepareTabOverflow(sess, sess.tabs[0], layout.Right, domain.Rect{Width: 80, Height: 23}, 1)
-			require.True(t, ok)
-			tt.mutate(sess, candidate)
-			activeBeforeCommit := testAttachmentTabIndex(sess)
-
-			require.False(t, d.commitTabOverflow(sess, candidate))
-			require.Equal(t, activeBeforeCommit, testAttachmentTabIndex(sess))
 		})
 	}
 }

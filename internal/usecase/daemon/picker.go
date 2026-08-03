@@ -527,6 +527,9 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 // generation guards terminal parked cleanup even when a refresh replaced the
 // model within that generation.
 func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
+	if ac == nil || ac.overlays == nil {
+		return false
+	}
 	ac.overlays.pickerMu.Lock()
 	if model != nil && (ac.overlays.picker != model || ac.overlays.pickerGeneration != generation) || model == nil && generation != 0 && ac.overlays.pickerGeneration != generation {
 		ac.overlays.pickerMu.Unlock()
@@ -612,7 +615,7 @@ func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence 
 }
 
 func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.sess == nil || token.ac == nil || false {
+	if token.sess == nil || token.ac == nil {
 		return nil
 	}
 	d.mu.Lock()

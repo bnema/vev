@@ -1,6 +1,41 @@
 package daemon
 
-// frozenMoveAttachmentRetirement records that the exact source attachment
-// effect gate was frozen before a final move removes its session membership.
-// Other registered attachments are independent and are never retired here.
-type frozenMoveAttachmentRetirement struct{}
+func moveAttachmentTokenCurrentLocked(token attachmentConnectionToken, sess *session) bool {
+	return token.sess == sess && token.ac != nil && token.generation == token.ac.connectionGeneration.Load() &&
+		token.ac.currentAttachmentSession() == sess && token.ac.transportSnapshotCurrent(token.transport) &&
+		attachmentRegisteredLocked(sess, token.ac)
+}
+
+// sameMoveAttachmentsLocked reports whether the source membership is unchanged
+// since admission. Caller holds the source session lock.
+func sameMoveAttachmentsLocked(sess *session, admitted []*attachedClient) bool {
+	if sess == nil || len(sess.attachments) != len(admitted) {
+		return false
+	}
+	for _, ac := range admitted {
+		if !attachmentRegisteredLocked(sess, ac) {
+			return false
+		}
+	}
+	return true
+}
+
+// detachMoveAttachmentsLocked invalidates every attachment of a source session
+// that became empty. Moves never transfer attachment ownership to the target;
+// each connection is retired independently after the shared content move.
+// Caller holds the source session lock and the affected attachment gates are
+// frozen.
+func detachMoveAttachmentsLocked(sess *session, transports map[*attachedClient]transportSnapshot) []detachedAttachmentSnapshot {
+	if sess == nil || len(sess.attachments) == 0 {
+		return nil
+	}
+	retired := make([]detachedAttachmentSnapshot, 0, len(sess.attachments))
+	for ac := range sess.attachments {
+		retired = append(retired, detachedAttachmentSnapshot{ac: ac, transport: transports[ac]})
+		ac.connectionGeneration.Add(1)
+		ac.setSession(nil)
+		ac.invalidateFrozenAttachmentCapability()
+	}
+	clear(sess.attachments)
+	return retired
+}

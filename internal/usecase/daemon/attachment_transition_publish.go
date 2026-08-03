@@ -200,11 +200,11 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 	}
 	var lease *attachmentLease
 	if publication.targetCoordinator != nil && !req.preserveAttachment {
-		if publication.targetCoordinator.lease == nil {
+		if publication.targetCoordinator.lease == nil || !publication.targetCoordinator.lease.active {
 			var cleanup renderLifecycleCleanup
 			cleanup, lease = publication.targetCoordinator.beginReplaceLocked(nil, req.next, req.ready)
 			result.cleanups = append(result.cleanups, cleanup)
-		} else if publication.targetCoordinator.lease.active && publication.targetCoordinator.lease.attachment == req.next {
+		} else if publication.targetCoordinator.lease.attachment == req.next {
 			lease = publication.targetCoordinator.lease
 		}
 	}

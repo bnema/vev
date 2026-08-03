@@ -483,6 +483,12 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
 		attachments := sess.snapshotAttachments()
+		if len(attachments) == 0 {
+			// A headless resize may commit while Open is warming. Reconcile the
+			// visible floating geometry even without an attachment callback.
+			d.applyVisibleFloatingLayout(sess, tb, nil)
+			return
+		}
 		tb.mu.Lock()
 		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 		tb.mu.Unlock()

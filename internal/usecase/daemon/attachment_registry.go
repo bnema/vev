@@ -341,6 +341,34 @@ func (s *session) repairAttachmentView(ac *attachedClient) bool {
 	return true
 }
 
+// prepareAttachmentViewsForRemovedTabLocked selects the nearest surviving tab
+// for attachments that were viewing removed. Caller holds s.mu before tabs is
+// mutated; the normal invalidation pass publishes the revised views.
+func (s *session) prepareAttachmentViewsForRemovedTabLocked(removed *tab, index int) {
+	if s == nil || removed == nil || len(s.tabs) <= 1 || index < 0 || index >= len(s.tabs) {
+		return
+	}
+	replacement := index + 1
+	if replacement >= len(s.tabs) {
+		replacement = index - 1
+	}
+	if replacement < 0 || replacement >= len(s.tabs) || s.tabs[replacement] == nil {
+		return
+	}
+	tabID := domain.TabStableID(s.tabs[replacement].stableID)
+	removedID := domain.TabStableID(removed.stableID)
+	for ac := range s.attachments {
+		view := ac.viewSnapshot()
+		if view.tabID == removedID {
+			view.tabID = tabID
+			view.paneID = ""
+			view.bookmark = 0
+			view.liveBottom = true
+			ac.publishView(view)
+		}
+	}
+}
+
 // invalidateViewsLocked orders all per-attachment invalidations behind the
 // shared session mutation. Caller holds s.mu and dispatchMu.
 func (s *session) invalidateViewsLocked() []viewInvalidation {

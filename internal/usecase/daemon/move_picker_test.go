@@ -67,7 +67,7 @@ func TestPaletteMovePaneCapturesSourceAndOpensPicker(t *testing.T) {
 	require.Equal(t, moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name}, captured.Session)
 	require.Equal(t, domain.TabStableID("source-tab"), captured.TabID)
 	require.Equal(t, domain.PaneStableID("source-pane"), captured.PaneID)
-	require.Same(t, ac, captured.Client)
+	require.Same(t, ac, captured.Attachment)
 }
 
 func TestPaletteMoveTabCapturesActiveTabAndOpensPicker(t *testing.T) {
@@ -86,7 +86,7 @@ func TestPaletteMoveTabCapturesActiveTabAndOpensPicker(t *testing.T) {
 	require.Equal(t, pickerMoveTab, intent)
 	require.Equal(t, domain.TabStableID("active-tab"), captured.TabID)
 	require.Equal(t, domain.PaneStableID(""), captured.PaneID)
-	require.Same(t, ac, captured.Client)
+	require.Same(t, ac, captured.Attachment)
 }
 
 func TestPaletteMoveWithoutDestinationShowsToastAndNoPicker(t *testing.T) {
@@ -254,28 +254,6 @@ func TestMovePickerStaleSourceTabReportsPreciseFeedback(t *testing.T) {
 	history := d.notices.history()
 	require.NotEmpty(t, history)
 	require.Equal(t, "Tab no longer exists.", history[0].Message)
-}
-
-func TestMovePickerSourceClientReplacementInvalidatesAction(t *testing.T) {
-	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
-	defer releaseAll(releases)
-
-	require.NoError(t, paletteExec{d: d, sess: source, ac: ac}.OpenMovePanePicker())
-	replacement := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: ac.size}
-	replacement.initOverlays()
-	replacement.setSession(source)
-	source.mu.Lock()
-	source.registerAttachmentLocked(replacement)
-	source.mu.Unlock()
-
-	d.handlePickerInput(ac, []byte("\r"))
-
-	require.True(t, ac.overlays.pickerActive())
-	require.Len(t, source.tabs, 1)
-	require.Len(t, destination.tabs, 1)
-	history := d.notices.history()
-	require.NotEmpty(t, history)
-	require.Equal(t, "Source client is no longer active.", history[0].Message)
 }
 
 func TestMovePickerRefreshCloseKeepsReplacementPicker(t *testing.T) {

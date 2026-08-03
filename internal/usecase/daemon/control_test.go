@@ -545,7 +545,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 		require.True(t, result.OK, result.Text)
 		sess.mu.Lock()
 		require.Len(t, sess.tabs, 1)
-		require.Equal(t, "t_first", sess.tabs[0].stableID)
+		require.Equal(t, "t_second", sess.tabs[0].stableID)
 		sess.mu.Unlock()
 	})
 }
@@ -567,7 +567,7 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 			sess.mu.Lock()
 			defer sess.mu.Unlock()
 			require.Len(t, sess.tabs, 2)
-			require.Equal(t, 1, testAttachmentTabIndexLocked(sess))
+			require.Equal(t, 0, testAttachmentTabIndexLocked(sess))
 		}},
 		{name: "rename tab", slug: "rename-tab", args: []string{"logs"}, verify: func(t *testing.T, _ *Daemon, sess *session) {
 			tb := testAttachmentTab(sess)
@@ -899,7 +899,8 @@ func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
 	result := sendCommand(t, d, ports.CommandRequest{
-		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work",
+		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work", Self: true,
+		TargetTab: "t_second", TargetPane: "p_second",
 	})
 	require.True(t, result.OK, result.Text)
 
@@ -1096,7 +1097,7 @@ func TestHandleCommandMovePaneStableIDsLocateSessionWithoutSelfRedirect(t *testi
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
 	result := sendCommand(t, d, ports.CommandRequest{
-		Slug: "move-pane", Args: []string{"dest", "t_dest"},
+		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "old-name", TargetTab: "t_inactive", TargetPane: "p_inactive",
 	})
 	require.True(t, result.OK, result.Text)

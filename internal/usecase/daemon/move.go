@@ -10,7 +10,8 @@ import (
 // immutable identity. Session names are advisory; the ID and incarnation are
 // the commit-time authority.
 type movePaneRequest struct {
-	Client           *attachedClient
+	Attachment       *attachedClient
+	AttachmentToken  attachmentConnectionToken
 	Source           moveSessionLocator
 	SourceTabID      domain.TabStableID
 	SourcePaneID     domain.PaneStableID
@@ -19,10 +20,11 @@ type movePaneRequest struct {
 }
 
 type moveTabRequest struct {
-	Client      *attachedClient
-	Source      moveSessionLocator
-	SourceTabID domain.TabStableID
-	Destination moveSessionLocator
+	Attachment      *attachedClient
+	AttachmentToken attachmentConnectionToken
+	Source          moveSessionLocator
+	SourceTabID     domain.TabStableID
+	Destination     moveSessionLocator
 }
 
 // movePane resolves, reserves, validates, and commits one pane relocation. All
@@ -75,8 +77,6 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	sourceTab := admission.sourceTab
 	destinationTab := admission.destinationTab
 	movedPane := admission.movedPane
-	sourceClient := admission.sourceClient
-	destinationClient := admission.destinationClient
 	sourceTabInitialGeneration := admission.sourceGeneration
 	destinationTabInitialGeneration := admission.destinationGeneration
 	finalSourceTab := admission.finalSourceTab
@@ -84,48 +84,28 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		d.afterMovePaneSourceSnapshot()
 	}
 
-	// A final source tab with an active client needs the centralized attachment
-	// transition. Freeze that exact role set before entering the fence callback;
-	// the callback then validates the handoff before changing any topology.
-	var handoffReq attachmentTransitionRequest
-	var handoffParticipants attachmentTransitionParticipants
+	// A final source tab is retired without transferring any attachment to the
+	// destination. Freeze every affected source connection before publication so
+	// teardown invalidates exact generations rather than racing input or render.
 	var frozen frozenAttachmentEffectGates
 	var sourceEffectsFrozen bool
-	var handoffFrozen bool
-
-	if finalSourceTab && source != destination && sourceClient != nil {
-		transport := sourceClient.transportSnapshot()
-		sourceToken := source.attachmentToken(sourceClient, transport.transport)
-		if sourceToken.ac == nil || sourceToken.transport.transport == nil {
-			return errMovePaneInvalid
+	if finalSourceTab && source != destination && len(admission.sourceAttachments) != 0 {
+		interrupts := make([]attachmentTransportInterrupt, 0, len(admission.sourceAttachments))
+		for _, ac := range admission.sourceAttachments {
+			if transport := admission.sourceTransports[ac]; transport.transport != nil {
+				interrupts = append(interrupts, attachmentTransportInterrupt{ac: ac, transport: transport})
+			}
 		}
-		destinationTabIndex := moveTabIndex(destination, destinationTab)
-		if destinationTabIndex < 0 {
-			return errMovePaneInvalid
-		}
-		handoffReq = attachmentTransitionRequest{
-			source: source, target: destination, next: sourceClient,
-
-			expectedTransport: sourceToken.transport, sourceToken: &sourceToken,
-			expectedSourceTab: sourceTab, targetTabIndex: destinationTabIndex, ready: true,
-		}
-		var err error
-		handoffReq, handoffParticipants, err = d.snapshotAttachmentTransition(handoffReq)
-		if err != nil {
-			return err
-		}
-		frozen = freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{interrupts: handoffParticipants.interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
+		frozen = freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{interrupts: interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
 			if d.afterAttachmentEffectGateFrozen != nil {
 				d.afterAttachmentEffectGateFrozen("move-pane", ac)
 			}
-		}}, handoffParticipants.clients...)
+		}}, admission.sourceAttachments...)
 		if !frozen.acquired || !frozen.drained {
 			frozen.unfreeze()
 			return errMovePaneInvalid
 		}
-		handoffFrozen = true
 		sourceEffectsFrozen = true
-		handoffReq.attachmentEffectsFrozen = true
 	}
 	if sourceEffectsFrozen {
 		defer func() {
@@ -142,16 +122,14 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		sourceTab:             sourceTab,
 		destinationTab:        destinationTab,
 		movedPane:             movedPane,
-		sourceClient:          sourceClient,
+		sourceAttachments:     admission.sourceAttachments,
+		sourceTransports:      admission.sourceTransports,
 		sourceGeneration:      sourceTabInitialGeneration,
 		destinationGeneration: destinationTabInitialGeneration,
-		handoffFrozen:         handoffFrozen,
 		frozenEffects:         frozen,
-		handoffReq:            handoffReq,
 	}
 	fences := newMovePaneResizeFences(source, destination, sourceTab, destinationTab, movedPane)
 	if !fences.acquire(func() bool { return commit.publishLocked(d) }) {
-		commit.releasePublication()
 		if commit.err != nil {
 			return commit.err
 		}
@@ -166,9 +144,7 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		sourceTab:                sourceTab,
 		destinationTab:           destinationTab,
 		movedPane:                movedPane,
-		destinationClient:        destinationClient,
-		sourceCleanupToken:       commit.sourceCleanupToken,
-		handoffResult:            commit.handoffResult,
+		sourceAttachments:        admission.sourceAttachments,
 		syncCleanup:              commit.syncCleanup,
 		frozenEffects:            frozen,
 		effectsFrozen:            sourceEffectsFrozen,
@@ -219,15 +195,6 @@ func findMoveTabLocked(sess *session, stableID domain.TabStableID) *tab {
 		}
 	}
 	return nil
-}
-
-func moveTabIndex(sess *session, target *tab) int {
-	if sess == nil || target == nil {
-		return -1
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	return indexMoveTabLocked(sess, target)
 }
 
 func indexMoveTabLocked(sess *session, target *tab) int {

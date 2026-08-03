@@ -585,10 +585,10 @@ func (e paletteExec) OpenMovePanePicker() error {
 		return errMovePaneInvalid
 	}
 	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMovePane, moveSourceLocator{
-		Session: sessionMoveLocator(e.sess),
-		TabID:   domain.TabStableID(target.tab.stableID),
-		PaneID:  domain.PaneStableID(target.pane.stableID),
-		Client:  e.ac,
+		Session:    sessionMoveLocator(e.sess),
+		TabID:      domain.TabStableID(target.tab.stableID),
+		PaneID:     domain.PaneStableID(target.pane.stableID),
+		Attachment: e.ac,
 	})
 }
 
@@ -598,9 +598,9 @@ func (e paletteExec) OpenMoveTabPicker() error {
 		return errMovePaneInvalid
 	}
 	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMoveTab, moveSourceLocator{
-		Session: sessionMoveLocator(e.sess),
-		TabID:   domain.TabStableID(target.tab.stableID),
-		Client:  e.ac,
+		Session:    sessionMoveLocator(e.sess),
+		TabID:      domain.TabStableID(target.tab.stableID),
+		Attachment: e.ac,
 	})
 }
 
