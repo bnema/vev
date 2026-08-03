@@ -9,6 +9,7 @@ package ports
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
@@ -25,6 +26,22 @@ var errShortPayload = errors.New("ports: payload too short")
 var errTrailingBytes = errors.New("ports: unexpected trailing bytes in payload")
 
 var errInvalidBoolean = errors.New("ports: invalid boolean flag")
+
+// ErrInvalidSize reports a terminal size that cannot be represented by the
+// protocol or would exceed the bounded screen area.
+var ErrInvalidSize = errors.New("ports: invalid terminal size")
+
+// ErrInvalidHello reports a malformed Hello semantic value.
+var ErrInvalidHello = errors.New("ports: invalid hello")
+
+// ErrInvalidOutput reports a malformed Output semantic value.
+var ErrInvalidOutput = errors.New("ports: invalid output")
+
+// ErrInvalidAck reports a malformed Ack semantic value.
+var ErrInvalidAck = errors.New("ports: invalid ack")
+
+// ErrInvalidAttachTarget reports a malformed attach target.
+var ErrInvalidAttachTarget = errors.New("ports: invalid attach target")
 
 // ErrInvalidSessionMeta reports metadata that cannot be represented by the
 // protocol's ordered uint16-indexed tab layout.
@@ -160,8 +177,14 @@ type Ping struct{}
 // Pong answers a Ping.
 type Pong struct{}
 
-// Ack acknowledges receipt/application of an output state number.
+// Ack acknowledges receipt/application of an output state in one output epoch.
 type Ack struct {
+	Epoch uint64
+	State uint64
+
+	// AckedStateNum is retained for the structured-proxy deletion task. It is
+	// populated from State when decoding and accepted as an input alias only
+	// when the final fields are otherwise unset.
 	AckedStateNum uint64
 }
 
@@ -180,12 +203,31 @@ type ErrorMsg struct {
 	Text string
 }
 
-// Output carries raw PTY output, destined for the client's terminal.
+// Output carries one ordered output publication for an attachment.
 type Output struct {
+	Epoch        uint64
+	Base         uint64
+	New          uint64
+	Echo         uint64
+	ViewRevision uint64
+	Size         domain.Size
+	Full         bool
+	Data         []byte
+
+	// The old state names remain until the structured-proxy deletion task. They
+	// are input/output aliases for the final fields and are not encoded as
+	// separate wire fields.
 	BaseStateNum uint64
 	NewStateNum  uint64
 	EchoAck      uint64
-	Data         []byte
+}
+
+// AttachTarget identifies the endpoint and session selected for a new
+// attachment. It deliberately carries no viewport, resume, or proxy state.
+type AttachTarget struct {
+	Endpoint string
+	Session  string
+	Intent   uint8
 }
 
 // Detached tells a client it has been disconnected from its session and why.
@@ -296,6 +338,11 @@ func (w *payloadWriter) putLongString(s string) {
 	w.b = append(w.b, s...)
 }
 
+func (w *payloadWriter) putLongBytes(b []byte) {
+	w.putUint32(uint32(len(b)))
+	w.b = append(w.b, b...)
+}
+
 // payloadReader consumes a message payload field by field in wire order,
 // erroring instead of panicking on any short read.
 type payloadReader struct {
@@ -384,6 +431,43 @@ func (r *payloadReader) getLongString() (string, error) {
 	return s, nil
 }
 
+func (r *payloadReader) getLongBytes() ([]byte, error) {
+	n, err := r.getUint32()
+	if err != nil {
+		return nil, err
+	}
+	if uint64(n) > uint64(len(r.b)) {
+		return nil, errShortPayload
+	}
+	b := append([]byte(nil), r.b[:int(n)]...)
+	r.b = r.b[int(n):]
+	return b, nil
+}
+
+func (r *payloadReader) skipString() error {
+	n, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if int(n) > len(r.b) {
+		return errShortPayload
+	}
+	r.b = r.b[n:]
+	return nil
+}
+
+func (r *payloadReader) skipLongString() error {
+	n, err := r.getUint32()
+	if err != nil {
+		return err
+	}
+	if uint64(n) > uint64(len(r.b)) {
+		return errShortPayload
+	}
+	r.b = r.b[n:]
+	return nil
+}
+
 // rest consumes and returns all remaining bytes, copied so the result is
 // independent of the reader's backing array.
 func (r *payloadReader) rest() []byte {
@@ -408,6 +492,67 @@ func PeekHelloVersion(b []byte) (uint16, bool) {
 	return binary.BigEndian.Uint16(b), true
 }
 
+// ValidateHello validates Hello semantics without retaining or allocating any
+// payload data.
+func ValidateHello(h Hello) error {
+	if h.Intent != IntentEphemeral && h.Intent != IntentNew && h.Intent != IntentAttach && h.Intent != IntentResume {
+		return ErrInvalidHello
+	}
+	if err := ValidateSize(h.Size); err != nil {
+		return fmt.Errorf("%w: size", ErrInvalidHello)
+	}
+	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || len(h.Env) > math.MaxUint32 {
+		return ErrInvalidHello
+	}
+	for _, entry := range h.Env {
+		if uint64(len(entry)) > math.MaxUint32 {
+			return ErrInvalidHello
+		}
+	}
+	return nil
+}
+
+// ValidateOutput validates the final output state before data allocation.
+func ValidateOutput(m Output) error {
+	if m.Epoch == 0 {
+		return ErrInvalidOutput
+	}
+	if m.New == 0 {
+		if m.Base != 0 || m.Full {
+			return ErrInvalidOutput
+		}
+	} else if (m.Base == 0 && !m.Full) || (m.Base != 0 && (m.Full || m.New != m.Base+1)) {
+		return ErrInvalidOutput
+	}
+	if err := ValidateSize(m.Size); err != nil {
+		return fmt.Errorf("%w: size", ErrInvalidOutput)
+	}
+	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxFrameLen-1-45-4 {
+		return ErrInvalidOutput
+	}
+	return nil
+}
+
+// ValidateAck validates an epoch-scoped output acknowledgement.
+func ValidateAck(m Ack) error {
+	if m.Epoch == 0 {
+		return ErrInvalidAck
+	}
+	return nil
+}
+
+// ValidateAttachTarget validates only the endpoint, session, and intent
+// fields carried by the server attach-target message.
+func ValidateAttachTarget(m AttachTarget) error {
+	if m.Endpoint == "" || m.Session == "" || len(m.Endpoint) > math.MaxUint16 || len(m.Session) > math.MaxUint16 {
+		return ErrInvalidAttachTarget
+	}
+	if m.Intent != IntentEphemeral && m.Intent != IntentNew && m.Intent != IntentAttach && m.Intent != IntentResume {
+		return ErrInvalidAttachTarget
+	}
+	return nil
+}
+
 // MarshalHello encodes h into a Hello message payload.
 func MarshalHello(h Hello) []byte {
 	w := payloadWriter{}
@@ -430,14 +575,90 @@ func MarshalHello(h Hello) []byte {
 	return w.b
 }
 
+func preflightHello(b []byte) error {
+	r := payloadReader{b: b}
+	version, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if version == 21 {
+		return ErrInvalidHello
+	}
+	intent, err := r.getUint8()
+	if err != nil {
+		return err
+	}
+	if intent != IntentEphemeral && intent != IntentNew && intent != IntentAttach && intent != IntentResume {
+		return ErrInvalidHello
+	}
+	if _, err := r.getBool(); err != nil {
+		return err
+	}
+	if len(r.b) < 16 {
+		return errShortPayload
+	}
+	r.b = r.b[16:]
+	if _, err := r.getUint64(); err != nil {
+		return err
+	}
+	if err := r.skipString(); err != nil {
+		return err
+	}
+	cols, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	rows, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if err := ValidateSize(domain.Size{Cols: int(cols), Rows: int(rows)}); err != nil {
+		return fmt.Errorf("%w: size", ErrInvalidHello)
+	}
+	if err := r.skipString(); err != nil {
+		return err
+	}
+	if err := r.skipString(); err != nil {
+		return err
+	}
+	if _, err := r.getBool(); err != nil {
+		return err
+	}
+	if _, err := r.getUint8(); err != nil {
+		return err
+	}
+	envCount, err := r.getUint32()
+	if err != nil {
+		return err
+	}
+	if uint64(envCount) > uint64(len(r.b)/4) {
+		return errShortPayload
+	}
+	for range int(envCount) {
+		if err := r.skipLongString(); err != nil {
+			return err
+		}
+	}
+	return r.done()
+}
+
 // UnmarshalHello decodes a Hello message payload.
 func UnmarshalHello(b []byte) (Hello, error) {
+	if len(b) > MaxFrameLen-1 {
+		return Hello{}, ErrInvalidHello
+	}
+	if err := preflightHello(b); err != nil {
+		return Hello{}, err
+	}
 	r := payloadReader{b: b}
 	var h Hello
 	var err error
 
 	if h.Version, err = r.getUint16(); err != nil {
 		return Hello{}, err
+	}
+	if h.Version == 21 {
+		return Hello{}, ErrInvalidHello
 	}
 	if h.Intent, err = r.getUint8(); err != nil {
 		return Hello{}, err
@@ -465,17 +686,21 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	h.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
+	if h.Intent != IntentEphemeral && h.Intent != IntentNew && h.Intent != IntentAttach && h.Intent != IntentResume {
+		return Hello{}, ErrInvalidHello
+	}
+	if err := ValidateSize(h.Size); err != nil {
+		return Hello{}, fmt.Errorf("%w: size", ErrInvalidHello)
+	}
 	if h.TermEnv, err = r.getString(); err != nil {
 		return Hello{}, err
 	}
 	if h.Cwd, err = r.getString(); err != nil {
 		return Hello{}, err
 	}
-	trueColor, err := r.getUint8()
-	if err != nil {
+	if h.TrueColor, err = r.getBool(); err != nil {
 		return Hello{}, err
 	}
-	h.TrueColor = trueColor != 0
 	if h.MaxOutputInFlight, err = r.getUint8(); err != nil {
 		return Hello{}, err
 	}
@@ -499,6 +724,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		}
 	}
 	if err := r.done(); err != nil {
+		return Hello{}, err
+	}
+	if err := ValidateHello(h); err != nil {
 		return Hello{}, err
 	}
 	return h, nil
@@ -572,6 +800,9 @@ func UnmarshalClientNotice(b []byte) (ClientNotice, error) {
 
 // MarshalResize encodes m into a Resize message payload.
 func MarshalResize(m Resize) []byte {
+	if err := ValidateSize(m.Size); err != nil {
+		return nil
+	}
 	w := payloadWriter{}
 	w.putUint16(uint16(m.Size.Cols))
 	w.putUint16(uint16(m.Size.Rows))
@@ -691,7 +922,11 @@ func UnmarshalResize(b []byte) (Resize, error) {
 	if err := r.done(); err != nil {
 		return Resize{}, err
 	}
-	return Resize{Size: domain.Size{Cols: int(cols), Rows: int(rows)}}, nil
+	m := Resize{Size: domain.Size{Cols: int(cols), Rows: int(rows)}}
+	if err := ValidateSize(m.Size); err != nil {
+		return Resize{}, err
+	}
+	return m, nil
 }
 
 // MarshalDetach encodes a Detach message payload (always empty).
@@ -736,24 +971,44 @@ func UnmarshalPong(b []byte) (Pong, error) {
 	return Pong{}, nil
 }
 
-// MarshalAck encodes m into an Ack message payload.
+// MarshalAck encodes m into an epoch/state Ack payload.
 func MarshalAck(m Ack) []byte {
+	if m.Epoch == 0 && m.State == 0 {
+		// Keep old in-tree callers source-compatible until the structured proxy
+		// deletion task moves them to the final names.
+		m.Epoch = 1
+		m.State = m.AckedStateNum
+	} else if m.AckedStateNum != 0 && m.State != m.AckedStateNum {
+		return nil
+	}
+	if err := ValidateAck(m); err != nil {
+		return nil
+	}
 	w := payloadWriter{}
-	w.putUint64(m.AckedStateNum)
+	w.putUint64(m.Epoch)
+	w.putUint64(m.State)
 	return w.b
 }
 
-// UnmarshalAck decodes an Ack message payload.
+// UnmarshalAck decodes an epoch/state Ack payload.
 func UnmarshalAck(b []byte) (Ack, error) {
 	r := payloadReader{b: b}
-	acked, err := r.getUint64()
-	if err != nil {
+	var m Ack
+	var err error
+	if m.Epoch, err = r.getUint64(); err != nil {
+		return Ack{}, err
+	}
+	if m.State, err = r.getUint64(); err != nil {
 		return Ack{}, err
 	}
 	if err := r.done(); err != nil {
 		return Ack{}, err
 	}
-	return Ack{AckedStateNum: acked}, nil
+	if err := ValidateAck(m); err != nil {
+		return Ack{}, err
+	}
+	m.AckedStateNum = m.State
+	return m, nil
 }
 
 // MarshalWelcome encodes m into a Welcome message payload.
@@ -826,33 +1081,159 @@ func UnmarshalErrorMsg(b []byte) (ErrorMsg, error) {
 	return m, nil
 }
 
-// MarshalOutput encodes m into an Output message payload.
+// MarshalOutput encodes m into the final epoch/base/new/echo/viewRevision/
+// size/full/data message layout.
 func MarshalOutput(m Output) []byte {
+	legacy := m.Epoch == 0 && m.Base == 0 && m.New == 0 && m.Echo == 0 && m.ViewRevision == 0 && m.Size == (domain.Size{}) && !m.Full
+	if legacy {
+		m.Epoch = 1
+		m.Base = m.BaseStateNum
+		m.New = m.NewStateNum
+		m.Echo = m.EchoAck
+		m.Full = m.New != 0 && m.Base == 0
+		m.Size = domain.Size{Cols: 1, Rows: 1}
+	} else {
+		if (m.BaseStateNum != 0 && m.BaseStateNum != m.Base) ||
+			(m.NewStateNum != 0 && m.NewStateNum != m.New) ||
+			(m.EchoAck != 0 && m.EchoAck != m.Echo) {
+			return nil
+		}
+	}
+	if err := ValidateOutput(m); err != nil {
+		return nil
+	}
 	w := payloadWriter{}
-	w.putUint64(m.BaseStateNum)
-	w.putUint64(m.NewStateNum)
-	w.putUint64(m.EchoAck)
-	w.putBytes(m.Data)
+	w.putUint64(m.Epoch)
+	w.putUint64(m.Base)
+	w.putUint64(m.New)
+	w.putUint64(m.Echo)
+	w.putUint64(m.ViewRevision)
+	w.putUint16(uint16(m.Size.Cols))
+	w.putUint16(uint16(m.Size.Rows))
+	w.putBool(m.Full)
+	w.putLongBytes(m.Data)
 	return w.b
 }
 
-// UnmarshalOutput decodes an Output message payload. After fixed state
-// numbers, the rest of the payload is data; there is no length prefix.
+// UnmarshalOutput strictly decodes one final Output payload. Header semantics
+// are validated before the length-prefixed data is copied.
 func UnmarshalOutput(b []byte) (Output, error) {
+	const outputHeaderLen = 45
+	if len(b) > MaxFrameLen-1 {
+		return Output{}, ErrInvalidOutput
+	}
+	if len(b) < outputHeaderLen+4 {
+		return Output{}, errShortPayload
+	}
 	r := payloadReader{b: b}
-	base, err := r.getUint64()
+	var m Output
+	var err error
+	if m.Epoch, err = r.getUint64(); err != nil {
+		return Output{}, err
+	}
+	if m.Base, err = r.getUint64(); err != nil {
+		return Output{}, err
+	}
+	if m.New, err = r.getUint64(); err != nil {
+		return Output{}, err
+	}
+	if m.Echo, err = r.getUint64(); err != nil {
+		return Output{}, err
+	}
+	if m.ViewRevision, err = r.getUint64(); err != nil {
+		return Output{}, err
+	}
+	cols, err := r.getUint16()
 	if err != nil {
 		return Output{}, err
 	}
-	newState, err := r.getUint64()
+	rows, err := r.getUint16()
 	if err != nil {
 		return Output{}, err
 	}
-	echoAck, err := r.getUint64()
+	m.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
+	if m.Full, err = r.getBool(); err != nil {
+		return Output{}, err
+	}
+	if err := ValidateOutput(m); err != nil {
+		return Output{}, err
+	}
+	if len(r.b) < 4 {
+		return Output{}, errShortPayload
+	}
+	dataLen := binary.BigEndian.Uint32(r.b)
+	if uint64(dataLen) > uint64(len(r.b)-4) {
+		return Output{}, errShortPayload
+	}
+	if uint64(dataLen) < uint64(len(r.b)-4) {
+		return Output{}, errTrailingBytes
+	}
+	data, err := r.getLongBytes()
 	if err != nil {
 		return Output{}, err
 	}
-	return Output{BaseStateNum: base, NewStateNum: newState, EchoAck: echoAck, Data: r.rest()}, nil
+	if err := r.done(); err != nil {
+		return Output{}, err
+	}
+	m.Data = data
+	m.BaseStateNum = m.Base
+	m.NewStateNum = m.New
+	m.EchoAck = m.Echo
+	return m, nil
+}
+
+// MarshalAttachTarget encodes a strict server attach-target payload.
+func MarshalAttachTarget(m AttachTarget) []byte {
+	if err := ValidateAttachTarget(m); err != nil {
+		return nil
+	}
+	w := payloadWriter{}
+	w.putString(m.Endpoint)
+	w.putString(m.Session)
+	w.putUint8(m.Intent)
+	return w.b
+}
+
+// UnmarshalAttachTarget decodes a strict server attach-target payload.
+func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
+	// Preflight lengths and intent before getString can allocate either value.
+	probe := payloadReader{b: b}
+	endpointLen, err := probe.getUint16()
+	if err != nil || endpointLen == 0 || int(endpointLen) > len(probe.b) {
+		return AttachTarget{}, ErrInvalidAttachTarget
+	}
+	probe.b = probe.b[endpointLen:]
+	sessionLen, err := probe.getUint16()
+	if err != nil || sessionLen == 0 || int(sessionLen) > len(probe.b) {
+		return AttachTarget{}, ErrInvalidAttachTarget
+	}
+	probe.b = probe.b[sessionLen:]
+	intent, err := probe.getUint8()
+	if err != nil || (intent != IntentEphemeral && intent != IntentNew && intent != IntentAttach && intent != IntentResume) {
+		return AttachTarget{}, ErrInvalidAttachTarget
+	}
+	if err := probe.done(); err != nil {
+		return AttachTarget{}, ErrInvalidAttachTarget
+	}
+
+	r := payloadReader{b: b}
+	var m AttachTarget
+	if m.Endpoint, err = r.getString(); err != nil {
+		return AttachTarget{}, err
+	}
+	if m.Session, err = r.getString(); err != nil {
+		return AttachTarget{}, err
+	}
+	if m.Intent, err = r.getUint8(); err != nil {
+		return AttachTarget{}, err
+	}
+	if err := r.done(); err != nil {
+		return AttachTarget{}, err
+	}
+	if err := ValidateAttachTarget(m); err != nil {
+		return AttachTarget{}, err
+	}
+	return m, nil
 }
 
 // MarshalDetached encodes m into a Detached message payload.

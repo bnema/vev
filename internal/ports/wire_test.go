@@ -81,12 +81,12 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 				Version:   1,
 				Intent:    IntentEphemeral,
 				Name:      "",
-				Size:      domain.Size{Cols: 0, Rows: 0},
+				Size:      domain.Size{Cols: 1, Rows: 1},
 				TermEnv:   "",
 				Cwd:       "",
 				TrueColor: false,
 			},
-			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 	}
 
@@ -122,7 +122,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			Env:     []string{"A=B", "XY=123"},
 		})
 		want := []byte{
-			0x00, 0x15, 0x00, 0x00, // version, intent, proxied
+			0x00, 0x16, 0x00, 0x00, // version, intent, proxied
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -143,20 +143,20 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 	t.Run("lossless order and values", func(t *testing.T) {
 		entryOverUint16 := "LARGE=" + string(bytes.Repeat([]byte("x"), 65536))
 		want := []string{"A=first", "TOKEN=a=b=c", "EMPTY=", entryOverUint16, "A=second"}
-		payload := MarshalHello(Hello{Version: ProtocolVersion, Env: want})
+		payload := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}, Env: want})
 		got, err := UnmarshalHello(payload)
 		require.NoError(t, err)
 		require.Equal(t, want, got.Env)
 	})
 
 	t.Run("empty", func(t *testing.T) {
-		payload := MarshalHello(Hello{Version: ProtocolVersion, Env: []string{}})
+		payload := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}, Env: []string{}})
 		got, err := UnmarshalHello(payload)
 		require.NoError(t, err)
 		require.Empty(t, got.Env)
 	})
 
-	base := MarshalHello(Hello{Version: ProtocolVersion})
+	base := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
 	withCount := func(count byte) []byte {
 		payload := append([]byte(nil), base...)
 		payload[len(payload)-1] = count
@@ -336,7 +336,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(21), ProtocolVersion)
+	require.Equal(t, uint16(22), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -461,7 +461,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "minimal",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
 			want: []byte{
-				0x00, 0x15,
+				0x00, 0x16,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x00, // self
@@ -484,7 +484,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 				JSON:          true,
 			},
 			want: []byte{
-				0x00, 0x15,
+				0x00, 0x16,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x01, // self
@@ -609,8 +609,8 @@ func TestErrorMsgGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestOutputGoldenAndRoundTrip(t *testing.T) {
-	msg := Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 3, Data: []byte("hello\n")}
-	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a}
+	msg := Output{Epoch: 1, Base: 0, New: 2, Echo: 3, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("hello\n"), NewStateNum: 2, EchoAck: 3}
+	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x06, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a}
 
 	got := MarshalOutput(msg)
 	if !bytes.Equal(got, want) {
@@ -624,23 +624,13 @@ func TestOutputGoldenAndRoundTrip(t *testing.T) {
 		t.Fatalf("round trip = %#v, want %#v", back, msg)
 	}
 
-	assertAllPrefixesFail(t, got[:24], UnmarshalOutput)
-
-	extra := []byte{0x00, 0xff, 0x7f}
-	withTrailing := append(append([]byte(nil), got...), extra...)
-	back, err = UnmarshalOutput(withTrailing)
-	if err != nil {
-		t.Fatalf("UnmarshalOutput() with trailing payload error = %v", err)
-	}
-	wantData := append(append([]byte(nil), msg.Data...), extra...)
-	if !bytes.Equal(back.Data, wantData) {
-		t.Fatalf("trailing payload data = %#v, want %#v", back.Data, wantData)
-	}
+	assertAllPrefixesFail(t, got, UnmarshalOutput)
+	assertTrailingGarbageFails(t, got, UnmarshalOutput)
 }
 
 func TestAckGoldenAndRoundTrip(t *testing.T) {
-	msg := Ack{AckedStateNum: 0x0102030405060708}
-	want := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	msg := Ack{Epoch: 1, State: 0x0102030405060708, AckedStateNum: 0x0102030405060708}
+	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
 
 	got := MarshalAck(msg)
 	if !bytes.Equal(got, want) {
@@ -884,11 +874,11 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 func TestHelloOutputWindowByteExactValues(t *testing.T) {
 	for _, window := range []uint8{0, 1, 8} {
 		t.Run(fmt.Sprintf("window_%d", window), func(t *testing.T) {
-			hello := Hello{Version: 14, MaxOutputInFlight: window}
-			// The empty Hello has 39 zero bytes before the negotiated output window,
-			// followed by a uint32 zero environment-entry count.
+			hello := Hello{Version: 14, Size: domain.Size{Cols: 1, Rows: 1}, MaxOutputInFlight: window}
+			// The empty Hello has a fixed 1x1 size before the negotiated output window.
 			want := append(make([]byte, 39), window, 0, 0, 0, 0)
 			want[1] = 14
+			want[31], want[33] = 1, 1
 			got := MarshalHello(hello)
 			requireBytesEqual(t, want, got)
 			back, err := UnmarshalHello(got)
@@ -921,7 +911,7 @@ func TestProxiedHelloGoldenAndStrict(t *testing.T) {
 		MaxOutputInFlight: 8,
 	}
 	want := []byte{
-		0x00, 0x15, 0x02, 0x01,
+		0x00, 0x16, 0x02, 0x01,
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x00, 0x06, 'r', 'e', 'm', 'o', 't', 'e',
@@ -954,7 +944,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "attached",
 			msg:  CommandRequest{Version: ProtocolVersion, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
 			want: []byte{
-				0x00, 0x15, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
+				0x00, 0x16, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, '-', '-', 'v', 'e', 'r', 't', 'i', 'c', 'a', 'l',
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -964,7 +954,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "control",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "ls"},
 			want: []byte{
-				0x00, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x02, 'l', 's', 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			},

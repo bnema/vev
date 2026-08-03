@@ -60,8 +60,6 @@ var (
 )
 
 const (
-	maxScreenCells = 1 << 18
-
 	screenHeaderLen = 40
 	screenStyleLen  = 18
 	screenSpanLimit = 4096
@@ -386,7 +384,7 @@ func validateScreenUpdate(m ScreenUpdate) error {
 }
 
 func screenAreaWithinLimit(size domain.Size) bool {
-	return size.Cols > 0 && size.Rows > 0 && size.Rows <= maxScreenCells/size.Cols
+	return validWireSize(size)
 }
 
 func validScreenScroll(scroll ScreenScroll, rows uint16) bool {
