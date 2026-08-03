@@ -64,7 +64,8 @@ func normalizeOutputWindow(window uint8) uint8 {
 
 const defaultResumeParkGrace = 15 * time.Minute
 
-// defaultSize is used when a client's Hello carries no valid dimensions.
+// defaultSize is retained for headless layout helpers that have no client
+// window; Hello routing rejects invalid dimensions instead of using it.
 var defaultSize = domain.Size{Cols: 80, Rows: 24}
 
 type Daemon struct {
@@ -1266,9 +1267,6 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 // the session for ephemeral/new intents.
 func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
 	sz := h.Size
-	if !sz.Valid() {
-		sz = defaultSize
-	}
 	term := terminalEnv{TrueColor: h.TrueColor}
 
 	// A non-zero token is an authoritative resume credential. If it is unknown,
@@ -1316,6 +1314,9 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		if err := d.waitForTargetRestore(ctx, h.Name); err != nil {
 			return nil, nil, err
 		}
+	}
+	if !sz.Valid() {
+		return nil, nil, &protoErr{ports.ErrInternal, "invalid terminal size"}
 	}
 
 	d.mu.Lock()

@@ -102,11 +102,7 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		}
 	case ports.MsgResize:
 		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.attachmentEffectCurrent() {
-			if sess, ok := localSession(token.sess); ok {
-				d.requestTransactionalResizeForLease(sess, token.ac, token.lease, rz.Size, false)
-			} else if proxy, ok := token.sess.(*proxySession); ok {
-				d.resizeProxyForLease(proxy, token.ac, token.lease, rz.Size)
-			}
+			d.resizeAttachmentForLease(token, rz.Size)
 		}
 	case ports.MsgTheme:
 		if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
@@ -246,21 +242,20 @@ func proxyAttachedCommandOwnedRemotely(slug string) bool {
 // transport revalidation under that lock rejects a link replaced while waiting.
 func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	ac := token.ac
-	if ac == nil || !ac.proxied || token.effect == nil || token.effect.ended.Load() {
+	if ac == nil || token.effect == nil || token.effect.ended.Load() {
 		return false
 	}
 	ac.sendMu.Lock()
-	if token.effect.ended.Load() || !ac.proxied || !token.attachmentCurrent() || ac.output == nil {
+	if token.effect.ended.Load() || !token.attachmentCurrent() || ac.output == nil {
 		ac.sendMu.Unlock()
 		return false
 	}
 	ac.rebaseOutput()
+	ac.pipelineCache = composeCacheInput{}
+	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
-
-	rc := token.sess.core().coordinator.Load()
-	return rc != nil && rc.invalidateForLease(ac, token.lease, renderInvalidation{
-		class: invalidateUrgent, reset: true, producer: "output-reset-request",
-	})
+	go d.paint(token.sess, ac, true, token.lease)
+	return true
 }
 
 func (d *Daemon) ackOutput(token attachmentConnectionToken, values ...uint64) bool {

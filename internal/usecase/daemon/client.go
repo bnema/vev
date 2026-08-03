@@ -569,6 +569,7 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		tr:            tr,
 		output:        output,
 		size:          sz,
+		view:          attachmentView{windowRows: sz.Rows, windowSet: true},
 		clientID:      opts.clientID,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
@@ -724,15 +725,14 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 	return true
 }
 
-// firstPaint guarantees the freshly attached client sees the full screen: if
-// the tab size differs from the client's it resizes first, then immediately
-// emits a full redraw. It is retained for direct test/headless setup; active
-// attachment transitions use firstPaintForTransition with their exact lease.
+// firstPaint guarantees the freshly attached client sees the full screen. The
+// session content geometry is fixed by the first valid Hello; an attachment's
+// window is rendered without resizing shared tabs or PTYs.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
 	d.firstPaintWithLease(sess, ac, clientSize, nil)
 }
 
-func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSize domain.Size, lease *attachmentLease) {
+func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, _ domain.Size, lease *attachmentLease) {
 	// Global notices raised while nothing was attached surface on this client.
 	// Drained before the early return below so a session without an active tab
 	// cannot swallow the queue.
@@ -741,29 +741,14 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 	if tb == nil {
 		return
 	}
-	tb.mu.Lock()
-	wsz := tb.size
-	tb.mu.Unlock()
-
-	outerResizeAccepted := false
-	if clientSize.Valid() && wsz != contentSize(clientSize, ac.proxied) {
-		if lease == nil {
-			outerResizeAccepted = d.resizeForFirstPaint(sess, ac, clientSize)
-		} else {
-			outerResizeAccepted = d.requestTransactionalResizeForLease(sess, ac, lease, clientSize, true)
-		}
-	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	// Activation can synchronously resize a retained floating pane. An accepted
-	// synchronous outer request already includes that pane and emits the reset,
-	// but activation still performs its warmup work.
-	activationResized := d.activateTabAfterResizeForLease(sess, tb, outerResizeAccepted, ac, lease)
-	if !outerResizeAccepted && !activationResized {
-		if lease == nil {
-			d.invalidateRenderNow(sess, ac, true, "client.go")
-		} else if rc := sess.renderCoordinator(); rc != nil && rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"}) {
-			rc.fireCurrentForLease(lease)
-		}
+	// Activation still performs attachment-local warmup, but it must not turn a
+	// new window into a shared session resize.
+	d.ensureFloatingWarm(sess, tb)
+	if lease == nil {
+		d.invalidateRenderNow(sess, ac, true, "client.go")
+	} else if rc := sess.renderCoordinator(); rc != nil && rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"}) {
+		rc.fireCurrentForLease(lease)
 	}
 }
 
@@ -815,6 +800,43 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	d.requestTransactionalResize(sess, ac, sz, false)
+}
+
+// resizeAttachmentForLease changes only the sender's window/view. Session tab
+// geometry and PTY sizes are deliberately outside this mutation boundary.
+// Callers hold the attachment effect admission; output state is rebased before
+// the targeted redraw so every subsequent frame starts a new epoch.
+func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size domain.Size) bool {
+	if token.ac == nil || !size.Valid() || !token.attachmentEffectCurrent() {
+		return false
+	}
+	ac := token.ac
+	ac.sendMu.Lock()
+	if !token.attachmentEffectCurrent() || !ac.transportSnapshotCurrent(token.transport) {
+		ac.sendMu.Unlock()
+		return false
+	}
+	if ac.size == size {
+		ac.sendMu.Unlock()
+		return false
+	}
+	ac.size = size
+	view := ac.viewSnapshot()
+	view.windowRows = size.Rows
+	view.windowSet = true
+	view.windowTop = 0
+	view.revision++
+	ac.publishView(view)
+	ac.rebaseOutput()
+	ac.pipelineCache = composeCacheInput{}
+	ac.pipelineScratch = composeCacheInput{}
+	ac.sendMu.Unlock()
+
+	entry := token.sess
+	// Rendering is attachment-scoped. Run it independently of the connection
+	// reader so a blocked transport cannot hold session dispatch or peers.
+	go d.paint(entry, ac, true, token.lease)
+	return true
 }
 
 // handleClientNotice maps the closed client-event enum to daemon-owned notice

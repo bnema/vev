@@ -832,6 +832,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		clip = clipboard
 	}
 	awaitingReconnectReset := false
+	outputState := outputApplyState{}
+	outputResetRequested := false
 	if reconnect.showing {
 		if reconnect.remote {
 			// Before the asynchronous sender starts, preserve transport ordering by
@@ -990,19 +992,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding output: %w", derr))
 				}
-				// Dismissing or changing a local overlay requests a same-size resize,
-				// whose stateful base-zero Output is the daemon's authoritative reset.
-				// ACK intervening increments so the output window keeps moving, but do
-				// not apply diffs based on cells hidden by the client-local overlay.
-				resetFrame := isReconnectResetFrame(o)
-				if awaitingReconnectReset && !resetFrame && o.NewStateNum != 0 {
-					ackQueue.offer(o.NewStateNum)
+				nextState, accepted := outputState.next(o)
+				if !accepted {
+					// A discarded frame was never written and must never be ACKed.
+					// Ask the daemon for one authoritative full reset, coalescing
+					// repeated gaps while that reset is in flight.
+					if !outputResetRequested {
+						select {
+						case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}:
+							outputResetRequested = true
+						case <-loopCtx.Done():
+							return loopCanceledResult()
+						}
+					}
 					continue
 				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
 					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
-				if awaitingReconnectReset && resetFrame {
+				if awaitingReconnectReset && o.Full && o.Base == 0 && o.New != 0 {
 					awaitingReconnectReset = false
 				}
 				if reconnect.showing && reconnect.remote {
@@ -1016,12 +1024,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				} else if ferr := term.Flush(); ferr != nil {
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
 				}
+				outputState = nextState
+				if o.New != 0 {
+					ackQueue.offer(o.Epoch, o.New)
+					outputResetRequested = false
+				}
 				// The terminal boundary is after a successful flush and before ACK.
 				if observer != nil {
 					observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeTerminalFlushed, uint64(len(o.Data)), true))
-				}
-				if o.NewStateNum != 0 {
-					ackQueue.offer(o.NewStateNum)
 				}
 				if !ms.firstOutput {
 					ms.firstOutput = true
@@ -1047,13 +1057,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			}
 		}
 	}
-}
-
-// isReconnectResetFrame identifies the authoritative stateful reset emitted
-// by the daemon's existing resize path. Stateless side effects can also have a
-// zero base, so they must not dismiss or reconcile a client-local overlay.
-func isReconnectResetFrame(o ports.Output) bool {
-	return o.BaseStateNum == 0 && o.NewStateNum != 0
 }
 
 // recvResult carries one framed message (or a read error) from the receive
@@ -1084,25 +1087,46 @@ func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResu
 // resize pumps through one goroutine keeps the transport's single-writer
 // contract intact. A send failure cancels the loop and is surfaced once.
 type cumulativeAckQueue struct {
-	latest atomic.Uint64
-	wake   chan struct{}
+	mu          sync.Mutex
+	latestEpoch uint64
+	latestState uint64
+	wake        chan struct{}
 }
 
 func newCumulativeAckQueue() *cumulativeAckQueue {
 	return &cumulativeAckQueue{wake: make(chan struct{}, 1)}
 }
 
-func (q *cumulativeAckQueue) offer(state uint64) {
-	for {
-		current := q.latest.Load()
-		if state <= current || q.latest.CompareAndSwap(current, state) {
-			break
-		}
+func (q *cumulativeAckQueue) offer(values ...uint64) {
+	epoch, state := uint64(1), uint64(0)
+	switch len(values) {
+	case 1:
+		state = values[0]
+	case 2:
+		epoch, state = values[0], values[1]
+	default:
+		return
 	}
+	if epoch == 0 || state == 0 {
+		return
+	}
+	q.mu.Lock()
+	if epoch > q.latestEpoch || (epoch == q.latestEpoch && state > q.latestState) {
+		q.latestEpoch, q.latestState = epoch, state
+	}
+	q.mu.Unlock()
 	select {
 	case q.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (q *cumulativeAckQueue) take() (uint64, uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	epoch, state := q.latestEpoch, q.latestState
+	q.latestEpoch, q.latestState = 0, 0
+	return epoch, state
 }
 
 func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
@@ -1119,8 +1143,8 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 		return true
 	}
 	sendAck := func() bool {
-		state := acks.latest.Swap(0)
-		return state == 0 || send(ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: state})})
+		epoch, state := acks.take()
+		return state == 0 || send(ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{Epoch: epoch, State: state})})
 	}
 	for {
 		select {

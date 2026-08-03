@@ -68,6 +68,10 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		scratch = scratchIn[0]
 	}
 	width, rows := state.layout.area.Width, state.layout.area.Height
+	if state.window.Valid() {
+		window := contentSize(state.window, state.contentOnly)
+		width, rows = window.Cols, window.Rows
+	}
 	if width <= 0 || rows < 0 {
 		return composedRenderFrame{frame: renderer.NewFrame(0, 0), cursor: cursorOut{hidden: true}, reset: state.reset}
 	}
@@ -197,14 +201,17 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 }
 
 func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, neutralBorder renderer.Style, dimmer themeui.Dimmer) {
+	if pl.TitleBar.Y < 0 || pl.TitleBar.Y >= frame.Height {
+		return
+	}
 	style := styles.StatusBar
 	if !focused {
 		style = dimmer.Dim(neutralBorder)
 	}
-	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
+	for x := max(pl.TitleBar.X, 0); x < min(pl.TitleBar.X+pl.TitleBar.Width, frame.Width); x++ {
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})
 	}
-	ui.DrawText(frame, pl.TitleBar.X, pl.TitleBar.Y, pl.TitleBar.X+pl.TitleBar.Width, title, style)
+	ui.DrawText(frame, max(pl.TitleBar.X, 0), pl.TitleBar.Y, min(pl.TitleBar.X+pl.TitleBar.Width, frame.Width), title, style)
 }
 
 func desiredCapturedCursor(c capturedCursorInputs, contentY int) cursorOut {
