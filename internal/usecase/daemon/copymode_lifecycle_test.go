@@ -98,7 +98,7 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	tb.panes["pane-2"] = closing
 	ac := &attachedClient{output: newOutputStateStream()}
 	ac.initOverlays()
-	sess.client = ac
+	sess.registerAttachment(ac)
 	ac.setSession(sess)
 	closing.mu.Lock()
 	document := scopy.NewDocument(scopy.NewSnapshot(closing.history, closing.screen.Frame, closing.screen.LineBounds(), nil), domain.DefaultWordSeparators)

@@ -176,7 +176,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	sctxW, cancelW := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelW)
 	tabW := newTestTabWithContext(newScriptPTY(nil), sctxW, cancelW)
-	sessW := &session{sessionCore: sessionCore{id: "wedged", name: "wedged", client: acW}, ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}}
+	sessW := &session{sessionCore: sessionCore{id: "wedged", name: "wedged", attachments: map[*attachedClient]struct{}{acW: {}}}, ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}}
 	acW.setSession(sessW)
 	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW}, nil)
 	d.sessions[sessW.id] = sessW
@@ -446,7 +446,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	sctxB, cancelB := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelB)
 	tbB := newTestTabWithContext(pB, sctxB, cancelB)
-	sessB := &session{sessionCore: sessionCore{id: "sessB", name: "other", client: acB}, ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}}
+	sessB := &session{sessionCore: sessionCore{id: "sessB", name: "other", attachments: map[*attachedClient]struct{}{acB: {}}}, ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}}
 	acB.setSession(sessB)
 	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB}, nil)
 	d.sessions[sessB.id] = sessB
@@ -465,7 +465,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 3)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.ptys = newBlockingOpenFactory(t, d)
 	defer releases[0]()
@@ -512,8 +512,8 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	require.NoError(t, d.jumpAttention(sess1, ac))
 
 	require.Same(t, sess2, ac.currentSession())
-	require.Same(t, ac, sess2.client)
-	require.Nil(t, sess1.client)
+	require.Contains(t, sess2.snapshotAttachments(), ac)
+	require.Empty(t, sess1.snapshotAttachments())
 	require.Equal(t, 1, activeTabIndex(sess2))
 	_ = mustOutputData(t, sends)
 }
@@ -556,7 +556,7 @@ func TestJumpAttentionSwitchFailureReportsNotice(t *testing.T) {
 	d.sessions[sess2.id] = sess2
 
 	sess1.mu.Lock()
-	sess1.client = nil
+	clearAttachmentsForTestLocked(sess1)
 	sess1.mu.Unlock()
 
 	err := d.jumpAttention(sess1, ac)

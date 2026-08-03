@@ -109,7 +109,7 @@ func TestMovePickerEnterCommitsMovePane(t *testing.T) {
 	d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.mu.Unlock()
 	sourceTab := source.tabs[0]
 	moved := sourceTab.focusedPane()
@@ -130,7 +130,7 @@ func TestMovePickerEnterCommitsMovePaneViaSharedAPI(t *testing.T) {
 	d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.mu.Unlock()
 	sourceTab := source.tabs[0]
 	moved := sourceTab.focusedPane()
@@ -157,7 +157,7 @@ func TestMovePickerEnterCommitsMoveTab(t *testing.T) {
 	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.mu.Unlock()
 	movedTab := source.tabs[0]
 	movedTab.stableID = "moved-tab"
@@ -265,7 +265,7 @@ func TestMovePickerSourceClientReplacementInvalidatesAction(t *testing.T) {
 	replacement.initOverlays()
 	replacement.setSession(source)
 	source.mu.Lock()
-	source.client = replacement
+	source.registerAttachmentLocked(replacement)
 	source.mu.Unlock()
 
 	d.handlePickerInput(ac, []byte("\r"))

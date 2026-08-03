@@ -231,7 +231,7 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "clip", name: "clip", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "clip", name: "clip", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -265,7 +265,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "clip-big", name: "clip-big", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "clip-big", name: "clip-big", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -290,7 +290,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "clip-bad", name: "clip-bad", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "clip-bad", name: "clip-bad", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -363,7 +363,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 	d.clipboardWorker(sess)
 
 	require.Zero(t, oldTransport.sendCount(), "clipboard queued by the former pane owner reached its client")
-	require.Same(t, ac, sess.client, "stale clipboard send handling detached the former owner's client")
+	require.Contains(t, sess.snapshotAttachments(), ac, "stale clipboard send handling detached the former owner's client")
 }
 
 type movingClipboardErrorTransport struct {
@@ -432,7 +432,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
 
 	require.Zero(t, oldTransport.sendCount(), "clipboard send was not revalidated immediately before transport I/O")
-	require.Same(t, ac, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), ac)
 }
 
 func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
@@ -461,7 +461,7 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	close(oldTransport.release)
 	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
 
-	require.Same(t, ac, sess.client, "a send error from the pane's retired owner detached its client")
+	require.Contains(t, sess.snapshotAttachments(), ac, "a send error from the pane's retired owner detached its client")
 	select {
 	case <-oldTransport.closed:
 		t.Fatal("a send error from the pane's retired owner closed its client transport")
@@ -495,7 +495,7 @@ func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
 	d.clipboardWorker(sess)
 	require.Zero(t, oldTransport.sendCount(), "stale queued work reached its captured failing transport")
 	require.Empty(t, newTransport.Sends(), "stale queued work was redirected to the replacement")
-	require.Same(t, next, sess.client, "stale clipboard send handling detached the current client")
+	require.Contains(t, sess.snapshotAttachments(), next, "stale clipboard send handling detached the current client")
 	require.False(t, newTransport.Closed())
 }
 

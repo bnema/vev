@@ -283,53 +283,6 @@ func TestEphemeralNumberingReuse(t *testing.T) {
 
 // --- attach replace ---------------------------------------------------------
 
-func TestAttachReplaceKeepsOldClientSnatched(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-
-	// Client A creates and attaches to ephemeral "0".
-	trA, sendsA, releaseA := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(trA) })
-	awaitFrame(t, sendsA, ports.MsgWelcome)
-	awaitFrame(t, sendsA, ports.MsgOutput)
-	sess := firstSession(d)
-	require.NotNil(t, sess)
-	sess.mu.Lock()
-	acA := sess.client
-	sess.mu.Unlock()
-	require.NotNil(t, acA)
-	// The transport observes Send before the render transaction releases sendMu.
-	// Wait for that contract boundary before replacing A; otherwise the test can
-	// intentionally classify the in-flight first paint as an interrupted render.
-	acA.sendMu.Lock()
-	require.Same(t, trA, acA.transportSnapshot().transport)
-	acA.sendMu.Unlock()
-
-	// Client B attaches to the same session, displacing A.
-	trB, sendsB, releaseB := newConn(t, mustHello(ports.IntentAttach, "0", domain.Size{Cols: 80, Rows: 24}))
-	hg.Go(func() { d.handleConn(trB) })
-	awaitFrame(t, sendsB, ports.MsgWelcome)
-	d.attachmentCleanupWg.Wait()
-
-	// B is now the sole active client while A remains a live snatched member.
-	sess.mu.Lock()
-	require.NotNil(t, sess.client)
-	require.NotSame(t, acA, sess.client)
-	_, oldSnatched := sess.snatched[acA]
-	sess.mu.Unlock()
-	require.True(t, oldSnatched)
-	require.Same(t, sess, acA.currentSession())
-
-	releaseA()
-	releaseB()
-	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
-	releasePTY()
-	hg.Wait()
-	d.sessWg.Wait()
-	d.waitNotifies()
-}
-
 // --- detach semantics -------------------------------------------------------
 
 func TestDetachKeepsEphemeralHeadless(t *testing.T) {
@@ -351,7 +304,7 @@ func TestDetachKeepsEphemeralHeadless(t *testing.T) {
 	require.NotNil(t, sess)
 	sess.mu.Lock()
 	require.True(t, sess.ephemeral)
-	require.Nil(t, sess.client, "ephemeral session is headless after detach")
+	require.Empty(t, sess.snapshotAttachmentsLocked(), "ephemeral session is headless after detach")
 	sess.mu.Unlock()
 
 	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -398,7 +351,7 @@ func TestDetachKeepsNamed(t *testing.T) {
 	require.Equal(t, 1, sessionCount(d), "named session survives detach")
 	sess := firstSession(d)
 	sess.mu.Lock()
-	require.Nil(t, sess.client, "named session is headless after detach")
+	require.Empty(t, sess.snapshotAttachmentsLocked(), "named session is headless after detach")
 	sess.mu.Unlock()
 
 	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -1038,7 +991,7 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 func TestCloseActiveTabActivatesDestinationFloatingPane(t *testing.T) {
 	d, sess, ac, _, releases := newManualTabSession(t, 2)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.ptys = newBlockingOpenFactory(t, d)
 	defer releases[0]()

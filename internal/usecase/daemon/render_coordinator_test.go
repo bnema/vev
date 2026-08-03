@@ -1306,7 +1306,7 @@ func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstal
 		clock: clock.clock,
 		wake: func(w renderWake) {
 			// This is the production ownership boundary: composition must use
-			// the coordinator's captured attachment, never sess.client.
+			// the coordinator's captured attachment, never sess.snapshotAttachments()[0].
 			d.paint(sess, w.lease.attachment, w.reset, w.lease)
 		},
 		ackReady: func() bool { return true },
@@ -1316,10 +1316,10 @@ func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstal
 	rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
 	timer := awaitCoordinatorScheduledTimer(t, clock)
 
-	// Model attachClient's publication window exactly: sess.client is new,
+	// Model attachClient's publication window exactly: sess.snapshotAttachments()[0] is new,
 	// but coordinator replacement has not yet invalidated the old deadline.
 	sess.mu.Lock()
-	sess.client = replacement
+	sess.registerAttachmentLocked(replacement)
 	sess.mu.Unlock()
 	timer.ch <- time.Time{}
 	requireNoCoordinatorOutputFrame(t, replacementSends)

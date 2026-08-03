@@ -539,7 +539,7 @@ func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID) (
 	ac.initOverlays()
 	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	tb.stableID = string(id) + "-tab"
-	sess := &session{sessionCore: sessionCore{id: id, name: string(id), client: ac}, tabs: []*tab{tb}, active: 0}
+	sess := &session{sessionCore: sessionCore{id: id, name: string(id), attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, active: 0}
 	publishTiledPaneOwners(sess, tb)
 	ac.setSession(sess)
 	d.sessions[id] = sess

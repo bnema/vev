@@ -127,7 +127,7 @@ func TestPaintACKBlockedDoesNotDestructivelyCapture(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	t.Cleanup(release)
 	d, sess, _, sends := newManualSessionWithPTYs(t, pty)
-	ac := sess.client
+	ac := sess.snapshotAttachments()[0]
 	ac.sendMu.Lock()
 	ac.output.next = ac.output.maxOutstanding
 	ac.output.acked = 0
@@ -240,7 +240,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	require.NotEmpty(t, probe.Bytes(), "failed output must not commit the renderer shadow")
 
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	ac.setSession(sess)
 	ac.replaceTransport(healthy)

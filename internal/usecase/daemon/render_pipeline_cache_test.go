@@ -57,7 +57,7 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 			// its original healthy transport, then retry the pending state.
 			if failure.name == "send" {
 				sess.mu.Lock()
-				sess.client = ac
+				sess.registerAttachmentLocked(ac)
 				sess.mu.Unlock()
 				ac.setSession(sess)
 				ac.replaceTransport(healthy)

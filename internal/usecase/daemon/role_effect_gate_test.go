@@ -161,8 +161,8 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	later.initOverlays()
 	later.setSession(sess)
 	sess.mu.Lock()
-	sess.addSnatchedLocked(blocked)
-	sess.addSnatchedLocked(later)
+	sess.registerAttachmentLocked(blocked)
+	sess.registerAttachmentLocked(later)
 	sess.mu.Unlock()
 
 	rc := d.attachCoordinator(sess, nil, first, true)
@@ -226,9 +226,9 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	require.Same(t, sess, d.sessions[sess.id], "partial gate acquisition removed the session registry owner")
 	d.mu.Unlock()
 	sess.mu.Lock()
-	require.Same(t, first, sess.client)
-	require.Contains(t, sess.snatched, blocked)
-	require.Contains(t, sess.snatched, later)
+	require.Contains(t, sess.snapshotAttachmentsLocked(), first)
+	require.Contains(t, sess.snapshotAttachmentsLocked(), blocked)
+	require.Contains(t, sess.snapshotAttachmentsLocked(), later)
 	sess.mu.Unlock()
 	for _, ac := range []*attachedClient{first, blocked, later} {
 		require.Same(t, sess, ac.currentSession(), "partial gate acquisition cleared attachment ownership")
@@ -287,7 +287,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	unrelatedTransport := &closeTrackingTransport{}
 	unrelatedClient := &attachedClient{tr: unrelatedTransport, output: newOutputStateStream(), size: active.size}
 	unrelatedClient.initOverlays()
-	unrelated := &session{sessionCore: sessionCore{id: "unrelated", name: "unrelated", client: unrelatedClient}, ctx: sess.ctx, cancel: func() {}}
+	unrelated := &session{sessionCore: sessionCore{id: "unrelated", name: "unrelated", attachments: map[*attachedClient]struct{}{unrelatedClient: {}}}, ctx: sess.ctx, cancel: func() {}}
 	unrelatedClient.setSession(unrelated)
 	d.mu.Lock()
 	d.sessions[unrelated.id] = unrelated
@@ -318,7 +318,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	require.True(t, snatchedTransport.Closed())
 	require.True(t, activeTransport.Closed())
 	require.False(t, unrelatedTransport.Closed(), "unrelated session transport was interrupted")
-	require.Same(t, unrelatedClient, unrelated.client)
+	require.Contains(t, unrelated.snapshotAttachments(), unrelatedClient)
 	require.Same(t, unrelated, unrelatedClient.currentSession())
 	requireRoleGateRetired(t, snatched)
 	requireRoleGateRetired(t, active)
@@ -348,7 +348,7 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 	require.Same(t, sess, d.sessions[sess.id], "transport incarnation change should abort stale teardown publication")
 	d.mu.Unlock()
 	sess.mu.Lock()
-	require.Same(t, ac, sess.client)
+	require.Contains(t, sess.snapshotAttachmentsLocked(), ac)
 	sess.mu.Unlock()
 	requireRoleGateRetired(t, ac)
 }
@@ -482,7 +482,7 @@ func TestRenderSendFailureCleanupRejectsReplacedAndResumedIncarnation(t *testing
 	awaitTestCompletion(t, cleanupTracked, "tracked render failure cleanup did not retire")
 
 	sess.mu.Lock()
-	require.Same(t, original, sess.client, "stale render cleanup detached the resumed incarnation")
+	require.Contains(t, sess.snapshotAttachmentsLocked(), original, "stale render cleanup detached the resumed incarnation")
 	sess.mu.Unlock()
 	require.Equal(t, resumedGeneration, original.roleGeneration.Load())
 	require.True(t, resumed.published.activeCurrent())
@@ -518,7 +518,7 @@ func TestRenderSendFailureCleanupIsDeadlineBoundedWhileRoleGateIsBusy(t *testing
 	awaitTestCompletion(t, waitGroupDone(&d.attachmentCleanupWg), "bounded render cleanup leaked its tracked goroutine")
 
 	sess.mu.Lock()
-	require.Same(t, ac, sess.client)
+	require.Contains(t, sess.snapshotAttachmentsLocked(), ac)
 	sess.mu.Unlock()
 	require.False(t, transport.Closed())
 }
@@ -567,13 +567,13 @@ func TestRoleEffectGateReplacementInterruptsBlockedOldRenderBeforePublication(t 
 	case <-time.After(time.Second):
 		t.Fatal("closing the exact old transport did not unblock its render")
 	}
-	require.Same(t, next, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), next)
 	require.False(t, newTransport.Closed(), "replacement transport was affected by old-link interruption")
 
 	d.deferAttachmentTransitionCleanups(result)
 	d.attachmentCleanupWg.Wait()
 	require.Nil(t, old.transport(), "the unhealthy old link was not retired")
-	require.Same(t, next, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), next)
 	require.False(t, newTransport.Closed())
 }
 
@@ -856,9 +856,9 @@ func TestJumpAttentionHandoffRevalidatesInitiatorAfterAdmissionEnds(t *testing.T
 
 	require.Equal(t, 0, activeTabIndex(target), "stale handoff changed target focus")
 	target.mu.Lock()
-	targetClient := target.client
+	targetAttachments := target.snapshotAttachmentsLocked()
 	target.mu.Unlock()
-	require.Nil(t, targetClient, "stale handoff attached the replaced initiator")
+	require.NotContains(t, targetAttachments, next, "stale handoff attached the replaced initiator")
 	d.deferAttachmentTransitionCleanups(result)
 }
 
@@ -1123,7 +1123,7 @@ func TestRoleEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testing.T) 
 	bTransport := newDatagramTestTransport()
 	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), size: a.size}
 	b.initOverlays()
-	second := &session{sessionCore: sessionCore{id: "second", name: "second", client: b, snatched: make(map[*attachedClient]struct{})}}
+	second := &session{sessionCore: sessionCore{id: "second", name: "second", attachments: map[*attachedClient]struct{}{b: {}}}}
 	b.setSession(second)
 	d.mu.Lock()
 	d.sessions[second.id] = second
@@ -1181,7 +1181,7 @@ func TestPickerDeleteReversedWithTargetTransitionDoesNotDeadlock(t *testing.T) {
 	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), size: a.size}
 	b.initOverlays()
 	target := &session{sessionCore: sessionCore{id: "picker-delete-target", name: "picker-delete-target",
-		client: b, snatched: make(map[*attachedClient]struct{})}, ctx: source.ctx, cancel: func() {},
+		attachments: map[*attachedClient]struct{}{b: {}}}, ctx: source.ctx, cancel: func() {},
 	}
 	b.setSession(target)
 	d.mu.Lock()

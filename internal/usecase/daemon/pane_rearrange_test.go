@@ -185,7 +185,7 @@ func TestPaneRearrangeEdgeNoopHasExactSilentInvariants(t *testing.T) {
 	ac := &attachedClient{}
 	ac.setSession(h.session)
 	h.session.mu.Lock()
-	h.session.client = ac
+	h.session.registerAttachmentLocked(ac)
 	h.session.mu.Unlock()
 	invalidations := make(chan renderInvalidation, 2)
 	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -270,7 +270,7 @@ func TestPaneRearrangeChangedActionPublishesOnce(t *testing.T) {
 	ac := &attachedClient{}
 	ac.setSession(h.session)
 	h.session.mu.Lock()
-	h.session.client = ac
+	h.session.registerAttachmentLocked(ac)
 	h.session.mu.Unlock()
 	invalidations := make(chan renderInvalidation, 2)
 	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -406,7 +406,7 @@ func TestPaneRearrangeNoChangeAdapterSideEffects(t *testing.T) {
 			ac := &attachedClient{}
 			ac.setSession(h.session)
 			h.session.mu.Lock()
-			h.session.client = ac
+			h.session.registerAttachmentLocked(ac)
 			h.session.mu.Unlock()
 			invalidations := make(chan renderInvalidation, 2)
 			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})

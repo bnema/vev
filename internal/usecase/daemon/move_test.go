@@ -49,7 +49,7 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 	defer release2()
 	d, source, _, _ := newManualSessionWithPTYs(t, p1)
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.mu.Unlock()
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
@@ -115,7 +115,7 @@ func TestMovePaneFinalSourceClientFollowsDestination(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, source.tabs)
 	require.Same(t, destination, client.currentSession())
-	require.Same(t, client, destination.client)
+	require.Contains(t, destination.snapshotAttachments(), client)
 	require.Equal(t, attachmentActive, destination.attachmentRole(client))
 	require.Same(t, destinationTab, destination.tabs[destination.active])
 	require.True(t, rebased.Load(), "final-source follower must rebase output before its first paint")
@@ -129,7 +129,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 	require.NoError(t, err)
 	require.NoError(t, clip.Close())
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.clipFiles = []string{clip.Name()}
 	source.mu.Unlock()
 	active.setSession(nil)
@@ -179,7 +179,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	movedPTY := newQuietPTY()
 	d, source, _, _ := newManualSessionWithPTYs(t, movedPTY)
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.mu.Unlock()
 	moved := source.tabs[0].focusedPane()
 	movedTab := source.tabs[0]

@@ -491,7 +491,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		viewer.overlays.pickerMu.Lock()
 		viewer.overlays.pickerPreview = target.tabs[0]
 		viewer.overlays.pickerMu.Unlock()
-		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", client: viewer}}
+		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
 		previews := make(chan renderWake, 2)
 		rc.subscribePreviewFor(viewer, 1, func(w renderWake) { previews <- w })
 
@@ -502,7 +502,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		drainCoordinatorTimers(clock) // detach must clear the pending output work.
 
 		target.mu.Lock()
-		target.client = nil
+		clearAttachmentsForTestLocked(target)
 		target.mu.Unlock()
 		rc.noteDetach(targetClient)
 		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
@@ -540,7 +540,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		replacement := &attachedClient{output: newOutputStateStream()}
 		rc.noteReplace(oldClient, replacement, true)
 		target.mu.Lock()
-		target.client = replacement
+		target.registerAttachmentLocked(replacement)
 		target.mu.Unlock()
 		// The replacement's initial full paint remains gated by the batch. Its
 		// reset must survive completion and coalesce with the completion wake.
@@ -575,7 +575,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		wakes := make(chan renderWake, 1)
 		rc.opts.wake = func(w renderWake) { wakes <- w }
 		target.mu.Lock()
-		target.client = nil
+		clearAttachmentsForTestLocked(target)
 		target.mu.Unlock()
 		rc.noteDetach(client)
 
@@ -628,7 +628,7 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 			name  string
 			setup func(*Daemon, *session, *tab, *pane)
 		}{
-			{name: "headless", setup: func(_ *Daemon, sess *session, _ *tab, _ *pane) { sess.client = nil }},
+			{name: "headless", setup: func(_ *Daemon, sess *session, _ *tab, _ *pane) { clearAttachmentsForTest(sess) }},
 			{name: "inactive tab", setup: func(_ *Daemon, sess *session, tb *tab, _ *pane) {
 				other := newTab(nil, domain.Size{Cols: 80, Rows: 23})
 				sess.tabs = append([]*tab{other}, sess.tabs...)
@@ -667,13 +667,13 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 		require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
 		p.screen.ClearDamage()
 
-		sess.client = nil
+		clearAttachmentsForTest(sess)
 		viewer := &attachedClient{}
 		viewer.initOverlays()
 		viewer.overlays.pickerMu.Lock()
 		viewer.overlays.pickerPreview = tb
 		viewer.overlays.pickerMu.Unlock()
-		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", client: viewer}}
+		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
 		p.screen.Write([]byte("preview"))
 		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
@@ -802,7 +802,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "s", name: "s", client: ac}, tabs: []*tab{win}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	// Client rows are one more than the equivalent case in a single-bar
@@ -1062,7 +1062,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "s", name: "s", client: ac}, tabs: []*tab{win}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	d.resize(sess, ac, newSize)
@@ -1091,7 +1091,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "e", name: "0", ephemeral: true, client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "e", name: "0", ephemeral: true, attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 
@@ -1103,7 +1103,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 
 	require.Equal(t, 1, sessionCount(d), "ephemeral session survives failed client send")
 	sess.mu.Lock()
-	require.Nil(t, sess.client)
+	require.Empty(t, sess.snapshotAttachmentsLocked())
 	sess.mu.Unlock()
 
 	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -1135,7 +1135,7 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "query", name: "query", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "query", name: "query", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)

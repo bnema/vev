@@ -41,7 +41,7 @@ func TestAttachmentLossParksOnlyThatAttachment(t *testing.T) {
 	sess.mu.Unlock()
 	require.False(t, firstAttached)
 	require.True(t, secondAttached)
-	require.Same(t, second, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), second)
 	require.False(t, secondTransport.Closed())
 }
 

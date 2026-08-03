@@ -9,6 +9,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func clearAttachmentsForTest(sess *session) {
+	for _, ac := range sess.snapshotAttachments() {
+		sess.unregisterAttachment(ac)
+	}
+}
+
+func clearAttachmentsForTestLocked(sess *session) {
+	for _, ac := range sess.snapshotAttachmentsLocked() {
+		sess.unregisterAttachmentLocked(ac)
+	}
+}
+
 func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 	sess := &session{}
 	sess.id = domain.SessionID("local")
@@ -24,7 +36,7 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 
 	core.mu.Lock()
 	require.False(t, sess.mu.TryLock(), "sessionCore.mu must be the mutex promoted as session.mu")
-	core.client = ac
+	core.registerAttachmentLocked(ac)
 	require.Equal(t, attachmentActive, sess.attachmentRoleLocked(ac))
 	sess.tabs = append(sess.tabs, &tab{name: "logs"})
 	require.Len(t, sess.tabs, 2)
@@ -47,7 +59,7 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 	sess.core().mu.Lock()
 	sess.tabs = append(sess.tabs, &tab{name: "logs"})
 	sess.active = 1
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 
 	preCall := make(chan struct{})
 	allowCall := make(chan struct{})

@@ -413,7 +413,7 @@ func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, regis
 		}
 		tabs = append(tabs, tb)
 	}
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", client: ac, attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: tabs}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: tabs}
 	for _, tb := range tabs {
 		publishTiledPaneOwners(sess, tb)
 	}
@@ -537,7 +537,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	require.Equal(t, ports.MsgWelcome, welcome.Type)
 	sess := firstSession(d)
 	sess.mu.Lock()
-	ac := sess.client
+	ac := sess.snapshotAttachmentsLocked()[0]
 	sess.mu.Unlock()
 	require.NotNil(t, ac, "route must publish the attachment before Welcome returns")
 

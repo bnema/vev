@@ -46,15 +46,6 @@ func attachmentSessionRoleLocked(entry attachmentSession, ac *attachedClient) at
 	return attachmentDetached
 }
 
-func addSnatchedLocked(entry attachmentSession, ac *attachedClient) {
-	// Role-preserving parking is attachment-local. Session membership is enough
-	// to admit the connection; there is no session-wide snatched owner.
-	if entry == nil || ac == nil || entry.core() == nil {
-		return
-	}
-	entry.core().registerAttachmentLocked(ac)
-}
-
 func (s *session) attachmentRole(ac *attachedClient) attachmentRole {
 	return attachmentSessionRole(s, ac)
 }
@@ -62,8 +53,6 @@ func (s *session) attachmentRole(ac *attachedClient) attachmentRole {
 func (s *session) attachmentRoleLocked(ac *attachedClient) attachmentRole {
 	return attachmentSessionRoleLocked(s, ac)
 }
-
-func (s *session) addSnatchedLocked(ac *attachedClient) { addSnatchedLocked(s, ac) }
 
 type attachmentRoleToken struct {
 	sess       attachmentSession

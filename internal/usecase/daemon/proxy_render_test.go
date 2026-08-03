@@ -91,7 +91,7 @@ func TestProxyRenderPaintsAfterLocalToRemoteHandoff(t *testing.T) {
 	ac := &attachedClient{tr: transport, output: newOutputStateStream(), size: domain.Size{Cols: 16, Rows: 6}}
 	ac.setSession(proxy)
 	proxy.sessionCore.mu.Lock()
-	proxy.client = ac
+	proxy.sessionCore.registerAttachmentLocked(ac)
 	proxy.sessionCore.mu.Unlock()
 
 	d.paint(proxy, ac, true, nil)
@@ -296,7 +296,7 @@ func newAttachedProxyFixture(t *testing.T, d *Daemon, clientTr ports.Transport, 
 	ac := &attachedClient{tr: clientTr, output: newOutputStateStream(), size: domain.Size{Cols: 16, Rows: 6}}
 	ac.setSession(proxy)
 	proxy.sessionCore.mu.Lock()
-	proxy.client = ac
+	proxy.sessionCore.registerAttachmentLocked(ac)
 	proxy.sessionCore.mu.Unlock()
 	return proxy, ac
 }
@@ -394,9 +394,9 @@ func TestProxySendErrorDetachesProxyAttachment(t *testing.T) {
 	d.paint(proxy, ac, true, nil)
 
 	proxy.sessionCore.mu.Lock()
-	client := proxy.client
+	attachments := proxy.sessionCore.snapshotAttachmentsLocked()
 	proxy.sessionCore.mu.Unlock()
-	require.Nil(t, client, "a failed send must release the proxy attachment")
+	require.Empty(t, attachments, "a failed send must release the proxy attachment")
 	require.Nil(t, ac.currentAttachmentSession(), "the client must no longer point at the proxy")
 }
 

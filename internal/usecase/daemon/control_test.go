@@ -93,7 +93,7 @@ func TestConsumeOrExpelControlEdgeNoopReturnsOKAndPreservesFocus(t *testing.T) {
 	ac := &attachedClient{}
 	ac.setSession(h.session)
 	h.session.mu.Lock()
-	h.session.client = ac
+	h.session.registerAttachmentLocked(ac)
 	h.session.mu.Unlock()
 	invalidations := make(chan renderInvalidation, 1)
 	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -403,7 +403,7 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 					require.Equal(t, snapshotGeneration+1, sess.snapshotGeneration, "one accepted action has one snapshot dirty boundary")
 					sess.snapshotMu.Unlock()
 					sess.mu.Lock()
-					require.Nil(t, sess.client, "one-shots must work headless")
+					require.Empty(t, sess.snapshotAttachmentsLocked(), "one-shots must work headless")
 					sess.mu.Unlock()
 				})
 			}
@@ -613,7 +613,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	d.mu.Unlock()
 	require.NotNil(t, created)
 	created.mu.Lock()
-	require.Nil(t, created.client)
+	require.Empty(t, created.snapshotAttachmentsLocked())
 	require.Equal(t, "/tmp/work", created.cwd)
 	require.Equal(t, []string{"INHERITED=yes"}, created.env)
 	require.True(t, created.terminal.TrueColor)
@@ -622,7 +622,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 118, Rows: 38}, tb.size)
 	tb.mu.Unlock()
-	require.Nil(t, source.client)
+	require.Empty(t, source.snapshotAttachments())
 
 	taken := sendCommand(t, d, ports.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
 	require.False(t, taken.OK)
@@ -674,7 +674,7 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	work := addControlSession(d, "work", "t_work", "p_work")
 	work.ephemeral = false
-	work.client = &attachedClient{}
+	work.registerAttachment(&attachedClient{})
 	work.mruAt.Store(2)
 	tb := newTabWithStableID("t_work_2", "p_work_2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	tb.ctx, tb.cancel = context.WithCancel(d.serveCtx)

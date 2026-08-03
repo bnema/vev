@@ -73,7 +73,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 
 			require.Same(t, source, ac.currentSession())
 			target.mu.Lock()
-			require.Nil(t, target.client)
+			require.Empty(t, target.snapshotAttachmentsLocked())
 			require.Zero(t, target.active)
 			target.mu.Unlock()
 		})

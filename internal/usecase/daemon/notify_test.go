@@ -106,7 +106,7 @@ func TestHandleClientNoticeSerializesReplacement(t *testing.T) {
 	newToasts, _ := visibleToasts(current)
 	require.Empty(t, newToasts)
 	sess.mu.Lock()
-	require.Same(t, current, sess.client)
+	require.Contains(t, sess.snapshotAttachmentsLocked(), current)
 	sess.mu.Unlock()
 }
 
@@ -379,7 +379,7 @@ func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attach
 	for _, pane := range tb.panes {
 		pane.ctx, pane.cancel = wctx, wcancel
 	}
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", client: ac}, ctx: sctx, cancel: cancel, tabs: []*tab{tb}}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: []*tab{tb}}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
@@ -521,7 +521,7 @@ func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 
 	other := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	other.initOverlays()
-	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", client: other}, ctx: sess.ctx, cancel: func() {}}
+	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{other: {}}}, ctx: sess.ctx, cancel: func() {}}
 	other.setSession(sess2)
 	d.mu.Lock()
 	d.sessions[sess2.id] = sess2
@@ -606,7 +606,7 @@ func TestNotifySessionScopedReleasesRoutingBeforeRepaint(t *testing.T) {
 func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	d, sessA, oldA, _ := newNoticeFixture(t, newNoticeClock())
 	sessA.mu.Lock()
-	sessA.client = nil
+	clearAttachmentsForTestLocked(sessA)
 	sessA.mu.Unlock()
 
 	clientB := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
@@ -628,7 +628,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	require.Empty(t, oldToasts, "a detached session must not paint a toast")
 
 	sessB.mu.Lock()
-	sessB.client = clientB
+	sessB.registerAttachmentLocked(clientB)
 	sessB.mu.Unlock()
 	d.drainPendingForFirstPaint(sessB, clientB)
 	bToasts, _ := visibleToasts(clientB)
@@ -638,7 +638,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	require.Equal(t, "global announcement", bToasts[0].Message)
 
 	sessA.mu.Lock()
-	sessA.client = oldA
+	sessA.registerAttachmentLocked(oldA)
 	sessA.mu.Unlock()
 	d.drainPendingForFirstPaint(sessA, oldA)
 	aToasts, _ := visibleToasts(oldA)
@@ -652,7 +652,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	secondA.initOverlays()
 	secondA.setSession(sessA)
 	sessA.mu.Lock()
-	sessA.client = secondA
+	sessA.registerAttachmentLocked(secondA)
 	sessA.mu.Unlock()
 	d.drainPendingForFirstPaint(sessA, secondA)
 	secondToasts, _ := visibleToasts(secondA)
@@ -664,7 +664,7 @@ func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
 
 	second := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	second.initOverlays()
-	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", client: second}, ctx: sess.ctx, cancel: func() {}}
+	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{second: {}}}, ctx: sess.ctx, cancel: func() {}}
 	second.setSession(sess2)
 	d.mu.Lock()
 	d.sessions[sess2.id] = sess2
@@ -682,7 +682,7 @@ func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
 func TestNotifyGlobalDoesNotStrandNoticeWhenFirstPaintRacesQueue(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	routeObserved := make(chan struct{})
@@ -701,7 +701,7 @@ func TestNotifyGlobalDoesNotStrandNoticeWhenFirstPaintRacesQueue(t *testing.T) {
 	// Publish the attachment and start firstPaint while global routing still
 	// owns its gate. firstPaint must wait for the queue, then drain it.
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	paintDone := make(chan struct{})
 	go func() {
@@ -744,7 +744,7 @@ func TestNotifyGlobalSerializesDetachWithDelivery(t *testing.T) {
 	toasts, _ := visibleToasts(ac)
 	require.Len(t, toasts, 1)
 	sess.mu.Lock()
-	require.Nil(t, sess.client)
+	require.Empty(t, sess.snapshotAttachmentsLocked())
 	sess.mu.Unlock()
 }
 
@@ -782,14 +782,14 @@ func TestNotifyGlobalSerializesReplacementWithDelivery(t *testing.T) {
 	newToasts, _ := visibleToasts(current)
 	require.Empty(t, newToasts)
 	sess.mu.Lock()
-	require.Same(t, current, sess.client)
+	require.Contains(t, sess.snapshotAttachmentsLocked(), current)
 	sess.mu.Unlock()
 }
 
 func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
@@ -797,7 +797,7 @@ func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.
 	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
 
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.drainPendingForFirstPaint(sess, ac)
 
@@ -813,7 +813,7 @@ func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.
 func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite, "snapshot write failed", nil)
@@ -824,7 +824,7 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 
 	// Re-attach and let firstPaint drain the pending queue.
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.firstPaint(sess, ac, domain.Size{})
 
@@ -841,7 +841,7 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	cause := errors.New("open store.db: permission denied")
@@ -854,7 +854,7 @@ func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {
 
 	// Re-attach and let firstPaint drain the pending queue.
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.firstPaint(sess, ac, domain.Size{})
 

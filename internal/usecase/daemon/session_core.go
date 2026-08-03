@@ -34,8 +34,6 @@ type sessionCore struct {
 	attachments      map[*attachedClient]struct{}
 	attachmentOrder  map[*attachedClient]uint64
 	nextAttachmentID uint64
-	client           *attachedClient
-	snatched         map[*attachedClient]struct{}
 	createdAt        int64
 	incarnation      domain.IncarnationID
 	mruAt            atomic.Uint64

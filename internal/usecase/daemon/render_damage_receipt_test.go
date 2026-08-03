@@ -95,7 +95,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			fail: func(_ *composedRenderFrame, ac *attachedClient) { ac.replaceTransport(cacheFailTransport{}) },
 			restore: func(sess *session, ac *attachedClient, healthy ports.Transport) {
 				sess.mu.Lock()
-				sess.client = ac
+				sess.registerAttachmentLocked(ac)
 				sess.mu.Unlock()
 				ac.setSession(sess)
 				ac.replaceTransport(healthy)

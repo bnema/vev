@@ -116,7 +116,7 @@ func TestMoveTabFinalSourceVisibleFloatingPreservesRuntimeAndFollowsClient(t *te
 	}))
 
 	require.Same(t, moved, destination.tabs[destination.active])
-	require.Same(t, client, destination.client)
+	require.Contains(t, destination.snapshotAttachments(), client)
 	require.Same(t, destination, client.currentSession())
 	moved.mu.Lock()
 	require.Equal(t, floatingVisible, moved.floating.state)
@@ -159,7 +159,7 @@ func TestMoveTabFinalSourceClientFollowsAndActivatesMovedTab(t *testing.T) {
 
 	require.Nil(t, source.tabs)
 	require.Same(t, destination, client.currentSession())
-	require.Same(t, client, destination.client)
+	require.Contains(t, destination.snapshotAttachments(), client)
 	require.Equal(t, attachmentActive, destination.attachmentRole(client))
 	require.Equal(t, []*tab{oldDestinationActive, moved}, destination.tabs)
 	require.Same(t, moved, destination.tabs[destination.active], "final-source follower activates the moved tab")

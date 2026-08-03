@@ -48,7 +48,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	ac := &attachedClient{output: newOutputStateStream()}
 	failed := &ownedSwapErrorTransport{ac: ac, replacement: replacement, err: sendErr, sent: make(chan ports.Frame, 1)}
 	ac.replaceTransport(failed)
-	sess := &session{sessionCore: sessionCore{name: "work", client: ac}}
+	sess := &session{sessionCore: sessionCore{name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}}
 	ac.setSession(sess)
 
 	used, err := d.boundedSendOutputErrTransport(ac, []byte("copy"))
@@ -60,7 +60,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	require.NoError(t, decodeErr)
 	require.Equal(t, []byte("copy"), out.Data)
 	d.detachOnSendError(sess, ac, used)
-	require.Same(t, ac, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), ac)
 	require.False(t, replacement.Closed())
 }
 
@@ -458,7 +458,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	ac := sess.client
+	ac := sess.snapshotAttachments()[0]
 	require.NotNil(t, ac)
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitCoordinatorOutput(t, sends, clk.timers, "while advancing render clock", "controllable timers did not produce an output frame")

@@ -149,11 +149,11 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	}
 	d.mu.Unlock()
 	alpha.mu.Lock()
-	attached := alpha.client
+	attached := alpha.snapshotAttachmentsLocked()
 	alpha.mu.Unlock()
 	require.True(t, stopped, "vertical overflow leaves the stopped session stopped")
 	require.False(t, bravoLive, "the stopped session is absent from the live registry")
-	require.Same(t, ac, attached, "the source session owns the genuinely attached client after returning")
+	require.Contains(t, attached, ac, "the source session owns the genuinely attached client after returning")
 }
 
 func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
@@ -172,10 +172,10 @@ func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
 
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, ac, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), ac)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -196,10 +196,10 @@ func TestVerticalOverflowRevalidatesFloatingSourceBeforeHandoff(t *testing.T) {
 	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, alpha.tabs[0], target), errNoNeighbor)
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, ac, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), ac)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -218,10 +218,10 @@ func TestVerticalOverflowRejectsStaleSourceTab(t *testing.T) {
 	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, expectedSource, picker.Target{Session: charlie.id, TabIndex: -1}), errNoNeighbor)
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, ac, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), ac)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -251,16 +251,16 @@ func TestVerticalOverflowTreatsDisplacedSourceClientAsNoNeighbor(t *testing.T) {
 	require.True(t, ok)
 	replacement := &attachedClient{}
 	alpha.mu.Lock()
-	alpha.client = replacement
+	alpha.registerAttachmentLocked(replacement)
 	alpha.mu.Unlock()
 
 	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, alpha.tabs[0], target), errNoNeighbor)
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, replacement, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), replacement)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -314,7 +314,7 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 			continue
 		}
 		candidate.mu.Lock()
-		if candidate.client == ac {
+		if attachmentRegistered(candidate, ac) {
 			owners = append(owners, candidate)
 		}
 		candidate.mu.Unlock()

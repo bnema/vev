@@ -163,7 +163,7 @@ func TestMovePaneCleanupUsesCommitPointSourceAttachmentToken(t *testing.T) {
 	awaitTestCompletion(t, snapshot, "move did not capture its pre-fence source attachment")
 
 	source.mu.Lock()
-	source.client = replacement
+	source.registerAttachmentLocked(replacement)
 	source.mu.Unlock()
 	close(releaseSnapshot)
 	source.layoutApplyMu.Unlock()

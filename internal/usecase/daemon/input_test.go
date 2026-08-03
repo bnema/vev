@@ -53,7 +53,7 @@ func TestConfiguredConsumeOrExpelActionsRouteThroughDaemonInput(t *testing.T) {
 			ac.setSession(h.session)
 			ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
 			h.session.mu.Lock()
-			h.session.client = ac
+			h.session.registerAttachmentLocked(ac)
 			h.session.mu.Unlock()
 			invalidations := make(chan renderInvalidation, 1)
 			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -82,7 +82,7 @@ func TestConfiguredConsumeOrExpelEdgeActionIsSilent(t *testing.T) {
 	ac.setSession(h.session)
 	ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
 	h.session.mu.Lock()
-	h.session.client = ac
+	h.session.registerAttachmentLocked(ac)
 	h.session.mu.Unlock()
 	invalidations := make(chan renderInvalidation, 1)
 	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -232,7 +232,7 @@ func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
 					rc.attach(ac)
 				} else {
 					sess.mu.Lock()
-					sess.client = nil
+					clearAttachmentsForTestLocked(sess)
 					sess.mu.Unlock()
 				}
 
@@ -1015,7 +1015,7 @@ func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
 	// A displaced attachment makes the previously valid handoff stale by the
 	// time switchToTarget commits it.
 	current.mu.Lock()
-	current.client = nil
+	clearAttachmentsForTestLocked(current)
 	current.mu.Unlock()
 
 	d.backSession(current, ac)
@@ -1224,7 +1224,7 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b "))
 	d.handleInput(sess, ac, []byte("DET\r"))
 
-	require.Nil(t, sess.client)
+	require.Empty(t, sess.snapshotAttachments())
 	f := awaitFrame(t, sends, ports.MsgDetached)
 	det, err := ports.UnmarshalDetached(f.Payload)
 	require.NoError(t, err)

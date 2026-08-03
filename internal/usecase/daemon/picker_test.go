@@ -200,7 +200,7 @@ func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
 			d, sess, ac, sends, releases := newManualTabSession(t, 2)
 			defer releaseAll(releases)
 			sess.mu.Lock()
-			sess.client = ac
+			sess.registerAttachmentLocked(ac)
 			secondTabID := domain.TabStableID(sess.tabs[1].stableID)
 			sess.mu.Unlock()
 			sess.mruAt.Store(1)
@@ -601,7 +601,7 @@ func TestSameSessionSwitchRejectsReplacedClient(t *testing.T) {
 	defer release1()
 	defer release2()
 	d, current, ac, _ := newManualSessionWithPTYs(t, p1, p2)
-	current.client = &attachedClient{}
+	current.registerAttachment(&attachedClient{})
 
 	require.Error(t, d.switchToTarget(current, ac, picker.Target{Session: current.id, TabIndex: 1}))
 	require.Equal(t, 0, current.active)
@@ -829,7 +829,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.ptys = newBlockingOpenFactory(t, d)
 	defer func() {
@@ -962,8 +962,8 @@ func TestPickerCrossSessionSwitchSnatchesExistingClient(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", ephemeral: true, client: ac1}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", client: ac2}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
+	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", ephemeral: true, attachments: map[*attachedClient]struct{}{ac1: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
+	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1}, nil)
@@ -978,8 +978,8 @@ func TestPickerCrossSessionSwitchSnatchesExistingClient(t *testing.T) {
 	d.handleInput(sess1, ac1, []byte("\r"))
 
 	require.Same(t, sess2, ac1.currentSession())
-	require.Same(t, ac1, sess2.client)
-	require.Nil(t, sess1.client)
+	require.Contains(t, sess2.snapshotAttachments(), ac1)
+	require.Empty(t, sess1.snapshotAttachments())
 	require.Equal(t, 2, sessionCount(d), "old ephemeral session remains alive after picker switch")
 
 	d.attachmentCleanupWg.Wait()
@@ -1016,8 +1016,8 @@ func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", client: ac1}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", client: ac2}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
+	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", attachments: map[*attachedClient]struct{}{ac1: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
+	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	d.sessions[sess1.id], d.sessions[sess2.id] = sess1, sess2
@@ -1051,8 +1051,8 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", ephemeral: true, client: ac1}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", client: ac2}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
+	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", ephemeral: true, attachments: map[*attachedClient]struct{}{ac1: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
+	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	d.sessions[sess1.id] = sess1
@@ -1102,7 +1102,7 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", client: ac}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
+	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
 	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta"}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
 	ac.setSession(sess1)
 	d.sessions[sess1.id] = sess1
@@ -1182,8 +1182,8 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", client: ac1}, cwd: t.TempDir(), ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, terminal: terminalEnv{}, env: []string{"SECRET=from-active-session", "SHELL=/usr/bin/fish", "PAIR=a=b"}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", client: ac2}, cwd: t.TempDir(), ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, terminal: terminalEnv{TrueColor: true}, env: []string{"STALE=destination-only", "SHELL=/bin/stale", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=stale", "VEV=stale"}}
+	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", attachments: map[*attachedClient]struct{}{ac1: {}}}, cwd: t.TempDir(), ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, terminal: terminalEnv{}, env: []string{"SECRET=from-active-session", "SHELL=/usr/bin/fish", "PAIR=a=b"}}
+	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, cwd: t.TempDir(), ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, terminal: terminalEnv{TrueColor: true}, env: []string{"STALE=destination-only", "SHELL=/bin/stale", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=stale", "VEV=stale"}}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	d.sessions[sess1.id] = sess1
@@ -1700,7 +1700,7 @@ func TestPickerRoleEffectDeleteRemovesSelectedSessionAndRefreshes(t *testing.T) 
 	target := &session{sessionCore: sessionCore{id: "target", name: "a-target", ephemeral: true}, ctx: current.ctx, cancel: func() {}, tabs: []*tab{targetTab}}
 	d.sessions[target.id] = target
 	current.mu.Lock()
-	current.client = ac
+	current.registerAttachmentLocked(ac)
 	current.mu.Unlock()
 	require.NotNil(t, d.attachCoordinator(current, nil, ac, true))
 

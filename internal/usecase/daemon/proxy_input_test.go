@@ -838,8 +838,8 @@ func TestConnectionRoleResolutionStopsAfterUnstableSnapshots(t *testing.T) {
 	client := newProxyTestTransport()
 	ac := &attachedClient{}
 	ac.replaceTransport(client)
-	first := &session{sessionCore: sessionCore{client: ac}}
-	second := &session{sessionCore: sessionCore{client: ac}}
+	first := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{ac: {}}}}
+	second := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{ac: {}}}}
 	ac.setSession(first)
 
 	const unstableSnapshots = 100
@@ -866,14 +866,14 @@ func TestConnectionLoopStopsWhenReceiveErrorCleanupMakesNoProgress(t *testing.T)
 	client := newProxyTestTransport()
 	ac := &attachedClient{}
 	ac.replaceTransport(client)
-	local := &session{sessionCore: sessionCore{client: ac}}
+	local := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{ac: {}}}}
 	ac.setSession(local)
 
 	cleanupAttempts := 0
 	d.beforeClientGoneDetach = func() {
 		cleanupAttempts++
 		local.mu.Lock()
-		local.client = &attachedClient{}
+		local.registerAttachmentLocked(&attachedClient{})
 		local.mu.Unlock()
 	}
 	snapshots := 0

@@ -255,7 +255,7 @@ func TestProxyWarmReattachCancelsAndStaleTimerCannotRemoveProxy(t *testing.T) {
 
 	ac := &attachedClient{}
 	proxy.sessionCore.mu.Lock()
-	proxy.client = ac
+	proxy.sessionCore.registerAttachmentLocked(ac)
 	proxy.sessionCore.mu.Unlock()
 	d.cancelProxyWarmForAttachment(proxy, ac)
 	awaitTestCompletion(t, firstToken.done, "first proxy warm lifecycle did not complete")
@@ -266,7 +266,9 @@ func TestProxyWarmReattachCancelsAndStaleTimerCannotRemoveProxy(t *testing.T) {
 	d.mu.Unlock()
 
 	proxy.sessionCore.mu.Lock()
-	proxy.client = nil
+	for _, attachment := range proxy.sessionCore.snapshotAttachmentsLocked() {
+		proxy.sessionCore.unregisterAttachmentLocked(attachment)
+	}
 	proxy.sessionCore.mu.Unlock()
 	d.armProxyWarm(proxy)
 	secondTimer := awaitTestValue(t, clock.timers, "second proxy timer was not registered")
@@ -471,7 +473,7 @@ func TestIncomingDirectAttachTerminatesProxiedRemoteAttachment(t *testing.T) {
 	old := &attachedClient{tr: oldTransport, output: newOutputStateStream(), proxied: true}
 	old.initOverlays()
 	old.setSession(sess)
-	sess.client = old
+	sess.registerAttachment(old)
 	d.mu.Lock()
 	require.True(t, d.registerSessionLocked(sess))
 	d.mu.Unlock()
@@ -487,7 +489,7 @@ func TestIncomingDirectAttachTerminatesProxiedRemoteAttachment(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Nil(t, result.displaced.ac, "a proxied attachment must never enter the snatched role")
-	require.Same(t, next, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), next)
 	require.Nil(t, old.currentAttachmentSession())
 
 	d.deferAttachmentTransitionCleanups(result)
@@ -1322,7 +1324,7 @@ func proxyWarmToken(p *proxySession) (*proxyWarmTimer, uint64) {
 
 func setProxyLifecycleClient(p *proxySession, ac *attachedClient) {
 	p.sessionCore.mu.Lock()
-	p.client = ac
+	p.sessionCore.registerAttachmentLocked(ac)
 	p.sessionCore.mu.Unlock()
 }
 

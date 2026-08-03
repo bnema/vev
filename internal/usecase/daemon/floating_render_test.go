@@ -595,7 +595,7 @@ func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	installTestFloating(tb, p, true)
 	ac := &attachedClient{}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{client: ac}, tabs: []*tab{tb}}
+	sess := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}}
 	base := barState{}
 	cfg := domain.FloatingConfig{Width: 100, Height: 100}
 

@@ -79,23 +79,22 @@ func TestPTYReaderRoutesEffectsToOwnerPublishedForEachRead(t *testing.T) {
 	source.snapEligible.Store(true)
 
 	destinationTab := newTab(nil, domain.Size{Cols: 80, Rows: 23})
+	destinationAttachment := &attachedClient{}
 	destination := &session{sessionCore: sessionCore{id: domain.SessionID("destination"),
-		name: "destination",
-
-		client: &attachedClient{}}, tabs: []*tab{destinationTab},
-
-		snapEligible: atomic.Bool{},
-	}
+		name:        "destination",
+		attachments: map[*attachedClient]struct{}{destinationAttachment: {}},
+	}, tabs: []*tab{destinationTab}, snapEligible: atomic.Bool{}}
 	destination.snapEligible.Store(true)
-	destination.client.initOverlays()
-	destination.client.setSession(destination)
+	destinationAttachment.initOverlays()
+	destinationAttachment.setSession(destination)
 	d.sessions[destination.id] = destination
 
 	sourceInvalidations := make(chan renderInvalidation, 2)
 	destinationInvalidations := make(chan renderInvalidation, 2)
-	sourceCoordinator := d.attachCoordinator(source, nil, source.client, true)
+	sourceAttachment := source.snapshotAttachments()[0]
+	sourceCoordinator := d.attachCoordinator(source, nil, sourceAttachment, true)
 	sourceCoordinator.opts.onInvalidate = func(invalidation renderInvalidation) { sourceInvalidations <- invalidation }
-	destinationCoordinator := d.attachCoordinator(destination, nil, destination.client, true)
+	destinationCoordinator := d.attachCoordinator(destination, nil, destinationAttachment, true)
 	destinationCoordinator.opts.onInvalidate = func(invalidation renderInvalidation) { destinationInvalidations <- invalidation }
 
 	d.startPaneGoroutines(source, source.activeTab(), pane)

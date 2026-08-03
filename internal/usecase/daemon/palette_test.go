@@ -94,7 +94,7 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	p2, release2 := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1, p2)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.ptys = newBlockingOpenFactory(t, d)
 	defer release1()
@@ -317,7 +317,7 @@ func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *t
 	d.handleInput(current, ac, []byte("recent\r"))
 
 	require.Same(t, target, ac.currentSession())
-	require.Same(t, ac, target.client, "canonical handoff reuses the attached client")
+	require.Contains(t, target.snapshotAttachments(), ac, "canonical handoff reuses the attached client")
 	require.False(t, ac.overlays.paletteActive())
 	require.Empty(t, d.paletteRecent, "session selections are not command recency")
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -340,7 +340,7 @@ func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *te
 
 	require.Same(t, current, ac.currentSession(), "failed resume must retain the source attachment")
 	current.mu.Lock()
-	require.Same(t, ac, current.client)
+	require.Contains(t, current.snapshotAttachmentsLocked(), ac)
 	current.mu.Unlock()
 	require.True(t, ac.overlays.paletteActive())
 	ac.overlays.paletteMu.Lock()
@@ -517,7 +517,7 @@ func TestPaletteDeniedPostHandoffRoleEffectClosesAndInvalidates(t *testing.T) {
 	// no-op BSK command succeeds, but its post-execution beginRoleEffect is
 	// deterministically denied.
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	d.handlePaletteInput(ac, []byte("\r"))
@@ -685,13 +685,13 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, 2, sessionCount(d))
-	require.Nil(t, sess.client)
+	require.Empty(t, sess.snapshotAttachments())
 	newSess := ac.currentSession()
 	require.NotNil(t, newSess)
 	require.NotSame(t, sess, newSess)
 	require.Equal(t, "scratch", newSess.name)
 	require.False(t, newSess.ephemeral)
-	require.Same(t, ac, newSess.client)
+	require.Contains(t, newSess.snapshotAttachments(), ac)
 	require.Equal(t, attachmentActive, newSess.attachmentRole(ac))
 	require.Greater(t, ac.roleGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
 	require.Contains(t, string(finalOutput.Data), "scratch")
@@ -701,7 +701,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	defer releases[0]()
 	defer releases[1]()
