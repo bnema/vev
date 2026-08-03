@@ -91,14 +91,15 @@ func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, o
 	go func() { completed <- operation() }()
 	select {
 	case err := <-completed:
-		if ctx.Err() != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
 			_ = transport.Close()
-			return ctx.Err()
+			return ctxErr
 		}
 		return err
 	case <-ctx.Done():
 		_ = transport.Close()
-		<-completed
+		// The result channel is buffered, so the operation can publish its
+		// completion after Close without keeping this cancellation path stuck.
 		return ctx.Err()
 	}
 }

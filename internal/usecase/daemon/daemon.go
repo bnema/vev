@@ -1034,7 +1034,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	d.mu.Unlock()
 
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-	_ = tr.Send(frameSessions(infos))
+	_ = d.boundedControlSend(tr, frameSessions(infos))
 }
 
 // handleKill terminates the requested live session or stopped named session,
@@ -1045,7 +1045,7 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 
 	k, err := ports.UnmarshalKill(f.Payload)
 	if err != nil {
-		_ = tr.Send(frameError(ports.ErrInternal, "malformed kill request"))
+		_ = d.boundedControlSend(tr, frameError(ports.ErrInternal, "malformed kill request"))
 		return
 	}
 	if k.All {
@@ -1062,7 +1062,7 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 			// deletion order as live and offline purges.
 			if err := d.retryStoppedPurge(k.Name); err != nil {
 				d.log.Warn("deleting stopped session failed", "err", err, "session", k.Name)
-				_ = tr.Send(frameError(ports.ErrInternal, "deleting stopped session failed"))
+				_ = d.boundedControlSend(tr, frameError(ports.ErrInternal, "deleting stopped session failed"))
 			}
 			return
 		}
@@ -1070,11 +1070,11 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	d.mu.Unlock()
 
 	if target == nil {
-		_ = tr.Send(frameError(ports.ErrNoSuchSession, "no such session: "+k.Name))
+		_ = d.boundedControlSend(tr, frameError(ports.ErrNoSuchSession, "no such session: "+k.Name))
 		return
 	}
 	if err := d.killSession(target, ports.ReasonSessionKilled, true); err != nil {
-		_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted session failed"))
+		_ = d.boundedControlSend(tr, frameError(ports.ErrInternal, "deleting persisted session failed"))
 	}
 }
 

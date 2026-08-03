@@ -81,11 +81,22 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 // sendCommandResult gives one-shot control responses the same observable
 // transport-failure behavior regardless of which validation path produced it.
 func (d *Daemon) sendCommandResult(tr ports.Transport, result ports.CommandResult) error {
-	if err := tr.Send(frameCommandResult(result)); err != nil {
+	if err := d.boundedControlSend(tr, frameCommandResult(result)); err != nil {
 		d.log.Warn("command response send failed", "err", err)
 		return err
 	}
 	return nil
+}
+
+// boundedControlSend keeps one-shot control handlers from waiting forever on a
+// client that stopped reading. A timeout closes the exact transport so a
+// blocked Send can unwind before the handler returns.
+func (d *Daemon) boundedControlSend(tr ports.Transport, frame ports.Frame) error {
+	_, err := d.boundedSendWith(tr, func() error { return tr.Send(frame) })
+	if errors.Is(err, errSendTimedOut) {
+		_ = tr.Close()
+	}
+	return err
 }
 
 func frameCommandResult(result ports.CommandResult) ports.Frame {

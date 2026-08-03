@@ -85,7 +85,6 @@ type attachedClient struct {
 	previousSession Guarded[attachmentSession]
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
-	commands        attachedCommandTracker
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.

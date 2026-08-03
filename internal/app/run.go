@@ -1049,9 +1049,27 @@ func runStdio(ctx context.Context) (retErr error) {
 		return err
 	}
 	defer func() { _ = transport.Close() }()
-	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
+
+	// sshstdio.Close owns and closes writers that implement io.Closer so a
+	// blocked Send can unwind. Keep process-global stdin/stdout outside that
+	// ownership boundary: input is a non-closing view and output is an owned
+	// pipe drained by a small forwarding goroutine.
+	stdin, stdout := os.Stdin, os.Stdout
+	stdoutReader, stdoutWriter := io.Pipe()
+	go func() {
+		if _, err := io.Copy(stdout, stdoutReader); err != nil {
+			_ = stdoutReader.CloseWithError(err)
+		}
+	}()
+	defer func() {
+		_ = stdoutWriter.Close()
+		_ = stdoutReader.Close()
+	}()
+	stdio := sshstdio.NewTransport(nonClosingReader{Reader: stdin}, stdoutWriter, nil, sshstdio.WithRuntimeObserver(observer))
 	return runStdioProxy(ctx, stdio, transport, log)
 }
+
+type nonClosingReader struct{ io.Reader }
 
 var (
 	udpBootstrapTimeout = 5 * time.Second

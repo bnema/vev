@@ -47,6 +47,66 @@ func (t *handshakeBlockingTransport) Close() error {
 	return nil
 }
 
+func TestBoundedHandshakeCompletionCancellationDoesNotDoubleReceive(t *testing.T) {
+	ctx := &completionCancellationContext{}
+	tr := &closeTrackingTransport{}
+	done := make(chan error, 1)
+	go func() {
+		done <- boundedHandshakeOperation(ctx, tr, func() error {
+			ctx.canceled = true
+			return nil
+		})
+	}()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("handshake completion/cancellation race deadlocked")
+	}
+}
+
+type completionCancellationContext struct{ canceled bool }
+
+func (c *completionCancellationContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *completionCancellationContext) Done() <-chan struct{}       { return nil }
+func (c *completionCancellationContext) Err() error {
+	if c.canceled {
+		return context.Canceled
+	}
+	return nil
+}
+func (*completionCancellationContext) Value(any) any { return nil }
+
+func TestBoundedHandshakeCancellationDoesNotWaitForUninterruptibleOperation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr := &closeTrackingTransport{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	operationDone := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- boundedHandshakeOperation(ctx, tr, func() error {
+			close(started)
+			<-release
+			close(operationDone)
+			return nil
+		})
+	}()
+
+	<-started
+	cancel()
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("handshake cancellation waited for the transport operation")
+	}
+	close(release)
+	awaitTestCompletion(t, operationDone, "handshake operation did not finish")
+}
+
 func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, nil, clock)

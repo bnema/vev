@@ -70,6 +70,8 @@ type transport struct {
 	operationCount int
 	closing        bool
 	operationsDone chan struct{}
+	closeOnce      sync.Once
+	closeErr       error
 
 	mu      sync.Mutex
 	readBuf []byte
@@ -160,22 +162,32 @@ func (t *transport) mapEOFError(err error) error {
 }
 
 func (t *transport) Close() error {
-	done := t.beginShutdown()
-	// Closing the reader first releases a Recv blocked in io.ReadFull even if
-	// the subprocess shutdown callback reports an error. This lets Recv emit
-	// its failed end mark before the process observer is closed.
-	var readErr error
-	if r, ok := t.r.(io.Closer); ok {
-		readErr = r.Close()
-	}
-	closeErr := t.close()
-	if done != nil {
-		<-done
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return readErr
+	t.closeOnce.Do(func() {
+		done := t.beginShutdown()
+		// Close owned streams before waiting for in-flight operations. The
+		// writer is what releases a Send blocked on a child stdin pipe; the
+		// reader releases a Recv blocked in io.ReadFull.
+		var writeErr, readErr error
+		if w, ok := t.w.(io.Closer); ok {
+			writeErr = w.Close()
+		}
+		if r, ok := t.r.(io.Closer); ok {
+			readErr = r.Close()
+		}
+		closeErr := t.close()
+		if done != nil {
+			<-done
+		}
+		switch {
+		case closeErr != nil:
+			t.closeErr = closeErr
+		case readErr != nil:
+			t.closeErr = readErr
+		default:
+			t.closeErr = writeErr
+		}
+	})
+	return t.closeErr
 }
 
 func (t *transport) beginObservedOperation() bool {

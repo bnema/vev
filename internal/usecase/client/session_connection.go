@@ -60,14 +60,6 @@ func (c *SessionConnection) Transport() ports.Transport {
 	return c.transport
 }
 
-// Target returns the immutable daemon-facing session selection.
-func (c *SessionConnection) Target() SessionTarget {
-	if c == nil {
-		return SessionTarget{}
-	}
-	return c.target
-}
-
 // AttachRequest returns the common request shape used after transport
 // selection. It contains no remote/proxy semantic.
 func (c *SessionConnection) AttachRequest() AttachRequest {
@@ -76,9 +68,6 @@ func (c *SessionConnection) AttachRequest() AttachRequest {
 	}
 	return AttachRequest{Intent: c.target.Intent, SessionName: c.target.SessionName}
 }
-
-// Request is the short form of AttachRequest for connection callers.
-func (c *SessionConnection) Request() AttachRequest { return c.AttachRequest() }
 
 // Close releases the owned transport.
 func (c *SessionConnection) Close() error {

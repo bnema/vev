@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,6 +105,42 @@ func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCloseInterruptsBlockedSend(t *testing.T) {
+	writer := &blockedWriter{started: make(chan struct{}), released: make(chan struct{})}
+	transport := NewTransport(nil, writer, nil)
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("blocked")}) }()
+	<-writer.started
+	if err := transport.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := <-sendDone; err == nil {
+		t.Fatal("Send() error = nil after Close()")
+	}
+}
+
+type blockedWriter struct {
+	started  chan struct{}
+	released chan struct{}
+	once     sync.Once
+}
+
+func (w *blockedWriter) Write([]byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.released
+	return 0, io.ErrClosedPipe
+}
+
+func (w *blockedWriter) Close() error {
+	select {
+	case <-w.released:
+	default:
+		close(w.released)
+	}
+	return nil
 }
 
 func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
