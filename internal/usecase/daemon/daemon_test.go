@@ -439,10 +439,101 @@ func newManualTabSession(t *testing.T, n int) (*Daemon, *session, *attachedClien
 	return d, sess, ac, sends, releases
 }
 
-func activeTabIndex(sess *session) int {
+func testAttachment(sess *session) *attachedClient {
+	if sess == nil {
+		return nil
+	}
+	attachments := sess.snapshotAttachments()
+	if len(attachments) == 0 {
+		return nil
+	}
+	return attachments[0]
+}
+
+func testAttachmentTabLocked(sess *session) *tab {
+	if sess == nil {
+		return nil
+	}
+	var ac *attachedClient
+	for candidate := range sess.attachments {
+		ac = candidate
+		break
+	}
+	if ac == nil {
+		if len(sess.tabs) == 0 {
+			return nil
+		}
+		return sess.tabs[0]
+	}
+	view := ac.viewSnapshot()
+	for _, tb := range sess.tabs {
+		if domain.TabStableID(tb.stableID) == view.tabID {
+			return tb
+		}
+	}
+	return nil
+}
+
+func testAttachmentTab(sess *session) *tab {
+	if ac := testAttachment(sess); ac != nil {
+		return sess.tabForAttachment(ac)
+	}
+	return sess.firstTab()
+}
+
+func selectTestAttachmentTab(sess *session, idx int) bool {
+	ac := testAttachment(sess)
+	if ac == nil {
+		return idx == 0 && testAttachmentTab(sess) != nil
+	}
+	return sess.switchAttachmentTab(ac, idx)
+}
+
+// selectTestAttachmentTabLocked is used only by fixtures that already hold
+// sess.mu; production navigation always goes through selectAttachmentTab.
+func selectTestAttachmentTabLocked(sess *session, idx int) bool {
+	if sess == nil {
+		return false
+	}
+	var ac *attachedClient
+	for candidate := range sess.attachments {
+		ac = candidate
+		break
+	}
+	if ac == nil {
+		return idx == 0 && len(sess.tabs) > 0
+	}
+	return sess.activateAttachmentViewLocked(ac, idx)
+}
+
+func testAttachmentTabIndexLocked(sess *session) int {
+	if sess == nil {
+		return 0
+	}
+	var ac *attachedClient
+	for candidate := range sess.attachments {
+		ac = candidate
+		break
+	}
+	if ac == nil {
+		return 0
+	}
+	view := ac.viewSnapshot()
+	for i, tb := range sess.tabs {
+		if domain.TabStableID(tb.stableID) == view.tabID {
+			return i
+		}
+	}
+	return 0
+}
+
+func testAttachmentTabIndex(sess *session) int {
+	if sess == nil {
+		return 0
+	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	return sess.active
+	return testAttachmentTabIndexLocked(sess)
 }
 
 func testRow(text string) []renderer.Cell {

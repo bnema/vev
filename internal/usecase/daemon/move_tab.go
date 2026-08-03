@@ -185,7 +185,6 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		unlockDispatch:           unlockDispatch,
 		reservation:              reservation,
 		oldTabCancel:             commit.oldTabCancel,
-		sourceTabWasActive:       !commit.sourceEmpty,
 		sourceTabRemoved:         true,
 		sourceEmpty:              commit.sourceEmpty,
 		retiredParked:            commit.retiredParked,

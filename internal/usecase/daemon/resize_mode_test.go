@@ -64,7 +64,7 @@ func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	require.Equal(t, "pane is not in a split", tooEarly.Text)
 
 	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	beforeFocus := tb.tree.Focus
 	beforeGeneration := tb.layoutGeneration
@@ -130,7 +130,7 @@ func TestResizeModeStateRenderingAndMouseConsumption(t *testing.T) {
 	snapshot.Unlock()
 	require.False(t, (capturedOverlayRenderState{resizeActive: true}).active(), "resize must not create a modal render layer")
 
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	focused := tb.focusedPane()
 	tb.mu.Unlock()
@@ -199,7 +199,7 @@ func TestResizeModeKeysAndEscapes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, ac := resizeModeFixture(t)
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
 			before := tb.layoutGeneration
 			if tt.equalize {
@@ -229,7 +229,7 @@ func TestResizeModeKeysAndEscapes(t *testing.T) {
 
 func TestResizeModeRendersGuidanceWithoutHidingContentOrCursor(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	second := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
 	tb.mu.Lock()
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
@@ -296,7 +296,7 @@ func TestResizeModeOverlayPriority(t *testing.T) {
 func TestResizeModeWarningPersistsAndActionsShareTransaction(t *testing.T) {
 	t.Run("too small warning leaves mode active", func(t *testing.T) {
 		d, sess, ac := resizeModeFixture(t)
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		tb.mu.Lock()
 		tb.size.Cols = 41 // two minimum-width panes and their separator
 		tb.bumpLayoutGenerationLocked()
@@ -331,7 +331,7 @@ func TestResizeModeWarningPersistsAndActionsShareTransaction(t *testing.T) {
 			t.Run(tt.name, func(t *testing.T) {
 				d, sess, ac := resizeModeFixture(t)
 				require.NoError(t, tt.run(d, sess, ac))
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				got := []float64{tb.tree.Root.Children[0].Weight, tb.tree.Root.Children[1].Weight}
 				tb.mu.Unlock()
@@ -372,7 +372,7 @@ func TestResizeModeReleasesTabAndOverlayLocksBeforePTY(t *testing.T) {
 	// Build a live tree directly so the probe is not concurrently owned by a
 	// pane reader; this isolates the lock boundary being asserted.
 	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	probe := &resizeLockProbePTY{entered: make(chan struct{}), release: make(chan struct{})}
 	second := newPane("pane-2", probe, domain.Size{Cols: 39, Rows: 23})
 	tb.mu.Lock()

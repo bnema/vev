@@ -51,14 +51,13 @@ type session struct {
 	teardownWaiters   uint
 	teardownChanged   chan struct{}
 	lifecycleStopOnce sync.Once
-	// sessionCore.mu guards tabs, active, attachment membership, restoreDone,
-	// clipFiles, and clipboard queue state.
+	// sessionCore.mu guards tabs, attachment membership, restoreDone, clipFiles,
+	// and clipboard queue state.
 	// restoreDone remains attached to a restored session after it is published in
 	// the live registry, so racing attaches cannot bypass restoration completion.
 	restoreDone            chan struct{}
 	themeMu                sync.Mutex
 	tabs                   []*tab
-	active                 int
 	clipboardQueue         []clipboardForward
 	clipboardWorkerRunning bool
 	cwd                    string
@@ -852,27 +851,6 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
 	return current
-}
-
-func (s *session) activeTab() *tab {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.active < 0 || s.active >= len(s.tabs) {
-		return nil
-	}
-	return s.tabs[s.active]
-}
-
-func (s *session) switchTab(idx int) bool {
-	s.mu.Lock()
-	if idx < 0 || idx >= len(s.tabs) || idx == s.active {
-		s.mu.Unlock()
-		return false
-	}
-	s.active = idx
-	s.mu.Unlock()
-	markSnapshotDirty(s)
-	return true
 }
 
 func (d *Daemon) renameSession(sess *session, name string) error {
@@ -1747,7 +1725,7 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	if d.procCwd == nil {
 		return
 	}
-	tb := sess.tabForAttachmentOrActive(nil)
+	tb := sess.firstTab()
 	if tb == nil {
 		return
 	}

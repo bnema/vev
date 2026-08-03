@@ -319,7 +319,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	}
 	var tb *tab
 	if local {
-		tb = sess.tabForAttachmentOrActive(ac)
+		tb = sess.tabForAttachment(ac)
 		if tb == nil {
 			return
 		}

@@ -1140,7 +1140,7 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 	if ac.proxied {
-		meta, ok := sess.sessionMetaSnapshot()
+		meta, ok := sess.sessionMetaSnapshotFor(ac)
 		metaFrame, metaErr := frameSessionMeta(meta)
 		if !ok || metaErr != nil || ac.sendExpectedTransportForRole(postWelcomeToken.transport, metaFrame, postWelcomeTicket) != nil {
 			postWelcomeTicket.End()

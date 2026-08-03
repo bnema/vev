@@ -219,7 +219,7 @@ func captureLocalPrimaryRenderState(
 	}
 	tb, _ := sess.paneForAttachment(ac)
 	if tb == nil {
-		tb = sess.tabForAttachmentOrActive(ac)
+		tb = sess.tabForAttachment(ac)
 	}
 	if tb == nil {
 		return nil, false

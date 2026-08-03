@@ -59,7 +59,7 @@ func (d *Daemon) jumpAttentionForRole(sess *session, ac *attachedClient, token a
 	}
 	if idx, ok := oldestAttentionTab(sess); ok {
 		if sess.switchAttachmentTab(ac, idx) {
-			d.activateTabAfterResizeForLease(sess, sess.tabForAttachmentOrActive(ac), false, ac, token.lease)
+			d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(ac), false, ac, token.lease)
 			d.invalidateRender(sess, ac, true, "attention.go")
 		}
 		return nil

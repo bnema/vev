@@ -285,7 +285,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 			p := newResizeReaderPTY([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			ac.output.maxOutstanding = tc.window
-			pane := sess.activeTab().focusedPane()
+			pane := testAttachmentTab(sess).focusedPane()
 			p.applying = func() bool {
 				pane.mu.Lock()
 				defer pane.mu.Unlock()
@@ -299,7 +299,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 
 			d.sessWg.Add(1)
 			pane.onExit = func() {}
-			go d.ptyReader(sess, sess.activeTab(), pane)
+			go d.ptyReader(sess, testAttachmentTab(sess), pane)
 			defer func() { p.close(); d.sessWg.Wait() }()
 
 			// The resize deadline drives coordinator prepare/apply/commit. No test
@@ -387,7 +387,7 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
-	require.Equal(t, 120, sess.activeTab().focusedPane().screen.Frame.Width)
+	require.Equal(t, 120, testAttachmentTab(sess).focusedPane().screen.Frame.Width)
 	requireNoOutputFrame(t, sends)
 }
 

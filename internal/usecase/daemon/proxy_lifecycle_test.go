@@ -581,7 +581,7 @@ func TestReplacedProxyCannotBeSelectedOrReattachedAfterSwitchAway(t *testing.T) 
 	require.True(t, ok)
 	require.Equal(t, proxyWarmDuration, warmTimer.delay)
 
-	views, _ := d.pickerViews(local)
+	views, _ := d.pickerViews(local, nil)
 	var expiredView picker.SessionView
 	for _, view := range views {
 		if view.RemoteKey != nil && *view.RemoteKey == key {
@@ -597,7 +597,7 @@ func TestReplacedProxyCannotBeSelectedOrReattachedAfterSwitchAway(t *testing.T) 
 	require.Equal(t, key.Display()+" [expired]", proxy.lifecycleDisplayName())
 
 	d.enterPicker(local, ac)
-	forced := d.newPickerModel(local, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{
+	forced := d.newPickerModel(local, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{
 		Session: key.ID(), RemoteKey: &key,
 	})
 	ac.overlays.pickerMu.Lock()

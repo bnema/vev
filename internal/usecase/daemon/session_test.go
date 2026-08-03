@@ -72,7 +72,7 @@ func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
 
 	require.NoError(t, d.createTab(sess, sz))
 	require.Equal(t, []string{"/tmp/work", "/tmp/work"}, dirs)
-	requireFloatingInitialized(t, sess.activeTab())
+	requireFloatingInitialized(t, testAttachmentTab(sess))
 	_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	releaseFirst()
 	releaseSecond()
@@ -998,7 +998,7 @@ func TestCloseActiveTabActivatesDestinationFloatingPane(t *testing.T) {
 	defer releases[1]()
 	sess.mu.Lock()
 	first, closing := sess.tabs[0], sess.tabs[1]
-	sess.active = 1
+	selectTestAttachmentTabLocked(sess, 1)
 	sess.mu.Unlock()
 	first.mu.Lock()
 	stale := first.takeFloatingLocked()
@@ -1007,7 +1007,7 @@ func TestCloseActiveTabActivatesDestinationFloatingPane(t *testing.T) {
 
 	require.NoError(t, d.closeTab(sess, closing, false))
 
-	require.Same(t, first, sess.activeTab())
+	require.Same(t, first, testAttachmentTab(sess))
 	requireFloatingInitialized(t, first)
 }
 

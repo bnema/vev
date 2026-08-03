@@ -78,7 +78,6 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	sourceClient := admission.sourceClient
 	destinationClient := admission.destinationClient
 	sourceSnatched := admission.sourceSnatched
-	sourceTabWasActive := admission.sourceTabWasActive
 	sourceTabInitialGeneration := admission.sourceGeneration
 	destinationTabInitialGeneration := admission.destinationGeneration
 	finalSourceTab := admission.finalSourceTab
@@ -215,7 +214,6 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		rolesFrozen:              sourceRolesFrozen,
 		unlockDispatch:           unlockDispatch,
 		reservation:              reservation,
-		sourceTabWasActive:       sourceTabWasActive,
 		sourceTabRemoved:         commit.sourceTabRemoved,
 		sourceEmpty:              commit.sourceEmpty,
 		retiredParked:            commit.retiredParked,

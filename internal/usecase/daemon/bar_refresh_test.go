@@ -85,17 +85,16 @@ func TestBarScriptRefreshIntervalClampingTickAndLastGoodOnFailure(t *testing.T) 
 	require.Equal(t, "bot2", state.bottomRight)
 }
 
-func TestBarScriptContextUsesActivePaneSessionAndClientCols(t *testing.T) {
+func TestBarScriptContextUsesFirstOrderedPaneAndClientCols(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top", "bottom"}}
 	d := newBarRefreshTestDaemon(r, time.Second)
 	sess := newBarRefreshTestSession()
 	sess.name = "work"
 	sess.cwd = "/repo"
 	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 132, Rows: 40}})
-	sess.active = 1
-	sess.tabs[1].size = domain.Size{Cols: 132, Rows: 38}
-	active := sess.tabs[1].focusedPane()
-	active.stableID = "pane-active"
+	sess.tabs[0].size = domain.Size{Cols: 132, Rows: 38}
+	active := sess.tabs[0].focusedPane()
+	active.stableID = "pane-default"
 	active.pty = newScriptPTY(nil)
 	d.procCwd = func(pid int) (string, error) {
 		require.Equal(t, 4242, pid)
@@ -107,8 +106,8 @@ func TestBarScriptContextUsesActivePaneSessionAndClientCols(t *testing.T) {
 	require.Len(t, r.calls, 2)
 	for _, call := range r.calls {
 		require.Equal(t, "work", call.Session)
-		require.Equal(t, "tab-active", call.Tab)
-		require.Equal(t, "pane-active", call.Pane)
+		require.Equal(t, "tab-inactive", call.Tab)
+		require.Equal(t, "pane-default", call.Pane)
 		require.Equal(t, "/pane-repo", call.PaneCWD)
 		require.Equal(t, 132, call.Cols)
 	}
@@ -587,7 +586,7 @@ func newBarRefreshTestSession() *session {
 	inactive := newTabWithStableID("tab-inactive", "pane-inactive", nil, domain.Size{Cols: 80, Rows: 22})
 	active := newTabWithStableID("tab-active", "pane-active", nil, domain.Size{Cols: 80, Rows: 22})
 	active.tree.Focus = layout.PaneID("pane-1")
-	return &session{sessionCore: sessionCore{id: "s", name: "s"}, cwd: "/tmp", tabs: []*tab{inactive, active}, active: 0, ctx: context.Background()}
+	return &session{sessionCore: sessionCore{id: "s", name: "s"}, cwd: "/tmp", tabs: []*tab{inactive, active}, ctx: context.Background()}
 }
 
 func waitBarRefreshIdle(t *testing.T, d *Daemon) {

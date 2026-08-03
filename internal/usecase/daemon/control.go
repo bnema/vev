@@ -276,7 +276,10 @@ func resolveDaemonActionTargetForAttachment(sess *session, ac *attachedClient) d
 	if sess == nil {
 		return daemonActionTarget{}
 	}
-	tb := sess.tabForAttachmentOrActive(ac)
+	tb := sess.tabForAttachment(ac)
+	if ac == nil {
+		tb = sess.firstTab()
+	}
 	if tb == nil {
 		return daemonActionTarget{session: sess}
 	}
@@ -364,8 +367,8 @@ func (d *Daemon) hasDaemonActionPaneTarget(target daemonActionTarget) bool {
 }
 
 func (a daemonActions) switchRelative(sess *session, ac *attachedClient, delta int) error {
-	if sess.switchAttachmentRelative(ac, delta) {
-		a.d.activateTabAfterResizeForLease(sess, sess.tabForAttachmentOrActive(ac), false, ac, nil)
+	if sess.switchAttachmentRelativeForDispatch(ac, delta) {
+		a.d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(ac), false, ac, nil)
 	}
 	return nil
 }
@@ -689,7 +692,11 @@ func (e controlExec) ListPanes(asJSON bool) (string, error) {
 	}
 	tb := e.tab
 	if tb == nil {
-		tb = e.sess.tabForAttachmentOrActive(e.target.attachment)
+		if e.target.attachment == nil {
+			tb = e.sess.firstTab()
+		} else {
+			tb = e.sess.tabForAttachment(e.target.attachment)
+		}
 	}
 	if tb == nil {
 		return "", errors.New("target session has no active tab")

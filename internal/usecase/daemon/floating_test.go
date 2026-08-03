@@ -485,7 +485,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		t.Helper()
 		normalPTY, releaseNormal := newBlockingPTY(t)
 		d, sess, ac, sends := newManualSessionWithPTYs(t, normalPTY)
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		require.NotNil(t, tb)
 		tb.mu.Lock()
 		normal := tb.focusedPane()

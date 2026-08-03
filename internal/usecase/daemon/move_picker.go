@@ -60,7 +60,7 @@ func (d *Daemon) enterPickerForIntent(sess *session, ac *attachedClient, intent 
 	if intent != pickerNavigate && !sess.capabilities().yieldsMoves() {
 		return errSessionCannotYieldMoves
 	}
-	model := d.newPickerModel(sess, intent, source, picker.SourceFilter{})
+	model := d.newPickerModel(sess, ac, intent, source, picker.SourceFilter{})
 	if intent != pickerNavigate {
 		if _, ok := model.Selected(); !ok {
 			return errNoMoveDestination
@@ -172,7 +172,7 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 		}
 	}
 	rt.pickerMu.Unlock()
-	model := d.newPickerModel(sess, intent, source, current)
+	model := d.newPickerModel(sess, ac, intent, source, current)
 	if rt.afterPickerRefreshBuild != nil {
 		rt.afterPickerRefreshBuild(model)
 	}

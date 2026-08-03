@@ -148,7 +148,7 @@ func (p *proxySession) snapshotView(opts viewOptions) sessionView {
 		expired:           expired,
 		createdAt:         p.createdAt,
 		mruAt:             p.mruAt.Load(),
-		active:            int(meta.Active),
+		defaultTab:        0,
 		tabCount:          len(meta.Tabs),
 		cannotAcceptMoves: true,
 	}
@@ -191,7 +191,7 @@ func (p *proxySession) statusSegments(_ bool) statusSnapshot {
 	return snapshot
 }
 
-func (p *proxySession) activateTargetLocked(tabIndex int) bool {
+func (p *proxySession) validTargetTabLocked(tabIndex int) bool {
 	if tabIndex < 0 {
 		return true
 	}

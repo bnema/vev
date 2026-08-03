@@ -35,7 +35,7 @@ func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDest
 	releases = append(releases, releaseDest)
 	destinationTab := newTabWithStableID("destination-tab", "destination-pane", destPTY, domain.Size{Cols: 80, Rows: 23})
 	publishTiledPaneOwners(source, sourceTab)
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{destinationTab}, active: 0}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{destinationTab}}
 	publishTiledPaneOwners(destination, destinationTab)
 	for range extraDestinationTabs {
 		extraPTY, releaseExtra := newBlockingPTY(t)
@@ -306,7 +306,7 @@ func TestMovePickerRefreshCloseKeepsReplacementPicker(t *testing.T) {
 		t.Fatal("timed out waiting for move-picker refresh rebuild")
 	}
 
-	replacement := d.newPickerModel(source, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	replacement := d.newPickerModel(source, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(source, ac, replacement, pickerNavigate, moveSourceLocator{})
 	close(allowClose)
 	select {

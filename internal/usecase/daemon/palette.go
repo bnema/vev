@@ -672,7 +672,10 @@ func (e paletteExec) RenameSession() error {
 }
 
 func (e paletteExec) RenameTab() error {
-	tb := e.sess.tabForAttachmentOrActive(e.ac)
+	tb := e.sess.tabForAttachment(e.ac)
+	if e.ac == nil {
+		tb = e.sess.firstTab()
+	}
 	if tb == nil {
 		return nil
 	}

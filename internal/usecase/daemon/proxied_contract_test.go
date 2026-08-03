@@ -57,9 +57,9 @@ func TestProxiedHandshakeOrdersWelcomeMetadataAndBaseZeroContent(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	sess.activeTab().mu.Lock()
-	actualContentSize := sess.activeTab().size
-	sess.activeTab().mu.Unlock()
+	testAttachmentTab(sess).mu.Lock()
+	actualContentSize := testAttachmentTab(sess).size
+	testAttachmentTab(sess).mu.Unlock()
 	require.Equal(t, contentSize, actualContentSize, "proxied geometry must not subtract chrome a second time")
 
 	release()
@@ -94,9 +94,9 @@ func TestOrdinaryHandshakeRetainsChromeAndNoMetadata(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	sess.activeTab().mu.Lock()
-	actualContentSize := sess.activeTab().size
-	sess.activeTab().mu.Unlock()
+	testAttachmentTab(sess).mu.Lock()
+	actualContentSize := testAttachmentTab(sess).size
+	testAttachmentTab(sess).mu.Unlock()
 	require.Equal(t, tabSize(viewport), actualContentSize)
 	requireNoOutputFrame(t, sends)
 
@@ -143,7 +143,7 @@ func TestProxiedRemotePaintSendsMetadataBeforeScreen(t *testing.T) {
 func TestProxiedPaintPublishesAbsoluteVisibleCursorStyle(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	pane := sess.activeTab().focusedPane()
+	pane := testAttachmentTab(sess).focusedPane()
 	pane.mu.Lock()
 	pane.screen.Write([]byte("\x1b[3;6H\x1b[0 q"))
 	pane.mu.Unlock()
@@ -209,7 +209,7 @@ func TestProxiedTransactionalResizeUsesReceivedContentGeometry(t *testing.T) {
 
 	want := domain.Size{Cols: 100, Rows: 12}
 	require.True(t, d.requestTransactionalResizeForLease(sess, ac, lease, want, true))
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	require.Equal(t, want, tb.size)
 	tb.mu.Unlock()

@@ -718,7 +718,7 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 	// Drained before the early return below so a session without an active tab
 	// cannot swallow the queue.
 	d.drainPendingForFirstPaint(sess, ac)
-	tb := sess.tabForAttachmentOrActive(ac)
+	tb := sess.tabForAttachment(ac)
 	if tb == nil {
 		return
 	}

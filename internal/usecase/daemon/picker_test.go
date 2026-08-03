@@ -79,7 +79,7 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	d.sessions[current.id] = current
 	d.sessions[ringing.id] = ringing
 
-	views, currentSelection := d.pickerViews(current)
+	views, currentSelection := d.pickerViews(current, nil)
 
 	require.Equal(t, picker.SourceFilter{Session: current.id}, currentSelection)
 	require.Len(t, views, 2)
@@ -104,7 +104,7 @@ func TestPickerViewsIncludesEphemeralSessions(t *testing.T) {
 	d.sessions[current.id] = current
 	d.sessions[ephemeral.id] = ephemeral
 
-	views, _ := d.pickerViews(current)
+	views, _ := d.pickerViews(current, nil)
 
 	require.Len(t, views, 2)
 	var ephemeralView picker.SessionView
@@ -132,7 +132,7 @@ func TestPickerViewsOrdersByMRUWithEphemeralInterleaved(t *testing.T) {
 	d.stopped["halted-old"] = stoppedSession{name: "halted-old", createdAt: 10, lastUsedSeq: 1}
 	d.stopped["halted-new"] = stoppedSession{name: "halted-new", createdAt: 11, lastUsedSeq: 2}
 
-	views, _ := d.pickerViews(recent)
+	views, _ := d.pickerViews(recent, nil)
 
 	names := make([]string, 0, len(views))
 	for _, v := range views {
@@ -152,7 +152,7 @@ func TestPickerViewsMRUTieBreaksAlphabetically(t *testing.T) {
 	d.sessions[b.id] = b
 	d.sessions[a.id] = a
 
-	views, _ := d.pickerViews(a)
+	views, _ := d.pickerViews(a, nil)
 
 	require.Equal(t, "alpha", views[0].Name)
 	require.Equal(t, "bravo", views[1].Name)
@@ -172,7 +172,7 @@ func TestPickerViewsGroupedModePutsNamedBeforeEphemeral(t *testing.T) {
 	d.sessions[named2.id] = named2
 	d.stopped["halted"] = stoppedSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
 
-	views, _ := d.pickerViews(named)
+	views, _ := d.pickerViews(named, nil)
 
 	names := make([]string, 0, len(views))
 	for _, v := range views {
@@ -283,7 +283,7 @@ func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	d.sessions[active.id] = active
 	d.stopped["stopped"] = stoppedSession{name: "stopped", createdAt: 24}
 
-	views, _ := d.pickerViews(active)
+	views, _ := d.pickerViews(active, nil)
 
 	require.Len(t, views, 2)
 	require.NotNil(t, views[0].ExpectedCreatedAt)
@@ -294,7 +294,7 @@ func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 
 func TestPickerCanonicalViewsLeaveMoveFilteringToModel(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	source := &session{sessionCore: sessionCore{id: "source", name: "source", incarnation: domain.IncarnationID{1}}, active: 0,
+	source := &session{sessionCore: sessionCore{id: "source", name: "source", incarnation: domain.IncarnationID{1}},
 		tabs: []*tab{
 			{stableID: "source-tab", panes: map[layout.PaneID]*pane{}},
 			{stableID: "sibling-tab", panes: map[layout.PaneID]*pane{}},
@@ -310,7 +310,7 @@ func TestPickerCanonicalViewsLeaveMoveFilteringToModel(t *testing.T) {
 		PaneID:  "source-pane",
 	}
 
-	views, current := d.pickerViews(source)
+	views, current := d.pickerViews(source, nil)
 	require.Len(t, views, 3, "canonical capture includes active and stopped lifecycles")
 	require.Equal(t, picker.SourceFilter{Session: source.id, Incarnation: source.incarnation, TabID: "source-tab"}, current)
 	var sourceView picker.SessionView
@@ -322,14 +322,14 @@ func TestPickerCanonicalViewsLeaveMoveFilteringToModel(t *testing.T) {
 	require.Equal(t, []picker.TabEntry{{TabID: "source-tab", Name: "1"}, {TabID: "sibling-tab", Name: "2"}}, sourceView.Tabs,
 		"daemon capture does not remove the move source")
 
-	paneModel := d.newPickerModel(source, pickerMovePane, sourceLocator, picker.SourceFilter{
+	paneModel := d.newPickerModel(source, nil, pickerMovePane, sourceLocator, picker.SourceFilter{
 		Session: source.id, Incarnation: source.incarnation, TabID: "sibling-tab",
 	})
 	paneTarget, ok := paneModel.Selected()
 	require.True(t, ok)
 	require.Equal(t, domain.TabStableID("sibling-tab"), paneTarget.TabID)
 
-	tabModel := d.newPickerModel(source, pickerMoveTab, sourceLocator, picker.SourceFilter{})
+	tabModel := d.newPickerModel(source, nil, pickerMoveTab, sourceLocator, picker.SourceFilter{})
 	tabTarget, ok := tabModel.Selected()
 	require.True(t, ok)
 	require.Equal(t, destination.id, tabTarget.Session)
@@ -445,7 +445,7 @@ func TestPickerMoveTabPreviewsDestinationActiveTabWithoutActivatingIt(t *testing
 	sourceSession.id, sourceSession.name, sourceSession.incarnation = "source", "source", domain.IncarnationID{1}
 	delete(d.sessions, domain.SessionID("manual"))
 	d.sessions[sourceSession.id] = sourceSession
-	target := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true}, active: 1,
+	target := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true},
 		ctx: sourceSession.ctx, cancel: func() {},
 		tabs: []*tab{
 			newTestTabWithContext(p2, sourceSession.ctx, sourceSession.cancel),
@@ -471,7 +471,7 @@ func TestPickerMoveTabPreviewsDestinationActiveTabWithoutActivatingIt(t *testing
 	require.Equal(t, target.name, selected.Name)
 	require.Equal(t, -1, selected.TabIndex)
 	require.Nil(t, selected.ExpectedCreatedAt)
-	require.Equal(t, 1, activeTabIndex(target), "preview must not mutate destination focus")
+	require.Equal(t, 1, testAttachmentTabIndex(target), "preview must not mutate destination focus")
 	d.closePicker(ac)
 }
 
@@ -575,7 +575,7 @@ func TestPickerRejectsRecreatedEphemeralTargetFromStaleSelection(t *testing.T) {
 	original := &session{sessionCore: sessionCore{id: "ephemeral-1", name: "2", ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{{}}}
 	d.sessions[original.id] = original
 
-	views, _ := d.pickerViews(current)
+	views, _ := d.pickerViews(current, nil)
 	var originalView picker.SessionView
 	for _, view := range views {
 		if view.ID == original.id {
@@ -604,7 +604,7 @@ func TestSameSessionSwitchRejectsReplacedClient(t *testing.T) {
 	current.registerAttachment(&attachedClient{})
 
 	require.Error(t, d.switchToTarget(current, ac, picker.Target{Session: current.id, TabIndex: 1}))
-	require.Equal(t, 0, current.active)
+	require.Equal(t, 0, testAttachmentTabIndex(current))
 }
 
 func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
@@ -626,7 +626,7 @@ func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
 	sess.tabs[1].attention = true
 	sess.mu.Unlock()
 
-	views, _ := d.pickerViews(sess)
+	views, _ := d.pickerViews(sess, nil)
 
 	require.Len(t, views, 1)
 	require.Equal(t, []picker.TabEntry{
@@ -653,7 +653,7 @@ func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
 
 	d.ApplyConfig(domain.Config{Tabs: domain.TabsConfig{TerminalTitle: false}})
 
-	views, _ := d.pickerViews(sess)
+	views, _ := d.pickerViews(sess, nil)
 
 	require.Len(t, views, 1)
 	require.Equal(t, []picker.TabEntry{
@@ -844,8 +844,8 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("\r"))
 
-	require.Equal(t, 1, activeTabIndex(sess))
-	requireFloatingInitialized(t, sess.activeTab())
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
+	requireFloatingInitialized(t, testAttachmentTab(sess))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -886,7 +886,7 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 			}
 			require.True(t, ac.overlays.pickerActive())
 			d.handleInput(sess, ac, []byte("\r"))
-			require.Equal(t, tc.wantActive, activeTabIndex(sess))
+			require.Equal(t, tc.wantActive, testAttachmentTabIndex(sess))
 		})
 	}
 }
@@ -1549,7 +1549,7 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 	require.Eventually(t, func() bool {
-		tb := got.activeTab()
+		tb := testAttachmentTab(got)
 		if tb == nil {
 			return false
 		}
@@ -1640,7 +1640,8 @@ func TestPickerNavigationRefreshAfterDeleteSelectsReplacingRow(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, current, ac, _, currentReleases := newManualTabSession(t, 2)
 			defer releaseAll(currentReleases)
-			current.id, current.name, current.active = "current", tt.currentName, 1
+			current.id, current.name = "current", tt.currentName
+			selectTestAttachmentTab(current, 1)
 			current.tabs[0].stableID, current.tabs[1].stableID = "current-first", "current-active"
 			delete(d.sessions, domain.SessionID("manual"))
 			d.sessions[current.id] = current
@@ -1811,8 +1812,7 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	require.True(t, stopped.purging, "an uncertain deletion stays fenced from restore")
 
 	from.mu.Lock()
-	activeTab := from.tabs[from.active]
-	activeTabID := activeTab.stableID
+	activeTabID := testAttachmentTabLocked(from).stableID
 	from.mu.Unlock()
 	ac.overlays.pickerMu.Lock()
 	selected, selectedOK := ac.overlays.picker.Selected()

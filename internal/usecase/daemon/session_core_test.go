@@ -49,7 +49,7 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.T) {
 	sess := &session{
 		sessionCore: sessionCore{id: domain.SessionID("local"), name: "work"},
-		tabs:        []*tab{{name: "shell"}},
+		tabs:        []*tab{{stableID: "tab-shell", name: "shell"}},
 	}
 	ac := &attachedClient{}
 
@@ -57,9 +57,9 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 	// promoted core mutex. snapshotView must observe the same mutex before it
 	// can publish either field.
 	sess.core().mu.Lock()
-	sess.tabs = append(sess.tabs, &tab{name: "logs"})
-	sess.active = 1
+	sess.tabs = append(sess.tabs, &tab{stableID: "tab-logs", name: "logs"})
 	sess.registerAttachmentLocked(ac)
+	sess.activateAttachmentViewLocked(ac, 1)
 
 	preCall := make(chan struct{})
 	allowCall := make(chan struct{})
@@ -89,7 +89,8 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 	view := awaitTestValue(t, snapshotted, "snapshotView did not complete after sessionCore.mu was released")
 	require.True(t, view.attached)
 	require.Equal(t, 2, view.tabCount)
-	require.Equal(t, 1, view.active)
+	require.Equal(t, 0, view.defaultTab)
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
 }
 
 func TestLocalCreateThenKillRemovesLiveRegistryEntry(t *testing.T) {
@@ -165,8 +166,9 @@ func TestInitialMetadataSkipsInvalidSnapshot(t *testing.T) {
 	sess := firstSession(d)
 	require.NotNil(t, sess)
 	sess.mu.Lock()
-	sess.active = len(sess.tabs)
+	invalidTabIndex := len(sess.tabs)
 	sess.mu.Unlock()
+	selectTestAttachmentTab(sess, invalidTabIndex)
 	// finish (not just release) also closes recvDone, so runConnLoop's Recv
 	// fails immediately after the first paint and the handshake goroutine
 	// returns instead of blocking on further input.

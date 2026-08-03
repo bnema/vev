@@ -78,7 +78,7 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 	title := d.refreshPaneTitle(sess, "pane-1")
 	require.Equal(t, "vim", title)
 
-	p := sess.activeTab().focusedPane()
+	p := testAttachmentTab(sess).focusedPane()
 	p.mu.Lock()
 	p.screen.Write([]byte("\x1b]2;project/main.go\a"))
 	p.refreshTerminalTitleLocked()
@@ -142,7 +142,7 @@ func TestRefreshFloatingPaneTitleUsesShellFallbackForEmptyCommand(t *testing.T) 
 
 func TestRefreshPaneTitleUpdatesNormalPaneShellFallback(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, nil)
-	p := sess.activeTab().focusedPane()
+	p := testAttachmentTab(sess).focusedPane()
 
 	d.shell = "/usr/bin/fish"
 	require.Equal(t, "fish", d.refreshPaneTitle(sess, "pane-1"))
@@ -170,7 +170,7 @@ func TestRefreshPaneTitleLookupFailureKeepsProcessNameEmpty(t *testing.T) {
 	d := newTestDaemon(t, nil, clk)
 	d.shell = "/usr/bin/fish"
 	d.procComm = func(int) (string, error) { return "", errors.New("unused") }
-	p := sess.activeTab().focusedPane()
+	p := testAttachmentTab(sess).focusedPane()
 
 	p.mu.Lock()
 	p.screen.Write([]byte("\x1b]2;terminal\a"))

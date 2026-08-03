@@ -14,12 +14,12 @@ func TestFullViewportSize(t *testing.T) {
 	}{
 		{
 			name: "derives from active tab content size",
-			sess: &session{tabs: []*tab{{size: domain.Size{Cols: 120, Rows: 38}}}, active: 0},
+			sess: &session{tabs: []*tab{{size: domain.Size{Cols: 120, Rows: 38}}}},
 			want: domain.Size{Cols: 120, Rows: 40},
 		},
 		{
 			name: "round-trips through tabSize",
-			sess: &session{tabs: []*tab{{size: tabSize(domain.Size{Cols: 80, Rows: 24})}}, active: 0},
+			sess: &session{tabs: []*tab{{size: tabSize(domain.Size{Cols: 80, Rows: 24})}}},
 			want: domain.Size{Cols: 80, Rows: 24},
 		},
 		{
@@ -29,7 +29,7 @@ func TestFullViewportSize(t *testing.T) {
 		},
 		{
 			name: "falls back to defaultSize with invalid tab size",
-			sess: &session{tabs: []*tab{{}}, active: 0},
+			sess: &session{tabs: []*tab{{}}},
 			want: defaultSize,
 		},
 	}

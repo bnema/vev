@@ -514,7 +514,7 @@ func TestProxyAttachedCommandRejectsTargetsAndExecutesExactActiveSession(t *test
 	publishTiledPaneOwners(sess, second)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, second)
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 	d.attachCoordinator(sess, nil, ac, true)
 
@@ -532,13 +532,13 @@ func TestProxyAttachedCommandRejectsTargetsAndExecutesExactActiveSession(t *test
 	result := send(ports.CommandRequest{Version: ports.ProtocolVersion, RequestID: 1, Attached: true, Slug: "next-tab"})
 	require.True(t, result.OK)
 	sess.mu.Lock()
-	require.Equal(t, 1, sess.active)
+	require.Equal(t, 1, testAttachmentTabIndexLocked(sess))
 	sess.mu.Unlock()
 
 	result = send(ports.CommandRequest{Version: ports.ProtocolVersion, RequestID: 2, Attached: true, Slug: "previous-tab", TargetSession: "other"})
 	require.False(t, result.OK)
 	sess.mu.Lock()
-	require.Equal(t, 1, sess.active, "target override must not execute against any session")
+	require.Equal(t, 1, testAttachmentTabIndexLocked(sess), "target override must not execute against any session")
 	sess.mu.Unlock()
 
 	result = send(ports.CommandRequest{Version: ports.ProtocolVersion, RequestID: 3, Attached: true, Slug: "rename-tab"})
@@ -669,7 +669,7 @@ func TestRemotePickerEnterRoutesStructuredKeyThroughProxyOwnership(t *testing.T)
 		Sessions: []ports.RemoteCatalogSession{{Name: key.Name, State: "running"}},
 	}})
 
-	model := d.newPickerModel(local, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: key.ID(), RemoteKey: &key})
+	model := d.newPickerModel(local, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: key.ID(), RemoteKey: &key})
 	d.publishPicker(local, ac, model, pickerNavigate, moveSourceLocator{})
 	target, selectable := model.Selected()
 	require.True(t, selectable)
@@ -694,7 +694,7 @@ func TestRemotePickerSwitchesFromProxyBackToLocalSession(t *testing.T) {
 	require.True(t, d.registerSessionLocked(local))
 	d.mu.Unlock()
 
-	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(tb.stableID)})
+	model := d.newPickerModel(proxy, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(tb.stableID)})
 	d.publishPicker(proxy, ac, model, pickerNavigate, moveSourceLocator{})
 	target, selectable := model.Selected()
 	require.True(t, selectable)
@@ -734,7 +734,7 @@ func TestRemotePickerRejectsReplacedLocalLifecycle(t *testing.T) {
 	require.True(t, d.registerSessionLocked(local))
 	d.mu.Unlock()
 
-	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(tb.stableID)})
+	model := d.newPickerModel(proxy, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(tb.stableID)})
 	target, selectable := model.Selected()
 	require.True(t, selectable)
 	d.afterRoleEffectsFrozen = func() {
@@ -759,7 +759,7 @@ func TestRemotePickerRejectsReplacedLocalIncarnation(t *testing.T) {
 	require.True(t, d.registerSessionLocked(local))
 	d.mu.Unlock()
 
-	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, Incarnation: local.incarnation, TabID: domain.TabStableID(tb.stableID)})
+	model := d.newPickerModel(proxy, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, Incarnation: local.incarnation, TabID: domain.TabStableID(tb.stableID)})
 	target, selectable := model.Selected()
 	require.True(t, selectable)
 	d.afterRoleEffectsFrozen = func() {
@@ -786,7 +786,7 @@ func TestRemotePickerRejectsReplacedLocalTab(t *testing.T) {
 	require.True(t, d.registerSessionLocked(local))
 	d.mu.Unlock()
 
-	model := d.newPickerModel(proxy, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(second.stableID)})
+	model := d.newPickerModel(proxy, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: local.id, TabID: domain.TabStableID(second.stableID)})
 	target, selectable := model.Selected()
 	require.True(t, selectable)
 	require.Equal(t, domain.TabStableID(second.stableID), target.TabID)
@@ -822,7 +822,7 @@ func TestRemotePickerCanReselectWarmProxyAfterReturningLocal(t *testing.T) {
 	require.NoError(t, d.switchToTargetForRole(proxyToken, picker.Target{Session: local.id, TabIndex: 0}, sessionHandoffGuard{}, "picker-select"))
 	require.Same(t, local, ac.currentSession())
 
-	model := d.newPickerModel(local, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: key.ID(), RemoteKey: &key})
+	model := d.newPickerModel(local, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: key.ID(), RemoteKey: &key})
 	d.publishPicker(local, ac, model, pickerNavigate, moveSourceLocator{})
 	target, selectable := model.Selected()
 	require.True(t, selectable)

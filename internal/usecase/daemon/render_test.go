@@ -79,7 +79,7 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 			// outer terminal also changes, its completed transaction must cover
 			// that popup rather than emitting a second reset-producing frame.
 			floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
-			installTestFloating(sess.activeTab(), floating, true)
+			installTestFloating(testAttachmentTab(sess), floating, true)
 
 			d.firstPaint(sess, ac, tc.clientSize)
 
@@ -321,7 +321,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, inactiveProcessed)
 
 		sess.mu.Lock()
-		sess.active = 1
+		selectTestAttachmentTabLocked(sess, 1)
 		sess.mu.Unlock()
 		d.invalidateRender(sess, ac, true, "sync activation")
 		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
@@ -358,7 +358,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, oldProcessed)
 
 		sess.mu.Lock()
-		sess.active = 1
+		selectTestAttachmentTabLocked(sess, 1)
 		sess.mu.Unlock()
 		newSteps <- channelPTYStep{data: []byte("newly active")}
 		awaitPTYReadProcessed(t, newProcessed)
@@ -601,7 +601,7 @@ func TestPaneRenderableActiveAttachmentDoesNotScanPickerPreviews(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	pane := tb.focusedPane()
 
 	// Holding daemon ownership makes a picker scan block. An active attached
@@ -632,7 +632,7 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 			{name: "inactive tab", setup: func(_ *Daemon, sess *session, tb *tab, _ *pane) {
 				other := newTab(nil, domain.Size{Cols: 80, Rows: 23})
 				sess.tabs = append([]*tab{other}, sess.tabs...)
-				sess.active = 0
+				selectTestAttachmentTab(sess, 0)
 				require.NotSame(t, other, tb)
 			}},
 			{name: "collapsed", setup: func(_ *Daemon, _ *session, tb *tab, p *pane) {
@@ -719,7 +719,7 @@ func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 	p2, releasePTY2 := newBlockingPTY(t)
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY2()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.tabs[1].focusedPane().screen.Write([]byte("remaining"))
 
 	d.sessWg.Add(1)
@@ -728,7 +728,7 @@ func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, activeTabIndex(sess))
+	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -745,7 +745,7 @@ func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 	p2, releasePTY2 := newBlockingPTY(t)
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.tabs[0].focusedPane().screen.Write([]byte("active"))
 
 	d.sessWg.Add(1)
@@ -754,7 +754,7 @@ func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, activeTabIndex(sess))
+	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -1198,7 +1198,7 @@ func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
 	floating := newPane("floating", nil, rectSize(committed.Inner))
 	floating.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
 	floating.popupGeometry = committed
-	installTestFloating(sess.activeTab(), floating, true)
+	installTestFloating(testAttachmentTab(sess), floating, true)
 
 	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
@@ -1300,7 +1300,7 @@ func TestPaintComposesCopyBodyAboveFloating(t *testing.T) {
 	fp := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 3})
 	appendHistoryRow(t, fp.history, testRow("flt-old"))
 	fp.screen.Write([]byte("flt-live"))
-	installTestFloating(sess.activeTab(), fp, true)
+	installTestFloating(testAttachmentTab(sess), fp, true)
 
 	d.enterCopyMode(sess, ac)
 	data := mustOutputData(t, sends)

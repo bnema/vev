@@ -1565,7 +1565,7 @@ func performanceFullWidthRow(width, tabIndex, row int) string {
 
 func (f *performanceFixture) findActivePane() *pane {
 	f.t.Helper()
-	tb := f.sess.activeTab()
+	tb := testAttachmentTab(f.sess)
 	require.NotNil(f.t, tb)
 	tb.mu.Lock()
 	defer tb.mu.Unlock()

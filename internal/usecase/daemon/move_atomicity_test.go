@@ -67,10 +67,10 @@ func readMoveCommitObservation(d *Daemon, source, destination *session, sourceTa
 }
 
 func activeMoveTabLocked(sess *session) *tab {
-	if sess == nil || sess.active < 0 || sess.active >= len(sess.tabs) {
+	if sess == nil || testAttachmentTabIndexLocked(sess) < 0 || testAttachmentTabIndexLocked(sess) >= len(sess.tabs) {
 		return nil
 	}
-	return sess.tabs[sess.active]
+	return sess.tabs[testAttachmentTabIndexLocked(sess)]
 }
 
 func TestMovePaneCommitPointHidesPartialPublication(t *testing.T) {
@@ -87,7 +87,6 @@ func TestMovePaneCommitPointHidesPartialPublication(t *testing.T) {
 	destination := &session{sessionCore: sessionCore{id: "destination",
 		name:      "destination",
 		ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", p2, domain.Size{Cols: 80, Rows: 23})},
-		active: 0,
 	}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)

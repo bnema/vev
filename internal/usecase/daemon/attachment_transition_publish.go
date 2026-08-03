@@ -165,7 +165,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	invalid = invalid || req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
 		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next)
 	invalid = invalid || !attachmentLifecycleCurrentLocked(req.target, req.expectedTargetLifecycle)
-	invalid = invalid || req.activateTargetTab && !req.target.activateTargetLocked(req.targetTabIndex)
+	invalid = invalid || req.activateTargetTab && !req.target.validTargetTabLocked(req.targetTabIndex)
 	if invalid {
 		publication.unlockCoordinators()
 		return nil, errAttachmentTransition

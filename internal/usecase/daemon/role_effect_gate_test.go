@@ -626,7 +626,7 @@ func TestRoleEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *testing.T
 		{
 			name: "mouse input",
 			setup: func(_ *Daemon, sess *session, _ *attachedClient, _ *transactionalResizePTY) {
-				p := sess.activeTab().focusedPane()
+				p := testAttachmentTab(sess).focusedPane()
 				p.mu.Lock()
 				p.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 				p.mu.Unlock()
@@ -769,12 +769,12 @@ func TestJumpAttentionDoesNotMutateSourceAfterInitiatorReplacement(t *testing.T)
 	})
 	require.NoError(t, err)
 	sess.mu.Lock()
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 	release()
 	<-actionDone
 
-	require.Equal(t, 0, activeTabIndex(sess), "the replaced initiator mutated source focus after losing its role")
+	require.Equal(t, 0, testAttachmentTabIndex(sess), "the replaced initiator mutated source focus after losing its role")
 	d.deferAttachmentTransitionCleanups(result)
 }
 
@@ -802,7 +802,7 @@ func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	d.handleActiveClientFrame(token, frameInput([]byte("\x1ba")))
 
 	require.Same(t, target, ac.currentSession())
-	require.Equal(t, 1, activeTabIndex(target))
+	require.Equal(t, 1, testAttachmentTabIndex(target))
 }
 
 func TestJumpAttentionHandoffRevalidatesInitiatorAfterAdmissionEnds(t *testing.T) {
@@ -854,7 +854,7 @@ func TestJumpAttentionHandoffRevalidatesInitiatorAfterAdmissionEnds(t *testing.T
 	release()
 	<-actionDone
 
-	require.Equal(t, 0, activeTabIndex(target), "stale handoff changed target focus")
+	require.Equal(t, 0, testAttachmentTabIndex(target), "stale handoff changed target focus")
 	target.mu.Lock()
 	targetAttachments := target.snapshotAttachmentsLocked()
 	target.mu.Unlock()

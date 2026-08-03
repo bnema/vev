@@ -27,13 +27,13 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			moved.name = "preserved-name"
 			remaining := source.tabs[1]
 			remaining.stableID = "remaining-tab"
-			source.active = 0
+			selectTestAttachmentTab(source, 0)
 
 			destinationCtx, destinationCancel := context.WithCancel(d.serveCtx)
 			t.Cleanup(destinationCancel)
 			destinationTab := newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 100, Rows: 30})
 			destinationTab.ctx, destinationTab.cancel = context.WithCancel(destinationCtx)
-			destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{9}, ephemeral: destinationEphemeral}, ctx: destinationCtx, cancel: destinationCancel, tabs: []*tab{destinationTab}, active: 0}
+			destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{9}, ephemeral: destinationEphemeral}, ctx: destinationCtx, cancel: destinationCancel, tabs: []*tab{destinationTab}}
 			publishTiledPaneOwners(destination, destinationTab)
 
 			floating := newPaneWithStableID("floating", "floating-stable", floatingPTY, domain.Size{Cols: 20, Rows: 8})
@@ -53,7 +53,7 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			oldWorkerCtx := moved.ctx
 			oldTree := moved.tree
 			oldPanes := moved.panes
-			beforeDestinationActive := destination.tabs[destination.active]
+			beforeDestinationActive := destination.tabs[testAttachmentTabIndex(destination)]
 
 			err := d.moveTab(moveTabRequest{
 				Source:      moveSessionLocator{ID: source.id, Incarnation: source.incarnation},
@@ -63,10 +63,10 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, []*tab{remaining}, source.tabs)
-			require.Zero(t, source.active)
-			require.Same(t, remaining, source.tabs[source.active])
+			require.Zero(t, testAttachmentTabIndex(source))
+			require.Same(t, remaining, source.tabs[testAttachmentTabIndex(source)])
 			require.Equal(t, []*tab{destinationTab, moved}, destination.tabs)
-			require.Same(t, beforeDestinationActive, destination.tabs[destination.active], "moved tab stays in the background")
+			require.Same(t, beforeDestinationActive, destination.tabs[testAttachmentTabIndex(destination)], "moved tab stays in the background")
 			require.Equal(t, destinationTab.size, moved.size, "destination geometry becomes authoritative")
 			require.Equal(t, "preserved-name", moved.name)
 			require.Same(t, oldTree, moved.tree)
@@ -115,7 +115,7 @@ func TestMoveTabFinalSourceVisibleFloatingPreservesRuntimeAndFollowsClient(t *te
 		Destination: moveSessionLocator{ID: destination.id, Incarnation: destination.incarnation},
 	}))
 
-	require.Same(t, moved, destination.tabs[destination.active])
+	require.Same(t, moved, destination.tabs[testAttachmentTabIndex(destination)])
 	require.Contains(t, destination.snapshotAttachments(), client)
 	require.Same(t, destination, client.currentSession())
 	moved.mu.Lock()
@@ -162,7 +162,7 @@ func TestMoveTabFinalSourceClientFollowsAndActivatesMovedTab(t *testing.T) {
 	require.Contains(t, destination.snapshotAttachments(), client)
 	require.Equal(t, attachmentActive, destination.attachmentRole(client))
 	require.Equal(t, []*tab{oldDestinationActive, moved}, destination.tabs)
-	require.Same(t, moved, destination.tabs[destination.active], "final-source follower activates the moved tab")
+	require.Same(t, moved, destination.tabs[testAttachmentTabIndex(destination)], "final-source follower activates the moved tab")
 	require.True(t, rebased)
 }
 
@@ -572,7 +572,7 @@ func addMoveTabTestSession(d *Daemon, id domain.SessionID, tabID string) *sessio
 	ctx, cancel := context.WithCancel(d.serveCtx)
 	tb := newTabWithStableID(tabID, tabID+"-pane", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
 	tb.ctx, tb.cancel = context.WithCancel(ctx)
-	sess := &session{sessionCore: sessionCore{id: id, name: string(id), incarnation: domain.IncarnationID{5}, ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0}
+	sess := &session{sessionCore: sessionCore{id: id, name: string(id), incarnation: domain.IncarnationID{5}, ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}}
 	publishTiledPaneOwners(sess, tb)
 	d.mu.Lock()
 	d.sessions[sess.id] = sess

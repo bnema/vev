@@ -31,7 +31,7 @@ func TestInjectClipboardPathTargetsVisibleFloatingPane(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, normal)
 	floating := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 5})
 	floating.screen.Write([]byte("\x1b[?2004h"))
-	installTestFloating(sess.activeTab(), floating, true)
+	installTestFloating(testAttachmentTab(sess), floating, true)
 
 	d.injectClipboardPath(sess, "/tmp/image.png")
 
@@ -211,7 +211,7 @@ func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClie
 
 func clipboardOwnerLease(t *testing.T, sess *session) paneEffectLease {
 	t.Helper()
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	p := tb.terminalTargetLocked()
 	tb.mu.Unlock()
@@ -354,7 +354,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 	sess.mu.Unlock()
 	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
 
-	sourceTab := sess.activeTab()
+	sourceTab := testAttachmentTab(sess)
 	p := sourceTab.focusedPane()
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
@@ -422,7 +422,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 		return ac.roleEffects.inFlightCount() == 1
 	}, time.Second, time.Millisecond, "clipboard send was not admitted before waiting on sendMu")
 
-	sourceTab := sess.activeTab()
+	sourceTab := testAttachmentTab(sess)
 	p := sourceTab.focusedPane()
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
@@ -453,7 +453,7 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	}()
 	awaitTestCompletion(t, oldTransport.started, "clipboard send did not start")
 
-	sourceTab := sess.activeTab()
+	sourceTab := testAttachmentTab(sess)
 	p := sourceTab.focusedPane()
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)

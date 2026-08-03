@@ -223,7 +223,7 @@ func TestPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
 			setup: func(t *testing.T, d *Daemon) (*pane, func(), func()) {
 				sess, err := createSessionForTest(d, "work", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
 				require.NoError(t, err)
-				return sess.activeTab().focusedPane(), sess.cancel, func() {
+				return testAttachmentTab(sess).focusedPane(), sess.cancel, func() {
 					_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 				}
 			},
@@ -239,7 +239,7 @@ func TestPaneProcessLifetimeIsDaemonRooted(t *testing.T) {
 				d.sessions[sess.id] = sess
 				d.mu.Unlock()
 				require.NoError(t, d.createTab(sess, domain.Size{Cols: 80, Rows: 24}))
-				created := sess.activeTab()
+				created := testAttachmentTab(sess)
 				return created.focusedPane(), cancelSession, created.closeAllPanes
 			},
 		},

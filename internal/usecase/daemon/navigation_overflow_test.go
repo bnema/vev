@@ -58,7 +58,7 @@ func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
 			sess.mu.Lock()
-			sess.active = tt.start
+			selectTestAttachmentTabLocked(sess, tt.start)
 			target := sess.tabs[tt.wantActive]
 			source := sess.tabs[tt.start]
 			sess.mu.Unlock()
@@ -71,11 +71,11 @@ func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 
 			daemonKeyHandler{d: d, ac: ac}.Action(tt.action, nil)
 
-			require.Equal(t, tt.wantActive, activeTabIndex(sess))
+			require.Equal(t, tt.wantActive, testAttachmentTabIndex(sess))
 			target.mu.Lock()
 			require.Equal(t, tt.wantFocus, target.tree.Focus)
 			target.mu.Unlock()
-			require.NotSame(t, source, sess.activeTab())
+			require.NotSame(t, source, testAttachmentTab(sess))
 		})
 	}
 }
@@ -93,7 +93,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 		target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: focus}
 		target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 		target.mu.Unlock()
-		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name}, ctx: t.Context(), cancel: func() {}, tabs: tabs, active: active}
+		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name}, ctx: t.Context(), cancel: func() {}, tabs: tabs}
 	}
 	charlie := newSession("live-charlie", "charlie", 1, "pane-2")
 	echo := newSession("live-echo", "echo", 1, "pane-2")
@@ -130,7 +130,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	}
 
 	for _, target := range []*session{charlie, echo} {
-		require.Equal(t, 1, activeTabIndex(target), "switch preserves the target active tab")
+		require.Equal(t, 1, testAttachmentTabIndex(target), "switch preserves the target active tab")
 		target.tabs[1].mu.Lock()
 		require.Equal(t, layout.PaneID("pane-2"), target.tabs[1].tree.Focus, "switch preserves the target pane focus")
 		target.tabs[1].mu.Unlock()
@@ -208,7 +208,7 @@ func TestVerticalOverflowRejectsStaleSourceTab(t *testing.T) {
 	alpha.mu.Lock()
 	alpha.name = "alpha"
 	expectedSource := alpha.tabs[0]
-	alpha.active = 1
+	selectTestAttachmentTabLocked(alpha, 1)
 	alpha.mu.Unlock()
 	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
@@ -351,7 +351,7 @@ func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t
 
 			daemonKeyHandler{d: d, ac: ac}.Action(tt.dir, nil)
 
-			require.Equal(t, 0, activeTabIndex(sess))
+			require.Equal(t, 0, testAttachmentTabIndex(sess))
 		})
 	}
 }
@@ -363,7 +363,7 @@ func TestCommitTabOverflowRevalidatesTabPointerIdentities(t *testing.T) {
 	}{
 		{name: "source no longer active", mutate: func(sess *session, _ tabOverflowCandidate) {
 			sess.mu.Lock()
-			sess.active = 1
+			selectTestAttachmentTabLocked(sess, 1)
 			sess.mu.Unlock()
 		}},
 		{name: "target entry replaced", mutate: func(sess *session, candidate tabOverflowCandidate) {
@@ -382,10 +382,10 @@ func TestCommitTabOverflowRevalidatesTabPointerIdentities(t *testing.T) {
 			candidate, ok := d.prepareTabOverflow(sess, sess.tabs[0], layout.Right, domain.Rect{Width: 80, Height: 23}, 1)
 			require.True(t, ok)
 			tt.mutate(sess, candidate)
-			activeBeforeCommit := activeTabIndex(sess)
+			activeBeforeCommit := testAttachmentTabIndex(sess)
 
 			require.False(t, d.commitTabOverflow(sess, candidate))
-			require.Equal(t, activeBeforeCommit, activeTabIndex(sess))
+			require.Equal(t, activeBeforeCommit, testAttachmentTabIndex(sess))
 		})
 	}
 }

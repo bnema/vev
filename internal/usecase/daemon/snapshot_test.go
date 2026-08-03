@@ -89,7 +89,7 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	p := tb.panes["pane-1"]
 	p.screen.Write([]byte("hello"))
 	appendHistoryRow(t, p.history, []renderer.Cell{{Rune: 'h'}, {Rune: 'i'}})
-	sess := &session{sessionCore: sessionCore{id: domain.SessionID("sess-" + name), name: name, ephemeral: ephemeral, createdAt: 42}, ctx: context.Background(), cancel: func() {}, tabs: []*tab{tb}, active: 0, cwd: cwd}
+	sess := &session{sessionCore: sessionCore{id: domain.SessionID("sess-" + name), name: name, ephemeral: ephemeral, createdAt: 42}, ctx: context.Background(), cancel: func() {}, tabs: []*tab{tb}, cwd: cwd}
 	if !ephemeral {
 		sess.incarnation = domain.IncarnationID{1}
 	}

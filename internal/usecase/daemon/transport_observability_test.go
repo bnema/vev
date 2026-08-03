@@ -125,7 +125,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 	}
 	ac.ackOutputState(output.NewStateNum)
 
-	pane := sess.activeTab().focusedPane()
+	pane := testAttachmentTab(sess).focusedPane()
 	for _, lock := range []struct {
 		name string
 		fn   func()
@@ -141,7 +141,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 
 	livePTY := make(chan struct{})
 	go func() {
-		d.processPTYData(sess, sess.activeTab(), pane, []byte("live"), false)
+		d.processPTYData(sess, testAttachmentTab(sess), pane, []byte("live"), false)
 		close(livePTY)
 	}()
 	awaitDaemonObserver(t, livePTY, "live PTY processing")

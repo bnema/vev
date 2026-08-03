@@ -23,7 +23,7 @@ func TestNoteAttentionFlagsBackgroundTab(t *testing.T) {
 	d, sess, _, _, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 
 	d.noteAttention(sess, sess.tabs[1])
 
@@ -37,7 +37,7 @@ func TestNoteAttentionFlagsBackgroundTab(t *testing.T) {
 func TestNoteAttentionFlagsVisibleTabUntilPainted(t *testing.T) {
 	d, sess, _, _, releases := newManualTabSession(t, 1)
 	defer releases[0]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 
 	d.noteAttention(sess, sess.tabs[0])
 
@@ -50,7 +50,7 @@ func TestNoteAttentionFlagsVisibleTabUntilPainted(t *testing.T) {
 func TestPaintDoesNotAckActiveAttentionOnBlankPulseFrame(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	d.setAttentionFrame(0)
 	d.noteAttention(sess, sess.tabs[0])
 
@@ -86,7 +86,7 @@ func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			pty := newScriptPTY([][]byte{tt.data})
 			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
-			sess.active = 0
+			selectTestAttachmentTab(sess, 0)
 			d.setAttentionFrame(1)
 
 			d.sessWg.Add(1)
@@ -119,7 +119,7 @@ func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.
 func TestNoteAttentionFlagsDetachedActiveTab(t *testing.T) {
 	d, sess, ac, _, releases := newManualTabSession(t, 1)
 	defer releases[0]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	require.True(t, sess.detachIfCurrent(ac))
 
 	d.noteAttention(sess, sess.tabs[0])
@@ -135,7 +135,7 @@ func TestPTYReaderBellMarksBackgroundTab(t *testing.T) {
 	p2 := newScriptPTY([][]byte{[]byte("\a")})
 	d, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 
 	d.sessWg.Add(1)
 	go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
@@ -161,7 +161,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	d, sess, _, _, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 
 	trW := portsmocks.NewMockTransport(t)
 	block := make(chan struct{})
@@ -235,7 +235,7 @@ func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.mu.Lock()
 	sess.tabs[0].attention = true
 	sess.tabs[0].attentionAt = time.Unix(1, 0)
@@ -266,7 +266,7 @@ func TestPaintPreservesBackgroundAttention(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.mu.Lock()
 	sess.tabs[1].attention = true
 	sess.tabs[1].attentionAt = time.Unix(2, 0)
@@ -286,13 +286,13 @@ func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.mu.Lock()
 	sess.tabs[1].attention = true
 	sess.tabs[1].attentionAt = time.Unix(2, 0)
 	sess.mu.Unlock()
 
-	require.True(t, sess.switchTab(1))
+	require.True(t, selectTestAttachmentTab(sess, 1))
 	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 	// As above: the deferred all-clients repaint has nothing new to say about
@@ -314,7 +314,7 @@ func TestCloseRingingTabClearsClientBar(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.mu.Lock()
 	ringing := sess.tabs[1]
 	ringing.attention = true
@@ -340,7 +340,7 @@ func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.tabs[0].focusedPane().screen.Write([]byte("MIDSCREENMARKER"))
 	sess.mu.Lock()
 	sess.tabs[1].attention = true
@@ -374,7 +374,7 @@ func TestComposeFrameAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
 	d, sess, _, _, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.mu.Lock()
 	sess.tabs[1].attention = true
 	sess.tabs[1].attentionAt = time.Unix(1, 0)
@@ -471,7 +471,7 @@ func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
 	defer releases[0]()
 	defer releases[1]()
 	defer releases[2]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.mu.Lock()
 	sess.tabs[1].attention = true
 	sess.tabs[1].attentionAt = time.Unix(20, 0)
@@ -481,8 +481,8 @@ func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1ba"))
 
-	require.Equal(t, 2, activeTabIndex(sess))
-	requireFloatingInitialized(t, sess.activeTab())
+	require.Equal(t, 2, testAttachmentTabIndex(sess))
+	requireFloatingInitialized(t, testAttachmentTab(sess))
 	_ = mustOutputData(t, sends)
 }
 
@@ -514,7 +514,7 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	require.Same(t, sess2, ac.currentSession())
 	require.Contains(t, sess2.snapshotAttachments(), ac)
 	require.Empty(t, sess1.snapshotAttachments())
-	require.Equal(t, 1, activeTabIndex(sess2))
+	require.Equal(t, 1, testAttachmentTabIndex(sess2))
 	_ = mustOutputData(t, sends)
 }
 
@@ -522,12 +522,12 @@ func TestJumpAttentionNoopsWithNoBells(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 
 	require.NoError(t, d.jumpAttention(sess, ac), "no target to jump to is not a failure")
 
 	require.Same(t, sess, ac.currentSession())
-	require.Equal(t, 0, activeTabIndex(sess))
+	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	select {
 	case f := <-sends:
 		t.Fatalf("unexpected frame on no-op jump: %v", f.Type)
@@ -576,7 +576,7 @@ func TestAttentionAnimatorParksAdvancesAndResets(t *testing.T) {
 	defer releases[1]()
 	clk := newManualAttentionClock()
 	d.clock = clk
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

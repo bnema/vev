@@ -14,7 +14,7 @@ type attachmentSession interface {
 	snapshotView(viewOptions) sessionView
 	statusSegments(includeTerminalTitle bool) statusSnapshot
 	capturePrimary(*attachedClient, primaryCaptureRequest) (*capturedRenderState, bool)
-	activateTargetLocked(tabIndex int) bool
+	validTargetTabLocked(tabIndex int) bool
 	isProxy() bool
 }
 
@@ -53,9 +53,10 @@ func (s *session) capturePrimary(ac *attachedClient, req primaryCaptureRequest) 
 	return captureLocalPrimaryRenderState(s, ac, req)
 }
 
-// activateTargetLocked validates a legacy session target. Client-facing
-// navigation updates attachment views through selectAttachmentTab.
-func (s *session) activateTargetLocked(tabIndex int) bool {
+// validTargetTabLocked validates a target tab index without changing any
+// attachment view. Client-facing navigation updates attachment views through
+// selectAttachmentTab.
+func (s *session) validTargetTabLocked(tabIndex int) bool {
 	if tabIndex < 0 {
 		return true
 	}

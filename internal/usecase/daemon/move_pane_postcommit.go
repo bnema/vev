@@ -36,9 +36,8 @@ type movePanePostcommitPlan struct {
 	reservation        *moveLifecycleReservation
 	oldTabCancel       context.CancelFunc
 
-	sourceTabWasActive bool
-	sourceTabRemoved   bool
-	sourceEmpty        bool
+	sourceTabRemoved bool
+	sourceEmpty      bool
 
 	retiredParked            []parkedAttachmentRetirement
 	retiredAttachments       []detachedAttachmentSnapshot
@@ -94,7 +93,7 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	if !moveSessionRetired(d, p.source) {
 		sourceLayoutTab := p.sourceTab
 		if p.sourceTabRemoved {
-			sourceLayoutTab = p.source.tabForAttachmentOrActive(nil)
+			sourceLayoutTab = p.source.firstTab()
 		}
 		if sourceLayoutTab != nil && sourceLayoutTab != p.destinationTab {
 			d.applyTabLayout(p.source, sourceLayoutTab)

@@ -1,9 +1,6 @@
 package daemon
 
-import (
-	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
-)
+import "github.com/bnema/vev/internal/usecase/layout"
 
 // movePaneAdmission is an immutable snapshot of the exact live objects and
 // generations a move may later commit. Resize fences are acquired only after
@@ -20,7 +17,6 @@ type movePaneAdmission struct {
 	sourceGeneration      uint64
 	destinationGeneration uint64
 	finalSourceTab        bool
-	sourceTabWasActive    bool
 }
 
 func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destination *session) (*movePaneAdmission, error) {
@@ -57,11 +53,6 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 		return nil, errMoveStaleTarget
 	}
 
-	sourceTabWasActive := false
-	if req.Client != nil {
-		view := req.Client.viewSnapshot()
-		sourceTabWasActive = view.tabID == domain.TabStableID(sourceTab.stableID)
-	}
 	return &movePaneAdmission{
 		source:                source,
 		destination:           destination,
@@ -75,6 +66,5 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 		destinationGeneration: destinationTab.layoutGeneration,
 		finalSourceTab: len(source.tabs) == 1 && source.tabs[0] == sourceTab &&
 			sourceTab.tree != nil && sourceTab.tree.Root != nil && len(layout.LeafIDs(sourceTab.tree.Root)) == 1,
-		sourceTabWasActive: sourceTabWasActive,
 	}, nil
 }

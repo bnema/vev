@@ -109,8 +109,8 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
-	require.Equal(t, 1, activeTabIndex(sess))
-	requireFloatingInitialized(t, sess.activeTab())
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
+	requireFloatingInitialized(t, testAttachmentTab(sess))
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
@@ -440,7 +440,7 @@ func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
 	d.handleInput(sess, ac, []byte("next\r"))
 
 	require.False(t, ac.overlays.paletteActive())
-	require.Equal(t, 1, activeTabIndex(sess))
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -639,7 +639,7 @@ func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	installTestFloating(tb, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
@@ -1125,9 +1125,9 @@ func TestPaletteExecMethods(t *testing.T) {
 	exec := paletteExec{d: d, sess: sess, ac: ac}
 
 	require.NoError(t, exec.NextTab())
-	require.Equal(t, 1, activeTabIndex(sess))
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
 	require.NoError(t, exec.PrevTab())
-	require.Equal(t, 0, activeTabIndex(sess))
+	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	sess.ephemeral = true
 	require.NoError(t, exec.RenameSession())
 	require.True(t, ac.overlays.promptActive())

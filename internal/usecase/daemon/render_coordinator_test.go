@@ -1116,7 +1116,7 @@ func TestProducerInvalidations(t *testing.T) {
 			name: "floating toggle to visible",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
 				fp := newPaneWithStableID(layout.PaneID("floating"), "float-producer", newQuietPTY(), domain.Size{Cols: 40, Rows: 10})
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				tb.floating.pane = fp
 				tb.floating.state = floatingHidden
@@ -1134,7 +1134,7 @@ func TestProducerInvalidations(t *testing.T) {
 				ac.proxied = true
 				sess.tabs[1].attention = true
 				daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionJumpAttention, nil)
-				require.Equal(t, 1, activeTabIndex(sess))
+				require.Equal(t, 1, testAttachmentTabIndex(sess))
 			},
 		},
 		{
@@ -1275,7 +1275,7 @@ func TestConcurrentPaintInitializesOverlayUnderSendOwnership(t *testing.T) {
 func TestStartPaneGoroutinesAccountsForOneReader(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	require.NotNil(t, tb)
 	d.startPaneGoroutines(sess, tb, tb.focusedPane())
 	release()

@@ -147,7 +147,12 @@ func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, token *
 	if token != nil {
 		ac = token.ac
 	}
-	tb := sess.tabForAttachmentOrActive(ac)
+	var tb *tab
+	if ac != nil {
+		tb = sess.tabForAttachment(ac)
+	} else {
+		tb = sess.firstTab()
+	}
 	if tb == nil {
 		return
 	}

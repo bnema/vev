@@ -13,7 +13,7 @@ func TestValidateAttachmentTransitionPrelockedLeavesMembershipUntouchedOnFailure
 
 	d := newTestDaemon(t, nil, stubClock{})
 	source := &session{sessionCore: sessionCore{id: domain.SessionID("source")}}
-	target := &session{sessionCore: sessionCore{id: domain.SessionID("target")}, active: 0}
+	target := &session{sessionCore: sessionCore{id: domain.SessionID("target")}}
 	next := &attachedClient{tr: &closeTrackingTransport{}}
 	next.setSession(source)
 	source.registerAttachmentLocked(next)
@@ -58,5 +58,5 @@ func TestValidateAttachmentTransitionPrelockedLeavesMembershipUntouchedOnFailure
 	require.Same(t, source, next.currentSession())
 	require.Equal(t, uint64(0), next.roleGeneration.Load())
 	require.Equal(t, uint64(0), old.roleGeneration.Load())
-	require.Equal(t, 0, target.active)
+	require.Equal(t, 0, testAttachmentTabIndex(target))
 }

@@ -21,9 +21,7 @@ func newMoveGateRaceFixture(t *testing.T) (*Daemon, *session, *tab, *pane, *sess
 	moved := sourceTab.focusedPane()
 	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
 
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
-		active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)
 	d.mu.Lock()

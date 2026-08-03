@@ -159,7 +159,7 @@ func TestNamedSessionPublishesNextCheckpointAfterClientSnatch(t *testing.T) {
 	sess, firstClient, err := d.route(snapshotLifecycleHello(ports.IntentNew, "work"), firstTransport)
 	require.NoError(t, err)
 
-	sess.activeTab().focusedPane().screen.Write([]byte("first checkpoint"))
+	testAttachmentTab(sess).focusedPane().screen.Write([]byte("first checkpoint"))
 	markSnapshotDirty(sess)
 	require.True(t, d.scheduleSnapshot(sess))
 	awaitSnapshotIdle(t, sess)
@@ -181,7 +181,7 @@ func TestNamedSessionPublishesNextCheckpointAfterClientSnatch(t *testing.T) {
 	require.Same(t, sess, snatchedSession, "client snatch must retain the live session")
 	require.NotSame(t, firstClient, secondClient, "client B must displace client A")
 
-	sess.activeTab().focusedPane().screen.Write([]byte("second checkpoint"))
+	testAttachmentTab(sess).focusedPane().screen.Write([]byte("second checkpoint"))
 	markSnapshotDirty(sess)
 	require.True(t, d.scheduleFinalSnapshot(sess))
 	awaitSnapshotIdle(t, sess)
@@ -223,7 +223,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	sess, _, err := d.route(snapshotLifecycleHello(ports.IntentNew, "work"), &closeTrackingTransport{})
 	require.NoError(t, err)
 
-	sess.activeTab().focusedPane().screen.Write([]byte("first checkpoint"))
+	testAttachmentTab(sess).focusedPane().screen.Write([]byte("first checkpoint"))
 	markSnapshotDirty(sess)
 	require.True(t, d.scheduleSnapshot(sess))
 	awaitSnapshotClean(t, sess)
@@ -247,7 +247,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	require.NotSame(t, sess, resumed, "stopped-session attach must create a new live runtime")
 	require.Equal(t, sess.incarnation, resumed.incarnation, "resume must retain durable incarnation authority")
 
-	resumed.activeTab().focusedPane().screen.Write([]byte("checkpoint after resume"))
+	testAttachmentTab(resumed).focusedPane().screen.Write([]byte("checkpoint after resume"))
 	markSnapshotDirty(resumed)
 	require.True(t, d.scheduleSnapshot(resumed))
 	awaitSnapshotIdle(t, resumed)

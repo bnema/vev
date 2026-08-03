@@ -78,7 +78,7 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
 		clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
 		d.clock = clock
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		tb.mu.Lock()
 		tb.size = domain.Size{Cols: 100, Rows: 20}
 		tb.bumpLayoutGenerationLocked()
@@ -118,7 +118,7 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
 		clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
 		d.clock = clock
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		tb.mu.Lock()
 		tb.size = domain.Size{Cols: 100, Rows: 20}
 		tb.bumpLayoutGenerationLocked()
@@ -145,7 +145,7 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 func TestFocusDirAtDoesNotApplyUncommittedCandidate(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	second := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 23})
 	tb.mu.Lock()
 	tb.panes[second.id] = second
@@ -164,7 +164,7 @@ func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
 	clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
 	d.clock = clock
-	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+	tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 	tb.mu.Lock()
 	tb.size = domain.Size{Cols: 100, Rows: 20}
 	tb.bumpLayoutGenerationLocked()
@@ -206,7 +206,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 	failed := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
 	d, sess, ac, _ := newManualSessionWithPTYs(t, failed)
 	d.clock = clock.clock
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	first := tb.focusedPane()
 	second := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 23})
 	tb.mu.Lock()
@@ -260,7 +260,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 
 func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
 	d, sess, pty, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.focusedPane().rect = domain.Rect{Width: 20, Height: 10}
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -290,7 +290,7 @@ func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
 
 func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	oldPane := tb.focusedPane()
 	oldPane.rect = domain.Rect{Width: 20, Height: 10}
 	oldPane.screen.Resize(20, 10)
@@ -341,7 +341,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		first, entered, release := newBlockedPTY()
 		second := &transactionalResizePTY{}
 		d, sess, _, _ := newManualSessionWithPTYs(t, first)
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		p1 := tb.focusedPane()
 		p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
 		tb.mu.Lock()
@@ -383,7 +383,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		first, entered, release := newBlockedPTY()
 		second := &transactionalResizePTY{}
 		d, sess, _, _ := newManualSessionWithPTYs(t, first)
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		p1 := tb.focusedPane()
 		p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
 		tb.mu.Lock()
@@ -417,7 +417,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 	t.Run("client size rejects and retries a blocked plan", func(t *testing.T) {
 		pty, entered, release := newBlockedPTY()
 		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		p := tb.focusedPane()
 		p.rect = domain.Rect{Width: 20, Height: 10}
 
@@ -476,7 +476,7 @@ func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 
 			require.NoError(t, d.splitPane(sess, nil, tt.dir))
 
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
 			defer tb.mu.Unlock()
 			require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
@@ -492,7 +492,7 @@ func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 
 func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 	d, sess, _, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 4})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	stackPTY := portsmocks.NewMockPTY(t)
 	stackPane := newPane("pane-2", stackPTY, domain.Size{Cols: 41, Rows: 2})
 	tb.panes[stackPane.id] = stackPane
@@ -520,7 +520,7 @@ func TestSplitPaneOpenErrorRollsBackTreeAndPaneMap(t *testing.T) {
 	cause := errors.New("open failed")
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(nil, cause).Once()
 
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	beforeRoot, beforeFocus, beforeNext, beforePaneCount := tb.tree.Root.Leaf, tb.tree.Focus, tb.nextPaneID, len(tb.panes)
 	tb.mu.Unlock()
@@ -547,7 +547,7 @@ func TestSplitPaneOpenErrorRollsBackTreeAndPaneMap(t *testing.T) {
 
 func TestApplyLayoutResizesPTYsAndScreens(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	newPTY := portsmocks.NewMockPTY(t)
 	newPane := newPane("pane-2", newPTY, domain.Size{Cols: 41, Rows: 10})
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
@@ -564,7 +564,7 @@ func TestApplyLayoutResizesPTYsAndScreens(t *testing.T) {
 
 func TestResizeReflowsAllPanes(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	newPTY := portsmocks.NewMockPTY(t)
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
 	tb.panes["pane-2"] = newPane("pane-2", newPTY, domain.Size{Cols: 20, Rows: 10})
@@ -596,7 +596,7 @@ func TestFocusDirAtReturnsDepartingSpanAndMapsNoNeighbor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, _, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			target := tb.panes["pane-1"]
 			tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
 			tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
@@ -614,7 +614,7 @@ func TestFocusDirAtReturnsDepartingSpanAndMapsNoNeighbor(t *testing.T) {
 
 func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	newPTY := portsmocks.NewMockPTY(t)
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
 	tb.panes["pane-2"] = newPane("pane-2", newPTY, domain.Size{Cols: 20, Rows: 10})
@@ -635,7 +635,7 @@ func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 
 func TestCloseFocusedPaneRemovesPaneReflowsAndIsIdempotent(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	closingPTY := portsmocks.NewMockPTY(t)
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
 	tb.panes["pane-2"] = newPane("pane-2", closingPTY, domain.Size{Cols: 20, Rows: 10})
@@ -654,7 +654,7 @@ func TestCloseFocusedPaneRemovesPaneReflowsAndIsIdempotent(t *testing.T) {
 
 func TestReapPaneSharesClosePathAndIsIdempotent(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	reapedPTY := portsmocks.NewMockPTY(t)
 	reaped := newPane("pane-2", reapedPTY, domain.Size{Cols: 20, Rows: 10})
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
@@ -673,7 +673,7 @@ func TestReapPaneSharesClosePathAndIsIdempotent(t *testing.T) {
 
 func TestClosePaneKeepsTabOpenWhenPendingSpawnLeafExists(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
 	oldPTY.EXPECT().Close().Return(nil).Once()
 
@@ -705,7 +705,7 @@ func TestStackPaneCreatesStackAndToggleRestoresSplit(t *testing.T) {
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 4}).Return(newPTY, nil).Once()
 
 	require.NoError(t, d.stackPane(sess, nil))
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	require.Equal(t, layout.Stack, tb.tree.Root.Kind)
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
@@ -728,7 +728,7 @@ func TestStackFocusWalkExpandsAndOverflowRefuses(t *testing.T) {
 
 	require.NoError(t, d.focusDir(sess, nil, layout.Up, nil))
 
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Root.Expanded)
 	thirdPTY := portsmocks.NewMockPTY(t)
@@ -773,7 +773,7 @@ func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(newPTY, nil).Once()
 
 	require.NoError(t, d.splitPane(sess, nil, layout.Right))
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	tb.tree.Focus = "pane-1"
 	tb.mu.Unlock()
@@ -844,7 +844,7 @@ func TestSplitPaneUsesExactAuthoritativeEnvironment(t *testing.T) {
 			).Once()
 
 			require.NoError(t, d.splitPane(sess, nil, layout.Right))
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
 			paneID := tb.panes["pane-2"].stableID
 			tabID := tb.stableID

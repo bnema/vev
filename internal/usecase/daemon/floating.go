@@ -223,7 +223,10 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	if d == nil || sess == nil {
 		return domain.UserErr(domain.NoticeFloatingSpawn, "couldn't open floating pane: no active session", nil)
 	}
-	tb := sess.tabForAttachmentOrActive(ac)
+	tb := sess.tabForAttachment(ac)
+	if ac == nil {
+		tb = sess.firstTab()
+	}
 	if tb == nil {
 		return domain.UserErr(domain.NoticeFloatingSpawn, "couldn't open floating pane: no active tab", layout.ErrNotFound)
 	}

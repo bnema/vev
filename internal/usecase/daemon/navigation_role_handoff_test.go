@@ -136,7 +136,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			source.mu.Unlock()
 			target.mu.Lock()
 			require.Empty(t, target.snapshotAttachmentsLocked(), "stale handoff attached to the target")
-			require.Zero(t, target.active, "stale handoff changed target tab focus")
+			require.Zero(t, testAttachmentTabIndexLocked(target), "stale handoff changed target tab focus")
 			target.mu.Unlock()
 			if tt.check != nil {
 				tt.check(t, d, source, target)

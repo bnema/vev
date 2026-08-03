@@ -131,7 +131,7 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	t.Run("success resizes then replays", func(t *testing.T) {
 		pty := &transactionalResizePTY{}
 		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-		tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+		tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 		p.resizeApplying = true
 		p.resizePending = []byte("A\x1b[1;81HB")
 		d.replayResizePending(sess, tb, p, true, domain.Rect{Width: 120, Height: 23})
@@ -142,7 +142,7 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	t.Run("failure retains old parser width", func(t *testing.T) {
 		pty := &transactionalResizePTY{}
 		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-		tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+		tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 		p.resizeApplying = true
 		p.resizePending = []byte("\x1b[1;81HB")
 		d.replayResizePending(sess, tb, p, false, domain.Rect{Width: 120, Height: 23})
@@ -152,7 +152,7 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 	t.Run("batches retain read order", func(t *testing.T) {
 		pty := &transactionalResizePTY{}
 		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-		tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+		tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 		p.screen.OnResponse = func([]byte) { p.ptyResponses = append(p.ptyResponses, 'r') }
 		pty.onWrite = func([]byte) {
 			p.mu.Lock()
@@ -171,7 +171,7 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 	pty := &transactionalResizePTY{onWrite: func(b []byte) { responses <- b }}
 	d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
 	publishActiveClipboardCapability(d, sess, ac, ac.transport())
-	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+	tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
 	p.screen.OnBell = func() { p.ptyAttention = true }
 	p.screen.OnClipboard = func(b64 string) { p.ptyClipboards = append(p.ptyClipboards, b64) }
@@ -207,7 +207,7 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+	tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 	d.beforeSessionResizePublication = sess.cancel
 
 	_, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
@@ -226,7 +226,7 @@ func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p := tb.focusedPane()
 	var tabUnlocked, paneUnlocked bool
 	pty.onResize = func() {
@@ -291,7 +291,7 @@ func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testi
 	ok := &transactionalResizePTY{}
 	failed := &transactionalResizePTY{errs: []error{errors.New("scripted resize failure")}}
 	d, sess, ac, _ := newManualSessionWithPTYs(t, ok)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	second := newPane("pane-2", failed, domain.Size{Cols: 80, Rows: 23})
 	tb.mu.Lock()
 	tb.panes[second.id] = second
@@ -332,7 +332,7 @@ func TestTransactionalResizeRetryMarksNamedSnapshotDirtyOnlyOnSuccess(t *testing
 			pty := &transactionalResizePTY{errs: tc.errs}
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 			sess.snapEligible.Store(true)
-			tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+			tb, p := testAttachmentTab(sess), testAttachmentTab(sess).focusedPane()
 
 			require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 100, Rows: 30}, true))
 			rc := sess.renderCoordinator()
@@ -356,7 +356,7 @@ func TestTransactionalResizeRetryTargetsNewestCommittedEpoch(t *testing.T) {
 	ok := &transactionalResizePTY{}
 	failed := &transactionalResizePTY{errs: []error{errors.New("first epoch fails"), nil}}
 	d, sess, ac, _ := newManualSessionWithPTYs(t, ok)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	retry := newPane("retry", failed, domain.Size{Cols: 80, Rows: 23})
 	tb.mu.Lock()
 	tb.panes[retry.id] = retry
@@ -465,7 +465,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p := tb.focusedPane()
 	p.resizeApplying = true
 	p.resizePending = []byte("x")
@@ -489,7 +489,7 @@ func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
 func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	var invalidate sync.Once
 	pty.onResize = func() {
 		invalidate.Do(func() {
@@ -509,7 +509,7 @@ func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
 func TestRetryOwnerCannotPublishFloatingGeometryAfterMove(t *testing.T) {
 	popupPTY := &transactionalResizePTY{errs: []error{errors.New("initial popup failure")}}
 	d, source, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	tb := source.activeTab()
+	tb := testAttachmentTab(source)
 	popup := newPane("popup", popupPTY, domain.Size{Cols: 80, Rows: 23})
 	tb.mu.Lock()
 	tb.floating = floatingSlot{state: floatingVisible, pane: popup, generation: 7}
@@ -561,7 +561,7 @@ func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
 			d.ApplyConfig(domain.Config{Floating: cfg})
 			require.True(t, d.requestTransactionalResize(sess, nil, tc.from, true))
 
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			fromGeometry := calculateContentFloatingGeometry(tabSize(tc.from), cfg)
 			toGeometry := calculateContentFloatingGeometry(tabSize(tc.to), cfg)
 			entered, release := make(chan struct{}), make(chan struct{})
@@ -735,7 +735,7 @@ func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t 
 func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) {
 	popupPTY := &transactionalResizePTY{errs: []error{errors.New("first popup resize fails")}}
 	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	popup := newPane("popup", popupPTY, domain.Size{Cols: 80, Rows: 23})
 	tb.mu.Lock()
 	tb.floating = floatingSlot{state: floatingVisible, pane: popup, generation: 7}
@@ -823,7 +823,7 @@ func TestTransactionalResizeFloatingMouseCopyAndSearchContract(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			pty := &transactionalResizePTY{errs: tc.errs, onResize: func() { close(entered); <-release }}
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			p := tb.focusedPane()
 			old := p.rect
 			d.enterCopyMode(sess, ac)

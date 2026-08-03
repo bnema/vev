@@ -74,7 +74,7 @@ func (p *pane) clearOwnerForTest() {
 func TestPTYReaderRoutesEffectsToOwnerPublishedForEachRead(t *testing.T) {
 	pty := newOwnerRoutingPTY()
 	d, source, _, _ := newManualSessionWithPTYs(t, pty)
-	pane := source.activeTab().focusedPane()
+	pane := testAttachmentTab(source).focusedPane()
 	pane.onExit = func() {}
 	source.snapEligible.Store(true)
 
@@ -97,14 +97,14 @@ func TestPTYReaderRoutesEffectsToOwnerPublishedForEachRead(t *testing.T) {
 	destinationCoordinator := d.attachCoordinator(destination, nil, destinationAttachment, true)
 	destinationCoordinator.opts.onInvalidate = func(invalidation renderInvalidation) { destinationInvalidations <- invalidation }
 
-	d.startPaneGoroutines(source, source.activeTab(), pane)
+	d.startPaneGoroutines(source, testAttachmentTab(source), pane)
 	pty.steps <- channelPTYStep{data: []byte("source\a")}
 	<-pty.processed
 	require.Len(t, sourceInvalidations, 1)
 	require.Empty(t, destinationInvalidations)
 	require.Equal(t, uint64(1), source.snapshotGeneration)
 	require.Zero(t, destination.snapshotGeneration)
-	require.True(t, source.activeTab().attention)
+	require.True(t, testAttachmentTab(source).attention)
 
 	installTiledPaneOwnerForTest(destination, destinationTab, pane)
 	pty.steps <- channelPTYStep{data: []byte("destination\a")}
@@ -124,7 +124,7 @@ func TestPTYReaderRoutesEffectsToOwnerPublishedForEachRead(t *testing.T) {
 func TestPTYReaderExitReapsExactlyCurrentOwnerAfterPublication(t *testing.T) {
 	pty := newOwnerRoutingPTY()
 	d, source, _, _ := newManualSessionWithPTYs(t, pty)
-	sourceTab := source.activeTab()
+	sourceTab := testAttachmentTab(source)
 	moved := sourceTab.focusedPane()
 
 	destinationTab := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 23})

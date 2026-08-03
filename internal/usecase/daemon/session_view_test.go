@@ -22,7 +22,7 @@ func TestSnapshotViewCapturesSessionFields(t *testing.T) {
 					name:        "alpha",
 					createdAt:   42,
 
-					attachments: map[*attachedClient]struct{}{&attachedClient{}: {}}}, active: 1,
+					attachments: map[*attachedClient]struct{}{&attachedClient{}: {}}},
 
 					tabs: []*tab{
 						{stableID: "t1", name: "build"},
@@ -38,7 +38,6 @@ func TestSnapshotViewCapturesSessionFields(t *testing.T) {
 				incarnation:  domain.IncarnationID{1},
 				name:         "alpha",
 				createdAt:    42,
-				active:       1,
 				mruAt:        7,
 				attached:     true,
 				tabCount:     2,

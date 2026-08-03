@@ -125,7 +125,7 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	attachments := sess.snapshotAttachmentsLocked()
 	ctx.PaneCWD = sess.cwd
 	sess.mu.Unlock()
-	tb := sess.tabForAttachmentOrActive(nil)
+	tb := sess.firstTab()
 	if len(attachments) == 0 || tb == nil {
 		return ctx, env, false
 	}
@@ -412,7 +412,14 @@ func (d *Daemon) pokeSessionRender(sess *session) {
 	// A headless session can still supply a picker preview to an attachment
 	// owned by another session. Its coordinator fans this wake out to those
 	// preview subscribers even though no primary attachment is bound.
-	for _, ac := range sess.snapshotAttachments() {
+	attachments := sess.snapshotAttachments()
+	if len(attachments) == 0 {
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "bar_refresh.go"})
+		}
+		return
+	}
+	for _, ac := range attachments {
 		d.invalidateRender(sess, ac, false, "bar_refresh.go")
 	}
 }

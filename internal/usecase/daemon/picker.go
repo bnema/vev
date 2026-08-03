@@ -52,7 +52,7 @@ func (d *Daemon) togglePickerSort() {
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
 func (d *Daemon) enterPicker(sess attachmentSession, ac *attachedClient) {
-	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	model := d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
 }
 
@@ -83,7 +83,7 @@ func (d *Daemon) publishPicker(sess attachmentSession, ac *attachedClient, model
 
 // pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
 // knows nothing about picker intent; picker.New owns all destination policy.
-func (d *Daemon) pickerViews(cur attachmentSession) ([]picker.SessionView, picker.SourceFilter) {
+func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
 	sessions := make([]attachmentSession, 0, len(d.sessions))
 	proxies := make(map[domain.SessionID]*proxySession)
@@ -119,13 +119,23 @@ func (d *Daemon) pickerViews(cur attachmentSession) ([]picker.SessionView, picke
 	live := make([]liveSnapshot, 0, len(sessions))
 	var current picker.SourceFilter
 	for _, entry := range sessions {
+		if entry == cur && ac != nil {
+			if local, ok := localSession(entry); ok {
+				local.repairAttachmentView(ac)
+			}
+		}
 		snap := entry.snapshotView(opts)
 		if entry == cur {
 			if proxy, ok := entry.(*proxySession); ok {
 				key := proxy.key
 				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, RemoteKey: &key}
-			} else if snap.active >= 0 && snap.active < len(snap.tabs) {
-				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.active].id}
+			} else if _, ok := localSession(entry); ok && ac != nil {
+				view := ac.viewSnapshot()
+				if view.tabID != "" {
+					current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: view.tabID}
+				}
+			} else if len(snap.tabs) > 0 {
+				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.defaultTab].id}
 			}
 		}
 		live = append(live, liveSnapshot{entry: entry, view: snap})
@@ -201,8 +211,8 @@ func (d *Daemon) pickerViews(cur attachmentSession) ([]picker.SessionView, picke
 	return views, current
 }
 
-func (d *Daemon) newPickerModel(cur attachmentSession, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
-	views, attachedCurrent := d.pickerViews(cur)
+func (d *Daemon) newPickerModel(cur attachmentSession, ac *attachedClient, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
+	views, attachedCurrent := d.pickerViews(cur, ac)
 	if intent == pickerNavigate && current == (picker.SourceFilter{}) {
 		current = attachedCurrent
 	}
@@ -877,12 +887,12 @@ func (d *Daemon) switchToTargetGuardedForRole(from *session, ac *attachedClient,
 		if sourceToken != nil {
 			fresh, admitted := ac.beginRoleEffect(transition.published)
 			if admitted {
-				d.activateTabAfterResizeForLease(from, from.tabForAttachmentOrActive(ac), false, ac, transition.published.lease)
+				d.activateTabAfterResizeForLease(from, from.tabForAttachment(ac), false, ac, transition.published.lease)
 				d.invalidateRender(from, ac, true, "picker.go")
 				fresh.End()
 			}
 		} else {
-			d.activateTabAfterResizeForLease(from, from.tabForAttachmentOrActive(ac), false, ac, nil)
+			d.activateTabAfterResizeForLease(from, from.tabForAttachment(ac), false, ac, nil)
 			d.invalidateRender(from, ac, true, "picker.go")
 		}
 	} else {
