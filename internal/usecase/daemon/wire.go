@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -25,7 +26,10 @@ func frameError(code uint16, text string) ports.Frame {
 }
 
 func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) ports.Frame {
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: baseState, NewStateNum: state, EchoAck: echoAck, Data: b})}
+	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
+		Epoch: 1, Base: baseState, New: state, Echo: echoAck,
+		Size: domain.Size{Cols: 1, Rows: 1}, Full: state != 0 && baseState == 0, Data: b,
+	})}
 }
 
 func frameDetached(reason uint8) ports.Frame {

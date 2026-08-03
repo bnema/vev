@@ -32,6 +32,12 @@ func (s *structuredOutputStream) prepare(frame renderer.Frame, damage []renderer
 	if s == nil || s.state == nil {
 		return nil, errors.New("structured output stream is nil")
 	}
+	if reset && s.state.initialized {
+		s.state.rebase()
+		s.shadow = renderer.Frame{}
+		s.cursorOut = cursorOut{}
+		s.forceSnapshot = true
+	}
 	if err := frame.Validate(); err != nil {
 		return nil, err
 	}
@@ -48,14 +54,21 @@ func (s *structuredOutputStream) prepare(frame renderer.Frame, damage []renderer
 	}
 
 	plan := candidate.Plan
+	s.state.initialized = true
 	snapshot := reset || plan.Snapshot
 	cursorChanged := cursor != s.cursorOut
 	if !snapshot && plan.Scroll.Height == 0 && len(plan.Spans) == 0 && !cursorChanged {
+		connectionGeneration, epoch, viewRevision := s.state.fence()
 		return &preparedStructuredOutput{
-			stream:    s,
-			candidate: candidate,
-			cursor:    cursor,
-			echoAck:   echoAck,
+			stream:               s,
+			candidate:            candidate,
+			cursor:               cursor,
+			base:                 s.state.next,
+			epoch:                epoch,
+			generation:           s.state.generation,
+			connectionGeneration: connectionGeneration,
+			viewRevision:         viewRevision,
+			echoAck:              echoAck,
 		}, nil
 	}
 	if s.state.next == ^uint64(0) {
@@ -66,9 +79,10 @@ func (s *structuredOutputStream) prepare(frame renderer.Frame, damage []renderer
 	if err != nil {
 		return nil, err
 	}
+	base := s.state.next
 	update := ports.ScreenUpdate{
-		BaseStateNum: s.state.next,
-		NewStateNum:  s.state.next + 1,
+		BaseStateNum: base,
+		NewStateNum:  base + 1,
 		EchoAck:      echoAck,
 		Kind:         ports.ScreenUpdateDelta,
 		Size:         frameSize(frame),
@@ -109,15 +123,21 @@ func (s *structuredOutputStream) prepare(frame renderer.Frame, damage []renderer
 	if err != nil {
 		return nil, err
 	}
+	connectionGeneration, epoch, viewRevision := s.state.fence()
 	return &preparedStructuredOutput{
-		stream:    s,
-		candidate: candidate,
-		cursor:    cursor,
-		update:    update,
-		next:      update.NewStateNum,
-		data:      data,
-		echoAck:   echoAck,
-		snapshot:  snapshot,
+		stream:               s,
+		candidate:            candidate,
+		cursor:               cursor,
+		base:                 base,
+		epoch:                epoch,
+		generation:           s.state.generation,
+		connectionGeneration: connectionGeneration,
+		viewRevision:         viewRevision,
+		update:               update,
+		next:                 update.NewStateNum,
+		data:                 data,
+		echoAck:              echoAck,
+		snapshot:             snapshot,
 	}, nil
 }
 
@@ -152,28 +172,38 @@ func wireScreenCursor(cursor cursorOut, frame renderer.Frame) (ports.ScreenCurso
 }
 
 type preparedStructuredOutput struct {
-	stream    *structuredOutputStream
-	candidate renderer.DeltaCandidate
-	cursor    cursorOut
-	update    ports.ScreenUpdate
-	next      uint64
-	echoAck   uint64
-	data      []byte
-	snapshot  bool
-	attempted bool
-	committed bool
+	stream               *structuredOutputStream
+	candidate            renderer.DeltaCandidate
+	cursor               cursorOut
+	base                 uint64
+	epoch                uint64
+	generation           uint64
+	connectionGeneration uint64
+	viewRevision         uint64
+	update               ports.ScreenUpdate
+	next                 uint64
+	echoAck              uint64
+	data                 []byte
+	snapshot             bool
+	attempted            bool
+	committed            bool
+	sent                 bool
 }
 
 func (p *preparedStructuredOutput) send(sender func(ports.Frame) error) error {
 	if p == nil || p.attempted {
 		return nil
 	}
-	if len(p.data) == 0 {
-		p.attempted = true
-		p.commit()
+	p.attempted = true
+	if !p.stream.state.preparedCurrent(p.generation, p.epoch, p.viewRevision, p.base) ||
+		(p.stream.state.attachment != nil && p.stream.state.attachment.connectionGeneration.Load() != p.connectionGeneration) {
 		return nil
 	}
-	p.attempted = true
+	if len(p.data) == 0 {
+		p.commit()
+		p.sent = true
+		return nil
+	}
 	if sender == nil {
 		p.stream.forceSnapshot = true
 		return errors.New("structured output: nil sender")
@@ -185,6 +215,7 @@ func (p *preparedStructuredOutput) send(sender func(ports.Frame) error) error {
 	p.commit()
 	p.stream.state.next = p.next
 	p.stream.state.publishOutstanding()
+	p.sent = true
 	return nil
 }
 
@@ -196,6 +227,10 @@ func (p *preparedStructuredOutput) commitNoSend() {
 		return
 	}
 	p.attempted = true
+	if !p.stream.state.preparedCurrent(p.generation, p.epoch, p.viewRevision, p.base) ||
+		(p.stream.state.attachment != nil && p.stream.state.attachment.connectionGeneration.Load() != p.connectionGeneration) {
+		return
+	}
 	if len(p.data) != 0 {
 		if p.stream != nil {
 			p.stream.forceSnapshot = true
@@ -203,6 +238,7 @@ func (p *preparedStructuredOutput) commitNoSend() {
 		return
 	}
 	p.commit()
+	p.sent = true
 }
 
 func (p *preparedStructuredOutput) commit() {
@@ -212,12 +248,13 @@ func (p *preparedStructuredOutput) commit() {
 	p.candidate.Commit(&p.stream.shadow)
 	p.stream.cursorOut = p.cursor
 	p.stream.forceSnapshot = false
+	p.stream.state.forceSnapshot = false
 	p.committed = true
 }
 
-func (s *structuredOutputStream) ack(state uint64) {
+func (s *structuredOutputStream) ack(values ...uint64) {
 	if s != nil && s.state != nil {
-		s.state.ack(state)
+		s.state.ack(values...)
 	}
 }
 

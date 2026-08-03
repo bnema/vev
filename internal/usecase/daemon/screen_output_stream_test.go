@@ -137,7 +137,7 @@ func TestStructuredOutputStreamResetAndResizeUseBaseZero(t *testing.T) {
 	resetUpdate := decodeStructured(t, reset.data)
 	require.Equal(t, ports.ScreenUpdateSnapshot, resetUpdate.Kind)
 	require.Zero(t, resetUpdate.BaseStateNum)
-	require.Equal(t, uint64(3), resetUpdate.NewStateNum)
+	require.Equal(t, uint64(1), resetUpdate.NewStateNum)
 	require.Len(t, resetUpdate.Spans, resized.Height)
 	for _, span := range resetUpdate.Spans {
 		require.Equal(t, uint16(resized.Width), uint16(len(span.Cells)))

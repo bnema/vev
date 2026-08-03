@@ -573,7 +573,13 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 					marks.attachmentEffect.endTransportSend()
 				}
 			}
-			endEmit(uint64(len(data)), sendErr == nil)
+			emitted := sendErr == nil && ((preparedANSI != nil && preparedANSI.sent) || (preparedScreen != nil && preparedScreen.sent))
+			endEmit(uint64(len(data)), emitted)
+			if sendErr == nil && !emitted {
+				ac.discardProxyCapture()
+				ac.sendMu.Unlock()
+				return true
+			}
 			if sendErr == nil && ac.proxied {
 				kind := ports.RuntimeScreenDelta
 				if preparedScreen.update.Kind == ports.ScreenUpdateSnapshot {
@@ -587,8 +593,17 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		if len(data) == 0 {
 			if ac.proxied {
 				preparedScreen.commitNoSend()
+				if !preparedScreen.sent {
+					ac.discardProxyCapture()
+					ac.sendMu.Unlock()
+					return true
+				}
 			} else {
 				preparedANSI.commitNoSend()
+				if !preparedANSI.sent {
+					ac.sendMu.Unlock()
+					return true
+				}
 			}
 		}
 		// Publish only after output preparation and transport emission both

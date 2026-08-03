@@ -289,10 +289,12 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
-func (ac *attachedClient) ackOutputState(state uint64) {
+func (ac *attachedClient) ackOutputState(values ...uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	ac.output.ack(state)
+	if ac.output != nil {
+		ac.output.ack(values...)
+	}
 }
 
 // ensureScreenOutput is called while sendMu owns the attachment. Production
@@ -317,8 +319,8 @@ func (ac *attachedClient) discardProxyCapture() {
 	}
 }
 
-// rebaseOutput resets both wire representations while retaining the shared
-// state-number chain. Callers hold sendMu (or the activation barrier).
+// rebaseOutput resets only this attachment's output representations. Callers
+// hold sendMu (or the activation barrier).
 func (ac *attachedClient) rebaseOutput() {
 	if ac == nil {
 		return
@@ -572,6 +574,7 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		resumeToken:   resumeToken,
 		proxied:       opts.proxied,
 	}
+	output.attachment = ac
 	if opts.proxied {
 		ac.screenOutput = newStructuredOutputStream(output)
 	}

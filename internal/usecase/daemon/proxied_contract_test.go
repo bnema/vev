@@ -283,7 +283,7 @@ func TestOutputResetRebasesFullWindowAndSchedulesBaseZeroPaint(t *testing.T) {
 	require.Equal(t, ports.ScreenUpdateSnapshot, out.Kind)
 	require.Zero(t, out.BaseStateNum)
 	ac.sendMu.Lock()
-	require.Equal(t, ac.output.maxOutstanding, ac.output.acked, "reset must retire the previously full output window")
+	require.Zero(t, ac.output.acked, "reset must clear the previous output window")
 	require.Equal(t, uint64(1), ac.output.outstanding(), "only the authoritative reset paint remains outstanding")
 	require.Equal(t, ac.output.next, out.NewStateNum)
 	ac.sendMu.Unlock()

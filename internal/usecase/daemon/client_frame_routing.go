@@ -129,7 +129,7 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		}
 	case ports.MsgAck:
 		if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
-			d.ackOutput(token, ack.AckedStateNum)
+			d.ackOutput(token, ack.Epoch, ack.State)
 		}
 	case ports.MsgOutputResetRequest:
 		if _, derr := ports.UnmarshalOutputResetRequest(f.Payload); derr == nil {
@@ -263,13 +263,13 @@ func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	})
 }
 
-func (d *Daemon) ackOutput(token attachmentConnectionToken, state uint64) bool {
+func (d *Daemon) ackOutput(token attachmentConnectionToken, values ...uint64) bool {
 	ac := token.ac
 	if token.effect == nil || token.effect.ended.Load() {
 		return false
 	}
 	ac.sendMu.Lock()
-	ac.output.ack(state)
+	ac.output.ack(values...)
 	ac.sendMu.Unlock()
 	if rc := token.sess.core().coordinator.Load(); rc != nil {
 		rc.notifyAckForLease(token.lease)

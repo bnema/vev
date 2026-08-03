@@ -1082,7 +1082,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	first, err := ports.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
 	require.Zero(t, first.BaseStateNum)
-	require.Equal(t, uint64(maxUnackedOutputStates+1), first.NewStateNum)
+	require.Equal(t, uint64(1), first.NewStateNum)
 	resumedAC.ackOutputState(first.NewStateNum)
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
