@@ -37,8 +37,8 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
-	sess, ok := localSession(token.sess)
-	if !ok {
+	sess := token.sess
+	if sess == nil {
 		return false
 	}
 	var parkingToken uint64
@@ -126,8 +126,8 @@ func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToke
 	if failed == nil || failed != token.transport.transport {
 		return
 	}
-	sess, ok := localSession(token.sess)
-	if !ok {
+	sess := token.sess
+	if sess == nil {
 		return
 	}
 	parkingToken := d.markParkingInFlight(sess, token.ac)

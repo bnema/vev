@@ -45,11 +45,11 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 
 // clearPreviousSessionIf clears target only if it has not been replaced since
 // the caller observed it. This preserves a concurrent successful hand-off.
-func (ac *attachedClient) clearPreviousSessionIf(target attachmentSession) {
+func (ac *attachedClient) clearPreviousSessionIf(target *session) {
 	if ac == nil {
 		return
 	}
-	ac.previousSession.With(func(previous *attachmentSession) {
+	ac.previousSession.With(func(previous **session) {
 		if *previous == target {
 			*previous = nil
 		}
@@ -59,7 +59,7 @@ func (ac *attachedClient) clearPreviousSessionIf(target attachmentSession) {
 // recordPreviousSession is called only after a cross-session hand-off has
 // committed. Keeping this after the commit makes failed/displaced switches
 // leave the toggle pair intact.
-func (ac *attachedClient) recordPreviousSession(origin attachmentSession) {
+func (ac *attachedClient) recordPreviousSession(origin *session) {
 	if ac != nil && origin != nil {
 		ac.previousSession.Set(origin)
 	}

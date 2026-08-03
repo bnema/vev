@@ -336,7 +336,7 @@ func (d *Daemon) resolveAppliedTheme(raw theme.Theme) appliedTheme {
 
 func (d *Daemon) reapplyThemeAllSessions() {
 	d.mu.Lock()
-	sessions := localSessionsSnapshot(d.sessions)
+	sessions := sessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 
 	for _, sess := range sessions {

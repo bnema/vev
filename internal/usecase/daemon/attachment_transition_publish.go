@@ -50,16 +50,15 @@ func (d *Daemon) sourceAttachmentTokenCurrentFrozen(token attachmentConnectionTo
 	return transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
 }
 
-func transitionSourceTabCurrentLocked(source attachmentSession, expected *tab) bool {
+func transitionSourceTabCurrentLocked(source *session, expected *tab) bool {
 	return transitionSourceTabCurrentForRequestLocked(source, expected, false)
 }
 
-func transitionSourceTabCurrentForRequestLocked(source attachmentSession, expected *tab, transferExpected bool) bool {
+func transitionSourceTabCurrentForRequestLocked(source *session, expected *tab, transferExpected bool) bool {
 	if expected == nil {
 		return true
 	}
-	local, ok := localSession(source)
-	if !ok || !containsTab(local.tabs, expected) {
+	if source == nil || !containsTab(source.tabs, expected) {
 		return false
 	}
 	expected.mu.Lock()
@@ -81,7 +80,7 @@ func (d *Daemon) transitionAttachmentLocked(req attachmentTransitionRequest) (at
 
 type attachmentPublication struct {
 	req                 attachmentTransitionRequest
-	source              attachmentSession
+	source              *session
 	targetCoordinator   *renderCoordinator
 	sourceCoordinator   *renderCoordinator
 	releaseCoordinators func()
@@ -92,22 +91,21 @@ func (p *attachmentPublication) unlockCoordinators() {
 	p.releaseCoordinators()
 }
 
-func attachmentLifecycleCurrentLocked(entry attachmentSession, fence *attachmentLifecycleFence) bool {
+func attachmentLifecycleCurrentLocked(entry *session, fence *attachmentLifecycleFence) bool {
 	if fence == nil {
 		return true
 	}
-	target, ok := localSession(entry)
-	if !ok {
+	if entry == nil {
 		return false
 	}
-	if fence.checkCreatedAt && (target.name != fence.name || target.createdAt != fence.createdAt) {
+	if fence.checkCreatedAt && (entry.name != fence.name || entry.createdAt != fence.createdAt) {
 		return false
 	}
-	if fence.checkIncarnation && target.incarnation != fence.incarnation {
+	if fence.checkIncarnation && entry.incarnation != fence.incarnation {
 		return false
 	}
-	return !fence.checkTab || fence.tabIndex >= 0 && fence.tabIndex < len(target.tabs) &&
-		domain.TabStableID(target.tabs[fence.tabIndex].stableID) == fence.tabID
+	return !fence.checkTab || fence.tabIndex >= 0 && fence.tabIndex < len(entry.tabs) &&
+		domain.TabStableID(entry.tabs[fence.tabIndex].stableID) == fence.tabID
 }
 
 // validateAttachmentTransitionPrelocked performs every fallible check before
@@ -174,18 +172,12 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 // shared environment state as part of the same publication.
 func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool {
 	req := publication.req
-	if req.activateTargetTab {
-		if target, ok := localSession(req.target); ok {
-			target.activateAttachmentViewLocked(req.next, req.targetTabIndex)
-		}
+	if req.activateTargetTab && req.target != nil {
+		req.target.activateAttachmentViewLocked(req.next, req.targetTabIndex)
 	}
-	if req.copySourceEnvironment {
-		source, sourceOK := localSession(publication.source)
-		target, targetOK := localSession(req.target)
-		if sourceOK && targetOK {
-			target.terminal = source.terminal
-			target.env = copyEnvironment(source.env)
-		}
+	if req.copySourceEnvironment && publication.source != nil && req.target != nil {
+		req.target.terminal = publication.source.terminal
+		req.target.env = copyEnvironment(publication.source.env)
 	}
 	return req.preserveAttachment
 }
@@ -259,9 +251,12 @@ func (d *Daemon) transitionAttachmentRoutedLocked(req attachmentTransitionReques
 }
 
 // lockAttachmentSessions gives every two-session transition one stable order.
-func lockAttachmentSessions(a, b attachmentSession) func() {
-	aCore := attachmentSessionCore(a)
-	bCore := attachmentSessionCore(b)
+func lockAttachmentSessions(a, b *session) func() {
+	if a == nil || b == nil {
+		return func() {}
+	}
+	aCore := a.core()
+	bCore := b.core()
 	if aCore == nil || bCore == nil {
 		return func() {}
 	}
@@ -283,7 +278,7 @@ func lockAttachmentSessions(a, b attachmentSession) func() {
 
 // lockAttachmentCoordinators follows the same immutable session-ID order as
 // lockAttachmentSessions. Callers already hold ordered session locks.
-func lockAttachmentCoordinators(a attachmentSession, aCoordinator *renderCoordinator, b attachmentSession, bCoordinator *renderCoordinator) func() {
+func lockAttachmentCoordinators(a *session, aCoordinator *renderCoordinator, b *session, bCoordinator *renderCoordinator) func() {
 	if aCoordinator == nil && bCoordinator == nil {
 		return func() {}
 	}

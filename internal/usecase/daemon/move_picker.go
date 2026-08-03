@@ -10,8 +10,8 @@ func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
 	if d == nil || source.Session.ID == "" || source.TabID == "" {
 		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source session is no longer available.", errMovePaneInvalid)
 	}
-	sess, ok := localSession(d.sessionByID(source.Session.ID))
-	if !ok || sess.incarnation != source.Session.Incarnation {
+	sess := d.sessionByID(source.Session.ID)
+	if sess == nil || sess.incarnation != source.Session.Incarnation {
 		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source session is no longer available.", errMovePaneInvalid)
 	}
 	sess.mu.Lock()
@@ -120,8 +120,8 @@ func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourc
 
 func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*session, *tab) {
 	d.mu.Lock()
-	sess, ok := localSession(d.sessions[target.Session])
-	if !ok {
+	sess := d.sessions[target.Session]
+	if sess == nil {
 		d.mu.Unlock()
 		return nil, nil
 	}

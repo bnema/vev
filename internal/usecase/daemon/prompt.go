@@ -13,7 +13,7 @@ func promptModalFor(title string) ui.Modal {
 	return ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 4, Title: title, Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
 }
 
-func (d *Daemon) enterPrompt(sess attachmentSession, ac *attachedClient, title, initial string, submit func(string) error) {
+func (d *Daemon) enterPrompt(sess *session, ac *attachedClient, title, initial string, submit func(string) error) {
 	d.closePrompt(ac)
 	ac.overlays.promptMu.Lock()
 	ac.overlays.prompt = promptui.New(title, initial)
@@ -23,7 +23,7 @@ func (d *Daemon) enterPrompt(sess attachmentSession, ac *attachedClient, title, 
 	d.invalidateRender(sess, ac, true, "prompt.go")
 }
 
-func (d *Daemon) enterTransitionPrompt(sess attachmentSession, ac *attachedClient, title, initial string, submit func(string, attachmentConnectionToken) error) {
+func (d *Daemon) enterTransitionPrompt(sess *session, ac *attachedClient, title, initial string, submit func(string, attachmentConnectionToken) error) {
 	d.closePrompt(ac)
 	ac.overlays.promptMu.Lock()
 	ac.overlays.prompt = promptui.New(title, initial)

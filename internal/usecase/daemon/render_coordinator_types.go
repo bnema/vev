@@ -95,8 +95,11 @@ type renderCoordinatorOptions struct {
 	// wake composes a coalesced render request.
 	wake func(renderWake)
 	// ackReady reports whether the attachment may compose another output
-	// state (the outputStateStream window has capacity).
-	ackReady func() bool
+	// state (the outputStateStream window has capacity). It is retained for
+	// coordinator-only tests and headless callers; production uses ackReadyFor
+	// so one attachment cannot gate another.
+	ackReady    func() bool
+	ackReadyFor func(*attachedClient) bool
 	// syncRenderable reports whether a pane's synchronized batch currently
 	// contributes to the attached composition. It must not acquire c.mu.
 	syncRenderable func(*pane) bool

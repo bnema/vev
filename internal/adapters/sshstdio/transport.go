@@ -33,6 +33,18 @@ var (
 
 type closeFunc func() error
 type eofErrFunc func() error
+type operationKind uint8
+
+const (
+	operationSend operationKind = iota
+	operationReceive
+	operationKindCount
+)
+
+type operationWait struct {
+	send    <-chan struct{}
+	receive <-chan struct{}
+}
 
 type Option func(*transport)
 
@@ -67,9 +79,9 @@ type transport struct {
 	eofErr         eofErrFunc
 	observer       ports.SerializedRuntimeObserver
 	operationMu    sync.Mutex
-	operationCount int
+	operationCount [operationKindCount]int
 	closing        bool
-	operationsDone chan struct{}
+	operationsDone [operationKindCount]chan struct{}
 	closeOnce      sync.Once
 	closeErr       error
 
@@ -136,7 +148,11 @@ func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) fu
 	if t.observer == nil {
 		return func(bool) {}
 	}
-	if !t.beginObservedOperation() {
+	kind := operationSend
+	if start == ports.RuntimeAdapterReceiveStart {
+		kind = operationReceive
+	}
+	if !t.beginObservedOperation(kind) {
 		return func(bool) {}
 	}
 	correlation := ports.NewRuntimeCorrelation()
@@ -146,7 +162,7 @@ func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) fu
 		end = ports.RuntimeAdapterReceiveEnd
 	}
 	return func(valid bool) {
-		defer t.finishObservedOperation()
+		defer t.finishObservedOperation(kind)
 		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("sshstdio", correlation, end, bytes, valid))
 	}
 }
@@ -163,20 +179,26 @@ func (t *transport) mapEOFError(err error) error {
 
 func (t *transport) Close() error {
 	t.closeOnce.Do(func() {
-		done := t.beginShutdown()
+		wait := t.beginShutdown()
+		w, writeOwned := t.w.(io.Closer)
+		r, readOwned := t.r.(io.Closer)
 		// Close owned streams before waiting for in-flight operations. The
 		// writer is what releases a Send blocked on a child stdin pipe; the
-		// reader releases a Recv blocked in io.ReadFull.
+		// reader releases a Recv blocked in io.ReadFull. Unowned streams cannot
+		// be interrupted safely, so Close must not wait for their operations.
 		var writeErr, readErr error
-		if w, ok := t.w.(io.Closer); ok {
+		if writeOwned {
 			writeErr = w.Close()
 		}
-		if r, ok := t.r.(io.Closer); ok {
+		if readOwned {
 			readErr = r.Close()
 		}
 		closeErr := t.close()
-		if done != nil {
-			<-done
+		if writeOwned && wait.send != nil {
+			<-wait.send
+		}
+		if readOwned && wait.receive != nil {
+			<-wait.receive
 		}
 		switch {
 		case closeErr != nil:
@@ -190,36 +212,40 @@ func (t *transport) Close() error {
 	return t.closeErr
 }
 
-func (t *transport) beginObservedOperation() bool {
+func (t *transport) beginObservedOperation(kind operationKind) bool {
 	t.operationMu.Lock()
 	defer t.operationMu.Unlock()
 	if t.closing {
 		return false
 	}
-	if t.operationCount == 0 {
-		t.operationsDone = make(chan struct{})
+	if t.operationCount[kind] == 0 {
+		t.operationsDone[kind] = make(chan struct{})
 	}
-	t.operationCount++
+	t.operationCount[kind]++
 	return true
 }
 
-func (t *transport) finishObservedOperation() {
+func (t *transport) finishObservedOperation(kind operationKind) {
 	t.operationMu.Lock()
 	defer t.operationMu.Unlock()
-	t.operationCount--
-	if t.operationCount == 0 {
-		close(t.operationsDone)
+	t.operationCount[kind]--
+	if t.operationCount[kind] == 0 {
+		close(t.operationsDone[kind])
 	}
 }
 
-func (t *transport) beginShutdown() <-chan struct{} {
+func (t *transport) beginShutdown() operationWait {
 	t.operationMu.Lock()
 	defer t.operationMu.Unlock()
 	t.closing = true
-	if t.operationCount == 0 {
-		return nil
+	var wait operationWait
+	if t.operationCount[operationSend] != 0 {
+		wait.send = t.operationsDone[operationSend]
 	}
-	return t.operationsDone
+	if t.operationCount[operationReceive] != 0 {
+		wait.receive = t.operationsDone[operationReceive]
+	}
+	return wait
 }
 
 type processWaiter struct {

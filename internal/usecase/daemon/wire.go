@@ -7,13 +7,15 @@ import (
 )
 
 func frameWelcome(s *session, ac *attachedClient) ports.Frame {
+	s.mu.Lock()
 	w := ports.Welcome{
 		SessionID:    string(s.id),
 		SessionName:  s.name,
 		Ephemeral:    s.ephemeral,
 		Capabilities: ports.CapabilityResume,
-		ResumeToken:  ac.resumeToken,
 	}
+	s.mu.Unlock()
+	w.ResumeToken = ac.resumeToken
 	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}
 }
 

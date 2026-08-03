@@ -89,8 +89,8 @@ func (d *Daemon) writeClipboardImageForAttachment(token attachmentConnectionToke
 	if err != nil {
 		return "", err
 	}
-	sess, ok := localSession(token.sess)
-	if !ok {
+	sess := token.sess
+	if sess == nil {
 		_ = os.Remove(path)
 		return "", errAttachmentTransition
 	}
@@ -135,8 +135,8 @@ func (d *Daemon) injectClipboardPath(sess *session, path string) {
 }
 
 func (d *Daemon) injectClipboardPathForAttachment(token attachmentConnectionToken, path string) {
-	sess, ok := localSession(token.sess)
-	if !ok || !token.attachmentEffectCurrent() {
+	sess := token.sess
+	if sess == nil || !token.attachmentEffectCurrent() {
 		return
 	}
 	d.injectClipboardPathToTarget(sess, path, &token)

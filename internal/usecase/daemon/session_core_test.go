@@ -30,7 +30,7 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 
 	core := sess.core()
 	require.Same(t, &sess.sessionCore, core)
-	require.Same(t, sess, mustLocalSession(t, attachmentSession(sess)))
+	require.Same(t, sess, sess)
 	require.Equal(t, sessionCapabilities{}, core.caps, "zero-value local sessions must retain all local capabilities")
 
 	core.mu.Lock()
@@ -113,7 +113,7 @@ func TestLocalCreateThenKillRemovesLiveRegistryEntry(t *testing.T) {
 }
 
 func TestAttachmentSessionRegistryUsesExactIdentity(t *testing.T) {
-	d := &Daemon{sessions: make(map[domain.SessionID]attachmentSession)}
+	d := &Daemon{sessions: make(map[domain.SessionID]*session)}
 	first := &session{}
 	first.id = domain.SessionID("same")
 	second := &session{}
@@ -146,9 +146,8 @@ func TestSessionCoreLockOrderUsesImmutableIDs(t *testing.T) {
 	second.core().mu.Unlock()
 }
 
-func mustLocalSession(t *testing.T, entry attachmentSession) *session {
+func mustLocalSession(t *testing.T, entry *session) *session {
 	t.Helper()
-	sess, ok := localSession(entry)
-	require.True(t, ok)
-	return sess
+	require.NotNil(t, entry)
+	return entry
 }

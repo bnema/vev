@@ -195,3 +195,62 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 		}
 	}
 }
+
+func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
+	meta, err := MarshalSessionMeta(SessionMeta{Tabs: []SessionTabMeta{{Name: "tab"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		payload []byte
+		decode  func([]byte) error
+	}{
+		{
+			name: "hello boolean",
+			payload: func() []byte {
+				b := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
+				b[len(b)-6] = 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalHello(b); return err },
+		},
+		{
+			name: "welcome boolean",
+			payload: func() []byte {
+				b := MarshalWelcome(Welcome{SessionID: "id"})
+				b[6] = 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalWelcome(b); return err },
+		},
+		{name: "detached reason", payload: []byte{0xff}, decode: func(b []byte) error { _, err := UnmarshalDetached(b); return err }},
+		{
+			name: "kill boolean",
+			payload: func() []byte {
+				b := MarshalKill(Kill{All: true})
+				b[len(b)-1] = 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalKill(b); return err },
+		},
+		{
+			name: "sessions booleans",
+			payload: func() []byte {
+				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionRunning}}})
+				b[4], b[7] = 2, 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalSessions(b); return err },
+		},
+		{name: "session metadata boolean", payload: func() []byte { b := append([]byte(nil), meta...); b[len(b)-1] = 2; return b }(), decode: func(b []byte) error { _, err := UnmarshalSessionMeta(b); return err }},
+		{name: "theme flags", payload: func() []byte { b := make([]byte, 57); b[0] = 0x20; return b }(), decode: func(b []byte) error { _, err := UnmarshalTheme(b); return err }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.decode(tt.payload); err == nil {
+				t.Fatal("decoder accepted unknown closed wire value")
+			}
+		})
+	}
+}

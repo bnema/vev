@@ -39,9 +39,6 @@ type renderCoordinator struct {
 	// invalidations retain only their exact target lease here.
 	pendingShared  bool
 	pendingTargets map[*attachedClient]*attachmentLease
-	// ackReadyFor is production's attachment-scoped ACK-window probe. The
-	// legacy options callback remains for coordinator-only tests.
-	ackReadyFor func(*attachedClient) bool
 	// ackBlocked retains the first rejected ACK-capacity probe until the
 	// matching consume or lifecycle closure releases that exact interval.
 	ackBlocked *ackBlockedSpan
@@ -807,7 +804,7 @@ func (c *renderCoordinator) waitForTimerWorkers() { c.supervisor.wait() }
 // invalidateRender is the sole producer fan-in. In tests and transitional
 // headless paths without an attached coordinator it retains the old private
 // compositor; attached sessions always schedule through their coordinator.
-func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
+func (d *Daemon) invalidateRender(entry *session, ac *attachedClient, reset bool, producer string) {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
 		invalidation := renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}
 		if rc.invalidateForAttachment(ac, invalidation) {
@@ -832,7 +829,7 @@ func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, r
 // invalidateRenderNow publishes through the coordinator but immediately
 // flushes the wake when the client can accept state. Attach uses this path so
 // the required first full frame never depends on a debounce timer.
-func (d *Daemon) invalidateRenderNow(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
+func (d *Daemon) invalidateRenderNow(entry *session, ac *attachedClient, reset bool, producer string) {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
 		if rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}) {
 			rc.fireCurrent(false)
@@ -880,8 +877,8 @@ func (c *renderCoordinator) fireWithTimerToken(token *timerToken, gen uint64, wa
 }
 
 func (c *renderCoordinator) attachmentAckReady(ac *attachedClient) bool {
-	if c.ackReadyFor != nil {
-		return c.ackReadyFor(ac)
+	if c.opts.ackReadyFor != nil {
+		return c.opts.ackReadyFor(ac)
 	}
 	if c.opts.ackReady != nil {
 		return c.opts.ackReady()
@@ -1019,7 +1016,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 			w.lease = syncLease
 		}
 	}
-	previews := c.takePendingPreviewsLocked()
+	preview, previews := c.takePendingPreviewsLocked()
 	worker := c.detachNormalTimerLocked()
 	c.armed = false
 
@@ -1038,7 +1035,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 		if ackStart != nil {
 			ackStart.publishStart()
 		}
-		c.notifyPreviews(w, previews)
+		c.notifyPreviews(w, preview, previews)
 		return
 	}
 
@@ -1107,7 +1104,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 	if outputReady && wake != nil {
 		wake(w)
 	}
-	c.notifyPreviews(w, previews)
+	c.notifyPreviews(w, preview, previews)
 }
 
 func (c *renderCoordinator) fireValidLocked(token *timerToken, gen uint64, watchdog bool) bool {
@@ -1151,19 +1148,19 @@ func (c *renderCoordinator) syncGateOpenLocked() bool {
 
 // takePendingPreviewsLocked snapshots and consumes picker preview delivery
 // for this target generation. Preview callbacks are never ACK-gated.
-func (c *renderCoordinator) takePendingPreviewsLocked() []func(renderWake) {
+func (c *renderCoordinator) takePendingPreviewsLocked() (func(renderWake), []func(renderWake)) {
 	if !c.pendingPreview {
-		return nil
+		return nil, nil
 	}
 	c.pendingPreview = false
 	previews := make([]func(renderWake), 0, len(c.previewWakes))
 	for _, subscription := range c.previewWakes {
 		previews = append(previews, subscription.fn)
 	}
-	return previews
+	return nil, previews
 }
 
-func (c *renderCoordinator) notifyPreviews(w renderWake, previews []func(renderWake)) {
+func (c *renderCoordinator) notifyPreviews(w renderWake, _ func(renderWake), previews []func(renderWake)) {
 	for _, fn := range previews {
 		fn(w)
 	}

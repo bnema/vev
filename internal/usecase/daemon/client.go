@@ -40,7 +40,7 @@ type attachedClient struct {
 	overlayOnce          sync.Once
 	clientID             [16]byte
 	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
-	// the linearization gate for every attachment-bound observable operation. An attachment
+	// the linearization gate for every attachment-bound observable operation. A role
 	// transition freezes and drains this gate before changing either generation
 	// or the session/coordinator registries.
 	connectionGeneration atomic.Uint64
@@ -73,7 +73,7 @@ type attachedClient struct {
 	// tabs and panes without changing shared session ownership.
 	viewMu       sync.Mutex
 	view         attachmentView
-	sess         Guarded[attachmentSession]
+	sess         Guarded[*session]
 	mouseScan    mouse.Scanner
 	themeMu      sync.Mutex
 	clientTheme  themeui.Theme
@@ -82,7 +82,7 @@ type attachedClient struct {
 	renderStages renderStageHooks // optional render and handoff observability hooks
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
-	previousSession Guarded[attachmentSession]
+	previousSession Guarded[*session]
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
 	// routeCreatedSession marks a session created by this attachment's route.
@@ -141,15 +141,14 @@ func (ac *attachedClient) initOverlays() {
 	ac.overlayOnce.Do(func() { ac.overlays = newOverlayRuntime(ac) })
 }
 
-func (ac *attachedClient) currentAttachmentSession() attachmentSession { return ac.sess.Get() }
+func (ac *attachedClient) currentAttachmentSession() *session { return ac.sess.Get() }
 
 // currentSession narrows the attachment to its owning local session.
 func (ac *attachedClient) currentSession() *session {
-	sess, _ := localSession(ac.currentAttachmentSession())
-	return sess
+	return ac.currentAttachmentSession()
 }
 
-func (ac *attachedClient) setSession(sess attachmentSession) { ac.sess.Set(sess) }
+func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
 
 func (ac *attachedClient) clearPreviousSession() {
 	if ac != nil {
@@ -558,13 +557,13 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 // attachCoordinator installs the coordinator lease for an attachment. Session
 // membership remains independent, so installing one attachment never displaces
 // another.
-func (d *Daemon) attachCoordinator(sess *session, current *attachedClient, ready bool) *renderCoordinator {
-	rc, cleanup := d.attachCoordinatorDeferred(sess, current, ready)
+func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, ready bool) *renderCoordinator {
+	rc, cleanup := d.attachCoordinatorDeferred(sess, old, current, ready)
 	cleanup.finish()
 	return rc
 }
 
-func (d *Daemon) attachCoordinatorDeferred(sess *session, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
+func (d *Daemon) attachCoordinatorDeferred(sess *session, _ *attachedClient, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
 	rc := d.ensureRenderCoordinator(sess)
 	if current != nil {
 		rc.attachWithReadiness(current, ready)
@@ -588,8 +587,8 @@ func (d *Daemon) ensureRenderCoordinatorPrelocked(sess *session) *renderCoordina
 }
 
 // ensureAttachmentRenderCoordinatorPrelocked publishes the coordinator for an
-// exact attachment implementation. The caller holds entry.core().mu.
-func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSession) *renderCoordinator {
+// exact session. The caller holds entry.core().mu.
+func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry *session) *renderCoordinator {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
 		return rc
 	}
@@ -604,7 +603,7 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 			// The session snapshot is deterministic. Each paint revalidates the
 			// attachment's membership and transport fence after that snapshot, so
 			// a detached peer cannot stop remaining attachments receiving output.
-			attachments := snapshotAttachmentSession(entry)
+			attachments := entry.snapshotAttachments()
 			for _, attachment := range attachments {
 				if !rc.wakeCurrent(w) {
 					return
@@ -614,27 +613,28 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 					continue
 				}
 				// Pane damage is session-shared; every fan-out attachment needs a
-				// complete frame because any peer may capture it first. A handshake
-				// target is the one synchronous exception: its first paint must finish
-				// before the handshake releases its lifecycle gate.
+				// fresh capture because any peer may acknowledge the damage first.
+				// Each attachment owns its send lock, so a blocked peer cannot stall
+				// this fan-out or the PTY reader. A handshake-targeted wake is the
+				// one synchronous exception: its first paint must finish before the
+				// handshake deadline is released.
 				fanoutReset := w.reset || len(attachments) > 1
 				if w.lease != nil && w.lease.attachment == attachment {
 					d.paint(entry, attachment, fanoutReset, lease)
 				} else if len(attachments) > 1 {
 					go d.paint(entry, attachment, fanoutReset, lease)
-
 				} else {
 					d.paint(entry, attachment, fanoutReset, lease)
 				}
 			}
 		},
+		ackReadyFor: func(attached *attachedClient) bool {
+			// outputStateStream publishes capacity atomically. Do not take
+			// attached.sendMu here: a slow transport may be holding it for an
+			// in-flight Send, and that peer must not gate healthy attachments.
+			return attached == nil || attached.output == nil || !attached.output.atCapacity()
+		},
 	})
-	rc.ackReadyFor = func(attached *attachedClient) bool {
-		// outputStateStream publishes capacity atomically. Do not take
-		// attached.sendMu here: a slow transport may be holding it for an
-		// in-flight Send, and that peer must not gate healthy attachments.
-		return attached == nil || attached.output == nil || !attached.output.atCapacity()
-	}
 	installAttachmentRenderCoordinator(entry, rc)
 	return rc
 }
@@ -684,11 +684,10 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
 	}
-	sess, ok := localSession(token.sess)
-	if !ok {
+	if token.sess == nil {
 		return false
 	}
-	d.firstPaintWithLease(sess, token.ac, token.ac.size, token.lease)
+	d.firstPaintWithLease(token.sess, token.ac, token.ac.size, token.lease)
 	return true
 }
 
@@ -752,8 +751,8 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 	}
 	clientTheme := themeFromMessage(msg)
 	token.ac.setClientTheme(clientTheme)
-	sess, ok := localSession(token.sess)
-	if !ok || !token.attachmentEffectCurrent() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
+	sess := token.sess
+	if sess == nil || !token.attachmentEffectCurrent() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
 		return false
 	}
 	if !token.attachmentEffectCurrent() {
@@ -847,12 +846,11 @@ func (d *Daemon) handleClientNoticeForAttachment(token attachmentConnectionToken
 		d.notices.routingMu.Unlock()
 		return
 	}
-	sess, ok := localSession(token.sess)
-	if !ok {
+	if token.sess == nil {
 		d.notices.routingMu.Unlock()
 		return
 	}
-	repaint := d.mutateClientNotice(sess, token.ac, notice)
+	repaint := d.mutateClientNotice(token.sess, token.ac, notice)
 	d.notices.routingMu.Unlock()
 	if repaint && token.attachmentEffectCurrent() {
 		d.repaintForNotice(token.ac)

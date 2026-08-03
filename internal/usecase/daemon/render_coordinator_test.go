@@ -403,13 +403,12 @@ func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
 
 func TestRenderCoordinatorAckReadinessIsAttachmentScoped(t *testing.T) {
 	slow, healthy := &attachedClient{}, &attachedClient{}
-	var slowReady atomic.Bool
-	slowReady.Store(false)
+	slowReady := false
 	wakes := make(chan renderWake, 2)
 	rc := newRenderCoordinator(renderCoordinatorOptions{
-		wake: func(w renderWake) { wakes <- w },
+		ackReadyFor: func(ac *attachedClient) bool { return ac == healthy || slowReady },
+		wake:        func(w renderWake) { wakes <- w },
 	})
-	rc.ackReadyFor = func(ac *attachedClient) bool { return ac == healthy || slowReady.Load() }
 	rc.attach(slow)
 	rc.attach(healthy)
 	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
@@ -423,7 +422,7 @@ func TestRenderCoordinatorAckReadinessIsAttachmentScoped(t *testing.T) {
 	require.True(t, rc.pending, "slow attachment must retain the shared mutation until its ACK window opens")
 	rc.mu.Unlock()
 
-	slowReady.Store(true)
+	slowReady = true
 	rc.notifyAckForLease(rc.attachmentLease(slow))
 	wake = awaitTestValue(t, wakes, "slow attachment did not receive its deferred wake")
 	require.Contains(t, wake.attachmentLeases, slow)
@@ -978,6 +977,7 @@ func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
 		teardown func(rc *renderCoordinator, owner *attachedClient)
 	}{
 		{"detach", func(rc *renderCoordinator, owner *attachedClient) { rc.noteDetach(owner) }},
+		{"detach", func(rc *renderCoordinator, owner *attachedClient) { rc.noteDetach(owner) }},
 		{"session teardown", func(rc *renderCoordinator, _ *attachedClient) { rc.beginSessionTeardown().finish() }},
 	}
 	for _, tc := range cases {
@@ -1408,6 +1408,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 			name string
 			run  func(*renderCoordinator, *attachedClient)
 		}{
+			{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
 			{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
 		} {
 			t.Run(transition.name, func(t *testing.T) {

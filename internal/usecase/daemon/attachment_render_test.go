@@ -76,6 +76,76 @@ func TestAttachmentResizeKeepsSessionContentAndPeersFixed(t *testing.T) {
 	require.Greater(t, second.output.currentEpoch(), secondEpoch)
 }
 
+func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
+	sess, old, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
+	require.NoError(t, err)
+	newTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
+	_, fresh, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, newTransport)
+	require.NoError(t, err)
+
+	rc := sess.renderCoordinator()
+	oldLease := rc.attachmentLease(old)
+	freshLease := rc.attachmentLease(fresh)
+	require.True(t, rc.markAttachmentReady(oldLease))
+	oldTransport.blocked.Store(true)
+	sess.tabs[0].focusedPane().screen.Write([]byte("slow peer"))
+	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
+	rc.fireCurrent(false)
+	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
+
+	require.True(t, rc.markAttachmentReady(freshLease))
+	token := sess.attachmentToken(fresh, newTransport)
+	token.lease = freshLease
+	painted := make(chan bool, 1)
+	go func() { painted <- d.firstPaintForTransition(token) }()
+	frame := awaitTestValue(t, newTransport.sends, "healthy attachment first paint was gated by slow peer")
+	require.Equal(t, ports.MsgOutput, frame.Type)
+	require.True(t, <-painted)
+	close(oldTransport.release)
+}
+
+func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	d := newTestDaemon(t, newFactory(t, pty), clock)
+	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
+	sess, old, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
+	require.NoError(t, err)
+	rc := sess.renderCoordinator()
+	require.True(t, rc.markAttachmentReady(rc.attachmentLease(old)))
+
+	oldTransport.blocked.Store(true)
+	sess.tabs[0].focusedPane().screen.Write([]byte("slow peer"))
+	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
+	fireDone := make(chan struct{})
+	go func() {
+		rc.fireCurrent(false)
+		close(fireDone)
+	}()
+	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
+
+	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}
+	tr, sends, releaseConn := newConn(t, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
+	defer releaseConn()
+	handshakeDone := make(chan struct{})
+	go func() {
+		d.handleConn(tr)
+		close(handshakeDone)
+	}()
+	awaitFrame(t, sends, ports.MsgWelcome)
+	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, ports.MsgOutput, firstPaint.Type)
+	releaseConn()
+	awaitTestCompletion(t, handshakeDone, "multi-attachment handshake did not complete after first paint")
+	close(oldTransport.release)
+	awaitTestCompletion(t, fireDone, "slow peer output did not finish after release")
+}
+
 func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()

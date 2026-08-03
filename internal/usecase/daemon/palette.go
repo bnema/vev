@@ -150,7 +150,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	if entry == nil {
 		return
 	}
-	sess, local := localSession(entry)
+	sess := entry
 	var cmd command.Command
 	var sessionTarget palette.Result
 	var hasSessionTarget bool
@@ -276,10 +276,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		var err error
 		if effect != nil {
 			err = d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{}, "palette-session")
-		} else if local {
-			err = d.switchToTarget(sess, ac, target)
 		} else {
-			err = errAttachmentTransition
+			err = d.switchToTarget(sess, ac, target)
 		}
 		if errors.Is(err, errAttachmentTransition) {
 			return
@@ -314,12 +312,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
 			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
-		}
-		return
-	}
-	if !local {
-		if ac.closeExecutedPalette(generation, rawQuery) {
-			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, cmd.Name+" is unavailable for this attachment", nil)
 		}
 		return
 	}
@@ -401,7 +393,7 @@ func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery strin
 type paletteExec struct {
 	d                   *Daemon
 	sess                *session
-	attachment          attachmentSession
+	attachment          *session
 	ac                  *attachedClient
 	recent              []recentSession
 	actions             daemonActionRunner
@@ -445,11 +437,10 @@ func (e paletteExec) CreateSession() error {
 	}
 	e.d.enterTransitionPrompt(entry, e.ac, " Create session ", "", func(name string, token attachmentConnectionToken) error {
 		if token.ac == nil {
-			sess, ok := e.localSession()
-			if !ok {
+			if e.sess == nil {
 				return errAttachmentTransition
 			}
-			return e.d.createSessionAndSwitch(sess, e.ac, name)
+			return e.d.createSessionAndSwitch(e.sess, e.ac, name)
 		}
 		return e.d.createSessionAndSwitchForAttachment(token, name)
 	})
@@ -633,14 +624,6 @@ func (e paletteExec) YankLastNotification() error {
 	return nil
 }
 
-func (e paletteExec) localSession() (*session, bool) {
-	entry := e.attachment
-	if entry == nil {
-		entry = e.sess
-	}
-	return localSession(entry)
-}
-
 func (e paletteExec) JumpRecentSession(rank int) error {
 	if rank < 1 || rank > len(e.recent) {
 		return command.ErrInvalidArguments
@@ -656,8 +639,11 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	if e.effect != nil {
 		err = e.d.switchToTargetForAttachment(e.effect.connectionToken(), picker.Target{Session: target.id, TabIndex: -1}, sessionHandoffGuard{}, "palette-recent-session")
 	} else {
-		sess, ok := e.localSession()
-		if !ok {
+		sess := e.attachment
+		if sess == nil {
+			sess = e.sess
+		}
+		if sess == nil {
 			return errAttachmentTransition
 		}
 		err = e.d.switchToTarget(sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})

@@ -17,7 +17,7 @@ var noticesModal = ui.Modal{WidthPct: 70, HeightPct: 70, MinWidth: 40, MinHeight
 
 // enterNotices opens the notification history overlay from the daemon's full
 // notice center history, newest first.
-func (d *Daemon) enterNotices(sess attachmentSession, ac *attachedClient) {
+func (d *Daemon) enterNotices(sess *session, ac *attachedClient) {
 	history := d.notices.history()
 	now := d.clock.Now()
 	ac.overlays.noticeMu.Lock()
@@ -221,13 +221,13 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 // OSC52, mirroring copy mode's own yank path (copymode.go handleCopyInput):
 // send each chunk, then leave a one-shot status-bar confirmation that the
 // next repaint clears.
-func (d *Daemon) yankNotice(entry attachmentSession, ac *attachedClient, n domain.Notification) {
+func (d *Daemon) yankNotice(entry *session, ac *attachedClient, n domain.Notification) {
 	chunks := scopy.OSC52(noticeYankPayload(n))
 	for _, chunk := range chunks {
 		failed, err := d.boundedSendOutputErrTransport(ac, chunk)
 		if err != nil {
-			if sess, ok := localSession(entry); ok {
-				d.detachOnSendError(sess, ac, failed)
+			if entry != nil {
+				d.detachOnSendError(entry, ac, failed)
 			} else {
 				_ = ac.closeCapturedTransport(failed)
 			}

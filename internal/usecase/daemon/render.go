@@ -60,7 +60,7 @@ func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
 		return false
 	}
 	d.mu.Lock()
-	sessions := localSessionsSnapshot(d.sessions)
+	sessions := sessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 	for _, sess := range sessions {
 		for _, ac := range sess.snapshotAttachments() {
@@ -290,10 +290,11 @@ func (b *runtimeMarkBatch) flush() {
 	}
 }
 
-func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, lease *attachmentLease) {
+func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *attachmentLease) {
 	// Session-owned PTY preparation remains local; attachment rendering is
-	// captured through attachmentSession.captureRenderState.
-	sess, local := localSession(entry)
+	// captured through session.captureRenderState.
+	sess := entry
+	local := sess != nil
 	marks := d.newRuntimeMarkBatch()
 	if lease != nil {
 		token := attachmentToken(entry, ac, ac.transport())
@@ -331,9 +332,16 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 			return
 		}
 	}
-	// Capacity is checked before any destructive capture. The coordinator is
-	// the normal gate, but this ownership check also protects direct resize and
-	// test paint paths from consuming damage that cannot be emitted.
+	// Capacity is checked before any destructive capture. Refresh the atomic
+	// readiness snapshot while sendMu is held so direct test/setup mutations of
+	// the stream fields remain covered without making coordinator probes wait on
+	// a blocked transport send.
+	if ac.output != nil {
+		ac.output.syncCapacityLocked()
+	}
+	// The coordinator is the normal gate, but this ownership check also protects
+	// direct resize and test paint paths from consuming damage that cannot be
+	// emitted.
 	if ac.output != nil && ac.output.atCapacity() {
 		// The coordinator owns the blocked interval; this guard only protects
 		// direct test/resize paint calls from destructive capture.
