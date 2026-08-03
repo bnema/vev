@@ -50,14 +50,27 @@ func TestScreenRowIDsDoNotAppendInteriorOrAlternateScrollHistory(t *testing.T) {
 }
 
 func TestScreenRowIDRefreshesOnSnapExpandedFullClear(t *testing.T) {
-	s := NewScreen(2, 1)
-	s.Write([]byte("界"))
-	before := s.RowID(0)
+	tests := []struct {
+		name        string
+		x0, x1      int
+		wantRefresh bool
+	}{
+		{name: "snap-expanded full clear", x0: 1, x1: 4, wantRefresh: true},
+		{name: "partial clear", x0: 0, x1: 1, wantRefresh: false},
+	}
 
-	s.clearRow(0, 1, 2)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(4, 1)
+			s.Write([]byte("界"))
+			before := s.RowID(0)
 
-	if got := s.RowID(0); got == before {
-		t.Fatalf("row ID = %d after snap-expanded full clear, want a fresh ID", got)
+			s.clearRow(0, tt.x0, tt.x1)
+
+			if got := s.RowID(0) != before; got != tt.wantRefresh {
+				t.Fatalf("row ID refreshed = %t, want %t", got, tt.wantRefresh)
+			}
+		})
 	}
 }
 
