@@ -386,10 +386,9 @@ func TestTransactionalResizeEpochLifecycleAndRetryContract(t *testing.T) {
 		name string
 		run  func(*renderCoordinator, *attachedClient, *attachedClient)
 	}{
-		{"replace", func(rc *renderCoordinator, old, next *attachedClient) { rc.noteReplace(old, next) }},
+		{"detach and attach", func(rc *renderCoordinator, old, next *attachedClient) { rc.noteDetach(old); rc.attach(next) }},
 		{"detach", func(rc *renderCoordinator, old, _ *attachedClient) { rc.noteDetach(old) }},
-		{"park", func(rc *renderCoordinator, old, _ *attachedClient) { rc.notePark(old) }},
-		{"resume", func(rc *renderCoordinator, old, next *attachedClient) { rc.notePark(old); rc.attach(next) }},
+		{"resume", func(rc *renderCoordinator, old, next *attachedClient) { rc.noteDetach(old); rc.attach(next) }},
 	} {
 		t.Run(transition.name, func(t *testing.T) {
 			rc := newRenderCoordinator(renderCoordinatorOptions{})

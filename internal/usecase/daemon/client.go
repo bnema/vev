@@ -239,7 +239,7 @@ func (ac *attachedClient) replaceTransport(tr ports.Transport) {
 
 // revokeTransport removes tr only if it is still this attachment's current
 // link. It returns the revoked transport, so asynchronous retirement can
-// close exactly that link without touching a later resume/replacement.
+// close exactly that link without touching a later connection incarnation.
 func (ac *attachedClient) revokeTransport(tr ports.Transport) ports.Transport {
 	if tr == nil {
 		return nil
@@ -577,24 +577,21 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 	return ac
 }
 
-// attachCoordinator is the sole direct attachment handoff. It creates at
-// most one coordinator for sess and changes its identity before any caller
-// can publish resize or render state for the new client.
+// attachCoordinator installs the coordinator lease for an attachment. Session
+// membership remains independent, so installing one attachment never displaces
+// another.
 func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, ready bool) *renderCoordinator {
 	rc, cleanup := d.attachCoordinatorDeferred(sess, old, current, ready)
 	cleanup.finish()
 	return rc
 }
 
-func (d *Daemon) attachCoordinatorDeferred(sess *session, old, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
+func (d *Daemon) attachCoordinatorDeferred(sess *session, _ *attachedClient, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
 	rc := d.ensureRenderCoordinator(sess)
-	var cleanup renderLifecycleCleanup
-	if old != nil {
-		cleanup = rc.beginReplace(old, current, ready)
-	} else if current != nil {
+	if current != nil {
 		rc.attachWithReadiness(current, ready)
 	}
-	return rc, cleanup
+	return rc, renderLifecycleCleanup{}
 }
 
 // ensureRenderCoordinator publishes the session's single coordinator without
@@ -624,24 +621,24 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 		clock:    d.clock,
 		observer: d.runtimeObserver,
 		wake: func(w renderWake) {
-			// The wake retains the exact primary lease. Paint the primary first,
-			// then fan the same shared-session state out to every live attachment
-			// using each attachment's own output stream and renderer shadow.
-			if w.lease == nil || !rc.wakeCurrent(w) {
-				return
-			}
-			primary := w.lease.attachment
-			d.paint(entry, primary, w.reset, w.lease)
 			if !rc.wakeCurrent(w) {
 				return
 			}
+			// The session snapshot is deterministic. Each paint revalidates the
+			// attachment's membership and transport fence after that snapshot, so
+			// a detached peer cannot stop remaining attachments receiving output.
 			attachments := snapshotAttachmentSession(entry)
-			for _, attachment := range attachments {
-				if attachment != primary {
-					// Pane damage is session-shared and the primary capture consumes it.
-					// ponytail: secondary full redraws avoid per-attachment damage tracking; add attachment-scoped damage when fanout cost matters.
-					d.paint(entry, attachment, true, nil)
+			for index, attachment := range attachments {
+				if !rc.wakeCurrent(w) {
+					return
 				}
+				lease := w.attachmentLeases[attachment]
+				if lease == nil || !rc.leaseCurrent(lease, true) {
+					continue
+				}
+				// Pane damage is session-shared; later attachments need a complete
+				// frame because the first capture consumes shared damage.
+				d.paint(entry, attachment, w.reset || index != 0, lease)
 			}
 		},
 		ackReady: func() bool {
@@ -650,11 +647,11 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 				attached.sendMu.Lock()
 				ready := attached.output == nil || !attached.output.atCapacity()
 				attached.sendMu.Unlock()
-				if ready {
-					return true
+				if !ready {
+					return false
 				}
 			}
-			return false
+			return true
 		},
 	})
 	installAttachmentRenderCoordinator(entry, rc)
@@ -733,21 +730,6 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 	d.drainPendingForFirstPaint(sess, ac)
 	tb := sess.tabForAttachment(ac)
 	if tb == nil {
-		return
-	}
-	// The coordinator lease is only the primary render lifecycle. A secondary
-	// attachment must paint directly: entering the nil-lease resize/activation
-	// path would hand the session coordinator to it and strand the first client.
-	secondary := false
-	if lease == nil {
-		if rc := sess.renderCoordinator(); rc != nil {
-			rc.mu.Lock()
-			secondary = rc.lease != nil && rc.lease.active && rc.lease.attachment != ac
-			rc.mu.Unlock()
-		}
-	}
-	if secondary {
-		d.paint(sess, ac, true, nil)
 		return
 	}
 	tb.mu.Lock()
@@ -906,7 +888,7 @@ func (d *Daemon) mutateClientNotice(sess *session, ac *attachedClient, notice po
 }
 
 // recordClientNotice mutates notice history and the selected attachment while
-// routingMu keeps replacement from changing that selection. Rendering is left
+// routingMu keeps another connection from changing that selection. Rendering is left
 // to the caller after it releases routingMu.
 func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domain.NoticeSeverity, code domain.NoticeCode, message string) bool {
 	n := d.notices.record(domain.Notification{

@@ -27,7 +27,7 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	p.mu.Unlock()
 
 	ac.sendMu.Lock()
-	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 		bars:        barState{},
 		overlays:    capturedOverlayRenderState{},
 		preview:     pickerPreviewEmpty(),
@@ -61,7 +61,7 @@ func TestCaptureComposeEmitAcknowledgesCollapsedPaneDamageOnlyAfterEmission(t *t
 	collapsed.screen.Write([]byte("hidden damage"))
 
 	ac.sendMu.Lock()
-	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{bars: barState{}})
+	state, ok := captureRenderState(sess, ac, renderCaptureRequest{bars: barState{}})
 	require.True(t, ok)
 	collapsedReceipt := false
 	for _, receipt := range state.receipts {
@@ -223,7 +223,7 @@ func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClient) (*capturedRenderState, composedRenderFrame) {
 	t.Helper()
 	ac.sendMu.Lock() // emitFrame releases the transaction lock.
-	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 		bars:        barState{},
 		overlays:    capturedOverlayRenderState{},
 		preview:     pickerPreviewEmpty(),

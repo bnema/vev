@@ -59,7 +59,7 @@ type composedRenderFrame struct {
 
 // composeFrame is pure with respect to daemon ownership: it consumes only the
 // capture, the last committed cache, and an independent attachment-owned
-// scratch cache. It returns a replacement cache without mutating committed.
+// scratch cache. It returns a new cache without mutating committed.
 const inactivePaneForegroundDimming = 55
 
 func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...composeCacheInput) composedRenderFrame {
@@ -619,8 +619,8 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 			}
 		} else {
 			// Capture the exact admitted capability, including its coordinator
-			// lease, before End permits a replacement publication. Reserve cleanup
-			// accounting before End so terminal Wait cannot race a later Add.
+			// lease, before End permits a new attachment publication. Reserve
+			// cleanup accounting before End so terminal Wait cannot race a later Add.
 			token := marks.attachmentEffect.connectionToken()
 			launchCleanup := d.reserveAttachmentSendErrorCleanup(token, sendTr)
 			marks.attachmentEffect.End()

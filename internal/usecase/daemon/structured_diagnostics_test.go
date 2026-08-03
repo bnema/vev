@@ -25,7 +25,7 @@ func TestP4StructuredRuntimeDiagnosticsRecordAcceptedSnapshotAndDelta(t *testing
 	emit := func(reset bool) ports.ScreenUpdate {
 		t.Helper()
 		ac.sendMu.Lock()
-		state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: reset})
+		state, ok := proxy.captureRenderState(ac, renderCaptureRequest{reset: reset})
 		require.True(t, ok)
 		composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
 		require.True(t, d.emitFrame(proxy, ac, state, composed))
@@ -75,7 +75,7 @@ func TestP4StructuredRuntimeDiagnosticsDoNotRecordFailedSend(t *testing.T) {
 	require.True(t, applyTestScreenText(proxy, 0, 0, "failed"))
 
 	ac.sendMu.Lock()
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.True(t, d.emitFrame(proxy, ac, state, composed))
@@ -122,7 +122,7 @@ func TestP4StructuredRuntimeDiagnosticsObserverRunsOutsideAttachmentAndProxyLock
 	done := make(chan struct{})
 	go func() {
 		ac.sendMu.Lock()
-		state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+		state, ok := proxy.captureRenderState(ac, renderCaptureRequest{reset: true})
 		if !ok {
 			ac.sendMu.Unlock()
 			close(done)

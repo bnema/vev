@@ -523,45 +523,42 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		d.sessWg.Wait()
 	})
 
-	t.Run("replacement receives one complete reset frame without later PTY output", func(t *testing.T) {
+	t.Run("remaining attachment receives shared output after peer detach", func(t *testing.T) {
 		pty, steps, processed := newChannelPTY(t)
-		d, target, oldClient, _ := newManualSessionWithPTYs(t, pty)
+		d, target, detached, _ := newManualSessionWithPTYs(t, pty)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(target, nil, oldClient, true)
+		rc := d.attachCoordinator(target, nil, detached, true)
 
-		wakes := make(chan renderWake, 2)
-		rc.opts.wake = func(w renderWake) { wakes <- w }
+		secondTransport, secondSends := newCapturingTransport(t)
+		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), size: detached.size}
+		remaining.initOverlays()
+		remaining.setSession(target)
+		target.mu.Lock()
+		require.True(t, target.registerAttachmentLocked(remaining))
+		target.mu.Unlock()
+		rc.attach(remaining)
+
 		d.sessWg.Add(1)
 		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
-		steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
+		steps <- channelPTYStep{data: []byte("before detach")}
 		awaitPTYReadProcessed(t, processed)
-		drainCoordinatorTimers(clock)
+		timers := drainCoordinatorTimers(clock)
 
-		replacement := &attachedClient{output: newOutputStateStream()}
-		rc.noteReplace(oldClient, replacement, true)
+		// Detaching one attachment must not discard the session-shared pending
+		// invalidation or stop the coordinator from painting the remaining one.
 		target.mu.Lock()
-		target.registerAttachmentLocked(replacement)
+		require.True(t, target.unregisterAttachmentLocked(detached))
 		target.mu.Unlock()
-		// The replacement's initial full paint remains gated by the batch. Its
-		// reset must survive completion and coalesce with the completion wake.
-		rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "replacement first paint"})
-		replacementTimers := drainCoordinatorTimers(clock)
-		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
-		awaitPTYReadProcessed(t, processed)
-		requireNoWake(t, wakes)
+		rc.noteDetach(detached)
+		fireCoordinatorTimer(t, rc, timers, minOutputRenderDeadline)
+		require.NotEmpty(t, secondSends, "the remaining attachment received no shared output after its peer detached")
+		before := len(secondSends)
 
-		fireCoordinatorTimer(t, rc, replacementTimers, urgentRenderDeadline)
-		wake := <-wakes
-		require.True(t, wake.urgent)
-		require.True(t, wake.reset, "the replacement's cleared batch must repaint a complete frame")
-		require.Equal(t, 2, wake.coalesced, "completion coalesces only with the replacement's fresh reset batch")
-		require.Same(t, replacement, wake.lease.attachment)
-		select {
-		case duplicate := <-wakes:
-			t.Fatalf("sync completion must publish exactly one replacement wake: %#v", duplicate)
-		default:
-		}
+		steps <- channelPTYStep{data: []byte("after detach")}
+		awaitPTYReadProcessed(t, processed)
+		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+		require.Greater(t, len(secondSends), before, "shared output stopped after the peer detached")
 
 		steps <- channelPTYStep{err: io.EOF}
 		d.sessWg.Wait()

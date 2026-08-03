@@ -477,6 +477,26 @@ func (s *session) paneForAttachment(ac *attachedClient) (*tab, *pane) {
 	return tb, tb.focusedPane()
 }
 
+// setAttachmentPaneLocked publishes the initiating attachment's pane target
+// after a shared focus mutation. Caller holds s.mu; the structural tree focus
+// is not used to resolve any other attachment's target.
+func (s *session) setAttachmentPaneLocked(ac *attachedClient, tb *tab, p *pane) bool {
+	if s == nil || ac == nil || tb == nil || p == nil || !attachmentRegisteredLocked(s, ac) {
+		return false
+	}
+	view := ac.viewSnapshot()
+	before := view
+	view.tabID = domain.TabStableID(tb.stableID)
+	view.paneID = domain.PaneStableID(p.stableID)
+	view = s.repairAttachmentViewLocked(ac, view)
+	if view.tabID == before.tabID && view.paneID == before.paneID {
+		return false
+	}
+	view.revision++
+	ac.publishView(view)
+	return true
+}
+
 // updateAttachmentView applies one attachment-local view mutation at the
 // shared mutation boundary. The revision increments exactly once and target
 // IDs are repaired before publication.

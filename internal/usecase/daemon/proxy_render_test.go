@@ -25,7 +25,7 @@ func TestProxyCaptureRetainsOwnedFrameAcrossSafeDamage(t *testing.T) {
 	proxy.mu.Unlock()
 
 	ac := &attachedClient{}
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{})
 	require.True(t, ok)
 	require.Equal(t, "abcdefghijkl", proxyFrameText(state.panes[0].frame))
 	commitDamageReceipts(state.receipts)
@@ -43,7 +43,7 @@ func TestProxyCaptureRetainsOwnedFrameAcrossSafeDamage(t *testing.T) {
 	proxy.mu.Unlock()
 
 	cellsBefore := &ac.proxyCapture.frame.Cells[0]
-	state, ok = proxy.capturePrimary(ac, primaryCaptureRequest{})
+	state, ok = proxy.captureRenderState(ac, renderCaptureRequest{})
 	require.True(t, ok)
 	require.Equal(t, "abcdeZghijkl", proxyFrameText(state.panes[0].frame))
 	require.Equal(t, cellsBefore, &ac.proxyCapture.frame.Cells[0], "safe span damage must update the retained frame")
@@ -59,7 +59,7 @@ func TestProxyRenderComposesRemoteVTUnderExactlyOneLocalChrome(t *testing.T) {
 	changed := applyTestScreenText(proxy, 1, 2, "remote")
 	require.True(t, changed)
 
-	state, ok := proxy.capturePrimary(&attachedClient{}, primaryCaptureRequest{
+	state, ok := proxy.captureRenderState(&attachedClient{}, renderCaptureRequest{
 		bars:  barState{status: proxy.statusSegments(false)},
 		reset: true,
 	})
@@ -269,7 +269,7 @@ func TestProxyResizeUsesReducedRemoteGeometryOnce(t *testing.T) {
 	default:
 	}
 
-	state, ok := proxy.capturePrimary(&attachedClient{}, primaryCaptureRequest{reset: true})
+	state, ok := proxy.captureRenderState(&attachedClient{}, renderCaptureRequest{reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.Equal(t, 10, composed.frame.Height, "local viewport remains full-sized")
@@ -318,7 +318,7 @@ func TestProxyStructuredSendFailureRetainsProxyDamage(t *testing.T) {
 	require.True(t, applyTestScreenText(proxy, 0, 0, "pending"))
 
 	ac.sendMu.Lock()
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.True(t, d.emitFrame(proxy, ac, state, composed))
@@ -373,7 +373,7 @@ func TestProxyPrepareFailureRepaintsWithoutLocalSession(t *testing.T) {
 	proxy, ac := newAttachedProxyFixture(t, d, clientTr, newProxyTestTransport())
 
 	ac.sendMu.Lock() // emitFrame releases the transaction lock.
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{bars: barState{status: proxy.statusSegments(false)}, reset: true})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{bars: barState{status: proxy.statusSegments(false)}, reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	// A malformed frame is what makes outputStateStream.prepare fail.

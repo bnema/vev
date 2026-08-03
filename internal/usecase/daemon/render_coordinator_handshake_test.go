@@ -32,7 +32,7 @@ func TestRenderCoordinatorFreshWakeWaitsForWelcome(t *testing.T) {
 	wake := awaitWake(t, h.wakes)
 	require.True(t, wake.reset)
 	require.Equal(t, 1, wake.coalesced)
-	require.Same(t, ac, wake.lease.attachment)
+	require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
 	requireNoWake(t, h.wakes)
 }
 
@@ -45,7 +45,7 @@ func TestRenderCoordinatorParkedResumeRequiresNewWelcome(t *testing.T) {
 	h.rc.attachWithReadiness(ac, false)
 	firstLease := h.rc.attachmentLease(ac)
 	require.True(t, h.rc.markAttachmentReady(firstLease))
-	h.rc.notePark(ac)
+	h.rc.noteDetach(ac)
 	h.rc.attachWithReadiness(ac, false)
 	resumedLease := h.rc.attachmentLease(ac)
 	require.NotNil(t, resumedLease)

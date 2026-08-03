@@ -131,8 +131,10 @@ func (d *Daemon) handleResizeInput(ac *attachedClient, data []byte) {
 		return
 	}
 	for _, request := range requests {
-		request.target = resolveDaemonActionTargetForAttachment(sess, ac)
-		if err := (daemonActions{d: d}).Run(request); err != nil {
+		if err := sess.runMutation(func() error {
+			request.target = resolveDaemonActionTargetForAttachment(sess, ac)
+			return (daemonActions{d: d}).Run(request)
+		}); err != nil {
 			d.reportError(sess, resizeUserError(err))
 			continue
 		}

@@ -27,6 +27,59 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+type blockingInputActionRunner struct {
+	admitted chan<- struct{}
+	release  <-chan struct{}
+	mu       *sync.Mutex
+	order    *[]string
+}
+
+func (r *blockingInputActionRunner) Run(daemonActionRequest) error {
+	close(r.admitted)
+	<-r.release
+	r.mu.Lock()
+	*r.order = append(*r.order, "keyboard")
+	r.mu.Unlock()
+	return nil
+}
+
+func TestAttachedKeyboardMutationSharesDispatchBoundaryWithCommand(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	ac := &attachedClient{}
+	ac.setSession(sess)
+
+	var orderMu sync.Mutex
+	var order []string
+	admitted := make(chan struct{})
+	release := make(chan struct{})
+	runner := &blockingInputActionRunner{admitted: admitted, release: release, mu: &orderMu, order: &order}
+	handler := daemonKeyHandler{d: d, ac: ac, actions: runner}
+	keyboardDone := make(chan struct{})
+	go func() {
+		handler.Action(keys.ActionGrowPaneWidth, nil)
+		close(keyboardDone)
+	}()
+	<-admitted
+	require.False(t, sess.dispatchMu.TryLock(), "keyboard mutation must hold the session dispatch boundary")
+
+	commandDone := make(chan struct{})
+	go func() {
+		_ = sess.runMutation(func() error {
+			orderMu.Lock()
+			order = append(order, "command")
+			orderMu.Unlock()
+			return nil
+		})
+		close(commandDone)
+	}()
+	close(release)
+	<-keyboardDone
+	<-commandDone
+
+	require.Equal(t, []string{"keyboard", "command"}, order)
+}
+
 func TestConfiguredConsumeOrExpelActionsRouteThroughDaemonInput(t *testing.T) {
 	tests := []struct {
 		name       string

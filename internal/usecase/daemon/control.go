@@ -276,17 +276,21 @@ func resolveDaemonActionTargetForAttachment(sess *session, ac *attachedClient) d
 	if sess == nil {
 		return daemonActionTarget{}
 	}
-	tb := sess.tabForAttachment(ac)
-	if ac == nil {
-		tb = sess.firstTab()
+	if ac != nil {
+		tb, pane := sess.paneForAttachment(ac)
+		if tb == nil {
+			return daemonActionTarget{session: sess, attachment: ac}
+		}
+		return daemonActionTarget{session: sess, attachment: ac, tab: tb, pane: pane}
 	}
+	tb := sess.firstTab()
 	if tb == nil {
 		return daemonActionTarget{session: sess}
 	}
 	tb.mu.Lock()
 	pane := tb.focusedPane()
 	tb.mu.Unlock()
-	return daemonActionTarget{session: sess, attachment: ac, tab: tb, pane: pane}
+	return daemonActionTarget{session: sess, tab: tb, pane: pane}
 }
 
 // daemonActions is the daemon-owned mutation seam shared by palette and
@@ -322,7 +326,7 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		}
 		return nil
 	case daemonActionFocusPane:
-		_, err := a.d.focusDirAt(target.session, target.tab, target.pane, request.direction)
+		_, err := a.d.focusDirAt(target.session, target.tab, target.pane, request.direction, target.attachment)
 		return err
 	case daemonActionNextTab:
 		return a.switchRelative(target.session, target.attachment, 1)
@@ -704,8 +708,17 @@ func (e controlExec) ListPanes(asJSON bool) (string, error) {
 	e.sess.mu.Lock()
 	fallbackCWD := e.sess.cwd
 	e.sess.mu.Unlock()
+	var focus layout.PaneID
+	var focusStableID domain.PaneStableID
+	if e.target.attachment != nil {
+		focusStableID = e.target.attachment.viewSnapshot().paneID
+	}
 	tb.mu.Lock()
-	focus := tb.tree.Focus
+	if e.target.attachment == nil {
+		if focused := tb.focusedPane(); focused != nil {
+			focus = focused.id
+		}
+	}
 	panes := tb.panesSnapshot()
 	tb.mu.Unlock()
 	rows := make([]row, 0, len(panes))
@@ -723,7 +736,11 @@ func (e controlExec) ListPanes(asJSON bool) (string, error) {
 				cwd = live
 			}
 		}
-		rows = append(rows, row{ID: pane.stableID, Pane: string(pane.id), Size: fmt.Sprintf("%dx%d", size.Cols, size.Rows), CWD: cwd, Focused: pane.id == focus})
+		focused := pane.id == focus
+		if e.target.attachment != nil {
+			focused = domain.PaneStableID(pane.stableID) == focusStableID
+		}
+		rows = append(rows, row{ID: pane.stableID, Pane: string(pane.id), Size: fmt.Sprintf("%dx%d", size.Cols, size.Rows), CWD: cwd, Focused: focused})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Pane < rows[j].Pane })
 	if asJSON {

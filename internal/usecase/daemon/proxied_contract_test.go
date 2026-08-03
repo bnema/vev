@@ -129,7 +129,7 @@ func TestProxiedRemotePaintSendsMetadataBeforeScreen(t *testing.T) {
 	require.True(t, applyTestScreenText(proxy, 0, 0, "remote"))
 
 	ac.sendMu.Lock()
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.True(t, d.emitFrame(proxy, ac, state, composed))

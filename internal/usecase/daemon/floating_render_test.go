@@ -617,7 +617,7 @@ func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 		cache := composeCacheInput{}
 		for range 500 {
 			ac.sendMu.Lock()
-			state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{bars: base, floatingCfg: cfg})
+			state, ok := captureRenderState(sess, ac, renderCaptureRequest{bars: base, floatingCfg: cfg})
 			ac.sendMu.Unlock()
 			require.True(t, ok)
 			out := composeFrame(*state, cache)

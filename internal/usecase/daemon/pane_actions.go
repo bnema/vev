@@ -195,14 +195,10 @@ func (d *Daemon) closeFocusedPane(sess *session, ac *attachedClient) error {
 	if tb == nil {
 		return layout.ErrNotFound
 	}
-	tb.mu.Lock()
-	if tb.tree == nil {
-		tb.mu.Unlock()
+	if target.pane == nil {
 		return layout.ErrNotFound
 	}
-	id := tb.tree.Focus
-	tb.mu.Unlock()
-	return d.closePane(sess, tb, id, ac, true)
+	return d.closePane(sess, tb, target.pane.id, ac, true)
 }
 
 // reapPane retains the explicit-owner entry point for focused close tests. PTY
@@ -374,7 +370,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	if target.pane != nil {
 		oldFocus = target.pane.id
 	}
-	span, err := d.focusDirAt(sess, target.tab, target.pane, dir)
+	span, err := d.focusDirAt(sess, target.tab, target.pane, dir, ac)
 	if err == nil {
 		if ac != nil {
 			d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "pane_actions.go")
@@ -419,11 +415,48 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 // successful directional focus move. Keep copy-mode exit before the optional
 // stack title refresh, and both before render invalidation.
 func (d *Daemon) finishPaneFocusForClient(sess *session, ac *attachedClient, tb *tab, oldFocus layout.PaneID, producer string) {
-	tb.mu.Lock()
-	newFocus := tb.tree.Focus
-	pl, hasPlacement := focusedPlacementLocked(tb)
-	tb.mu.Unlock()
-	if newFocus != oldFocus {
+	var newFocus layout.PaneID
+	var newPane *pane
+	var pl layout.Placement
+	var hasPlacement bool
+	beforePaneID := domain.PaneStableID("")
+	if ac != nil {
+		beforePaneID = ac.viewSnapshot().paneID
+	}
+	if tb != nil {
+		tb.mu.Lock()
+		if ac != nil {
+			view := ac.viewSnapshot()
+			if domain.TabStableID(tb.stableID) == view.tabID {
+				for _, candidate := range tb.panes {
+					if candidate != nil && domain.PaneStableID(candidate.stableID) == view.paneID {
+						newPane = candidate
+						break
+					}
+				}
+			}
+		} else {
+			newPane = tb.focusedPane()
+			if newPane != nil {
+				newFocus = newPane.id
+			}
+		}
+		if newPane != nil {
+			newFocus = newPane.id
+			pl, hasPlacement = panePlacementLocked(tb, newFocus)
+		}
+		tb.mu.Unlock()
+	}
+
+	moved := newFocus != oldFocus
+	if ac != nil && newPane != nil {
+		sess.mu.Lock()
+		sess.setAttachmentPaneLocked(ac, tb, newPane)
+		sess.mu.Unlock()
+		after := ac.viewSnapshot()
+		moved = beforePaneID != after.paneID
+	}
+	if moved {
 		d.exitCopyMode(ac)
 		if hasPlacement && pl.InStack {
 			d.refreshPaneTitleOnFocus(sess, newFocus)
@@ -432,9 +465,26 @@ func (d *Daemon) finishPaneFocusForClient(sess *session, ac *attachedClient, tb 
 	d.invalidateRender(sess, ac, true, producer)
 }
 
-func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction) (domain.Rect, error) {
+func panePlacementLocked(tb *tab, id layout.PaneID) (layout.Placement, bool) {
+	placements, ok := solvedPlacementsLocked(tb)
+	if !ok {
+		return layout.Placement{}, false
+	}
+	for _, placement := range placements {
+		if placement.ID == id {
+			return placement, true
+		}
+	}
+	return layout.Placement{}, false
+}
+
+func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction, initiating ...*attachedClient) (domain.Rect, error) {
 	if tb == nil || target == nil {
 		return domain.Rect{}, layout.ErrNotFound
+	}
+	var ac *attachedClient
+	if len(initiating) > 0 {
+		ac = initiating[0]
 	}
 	tb.mu.Lock()
 	if tb.tree == nil || tb.panes[target.id] != target || !layout.ContainsLeaf(tb.tree.Root, target.id) {
@@ -446,13 +496,24 @@ func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Dir
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	span, _ := candidate.FocusSpan(area)
 	err := candidate.FocusDir(dir, area)
-	committed := err == nil && candidate.Focus != tb.tree.Focus
+	currentFocus := tb.focusedPane()
+	committed := err == nil && currentFocus != nil && candidate.Focus != currentFocus.id
+	var focusedPane *pane
 	if committed {
+		focusedPane = tb.panes[candidate.Focus]
 		tb.tree = candidate
 		tb.bumpLayoutGenerationLocked()
 	}
 	tb.mu.Unlock()
 	if committed {
+		if ac != nil {
+			d.exitCopyMode(ac)
+		}
+		if sess != nil && ac != nil && focusedPane != nil {
+			sess.mu.Lock()
+			sess.setAttachmentPaneLocked(ac, tb, focusedPane)
+			sess.mu.Unlock()
+		}
 		d.applyTabLayout(sess, tb)
 	}
 	if errors.Is(err, layout.ErrNoPane) {

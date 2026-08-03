@@ -31,7 +31,7 @@ func (*coreNilAttachment) snapshotView(viewOptions) sessionView {
 	return sessionView{}
 }
 func (*coreNilAttachment) statusSegments(bool) statusSnapshot { return statusSnapshot{} }
-func (*coreNilAttachment) capturePrimary(*attachedClient, primaryCaptureRequest) (*capturedRenderState, bool) {
+func (*coreNilAttachment) captureRenderState(*attachedClient, renderCaptureRequest) (*capturedRenderState, bool) {
 	return nil, false
 }
 func (*coreNilAttachment) validTargetTabLocked(int) bool { return false }
@@ -1141,7 +1141,7 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 	capture := func(bars barState) capturedRenderState {
 		t.Helper()
-		state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 			bars:        bars,
 			overlays:    capturedOverlayRenderState{},
 			preview:     picker.Preview{},
