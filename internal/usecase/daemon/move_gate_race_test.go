@@ -74,7 +74,7 @@ func TestMovePaneGateReservationRaceKillWinsWithoutDeadlock(t *testing.T) {
 	killFrozen := make(chan struct{})
 	releaseKill := make(chan struct{})
 	var killFrozenOnce sync.Once
-	d.afterRoleEffectGateFrozen = func(action string, _ *attachedClient) {
+	d.afterAttachmentEffectGateFrozen = func(action string, _ *attachedClient) {
 		if action != "" {
 			return
 		}
@@ -83,7 +83,7 @@ func TestMovePaneGateReservationRaceKillWinsWithoutDeadlock(t *testing.T) {
 	}
 	defer func() {
 		d.afterMoveLifecycleReserved = nil
-		d.afterRoleEffectGateFrozen = nil
+		d.afterAttachmentEffectGateFrozen = nil
 	}()
 
 	moveDone := make(chan error, 1)
@@ -118,7 +118,7 @@ func TestMovePaneGateReservationRaceMoveWinsWithoutDeadlock(t *testing.T) {
 	moveGateFrozen := make(chan struct{})
 	releaseMove := make(chan struct{})
 	var moveGateFrozenOnce sync.Once
-	d.afterRoleEffectGateFrozen = func(action string, _ *attachedClient) {
+	d.afterAttachmentEffectGateFrozen = func(action string, _ *attachedClient) {
 		if action != "move-pane" {
 			return
 		}
@@ -127,14 +127,14 @@ func TestMovePaneGateReservationRaceMoveWinsWithoutDeadlock(t *testing.T) {
 	}
 	killSnapshotted := make(chan struct{})
 	var killSnapshottedOnce sync.Once
-	d.afterRoleEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
+	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
 		if action == "" {
 			killSnapshottedOnce.Do(func() { close(killSnapshotted) })
 		}
 	}
 	defer func() {
-		d.afterRoleEffectGateFrozen = nil
-		d.afterRoleEffectParticipantsSnapshotted = nil
+		d.afterAttachmentEffectGateFrozen = nil
+		d.afterAttachmentEffectParticipantsSnapshotted = nil
 	}()
 
 	moveDone := make(chan error, 1)

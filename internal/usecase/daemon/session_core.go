@@ -28,9 +28,9 @@ type sessionCore struct {
 	name      string
 	ephemeral bool
 	caps      sessionCapabilities
-	// attachments is the session-owned membership registry. Role transition
-	// metadata below is separate from membership; admission and view code use
-	// this collection as their membership source.
+	// attachments is the session-owned membership registry. Connection
+	// generation and effect state remain attachment-local; admission and view
+	// code use this collection as their membership source.
 	attachments      map[*attachedClient]struct{}
 	attachmentOrder  map[*attachedClient]uint64
 	nextAttachmentID uint64

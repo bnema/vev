@@ -116,7 +116,7 @@ func TestMovePaneFinalSourceClientFollowsDestination(t *testing.T) {
 	require.Nil(t, source.tabs)
 	require.Same(t, destination, client.currentSession())
 	require.Contains(t, destination.snapshotAttachments(), client)
-	require.Equal(t, attachmentActive, destination.attachmentRole(client))
+	require.Equal(t, true, destination.attachmentRegistered(client))
 	require.Same(t, destinationTab, destination.tabs[testAttachmentTabIndex(destination)])
 	require.True(t, rebased.Load(), "final-source follower must rebase output before its first paint")
 	require.NoError(t, moved.ctx.Err(), "transferred pane process must remain alive")

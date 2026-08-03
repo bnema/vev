@@ -110,8 +110,7 @@ func (d *Daemon) clearParkingInFlightIfAbandoned(sess *session, ac *attachedClie
 	stillOwner := false
 	if sess != nil {
 		sess.mu.Lock()
-		role := sess.attachmentRoleLocked(ac)
-		stillOwner = role == attachmentActive || role == attachmentSnatched
+		stillOwner = attachmentRegisteredLocked(sess, ac)
 		sess.mu.Unlock()
 	}
 	if !stillOwner {
@@ -342,7 +341,7 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	ac.resumeClaimToken = 0
 	ac.resumeToken = token
 	ac.parked = true
-	ac.roleGeneration.Add(1)
+	ac.connectionGeneration.Add(1)
 	sess := parked.sess
 	if sess != nil {
 		sess.mu.Lock()
@@ -369,7 +368,7 @@ func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttach
 	parked.ac.clearPreviousSession()
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
-	parked.ac.roleGeneration.Add(1)
+	parked.ac.connectionGeneration.Add(1)
 	parked.ac.setSession(nil)
 	return parkedAttachmentRetirement{
 		parked:           parked,
@@ -612,10 +611,9 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	d.mu.Unlock()
 	ac.sendMu.Unlock()
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		target:            sess,
-		next:              ac,
-		expectedRole:      attachmentDetached,
-		targetRole:        attachmentActive,
+		target: sess,
+		next:   ac,
+
 		expectedTransport: ac.transportSnapshot(),
 		ready:             false,
 	})

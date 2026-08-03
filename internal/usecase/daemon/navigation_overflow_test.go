@@ -130,7 +130,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	}
 
 	for _, target := range []*session{charlie, echo} {
-		require.Equal(t, 1, testAttachmentTabIndex(target), "switch preserves the target active tab")
+		require.Equal(t, 0, testAttachmentTabIndex(target), "new attachment starts at the deterministic first tab")
 		target.tabs[1].mu.Lock()
 		require.Equal(t, layout.PaneID("pane-2"), target.tabs[1].tree.Focus, "switch preserves the target pane focus")
 		target.tabs[1].mu.Unlock()

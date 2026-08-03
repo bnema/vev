@@ -23,23 +23,22 @@ func TestValidateAttachmentTransitionPrelockedLeavesMembershipUntouchedOnFailure
 	d.sessions[source.id] = source
 	d.sessions[target.id] = target
 
-	frozen := freezeRoleEffectGates(next, old)
+	frozen := freezeAttachmentEffectGates(next, old)
 	require.True(t, frozen.acquired)
 	require.True(t, frozen.drained)
 	defer frozen.unfreeze()
 
 	req := attachmentTransitionRequest{
-		source:                source,
-		target:                target,
-		next:                  next,
-		expectedRole:          attachmentActive,
-		targetRole:            attachmentActive,
-		expectedTransport:     next.transportSnapshot(),
-		expectedTargetCurrent: old,
-		preflighted:           true,
-		roleEffectsFrozen:     true,
-		activateTargetTab:     true,
-		targetTabIndex:        1,
+		source: source,
+		target: target,
+		next:   next,
+
+		expectedTransport: next.transportSnapshot(),
+
+		preflighted:             true,
+		attachmentEffectsFrozen: true,
+		activateTargetTab:       true,
+		targetTabIndex:          1,
 	}
 
 	d.mu.Lock()
@@ -52,11 +51,11 @@ func TestValidateAttachmentTransitionPrelockedLeavesMembershipUntouchedOnFailure
 
 	require.ErrorIs(t, err, errAttachmentTransition)
 	require.Nil(t, publication)
-	require.Equal(t, attachmentActive, source.attachmentRole(next))
-	require.Equal(t, attachmentDetached, target.attachmentRole(next))
-	require.Equal(t, attachmentActive, target.attachmentRole(old))
+	require.Equal(t, true, source.attachmentRegistered(next))
+	require.Equal(t, false, target.attachmentRegistered(next))
+	require.Equal(t, true, target.attachmentRegistered(old))
 	require.Same(t, source, next.currentSession())
-	require.Equal(t, uint64(0), next.roleGeneration.Load())
-	require.Equal(t, uint64(0), old.roleGeneration.Load())
+	require.Equal(t, uint64(0), next.connectionGeneration.Load())
+	require.Equal(t, uint64(0), old.connectionGeneration.Load())
 	require.Equal(t, 0, testAttachmentTabIndex(target))
 }

@@ -14,18 +14,17 @@ type movePaneCommit struct {
 	sourceTab, destinationTab *tab
 	movedPane                 *pane
 	sourceClient              *attachedClient
-	sourceSnatched            []*attachedClient
 	sourceGeneration          uint64
 	destinationGeneration     uint64
 	handoffFrozen             bool
-	frozenRoles               frozenRoleEffectGates
+	frozenEffects             frozenAttachmentEffectGates
 	handoffReq                attachmentTransitionRequest
 	handoffPublication        *attachmentPublication
 	err                       error
 
 	handoffResult            attachmentTransitionResult
 	syncCleanup              syncTimerCleanup
-	sourceCleanupToken       attachmentRoleToken
+	sourceCleanupToken       attachmentConnectionToken
 	sourceEmpty              bool
 	sourceTabRemoved         bool
 	retiredParked            []parkedAttachmentRetirement
@@ -62,7 +61,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 		return false
 	}
 	if c.handoffFrozen {
-		if (c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient)) || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
+		if c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient) ||
 			c.handoffReq.targetTabIndex < 0 || c.handoffReq.targetTabIndex >= len(c.destination.tabs) ||
 			c.destination.tabs[c.handoffReq.targetTabIndex] != c.destinationTab {
 			return false
@@ -102,13 +101,8 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 
 	sourceWillEmpty := candidate.removeSourceTab && len(c.source.tabs) == 1
 	if sourceWillEmpty && c.source != c.destination {
-		if (c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient)) || !sameMoveSnatchedLocked(c.source, c.sourceSnatched) ||
+		if (c.sourceClient != nil && !attachmentRegisteredLocked(c.source, c.sourceClient)) ||
 			(c.sourceClient != nil) != c.handoffFrozen {
-			return false
-		}
-		var retirementOK bool
-		retirement, retirementOK = prepareFrozenMoveAttachmentRetirementLocked(c.source, c.sourceSnatched, c.frozenRoles)
-		if !retirementOK {
 			return false
 		}
 	}

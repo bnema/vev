@@ -47,12 +47,12 @@ func (d *Daemon) enterRemoteKillConfirmation(owner attachmentSession, ac *attach
 	if unreachable {
 		title = " Type " + key.Display() + " to kill (remote unreachable) "
 	}
-	d.enterTransitionPrompt(owner, ac, title, "", func(value string, token attachmentRoleToken) error {
+	d.enterTransitionPrompt(owner, ac, title, "", func(value string, token attachmentConnectionToken) error {
 		if value != key.Display() {
 			return errProxyKillConfirmation
 		}
 		if token.ac != nil {
-			if !token.activeCurrent() {
+			if !token.attachmentCurrent() {
 				return errAttachmentTransition
 			}
 			token.effect.bindActionEnd(d, "remote-picker-delete")

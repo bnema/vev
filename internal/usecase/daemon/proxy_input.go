@@ -42,36 +42,36 @@ func (p *proxySession) sendInput(raw []byte) error {
 // proxy. Local UI actions never reach the link. Every remote-owned action is
 // sent using the exact bytes supplied by keys.Router.
 type proxyKeyHandler struct {
-	d         *Daemon
-	proxy     *proxySession
-	ac        *attachedClient
-	roleToken attachmentRoleToken
+	d               *Daemon
+	proxy           *proxySession
+	ac              *attachedClient
+	connectionToken attachmentConnectionToken
 }
 
-func (h proxyKeyHandler) acquireRoleEffect() (*roleEffectTicket, bool, bool) {
+func (h proxyKeyHandler) acquireAttachmentEffect() (*attachmentEffectTicket, bool, bool) {
 	if h.proxy == nil || h.ac == nil {
 		return nil, false, false
 	}
-	if h.roleToken.ac == nil {
+	if h.connectionToken.ac == nil {
 		return nil, false, false
 	}
-	if h.roleToken.sess != h.proxy || h.roleToken.ac != h.ac {
+	if h.connectionToken.sess != h.proxy || h.connectionToken.ac != h.ac {
 		return nil, false, false
 	}
-	if effect := h.roleToken.effect; effect != nil && !effect.ended.Load() {
+	if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
 		return effect, false, true
 	}
-	effect, admitted := h.roleToken.ac.beginRoleEffect(h.roleToken)
+	effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
 	if h.d != nil && h.d.afterDelayedKeyEffectAttempt != nil {
 		h.d.afterDelayedKeyEffectAttempt(admitted)
 	}
 	if !admitted {
 		return nil, false, false
 	}
-	if h.d != nil && h.d.afterRoleEffectAdmitted != nil {
-		token := h.roleToken
+	if h.d != nil && h.d.afterAttachmentEffectAdmitted != nil {
+		token := h.connectionToken
 		token.effect = effect
-		h.d.afterRoleEffectAdmitted(token)
+		h.d.afterAttachmentEffectAdmitted(token)
 	}
 	return effect, true, true
 }
@@ -86,7 +86,7 @@ func (h proxyKeyHandler) sendOwned(raw []byte) {
 }
 
 func (h proxyKeyHandler) send(raw []byte) {
-	effect, owned, ok := h.acquireRoleEffect()
+	effect, owned, ok := h.acquireAttachmentEffect()
 	if !ok {
 		return
 	}
@@ -101,14 +101,14 @@ func (h proxyKeyHandler) Forward(raw []byte) { h.send(raw) }
 func (h proxyKeyHandler) Mouse(event mouse.Event) { h.send(event.Raw) }
 
 func (h proxyKeyHandler) Action(action keys.Action, raw []byte) {
-	effect, owned, ok := h.acquireRoleEffect()
+	effect, owned, ok := h.acquireAttachmentEffect()
 	if !ok {
 		return
 	}
 	if owned {
 		defer effect.End()
 	}
-	h.roleToken.effect = effect
+	h.connectionToken.effect = effect
 	switch action {
 	case keys.ActionOpenPalette:
 		h.enterPalette()
@@ -176,7 +176,7 @@ func (h proxyKeyHandler) enterPalette() {
 // navigation. A pending tab on the proxy remains remote-owned; without one,
 // the local daemon may move the client to another local session.
 func (h proxyKeyHandler) jumpLocalAttention() {
-	if h.d == nil || h.roleToken.ac == nil || h.roleToken.effect == nil {
+	if h.d == nil || h.connectionToken.ac == nil || h.connectionToken.effect == nil {
 		return
 	}
 	target, ok := h.d.oldestOtherSessionAttention(nil)
@@ -190,12 +190,12 @@ func (h proxyKeyHandler) jumpLocalAttention() {
 		return
 	}
 
-	token := h.roleToken
+	token := h.connectionToken
 	token.effect.bindActionEnd(h.d, "proxy-jump-attention")
 	token.effect.End()
 	transition, err := h.d.transitionAttachment(attachmentTransitionRequest{
 		source: h.proxy, target: targetSession, next: h.ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: token.transport, sourceToken: &token,
 		action: "proxy-jump-attention", activateTargetTab: true,
 		targetTabIndex: target.tabIndex, ready: true,

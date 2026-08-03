@@ -993,7 +993,7 @@ func TestPickerCrossSessionSwitchSnatchesExistingClient(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(displacedOutput.Data), "Session snatched")
 	require.Same(t, sess2, ac2.currentSession())
-	require.Equal(t, attachmentSnatched, sess2.attachmentRole(ac2))
+	require.Equal(t, true, sess2.attachmentRegistered(ac2))
 
 	movingFrame := awaitFrame(t, sends1, ports.MsgOutput)
 	movingOutput, err := ports.UnmarshalOutput(movingFrame.Payload)
@@ -1120,11 +1120,10 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	switchErr := make(chan error, 1)
 	go func() {
 		result, err := d.transitionAttachment(attachmentTransitionRequest{
-			source:            sess1,
-			target:            sess2,
-			next:              ac,
-			expectedRole:      attachmentActive,
-			targetRole:        attachmentActive,
+			source: sess1,
+			target: sess2,
+			next:   ac,
+
 			expectedTransport: ac.transportSnapshot(),
 			ready:             true,
 		})
@@ -1139,7 +1138,7 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	case <-time.After(2 * time.Second):
 		t.Fatal("session switch waited for in-flight transport send")
 	}
-	require.True(t, result.published.activeCurrent())
+	require.True(t, result.published.attachmentCurrent())
 	select {
 	case <-handoffAtSendMu:
 		t.Fatal("output rebase ran during architecture publication")
@@ -1688,7 +1687,7 @@ func TestPickerNavigationRefreshAfterDeleteSelectsReplacingRow(t *testing.T) {
 	}
 }
 
-func TestPickerRoleEffectDeleteRemovesSelectedSessionAndRefreshes(t *testing.T) {
+func TestPickerAttachmentEffectDeleteRemovesSelectedSessionAndRefreshes(t *testing.T) {
 	d, current, ac, _, currentReleases := newManualTabSession(t, 1)
 	defer releaseAll(currentReleases)
 	current.id, current.name = "current", "z-current"
@@ -1715,8 +1714,8 @@ func TestPickerRoleEffectDeleteRemovesSelectedSessionAndRefreshes(t *testing.T) 
 
 	token := current.attachmentToken(ac, ac.transport())
 	token.lease = current.renderCoordinator().attachmentLease(ac)
-	ac.publishRoleCapability(token)
-	effect, admitted := ac.beginRoleEffect(token)
+	ac.publishAttachmentCapability(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	d.handlePickerInput(ac, []byte("x"), effect)
 

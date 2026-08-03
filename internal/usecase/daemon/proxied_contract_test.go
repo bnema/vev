@@ -270,7 +270,7 @@ func TestOutputResetRebasesFullWindowAndSchedulesBaseZeroPaint(t *testing.T) {
 	ac.sendMu.Unlock()
 
 	token := sess.attachmentToken(ac, ac.transport())
-	require.False(t, d.handleActiveClientFrame(token, ports.Frame{
+	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{
 		Type:    ports.MsgOutputResetRequest,
 		Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 	}))
@@ -309,9 +309,9 @@ func TestOutputResetRequiresProxiedActiveRoleAndStrictPayload(t *testing.T) {
 
 			token := sess.attachmentToken(ac, ac.transport())
 			if tt.staleRole {
-				token.role = attachmentSnatched
+				token.generation++
 			}
-			require.False(t, d.handleActiveClientFrame(token, ports.Frame{Type: ports.MsgOutputResetRequest, Payload: tt.payload}))
+			require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgOutputResetRequest, Payload: tt.payload}))
 			ac.sendMu.Lock()
 			acked := ac.output.acked
 			ac.sendMu.Unlock()
@@ -331,11 +331,11 @@ func TestOutputResetRevalidatesTransportUnderSendLock(t *testing.T) {
 
 	admitted := make(chan struct{})
 	var once sync.Once
-	d.afterRoleEffectAdmitted = func(attachmentRoleToken) { once.Do(func() { close(admitted) }) }
+	d.afterAttachmentEffectAdmitted = func(attachmentConnectionToken) { once.Do(func() { close(admitted) }) }
 	ac.sendMu.Lock()
 	done := make(chan bool, 1)
 	go func() {
-		done <- d.handleActiveClientFrame(token, ports.Frame{
+		done <- d.handleAttachmentClientFrame(token, ports.Frame{
 			Type:    ports.MsgOutputResetRequest,
 			Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 		})

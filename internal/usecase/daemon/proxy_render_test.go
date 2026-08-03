@@ -118,7 +118,7 @@ func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 
 	toProxy, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: local, target: proxy, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &localToken,
 		action: "test transition", ready: true,
 	})
@@ -129,7 +129,7 @@ func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 
 	toLocal, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: proxy, target: local, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &toProxy.published,
 		action: "test transition", ready: true,
 	})

@@ -103,7 +103,7 @@ func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	oldToken := ac.resumeToken
-	oldGeneration := ac.roleGeneration.Load()
+	oldGeneration := ac.connectionGeneration.Load()
 	d.clientGone(sess, ac, oldTransport, false)
 
 	newTransport := &closeTrackingTransport{}
@@ -113,7 +113,7 @@ func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 	require.Same(t, sess, resumed)
 	require.Same(t, ac, same)
 	require.NotEqual(t, oldToken, ac.resumeToken)
-	require.Greater(t, ac.roleGeneration.Load(), oldGeneration)
+	require.Greater(t, ac.connectionGeneration.Load(), oldGeneration)
 	require.True(t, d.commitResumeClaim(ac))
 	d.mu.Lock()
 	_, oldRetained := d.parked[oldToken]
@@ -262,7 +262,7 @@ func TestHandleHelloAllowsMultipleAttachments(t *testing.T) {
 	secondTransport := &closeTrackingTransport{}
 	_, second, err := d.route(helloResumeCapable(ports.IntentAttach, "work", 0), secondTransport)
 	require.NoError(t, err)
-	require.Equal(t, attachmentActive, sess.attachmentRole(first))
-	require.Equal(t, attachmentActive, sess.attachmentRole(second))
+	require.Equal(t, true, sess.attachmentRegistered(first))
+	require.Equal(t, true, sess.attachmentRegistered(second))
 	require.NotSame(t, first, second)
 }

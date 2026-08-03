@@ -37,7 +37,7 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 	core.mu.Lock()
 	require.False(t, sess.mu.TryLock(), "sessionCore.mu must be the mutex promoted as session.mu")
 	core.registerAttachmentLocked(ac)
-	require.Equal(t, attachmentActive, sess.attachmentRoleLocked(ac))
+	require.Equal(t, true, sess.attachmentRegisteredLocked(ac))
 	sess.tabs = append(sess.tabs, &tab{name: "logs"})
 	require.Len(t, sess.tabs, 2)
 	core.mu.Unlock()
@@ -83,7 +83,7 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 		t.Fatal("snapshotView completed while sessionCore.mu guarded local session state")
 	case <-timer.C:
 	}
-	require.Equal(t, attachmentActive, sess.attachmentRoleLocked(ac))
+	require.Equal(t, true, sess.attachmentRegisteredLocked(ac))
 	sess.core().mu.Unlock()
 
 	view := awaitTestValue(t, snapshotted, "snapshotView did not complete after sessionCore.mu was released")

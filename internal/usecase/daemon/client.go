@@ -42,14 +42,14 @@ type attachedClient struct {
 	overlays     *overlayRuntime
 	overlayOnce  sync.Once
 	clientID     [16]byte
-	// roleGeneration is the wire-facing capability generation. roleEffects is
-	// the linearization gate for every role-bound observable operation. A role
+	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
+	// the linearization gate for every attachment-bound observable operation. A role
 	// transition freezes and drains this gate before changing either generation
 	// or the session/coordinator registries.
-	roleGeneration atomic.Uint64
-	roleEffects    roleEffectGate
-	resumeCapable  bool
-	resumeToken    uint64
+	connectionGeneration atomic.Uint64
+	attachmentEffects    attachmentEffectGate
+	resumeCapable        bool
+	resumeToken          uint64
 	// resumeClaimToken is non-zero only between a parked resume claim and its
 	// successful Welcome. It lets a failed pre-claim handshake restore the old
 	// credential instead of consuming it.
@@ -352,7 +352,7 @@ func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f po
 // attachment's current transport incarnation and admits ticket's interruptible
 // transport send. The caller must already hold ac.sendMu and, on success, owns
 // both the send and its matching ticket.endTransportSend.
-func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSnapshot, ticket *roleEffectTicket) error {
+func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSnapshot, ticket *attachmentEffectTicket) error {
 	if expected.transport == nil || !ac.transportSnapshotCurrent(expected) {
 		return errTransportReplaced
 	}
@@ -362,10 +362,10 @@ func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSna
 	return nil
 }
 
-func (ac *attachedClient) sendExpectedTransportForRole(expected transportSnapshot, f ports.Frame, ticket *roleEffectTicket) error {
+func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportSnapshot, f ports.Frame, ticket *attachmentEffectTicket) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	// A role-bound send requires a live ticket, and reports every rejection,
+	// A attachment-bound send requires a live ticket, and reports every rejection,
 	// including a replaced transport, as a lost attachment transition.
 	if ticket == nil {
 		return errAttachmentTransition
@@ -523,15 +523,14 @@ type attachClientOptions struct {
 	proxied           bool
 }
 
-func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient, error) {
+func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
 	d.mu.Lock()
 	ac := d.prepareAttachedClientLocked(tr, sz, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
-		target:            sess,
-		next:              ac,
-		expectedRole:      attachmentDetached,
-		targetRole:        attachmentActive,
+		target: sess,
+		next:   ac,
+
 		expectedTransport: ac.transportSnapshot(),
 		ready:             false,
 	})
@@ -539,11 +538,11 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 		if tr != nil {
 			_ = tr.Close()
 		}
-		return nil, nil, err
+		return nil, err
 	}
 	d.finishAttachedClient(sess, ac, opts)
 	d.deferAttachmentTransitionCleanups(result)
-	return ac, result.displaced.ac, nil
+	return ac, nil
 }
 
 func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
@@ -553,7 +552,7 @@ func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts at
 }
 
 // prepareAttachedClientLocked allocates one detached attachment. Caller holds
-// d.mu only to allocate its resume token; role publication happens later after
+// d.mu only to allocate its resume token; attachment publication happens later after
 // the caller releases every architecture lock.
 func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size, opts attachClientOptions) *attachedClient {
 	resumeToken := uint64(0)
@@ -664,20 +663,20 @@ func (d *Daemon) resetScreenDefaultColors(sess *session) {
 }
 
 // firstPaintForTransition is the only active post-transition paint entry
-// point. It rejects a stale role capability before rebasing output and carries
+// point. It rejects a stale attachment capability before rebasing output and carries
 // the exact coordinator lease through every resize and render effect.
-func (d *Daemon) firstPaintForTransition(token attachmentRoleToken) bool {
-	if !token.activeCurrent() {
+func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
+	if !token.attachmentCurrent() {
 		return false
 	}
-	ticket, admitted := token.ac.beginRoleEffect(token)
+	ticket, admitted := token.ac.beginAttachmentEffect(token)
 	if !admitted {
 		return false
 	}
 	token.effect = ticket
-	defer token.endRoleEffect()
-	if d.afterRoleEffectAdmitted != nil {
-		d.afterRoleEffectAdmitted(token)
+	defer token.endAttachmentEffect()
+	if d.afterAttachmentEffectAdmitted != nil {
+		d.afterAttachmentEffectAdmitted(token)
 	}
 	if token.rebase {
 		if d.beforeFirstPaintSendWait != nil {
@@ -708,7 +707,7 @@ func (d *Daemon) firstPaintForTransition(token attachmentRoleToken) bool {
 // firstPaint guarantees the freshly attached client sees the full screen: if
 // the tab size differs from the client's it resizes first, then immediately
 // emits a full redraw. It is retained for direct test/headless setup; active
-// role transitions use firstPaintForTransition with their exact lease.
+// attachment transitions use firstPaintForTransition with their exact lease.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
 	d.firstPaintWithLease(sess, ac, clientSize, nil)
 }
@@ -775,17 +774,17 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 	d.invalidateRender(sess, ac, true, "client.go")
 }
 
-func (d *Daemon) applyThemeForRole(token attachmentRoleToken, msg ports.Theme) bool {
-	if !token.activeEffect() {
+func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg ports.Theme) bool {
+	if !token.attachmentEffectCurrent() {
 		return false
 	}
 	clientTheme := themeFromMessage(msg)
 	token.ac.setClientTheme(clientTheme)
 	sess, ok := localSession(token.sess)
-	if !ok || !token.activeEffect() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
+	if !ok || !token.attachmentEffectCurrent() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
 		return false
 	}
-	if !token.activeEffect() {
+	if !token.attachmentEffectCurrent() {
 		return false
 	}
 	if rc := token.sess.core().coordinator.Load(); rc != nil {
@@ -811,23 +810,23 @@ func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice po
 	token := sess.attachmentToken(ac, tr)
 	if token.lease == nil {
 		// Direct test/headless callers retain pointer-based routing. Production
-		// client frames always carry the exact lease through the role path below.
+		// client frames always carry the exact lease through the attachment path below.
 		d.handleClientNoticeDirect(sess, ac, notice)
 		return
 	}
-	d.handleClientNoticeForRole(token, notice)
+	d.handleClientNoticeForAttachment(token, notice)
 }
 
-func (d *Daemon) handleClientNoticeForRole(token attachmentRoleToken, notice ports.ClientNotice) {
+func (d *Daemon) handleClientNoticeForAttachment(token attachmentConnectionToken, notice ports.ClientNotice) {
 	d.notices.routingMu.Lock()
-	if !token.activeEffect() {
+	if !token.attachmentEffectCurrent() {
 		d.notices.routingMu.Unlock()
 		return
 	}
 	if d.notices.beforeClientNoticeMutation != nil {
 		d.notices.beforeClientNoticeMutation()
 	}
-	if !token.activeEffect() {
+	if !token.attachmentEffectCurrent() {
 		d.notices.routingMu.Unlock()
 		return
 	}
@@ -838,7 +837,7 @@ func (d *Daemon) handleClientNoticeForRole(token attachmentRoleToken, notice por
 	}
 	repaint := d.mutateClientNotice(sess, token.ac, notice)
 	d.notices.routingMu.Unlock()
-	if repaint && token.activeEffect() {
+	if repaint && token.attachmentEffectCurrent() {
 		d.repaintForNotice(token.ac)
 	}
 }

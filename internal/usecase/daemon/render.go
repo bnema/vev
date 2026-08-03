@@ -258,9 +258,9 @@ func (d *Daemon) observeRuntime(kind ports.RuntimeMarkKind, bytes uint64, valid 
 // paint owns attachment sendMu while it captures, composes, and emits; JSONL
 // observer I/O must therefore happen only after that ownership is released.
 type runtimeMarkBatch struct {
-	observer   ports.RuntimeObserver
-	marks      []ports.RuntimeMark
-	roleEffect *roleEffectTicket
+	observer         ports.RuntimeObserver
+	marks            []ports.RuntimeMark
+	attachmentEffect *attachmentEffectTicket
 }
 
 func (d *Daemon) newRuntimeMarkBatch() runtimeMarkBatch {
@@ -310,11 +310,11 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	if lease != nil {
 		token := attachmentToken(entry, ac, ac.transport())
 		token.lease = lease
-		ticket, admitted := ac.beginRoleEffect(token)
+		ticket, admitted := ac.beginAttachmentEffect(token)
 		if !admitted {
 			return
 		}
-		marks.roleEffect = ticket
+		marks.attachmentEffect = ticket
 		defer ticket.End()
 	}
 	var tb *tab

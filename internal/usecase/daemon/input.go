@@ -20,11 +20,11 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 	d.handleInput(sess, ac, data)
 }
 
-func (d *Daemon) handleSequencedInputForRole(token attachmentRoleToken, _ uint64, data []byte) {
-	if !token.activeEffect() {
+func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionToken, _ uint64, data []byte) {
+	if !token.attachmentEffectCurrent() {
 		return
 	}
-	d.handleInputForRole(token, data)
+	d.handleInputForAttachment(token, data)
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
@@ -40,19 +40,19 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	)
 }
 
-func (d *Daemon) handleInputForRole(token attachmentRoleToken, data []byte) {
+func (d *Daemon) handleInputForAttachment(token attachmentConnectionToken, data []byte) {
 	ac := token.ac
 	ac.initOverlays()
 	if proxy, ok := token.sess.(*proxySession); ok {
-		handler := proxyKeyHandler{d: d, proxy: proxy, ac: ac, roleToken: token}
+		handler := proxyKeyHandler{d: d, proxy: proxy, ac: ac, connectionToken: token}
 		ac.mouseScan.Scan(data,
 			func(ev mouse.Event) {
-				if token.activeEffect() && !proxyMouseOwnedLocally(ac.overlays) {
+				if token.attachmentEffectCurrent() && !proxyMouseOwnedLocally(ac.overlays) {
 					handler.Mouse(ev)
 				}
 			},
 			func(b []byte) {
-				if !token.activeEffect() || ac.overlays.HandleInput(d, b, token.effect) || !token.activeEffect() {
+				if !token.attachmentEffectCurrent() || ac.overlays.HandleInput(d, b, token.effect) || !token.attachmentEffectCurrent() {
 					return
 				}
 				ac.keys.RouteWithHandler(b, handler)
@@ -62,21 +62,21 @@ func (d *Daemon) handleInputForRole(token attachmentRoleToken, data []byte) {
 	}
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) {
-			if token.activeEffect() {
+			if token.attachmentEffectCurrent() {
 				d.handleMouse(ac, ev)
 			}
 		},
 		func(b []byte) {
-			if !token.activeEffect() {
+			if !token.attachmentEffectCurrent() {
 				return
 			}
 			if ac.overlays.HandleInput(d, b, token.effect) {
 				return
 			}
-			if !token.activeEffect() {
+			if !token.attachmentEffectCurrent() {
 				return
 			}
-			ac.keys.RouteWithHandler(b, daemonKeyHandler{d: d, ac: ac, roleToken: token})
+			ac.keys.RouteWithHandler(b, daemonKeyHandler{d: d, ac: ac, connectionToken: token})
 		},
 	)
 }
@@ -315,34 +315,34 @@ func sgrOffset(raw []byte, colDelta, rowDelta int) []byte {
 }
 
 type daemonKeyHandler struct {
-	d         *Daemon
-	ac        *attachedClient
-	actions   daemonActionRunner
-	roleToken attachmentRoleToken
+	d               *Daemon
+	ac              *attachedClient
+	actions         daemonActionRunner
+	connectionToken attachmentConnectionToken
 }
 
-// acquireRoleEffect preserves a synchronous frame's existing admission and
+// acquireAttachmentEffect preserves a synchronous frame's existing admission and
 // gives delayed router callbacks a fresh ticket for the exact captured role.
 // Direct/headless callers without a role token retain their existing behavior.
-func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool) {
-	if h.roleToken.ac != nil {
-		if effect := h.roleToken.effect; effect != nil && !effect.ended.Load() {
-			sess, _ := localSession(h.roleToken.sess)
+func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffectTicket, bool) {
+	if h.connectionToken.ac != nil {
+		if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
+			sess, _ := localSession(h.connectionToken.sess)
 			return sess, effect, false
 		}
-		effect, admitted := h.roleToken.ac.beginRoleEffect(h.roleToken)
+		effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
 		if h.d.afterDelayedKeyEffectAttempt != nil {
 			h.d.afterDelayedKeyEffectAttempt(admitted)
 		}
 		if !admitted {
 			return nil, nil, false
 		}
-		if h.d.afterRoleEffectAdmitted != nil {
-			token := h.roleToken
+		if h.d.afterAttachmentEffectAdmitted != nil {
+			token := h.connectionToken
 			token.effect = effect
-			h.d.afterRoleEffectAdmitted(token)
+			h.d.afterAttachmentEffectAdmitted(token)
 		}
-		sess, ok := localSession(h.roleToken.sess)
+		sess, ok := localSession(h.connectionToken.sess)
 		if !ok {
 			effect.End()
 			return nil, nil, false
@@ -357,7 +357,7 @@ func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool
 }
 
 func (h daemonKeyHandler) Forward(data []byte) {
-	sess, effect, owned := h.acquireRoleEffect()
+	sess, effect, owned := h.acquireAttachmentEffect()
 	if sess == nil {
 		return
 	}
@@ -375,7 +375,7 @@ func (h daemonKeyHandler) Forward(data []byte) {
 }
 
 func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
-	sess, effect, owned := h.acquireRoleEffect()
+	sess, effect, owned := h.acquireAttachmentEffect()
 	if sess == nil {
 		return
 	}
@@ -421,9 +421,9 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 			return
 		}
 		effect.bindActionEnd(h.d, "jump-attention")
-		token := h.roleToken
+		token := h.connectionToken
 		token.effect = effect
-		if err := h.d.jumpAttentionForRole(sess, h.ac, token); err != nil {
+		if err := h.d.jumpAttentionForAttachment(sess, h.ac, token); err != nil {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionToggleFloatingPane:
@@ -464,7 +464,7 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 	}
 }
 
-func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *roleEffectTicket) {
+func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *attachmentEffectTicket) {
 	var err error
 	if h.ac.proxied {
 		err = h.d.focusDirProxied(sess, h.ac, dir)

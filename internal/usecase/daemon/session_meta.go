@@ -78,7 +78,7 @@ func cloneSessionMeta(meta ports.SessionMeta) ports.SessionMeta {
 // caller holds ac.sendMu, which serializes this snapshot shadow with every
 // output write. The shadow is committed only after the transport accepts the
 // metadata frame.
-func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected transportSnapshot, ticket *roleEffectTicket) error {
+func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected transportSnapshot, ticket *attachmentEffectTicket) error {
 	if ac == nil || sess == nil || !ac.proxied {
 		return nil
 	}
@@ -91,7 +91,7 @@ func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected trans
 
 // sendSessionMetaSnapshot sends an already captured metadata snapshot while
 // the caller holds ac.sendMu.
-func (ac *attachedClient) sendSessionMetaSnapshot(meta ports.SessionMeta, expected transportSnapshot, ticket *roleEffectTicket) error {
+func (ac *attachedClient) sendSessionMetaSnapshot(meta ports.SessionMeta, expected transportSnapshot, ticket *attachmentEffectTicket) error {
 	if ac == nil || !ac.proxied {
 		return nil
 	}

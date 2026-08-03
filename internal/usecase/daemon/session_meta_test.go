@@ -197,7 +197,7 @@ func TestProxiedAttachedCommandValidationPreservesRequestID(t *testing.T) {
 			require.NoError(t, err)
 
 			token := sess.attachmentToken(ac, ac.transport())
-			require.False(t, d.handleActiveClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
+			require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
 
 			reply := awaitFrame(t, sends, ports.MsgCommandResult)
 			result, err := ports.UnmarshalCommandResult(reply.Payload)

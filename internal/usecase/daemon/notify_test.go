@@ -86,7 +86,7 @@ func TestHandleClientNoticeSerializesReplacement(t *testing.T) {
 	tr, _ := newCapturingTransport(t)
 	replaced := make(chan *attachedClient, 1)
 	go func() {
-		current, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+		current, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 		replaced <- current
 	}()
 
@@ -134,7 +134,7 @@ func TestHandleClientNoticeRejectsReplacedClient(t *testing.T) {
 				tt.setup(d, old, sess.id)
 			}
 			tr, _ := newCapturingTransport(t)
-			current, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+			current, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 			d.attachmentCleanupWg.Wait()
 
 			d.handleClientNotice(sess, old, tt.notice)
@@ -767,7 +767,7 @@ func TestNotifyGlobalSerializesReplacementWithDelivery(t *testing.T) {
 	tr, _ := newCapturingTransport(t)
 	replaced := make(chan *attachedClient, 1)
 	go func() {
-		ac, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+		ac, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 		replaced <- ac
 	}()
 	close(releaseRoute)

@@ -23,70 +23,65 @@ type attachmentTransitionRequest struct {
 	source                attachmentSession
 	target                attachmentSession
 	next                  *attachedClient
-	expectedRole          attachmentRole
-	targetRole            attachmentRole
 	expectedTransport     transportSnapshot
-	sourceToken           *attachmentRoleToken
+	sourceToken           *attachmentConnectionToken
 	action                string
 	activateTargetTab     bool
 	targetTabIndex        int
 	copySourceEnvironment bool
-	// preserveRole commits navigation state without replacing attachment
-	// ownership. It is used for same-session picker selections after the exact
-	// initiating capability has been frozen and revalidated.
-	preserveRole      bool
-	expectedSourceTab *tab
+	// preserveAttachment commits attachment-local navigation state without
+	// changing session membership. The initiating connection token remains the
+	// exact authority for this mutation.
+	preserveAttachment bool
+	expectedSourceTab  *tab
 	// transferExpectedSourceTab permits an installed visible floating pane only
-	// when the caller atomically transfers this exact tab under its own tab and
-	// floating-generation fences. Ordinary navigation still rejects visibility.
-	transferExpectedSourceTab          bool
-	createTargetLocked                 func() (*session, error)
-	ready                              bool
-	expectedTargetCurrent              *attachedClient
-	expectedTargetTransport            transportSnapshot
-	expectedTargetLifecycle            *attachmentLifecycleFence
-	preflighted                        bool
-	roleEffectsFrozen                  bool
-	expectedTargetTransportInterrupted bool
+	// when the caller atomically transfers this exact tab under its fences.
+	transferExpectedSourceTab bool
+	createTargetLocked        func() (*session, error)
+	ready                     bool
+	expectedTargetLifecycle   *attachmentLifecycleFence
+	preflighted               bool
+	attachmentEffectsFrozen   bool
 }
 
-func transitionSourceTokenMatchesRequest(token attachmentRoleToken, source attachmentSession, req attachmentTransitionRequest) bool {
-	return token.sess == source && token.ac == req.next && token.role == req.expectedRole &&
+func transitionSourceTokenMatchesRequest(token attachmentConnectionToken, source attachmentSession, req attachmentTransitionRequest) bool {
+	return token.sess == source && token.ac == req.next &&
+		token.generation == req.next.connectionGeneration.Load() &&
 		token.transport.transport == req.expectedTransport.transport &&
 		token.transport.incarnation == req.expectedTransport.incarnation
 }
 
-// transitionSourceTokenCurrentLocked requires source.mu and, for an active
-// source, sourceCoordinator.mu. This is the canonical handoff preflight: every
-// client-originated navigation, delete, or create intent is bound to one exact
-// role generation, transport incarnation, and coordinator lease.
-func transitionSourceTokenCurrentLocked(token attachmentRoleToken, source attachmentSession, sourceCoordinator *renderCoordinator, req attachmentTransitionRequest) bool {
-	if token.sess != source || token.ac != req.next || token.role != req.expectedRole ||
-		token.generation != req.next.roleGeneration.Load() || attachmentSessionRoleLocked(source, req.next) != token.role ||
-		req.next.currentAttachmentSession() != source || !req.next.transportSnapshotCurrent(token.transport) {
+// transitionSourceTokenCurrentLocked requires source.core().mu and, when a
+// lease exists, sourceCoordinator.mu. It is the canonical exact-connection
+// handoff check for client-originated navigation and lifecycle mutations.
+func transitionSourceTokenCurrentLocked(token attachmentConnectionToken, source attachmentSession, sourceCoordinator *renderCoordinator, req attachmentTransitionRequest) bool {
+	if token.sess != source || token.ac != req.next ||
+		token.generation != req.next.connectionGeneration.Load() ||
+		token.sess == nil || token.ac.currentAttachmentSession() != source ||
+		!attachmentRegisteredLocked(source, req.next) ||
+		!req.next.transportSnapshotCurrent(token.transport) {
 		return false
 	}
-	if token.role != attachmentActive {
+	if token.lease == nil {
 		return true
 	}
-	return sourceCoordinator != nil && token.lease != nil && token.lease.attachment == req.next &&
+	return sourceCoordinator != nil && token.lease.attachment == req.next &&
 		sourceCoordinator.leaseCurrentLocked(token.lease, true)
 }
 
 type attachmentTransitionResult struct {
-	published attachmentRoleToken
-	displaced attachmentRoleToken
+	published attachmentConnectionToken
 	cleanups  []renderLifecycleCleanup
 }
 
 type attachmentTransitionParticipants struct {
 	clients    []*attachedClient
-	interrupts []roleTransportInterrupt
+	interrupts []attachmentTransportInterrupt
 }
 
-// snapshotAttachmentTransition discovers the exact participants while d.mu is
-// held. It releases every architecture lock before any role effect is ended or
-// any gate is frozen and drained.
+// snapshotAttachmentTransition discovers the exact connection participant
+// while d.mu is held, then releases architecture locks before effect gates are
+// frozen and drained. Existing target attachments are never displaced.
 func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (attachmentTransitionRequest, attachmentTransitionParticipants, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -107,48 +102,41 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 		d.sessions[sourceCore.id] != source || req.target != nil && d.sessions[targetCore.id] != req.target {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
-	// Existing attachments remain independent session members. Transitions only
-	// publish the initiating attachment; there is no singleton target owner to
-	// displace or interrupt.
-	req.expectedTargetCurrent = nil
 	if req.sourceToken != nil && !transitionSourceTokenMatchesRequest(*req.sourceToken, source, req) {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
 	req.preflighted = true
-	participants := attachmentTransitionParticipants{clients: []*attachedClient{req.next}}
-	// Every attachment joins without displacing another connection.
-	return req, participants, nil
+	return req, attachmentTransitionParticipants{clients: []*attachedClient{req.next}}, nil
 }
 
-// freezeAttachmentTransition drains the snapshotted participants without any
-// architecture lock held. The returned guard remains frozen through atomic
-// publication and must be released by the caller.
-func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, participants attachmentTransitionParticipants) (frozenRoleEffectGates, bool, error) {
-	if d.afterRoleEffectParticipantsSnapshotted != nil {
-		d.afterRoleEffectParticipantsSnapshotted(req.action, participants.clients)
+// freezeAttachmentTransition drains the snapshotted connection without any
+// architecture lock held. The returned guard remains frozen through publication.
+func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, participants attachmentTransitionParticipants) (frozenAttachmentEffectGates, bool, error) {
+	if d.afterAttachmentEffectParticipantsSnapshotted != nil {
+		d.afterAttachmentEffectParticipantsSnapshotted(req.action, participants.clients)
 	}
-	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, afterFrozen: func(ac *attachedClient) {
-		if d.afterRoleEffectGateFrozen != nil {
-			d.afterRoleEffectGateFrozen(req.action, ac)
+	frozen := freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{interrupts: participants.interrupts, afterFrozen: func(ac *attachedClient) {
+		if d.afterAttachmentEffectGateFrozen != nil {
+			d.afterAttachmentEffectGateFrozen(req.action, ac)
 		}
 	}}, participants.clients...)
 	if !frozen.acquired || !frozen.drained {
 		return frozen, false, errAttachmentTransition
 	}
-	interrupted := frozen.interrupted(req.expectedTargetCurrent, req.expectedTargetTransport)
-	if d.afterRoleEffectsFrozen != nil {
-		d.afterRoleEffectsFrozen()
+	interrupted := frozen.interrupted(nil, transportSnapshot{})
+	if d.afterAttachmentEffectsFrozen != nil {
+		d.afterAttachmentEffectsFrozen()
 	}
 	return frozen, interrupted, nil
 }
 
 // publishAttachmentTransition revalidates the frozen source, creates an
-// optional target, and performs publication while d.mu remains held.
+// optional target, and performs exact membership publication under d.mu.
 func (d *Daemon) publishAttachmentTransition(req attachmentTransitionRequest) (attachmentTransitionResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	req.roleEffectsFrozen = true
+	req.attachmentEffectsFrozen = true
 	if req.target == nil {
 		if !d.transitionSourcePreflightLocked(req) {
 			return attachmentTransitionResult{}, errAttachmentTransition
@@ -158,7 +146,6 @@ func (d *Daemon) publishAttachmentTransition(req attachmentTransitionRequest) (a
 		if err != nil {
 			return attachmentTransitionResult{}, err
 		}
-		req.expectedTargetCurrent = nil
 	}
 	return d.transitionAttachmentLocked(req)
 }
@@ -169,24 +156,20 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 		return attachmentTransitionResult{}, err
 	}
 	if req.sourceToken != nil {
-		d.endActionRoleEffect(req.sourceToken.effect, req.action)
+		d.endActionAttachmentEffect(req.sourceToken.effect, req.action)
 	}
 
-	frozen, interrupted, err := d.freezeAttachmentTransition(req, participants)
+	frozen, _, err := d.freezeAttachmentTransition(req, participants)
 	defer frozen.unfreeze()
 	if err != nil {
 		return attachmentTransitionResult{}, err
 	}
-	req.expectedTargetTransportInterrupted = interrupted
 
 	result, err := d.publishAttachmentTransition(req)
 	if err != nil {
 		return result, err
 	}
-	// Warm-proxy timers are external clock operations. Apply them only after
-	// frozen ownership publication and every architecture lock have completed;
-	// the lifecycle helper revalidates exact registry pointers and clients.
-	d.proxyAttachmentTransitionCommitted(req.source, req.target, req.next, req.preserveRole)
+	d.proxyAttachmentTransitionCommitted(req.source, req.target, req.next, req.preserveAttachment)
 	return result, nil
 }
 

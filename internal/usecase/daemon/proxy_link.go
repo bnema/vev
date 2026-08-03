@@ -652,7 +652,7 @@ func (d *Daemon) runProxyTransport(ctx context.Context, p *proxySession, generat
 }
 
 // handleProxySideEffect forwards a stateless remote effect to the exact local
-// attachment that currently owns this proxy. Role admission and transport
+// attachment that currently owns this proxy. Connection admission and transport
 // incarnation checks make a stale handoff a harmless drop rather than a send
 // to the client's next session.
 func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out ports.Output) error {
@@ -672,10 +672,10 @@ func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out p
 		return nil
 	}
 	token := attachmentToken(p, ac, expected.transport)
-	if token.role != attachmentActive || token.sess != p {
+	if token.sess != p {
 		return nil
 	}
-	ticket, admitted := ac.beginRoleEffect(token)
+	ticket, admitted := ac.beginAttachmentEffect(token)
 	if !admitted {
 		return nil
 	}
@@ -684,7 +684,7 @@ func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out p
 		return nil
 	}
 	frame := ac.output.sideEffect(out.Data, ac.echoAck.Load())
-	if err := ac.sendExpectedTransportForRole(expected, frame, ticket); err != nil {
+	if err := ac.sendExpectedTransportForAttachment(expected, frame, ticket); err != nil {
 		if errors.Is(err, errAttachmentTransition) {
 			return nil
 		}

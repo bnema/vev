@@ -138,7 +138,7 @@ func TestRemotePaletteClosesBeforeOpeningLocalOverlay(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			d, _, ac, link, handler := newProxyInputHarness(t)
 			handler.enterPalette()
-			d.handlePaletteInput(ac, []byte(test.code+"\r"), handler.roleToken.effect)
+			d.handlePaletteInput(ac, []byte(test.code+"\r"), handler.connectionToken.effect)
 
 			require.False(t, ac.overlays.paletteActive(), "stale remote palette remained active")
 			require.True(t, test.active(ac.overlays), "replacement local overlay was not opened")
@@ -361,14 +361,14 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	generation := ac.roleGeneration.Load()
+	generation := ac.connectionGeneration.Load()
 	d.handleInput(current, ac, []byte("stopped\r"))
 
 	resumed := ac.currentSession()
 	require.Equal(t, "stopped", resumed.name)
 	require.Equal(t, int64(42), resumed.createdAt)
-	require.Equal(t, attachmentActive, resumed.attachmentRole(ac))
-	require.Greater(t, ac.roleGeneration.Load(), generation, "stopped-session handoff must publish through the attachment transition")
+	require.Equal(t, true, resumed.attachmentRegistered(ac))
+	require.Greater(t, ac.connectionGeneration.Load(), generation, "stopped-session handoff must publish through the attachment transition")
 	require.False(t, ac.overlays.paletteActive())
 	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
@@ -486,7 +486,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	invalidations := installPaletteInvalidationObserver(current)
 	d.enterPalette(current, ac)
 	d.handlePaletteInput(ac, []byte("BSK"))
-	d.afterActionRoleEffectEnded = func(action string) {
+	d.afterActionAttachmentEffectEnded = func(action string) {
 		if action == "back-session" {
 			d.mu.Lock()
 			delete(d.sessions, target.core().id)
@@ -495,7 +495,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	}
 
 	token := current.attachmentToken(ac, ac.transport())
-	effect, admitted := ac.beginRoleEffect(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	d.handlePaletteInput(ac, []byte("\r"), effect)
 
@@ -505,7 +505,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	require.True(t, invalidation.reset)
 }
 
-func TestPaletteDeniedPostHandoffRoleEffectClosesAndInvalidates(t *testing.T) {
+func TestPaletteDeniedPostHandoffAttachmentEffectClosesAndInvalidates(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
@@ -514,7 +514,7 @@ func TestPaletteDeniedPostHandoffRoleEffectClosesAndInvalidates(t *testing.T) {
 	d.enterPalette(sess, ac)
 	d.handlePaletteInput(ac, []byte("BSK"))
 	// Make the attachment token detached while retaining currentSession. The
-	// no-op BSK command succeeds, but its post-execution beginRoleEffect is
+	// no-op BSK command succeeds, but its post-execution beginAttachmentEffect is
 	// deterministically denied.
 	sess.mu.Lock()
 	clearAttachmentsForTestLocked(sess)
@@ -671,7 +671,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.True(t, ac.overlays.promptActive())
 	require.Contains(t, string(promptOutput.Data), "Create session")
 
-	generation := ac.roleGeneration.Load()
+	generation := ac.connectionGeneration.Load()
 	d.handleInput(sess, ac, []byte("scratch\r"))
 	// The submit first paints the newly attached session while the prompt is
 	// still open, then handlePromptInput closes the prompt and repaints the
@@ -692,8 +692,8 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.Equal(t, "scratch", newSess.name)
 	require.False(t, newSess.ephemeral)
 	require.Contains(t, newSess.snapshotAttachments(), ac)
-	require.Equal(t, attachmentActive, newSess.attachmentRole(ac))
-	require.Greater(t, ac.roleGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
+	require.Equal(t, true, newSess.attachmentRegistered(ac))
+	require.Greater(t, ac.connectionGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
 	require.Contains(t, string(finalOutput.Data), "scratch")
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }

@@ -159,6 +159,12 @@ func (c *sessionCore) snapshotAttachmentsLocked() []*attachedClient {
 	for ac := range c.attachments {
 		out = append(out, ac)
 	}
+	slices.SortStableFunc(out, func(a, b *attachedClient) int {
+		if id := bytes.Compare(a.clientID[:], b.clientID[:]); id != 0 {
+			return id
+		}
+		return cmp.Compare(c.attachmentOrder[a], c.attachmentOrder[b])
+	})
 	return out
 }
 
@@ -197,6 +203,14 @@ func attachmentRegistered(entry attachmentSession, ac *attachedClient) bool {
 	core.mu.Lock()
 	defer core.mu.Unlock()
 	return attachmentRegisteredLocked(entry, ac)
+}
+
+func (s *session) attachmentRegistered(ac *attachedClient) bool {
+	return attachmentRegistered(s, ac)
+}
+
+func (s *session) attachmentRegisteredLocked(ac *attachedClient) bool {
+	return attachmentRegisteredLocked(s, ac)
 }
 
 func (s *session) attachmentViewsTabLocked(tb *tab) bool {

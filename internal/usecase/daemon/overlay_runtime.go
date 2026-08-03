@@ -48,7 +48,7 @@ type overlayRuntime struct {
 	promptMu               sync.Mutex
 	prompt                 *promptui.Model
 	promptSubmit           func(string) error
-	promptTransitionSubmit func(string, attachmentRoleToken) error
+	promptTransitionSubmit func(string, attachmentConnectionToken) error
 	promptPending          []byte
 
 	resizeMu      sync.Mutex
@@ -242,12 +242,12 @@ func (rt *overlayRuntime) clearCopyModeForPane(p *pane) bool {
 	return active || prePublication
 }
 
-func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte, effects ...*roleEffectTicket) bool {
+func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte, effects ...*attachmentEffectTicket) bool {
 	if rt == nil || rt.ac == nil {
 		return false
 	}
 	ac := rt.ac
-	var effect *roleEffectTicket
+	var effect *attachmentEffectTicket
 	if len(effects) != 0 {
 		effect = effects[0]
 	}

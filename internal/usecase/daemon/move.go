@@ -77,7 +77,6 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	movedPane := admission.movedPane
 	sourceClient := admission.sourceClient
 	destinationClient := admission.destinationClient
-	sourceSnatched := admission.sourceSnatched
 	sourceTabInitialGeneration := admission.sourceGeneration
 	destinationTabInitialGeneration := admission.destinationGeneration
 	finalSourceTab := admission.finalSourceTab
@@ -90,14 +89,14 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	// the callback then validates the handoff before changing any topology.
 	var handoffReq attachmentTransitionRequest
 	var handoffParticipants attachmentTransitionParticipants
-	var frozen frozenRoleEffectGates
-	var sourceRolesFrozen bool
+	var frozen frozenAttachmentEffectGates
+	var sourceEffectsFrozen bool
 	var handoffFrozen bool
 
 	if finalSourceTab && source != destination && sourceClient != nil {
 		transport := sourceClient.transportSnapshot()
 		sourceToken := source.attachmentToken(sourceClient, transport.transport)
-		if sourceToken.role != attachmentActive || sourceToken.transport.transport == nil {
+		if sourceToken.ac == nil || sourceToken.transport.transport == nil {
 			return errMovePaneInvalid
 		}
 		destinationTabIndex := moveTabIndex(destination, destinationTab)
@@ -106,32 +105,18 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		}
 		handoffReq = attachmentTransitionRequest{
 			source: source, target: destination, next: sourceClient,
-			expectedRole: attachmentActive, targetRole: attachmentActive,
+
 			expectedTransport: sourceToken.transport, sourceToken: &sourceToken,
-			expectedSourceTab: sourceTab, activateTargetTab: true,
-			targetTabIndex: destinationTabIndex, ready: true,
+			expectedSourceTab: sourceTab, targetTabIndex: destinationTabIndex, ready: true,
 		}
 		var err error
 		handoffReq, handoffParticipants, err = d.snapshotAttachmentTransition(handoffReq)
 		if err != nil {
 			return err
 		}
-		// Retiring source snatched clients is part of the same role gate set as
-		// the follower. Their exact membership is checked again in the commit.
-		d.mu.Lock()
-		source.mu.Lock()
-		for _, ac := range sourceSnatched {
-			handoffParticipants.clients = append(handoffParticipants.clients, ac)
-			tr := ac.transportSnapshot()
-			if tr.transport != nil {
-				handoffParticipants.interrupts = append(handoffParticipants.interrupts, roleTransportInterrupt{ac: ac, transport: tr})
-			}
-		}
-		source.mu.Unlock()
-		d.mu.Unlock()
-		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: handoffParticipants.interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
-			if d.afterRoleEffectGateFrozen != nil {
-				d.afterRoleEffectGateFrozen("move-pane", ac)
+		frozen = freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{interrupts: handoffParticipants.interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
+			if d.afterAttachmentEffectGateFrozen != nil {
+				d.afterAttachmentEffectGateFrozen("move-pane", ac)
 			}
 		}}, handoffParticipants.clients...)
 		if !frozen.acquired || !frozen.drained {
@@ -139,36 +124,12 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 			return errMovePaneInvalid
 		}
 		handoffFrozen = true
-		sourceRolesFrozen = true
-		handoffReq.roleEffectsFrozen = true
-	} else if finalSourceTab && source != destination && len(sourceSnatched) > 0 {
-		// A headless source may still have persistent snatched clients. Freeze
-		// their exact role gates before retiring the source registry.
-		d.mu.Lock()
-		source.mu.Lock()
-		participants := append([]*attachedClient(nil), sourceSnatched...)
-		interrupts := make([]roleTransportInterrupt, 0, len(sourceSnatched))
-		for _, ac := range sourceSnatched {
-			if transport := ac.transportSnapshot(); transport.transport != nil {
-				interrupts = append(interrupts, roleTransportInterrupt{ac: ac, transport: transport})
-			}
-		}
-		source.mu.Unlock()
-		d.mu.Unlock()
-		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
-			if d.afterRoleEffectGateFrozen != nil {
-				d.afterRoleEffectGateFrozen("move-pane", ac)
-			}
-		}}, participants...)
-		if !frozen.acquired || !frozen.drained {
-			frozen.unfreeze()
-			return errMovePaneInvalid
-		}
-		sourceRolesFrozen = true
+		sourceEffectsFrozen = true
+		handoffReq.attachmentEffectsFrozen = true
 	}
-	if sourceRolesFrozen {
+	if sourceEffectsFrozen {
 		defer func() {
-			if sourceRolesFrozen {
+			if sourceEffectsFrozen {
 				frozen.unfreeze()
 			}
 		}()
@@ -182,11 +143,10 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		destinationTab:        destinationTab,
 		movedPane:             movedPane,
 		sourceClient:          sourceClient,
-		sourceSnatched:        sourceSnatched,
 		sourceGeneration:      sourceTabInitialGeneration,
 		destinationGeneration: destinationTabInitialGeneration,
 		handoffFrozen:         handoffFrozen,
-		frozenRoles:           frozen,
+		frozenEffects:         frozen,
 		handoffReq:            handoffReq,
 	}
 	fences := newMovePaneResizeFences(source, destination, sourceTab, destinationTab, movedPane)
@@ -210,8 +170,8 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		sourceCleanupToken:       commit.sourceCleanupToken,
 		handoffResult:            commit.handoffResult,
 		syncCleanup:              commit.syncCleanup,
-		frozenRoles:              frozen,
-		rolesFrozen:              sourceRolesFrozen,
+		frozenEffects:            frozen,
+		effectsFrozen:            sourceEffectsFrozen,
 		unlockDispatch:           unlockDispatch,
 		reservation:              reservation,
 		sourceTabRemoved:         commit.sourceTabRemoved,
@@ -225,7 +185,7 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	}
 	// Transfer cleanup ownership away from the admission defers only after the
 	// complete postcommit plan exists.
-	sourceRolesFrozen = false
+	sourceEffectsFrozen = false
 	dispatchHeld = false
 	reservationHeld = false
 	postcommit.execute(d)

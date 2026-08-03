@@ -1031,10 +1031,10 @@ func TestProxySideEffectDropsStaleGenerationAndRole(t *testing.T) {
 	}
 
 	token := attachmentToken(proxy, ac, ac.transport())
-	ticket, admitted := ac.beginRoleEffect(token)
+	ticket, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	ticket.End()
-	ac.roleGeneration.Add(1)
+	ac.connectionGeneration.Add(1)
 	result, err = d.handleLinkFrame(proxy, 1, frame)
 	require.Equal(t, proxyLinkResume, result)
 	require.NoError(t, err)

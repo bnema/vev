@@ -186,7 +186,7 @@ func TestProxyWarmLifecycleFollowsAttachmentTransitions(t *testing.T) {
 
 	toProxy, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: local, target: proxy, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &localToken,
 		action: "lifecycle test", ready: true,
 	})
@@ -198,7 +198,7 @@ func TestProxyWarmLifecycleFollowsAttachmentTransitions(t *testing.T) {
 
 	_, err = d.transitionAttachment(attachmentTransitionRequest{
 		source: proxy, target: local, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &toProxy.published,
 		action: "lifecycle test", ready: true,
 	})
@@ -484,24 +484,25 @@ func TestIncomingDirectAttachTerminatesProxiedRemoteAttachment(t *testing.T) {
 	next.initOverlays()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: sess, next: next,
-		expectedRole: attachmentDetached, targetRole: attachmentActive,
+
 		expectedTransport: next.transportSnapshot(), ready: true,
 	})
 	require.NoError(t, err)
-	require.Nil(t, result.displaced.ac, "a proxied attachment must never enter the snatched role")
+	require.NotNil(t, result.published.ac)
 	require.Contains(t, sess.snapshotAttachments(), next)
-	require.Nil(t, old.currentAttachmentSession())
+	require.Same(t, sess, old.currentAttachmentSession())
 
 	d.deferAttachmentTransitionCleanups(result)
 	d.waitNotifies()
-	frame := awaitTestValue(t, oldTransport.sent, "replacement did not notify old transport")
-	detached, err := ports.UnmarshalDetached(frame.Payload)
-	require.NoError(t, err)
-	require.Equal(t, ports.ReasonReplaced, detached.Reason)
+	select {
+	case <-oldTransport.sent:
+		t.Fatal("publishing an attachment displaced the existing connection")
+	default:
+	}
 	select {
 	case <-oldTransport.closed:
+		t.Fatal("publishing an attachment closed the existing connection")
 	default:
-		t.Fatal("terminal proxied replacement did not close its transport")
 	}
 }
 
@@ -552,7 +553,7 @@ func TestReplacedProxyCannotBeSelectedOrReattachedAfterSwitchAway(t *testing.T) 
 
 	toProxy, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: local, target: proxy, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &localToken,
 		action: "replaced picker regression", ready: true,
 	})
@@ -567,7 +568,7 @@ func TestReplacedProxyCannotBeSelectedOrReattachedAfterSwitchAway(t *testing.T) 
 
 	_, err = d.transitionAttachment(attachmentTransitionRequest{
 		source: proxy, target: local, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &toProxy.published,
 		action: "replaced picker regression", ready: true,
 	})
@@ -613,10 +614,10 @@ func TestReplacedProxyCannotBeSelectedOrReattachedAfterSwitchAway(t *testing.T) 
 	require.Same(t, local, ac.currentAttachmentSession(), "picker activation reattached the terminal proxy")
 
 	token := attachmentToken(local, ac, ac.transport())
-	effect, admitted := ac.beginRoleEffect(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	token.effect = effect
-	err = d.switchToTargetForRole(token, cursor, sessionHandoffGuard{}, "replaced picker regression")
+	err = d.switchToTargetForAttachment(token, cursor, sessionHandoffGuard{}, "replaced picker regression")
 	require.Error(t, err)
 	require.Same(t, local, ac.currentAttachmentSession(), "defensive activation reused the terminal proxy")
 
@@ -1087,7 +1088,7 @@ func TestProxyKillConfirmationRequiresExactRemoteDisplay(t *testing.T) {
 	require.Equal(t, " Type work@arch to kill ", ac.overlays.prompt.Title())
 	submit := ac.overlays.promptTransitionSubmit
 	ac.overlays.promptMu.Unlock()
-	require.Error(t, submit("work", attachmentRoleToken{}))
+	require.Error(t, submit("work", attachmentConnectionToken{}))
 	d.mu.Lock()
 	require.Same(t, proxy, d.sessions[proxy.id])
 	d.mu.Unlock()
@@ -1546,7 +1547,7 @@ func TestExpireWarmProxyIgnoresSupersededToken(t *testing.T) {
 	require.False(t, proxyRegistered(d, p))
 }
 
-func newProxyRoleDetachFixture(t *testing.T) (*Daemon, *proxySession, *attachedClient, *closeTrackingTransport, *warmHookClock, attachmentRoleToken, *renderCoordinator) {
+func newProxyRoleDetachFixture(t *testing.T) (*Daemon, *proxySession, *attachedClient, *closeTrackingTransport, *warmHookClock, attachmentConnectionToken, *renderCoordinator) {
 	t.Helper()
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	clock := &warmHookClock{timers: make(chan *signalTimer, 4)}
@@ -1559,7 +1560,7 @@ func newProxyRoleDetachFixture(t *testing.T) (*Daemon, *proxySession, *attachedC
 	proxy := registerLifecycleProxy(t, d, domain.RemoteSessionKey{Host: "arch", Name: "detach"})
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: local, target: proxy, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &localToken,
 		action: "proxy detach fixture", ready: true,
 	})
@@ -1570,21 +1571,21 @@ func newProxyRoleDetachFixture(t *testing.T) (*Daemon, *proxySession, *attachedC
 func TestProxyRoleDetachRetiresExactClientAndOwnsOneWarmTimer(t *testing.T) {
 	tests := []struct {
 		name   string
-		detach func(*Daemon, attachmentRoleToken, ports.Transport) bool
+		detach func(*Daemon, attachmentConnectionToken, ports.Transport) bool
 	}{
 		{
 			name: "explicit",
-			detach: func(d *Daemon, token attachmentRoleToken, _ ports.Transport) bool {
-				effect, admitted := token.ac.beginRoleEffect(token)
+			detach: func(d *Daemon, token attachmentConnectionToken, _ ports.Transport) bool {
+				effect, admitted := token.ac.beginAttachmentEffect(token)
 				require.True(t, admitted)
 				token.effect = effect
-				return d.clientGoneForRole(token, true)
+				return d.clientGoneForAttachment(token, true)
 			},
 		},
 		{
 			name: "send error",
-			detach: func(d *Daemon, token attachmentRoleToken, failed ports.Transport) bool {
-				d.detachOnRoleSendError(token, failed)
+			detach: func(d *Daemon, token attachmentConnectionToken, failed ports.Transport) bool {
+				d.detachOnAttachmentSendError(token, failed)
 				return token.ac.currentAttachmentSession() == nil
 			},
 		},
@@ -1622,11 +1623,11 @@ func TestProxyRoleDetachRetiresExactClientAndOwnsOneWarmTimer(t *testing.T) {
 func TestProxyRoleDetachRejectsStaleTransportAndRole(t *testing.T) {
 	tests := []struct {
 		name  string
-		stale func(*attachedClient, *attachmentRoleToken) *closeTrackingTransport
+		stale func(*attachedClient, *attachmentConnectionToken) *closeTrackingTransport
 	}{
 		{
 			name: "transport",
-			stale: func(ac *attachedClient, _ *attachmentRoleToken) *closeTrackingTransport {
+			stale: func(ac *attachedClient, _ *attachmentConnectionToken) *closeTrackingTransport {
 				current := &closeTrackingTransport{}
 				ac.replaceTransport(current)
 				return current
@@ -1634,8 +1635,8 @@ func TestProxyRoleDetachRejectsStaleTransportAndRole(t *testing.T) {
 		},
 		{
 			name: "role generation",
-			stale: func(ac *attachedClient, _ *attachmentRoleToken) *closeTrackingTransport {
-				ac.roleGeneration.Add(1)
+			stale: func(ac *attachedClient, _ *attachmentConnectionToken) *closeTrackingTransport {
+				ac.connectionGeneration.Add(1)
 				return nil
 			},
 		},
@@ -1644,7 +1645,7 @@ func TestProxyRoleDetachRejectsStaleTransportAndRole(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, proxy, ac, failed, clock, token, _ := newProxyRoleDetachFixture(t)
 			current := tt.stale(ac, &token)
-			d.detachOnRoleSendError(token, failed)
+			d.detachOnAttachmentSendError(token, failed)
 			require.Same(t, proxy, ac.currentAttachmentSession())
 			if current != nil {
 				require.False(t, current.Closed(), "stale transport error closed the rebound client")

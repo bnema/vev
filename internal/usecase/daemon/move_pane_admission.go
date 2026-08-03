@@ -13,7 +13,6 @@ type movePaneAdmission struct {
 	movedPane             *pane
 	sourceClient          *attachedClient
 	destinationClient     *attachedClient
-	sourceSnatched        []*attachedClient
 	sourceGeneration      uint64
 	destinationGeneration uint64
 	finalSourceTab        bool
@@ -53,15 +52,21 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 		return nil, errMoveStaleTarget
 	}
 
+	sourceClient := req.Client
+	if sourceClient == nil {
+		attachments := source.snapshotAttachmentsLocked()
+		if len(attachments) != 0 {
+			sourceClient = attachments[0]
+		}
+	}
 	return &movePaneAdmission{
 		source:                source,
 		destination:           destination,
 		sourceTab:             sourceTab,
 		destinationTab:        destinationTab,
 		movedPane:             movedPane,
-		sourceClient:          req.Client,
+		sourceClient:          sourceClient,
 		destinationClient:     nil,
-		sourceSnatched:        nil,
 		sourceGeneration:      sourceTab.layoutGeneration,
 		destinationGeneration: destinationTab.layoutGeneration,
 		finalSourceTab: len(source.tabs) == 1 && source.tabs[0] == sourceTab &&

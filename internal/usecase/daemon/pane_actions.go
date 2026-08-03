@@ -356,7 +356,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	return nil
 }
 
-func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction, effect *roleEffectTicket) error {
+func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction, effect *attachmentEffectTicket) error {
 	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	oldFocus := layout.PaneID("")
 	if target.pane != nil {
@@ -382,7 +382,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 			return errNoNeighbor
 		}
 		if effect != nil {
-			return d.switchToTargetForRole(effect.roleToken(), sessionTarget, sessionHandoffGuard{expectedSource: target.tab}, "overflow-session")
+			return d.switchToTargetForAttachment(effect.connectionToken(), sessionTarget, sessionHandoffGuard{expectedSource: target.tab}, "overflow-session")
 		}
 		return d.commitSessionOverflow(sess, ac, target.tab, sessionTarget)
 	}

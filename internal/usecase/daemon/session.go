@@ -241,6 +241,9 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 		}
 	}
 
+	if d.ptys == nil {
+		return nil, errors.New("daemon: PTY factory is unavailable")
+	}
 	tbSize := contentSize(sz, proxied)
 	var names []string
 	if len(restoredTabNames) > 0 {
@@ -427,15 +430,14 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	if err != nil {
 		return err
 	}
-	// The newly created target is registered before the role transition, but
+	// The newly created target is registered before the attachment transition, but
 	// remains headless. Freeze/drain must occur with no daemon/routing/session
 	// lock held; the transition revalidates both lifecycles before publication.
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source:            from,
-		target:            newSess,
-		next:              ac,
-		expectedRole:      attachmentActive,
-		targetRole:        attachmentActive,
+		source: from,
+		target: newSess,
+		next:   ac,
+
 		expectedTransport: ac.transportSnapshot(),
 		ready:             true,
 	})
@@ -452,16 +454,16 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	return nil
 }
 
-// createSessionAndSwitchForRole creates no target until the initiating role
+// createSessionAndSwitchForAttachment creates no target until the initiating role
 // ticket has ended and the exact source capability is frozen and revalidated.
-func (d *Daemon) createSessionAndSwitchForRole(token attachmentRoleToken, name string) error {
+func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionToken, name string) error {
 	if name == "" {
 		return errSessionNameRequired
 	}
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
-	if token.sess == nil || token.ac == nil || token.effect == nil || token.role != attachmentActive {
+	if token.sess == nil || token.ac == nil || token.effect == nil || false {
 		return errAttachmentTransition
 	}
 	token.effect.bindActionEnd(d, "create-session")
@@ -470,7 +472,7 @@ func (d *Daemon) createSessionAndSwitchForRole(token attachmentRoleToken, name s
 	var created *session
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: token.sess, next: token.ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: token.transport, sourceToken: &token, action: "create-session",
 		copySourceEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
@@ -708,9 +710,6 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	go d.readPanePTY(p)
 }
 
-// attachClient makes ac the session's current client, displacing any prior one
-// (which is notified with ReasonDetach and disconnected — its own conn handler
-
 func (s *session) detachIfCurrent(ac *attachedClient) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -722,7 +721,7 @@ func (s *session) detachIfCurrent(ac *attachedClient) bool {
 	return true
 }
 
-// detachIfCurrent publishes terminal role invalidation through the attachment
+// detachIfCurrent publishes terminal attachment invalidation through the attachment
 // gate. Freeze/drain happens before routing or session locks are acquired.
 func (d *Daemon) detachIfCurrent(sess *session, ac *attachedClient) bool {
 	return d.detachIfCurrentTransport(sess, ac, transportSnapshot{})
@@ -735,10 +734,10 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	if sess == nil || ac == nil {
 		return false
 	}
-	frozen := freezeRoleEffectGates(ac)
+	frozen := freezeAttachmentEffectGates(ac)
 	defer frozen.unfreeze()
-	if d.afterDetachRoleEffectsFrozen != nil {
-		d.afterDetachRoleEffectsFrozen()
+	if d.afterDetachAttachmentEffectsFrozen != nil {
+		d.afterDetachAttachmentEffectsFrozen()
 	}
 	d.notices.routingMu.Lock()
 	sess.mu.Lock()
@@ -748,9 +747,9 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	}
 	if current {
 		sess.unregisterAttachmentLocked(ac)
-		ac.roleGeneration.Add(1)
+		ac.connectionGeneration.Add(1)
 		ac.setSession(nil)
-		ac.invalidateFrozenRoleCapability()
+		ac.invalidateFrozenAttachmentCapability()
 	}
 	sess.mu.Unlock()
 	d.notices.routingMu.Unlock()
@@ -765,10 +764,10 @@ func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClie
 	if p == nil || ac == nil {
 		return false
 	}
-	frozen := freezeRoleEffectGates(ac)
+	frozen := freezeAttachmentEffectGates(ac)
 	defer frozen.unfreeze()
-	if d.afterDetachRoleEffectsFrozen != nil {
-		d.afterDetachRoleEffectsFrozen()
+	if d.afterDetachAttachmentEffectsFrozen != nil {
+		d.afterDetachAttachmentEffectsFrozen()
 	}
 	d.notices.routingMu.Lock()
 	p.sessionCore.mu.Lock()
@@ -778,9 +777,9 @@ func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClie
 	}
 	if current {
 		unregisterAttachmentSessionLocked(attachmentSession(p), ac)
-		ac.roleGeneration.Add(1)
+		ac.connectionGeneration.Add(1)
 		ac.setSession(nil)
-		ac.invalidateFrozenRoleCapability()
+		ac.invalidateFrozenAttachmentCapability()
 	}
 	p.sessionCore.mu.Unlock()
 	d.notices.routingMu.Unlock()
@@ -790,15 +789,15 @@ func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClie
 	return current
 }
 
-// detachIfRoleCurrent invalidates only the exact role generation and transport
-// whose admitted send failed. A queued stale error cannot detach a later role
-// publication or a rebound transport on the same attachment object.
-func (d *Daemon) detachIfRoleCurrent(token attachmentRoleToken) bool {
-	return d.detachIfRoleCurrentUntil(token, nil)
+// detachIfAttachmentCurrent invalidates only the exact attachment generation and transport
+// whose admitted send failed. A queued stale error cannot detach a later
+// attachment publication or a rebound transport on the same attachment object.
+func (d *Daemon) detachIfAttachmentCurrent(token attachmentConnectionToken) bool {
+	return d.detachIfAttachmentCurrentUntil(token, nil)
 }
 
-func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func() <-chan struct{}) bool {
-	if token.sess == nil || token.ac == nil || token.role != attachmentActive || token.transport.transport == nil {
+func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken, done func() <-chan struct{}) bool {
+	if token.sess == nil || token.ac == nil || token.transport.transport == nil {
 		return false
 	}
 	// Attachments without the session's optional primary render lease still
@@ -813,13 +812,13 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 		}
 		return false
 	}
-	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{done: done}, token.ac)
+	frozen := freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{done: done}, token.ac)
 	defer frozen.unfreeze()
 	if !frozen.acquired || !frozen.drained {
 		return false
 	}
-	if d.afterDetachRoleEffectsFrozen != nil {
-		d.afterDetachRoleEffectsFrozen()
+	if d.afterDetachAttachmentEffectsFrozen != nil {
+		d.afterDetachAttachmentEffectsFrozen()
 	}
 	d.mu.Lock()
 	core := token.sess.core()
@@ -834,15 +833,14 @@ func (d *Daemon) detachIfRoleCurrentUntil(token attachmentRoleToken, done func()
 		coordinator.mu.Lock()
 	}
 	req := attachmentTransitionRequest{
-		source: token.sess, next: token.ac, expectedRole: token.role,
-		expectedTransport: token.transport,
+		source: token.sess, next: token.ac, expectedTransport: token.transport,
 	}
 	current := coordinator != nil && transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
 	if current {
 		unregisterAttachmentSessionLocked(token.sess, token.ac)
-		token.ac.roleGeneration.Add(1)
+		token.ac.connectionGeneration.Add(1)
 		token.ac.setSession(nil)
-		token.ac.invalidateFrozenRoleCapability()
+		token.ac.invalidateFrozenAttachmentCapability()
 	}
 	if coordinator != nil {
 		coordinator.mu.Unlock()
@@ -1132,33 +1130,33 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 }
 
 type sessionKillAdmission struct {
-	token  attachmentRoleToken
+	token  attachmentConnectionToken
 	action string
 }
 
 type sessionKillParticipants struct {
 	attachments map[*attachedClient]struct{}
 	transports  map[*attachedClient]transportSnapshot
-	roleGates   []*attachedClient
-	interrupts  []roleTransportInterrupt
+	effectGates []*attachedClient
+	interrupts  []attachmentTransportInterrupt
 	source      *session
-	sourceToken *attachmentRoleToken
+	sourceToken *attachmentConnectionToken
 	target      *session
 }
 
-func (d *Daemon) killSessionForRole(sess *session, reason uint8, purge bool, token attachmentRoleToken, action string) error {
+func (d *Daemon) killSessionForAttachment(sess *session, reason uint8, purge bool, token attachmentConnectionToken, action string) error {
 	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil, &sessionKillAdmission{token: token, action: action})
 }
 
-// snapshotSessionKillParticipants captures role membership under the canonical
-// architecture locks, but releases every lock before any role gate is frozen or
+// snapshotSessionKillParticipants captures attachment membership under the canonical
+// architecture locks, but releases every lock before any attachment gate is frozen or
 // drained. The initiator is part of the same deduplicated global gate set even
 // when it belongs to a different source session.
 func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *sessionKillAdmission) (sessionKillParticipants, bool) {
 	snapshot := sessionKillParticipants{target: target}
 	if admission != nil {
 		token := admission.token
-		if token.sess == nil || token.ac == nil || token.role != attachmentActive || token.transport.transport == nil {
+		if token.sess == nil || token.ac == nil || token.transport.transport == nil {
 			return sessionKillParticipants{}, false
 		}
 		var ok bool
@@ -1200,7 +1198,7 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 			return
 		}
 		seen[ac] = struct{}{}
-		snapshot.roleGates = append(snapshot.roleGates, ac)
+		snapshot.effectGates = append(snapshot.effectGates, ac)
 	}
 	if admission != nil {
 		add(admission.token.ac)
@@ -1210,14 +1208,14 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 	}
 	for ac, transport := range snapshot.transports {
 		if transport.transport != nil {
-			snapshot.interrupts = append(snapshot.interrupts, roleTransportInterrupt{ac: ac, transport: transport})
+			snapshot.interrupts = append(snapshot.interrupts, attachmentTransportInterrupt{ac: ac, transport: transport})
 		}
 	}
 	return snapshot, true
 }
 
 // sessionKillParticipantsCurrent repeats lifecycle, source-token, and exact
-// target-membership validation while every discovered role gate is frozen.
+// target-membership validation while every discovered attachment gate is frozen.
 func (d *Daemon) sessionKillParticipantsCurrent(snapshot sessionKillParticipants) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1263,8 +1261,7 @@ func sessionKillParticipantsCurrentLocked(snapshot sessionKillParticipants, sour
 	}
 	token := *snapshot.sourceToken
 	req := attachmentTransitionRequest{
-		source: token.sess, next: token.ac, expectedRole: token.role,
-		expectedTransport: token.transport,
+		source: token.sess, next: token.ac, expectedTransport: token.transport,
 	}
 	return transitionSourceTokenCurrentLocked(token, token.sess, sourceCoordinator, req)
 }
@@ -1374,7 +1371,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	if sess == nil {
 		return nil
 	}
-	// Discover every role whose membership can be invalidated before freezing
+	// Discover every attachment whose membership can be invalidated before freezing
 	// any one of them. The common gate helper deduplicates and freezes the whole
 	// immutable identity set in the same global order used by transitions.
 	participants, ok := d.snapshotSessionKillParticipants(sess, admission)
@@ -1382,29 +1379,29 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		return nil
 	}
 	if admission != nil {
-		d.endActionRoleEffect(admission.token.effect, admission.action)
+		d.endActionAttachmentEffect(admission.token.effect, admission.action)
 	}
 	action := ""
 	if admission != nil {
 		action = admission.action
 	}
-	if d.afterRoleEffectParticipantsSnapshotted != nil {
-		d.afterRoleEffectParticipantsSnapshotted(action, participants.roleGates)
+	if d.afterAttachmentEffectParticipantsSnapshotted != nil {
+		d.afterAttachmentEffectParticipantsSnapshotted(action, participants.effectGates)
 	}
 	var drainDone func() <-chan struct{}
-	var drainDeadline *roleEffectDrainDeadline
+	var drainDeadline *attachmentEffectDrainDeadline
 	if deadline != nil {
 		drainDone = deadline.Done
 	} else {
-		drainDeadline = newRoleEffectDrainDeadline(d.clock)
+		drainDeadline = newAttachmentEffectDrainDeadline(d.clock)
 		drainDone = drainDeadline.Done
 		defer drainDeadline.stop()
 	}
-	frozen := freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, done: drainDone, afterFrozen: func(ac *attachedClient) {
-		if d.afterRoleEffectGateFrozen != nil {
-			d.afterRoleEffectGateFrozen(action, ac)
+	frozen := freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{interrupts: participants.interrupts, done: drainDone, afterFrozen: func(ac *attachedClient) {
+		if d.afterAttachmentEffectGateFrozen != nil {
+			d.afterAttachmentEffectGateFrozen(action, ac)
 		}
-	}}, participants.roleGates...)
+	}}, participants.effectGates...)
 	defer func() { frozen.unfreeze() }()
 	if !frozen.acquired {
 		// The acquisition helper has already rolled back exactly the gates it
@@ -1508,8 +1505,8 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 			sess.snapshotMu.Unlock()
 		}
 	}
-	// Revalidate the exact source capability, target lifecycle, and active plus
-	// snatched memberships under canonical architecture locks immediately before
+	// Revalidate the exact source capability, target lifecycle, and attachment
+	// memberships under canonical architecture locks immediately before
 	// publication. A changed preflight aborts without mutating either lifecycle.
 	d.mu.Lock()
 	if d.sessions[sess.id] != sess || participants.source != nil && d.sessions[participants.source.id] != participants.source {
@@ -1534,7 +1531,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	}
 
 	// d.mu -> routingMu -> ordered sessions -> ordered coordinators are held
-	// here. Registry removal and every role invalidation are one publication
+	// here. Registry removal and every attachment invalidation are one publication
 	// while the complete immutable gate set remains frozen.
 	if !d.unregisterSessionLocked(sess) {
 		unlockCoordinators()
@@ -1546,15 +1543,15 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	d.clearBarScriptsForSession(sess.id)
 	d.purgeParkingForSessionLocked(sess)
 	parkedRetirements := d.purgeParkedForSessionLocked(sess)
-	attachments := make([]detachedAttachmentSnapshot, 0, len(participants.roleGates))
+	attachments := make([]detachedAttachmentSnapshot, 0, len(participants.effectGates))
 	capture := func(attached *attachedClient) {
 		if attached == nil {
 			return
 		}
 		attachments = append(attachments, detachedAttachmentSnapshot{ac: attached, transport: participants.transports[attached]})
-		attached.roleGeneration.Add(1)
+		attached.connectionGeneration.Add(1)
 		attached.setSession(nil)
-		attached.invalidateFrozenRoleCapability()
+		attached.invalidateFrozenAttachmentCapability()
 	}
 	for attached := range sess.attachments {
 		capture(attached)
@@ -1582,7 +1579,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	d.mu.Unlock()
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	frozen.unfreeze()
-	frozen = frozenRoleEffectGates{}
+	frozen = frozenAttachmentEffectGates{}
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
 	var purgeErr error

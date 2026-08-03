@@ -27,11 +27,11 @@ type movePanePostcommitPlan struct {
 	movedPane          *pane
 	movedPanes         []*pane
 	destinationClient  *attachedClient
-	sourceCleanupToken attachmentRoleToken
+	sourceCleanupToken attachmentConnectionToken
 	handoffResult      attachmentTransitionResult
 	syncCleanup        syncTimerCleanup
-	frozenRoles        frozenRoleEffectGates
-	rolesFrozen        bool
+	frozenEffects      frozenAttachmentEffectGates
+	effectsFrozen      bool
 	unlockDispatch     func()
 	reservation        *moveLifecycleReservation
 	oldTabCancel       context.CancelFunc
@@ -77,8 +77,8 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 		markSnapshotDirty(p.source)
 	}
 	p.syncCleanup.finish()
-	if p.rolesFrozen {
-		p.frozenRoles.unfreeze()
+	if p.effectsFrozen {
+		p.frozenEffects.unfreeze()
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
@@ -114,6 +114,7 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 	if p.handoffResult.published.ac != nil {
 		follower := p.handoffResult.published.ac
+		p.destination.selectAttachmentTab(follower, domain.TabStableID(p.destinationTab.stableID))
 		d.applyHostTheme(p.destination, follower, follower.getClientTheme(), false)
 		follower.recordPreviousSession(p.source)
 		d.deferAttachmentTransitionCleanups(p.handoffResult)
@@ -145,23 +146,15 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 }
 
-// retireEmptyMoveSessionLocked removes all source-owned attachment roles that
-// were not transferred. It runs inside the move commit, after the moved pane
-// has already acquired its destination owner, and performs no external work.
+// retireEmptyMoveSessionLocked clears the empty source session after the exact
+// attachment transfer has committed. It performs no external work.
 func retireEmptyMoveSessionLocked(sess *session, retirement frozenMoveAttachmentRetirement) []detachedAttachmentSnapshot {
 	if sess == nil || len(sess.attachments) != 0 {
 		return nil
 	}
-	retired := make([]detachedAttachmentSnapshot, 0, len(retirement.clients))
-	for _, ac := range retirement.clients {
-		retired = append(retired, detachedAttachmentSnapshot{ac: ac, transport: ac.transportSnapshot()})
-		sess.unregisterAttachmentLocked(ac)
-		ac.roleGeneration.Add(1)
-		ac.setSession(nil)
-		ac.invalidateFrozenRoleCapability()
-	}
+	_ = retirement
 	sess.tabs = nil
-	return retired
+	return nil
 }
 
 func moveSessionRetired(d *Daemon, sess *session) bool {

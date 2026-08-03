@@ -7,7 +7,7 @@ import (
 
 // backSession toggles this attachment between its current session and the
 // immediately preceding successfully activated session.
-func (d *Daemon) backSessionForRole(token attachmentRoleToken) error {
+func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error {
 	if d == nil || token.sess == nil || token.ac == nil {
 		return nil
 	}
@@ -21,7 +21,7 @@ func (d *Daemon) backSessionForRole(token attachmentRoleToken) error {
 		key := proxy.key
 		pickerTarget.RemoteKey = &key
 	}
-	return d.switchToTargetForRole(token, pickerTarget, sessionHandoffGuard{}, "back-session")
+	return d.switchToTargetForAttachment(token, pickerTarget, sessionHandoffGuard{}, "back-session")
 }
 
 func (d *Daemon) backSession(current *session, ac *attachedClient) {
@@ -35,14 +35,14 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 		return
 	}
 	token := attachmentToken(current, ac, ac.transport())
-	effect, admitted := ac.beginRoleEffect(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
 	if !admitted {
 		d.reportError(current, domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", errAttachmentTransition))
 		return
 	}
 	token.effect = effect
 	defer effect.End()
-	if err := d.backSessionForRole(token); err != nil {
+	if err := d.backSessionForAttachment(token); err != nil {
 		d.reportError(current, err)
 	}
 }

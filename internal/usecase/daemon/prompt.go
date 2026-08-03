@@ -23,7 +23,7 @@ func (d *Daemon) enterPrompt(sess attachmentSession, ac *attachedClient, title, 
 	d.invalidateRender(sess, ac, true, "prompt.go")
 }
 
-func (d *Daemon) enterTransitionPrompt(sess attachmentSession, ac *attachedClient, title, initial string, submit func(string, attachmentRoleToken) error) {
+func (d *Daemon) enterTransitionPrompt(sess attachmentSession, ac *attachedClient, title, initial string, submit func(string, attachmentConnectionToken) error) {
 	d.closePrompt(ac)
 	ac.overlays.promptMu.Lock()
 	ac.overlays.prompt = promptui.New(title, initial)
@@ -51,7 +51,7 @@ func promptValidationError(err error) bool {
 		errors.Is(err, errProxyKillConfirmation)
 }
 
-func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte, effects ...*roleEffectTicket) {
+func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
 	sess := ac.currentAttachmentSession()
 	if sess == nil {
 		return
@@ -67,7 +67,7 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte, effects ...*
 	changed := false
 	exit := false
 	var submit func(string) error
-	var transitionSubmit func(string, attachmentRoleToken) error
+	var transitionSubmit func(string, attachmentConnectionToken) error
 	var submittedPrompt *promptui.Model
 	var value string
 
@@ -95,9 +95,9 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte, effects ...*
 	if submit != nil || transitionSubmit != nil {
 		var err error
 		if transitionSubmit != nil {
-			var token attachmentRoleToken
+			var token attachmentConnectionToken
 			if len(effects) != 0 && effects[0] != nil {
-				token = effects[0].roleToken()
+				token = effects[0].connectionToken()
 			}
 			err = transitionSubmit(value, token)
 		} else {

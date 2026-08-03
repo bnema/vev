@@ -160,7 +160,7 @@ func TestMoveTabFinalSourceClientFollowsAndActivatesMovedTab(t *testing.T) {
 	require.Nil(t, source.tabs)
 	require.Same(t, destination, client.currentSession())
 	require.Contains(t, destination.snapshotAttachments(), client)
-	require.Equal(t, attachmentActive, destination.attachmentRole(client))
+	require.Equal(t, true, destination.attachmentRegistered(client))
 	require.Equal(t, []*tab{oldDestinationActive, moved}, destination.tabs)
 	require.Same(t, moved, destination.tabs[testAttachmentTabIndex(destination)], "final-source follower activates the moved tab")
 	require.True(t, rebased)
@@ -241,7 +241,7 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 
 			source.layoutApplyMu.Lock()
 			admitted := make(chan struct{})
-			d.afterRoleEffectGateFrozen = func(action string, ac *attachedClient) {
+			d.afterAttachmentEffectGateFrozen = func(action string, ac *attachedClient) {
 				if action == "move-tab" && ac == client {
 					close(admitted)
 				}
@@ -262,7 +262,7 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 			require.Error(t, awaitTestValue(t, moveDone, "stale floating transfer did not return"))
 			require.NotContains(t, destination.tabs, moved)
 			require.Same(t, source, floating.ownerSnapshot().session)
-			d.afterRoleEffectGateFrozen = nil
+			d.afterAttachmentEffectGateFrozen = nil
 		})
 	}
 }
@@ -487,12 +487,12 @@ func (r *moveTabPurgeRepository) DeleteIncarnation(_ context.Context, id domain.
 	sourceFenceUnlocked := r.source.layoutApplyMu.TryLock()
 	destinationFenceUnlocked := r.destination.layoutApplyMu.TryLock()
 	tabFenceUnlocked := r.moved.layoutApplyMu.TryLock()
-	roleUnlocked := r.client.roleEffects.mu.TryLock()
-	roleStable := roleUnlocked && r.client.roleEffects.phase == roleEffectsStable
+	roleUnlocked := r.client.attachmentEffects.mu.TryLock()
+	roleStable := roleUnlocked && r.client.attachmentEffects.phase == attachmentEffectsStable
 	r.outside = daemonUnlocked && routingUnlocked && sourceUnlocked && destinationUnlocked && tabUnlocked && paneUnlocked &&
 		sourceFenceUnlocked && destinationFenceUnlocked && tabFenceUnlocked && roleStable
 	if roleUnlocked {
-		r.client.roleEffects.mu.Unlock()
+		r.client.attachmentEffects.mu.Unlock()
 	}
 	if tabFenceUnlocked {
 		r.moved.layoutApplyMu.Unlock()

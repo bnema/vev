@@ -206,7 +206,7 @@ func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClie
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.attachmentToken(ac, tr)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishRoleCapability(token)
+	ac.publishAttachmentCapability(token)
 }
 
 func clipboardOwnerLease(t *testing.T, sess *session) paneEffectLease {
@@ -419,7 +419,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 		close(workerDone)
 	}()
 	require.Eventually(t, func() bool {
-		return ac.roleEffects.inFlightCount() == 1
+		return ac.attachmentEffects.inFlightCount() == 1
 	}, time.Second, time.Millisecond, "clipboard send was not admitted before waiting on sendMu")
 
 	sourceTab := testAttachmentTab(sess)
@@ -476,7 +476,7 @@ func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
 	rc := d.attachCoordinator(sess, nil, old, true)
 	token := sess.attachmentToken(old, oldTransport)
 	token.lease = rc.attachmentLease(old)
-	old.publishRoleCapability(token)
+	old.publishAttachmentCapability(token)
 
 	sess.mu.Lock()
 	sess.clipboardWorkerRunning = true
@@ -487,8 +487,7 @@ func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
 	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), size: old.size}
 	next.initOverlays()
 	_, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess, next: next, expectedRole: attachmentDetached, targetRole: attachmentActive,
-		expectedTransport: next.transportSnapshot(), ready: true,
+		target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
 	})
 	require.NoError(t, err)
 

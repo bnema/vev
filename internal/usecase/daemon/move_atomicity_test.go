@@ -21,8 +21,8 @@ type moveCommitObservation struct {
 	destinationFocus      layout.PaneID
 	ownerSession          *session
 	ownerTab              *tab
-	sourceRole            attachmentRole
-	destinationRole       attachmentRole
+	sourceRole            bool
+	destinationRole       bool
 	sourceClientSession   *session
 }
 
@@ -50,8 +50,8 @@ func readMoveCommitObservation(d *Daemon, source, destination *session, sourceTa
 		destinationFocus:      destinationTab.tree.Focus,
 		ownerSession:          nil,
 		ownerTab:              nil,
-		sourceRole:            source.attachmentRoleLocked(sourceClient),
-		destinationRole:       destination.attachmentRoleLocked(sourceClient),
+		sourceRole:            source.attachmentRegisteredLocked(sourceClient),
+		destinationRole:       destination.attachmentRegisteredLocked(sourceClient),
 		sourceClientSession:   sourceClient.currentSession(),
 	}
 	if owner != nil {
@@ -127,8 +127,8 @@ func TestMovePaneCommitPointHidesPartialPublication(t *testing.T) {
 		{name: "active tab and focus", read: func(o moveCommitObservation) bool {
 			return o.sourceActive == sourceTab || o.sourceFocus != layout.PaneID("pane-1") || o.destinationActive != destinationTab || o.destinationFocus != layout.PaneID("pane-2")
 		}},
-		{name: "attachment roles", read: func(o moveCommitObservation) bool {
-			return o.sourceRole == attachmentActive && o.destinationRole == attachmentDetached && o.sourceClientSession == source
+		{name: "attachment membership", read: func(o moveCommitObservation) bool {
+			return o.sourceRole != false || o.destinationRole != true || o.sourceClientSession != destination
 		}},
 	}
 	started := make(chan string, len(readers))
@@ -176,7 +176,7 @@ func TestMovePaneCommitPointHidesPartialPublication(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), observation.destinationFocus)
 	require.Same(t, destination, observation.ownerSession)
 	require.Same(t, destinationTab, observation.ownerTab)
-	require.Equal(t, attachmentDetached, observation.sourceRole)
-	require.Equal(t, attachmentActive, observation.destinationRole)
+	require.Equal(t, false, observation.sourceRole)
+	require.Equal(t, true, observation.destinationRole)
 	require.Same(t, destination, observation.sourceClientSession)
 }

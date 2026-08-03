@@ -39,8 +39,8 @@ func (t *proxyWarmTimer) stop() {
 // proxyAttachmentTransitionCommitted applies lifecycle policy only after the
 // attachment publication has released every architecture lock. Each helper
 // performs its own exact pointer/client revalidation before changing a timer.
-func (d *Daemon) proxyAttachmentTransitionCommitted(source, target attachmentSession, ac *attachedClient, preserveRole bool) {
-	if d == nil || preserveRole || source == target {
+func (d *Daemon) proxyAttachmentTransitionCommitted(source, target attachmentSession, ac *attachedClient, preserveAttachment bool) {
+	if d == nil || preserveAttachment || source == target {
 		return
 	}
 	if proxy, ok := source.(*proxySession); ok {

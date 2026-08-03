@@ -541,7 +541,7 @@ func TestAttachClientAppliesForcedThemeBeforeMsgTheme(t *testing.T) {
 			}
 			tr, _ := newCapturingTransport(t)
 
-			ac, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+			ac, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 			require.NoError(t, err)
 
 			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
@@ -581,7 +581,7 @@ func TestAttachClientClearsStaleColorSchemeOnReplacement(t *testing.T) {
 	assertSessionColorScheme(t, sess, true)
 
 	tr, _ := newCapturingTransport(t)
-	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	require.NoError(t, err)
 
 	assertSessionColorSchemeUnknown(t, sess)
@@ -690,7 +690,7 @@ func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
 	})
 	tr, _ := newCapturingTransport(t)
 
-	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	require.NoError(t, err)
 
 	var got []byte
@@ -740,7 +740,7 @@ func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
 	require.True(t, sess.detachIfCurrent(ac))
 
 	tr, _ := newCapturingTransport(t)
-	newAC, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	newAC, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	require.NoError(t, err)
 	d.applyTheme(sess, newAC, ports.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 20, G: 21, B: 22},
@@ -800,7 +800,7 @@ func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
 	d, sess, old, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	tr, _ := newCapturingTransport(t)
-	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	require.NoError(t, err)
 
 	d.applyTheme(sess, old, ports.Theme{
