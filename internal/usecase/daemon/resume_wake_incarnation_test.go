@@ -66,3 +66,45 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	d.firstPaint(sess, ac, ac.size)
 	require.NotEmpty(t, newTransport.Sends())
 }
+
+func TestSameAttachmentRebindRejectsQueuedWakeAndFansOutFreshGeneration(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	oldLease := rc.attachmentLease(ac)
+	require.NotNil(t, oldLease)
+
+	originalWake := rc.opts.wake
+	wakeDispatched := make(chan struct{})
+	releaseWake := make(chan struct{})
+	rc.opts.wake = func(w renderWake) {
+		close(wakeDispatched)
+		<-releaseWake
+		originalWake(w)
+	}
+	wakeDone := make(chan struct{})
+	go func() {
+		d.invalidateRenderNow(sess, ac, true, "same-attachment-rebind")
+		close(wakeDone)
+	}()
+	<-wakeDispatched
+
+	oldGeneration := ac.connectionGeneration.Load()
+	result, err := d.transitionAttachment(attachmentTransitionRequest{
+		source: sess, target: sess, next: ac,
+
+		expectedTransport: ac.transportSnapshot(), ready: true,
+	})
+	require.NoError(t, err)
+	d.deferAttachmentTransitionCleanups(result)
+	require.Greater(t, ac.connectionGeneration.Load(), oldGeneration)
+	freshLease := rc.attachmentLease(ac)
+	require.NotSame(t, oldLease, freshLease)
+
+	close(releaseWake)
+	<-wakeDone
+	require.Empty(t, sends, "a queued wake from the prior generation must not paint the rebound transport")
+
+	rc.opts.wake = originalWake
+	d.invalidateRenderNow(sess, ac, true, "fresh-generation-fanout")
+	require.Greater(t, len(sends), 0, "the current generation must receive fanout output")
+}

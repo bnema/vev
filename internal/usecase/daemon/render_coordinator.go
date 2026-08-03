@@ -593,6 +593,21 @@ func (c *renderCoordinator) attachWithReadinessLocked(ac *attachedClient, ready 
 	return c.installLeaseLocked(ac, ready)
 }
 
+// rebindAttachmentWithReadinessLocked retires the previous lease before
+// publishing a new one for the same attachment object. A queued wake carries
+// the old lease pointer, so reusing it would let that wake paint a rebound
+// transport.
+func (c *renderCoordinator) rebindAttachmentWithReadinessLocked(ac *attachedClient, ready bool) *attachmentLease {
+	if c.torndown {
+		return nil
+	}
+	if lease := c.leases[ac]; lease != nil {
+		lease.active = false
+		delete(c.leases, ac)
+	}
+	return c.installLeaseLocked(ac, ready)
+}
+
 // markAttachmentReady completes only the captured attachment incarnation.
 func (c *renderCoordinator) markAttachmentReady(lease *attachmentLease) bool {
 	c.mu.Lock()

@@ -200,7 +200,11 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 	}
 	var lease *attachmentLease
 	if publication.targetCoordinator != nil && !req.preserveAttachment {
-		lease = publication.targetCoordinator.attachWithReadinessLocked(req.next, req.ready)
+		if publication.source == req.target {
+			lease = publication.targetCoordinator.rebindAttachmentWithReadinessLocked(req.next, req.ready)
+		} else {
+			lease = publication.targetCoordinator.attachWithReadinessLocked(req.next, req.ready)
+		}
 	}
 	result.published = attachmentConnectionToken{
 		sess: req.target, ac: req.next,
