@@ -406,7 +406,7 @@ func TestProxyPipelineFixturesProduceEquivalentFrames(t *testing.T) {
 			require.Equal(t, uint64(1), structuredState.stateNum)
 			requireProxyPipelineFramesEqual(t, ansiState.screen.Frame, structuredState.frame)
 
-			for i := range 3 {
+			for i := 0; i < 3; i++ {
 				fixture.mutate(ansiFrame, i)
 				fixture.mutate(structuredFrame, i)
 				ansiDraw, err := ansiRenderer.Prepare(ansiFrame, fixture.damage, false)
