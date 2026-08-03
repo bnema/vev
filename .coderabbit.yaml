@@ -1,0 +1,6 @@
+reviews:
+  path_filters:
+    - "!internal/usecase/daemon/copy_enter_allocation_budget_race_test.go"
+    - "!internal/usecase/daemon/copy_enter_allocation_budget_test.go"
+    - "!internal/usecase/daemon/pane_sync_owner_test.go"
+    - "!internal/usecase/daemon/performance_benchmark_test.go"
