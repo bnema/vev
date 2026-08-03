@@ -9,6 +9,83 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *testing.T) {
+	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	first.clientID[0] = 1
+	firstTab := sess.tabs[0]
+	firstTab.stableID = "tab-first"
+	firstTab.panes[firstTab.focusedPane().id].stableID = "pane-first"
+
+	secondTransport, _ := newCapturingTransport(t)
+	second := &attachedClient{
+		tr:     secondTransport,
+		output: newOutputStateStream(),
+		size:   domain.Size{Cols: 80, Rows: 24},
+	}
+	second.initOverlays()
+	second.clientID[0] = 2
+	second.setSession(sess)
+	secondTab := newTabWithStableID("tab-second", "pane-second", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
+	secondTab.ctx, secondTab.cancel = sess.ctx, func() {}
+	publishTiledPaneOwners(sess, secondTab)
+	require.NoError(t, sess.runMutation(func() error {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		sess.tabs = append(sess.tabs, secondTab)
+		return nil
+	}))
+	require.True(t, sess.registerAttachment(second))
+	require.True(t, sess.selectAttachmentTab(first, domain.TabStableID(firstTab.stableID)))
+	require.True(t, sess.selectAttachmentTab(second, domain.TabStableID(secondTab.stableID)))
+
+	d.ptys = newFactory(t, newQuietPTY())
+	rc := d.attachCoordinator(sess, nil, first, true)
+	d.attachCoordinator(sess, nil, second, true)
+	firstToken := sess.attachmentToken(first, first.transport())
+	firstToken.lease = rc.attachmentLease(first)
+	first.publishAttachmentCapability(firstToken)
+	secondToken := sess.attachmentToken(second, second.transport())
+	secondToken.lease = rc.attachmentLease(second)
+	second.publishAttachmentCapability(secondToken)
+
+	firstView := first.viewSnapshot()
+	secondView := second.viewSnapshot()
+	first.sendMu.Lock()
+	firstEpoch := first.output.currentEpoch()
+	first.sendMu.Unlock()
+	require.True(t, d.resizeAttachmentForLease(secondToken, domain.Size{Cols: 120, Rows: 40}))
+
+	d.enterPalette(sess, second)
+	d.handlePaletteInput(second, []byte("CNT\r"))
+
+	sess.mu.Lock()
+	tabs := append([]*tab(nil), sess.tabs...)
+	sess.mu.Unlock()
+	require.Len(t, tabs, 3)
+	wantContent := domain.Size{Cols: 80, Rows: 23}
+	for _, tb := range tabs {
+		tb.mu.Lock()
+		gotTabSize := tb.size
+		pane := tb.focusedPane()
+		pane.mu.Lock()
+		gotPaneSize := domain.Size{Cols: pane.screen.Frame.Width, Rows: pane.screen.Frame.Height}
+		pane.mu.Unlock()
+		tb.mu.Unlock()
+		require.Equal(t, wantContent, gotTabSize)
+		require.Equal(t, wantContent, gotPaneSize)
+	}
+	require.Equal(t, firstView.tabID, first.viewSnapshot().tabID, "new tab selection crossed attachment boundary")
+	require.NotEqual(t, secondView.tabID, second.viewSnapshot().tabID, "palette did not select the created tab")
+	first.sendMu.Lock()
+	gotFirstEpoch := first.output.currentEpoch()
+	first.sendMu.Unlock()
+	require.Equal(t, firstEpoch, gotFirstEpoch, "new tab render crossed attachment boundary")
+	second.sendMu.Lock()
+	gotSecondSize := second.size
+	second.sendMu.Unlock()
+	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, gotSecondSize)
+}
+
 func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing.T) {
 	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	first.clientID[0] = 1

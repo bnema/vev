@@ -513,7 +513,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	return d.createTabForAttachment(sess, nil, sz)
 }
 
-func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, sz domain.Size) error {
+func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ domain.Size) error {
 	sess.mu.Lock()
 	name := sess.name
 	cwd := sess.cwd
@@ -521,7 +521,7 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, sz do
 	env := copyEnvironment(sess.env)
 	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
-	tbSize := contentSize(sz)
+	tbSize := contentSize(sess.fullViewportSize())
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err

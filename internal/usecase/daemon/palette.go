@@ -435,7 +435,7 @@ func (e paletteExec) runAction(request daemonActionRequest) error {
 }
 
 func (e paletteExec) CreateTab() error {
-	return e.runAction(daemonActionRequest{kind: daemonActionCreateTab, viewport: e.ac.size})
+	return e.runAction(daemonActionRequest{kind: daemonActionCreateTab, viewport: e.sess.fullViewportSize()})
 }
 
 func (e paletteExec) CreateSession() error {
