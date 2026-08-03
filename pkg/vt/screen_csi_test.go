@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -605,6 +606,37 @@ func TestClearAndErase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestEraseCharacters(t *testing.T) {
+	s := NewScreen(50, 1)
+	s.Write([]byte(`        // scroll-method "on-button-down"`))
+	s.ClearDamage()
+
+	s.Write([]byte("\x1b[1;19Hbutton 273\x1b[13X"))
+
+	for x := 28; x <= 40; x++ {
+		if c := cellAt(s, x, 0); c.Rune != ' ' {
+			t.Errorf("cell(%d,0) = %q, want space after ECH", x, c.Rune)
+		}
+	}
+	if !hasDamageKind(s.Damage(), renderer.DamageClear) {
+		t.Fatal("expected DamageClear after CSI X")
+	}
+
+	// A valid maximum int must clip without overflowing the end calculation,
+	// and ECH must not move the cursor.
+	s = NewScreen(6, 1)
+	s.Write([]byte("abcdef"))
+	s.Write([]byte("\x1b[1;4H\x1b[" + strconv.Itoa(int(^uint(0)>>1)) + "X"))
+	for x := 3; x < 6; x++ {
+		if c := cellAt(s, x, 0); c.Rune != ' ' {
+			t.Errorf("cell(%d,0) = %q, want space after clipped ECH", x, c.Rune)
+		}
+	}
+	if s.Col != 3 {
+		t.Errorf("cursor column = %d, want 3 after ECH", s.Col)
 	}
 }
 

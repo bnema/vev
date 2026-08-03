@@ -99,6 +99,8 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 			mode = parts[0]
 		}
 		s.clearLineMode(mode)
+	case 'X':
+		s.eraseChars(firstPositive(parts, 1))
 	case 'S':
 		s.scrollUpBy(firstPositive(parts, 1))
 	case 'T':
@@ -435,6 +437,21 @@ func (s *Screen) clearLineMode(mode int) {
 		s.record(renderer.Damage{Kind: renderer.DamageClear, X: start, Y: s.Row, Width: width, Height: 1, Count: 1})
 	default:
 		start, width := s.clearRow(s.Row, s.Col, s.Frame.Width)
+		s.record(renderer.Damage{Kind: renderer.DamageClear, X: start, Y: s.Row, Width: width, Height: 1, Count: 1})
+	}
+}
+
+func (s *Screen) eraseChars(n int) {
+	if n <= 0 {
+		return
+	}
+	s.clampCursor()
+	if remaining := s.Frame.Width - s.Col; n > remaining {
+		n = remaining
+	}
+	end := s.Col + n
+	start, width := s.clearRow(s.Row, s.Col, end)
+	if width > 0 {
 		s.record(renderer.Damage{Kind: renderer.DamageClear, X: start, Y: s.Row, Width: width, Height: 1, Count: 1})
 	}
 }
