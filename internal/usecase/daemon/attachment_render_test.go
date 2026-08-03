@@ -103,6 +103,9 @@ func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	select {
 	case frame := <-secondTransport.sends:
 		require.Equal(t, ports.MsgOutput, frame.Type)
+		out, err := ports.UnmarshalOutput(frame.Payload)
+		require.NoError(t, err)
+		require.True(t, out.Full, "fan-out peers must send a fresh first frame even after another attachment acknowledges shared damage")
 	case <-time.After(time.Second):
 		t.Fatal("second attachment waited for first attachment transport")
 	}

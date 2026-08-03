@@ -224,6 +224,13 @@ func captureLocalRenderState(
 		return nil, false
 	}
 
+	// A reset is an attachment-local capture boundary. The shared pane damage
+	// receipt may have been acknowledged by another fan-out attachment before
+	// this capture runs, so retaining this attachment's prior pane snapshots
+	// would compose an old frame with a fresh reset epoch.
+	if reset {
+		ac.captureFrames = nil
+	}
 	scratch := &ac.renderScratch
 	scratch.statusTabs = append(scratch.statusTabs[:0], bars.status.tabs...)
 	bars.status.tabs = scratch.statusTabs

@@ -185,7 +185,14 @@ func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision ui
 	})}
 }
 
+// sideEffect builds an output frame without advancing the state stream. When
+// an attachment is present, callers must hold its sendMu; attachment-bound
+// sends use sideEffectLocked after validating their transport incarnation.
 func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) ports.Frame {
+	return s.sideEffectLocked(data, echoAck)
+}
+
+func (s *outputStateStream) sideEffectLocked(data []byte, echoAck uint64) ports.Frame {
 	_, epoch, viewRevision := s.fence()
 	size := domain.Size{Cols: 1, Rows: 1}
 	if s != nil && s.attachment != nil && s.attachment.size.Valid() {

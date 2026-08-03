@@ -15,24 +15,51 @@ func (p *proxySession) applyOutputForGeneration(generation uint64, out ports.Out
 	if p.linkGeneration != generation {
 		return 0, false, false
 	}
+	invalid := func() (uint64, bool, bool) {
+		if p.outputResetRequested {
+			return 0, false, false
+		}
+		p.outputResetRequested = true
+		return 0, true, false
+	}
+	if out.Epoch == 0 {
+		return invalid()
+	}
 	if out.New == 0 {
+		// New == 0 is an ordinary byte side effect, not a state transition.
+		// Match the thin client: it is accepted before the first state-bearing
+		// frame, and thereafter only within the current epoch.
+		if out.Base != 0 || out.Full || (p.outputReady && out.Epoch != p.outputEpoch) {
+			return invalid()
+		}
 		return 0, false, len(out.Data) != 0
 	}
-	if out.Base == 0 {
+	if !p.outputReady {
+		if out.Base != 0 || !out.Full {
+			return invalid()
+		}
 		p.outputEpoch = out.Epoch
 		p.outputState = out.New
 		p.outputReady = true
 		p.outputResetRequested = false
 		return out.New, false, len(out.Data) != 0
 	}
-	if !p.outputReady || p.outputResetRequested || out.Epoch != p.outputEpoch || out.Base != p.outputState || out.New != out.Base+1 {
-		if !p.outputResetRequested {
-			p.outputResetRequested = true
-			requestReset = true
-		}
-		return 0, requestReset, false
+	if out.Epoch < p.outputEpoch {
+		return invalid()
 	}
+	if out.Epoch == p.outputEpoch {
+		if p.outputResetRequested || out.Full || out.Base != p.outputState || out.New != out.Base+1 {
+			return invalid()
+		}
+		p.outputState = out.New
+		return out.New, false, len(out.Data) != 0
+	}
+	if out.Base != 0 || !out.Full {
+		return invalid()
+	}
+	p.outputEpoch = out.Epoch
 	p.outputState = out.New
+	p.outputResetRequested = false
 	return out.New, false, len(out.Data) != 0
 }
 

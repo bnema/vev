@@ -602,54 +602,48 @@ func (d *Daemon) runProxyTransport(ctx context.Context, p *proxySession, generat
 	}
 }
 
-// handleProxySideEffect fans out a stateless remote effect to every attachment
-// currently owning this proxy. Each attachment gets an independent capability,
-// effect ticket, output snapshot, and exact transport-incarnation fence.
+// handleProxySideEffect forwards a stateless remote effect to every live local
+// attachment. Connection admission and transport incarnation checks make a stale
+// handoff a harmless drop rather than a send to the client's next session.
 func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out ports.Output) error {
 	if p == nil || !p.currentLinkGeneration(generation) {
 		return nil
 	}
+	attachments := snapshotAttachmentSession(p)
 	var sendErr error
-	for _, ac := range snapshotAttachmentSession(p) {
-		if !p.currentLinkGeneration(generation) {
-			break
+	for _, ac := range attachments {
+		if ac == nil || ac.output == nil {
+			continue
 		}
-		if err := d.sendProxySideEffect(p, generation, ac, out); err != nil && sendErr == nil {
+		expected := ac.transportSnapshot()
+		if expected.transport == nil {
+			continue
+		}
+		token := attachmentToken(p, ac, expected.transport)
+		if token.sess != p {
+			continue
+		}
+		ticket, admitted := ac.beginAttachmentEffect(token)
+		if !admitted {
+			continue
+		}
+		if !p.currentLinkGeneration(generation) {
+			ticket.End()
+			return nil
+		}
+		err := ac.sendExpectedSideEffectForAttachment(expected, out.Data, ac.echoAck.Load(), ticket)
+		ticket.End()
+		if err == nil || errors.Is(err, errAttachmentTransition) {
+			continue
+		}
+		// Try every live attachment before retiring the remote link for a failed
+		// client send; one blocked or dead peer must not starve the others.
+		if sendErr == nil {
 			sendErr = err
 		}
 	}
-	return sendErr
-}
-
-func (d *Daemon) sendProxySideEffect(p *proxySession, generation uint64, ac *attachedClient, out ports.Output) error {
-	if p == nil || ac == nil || ac.output == nil || !p.currentLinkGeneration(generation) {
-		return nil
-	}
-	expected := ac.transportSnapshot()
-	if expected.transport == nil {
-		return nil
-	}
-	token := attachmentToken(p, ac, expected.transport)
-	if token.sess != p || !token.current() {
-		return nil
-	}
-	ticket, admitted := ac.beginAttachmentEffect(token)
-	if !admitted {
-		return nil
-	}
-	defer ticket.End()
-	if !p.currentLinkGeneration(generation) || !token.current() {
-		return nil
-	}
-	frame := ac.output.sideEffect(out.Data, ac.echoAck.Load())
-	if !p.currentLinkGeneration(generation) || !token.current() {
-		return nil
-	}
-	if err := ac.sendExpectedTransportForAttachment(expected, frame, ticket); err != nil {
-		if errors.Is(err, errAttachmentTransition) {
-			return nil
-		}
-		return fmt.Errorf("proxy session: side-effect send: %w: %w", errProxyLinkSend, err)
+	if sendErr != nil {
+		return fmt.Errorf("proxy session: side-effect send: %w: %w", errProxyLinkSend, sendErr)
 	}
 	return nil
 }

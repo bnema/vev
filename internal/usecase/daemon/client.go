@@ -344,6 +344,27 @@ func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportS
 	return err
 }
 
+// sendExpectedSideEffectForAttachment captures the output epoch, view revision,
+// and window while sendMu is held. A resize or handoff therefore cannot put a
+// side-effect frame from the old attachment state onto the new transport state.
+func (ac *attachedClient) sendExpectedSideEffectForAttachment(expected transportSnapshot, data []byte, echoAck uint64, ticket *attachmentEffectTicket) error {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	if ticket == nil {
+		return errAttachmentTransition
+	}
+	if err := ac.beginExpectedTransportSendLocked(expected, ticket); err != nil {
+		return errAttachmentTransition
+	}
+	frame := ac.output.sideEffectLocked(data, echoAck)
+	err := expected.transport.Send(frame)
+	if err != nil {
+		ticket.reportTransportFailure(expected)
+	}
+	ticket.endTransportSend()
+	return err
+}
+
 // boundedSend sends f to ac with a deadline watchdog: if the send (including
 // waiting on sendMu behind a wedged paint) does not complete within
 // detachNotifyTimeout, the transport is force-closed, failing the in-flight
@@ -373,24 +394,26 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 }
 
 func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
-	frame := ac.output.sideEffect(b, ac.echoAck.Load())
 	expected := ac.transportSnapshot()
 	if expected.transport == nil {
 		return nil, errors.New("client transport is nil")
 	}
-	ac.sendMu.Lock()
-	if !ac.transportSnapshotCurrent(expected) {
-		ac.sendMu.Unlock()
-		return expected.transport, errTransportReplaced
-	}
 	if owned, ok := expected.transport.(ports.OwnedSynchronousTransport); ok {
-		err := owned.SendSynchronous(frame)
-		ac.sendMu.Unlock()
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		if !ac.transportSnapshotCurrent(expected) {
+			return expected.transport, errTransportReplaced
+		}
+		err := owned.SendSynchronous(ac.output.sideEffectLocked(b, ac.echoAck.Load()))
 		return expected.transport, err
 	}
-	ac.sendMu.Unlock()
 	return d.boundedSendWith(expected.transport, func() error {
-		return ac.sendExpectedTransport(expected, frame)
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		if !ac.transportSnapshotCurrent(expected) {
+			return errTransportReplaced
+		}
+		return expected.transport.Send(ac.output.sideEffectLocked(b, ac.echoAck.Load()))
 	})
 }
 
@@ -605,6 +628,7 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 					d.paint(entry, attachment, fanoutReset, lease)
 				} else if len(attachments) > 1 {
 					go d.paint(entry, attachment, fanoutReset, lease)
+
 				} else {
 					d.paint(entry, attachment, fanoutReset, lease)
 				}
