@@ -221,7 +221,7 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 	return result
 }
 
-// resetOutput rebases only the exact proxied attachment and transport admitted
+// resetOutput rebases only the exact attachment and transport admitted
 // by the frame router. sendMu serializes the rebase with every output send;
 // transport revalidation under that lock rejects a link replaced while waiting.
 func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {

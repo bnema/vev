@@ -214,7 +214,7 @@ type Output struct {
 }
 
 // AttachTarget identifies the endpoint and session selected for a new
-// attachment. It deliberately carries no viewport, resume, or proxy state.
+// attachment. It deliberately carries no viewport, resume, or session state.
 type AttachTarget struct {
 	Endpoint string
 	Session  string

@@ -51,7 +51,7 @@ vev kill <name>                  kill a session (--all kills everything)
 
 The daemon starts on first use and exits with the last session. Ephemeral sessions are numbered, survive detach, and disappear with the daemon. Named sessions persist across daemon restarts and come back with their layout, recovered terminal transcript, and allowlisted processes.
 
-Each session has one active client. Attaching another client shows `Session snatched` on the prior client; press `r` to resume control, or `q`/Esc to quit that attachment. A remote snatched client that reconnects stays snatched and does not take control automatically.
+A session may have multiple attachments. The session owns the PTYs, VT state, tabs, panes, fixed PTY content size, and ordered mutations. Each attachment owns its window, view, copy mode, overlays, rendering/output state, and reconnect lifecycle, so attachments can focus different tabs or panes without changing one another's view. The first valid attachment establishes the session's PTY content size; later window resizes affect only that attachment.
 
 ## Keys
 
@@ -73,13 +73,13 @@ The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, 
 vev attach user@host[:session]
 ```
 
-SSH bootstraps the connection, then the session runs over UDP and resumes after sleep or Wi-Fi changes. vev must be installed on the remote. If your firewall only allows SSH, open the UDP range first (default `61000:61023`, override with `VEV_UDP_PORT_RANGE`):
+The client opens a direct connection to the selected remote daemon. UDP is the default: SSH bootstraps an authenticated UDP endpoint, then the session runs over that connection and resumes after sleep or Wi-Fi changes. vev must be installed on the remote. If your firewall only allows SSH, open the UDP range first (default `61000:61023`, override with `VEV_UDP_PORT_RANGE`):
 
 ```sh
 sudo ufw allow 61000:61023/udp
 ```
 
-Where UDP is not an option, `VEV_REMOTE_TRANSPORT=stdio` keeps everything inside SSH at the cost of slower disconnect detection. Details in [docs/remote-resilience.md](docs/remote-resilience.md).
+Where UDP is not an option, set `VEV_REMOTE_TRANSPORT=stdio` to keep the direct connection inside SSH; this is an explicit transport choice. Every connection has a 15-second handshake deadline, and each command request has a 10-second deadline. Details in [docs/remote-resilience.md](docs/remote-resilience.md).
 
 List sessions on a known host (OpenSSH resolves aliases from your SSH config):
 
@@ -119,7 +119,7 @@ vev cmd [-s <source-session>] [--self] move-pane <destination-session> <destinat
 vev cmd [-s <source-session>] [--self] move-tab <destination-session>
 ```
 
-Use `vev cmd -s <destination-session> list-tabs` to find stable destination tab IDs. Destinations must be live, but may be named or ephemeral; stopped sessions are not eligible. A moved pane is split to the right of the destination tab's focused pane and becomes that tab's internal focus without activating the tab. A moved tab is appended to the destination in the background. If the move empties the source session, its client follows the moved pane or tab, activates the destination, and snatches any active destination client.
+Use `vev cmd -s <destination-session> list-tabs` to find stable destination tab IDs. Destinations must be live, but may be named or ephemeral; stopped sessions are not eligible. A moved pane is split to the right of the destination tab's focused pane and becomes that tab's internal focus without activating the tab. A moved tab is appended to the destination in the background. If the move empties the source session, its attachment follows the moved pane or tab and activates the destination; existing destination attachments keep their own views.
 
 Moving the final tiled pane out of a tab is rejected while that tab has a floating pane slot; close the floating pane or move the whole tab instead. Named-session persistence is best-effort across a move, not crash-atomic across source and destination snapshots.
 
