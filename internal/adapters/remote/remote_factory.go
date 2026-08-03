@@ -31,14 +31,14 @@ func (f DialerFactory) DialerForRemote(target string, session string, mode ports
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
 		}
-		dialer := dgram.NewRemoteDialerWithLogger(target, session, log)
+		dialer := dgram.NewRemoteDialerWithLogger(target, "", log)
 		dialer.RuntimeObserver = f.observer
 		return dialer, nil
 	case ports.RemoteTransportStdio:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
 		}
-		return stdioDialer{target: target, session: session, log: log, observer: f.observer}, nil
+		return stdioDialer{target: target, log: log, observer: f.observer}, nil
 	default:
 		return nil, fmt.Errorf("vev: unsupported remote transport %q", mode)
 	}
@@ -52,5 +52,5 @@ type stdioDialer struct {
 }
 
 func (d stdioDialer) Dial(ctx context.Context) (ports.Transport, error) {
-	return sshstdio.DialContextWithRuntimeObserver(ctx, d.target, d.session, d.log, sshstdio.WithRuntimeObserver(d.observer))
+	return sshstdio.DialContextWithRuntimeObserver(ctx, d.target, "", d.log, sshstdio.WithRuntimeObserver(d.observer))
 }

@@ -15,7 +15,6 @@ type attachmentSession interface {
 	statusSegments(includeTerminalTitle bool) statusSnapshot
 	captureRenderState(*attachedClient, renderCaptureRequest) (*capturedRenderState, bool)
 	validTargetTabLocked(tabIndex int) bool
-	isProxy() bool
 }
 
 // sessionCore is the state shared by every attachment-capable session. It is
@@ -46,8 +45,6 @@ func (s *session) core() *sessionCore {
 	}
 	return &s.sessionCore
 }
-
-func (s *session) isProxy() bool { return false }
 
 func (s *session) captureRenderState(ac *attachedClient, req renderCaptureRequest) (*capturedRenderState, bool) {
 	return captureLocalRenderState(s, ac, req)

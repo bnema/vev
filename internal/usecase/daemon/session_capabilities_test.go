@@ -10,27 +10,8 @@ import (
 func TestCapabilitiesZeroValueIsFullyCapable(t *testing.T) {
 	s := &session{sessionCore: sessionCore{id: domain.SessionID("s1"), name: "alpha"}}
 	caps := s.capabilities()
-	if caps.cannotAcceptMoves || caps.cannotYieldMoves || !caps.yieldsMoves() {
+	if caps.cannotYieldMoves || !caps.yieldsMoves() {
 		t.Fatalf("zero-value capabilities = %+v, want fully capable", caps)
-	}
-}
-
-func TestSnapshotViewCarriesCannotAcceptMoves(t *testing.T) {
-	tests := []struct {
-		name string
-		caps sessionCapabilities
-		want bool
-	}{
-		{name: "default local", caps: sessionCapabilities{}, want: false},
-		{name: "restricted proxy", caps: sessionCapabilities{cannotAcceptMoves: true}, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &session{sessionCore: sessionCore{id: domain.SessionID("s1"), name: "alpha", caps: tt.caps}}
-			if got := s.snapshotView(viewOptions{}).cannotAcceptMoves; got != tt.want {
-				t.Fatalf("snapshotView().cannotAcceptMoves = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }
 

@@ -294,18 +294,14 @@ type CommandSpec struct {
 // BuildCommand constructs the local ssh subprocess argv without invoking a
 // local shell. OpenSSH sends the remote command as one string for the remote
 // user's shell to interpret, so every remote argv word is POSIX single-quoted.
-func BuildCommand(target, session string) CommandSpec {
-	return BuildCommandForMode(target, "_stdio", session)
+func BuildCommand(target, _ string) CommandSpec {
+	return BuildCommandForMode(target, "_stdio", "")
 }
 
 // BuildCommandForMode constructs the local ssh subprocess argv for a hidden vev
 // remote mode such as _stdio or _udp-bootstrap.
-func BuildCommandForMode(target, mode, session string) CommandSpec {
-	remote := []string{"vev", mode}
-	if session != "" {
-		remote = append(remote, session)
-	}
-	return BuildCommandForRemoteCommand(target, remote...)
+func BuildCommandForMode(target, mode, _ string) CommandSpec {
+	return BuildCommandForRemoteCommand(target, "vev", mode)
 }
 
 // BuildCommandForRemoteCommand constructs ssh argv for an arbitrary remote

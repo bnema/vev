@@ -170,8 +170,6 @@ func (d *Daemon) touchMRU(entry attachmentSession) {
 			break
 		}
 	}
-	// Proxy recency is live derived state only. Local named sessions retain the
-	// existing catalogue metadata publication semantics.
 	sess, ok := localSession(entry)
 	if !ok {
 		return
@@ -761,39 +759,6 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	return current
 }
 
-// detachProxyIfCurrentTransport is detachIfCurrentTransport for a proxy
-// attachment. It fences on the same published identity — exact session pointer,
-// exact attachment, exact transport incarnation — but reads the attachment
-// through the shared sessionCore rather than a local session.
-func (d *Daemon) detachProxyIfCurrentTransport(p *proxySession, ac *attachedClient, expected transportSnapshot) bool {
-	if p == nil || ac == nil {
-		return false
-	}
-	frozen := freezeAttachmentEffectGates(ac)
-	defer frozen.unfreeze()
-	if d.afterDetachAttachmentEffectsFrozen != nil {
-		d.afterDetachAttachmentEffectsFrozen()
-	}
-	d.notices.routingMu.Lock()
-	p.sessionCore.mu.Lock()
-	current := attachmentRegisteredLocked(attachmentSession(p), ac) && ac.currentAttachmentSession() == attachmentSession(p)
-	if current && expected.transport != nil && !ac.transportSnapshotCurrent(expected) {
-		current = false
-	}
-	if current {
-		unregisterAttachmentSessionLocked(attachmentSession(p), ac)
-		ac.connectionGeneration.Add(1)
-		ac.setSession(nil)
-		ac.invalidateFrozenAttachmentCapability()
-	}
-	p.sessionCore.mu.Unlock()
-	d.notices.routingMu.Unlock()
-	if current {
-		d.armProxyWarm(p)
-	}
-	return current
-}
-
 // detachIfAttachmentCurrent invalidates only the exact attachment generation and transport
 // whose admitted send failed. A queued stale error cannot detach a later
 // attachment publication or a rebound transport on the same attachment object.
@@ -811,9 +776,6 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken,
 	if token.lease == nil {
 		if sess, ok := localSession(token.sess); ok {
 			return d.detachIfCurrentTransport(sess, token.ac, token.transport)
-		}
-		if proxy, ok := token.sess.(*proxySession); ok {
-			return d.detachProxyIfCurrentTransport(proxy, token.ac, token.transport)
 		}
 		return false
 	}

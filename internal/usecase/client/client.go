@@ -376,6 +376,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if !result.transportClosed {
 			_ = connection.Close()
 		}
+		if result.target != nil {
+			return &AttachTargetError{Target: *result.target}
+		}
 		if result.resumeToken != 0 {
 			resumeToken = result.resumeToken
 		}
@@ -551,7 +554,21 @@ type attachResult struct {
 	sessionName     string
 	welcomed        bool
 	transportClosed bool
+	target          *ports.AttachTarget
 	err             error
+}
+
+// AttachTargetError requests that the composition root replace the current
+// transport with the selected endpoint. The daemon never opens that endpoint.
+type AttachTargetError struct {
+	Target ports.AttachTarget
+}
+
+func (e *AttachTargetError) Error() string {
+	if e == nil {
+		return "client: attach target handoff"
+	}
+	return fmt.Sprintf("client: attach target %q/%q", e.Target.Endpoint, e.Target.Session)
 }
 
 // boundedPreWelcome runs one blocking handshake operation. Transport methods
@@ -1066,6 +1083,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					ms.firstOutput = true
 					log.Debug("received first output")
 				}
+			case ports.MsgAttachTarget:
+				target, derr := ports.UnmarshalAttachTarget(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding attach target: %w", derr))
+				}
+				handoff := welcomedResult(nil)
+				handoff.target = &target
+				return handoff
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {

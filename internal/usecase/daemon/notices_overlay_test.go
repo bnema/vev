@@ -431,40 +431,6 @@ func TestYankLastNotificationWithEmptyHistoryShowsWarnToast(t *testing.T) {
 	require.Equal(t, "no notifications yet", history[0].Message)
 }
 
-func TestProxyYankLastNotificationEmptyHistoryUsesAttachmentScope(t *testing.T) {
-	d, proxy, ac, _, handler := newProxyInputHarness(t)
-	handler.enterPalette()
-	d.handlePaletteInput(ac, []byte("YLN\r"), handler.connectionToken.effect)
-
-	history := d.notices.history()
-	require.Len(t, history, 1)
-	require.Equal(t, domain.SessionID(""), history[0].SessionID)
-	require.Same(t, proxy, ac.currentAttachmentSession())
-}
-
-func TestProxyNoticeYankSendFailureDetachesAndArmsWarmExpiry(t *testing.T) {
-	d, proxy, ac, _, handler := newProxyInputHarness(t)
-	handler.connectionToken.effect.End()
-	client, ok := ac.transport().(*proxyTestTransport)
-	require.True(t, ok)
-	client.sendFails.Store(true)
-
-	d.yankNotice(proxy, ac, domain.Notification{Code: domain.NoticeClipboard, Message: "copy", Time: time.Unix(1, 0)})
-
-	require.Nil(t, ac.currentAttachmentSession())
-	select {
-	case <-client.closed:
-	default:
-		t.Fatal("proxy client transport was not closed")
-	}
-	proxy.mu.Lock()
-	warm := proxy.warm
-	proxy.mu.Unlock()
-	require.NotNil(t, warm, "proxy send failure must retain one warm expiry path")
-	warm.stop()
-	awaitTestCompletion(t, warm.done, "warm expiry did not stop during cleanup")
-}
-
 func TestNoticesYKeyYanksSelectedNotification(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)

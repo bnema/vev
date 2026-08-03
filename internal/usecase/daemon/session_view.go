@@ -25,23 +25,21 @@ type tabView struct {
 
 // sessionView is an immutable, value-only description of a session. It
 // deliberately retains no live pointers, mirroring recentSession
-// (recent_sessions.go). Listing paths (picker, MRU bar, palette,
-// list-sessions) read local session state through snapshotView; proxy rows in
-// later phases still come from registry/discovery, not this type alone.
+// (recent_sessions.go). Listing paths (picker, MRU bar, palette, and
+// list-sessions) read local session state through snapshotView.
 type sessionView struct {
-	id                domain.SessionID
-	incarnation       domain.IncarnationID
-	name              string
-	ephemeral         bool
-	createdAt         int64
-	defaultTab        int
-	mruAt             uint64
-	attached          bool
-	tabCount          int
-	hasAttention      bool
-	tabs              []tabView
-	cannotAcceptMoves bool
-	expired           bool
+	id           domain.SessionID
+	incarnation  domain.IncarnationID
+	name         string
+	ephemeral    bool
+	createdAt    int64
+	defaultTab   int
+	mruAt        uint64
+	attached     bool
+	tabCount     int
+	hasAttention bool
+	tabs         []tabView
+	expired      bool
 }
 
 // snapshotView reads session fields under s.mu and samples the independently
@@ -57,16 +55,15 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 	// default. Interactive callers pass an attachment and resolve its stable
 	// view separately.
 	view := sessionView{
-		id:                s.id,
-		incarnation:       s.incarnation,
-		name:              s.name,
-		ephemeral:         s.ephemeral,
-		createdAt:         s.createdAt,
-		defaultTab:        0,
-		mruAt:             s.mruAt.Load(),
-		attached:          len(s.attachments) != 0,
-		tabCount:          len(s.tabs),
-		cannotAcceptMoves: s.capabilities().cannotAcceptMoves,
+		id:          s.id,
+		incarnation: s.incarnation,
+		name:        s.name,
+		ephemeral:   s.ephemeral,
+		createdAt:   s.createdAt,
+		defaultTab:  0,
+		mruAt:       s.mruAt.Load(),
+		attached:    len(s.attachments) != 0,
+		tabCount:    len(s.tabs),
 	}
 	if opts.tabDetails {
 		view.tabs = make([]tabView, 0, len(s.tabs))
@@ -100,13 +97,12 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 // equivalent to the inline construction previously in pickerViews.
 func (view sessionView) pickerView() picker.SessionView {
 	out := picker.SessionView{
-		ID:                view.id,
-		Incarnation:       view.incarnation,
-		Name:              view.name,
-		TargetName:        view.name,
-		Active:            view.defaultTab,
-		Tabs:              make([]picker.TabEntry, 0, len(view.tabs)),
-		CannotAcceptMoves: view.cannotAcceptMoves,
+		ID:          view.id,
+		Incarnation: view.incarnation,
+		Name:        view.name,
+		TargetName:  view.name,
+		Active:      view.defaultTab,
+		Tabs:        make([]picker.TabEntry, 0, len(view.tabs)),
 	}
 	if !view.ephemeral {
 		createdAt := view.createdAt

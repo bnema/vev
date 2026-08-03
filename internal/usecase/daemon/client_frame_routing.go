@@ -54,13 +54,11 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 				if !ok {
 					return
 				}
-				if proxy, ok := sess.(*proxySession); ok {
-					d.detachProxyOnSendError(proxy, ac, tr)
-				} else if local, ok := localSession(sess); ok {
-					d.clientGone(local, ac, tr, false)
-				} else {
+				local, ok := localSession(sess)
+				if !ok {
 					return
 				}
+				d.clientGone(local, ac, tr, false)
 				current := ac.currentAttachmentSession()
 				if current == sess || !ac.currentTransportIs(tr) || current == nil {
 					return
@@ -204,12 +202,6 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 		result.Text = request.Slug + " is not scriptable"
 		return result
 	}
-	if !proxyAttachedCommandOwnedRemotely(cmd.Slug) {
-		result.Code = ports.ErrNotScriptable
-		result.Text = request.Slug + " is owned by the local proxy daemon"
-		return result
-	}
-
 	// The frame's attachment token is the target capability. No registry/name lookup is
 	// performed, so the command cannot escape to another remote session.
 	err := sess.runMutation(func() error {
@@ -227,12 +219,6 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 	result.Code = ports.ErrInternal
 	result.Text = err.Error()
 	return result
-}
-
-// proxyAttachedCommandOwnedRemotely applies the palette's canonical ownership
-// policy to command frames received by the remote daemon.
-func proxyAttachedCommandOwnedRemotely(slug string) bool {
-	return proxyPaletteCommandOwnership(slug) == proxyPaletteRemote
 }
 
 // resetOutput rebases only the exact proxied attachment and transport admitted

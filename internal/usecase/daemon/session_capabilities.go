@@ -3,8 +3,7 @@ package daemon
 import "errors"
 
 // errSessionCannotYieldMoves rejects move-picker entry for sessions whose
-// tabs and panes cannot leave the session (no local session sets this today;
-// proxy sessions will).
+// tabs and panes cannot leave the session.
 var errSessionCannotYieldMoves = errors.New("session does not support moving tabs or panes")
 
 // sessionCapabilities declares what cross-session operations a session
@@ -14,8 +13,7 @@ var errSessionCannotYieldMoves = errors.New("session does not support moving tab
 //
 // Set once at construction, never mutated: reading needs no lock.
 type sessionCapabilities struct {
-	cannotAcceptMoves bool
-	cannotYieldMoves  bool
+	cannotYieldMoves bool
 }
 
 func (c sessionCapabilities) yieldsMoves() bool { return !c.cannotYieldMoves }

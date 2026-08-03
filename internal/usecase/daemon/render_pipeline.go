@@ -491,9 +491,8 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 			}
 			d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
 		}
-		// Notices are session-scoped, but the repaint is not: a proxy attachment
-		// has no local session to report through and still needs its chrome
-		// redrawn after a failed transaction.
+		// Notices are session-scoped, while the attachment repaint still needs
+		// to redraw its chrome after a failed transaction.
 		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
 		return true
 	}
@@ -566,8 +565,6 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		if marks.attachmentEffect == nil {
 			if sess, ok := localSession(entry); ok {
 				d.detachOnSendError(sess, ac, sendTr)
-			} else if proxy, ok := entry.(*proxySession); ok {
-				d.detachProxyOnSendError(proxy, ac, sendTr)
 			}
 		} else {
 			// Capture the exact admitted capability, including its coordinator

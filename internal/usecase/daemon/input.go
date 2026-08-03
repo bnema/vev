@@ -43,23 +43,6 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 func (d *Daemon) handleInputForAttachment(token attachmentConnectionToken, data []byte) {
 	ac := token.ac
 	ac.initOverlays()
-	if proxy, ok := token.sess.(*proxySession); ok {
-		handler := proxyKeyHandler{d: d, proxy: proxy, ac: ac, connectionToken: token}
-		ac.mouseScan.Scan(data,
-			func(ev mouse.Event) {
-				if token.attachmentEffectCurrent() && !proxyMouseOwnedLocally(ac.overlays) {
-					handler.Mouse(ev)
-				}
-			},
-			func(b []byte) {
-				if !token.attachmentEffectCurrent() || ac.overlays.HandleInput(d, b, token.effect) || !token.attachmentEffectCurrent() {
-					return
-				}
-				ac.keys.RouteWithHandler(b, handler)
-			},
-		)
-		return
-	}
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) {
 			if token.attachmentEffectCurrent() {

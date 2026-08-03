@@ -125,28 +125,6 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 // only a log line. The new-tab spawn failure is wrapped as a domain.UserError
 // with NoticeTabSpawn (session.go createTab), so it surfaces under that code
 // rather than the NoticeInternal catch-all.
-func TestRemotePaletteClosesBeforeOpeningLocalOverlay(t *testing.T) {
-	tests := []struct {
-		name   string
-		code   string
-		active func(*overlayRuntime) bool
-	}{
-		{name: "session picker", code: "SSP", active: func(rt *overlayRuntime) bool { return rt.pickerActive() }},
-		{name: "notifications", code: "NTC", active: func(rt *overlayRuntime) bool { return rt.noticesActive() }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			d, _, ac, link, handler := newProxyInputHarness(t)
-			handler.enterPalette()
-			d.handlePaletteInput(ac, []byte(test.code+"\r"), handler.connectionToken.effect)
-
-			require.False(t, ac.overlays.paletteActive(), "stale remote palette remained active")
-			require.True(t, test.active(ac.overlays), "replacement local overlay was not opened")
-			requireNoProxyFrame(t, link)
-		})
-	}
-}
-
 func TestPaletteCommandFailureSurfacesAsNotice(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

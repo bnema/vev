@@ -32,16 +32,16 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 				if !ok {
 					t.Fatalf("dialer type = %T, want %T", dialer, dgram.RemoteDialer{})
 				}
-				if got.Target != "remote.example" || got.Session != "work" {
-					t.Fatalf("dialer = %+v, want target/session copied", got)
+				if got.Target != "remote.example" || got.Session != "" {
+					t.Fatalf("dialer = %+v, want target and no session metadata", got)
 				}
 			case stdioDialer:
 				got, ok := dialer.(stdioDialer)
 				if !ok {
 					t.Fatalf("dialer type = %T, want %T", dialer, stdioDialer{})
 				}
-				if got.target != "remote.example" || got.session != "work" {
-					t.Fatalf("dialer = %+v, want target/session copied", got)
+				if got.target != "remote.example" || got.session != "" {
+					t.Fatalf("dialer = %+v, want target and no session metadata", got)
 				}
 			}
 		})

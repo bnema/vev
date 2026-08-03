@@ -168,7 +168,6 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if err != nil {
 		return result, err
 	}
-	d.proxyAttachmentTransitionCommitted(req.source, req.target, req.next, req.preserveAttachment)
 	return result, nil
 }
 

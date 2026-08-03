@@ -121,7 +121,7 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
 	proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader("VEV-UDP 4444 " + key + "\n"))}
 	withBootstrapStarter(t, func(_ context.Context, target, session string, _ io.Writer) bootstrapProcess {
-		if target != "127.0.0.1" || session != "work" {
+		if target != "127.0.0.1" || session != "" {
 			t.Fatalf("bootstrap target/session = %q/%q", target, session)
 		}
 		return proc

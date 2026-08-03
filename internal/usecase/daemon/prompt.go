@@ -47,8 +47,7 @@ func (d *Daemon) closePrompt(ac *attachedClient) {
 func promptValidationError(err error) bool {
 	return errors.Is(err, domain.ErrInvalidSessionName) ||
 		errors.Is(err, errSessionNameRequired) ||
-		errors.Is(err, errSessionNameInUse) ||
-		errors.Is(err, errProxyKillConfirmation)
+		errors.Is(err, errSessionNameInUse)
 }
 
 func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {

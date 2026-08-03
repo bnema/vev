@@ -26,9 +26,8 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 		want    []string
 	}{
 		{name: "no session", target: "user@example.com", want: []string{"--", "user@example.com", "'vev' '_stdio'"}},
-		{name: "session shell metacharacters are quoted in remote command", target: "user@example.com", session: "work; rm -rf /", want: []string{"--", "user@example.com", "'vev' '_stdio' 'work; rm -rf /'"}},
-		{name: "single quote in session is posix escaped", target: "user@example.com", session: "it's fine", want: []string{"--", "user@example.com", "'vev' '_stdio' 'it'\\''s fine'"}},
-		{name: "target kept as single local arg after option terminator", target: "user@host; touch /tmp/pwn", session: "work", want: []string{"--", "user@host; touch /tmp/pwn", "'vev' '_stdio' 'work'"}},
+		{name: "session is carried by Hello rather than ssh command", target: "user@example.com", session: "work; rm -rf /", want: []string{"--", "user@example.com", "'vev' '_stdio'"}},
+		{name: "target kept as single local arg after option terminator", target: "user@host; touch /tmp/pwn", session: "work", want: []string{"--", "user@host; touch /tmp/pwn", "'vev' '_stdio'"}},
 	}
 
 	for _, tt := range tests {
@@ -51,7 +50,7 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 
 func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
 	got := BuildCommandForMode("user@example.com", "_udp-bootstrap", "work")
-	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap' 'work'"}
+	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap'"}
 	if got.Path != "ssh" {
 		t.Fatalf("Path = %q, want ssh", got.Path)
 	}

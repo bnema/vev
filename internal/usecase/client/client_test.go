@@ -337,6 +337,31 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	}
 }
 
+func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	target := ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "local"}))},
+		recvItem{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(target))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"})
+	var handoff *client.AttachTargetError
+	require.ErrorAs(t, err, &handoff)
+	require.Equal(t, target, handoff.Target)
+	require.Equal(t, int32(1), restoreCount.Load(), "handoff must restore the terminal after closing the old connection")
+}
+
 func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 	t.Setenv("VEV_CLIENT_ENV_TEST", "TOKEN=a=b=c")
 

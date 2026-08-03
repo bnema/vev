@@ -833,23 +833,35 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if factory == nil {
 			factory = defaultRemoteDialerFactory()
 		}
-		if log != nil {
-			log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
+		for {
+			if log != nil {
+				log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
+			}
+			dialer, err := factory.DialerForRemote(remoteTarget, name, mode, log)
+			if err != nil {
+				return err
+			}
+			err = runClient(ctx, client.Dependencies{
+				Dialer:            dialer,
+				Terminal:          term.New(),
+				Clock:             clock.New(),
+				Clipboard:         deps.clipboard,
+				Logger:            log,
+				RuntimeObserver:   deps.runtimeObserver,
+				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
+				Remote:            true,
+			}, client.AttachRequest{Intent: intent, SessionName: name})
+			var handoff *client.AttachTargetError
+			if !errors.As(err, &handoff) {
+				return err
+			}
+			if handoff == nil || ports.ValidateAttachTarget(handoff.Target) != nil {
+				return fmt.Errorf("vev: invalid remote attach handoff")
+			}
+			remoteTarget = handoff.Target.Endpoint
+			name = handoff.Target.Session
+			intent = handoff.Target.Intent
 		}
-		dialer, err := factory.DialerForRemote(remoteTarget, name, mode, log)
-		if err != nil {
-			return err
-		}
-		return runClient(ctx, client.Dependencies{
-			Dialer:            dialer,
-			Terminal:          term.New(),
-			Clock:             clock.New(),
-			Clipboard:         deps.clipboard,
-			Logger:            log,
-			RuntimeObserver:   deps.runtimeObserver,
-			RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
-			Remote:            true,
-		}, client.AttachRequest{Intent: intent, SessionName: name})
 	}
 
 	localDialer := deps.localDialer
@@ -1063,7 +1075,7 @@ func runStdio(ctx context.Context) (retErr error) {
 	}
 	defer func() { _ = transport.Close() }()
 	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
-	return runStdioProxy(ctx, stdio, transport, os.Environ(), log)
+	return runStdioProxy(ctx, stdio, transport, log)
 }
 
 var (
@@ -1075,12 +1087,12 @@ var (
 
 // runUDPBootstrap starts a detached _udp-proxy, forwards its single readiness
 // line, and exits so SSH stdio can close without owning the UDP proxy lifetime.
-func runUDPBootstrap(ctx context.Context, session string) error {
+func runUDPBootstrap(ctx context.Context, _ string) error {
 	// Always start a fresh proxy for a bootstrap request. A client attach begins
 	// with MsgHello, which must reach the daemon handshake path; reusing an
 	// already-running proxy would forward that Hello into the daemon connection's
-	// post-handshake runConnLoop, where it is intentionally ignored. The new
-	// proxy publishes itself and retires any older registry entry once ready.
+	// post-handshake runConnLoop, where it is intentionally ignored. Every
+	// bootstrap starts a fresh byte-only carriage.
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -1093,9 +1105,6 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 		return err
 	}
 	args := []string{"_udp-proxy"}
-	if session != "" {
-		args = append(args, session)
-	}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		_ = w.Close()
@@ -1146,13 +1155,13 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 }
 
 // runUDPProxy is the detached long-lived remote-side datagram proxy.
-func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr error) {
+func runUDPProxy(ctx context.Context, _ string, ready io.Writer) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
-	log.Debug("udp proxy starting", "session", session)
+	log.Debug("udp carriage starting")
 
 	observer, observerCloser, err := newPerformanceTrace(clock.New())
 	if err != nil {
@@ -1183,13 +1192,9 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 	if !ok {
 		return errors.New("vev: udp proxy did not get a UDP address")
 	}
-	registry := dgram.NewProxyRegistry(filepath.Join(ipc.SocketDir(), "udp-proxies"))
-
 	var (
-		dg        *dgram.Transport
-		record    dgram.ProxyRecord
-		published bool
-		setupErr  error
+		dg       *dgram.Transport
+		setupErr error
 	)
 	pdgram.SecretDo(func() {
 		key := make([]byte, pdgram.KeySize)
@@ -1201,12 +1206,6 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		if setupErr != nil {
 			return
 		}
-		record = dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, KeyFingerprint: dgram.KeyFingerprint(key)}
-		if setupErr = registry.Publish(record); setupErr != nil {
-			return
-		}
-		published = true
-
 		readiness := append([]byte("VEV-UDP "), strconv.Itoa(addr.Port)...)
 		readiness = append(readiness, ' ')
 		readiness = base64.StdEncoding.AppendEncode(readiness, key)
@@ -1220,15 +1219,10 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		if dg != nil {
 			_ = dg.Close()
 		}
-		if published {
-			_ = registry.RemoveOwned(record)
-		}
 		return setupErr
 	}
 	defer func() { _ = dg.Close() }()
-	defer func() { _ = registry.RemoveOwned(record) }()
-
-	return runUDPProxyRuntime(ctx, session, dg, daemonTr, os.Environ(), log)
+	return runUDPProxyRuntime(ctx, dg, daemonTr, log)
 }
 
 const udpProxyIdleTTL = 15 * time.Minute
@@ -1319,66 +1313,14 @@ func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, erro
 	return nil, fmt.Errorf("no free UDP port in range %d-%d: %w", r.start, r.end, lastErr)
 }
 
-// firstHelloTransport applies proxy-owned values to exactly the first Hello
-// crossing a remote boundary. It intentionally leaves all later frames and
-// malformed Hellos untouched so proxying preserves the client stream.
-type firstHelloTransport struct {
-	ports.Transport
-	mu      sync.Mutex
-	seen    bool
-	session string
-	env     []string
+// runStdioProxy forwards the framed transport without interpreting protocol
+// messages. Session selection remains in the Hello sent by the thin client.
+func runStdioProxy(ctx context.Context, client, daemon ports.Transport, log *slog.Logger) error {
+	return proxyTransports(ctx, client, daemon, log)
 }
 
-func newFirstHelloTransport(transport ports.Transport, session string, env []string) *firstHelloTransport {
-	return &firstHelloTransport{
-		Transport: transport,
-		session:   session,
-		env:       append([]string(nil), env...),
-	}
-}
-
-func (t *firstHelloTransport) Recv() (ports.Frame, error) {
-	f, err := t.Transport.Recv()
-	if err != nil || f.Type != ports.MsgHello {
-		return f, err
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.seen {
-		return f, nil
-	}
-	t.seen = true
-
-	h, err := ports.UnmarshalHello(f.Payload)
-	if err != nil {
-		return f, nil
-	}
-	h.Env = append([]string(nil), t.env...)
-	if h.Name == "" {
-		h.Name = t.session
-	}
-	f.Payload = ports.MarshalHello(h)
-	return f, nil
-}
-
-// runStdioProxy applies the remote host environment before the stdio stream
-// reaches the daemon. Its explicit environment input keeps this host boundary
-// independently testable.
-func runStdioProxy(ctx context.Context, client, daemon ports.Transport, env []string, log *slog.Logger) error {
-	return proxyTransports(ctx, newFirstHelloTransport(client, "", env), daemon, log)
-}
-
-// runUDPProxyRuntime applies the remote host environment and selected session
-// before the datagram stream reaches the daemon.
-func runUDPProxyRuntime(ctx context.Context, session string, client, daemon ports.Transport, env []string, log *slog.Logger) error {
-	return dgram.ProxyRuntime{
-		Client:  newFirstHelloTransport(client, session, env),
-		Daemon:  daemon,
-		Log:     log,
-		IdleTTL: udpProxyIdleTTL,
-	}.Run(ctx)
+func runUDPProxyRuntime(ctx context.Context, client, daemon ports.Transport, log *slog.Logger) error {
+	return dgram.ProxyRuntime{Client: client, Daemon: daemon, Log: log, IdleTTL: udpProxyIdleTTL}.Run(ctx)
 }
 
 func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger) error {

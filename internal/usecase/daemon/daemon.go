@@ -49,8 +49,8 @@ const detachNotifyTimeout = time.Second
 // not yet acked by the client) before paint defers rather than composing
 // another diff. It bounds the daemon's paint rate to the client's ack rate, so
 // heavy output degrades to lower fps on a slow link instead of overflowing the
-// transport. It must stay well under the UDP proxy's 32-frame client window so
-// the proxy's reliable queue never fills from painting alone.
+// transport. It must stay well under the datagram carriage's 32-frame client
+// window so its reliable queue never fills from painting alone.
 const maxUnackedOutputStates = 8
 
 // normalizeOutputWindow bounds the untrusted Hello value. Zero deliberately
@@ -74,10 +74,7 @@ type Daemon struct {
 	stopped  map[string]stoppedSession
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
-	// proxyConstructions serializes remote IntentAttach handshakes by remote
-	// key. Entries are guarded by mu and never retain it across dial or link I/O.
-	proxyConstructions map[domain.RemoteSessionKey]*proxyConstruction
-	nextID             uint64
+	nextID   uint64
 	// lastAllocatedCreatedAt is the named-session lifecycle timestamp high-water
 	// mark. It is guarded by mu and prevents a wall-clock regression from
 	// reusing a lifecycle identity.

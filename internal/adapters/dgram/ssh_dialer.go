@@ -40,7 +40,7 @@ func (p execBootstrapProcess) Wait() error                        { return p.cmd
 
 var (
 	startUDPBootstrap = func(ctx context.Context, target, session string, stderr io.Writer) bootstrapProcess {
-		spec := sshstdio.BuildCommandForMode(target, "_udp-bootstrap", session)
+		spec := sshstdio.BuildCommandForMode(target, "_udp-bootstrap", "")
 		cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
 		cmd.Stderr = stderr
 		return execBootstrapProcess{cmd: cmd}
@@ -129,7 +129,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	defer bootstrapCancel()
 
 	var stderr limitedBuffer
-	proc := startUDPBootstrap(bootstrapCtx, d.Target, d.Session, &stderr)
+	proc := startUDPBootstrap(bootstrapCtx, d.Target, "", &stderr)
 	stdout, err := proc.StdoutPipe()
 	if err != nil {
 		return nil, udpUnavailable("bootstrap stdout", err, &stderr)
