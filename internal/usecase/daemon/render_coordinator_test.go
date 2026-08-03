@@ -195,6 +195,7 @@ func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
 	wake := awaitTestValue(t, ch, "coordinator did not publish a wake after fake-clock advancement")
 	wake.attachmentLeases = nil
+	wake.generation = 0
 	return wake
 }
 

@@ -290,7 +290,15 @@ func (b *runtimeMarkBatch) flush() {
 	}
 }
 
-func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *attachmentLease) {
+type paintResult uint8
+
+const (
+	paintRejected paintResult = iota
+	paintEmitted
+	paintBlockedCapacity
+)
+
+func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *attachmentLease) paintResult {
 	// Session-owned PTY preparation remains local; attachment rendering is
 	// captured through session.captureRenderState.
 	sess := entry
@@ -301,7 +309,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		token.lease = lease
 		ticket, admitted := ac.beginAttachmentEffect(token)
 		if !admitted {
-			return
+			return paintRejected
 		}
 		marks.attachmentEffect = ticket
 		defer ticket.End()
@@ -310,7 +318,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	if local {
 		tb = sess.tabForAttachment(ac)
 		if tb == nil {
-			return
+			return paintRejected
 		}
 	}
 
@@ -323,13 +331,13 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	entry.core().mu.Unlock()
 	if !owned || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
-		return
+		return paintRejected
 	}
 	if lease != nil {
 		rc := attachmentRenderCoordinator(entry)
 		if rc == nil || lease.attachment != ac || !rc.leaseCurrent(lease, true) {
 			ac.sendMu.Unlock()
-			return
+			return paintRejected
 		}
 	}
 	// Capacity is checked before any destructive capture. Refresh the atomic
@@ -346,7 +354,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		// The coordinator owns the blocked interval; this guard only protects
 		// direct test/resize paint calls from destructive capture.
 		ac.sendMu.Unlock()
-		return
+		return paintBlockedCapacity
 	}
 	// Composition owns attachment sendMu; initialize its lazy overlay state
 	// under that same ownership so concurrent fallback paints cannot observe a
@@ -426,7 +434,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	endCapture(0, ok)
 	if !ok {
 		ac.sendMu.Unlock()
-		return
+		return paintRejected
 	}
 	if ac.renderStages.capture != nil {
 		ac.renderStages.capture()
@@ -445,6 +453,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		ac.renderStages.compose()
 	}
 	d.emitFrame(entry, ac, state, composed, &marks)
+	return paintEmitted
 }
 
 var fallbackChromeStyles = themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles

@@ -313,6 +313,81 @@ func (c *renderCoordinator) notifyAckForLease(lease *attachmentLease) {
 	c.fire(gen, false, false)
 }
 
+// retryCapacity restores only the attachment whose wake failed the final
+// capacity check. Readiness is an atomic observation, so paint may discover
+// backpressure after fire has marked the wake delivered. Requeueing the exact
+// wake generation keeps that stale result from clearing shared work and avoids
+// making a healthy peer wait for the blocked attachment.
+func (c *renderCoordinator) retryCapacity(w renderWake, lease *attachmentLease) {
+	if lease == nil || w.generation == 0 {
+		return
+	}
+	var queueStart bool
+	c.mu.Lock()
+	if !c.leaseCurrentLocked(lease, true) || c.pendingGeneration < w.generation {
+		c.mu.Unlock()
+		return
+	}
+	// A newer wake already attempted this lease; its callback owns any
+	// capacity retry. An older callback may still widen a newer targeted wake
+	// to include this lease when that newer wake never reached it.
+	if c.pendingGeneration > w.generation && lease.deliveredGeneration == c.pendingGeneration {
+		c.mu.Unlock()
+		return
+	}
+	if !c.pending {
+		c.pending = true
+		c.pendingReset = w.reset
+		c.pendingUrgent = w.urgent
+		c.pendingShared = false
+		c.pendingTargets = map[*attachedClient]*attachmentLease{lease.attachment: lease}
+		c.coalesced = max(1, w.coalesced)
+		c.deadlineDue = false
+		c.armed = false
+		if c.opts.observer != nil && !c.queueMarked {
+			c.queueMarked = true
+			c.queueCorrelation = ports.NewRuntimeCorrelation()
+			queueStart = true
+		}
+	} else {
+		c.pendingReset = c.pendingReset || w.reset
+		c.pendingUrgent = c.pendingUrgent || w.urgent
+		if !c.pendingShared {
+			if c.pendingTargets == nil {
+				c.pendingTargets = make(map[*attachedClient]*attachmentLease)
+			}
+			c.pendingTargets[lease.attachment] = lease
+		}
+	}
+	if c.delivered != nil {
+		delete(c.delivered, lease.attachment)
+	}
+	if c.ackDeferredFor == nil {
+		c.ackDeferredFor = make(map[*attachedClient]bool)
+	}
+	c.ackDeferredFor[lease.attachment] = true
+	c.ackDeferred = true
+	generation := c.pendingGeneration
+	queueCorrelation := c.queueCorrelation
+	observer := c.opts.observer
+	c.mu.Unlock()
+	if queueStart && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
+	}
+	go c.retryPendingGeneration(generation)
+}
+
+func (c *renderCoordinator) retryPendingGeneration(generation uint64) {
+	c.mu.Lock()
+	if c.torndown || !c.pending || c.pendingGeneration != generation {
+		c.mu.Unlock()
+		return
+	}
+	gen, token := c.normalLane.generation, c.normalLane.token
+	c.mu.Unlock()
+	c.fireWithTimerToken(token, gen, false, false)
+}
+
 // noteSyncBegin records a synchronized-output batch for its stable pane and
 // arms that pane's watchdog. Overlapping pane batches are independent.
 // markDeadlineDue records a received timer tick before the worker probes ACK
@@ -1010,7 +1085,11 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 	if len(leases) == 0 && legacyOutput {
 		allDelivered = true
 	}
-	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, attachmentLeases: attachmentLeases, watchdog: watchdog}
+	wakeGeneration := uint64(0)
+	if len(leases) != 0 {
+		wakeGeneration = c.pendingGeneration
+	}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, generation: wakeGeneration, attachmentLeases: attachmentLeases, watchdog: watchdog}
 	if syncLease != nil {
 		if selected, ok := attachmentLeases[syncLease.attachment]; ok && selected == syncLease {
 			w.lease = syncLease
@@ -1040,11 +1119,12 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 	}
 
 	if outputReady {
-		for ac := range attachmentLeases {
+		for ac, lease := range attachmentLeases {
 			if c.delivered == nil {
 				c.delivered = make(map[*attachedClient]uint64)
 			}
 			c.delivered[ac] = c.pendingGeneration
+			lease.deliveredGeneration = c.pendingGeneration
 		}
 	}
 	if len(leases) != 0 {

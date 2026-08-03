@@ -51,6 +51,9 @@ type renderWake struct {
 	reset     bool
 	urgent    bool
 	coalesced int
+	// generation fences a capacity retry to the mutation that produced this
+	// wake. A newer invalidation owns its own retry path.
+	generation uint64
 	// lease is optional coordinator-owned lifecycle safety for an attachment
 	// specific wake. Shared wakes leave it nil and snapshot live attachment
 	// leases at dispatch time; each paint then revalidates its exact connection
@@ -68,8 +71,12 @@ type attachmentLease struct {
 	attachment *attachedClient
 	ready      bool
 	active     bool
-	// A lease is an immutable callback capability. Its lifecycle bits are
-	// changed only under renderCoordinator.mu; callbacks revalidate it at each
+	// deliveredGeneration records the latest wake that reached this lease. It
+	// outlives the coordinator's coalesced delivered map so an older capacity
+	// failure cannot overwrite a newer attempt.
+	deliveredGeneration uint64
+	// A lease is an immutable callback capability. Its lifecycle and delivery
+	// bits are changed only under renderCoordinator.mu; callbacks revalidate it at each
 	// short effect boundary and never retain coordinator ownership while routing
 	// arbitrary handlers.
 }

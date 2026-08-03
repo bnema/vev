@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -93,7 +94,7 @@ func assertSSHReceiveFailurePair(t *testing.T, path string) {
 		Kind      string `json:"kind"`
 		Valid     bool   `json:"valid"`
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		var mark struct {
 			ProcessID string `json:"process_id"`
 			Scenario  string `json:"scenario"`
@@ -126,6 +127,24 @@ func assertSSHReceiveFailurePair(t *testing.T, path string) {
 	}
 }
 
+func TestProcessStdinPumpIsSingleton(t *testing.T) {
+	first := processStdinPumpFor(os.Stdin)
+	second := processStdinPumpFor(os.Stdin)
+	if first != second {
+		t.Fatal("process stdin created more than one lifetime pump")
+	}
+}
+
+func TestTransportCloseLeavesProcessStdinOpen(t *testing.T) {
+	transport := NewTransport(os.Stdin, io.Discard, nil)
+	if err := transport.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stdin.Stat(); err != nil {
+		t.Fatalf("process stdin was closed: %v", err)
+	}
+}
+
 func TestTransportObservabilitySSHStdioCloseDoesNotWaitForUnownedReceive(t *testing.T) {
 	tracePath := t.TempDir() + "/ssh-unowned-close.jsonl"
 	observer, closer, err := observability.NewJSONL(tracePath, sshRuntimeClock{now: time.Unix(0, 313)}, "ssh-process")
@@ -152,14 +171,13 @@ func TestTransportObservabilitySSHStdioCloseDoesNotWaitForUnownedReceive(t *test
 		t.Fatal("Close() waited for an unowned blocked reader")
 	}
 
-	reader.unblock()
 	select {
 	case err := <-recvDone:
 		if err == nil {
-			t.Fatal("Recv() error = nil after releasing blocked reader")
+			t.Fatal("Recv() error = nil after Close()")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Recv() did not finish after releasing blocked reader")
+		t.Fatal("Recv() did not finish after Close()")
 	}
 	reporter.Close()
 	if err := closer.Close(); err != nil {

@@ -619,12 +619,17 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry *session) *ren
 				// one synchronous exception: its first paint must finish before the
 				// handshake deadline is released.
 				fanoutReset := w.reset || len(attachments) > 1
+				paint := func() {
+					if d.paint(entry, attachment, fanoutReset, lease) == paintBlockedCapacity {
+						rc.retryCapacity(w, lease)
+					}
+				}
 				if w.lease != nil && w.lease.attachment == attachment {
-					d.paint(entry, attachment, fanoutReset, lease)
+					paint()
 				} else if len(attachments) > 1 {
-					go d.paint(entry, attachment, fanoutReset, lease)
+					go paint()
 				} else {
-					d.paint(entry, attachment, fanoutReset, lease)
+					paint()
 				}
 			}
 		},

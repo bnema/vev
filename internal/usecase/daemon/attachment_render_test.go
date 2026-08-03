@@ -31,6 +31,71 @@ func (t *blockedAttachmentTransport) Send(frame ports.Frame) error {
 func (*blockedAttachmentTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
 func (*blockedAttachmentTransport) Close() error               { return nil }
 
+func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc.opts.clock = nil // drive fire explicitly; the interleaving is the test.
+
+	firstObserved := make(chan struct{})
+	retryObserved := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	var probes atomic.Int32
+	rc.opts.ackReadyFor = func(*attachedClient) bool {
+		switch probes.Add(1) {
+		case 1:
+			close(firstObserved)
+			<-releaseFirst
+		case 2:
+			close(retryObserved)
+			<-releaseRetry
+		}
+		return true
+	}
+
+	pane := sess.tabs[0].focusedPane()
+	pane.mu.Lock()
+	pane.screen.Write([]byte("capacity race"))
+	pane.mu.Unlock()
+	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "capacity-race-test"}))
+	fireDone := make(chan struct{})
+	go func() {
+		rc.fireCurrent(false)
+		close(fireDone)
+	}()
+	awaitTestCompletion(t, firstObserved, "readiness probe did not start")
+
+	// Readiness was observed while the window had room. Fill it before the
+	// wake reaches paint; paint must report the failed final capacity check.
+	ac.sendMu.Lock()
+	ac.output.maxOutstanding = 1
+	ac.output.next = 1
+	ac.output.acked = 0
+	ac.output.syncCapacityLocked()
+	ac.sendMu.Unlock()
+	close(releaseFirst)
+	awaitTestCompletion(t, retryObserved, "capacity failure did not schedule an internal retry")
+
+	// The retry is already in flight. Restore capacity without publishing any
+	// new invalidation or ACK notification, then let that retry paint.
+	ac.sendMu.Lock()
+	ac.output.maxOutstanding = 2
+	ac.output.syncCapacityLocked()
+	ac.sendMu.Unlock()
+	close(releaseRetry)
+	frame := awaitFrame(t, sends, ports.MsgOutput)
+	output, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(output.Data), "capacity race")
+	awaitTestCompletion(t, fireDone, "initial fire did not finish")
+
+	rc.mu.Lock()
+	requeuedPending := rc.pending
+	rc.mu.Unlock()
+	require.False(t, requeuedPending, "successful internal retry must consume the mutation")
+	require.Equal(t, int32(2), probes.Load(), "retry must not require another external wake")
+}
+
 func TestAttachmentResizeKeepsSessionContentAndPeersFixed(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
