@@ -178,15 +178,8 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 	if d == nil || sess == nil || tb == nil {
 		return false
 	}
-	// A headless session has no actual terminal destination. Deferring warmup
-	// until firstPaint keeps restored tabs cold and avoids launching children
-	// merely because a tab was manipulated during teardown.
-	if ac == nil {
-		attachments := sess.snapshotAttachments()
-		if len(attachments) != 0 {
-			ac = attachments[0]
-		}
-	}
+	// A headless session has no attachment-local copy mode to clear. Keep its
+	// geometry work session-wide instead of choosing an arbitrary attachment.
 	if rc := sess.renderCoordinator(); rc != nil && rc.opts.onActivateTabAfterResize != nil {
 		rc.opts.onActivateTabAfterResize(lease != nil)
 	}
@@ -196,11 +189,24 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 			return false
 		}
 	}
-	d.exitCopyMode(ac)
+	d.ensureFloatingWarm(sess, tb)
 	if ac == nil {
+		for _, attachment := range sess.snapshotAttachments() {
+			d.exitCopyMode(attachment)
+		}
+		if outerResizeAccepted {
+			return false
+		}
+		tb.mu.Lock()
+		hasFloating := tb.floating.pane != nil
+		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+		tb.mu.Unlock()
+		if hasFloating {
+			return d.requestTransactionalResize(sess, nil, size, true)
+		}
 		return false
 	}
-	d.ensureFloatingWarm(sess, tb)
+	d.exitCopyMode(ac)
 	if outerResizeAccepted {
 		return false
 	}

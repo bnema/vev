@@ -22,13 +22,6 @@ type attachmentView struct {
 	revision   uint64
 }
 
-// attachmentViewSnapshot is the immutable value returned to callers that need
-// to inspect attachment-local state without retaining its mutex.
-type attachmentViewSnapshot struct {
-	attachment *attachedClient
-	view       attachmentView
-}
-
 // viewInvalidation records the order in which attachment views observed one
 // shared session mutation. The order is stable client-ID order, not map
 // iteration or lock-acquisition order, which keeps concurrent attaches
@@ -168,25 +161,6 @@ func (c *sessionCore) snapshotAttachmentsLocked() []*attachedClient {
 	return out
 }
 
-func (s *session) snapshotAttachmentsLocked() []*attachedClient {
-	if s == nil || len(s.attachments) == 0 {
-		return nil
-	}
-	out := make([]*attachedClient, 0, len(s.attachments))
-	for ac := range s.attachments {
-		out = append(out, ac)
-	}
-	slices.SortStableFunc(out, func(a, b *attachedClient) int {
-		// ClientID is the stable wire identity, so concurrent registration order
-		// cannot affect snapshots or invalidation order.
-		if id := bytes.Compare(a.clientID[:], b.clientID[:]); id != 0 {
-			return id
-		}
-		return cmp.Compare(s.attachmentOrder[a], s.attachmentOrder[b])
-	})
-	return out
-}
-
 func attachmentRegisteredLocked(entry attachmentSession, ac *attachedClient) bool {
 	if entry == nil || ac == nil || entry.core() == nil {
 		return false
@@ -244,18 +218,6 @@ func (s *session) snapshotAttachments() []*attachedClient {
 	return s.snapshotAttachmentsLocked()
 }
 
-func (s *session) snapshotAttachmentViews() []attachmentViewSnapshot {
-	attachments := s.snapshotAttachments()
-	if len(attachments) == 0 {
-		return nil
-	}
-	views := make([]attachmentViewSnapshot, 0, len(attachments))
-	for _, ac := range attachments {
-		views = append(views, attachmentViewSnapshot{attachment: ac, view: ac.viewSnapshot()})
-	}
-	return views
-}
-
 // repairAttachmentViewLocked validates stable targets and chooses the nearest
 // surviving target when a tab or pane was removed. Caller holds s.mu.
 func (s *session) repairAttachmentViewLocked(ac *attachedClient, view attachmentView) attachmentView {
@@ -302,12 +264,10 @@ func (s *session) repairAttachmentViewLocked(ac *attachedClient, view attachment
 	} else {
 		view.paneID = ""
 	}
-	targetTab.mu.Unlock()
 	if view.windowRows <= 0 {
-		targetTab.mu.Lock()
 		view.windowRows = targetTab.size.Rows
-		targetTab.mu.Unlock()
 	}
+	targetTab.mu.Unlock()
 	if view.windowTop < 0 {
 		view.windowTop = 0
 	}
@@ -402,7 +362,6 @@ func (s *session) tabForAttachment(ac *attachedClient) *tab {
 	if s == nil || ac == nil {
 		return nil
 	}
-	s.repairAttachmentView(ac)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.attachments[ac]; !ok {
@@ -618,8 +577,8 @@ func (s *session) repairAttachmentViews() []viewInvalidation {
 }
 
 // repairAttachmentViewsLocked repairs all live attachment targets after a tab
-// or pane mutation. It is intended to run at the same mutation linearization
-// point as the shared membership change.
+// or pane mutation. Caller holds dispatchMu and s.mu; it is intended to run at
+// the same mutation linearization point as the shared membership change.
 func (s *session) repairAttachmentViewsLocked() []viewInvalidation {
 	if s == nil {
 		return nil

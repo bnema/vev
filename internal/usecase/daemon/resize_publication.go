@@ -24,7 +24,7 @@ func (p resizeCommitPublication) current() bool {
 	if p.attachment == nil {
 		return true
 	}
-	// Attached resize publication is admitted only through a live role ticket.
+	// Attached resize publication is admitted only through a live attachment effect ticket.
 	if p.connection.effect == nil {
 		return false
 	}

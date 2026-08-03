@@ -46,6 +46,20 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		return errMoveStaleTarget
 	}
 
+	// Dispatch admission must precede lifecycle reservation. A final close holds
+	// dispatchMu while it waits for teardown ownership; reserving first would let
+	// that close wait on a move which is itself blocked on dispatchMu.
+	if d.beforeMoveDispatch != nil {
+		d.beforeMoveDispatch()
+	}
+	unlockDispatch := lockMoveDispatch(source, destination)
+	dispatchHeld := true
+	defer func() {
+		if dispatchHeld {
+			unlockDispatch()
+		}
+	}()
+
 	reservation, err := d.reserveMoveLifecycles(source, destination)
 	if err != nil {
 		return errMoveStaleTarget
@@ -59,14 +73,6 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	if d.afterMoveLifecycleReserved != nil {
 		d.afterMoveLifecycleReserved()
 	}
-
-	unlockDispatch := lockMoveDispatch(source, destination)
-	dispatchHeld := true
-	defer func() {
-		if dispatchHeld {
-			unlockDispatch()
-		}
-	}()
 
 	// Snapshot the exact live objects and generations before waiting on resize
 	// fences. The locked commit repeats every authority check before publication.

@@ -395,8 +395,8 @@ type daemonKeyHandler struct {
 }
 
 // acquireAttachmentEffect preserves a synchronous frame's existing admission and
-// gives delayed router callbacks a fresh ticket for the exact captured role.
-// Direct/headless callers without a role token retain their existing behavior.
+// gives delayed router callbacks a fresh ticket for the exact captured attachment.
+// Direct/headless callers without an attachment token retain their existing behavior.
 func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffectTicket, bool) {
 	if h.connectionToken.ac != nil {
 		if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
@@ -459,6 +459,7 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		defer effect.End()
 	}
 	runAction := func(request daemonActionRequest) {
+		request.effect = effect
 		runner := h.actions
 		if runner == nil {
 			runner = daemonActions{d: h.d}

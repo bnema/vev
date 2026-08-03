@@ -548,17 +548,25 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 				sendErr = errors.New("client transport is nil")
 			}
 			if sendErr == nil {
-				send := sendTr.Send
-				if async, ok := sendTr.(ports.AsyncTransport); ok {
-					send = async.SendAsync
+				interruptible := false
+				if marks.attachmentEffect != nil {
+					interruptible = marks.attachmentEffect.beginTransportSend(sendTransport)
+					if !interruptible {
+						sendErr = errAttachmentTransition
+					}
 				}
-				interruptible := marks.attachmentEffect != nil && marks.attachmentEffect.beginTransportSend(sendTransport)
-				if ac.proxied {
-					sendErr = preparedScreen.send(send)
-				} else {
-					sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
+				if sendErr == nil {
+					send := sendTr.Send
+					if async, ok := sendTr.(ports.AsyncTransport); ok {
+						send = async.SendAsync
+					}
+					if ac.proxied {
+						sendErr = preparedScreen.send(send)
+					} else {
+						sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
+					}
 				}
-				if interruptible {
+				if marks.attachmentEffect != nil && interruptible {
 					if sendErr != nil {
 						marks.attachmentEffect.reportTransportFailure(sendTransport)
 					}

@@ -111,7 +111,7 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 
 // freezeAttachmentTransition drains the snapshotted connection without any
 // architecture lock held. The returned guard remains frozen through publication.
-func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, participants attachmentTransitionParticipants) (frozenAttachmentEffectGates, bool, error) {
+func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, participants attachmentTransitionParticipants) (frozenAttachmentEffectGates, error) {
 	if d.afterAttachmentEffectParticipantsSnapshotted != nil {
 		d.afterAttachmentEffectParticipantsSnapshotted(req.action, participants.clients)
 	}
@@ -121,13 +121,12 @@ func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, par
 		}
 	}}, participants.clients...)
 	if !frozen.acquired || !frozen.drained {
-		return frozen, false, errAttachmentTransition
+		return frozen, errAttachmentTransition
 	}
-	interrupted := frozen.interrupted(nil, transportSnapshot{})
 	if d.afterAttachmentEffectsFrozen != nil {
 		d.afterAttachmentEffectsFrozen()
 	}
-	return frozen, interrupted, nil
+	return frozen, nil
 }
 
 // publishAttachmentTransition revalidates the frozen source, creates an
@@ -159,7 +158,7 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 		d.endActionAttachmentEffect(req.sourceToken.effect, req.action)
 	}
 
-	frozen, _, err := d.freezeAttachmentTransition(req, participants)
+	frozen, err := d.freezeAttachmentTransition(req, participants)
 	defer frozen.unfreeze()
 	if err != nil {
 		return attachmentTransitionResult{}, err

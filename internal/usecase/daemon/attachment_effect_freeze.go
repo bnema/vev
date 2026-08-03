@@ -67,17 +67,12 @@ type frozenAttachmentEffectGates struct {
 	drained       bool
 }
 
-func (f frozenAttachmentEffectGates) interrupted(ac *attachedClient, expected transportSnapshot) bool {
-	interrupted, ok := f.interruptions[ac]
-	return ok && interrupted.transport == expected.transport && interrupted.incarnation == expected.incarnation
-}
-
 type attachmentTransportInterrupt struct {
 	ac        *attachedClient
 	transport transportSnapshot
 }
 
-// attachmentEffectFreezeOptions controls one role-gate freeze operation. A freeze
+// attachmentEffectFreezeOptions controls one attachment-effect-gate freeze operation. A freeze
 // must be called without daemon, routing, session, coordinator, send, overlay,
 // router, or pane locks held.
 type attachmentEffectFreezeOptions struct {

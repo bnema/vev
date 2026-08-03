@@ -404,7 +404,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 		hasFloating := tb.floating.state == floatingVisible && floating != nil
 		tb.mu.Unlock()
 		for _, id := range titleIDs {
-			d.refreshPaneTitle(sess, id)
+			d.refreshPaneTitle(sess, id, tb)
 		}
 		if hasFloating {
 			d.refreshPaneDisplayTitle(sess, floating, false)

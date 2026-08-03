@@ -161,10 +161,7 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 	if len(locals) != 1 {
 		return nil, ports.ErrAmbiguousTarget, "several sessions are live; use -s <session> or run from inside a pane"
 	}
-	if len(locals) != 0 {
-		return locals[0], 0, ""
-	}
-	return nil, ports.ErrNoSuchTarget, "no live sessions"
+	return locals[0], 0, ""
 }
 
 func (s *session) containsStableIDs(tabID, paneID string) bool {
@@ -257,6 +254,7 @@ type daemonActionTarget struct {
 type daemonActionRequest struct {
 	kind      daemonActionKind
 	target    daemonActionTarget
+	effect    *attachmentEffectTicket
 	direction layout.Direction
 	axis      layout.Axis
 	delta     int
@@ -300,7 +298,7 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 	case daemonActionCreateTab:
 		return a.d.createTabForAttachment(target.session, target.attachment, request.viewport)
 	case daemonActionCloseTab:
-		return a.d.closeTab(target.session, target.tab, true)
+		return a.d.closeTabLockedWithEffect(target.session, target.tab, true, request.effect)
 	case daemonActionSplitPane:
 		return a.d.splitPaneAt(target.session, target.tab, target.pane, request.direction)
 	case daemonActionStackPane:
@@ -314,7 +312,7 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		if !a.d.hasDaemonActionPaneTarget(target) {
 			return layout.ErrNotFound
 		}
-		if err := a.d.closePane(target.session, target.tab, target.pane.id, nil, true); err != nil {
+		if err := a.d.closePaneLockedWithEffect(target.session, target.tab, target.pane.id, nil, true, request.effect); err != nil {
 			return err
 		}
 		if a.d.hasDaemonActionPaneTarget(target) {
@@ -454,8 +452,17 @@ func (e controlExec) MovePane(destinationSession, destinationTabID string) error
 	if e.sess == nil || e.tab == nil || e.target.pane == nil {
 		return errMovePaneInvalid
 	}
+	attachment := e.target.attachment
+	token := attachmentConnectionToken{}
+	if attachment != nil {
+		token = e.sess.attachmentToken(attachment, attachment.transport())
+		if token.ac == nil {
+			return errMoveStaleTarget
+		}
+	}
 	return e.d.movePane(movePaneRequest{
-		Attachment:       e.target.attachment,
+		Attachment:       attachment,
+		AttachmentToken:  token,
 		Source:           sessionMoveLocator(e.sess),
 		SourceTabID:      domain.TabStableID(e.tab.stableID),
 		SourcePaneID:     domain.PaneStableID(e.target.pane.stableID),
@@ -472,11 +479,20 @@ func (e controlExec) MoveTab(destinationSession string) error {
 	if e.sess == nil || e.tab == nil {
 		return errMovePaneInvalid
 	}
+	attachment := e.target.attachment
+	token := attachmentConnectionToken{}
+	if attachment != nil {
+		token = e.sess.attachmentToken(attachment, attachment.transport())
+		if token.ac == nil {
+			return errMoveStaleTarget
+		}
+	}
 	return e.d.moveTab(moveTabRequest{
-		Attachment:  e.target.attachment,
-		Source:      sessionMoveLocator(e.sess),
-		SourceTabID: domain.TabStableID(e.tab.stableID),
-		Destination: sessionMoveLocator(destination),
+		Attachment:      attachment,
+		AttachmentToken: token,
+		Source:          sessionMoveLocator(e.sess),
+		SourceTabID:     domain.TabStableID(e.tab.stableID),
+		Destination:     sessionMoveLocator(destination),
 	})
 }
 

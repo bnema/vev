@@ -43,7 +43,7 @@ type attachedClient struct {
 	overlayOnce  sync.Once
 	clientID     [16]byte
 	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
-	// the linearization gate for every attachment-bound observable operation. A role
+	// the linearization gate for every attachment-bound observable operation. An attachment
 	// transition freezes and drains this gate before changing either generation
 	// or the session/coordinator registries.
 	connectionGeneration atomic.Uint64
@@ -583,13 +583,13 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 // attachCoordinator installs the coordinator lease for an attachment. Session
 // membership remains independent, so installing one attachment never displaces
 // another.
-func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, ready bool) *renderCoordinator {
-	rc, cleanup := d.attachCoordinatorDeferred(sess, old, current, ready)
+func (d *Daemon) attachCoordinator(sess *session, current *attachedClient, ready bool) *renderCoordinator {
+	rc, cleanup := d.attachCoordinatorDeferred(sess, current, ready)
 	cleanup.finish()
 	return rc
 }
 
-func (d *Daemon) attachCoordinatorDeferred(sess *session, _ *attachedClient, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
+func (d *Daemon) attachCoordinatorDeferred(sess *session, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
 	rc := d.ensureRenderCoordinator(sess)
 	if current != nil {
 		rc.attachWithReadiness(current, ready)
@@ -631,7 +631,7 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 			// attachment's membership and transport fence after that snapshot, so
 			// a detached peer cannot stop remaining attachments receiving output.
 			attachments := snapshotAttachmentSession(entry)
-			for index, attachment := range attachments {
+			for _, attachment := range attachments {
 				if !rc.wakeCurrent(w) {
 					return
 				}
@@ -639,24 +639,27 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 				if lease == nil || !rc.leaseCurrent(lease, true) {
 					continue
 				}
-				// Pane damage is session-shared; later attachments need a complete
-				// frame because the first capture consumes shared damage.
-				d.paint(entry, attachment, w.reset || index != 0, lease)
-			}
-		},
-		ackReady: func() bool {
-			attachments := snapshotAttachmentSession(entry)
-			for _, attached := range attachments {
-				attached.sendMu.Lock()
-				ready := attached.output == nil || !attached.output.atCapacity()
-				attached.sendMu.Unlock()
-				if !ready {
-					return false
+				// Pane damage is session-shared; every fan-out attachment needs a
+				// complete frame because any peer may capture it first. A handshake
+				// target is the one synchronous exception: its first paint must finish
+				// before the handshake releases its lifecycle gate.
+				fanoutReset := w.reset || len(attachments) > 1
+				if w.lease != nil && w.lease.attachment == attachment {
+					d.paint(entry, attachment, fanoutReset, lease)
+				} else if len(attachments) > 1 {
+					go d.paint(entry, attachment, fanoutReset, lease)
+				} else {
+					d.paint(entry, attachment, fanoutReset, lease)
 				}
 			}
-			return true
 		},
 	})
+	rc.ackReadyFor = func(attached *attachedClient) bool {
+		// outputStateStream publishes capacity atomically. Do not take
+		// attached.sendMu here: a slow transport may be holding it for an
+		// in-flight Send, and that peer must not gate healthy attachments.
+		return attached == nil || attached.output == nil || !attached.output.atCapacity()
+	}
 	installAttachmentRenderCoordinator(entry, rc)
 	return rc
 }
@@ -756,7 +759,7 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 		if lease == nil {
 			d.invalidateRenderNow(sess, ac, true, "client.go")
 		} else if rc := sess.renderCoordinator(); rc != nil && rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"}) {
-			rc.fireCurrent(false)
+			rc.fireCurrentForLease(lease)
 		}
 	}
 }

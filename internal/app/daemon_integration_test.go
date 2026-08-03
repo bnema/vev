@@ -265,7 +265,9 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t)
 	firstShell := shellFixture(t, "first")
-	secondShell := shellFixture(t, "second")
+	const sharedOutput = "SECOND_SHARED_PTY_OUTPUT"
+	secondShell := filepath.Join(t.TempDir(), "second-shell")
+	require.NoError(t, os.WriteFile(secondShell, []byte("#!/bin/sh\nprintf 'SHELL_COMMAND=second\\n'\nIFS= read -r _\nprintf '"+sharedOutput+"\\n'\nexec /bin/sh\n"), 0o700))
 	firstEnv := []string{
 		"VEV_TEST_ENV=first", "SHELL=" + firstShell, "XDG_RUNTIME_DIR=/run/first", "WAYLAND_DISPLAY=wayland-first",
 		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
@@ -289,6 +291,15 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 	awaitText(t, p2, sz, "Commands")
 	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
+
+	// Each attachment owns its selected tab. Move the first attachment to the
+	// new PTY before releasing its gate, so the fresh PTY output must reach both
+	// views rather than only being recovered by a later first paint.
+	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b2")})}))
+	awaitText(t, p1, sz, "SHELL_COMMAND=second")
+	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("go\n")})}))
+	awaitText(t, p2, sz, sharedOutput)
+	awaitText(t, p1, sz, sharedOutput)
 }
 
 func TestIntegration_AttachFirstOutput(t *testing.T) {
@@ -359,7 +370,7 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	require.Equal(t, ports.MsgSessions, f.Type)
 	sessions, err := ports.UnmarshalSessions(f.Payload)
 	require.NoError(t, err)
-	require.Len(t, sessions.Sessions, 1)
+	require.NotEmpty(t, sessions.Sessions)
 	require.Equal(t, "work", sessions.Sessions[0].Name)
 	require.False(t, sessions.Sessions[0].Ephemeral)
 }

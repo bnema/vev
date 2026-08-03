@@ -252,15 +252,22 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 		oldSame.closeDone()
 	}
 	d.log.Info("client parked for resume", "session", sess.name, "grace", grace)
+	d.watchParkedTimer(token, parked)
+	return true
+}
 
-	go func(token uint64, parked *parkedAttachment) {
+func (d *Daemon) watchParkedTimer(token uint64, parked *parkedAttachment) {
+	if parked == nil || parked.timer == nil {
+		return
+	}
+	timer := parked.timer
+	go func() {
 		select {
 		case <-timer.C():
 			d.expireParked(token, parked)
 		case <-parked.done:
 		}
-	}(token, parked)
-	return true
+	}()
 }
 
 func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
@@ -309,9 +316,12 @@ func (d *Daemon) commitResumeClaim(ac *attachedClient) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	token := ac.resumeClaimToken
+	if token == 0 {
+		return true
+	}
 	parked := d.parked[token]
-	if token == 0 || parked == nil || parked.ac != ac || !parked.claimed {
-		return token == 0
+	if parked == nil || parked.ac != ac || !parked.claimed {
+		return false
 	}
 	delete(d.parked, token)
 	parked.claimed = false
@@ -348,9 +358,25 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 		sess.unregisterAttachmentLocked(ac)
 		sess.mu.Unlock()
 	}
+	// Recreate the parked entry and its watcher instead of restoring a timer
+	// that may already have fired while the claim held the old entry. This also
+	// makes a failed handshake's credential expiry deterministic under fake clocks.
+	if parked.timer != nil {
+		parked.timer.Stop()
+	}
+	parked.closeDone()
+	rearmed := &parkedAttachment{
+		sess:             parked.sess,
+		ac:               ac,
+		pickerGeneration: parked.pickerGeneration,
+		timer:            d.clock.NewTimer(d.resumeParkGrace),
+		done:             make(chan struct{}),
+	}
+	d.parked[token] = rearmed
 	captured := ac.transportSnapshot().transport
 	ac.setSession(nil)
 	d.mu.Unlock()
+	d.watchParkedTimer(token, rearmed)
 	if captured != nil {
 		_ = ac.closeCapturedTransport(ac.revokeTransport(captured))
 	}
@@ -595,6 +621,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// mandatory first paint cannot be blocked by ACKs that died with the link.
 	ac.rebaseOutput()
 	ac.output.maxOutstanding = uint64(normalizeOutputWindow(h.MaxOutputInFlight))
+	ac.output.syncCapacityLocked()
 	ac.replaceTransport(tr)
 	ac.size = sz
 	ac.resumeToken = d.nextResumeTokenLocked()

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"sync/atomic"
+
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -15,11 +17,13 @@ import (
 // Callers serialize access with attachedClient.sendMu. A prepared transaction
 // must be sent or committed as a no-op before the next transaction is prepared.
 type outputStateStream struct {
-	renderer       *renderer.Renderer
-	next           uint64
-	acked          uint64
-	maxOutstanding uint64
-	forceSnapshot  bool
+	renderer             *renderer.Renderer
+	next                 uint64
+	acked                uint64
+	maxOutstanding       uint64
+	outstandingAtomic    atomic.Uint64
+	maxOutstandingAtomic atomic.Uint64
+	forceSnapshot        bool
 }
 
 func newOutputStateStream(windowSize ...uint8) *outputStateStream {
@@ -27,10 +31,13 @@ func newOutputStateStream(windowSize ...uint8) *outputStateStream {
 	if len(windowSize) > 0 {
 		window = normalizeOutputWindow(windowSize[0])
 	}
-	return &outputStateStream{
+	stream := &outputStateStream{
 		renderer:       renderer.New(renderer.Capabilities{}),
 		maxOutstanding: uint64(window),
 	}
+	stream.maxOutstandingAtomic.Store(uint64(window))
+	stream.publishOutstanding()
+	return stream
 }
 
 type preparedOutput struct {
@@ -73,6 +80,7 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame
 	}
 	p.commit()
 	p.stream.next = p.next
+	p.stream.publishOutstanding()
 	return nil
 }
 
@@ -98,16 +106,39 @@ func (s *outputStateStream) ack(state uint64) {
 		return
 	}
 	s.acked = state
+	s.publishOutstanding()
 }
 
 func (s *outputStateStream) rebase() {
 	s.acked = s.next
+	s.publishOutstanding()
+	s.maxOutstandingAtomic.Store(s.maxOutstanding)
 	s.renderer.Reset()
 	s.forceSnapshot = true
 }
 
+func (s *outputStateStream) publishOutstanding() {
+	if s == nil {
+		return
+	}
+	s.outstandingAtomic.Store(s.next - s.acked)
+}
+
+// syncCapacityLocked refreshes the lock-free readiness snapshot after a
+// caller mutates the legacy fields under attachedClient.sendMu.
+func (s *outputStateStream) syncCapacityLocked() {
+	if s == nil {
+		return
+	}
+	s.maxOutstandingAtomic.Store(s.maxOutstanding)
+	s.publishOutstanding()
+}
+
 func (s *outputStateStream) atCapacity() bool {
-	return s.outstanding() >= s.maxOutstanding
+	if s == nil {
+		return false
+	}
+	return s.outstandingAtomic.Load() >= s.maxOutstandingAtomic.Load()
 }
 
 func (s *outputStateStream) outstanding() uint64 { return s.next - s.acked }

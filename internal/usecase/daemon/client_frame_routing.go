@@ -218,10 +218,8 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 
 	// The frame's attachment token is the target capability. No registry/name lookup is
 	// performed, so the command cannot escape to another remote session.
-	var err error
-	_ = sess.runMutation(func() error {
-		err = cmd.Run(paletteExec{d: d, sess: sess, ac: token.ac, effect: token.effect}, request.Args)
-		return nil
+	err := sess.runMutation(func() error {
+		return cmd.Run(paletteExec{d: d, sess: sess, ac: token.ac, effect: token.effect}, request.Args)
 	})
 	if err == nil {
 		result.OK = true

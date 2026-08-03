@@ -131,6 +131,7 @@ func TestPaintACKBlockedDoesNotDestructivelyCapture(t *testing.T) {
 	ac.sendMu.Lock()
 	ac.output.next = ac.output.maxOutstanding
 	ac.output.acked = 0
+	ac.output.syncCapacityLocked()
 	ac.sendMu.Unlock()
 	p := sess.tabs[0].focusedPane()
 	p.mu.Lock()
@@ -673,4 +674,28 @@ func TestNoticeStylesFromMapsWarnToDedicatedRoleDistinctFromInfo(t *testing.T) {
 	// role fixes (Warn and Info toasts were visually identical).
 	require.Equal(t, warn, got.BoxWarn)
 	require.NotEqual(t, got.BoxInfo, got.BoxWarn)
+}
+
+func TestEmitFrameSkipsTransportSendWhenAttachmentEffectFenceRejects(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	token := sess.attachmentToken(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	ac.attachmentEffects.mu.Lock()
+	ac.attachmentEffects.capability.transport = transportSnapshot{}
+	ac.attachmentEffects.mu.Unlock()
+
+	state := cacheState("stale", 1)
+	state.attachment = ac
+	composed := composeFrame(state, composeCacheInput{})
+	ac.sendMu.Lock()
+	require.True(t, d.emitFrame(sess, ac, &state, composed, &runtimeMarkBatch{attachmentEffect: effect}))
+	d.attachmentCleanupWg.Wait()
+
+	require.Zero(t, ac.output.next, "rejected transport effect must not commit output state")
+	select {
+	case frame := <-sends:
+		t.Fatalf("rejected transport effect was sent: %v", frame.Type)
+	default:
+	}
 }

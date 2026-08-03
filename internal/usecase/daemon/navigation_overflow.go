@@ -143,12 +143,16 @@ func (d *Daemon) prepareTabOverflowForAttachment(sess *session, ac *attachedClie
 		sess.mu.Unlock()
 		return tabOverflowCandidate{}, false
 	}
-	sourceIndex := 0
+	sourceIndex := -1
 	for i, tb := range sess.tabs {
 		if tb == expectedSource {
 			sourceIndex = i
 			break
 		}
+	}
+	if sourceIndex < 0 {
+		sess.mu.Unlock()
+		return tabOverflowCandidate{}, false
 	}
 	targetIndex := sourceIndex + delta
 	if targetIndex < 0 || targetIndex >= len(sess.tabs) {

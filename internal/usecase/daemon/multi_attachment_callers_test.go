@@ -84,10 +84,15 @@ func TestPaneRemovalRepairsEachAttachmentViewIndependently(t *testing.T) {
 		defer sess.mu.Unlock()
 		tb := sess.tabs[0]
 		tb.mu.Lock()
-		require.NoError(t, tb.tree.Close(firstPane.id))
-		delete(tb.panes, firstPane.id)
-		tb.bumpLayoutGenerationLocked()
+		closeErr := tb.tree.Close(firstPane.id)
+		if closeErr == nil {
+			delete(tb.panes, firstPane.id)
+			tb.bumpLayoutGenerationLocked()
+		}
 		tb.mu.Unlock()
+		if closeErr != nil {
+			return closeErr
+		}
 		sess.repairAttachmentViewsLocked()
 		return nil
 	}))

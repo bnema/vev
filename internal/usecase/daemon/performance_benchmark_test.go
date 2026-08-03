@@ -1456,7 +1456,7 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 		compose: func() { fixture.renderCompositions++ },
 		emit:    func() { fixture.renderEmissions++ },
 	}
-	d.attachCoordinator(sess, nil, ac, true)
+	d.attachCoordinator(sess, ac, true)
 
 	// Prime the real renderer shadow before measurements. Subsequent paints use
 	// actual production diffs rather than the initial full frame.

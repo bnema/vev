@@ -241,6 +241,13 @@ func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.T
 			continue
 		}
 		g.mu.Unlock()
+		// A stable mismatch is only recoverable when a publication raced token
+		// capture; an already-stale token proves that happened. A current token
+		// with a stable mismatch violates the publication invariant, so fail
+		// closed instead of spinning forever.
+		if token.current() {
+			return token, nil, false
+		}
 		// Publication may have completed between token capture and admission.
 		// Re-read the registry and exact generation instead of using stale authority.
 	}

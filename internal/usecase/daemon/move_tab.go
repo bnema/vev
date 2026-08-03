@@ -50,12 +50,26 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 	source := moveSessionForLocatorLocked(d, req.Source)
 	destination := moveSessionForLocatorLocked(d, req.Destination)
 	d.mu.Unlock()
-	if source == nil || destination == nil || source == destination {
-		if source == destination && source != nil {
-			return errMovePaneInvalid
-		}
+	if source == nil || destination == nil {
 		return errMoveStaleTarget
 	}
+	if source == destination {
+		return errMovePaneInvalid
+	}
+	// Dispatch admission must precede lifecycle reservation. A final close holds
+	// dispatchMu while it waits for teardown ownership; reserving first would let
+	// that close wait on a move which is itself blocked on dispatchMu.
+	if d.beforeMoveDispatch != nil {
+		d.beforeMoveDispatch()
+	}
+	unlockDispatch := lockMoveDispatch(source, destination)
+	dispatchHeld := true
+	defer func() {
+		if dispatchHeld {
+			unlockDispatch()
+		}
+	}()
+
 	reservation, err := d.reserveMoveLifecycles(source, destination)
 	if err != nil {
 		return errMoveStaleTarget
@@ -69,13 +83,6 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 	if d.afterMoveLifecycleReserved != nil {
 		d.afterMoveLifecycleReserved()
 	}
-	unlockDispatch := lockMoveDispatch(source, destination)
-	dispatchHeld := true
-	defer func() {
-		if dispatchHeld {
-			unlockDispatch()
-		}
-	}()
 
 	admission, err := d.snapshotMoveTabAdmission(req, source, destination)
 	if err != nil {

@@ -184,6 +184,7 @@ func (p *preparedStructuredOutput) send(sender func(ports.Frame) error) error {
 	}
 	p.commit()
 	p.stream.state.next = p.next
+	p.stream.state.publishOutstanding()
 	return nil
 }
 

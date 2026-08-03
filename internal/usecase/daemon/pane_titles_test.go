@@ -89,6 +89,27 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 	require.Equal(t, "vim", p.title.processName)
 }
 
+func TestRefreshPaneTitleUsesProvidedOwningTab(t *testing.T) {
+	secondPTY := portsmocks.NewMockPTY(t)
+	secondPTY.EXPECT().ForegroundPgid().Return(222, nil).Once()
+	_, sess, _, _ := newManualSessionWithPTYs(t, nil)
+	second := newTabWithStableID("second-tab", "second-pane", secondPTY, domain.Size{Cols: 80, Rows: 23})
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, second)
+	sess.mu.Unlock()
+	d := newTestDaemon(t, nil, stubClock{})
+	d.procComm = func(pid int) (string, error) {
+		require.Equal(t, 222, pid)
+		return "vim", nil
+	}
+
+	require.Equal(t, "vim", d.refreshPaneTitle(sess, "pane-1", second))
+	secondPane := second.panes["pane-1"]
+	secondPane.mu.Lock()
+	require.Equal(t, "vim", secondPane.title.processName)
+	secondPane.mu.Unlock()
+}
+
 func TestRefreshPaneTitleCachesByTTLAndRefreshesOnFocus(t *testing.T) {
 	pty := portsmocks.NewMockPTY(t)
 	pty.EXPECT().ForegroundPgid().Return(1234, nil).Twice()

@@ -57,7 +57,7 @@ func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.
 
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
-	d.attachCoordinator(sess, nil, ac, true)
+	d.attachCoordinator(sess, ac, true)
 	tr, ok := ac.tr.(*portsmocks.MockTransport)
 	require.True(t, ok, "attached client transport must be a MockTransport")
 	frames := []ports.Frame{

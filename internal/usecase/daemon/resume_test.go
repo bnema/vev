@@ -97,6 +97,53 @@ func helloResumeCapable(intent uint8, name string, token uint64) ports.Hello {
 	}
 }
 
+func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 8)}
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), clock)
+
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+	parkTimer := <-clock.timers
+	d.mu.Lock()
+	parked := d.parked[token]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+
+	resumed, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, defaultSize)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Same(t, sess, resumed)
+	require.Same(t, ac, resumedAC)
+
+	// Drive the original fake timer after the claim. The old entry remains
+	// claimable only until abort; abort must install a fresh expiry rather than
+	// restoring a credential whose timer has already fired.
+	parkTimer.ch <- time.Time{}
+	d.expireParked(token, parked)
+	require.True(t, d.abortResumeClaim(ac))
+	rearmedTimer := <-clock.timers
+	require.NotSame(t, parkTimer, rearmedTimer)
+	d.mu.Lock()
+	rearmed := d.parked[token]
+	d.mu.Unlock()
+	require.NotNil(t, rearmed)
+	require.False(t, rearmed.claimed)
+	rearmedTimer.ch <- time.Time{}
+	d.expireParked(token, rearmed)
+	d.mu.Lock()
+	_, retained := d.parked[token]
+	d.mu.Unlock()
+	require.False(t, retained, "rearmed credential must still expire")
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	d.sessWg.Wait()
+}
+
 func TestNamedLinkLossParks(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()

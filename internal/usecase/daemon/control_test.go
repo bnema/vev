@@ -814,6 +814,27 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	require.NotEqual(t, original, target.tree.Focus, "second command must execute after the split creates its right neighbor")
 }
 
+func TestControlMoveRejectsMissingAttachmentCapability(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := addControlSession(d, "work", "t_work", "p_work")
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+	tb := source.tabs[0]
+	tb.mu.Lock()
+	pane := tb.focusedPane()
+	tb.mu.Unlock()
+	ac := &attachedClient{tr: &closeTrackingTransport{}}
+	ac.setSession(source)
+
+	source.mu.Lock()
+	require.True(t, source.registerAttachmentLocked(ac))
+	target := daemonActionTarget{session: source, attachment: ac, tab: tb, pane: pane}
+	require.True(t, source.unregisterAttachmentLocked(ac))
+	source.mu.Unlock()
+
+	err := (controlExec{d: d, sess: source, tab: tb, target: target}).MovePane(destination.name, destination.tabs[0].stableID)
+	require.ErrorIs(t, err, errMoveStaleTarget)
+}
+
 func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	source := addControlSession(d, "work", "t_active", "p_active")
@@ -889,28 +910,29 @@ func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	source := addControlSession(d, "work", "t_first", "p_first")
+	publishTiledPaneOwners(source, source.tabs[0])
 	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
 	publishTiledPaneOwners(source, second)
 	source.mu.Lock()
 	source.tabs = append(source.tabs, second)
-	selectTestAttachmentTabLocked(source, 1)
+	selectTestAttachmentTabLocked(source, 0)
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
 	result := sendCommand(t, d, ports.CommandRequest{
-		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work", Self: true,
+		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work", Self: false,
 		TargetTab: "t_second", TargetPane: "p_second",
 	})
 	require.True(t, result.OK, result.Text)
 
 	source.mu.Lock()
 	require.Len(t, source.tabs, 1)
-	require.Equal(t, "t_first", source.tabs[0].stableID)
+	require.Equal(t, "t_second", source.tabs[0].stableID)
 	source.mu.Unlock()
 	destination.mu.Lock()
 	require.Len(t, destination.tabs, 2)
-	require.Equal(t, "t_second", destination.tabs[1].stableID)
+	require.Equal(t, "t_first", destination.tabs[1].stableID)
 	destination.mu.Unlock()
 }
 

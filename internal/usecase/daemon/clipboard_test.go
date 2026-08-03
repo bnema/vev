@@ -203,7 +203,7 @@ func chunkReadPTY(t *testing.T, chunks ...[]byte) *portsmocks.MockPTY {
 }
 
 func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClient, tr ports.Transport) {
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := d.attachCoordinator(sess, ac, true)
 	token := sess.attachmentToken(ac, tr)
 	token.lease = rc.attachmentLease(ac)
 	ac.publishAttachmentCapability(token)

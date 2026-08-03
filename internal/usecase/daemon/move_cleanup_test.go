@@ -9,6 +9,23 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
+func TestDetachMoveAttachmentsUsesStableSnapshotOrder(t *testing.T) {
+	first := &attachedClient{clientID: [16]byte{1}}
+	second := &attachedClient{clientID: [16]byte{2}}
+	sess := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{second: {}, first: {}}}}
+	frozen := freezeAttachmentEffectGates(first, second)
+	require.True(t, frozen.acquired)
+	defer frozen.unfreeze()
+
+	sess.mu.Lock()
+	retired := detachMoveAttachmentsLocked(sess, nil)
+	sess.mu.Unlock()
+
+	require.Len(t, retired, 2)
+	require.Same(t, first, retired[0].ac)
+	require.Same(t, second, retired[1].ac)
+}
+
 func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	movedPTY, releaseMoved := newBlockingPTY(t)
 	remainingPTY, releaseRemaining := newBlockingPTY(t)
@@ -18,7 +35,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	defer releaseDestination()
 
 	d, source, client, _ := newManualSessionWithPTYs(t, movedPTY, remainingPTY)
-	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
+	require.NotNil(t, d.attachCoordinator(source, client, true))
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
@@ -100,7 +117,7 @@ func TestMovePaneCleanupUsesCommitPointSourceAttachmentToken(t *testing.T) {
 	sourceTab.stableID = "source-tab"
 	remainingTab.stableID = "remaining-tab"
 	moved := sourceTab.focusedPane()
-	require.NotNil(t, d.attachCoordinator(source, nil, displaced, true))
+	require.NotNil(t, d.attachCoordinator(source, displaced, true))
 
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	destinationTab := destination.tabs[0]

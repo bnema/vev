@@ -242,7 +242,7 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 	}
 
 	if d.ptys == nil {
-		return nil, errors.New("daemon: PTY factory is unavailable")
+		return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("daemon: PTY factory is unavailable"))
 	}
 	tbSize := contentSize(sz, proxied)
 	var names []string
@@ -523,7 +523,14 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, sz do
 	env := copyEnvironment(sess.env)
 	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
-	proxied := len(attachments) != 0 && attachments[0].proxied
+	// A client-requested tab must use that client's negotiated viewport and
+	// theme. Only the explicitly headless helper path falls back to the stable
+	// first attachment snapshot.
+	themeClient := ac
+	if themeClient == nil && len(attachments) != 0 {
+		themeClient = attachments[0]
+	}
+	proxied := themeClient != nil && themeClient.proxied
 	tbSize := contentSize(sz, proxied)
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
@@ -541,8 +548,8 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, sz do
 		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
 	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
-	if len(attachments) != 0 {
-		t := d.effectiveTheme(attachments[0].getClientTheme())
+	if themeClient != nil {
+		t := d.effectiveTheme(themeClient.getClientTheme())
 		tb.mu.Lock()
 		p := tb.focusedPane()
 		tb.mu.Unlock()
@@ -706,6 +713,7 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 		return
 	}
 	if owner.session != sess || owner.tab != tb {
+		d.log.Warn("pane owner mismatch", "pane", p.id)
 		return
 	}
 	sess.mu.Lock()
@@ -990,7 +998,24 @@ func (s *session) persistRecordLocked(updatedAt int64) domain.CatalogueRecord {
 	return domain.CatalogueRecord{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
 }
 
+// closeTab is the public close boundary for callers that are not already
+// inside session.runMutation. Mutation dispatchers use closeTabLocked.
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
+	if sess == nil {
+		return layout.ErrNotFound
+	}
+	sess.dispatchMu.Lock()
+	defer sess.dispatchMu.Unlock()
+	return d.closeTabLocked(sess, tb, repaint)
+}
+
+// closeTabLocked requires sess.dispatchMu before entering daemon or session
+// locks. Existing runMutation callers use it to avoid nested dispatch locking.
+func (d *Daemon) closeTabLocked(sess *session, tb *tab, repaint bool) error {
+	return d.closeTabLockedWithEffect(sess, tb, repaint, nil)
+}
+
+func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, effect *attachmentEffectTicket) error {
 	if sess == nil || tb == nil {
 		return layout.ErrNotFound
 	}
@@ -1016,7 +1041,14 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 		name := sess.name
 		sess.mu.Unlock()
 		d.mu.Unlock()
-		if err := d.killSession(sess, ports.ReasonSessionKilled, false); err != nil {
+		var err error
+		if effect != nil {
+			effect.bindActionEnd(d, "close-tab")
+			err = d.killSessionForAttachment(sess, ports.ReasonSessionKilled, false, effect.connectionToken(), "close-tab")
+		} else {
+			err = d.killSession(sess, ports.ReasonSessionKilled, false)
+		}
+		if err != nil {
 			d.log.Warn("closing last tab failed", "session", name, "err", err)
 			d.reportError(sess, domain.UserErr(domain.NoticeSnapshotSaturated,
 				"couldn't close tab: session state not yet saved; try again", err))

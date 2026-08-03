@@ -25,9 +25,23 @@ type renderCoordinator struct {
 	// viewers may consume a coalesced target snapshot while output is
 	// still ACK-blocked.
 	pendingPreview bool
-	// ackDeferred records that an expired deadline or watchdog was blocked by
-	// output-window capacity. ACK notifications may flush only this state.
-	ackDeferred bool
+	// ackDeferred records that at least one attachment's render wake was
+	// blocked by output-window capacity. ACK notifications use ackDeferredFor
+	// to flush only the acknowledging attachment's work.
+	ackDeferred    bool
+	ackDeferredFor map[*attachedClient]bool
+	// pendingGeneration identifies the latest coalesced session mutation.
+	// delivered records which attachment incarnations have consumed it, so a
+	// blocked peer can catch up without replaying the wake to healthy peers.
+	pendingGeneration uint64
+	delivered         map[*attachedClient]uint64
+	// pendingShared is set by session-owned producers. Attachment-owned
+	// invalidations retain only their exact target lease here.
+	pendingShared  bool
+	pendingTargets map[*attachedClient]*attachmentLease
+	// ackReadyFor is production's attachment-scoped ACK-window probe. The
+	// legacy options callback remains for coordinator-only tests.
+	ackReadyFor func(*attachedClient) bool
 	// ackBlocked retains the first rejected ACK-capacity probe until the
 	// matching consume or lifecycle closure releases that exact interval.
 	ackBlocked *ackBlockedSpan
@@ -161,9 +175,14 @@ func (c *renderCoordinator) reserveInvalidationForLeaseAtResizeEpoch(source *att
 	}
 	reservation := &renderInvalidationReservation{coordinator: c, invalidation: inv, onInvalidate: c.opts.onInvalidate}
 	c.metrics.invalidations.Add(1)
+	c.pendingGeneration++
+	if c.pendingGeneration == 0 {
+		c.pendingGeneration = 1
+	}
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
 	if !wasPending {
 		c.ackDeferred = false
+		c.ackDeferredFor = nil
 		c.deadlineDue = false
 		if c.opts.observer != nil {
 			c.queueMarked = true
@@ -173,11 +192,26 @@ func (c *renderCoordinator) reserveInvalidationForLeaseAtResizeEpoch(source *att
 		}
 	}
 	c.pending = true
+	if source == nil {
+		c.pendingShared = true
+		c.pendingTargets = nil
+	} else if !c.pendingShared {
+		if c.pendingTargets == nil {
+			c.pendingTargets = make(map[*attachedClient]*attachmentLease)
+		}
+		targetLease := lease
+		if targetLease == nil {
+			targetLease = c.leases[source]
+		}
+		if targetLease != nil {
+			c.pendingTargets[source] = targetLease
+		}
+	}
 	c.pendingReset = c.pendingReset || inv.reset
 	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
 	c.pendingPreview = c.pendingPreview || len(c.previewWakes) != 0
 	c.coalesced++
-	reservation.arm = !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
+	reservation.arm = !wasPending || !c.armed || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
 	if reservation.arm {
 		_, reservation.old = c.normalLane.replaceLocked()
 	}
@@ -250,8 +284,8 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 }
 
 // notifyAck reports that the client acknowledged an output state, releasing
-// at most one deadline/watchdog-deferred wake. It never bypasses an unexpired
-// normal or urgent deadline.
+// at most one attachment's blocked wake. It never bypasses an unexpired normal
+// or urgent deadline.
 func (c *renderCoordinator) notifyAck() { c.notifyAckForLease(nil) }
 
 // notifyAckForLease prevents an acknowledgement captured by an obsolete active
@@ -259,11 +293,16 @@ func (c *renderCoordinator) notifyAck() { c.notifyAckForLease(nil) }
 // reserved for coordinator-owned/direct test callers.
 func (c *renderCoordinator) notifyAckForLease(lease *attachmentLease) {
 	c.mu.Lock()
-	if lease != nil && !c.leaseCurrentLocked(lease, true) {
+	if lease != nil {
+		if !c.leaseCurrentLocked(lease, true) || !c.ackDeferredFor[lease.attachment] {
+			c.mu.Unlock()
+			return
+		}
+	} else if !c.ackDeferred && !c.deadlineDue {
 		c.mu.Unlock()
 		return
 	}
-	if (!c.ackDeferred && !c.deadlineDue) || !c.pending {
+	if !c.pending {
 		c.mu.Unlock()
 		return
 	}
@@ -541,6 +580,12 @@ func (c *renderCoordinator) installLeaseLocked(ac *attachedClient, ready bool) *
 	}
 	lease := &attachmentLease{attachment: ac, ready: ready, active: true}
 	c.leases[ac] = lease
+	if c.delivered != nil {
+		delete(c.delivered, ac)
+	}
+	if c.ackDeferredFor != nil {
+		delete(c.ackDeferredFor, ac)
+	}
 	return lease
 }
 
@@ -667,6 +712,8 @@ func (c *renderCoordinator) beginDetachLocked(ac *attachedClient) renderLifecycl
 		lease.active = false
 		delete(c.leases, ac)
 	}
+	delete(c.delivered, ac)
+	delete(c.ackDeferredFor, ac)
 	// Shared pending output belongs to the session, not the detached
 	// attachment. Keep it alive while another attachment remains registered.
 	if len(c.attachments) != 0 {
@@ -686,7 +733,11 @@ func (c *renderCoordinator) resetAttachmentLifecycleLocked() renderLifecycleClea
 	c.pendingReset = false
 	c.pendingUrgent = false
 	c.ackDeferred = false
+	c.ackDeferredFor = nil
+	c.delivered = nil
 	c.pendingPreview = false
+	c.pendingShared = false
+	c.pendingTargets = nil
 	c.coalesced = 0
 	_, timer := c.normalLane.replaceLocked()
 	c.armed = false
@@ -728,7 +779,11 @@ func (c *renderCoordinator) beginSessionTeardown() renderLifecycleCleanup {
 	_, resizeTimer := c.resizeLane.replaceLocked()
 	_, retryTimer := c.retryLane.replaceLocked()
 	c.ackDeferred = false
+	c.ackDeferredFor = nil
+	c.delivered = nil
 	c.pendingPreview = false
+	c.pendingShared = false
+	c.pendingTargets = nil
 	_, timer := c.normalLane.replaceLocked()
 	c.armed = false
 	workers := c.detachSyncTimersLocked()
@@ -804,35 +859,73 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	c.fireWithTimerToken(token, gen, watchdog, deadline)
 }
 
+// fireCurrentForLease makes the selected attachment's wake synchronous. The
+// handshake must not finish before that attachment's first output is emitted,
+// while other attachments remain independently asynchronous.
+func (c *renderCoordinator) fireCurrentForLease(lease *attachmentLease) {
+	c.mu.Lock()
+	gen := c.normalLane.generation
+	token := c.normalLane.token
+	c.mu.Unlock()
+	c.fireWithTimerTokenAndLease(token, gen, false, false, lease)
+}
+
 // fireFromTimer consumes a normal deadline using its exact immutable token.
 func (c *renderCoordinator) fireFromTimer(token *timerToken, watchdog, deadline bool) {
 	c.fireWithTimerToken(token, token.generation, watchdog, deadline)
 }
 
 func (c *renderCoordinator) fireWithTimerToken(token *timerToken, gen uint64, watchdog, deadline bool) {
-	// Readiness probes enter the attachment send path, which may in turn read
-	// coordinator metadata. Never hold c.mu across that external callback.
+	c.fireWithTimerTokenAndLease(token, gen, watchdog, deadline, nil)
+}
+
+func (c *renderCoordinator) attachmentAckReady(ac *attachedClient) bool {
+	if c.ackReadyFor != nil {
+		return c.ackReadyFor(ac)
+	}
+	if c.opts.ackReady != nil {
+		return c.opts.ackReady()
+	}
+	return true
+}
+
+func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen uint64, watchdog, deadline bool, syncLease *attachmentLease) {
+	// Readiness probes enter each attachment's send path, which may in turn
+	// read coordinator metadata. Never hold c.mu across those callbacks.
 	c.mu.Lock()
 	if !c.fireValidLocked(token, gen, watchdog) {
 		c.mu.Unlock()
 		return
 	}
-	// Welcome holds attachment.sendMu while its transport Send is in flight.
-	// Do not probe ACK capacity through that lock before this incarnation is
-	// ready: a deadline that expires during the handshake must complete and
-	// leave work pending, rather than wedging behind Welcome.
-	hasLiveAttachment, allAttachmentsReady := false, true
-	for _, lease := range c.leases {
-		if lease.active {
-			hasLiveAttachment = true
-			allAttachmentsReady = allAttachmentsReady && lease.ready
+	if c.pendingGeneration == 0 {
+		c.pendingGeneration = 1
+	}
+	leases := make(map[*attachedClient]*attachmentLease, len(c.leases))
+	for ac, lease := range c.leases {
+		if lease != nil && lease.active {
+			leases[ac] = lease
 		}
 	}
-	handshakePending := hasLiveAttachment && !allAttachmentsReady
-	previewOnly := !hasLiveAttachment && len(c.previewWakes) != 0
-	ackReady := c.opts.ackReady
+	previewOnly := len(leases) == 0 && len(c.previewWakes) != 0
+	legacyAckReady := c.opts.ackReady
 	c.mu.Unlock()
-	ready := !handshakePending && (previewOnly || ackReady == nil || ackReady())
+
+	ready := make(map[*attachmentLease]bool, len(leases))
+	if len(leases) != 0 {
+		for ac, lease := range leases {
+			// Welcome holds attachment.sendMu while its transport Send is in
+			// flight. Do not probe an incarnation before it is ready.
+			if lease.ready {
+				ready[lease] = c.attachmentAckReady(ac)
+			}
+		}
+	} else if !previewOnly && legacyAckReady != nil {
+		// Keep coordinator-only/headless callers compatible; production always
+		// has attachment leases and uses the per-attachment callback above.
+		ready[nil] = legacyAckReady()
+	} else {
+		ready[nil] = true
+	}
 
 	// The readiness callback can detach, replace, or publish a sync batch.
 	// syncGateOpenLocked retries predicate evaluation on every registry change
@@ -850,70 +943,171 @@ func (c *renderCoordinator) fireWithTimerToken(token *timerToken, gen uint64, wa
 		c.mu.Unlock()
 		return
 	}
-	// Shared invalidations are consumed once and dispatched as a shared wake.
-	// Capture each live lease so a park/resume of the same attachment object
-	// cannot let this already-dispatched wake paint the new connection.
+
+	// Re-snapshot after every external readiness probe. A replacement may have
+	// retired one of the leases we probed while the callback was unlocked.
+	leases = make(map[*attachedClient]*attachmentLease, len(c.leases))
+	for ac, lease := range c.leases {
+		if lease != nil && lease.active {
+			leases[ac] = lease
+		}
+	}
 	var attachmentLeases map[*attachedClient]*attachmentLease
-	if len(c.leases) != 0 {
-		attachmentLeases = make(map[*attachedClient]*attachmentLease, len(c.leases))
-		for ac, lease := range c.leases {
-			if lease != nil && lease.active {
+	if len(leases) != 0 {
+		attachmentLeases = make(map[*attachedClient]*attachmentLease, len(leases))
+	}
+	blockedByAck := false
+	allDelivered := true
+	if len(leases) != 0 {
+		for ac, lease := range leases {
+			if !c.pendingShared && len(c.pendingTargets) != 0 {
+				targetLease, targeted := c.pendingTargets[ac]
+				if !targeted || targetLease != lease {
+					continue
+				}
+			}
+			if c.delivered[ac] == c.pendingGeneration {
+				continue
+			}
+			allDelivered = false
+			if !lease.ready {
+				continue
+			}
+			canReady, probed := ready[lease]
+			if !probed {
+				continue
+			}
+			if canReady {
 				attachmentLeases[ac] = lease
+				if c.ackDeferredFor != nil {
+					delete(c.ackDeferredFor, ac)
+				}
+				continue
+			}
+			blockedByAck = true
+			if c.ackDeferredFor == nil {
+				c.ackDeferredFor = make(map[*attachedClient]bool)
+			}
+			c.ackDeferredFor[ac] = true
+		}
+	} else if !ready[nil] {
+		blockedByAck = true
+		allDelivered = false
+	}
+	legacyOutput := len(leases) == 0 && ready[nil] && (c.pendingShared || len(c.pendingTargets) == 0)
+	outputReady := len(attachmentLeases) != 0 || legacyOutput
+	if len(leases) != 0 {
+		for ac, lease := range leases {
+			if !c.pendingShared && len(c.pendingTargets) != 0 {
+				targetLease, targeted := c.pendingTargets[ac]
+				if !targeted || targetLease != lease {
+					continue
+				}
+			}
+			if c.delivered[ac] != c.pendingGeneration {
+				allDelivered = false
+				break
 			}
 		}
 	}
+	if len(leases) == 0 && legacyOutput {
+		allDelivered = true
+	}
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, attachmentLeases: attachmentLeases, watchdog: watchdog}
-	if !ready || handshakePending {
-		var ackStart *ackBlockedSpan
-		if !ready && deadline {
-			c.ackDeferred = true
-			if c.ackBlocked == nil && c.opts.observer != nil {
-				// Install the span while coordinator state is owned. Its Start
-				// publication runs unlocked, and its own handoff defers End until
-				// that call has returned.
-				ackStart = newACKBlockedSpan(c.opts.observer)
-				c.ackBlocked = ackStart
-			}
+	if syncLease != nil {
+		if selected, ok := attachmentLeases[syncLease.attachment]; ok && selected == syncLease {
+			w.lease = syncLease
 		}
-		preview, previews := c.takePendingPreviewsLocked()
+	}
+	previews := c.takePendingPreviewsLocked()
+	worker := c.detachNormalTimerLocked()
+	c.armed = false
+
+	var ackStart *ackBlockedSpan
+	if blockedByAck && deadline && c.ackBlocked == nil && c.opts.observer != nil {
+		// Install the span while coordinator state is owned. Its Start
+		// publication runs unlocked, and its own handoff defers End until that
+		// call has returned.
+		ackStart = newACKBlockedSpan(c.opts.observer)
+		c.ackBlocked = ackStart
+	}
+	c.ackDeferred = len(c.ackDeferredFor) != 0 || (len(leases) == 0 && blockedByAck && deadline)
+	if !outputReady && !allDelivered {
 		c.mu.Unlock()
+		stopDetachedTimer(worker)
 		if ackStart != nil {
 			ackStart.publishStart()
 		}
-		c.notifyPreviews(w, preview, previews)
+		c.notifyPreviews(w, previews)
 		return
 	}
-	preview, previews := c.takePendingPreviewsLocked()
-	c.metrics.wakes.Add(1)
-	c.metrics.coalesced.Add(uint64(w.coalesced))
-	if !w.urgent {
-		if w.coalesced > 1 {
-			c.outputPressure += w.coalesced - 1
-			if c.outputPressure > int((maxOutputRenderDeadline-minOutputRenderDeadline)/time.Millisecond) {
-				c.outputPressure = int((maxOutputRenderDeadline - minOutputRenderDeadline) / time.Millisecond)
+
+	if outputReady {
+		for ac := range attachmentLeases {
+			if c.delivered == nil {
+				c.delivered = make(map[*attachedClient]uint64)
 			}
-		} else if c.outputPressure > 0 {
-			c.outputPressure--
+			c.delivered[ac] = c.pendingGeneration
 		}
 	}
-	worker := c.detachNormalTimerLocked()
-	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
+	if len(leases) != 0 {
+		allDelivered = true
+		for ac, lease := range leases {
+			if !c.pendingShared && len(c.pendingTargets) != 0 {
+				targetLease, targeted := c.pendingTargets[ac]
+				if !targeted || targetLease != lease {
+					continue
+				}
+			}
+			if c.delivered[ac] != c.pendingGeneration {
+				allDelivered = false
+				break
+			}
+		}
+	}
+	complete := allDelivered || (len(leases) == 0 && outputReady)
+	if complete {
+		c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
+		c.ackDeferredFor = nil
+		c.delivered = nil
+		c.pendingShared = false
+		c.pendingTargets = nil
+	}
+	if outputReady {
+		c.metrics.wakes.Add(1)
+		c.metrics.coalesced.Add(uint64(w.coalesced))
+		if !w.urgent {
+			if w.coalesced > 1 {
+				c.outputPressure += w.coalesced - 1
+				if c.outputPressure > int((maxOutputRenderDeadline-minOutputRenderDeadline)/time.Millisecond) {
+					c.outputPressure = int((maxOutputRenderDeadline - minOutputRenderDeadline) / time.Millisecond)
+				}
+			} else if c.outputPressure > 0 {
+				c.outputPressure--
+			}
+		}
+	}
 	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
 	ackBlocked := c.ackBlocked
-	c.queueMarked, c.ackBlocked = false, nil
+	if complete {
+		c.queueMarked, c.ackBlocked = false, nil
+	}
 	wake := c.opts.wake
 	c.mu.Unlock()
 	stopDetachedTimer(worker)
-	if queueMarked && observer != nil {
+	if ackStart != nil {
+		ackStart.publishStart()
+	}
+	if complete && queueMarked && observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, true))
 	}
-	if ackBlocked != nil {
+	if complete && ackBlocked != nil {
 		ackBlocked.finish(true)
 	}
-	if wake != nil {
+	if outputReady && wake != nil {
 		wake(w)
 	}
-	c.notifyPreviews(w, preview, previews)
+	c.notifyPreviews(w, previews)
 }
 
 func (c *renderCoordinator) fireValidLocked(token *timerToken, gen uint64, watchdog bool) bool {
@@ -957,19 +1151,19 @@ func (c *renderCoordinator) syncGateOpenLocked() bool {
 
 // takePendingPreviewsLocked snapshots and consumes picker preview delivery
 // for this target generation. Preview callbacks are never ACK-gated.
-func (c *renderCoordinator) takePendingPreviewsLocked() (func(renderWake), []func(renderWake)) {
+func (c *renderCoordinator) takePendingPreviewsLocked() []func(renderWake) {
 	if !c.pendingPreview {
-		return nil, nil
+		return nil
 	}
 	c.pendingPreview = false
 	previews := make([]func(renderWake), 0, len(c.previewWakes))
 	for _, subscription := range c.previewWakes {
 		previews = append(previews, subscription.fn)
 	}
-	return nil, previews
+	return previews
 }
 
-func (c *renderCoordinator) notifyPreviews(w renderWake, _ func(renderWake), previews []func(renderWake)) {
+func (c *renderCoordinator) notifyPreviews(w renderWake, previews []func(renderWake)) {
 	for _, fn := range previews {
 		fn(w)
 	}

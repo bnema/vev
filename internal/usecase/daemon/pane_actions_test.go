@@ -635,6 +635,116 @@ func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	newPTY.AssertNotCalled(t, "Resize", mock.Anything)
 }
 
+func TestClosePaneRepaintFanoutRespectsAttachmentScope(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		attachment *attachedClient
+		wantFirst  bool
+		wantSecond bool
+	}{
+		{name: "nil attachment fans out", wantFirst: true, wantSecond: true},
+		{name: "non-nil attachment stays targeted"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+			tb := testAttachmentTab(sess)
+			closingPTY := portsmocks.NewMockPTY(t)
+			tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+			tb.panes["pane-2"] = newPane("pane-2", closingPTY, domain.Size{Cols: 20, Rows: 10})
+			tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
+			tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
+			oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+			closingPTY.EXPECT().Close().Return(nil).Once()
+
+			clients := make([]*attachedClient, 2)
+			sends := make([]chan ports.Frame, 2)
+			for i := range clients {
+				tr, sent := newCapturingTransport(t)
+				clients[i] = &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
+				clients[i].clientID[0] = byte(i + 1)
+				clients[i].initOverlays()
+				clients[i].setSession(sess)
+				require.True(t, sess.registerAttachment(clients[i]))
+				sends[i] = sent
+			}
+			if tt.name == "non-nil attachment stays targeted" {
+				tt.attachment = clients[0]
+				tt.wantFirst = true
+			}
+
+			require.NoError(t, d.closePane(sess, tb, "pane-2", tt.attachment, true))
+			for i, want := range []bool{tt.wantFirst, tt.wantSecond} {
+				select {
+				case frame := <-sends[i]:
+					require.True(t, want, "attachment %d unexpectedly repainted: %#v", i, frame)
+					require.Equal(t, ports.MsgOutput, frame.Type)
+				default:
+					require.False(t, want, "attachment %d was not repainted", i)
+				}
+			}
+		})
+	}
+}
+
+func TestFinalPaneReapClearsCopyModeForEveryAttachment(t *testing.T) {
+	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+	tb := testAttachmentTab(sess)
+	other := newTab(nil, domain.Size{Cols: 41, Rows: 10})
+	sess.tabs = append(sess.tabs, other)
+	d.sessions[sess.id] = sess
+	pane := tb.focusedPane()
+	publishTiledPaneOwners(sess, tb)
+	oldPTY.EXPECT().Close().Return(nil).Once()
+
+	for i := range 2 {
+		tr, _ := newCapturingTransport(t)
+		ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
+		ac.clientID[0] = byte(i + 1)
+		ac.initOverlays()
+		ac.setSession(sess)
+		require.True(t, sess.registerAttachment(ac))
+		ac.overlays.copyMode = &scopy.Mode{}
+		ac.overlays.copyPane = pane
+	}
+
+	d.reapPaneOwner(pane)
+
+	require.Len(t, sess.tabs, 1)
+	for _, ac := range sess.snapshotAttachments() {
+		require.Nil(t, ac.overlays.copyMode, "final-pane reap left copy mode active for attachment %d", ac.clientID[0])
+		require.Nil(t, ac.overlays.copyPane, "final-pane reap left copy pane active for attachment %d", ac.clientID[0])
+	}
+}
+
+func TestClosePaneActionDoesNotReenterDispatchBoundary(t *testing.T) {
+	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+	tb := testAttachmentTab(sess)
+	closingPTY := portsmocks.NewMockPTY(t)
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+	tb.panes["pane-2"] = newPane("pane-2", closingPTY, domain.Size{Cols: 20, Rows: 10})
+	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
+	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
+	d.sessions[sess.id] = sess
+	oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+	closingPTY.EXPECT().Close().Return(nil).Once()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sess.runMutation(func() error {
+			return (daemonActions{d: d}).Run(daemonActionRequest{
+				kind:   daemonActionClosePane,
+				target: daemonActionTarget{session: sess, tab: tb, pane: tb.panes["pane-2"]},
+			})
+		})
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("close pane action re-entered dispatch boundary")
+	}
+}
+
 func TestCloseFocusedPaneRemovesPaneReflowsAndIsIdempotent(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 	tb := testAttachmentTab(sess)

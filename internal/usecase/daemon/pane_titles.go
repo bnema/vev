@@ -137,32 +137,43 @@ func (d *Daemon) paneTitleFallback() string {
 	return fallback
 }
 
-func (d *Daemon) refreshPaneTitle(sess *session, id layout.PaneID) string {
-	return d.refreshPaneTitleCached(sess, id, false)
+func (d *Daemon) refreshPaneTitle(sess *session, id layout.PaneID, owningTab ...*tab) string {
+	return d.refreshPaneTitleCached(sess, id, false, owningTab...)
 }
 
-func (d *Daemon) refreshPaneTitleOnFocus(sess *session, id layout.PaneID) string {
-	return d.refreshPaneTitleCached(sess, id, true)
+func (d *Daemon) refreshPaneTitleOnFocus(sess *session, id layout.PaneID, owningTab ...*tab) string {
+	return d.refreshPaneTitleCached(sess, id, true, owningTab...)
 }
 
-// refreshPaneTitleCached retains the ID lookup used by normal layout panes.
-func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force bool) string {
+// refreshPaneTitleCached resolves the pane in its owning tab. A caller with a
+// current tab supplies it explicitly; direct callers refresh every matching
+// tab because layout pane IDs are local to a tab and may repeat.
+func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force bool, owningTab ...*tab) string {
 	fallback := d.paneTitleFallback()
 	if sess == nil {
 		return fallback
 	}
-	tb := sess.firstTab()
-	if tb == nil {
-		return fallback
+	tabs := owningTab
+	if len(tabs) == 0 || tabs[0] == nil {
+		sess.mu.Lock()
+		tabs = append([]*tab(nil), sess.tabs...)
+		sess.mu.Unlock()
 	}
-	tb.mu.Lock()
-	p := tb.panes[id]
-	tb.mu.Unlock()
-	if p == nil {
-		return fallback
+	title := fallback
+	for _, tb := range tabs {
+		if tb == nil {
+			continue
+		}
+		tb.mu.Lock()
+		p := tb.panes[id]
+		tb.mu.Unlock()
+		if p == nil {
+			continue
+		}
+		p.setDisplayFallback(fallback)
+		title = d.refreshPaneDisplayTitle(sess, p, force)
 	}
-	p.setDisplayFallback(fallback)
-	return d.refreshPaneDisplayTitle(sess, p, force)
+	return title
 }
 
 // refreshPaneDisplayTitle refreshes only the process-name portion of p's

@@ -378,6 +378,37 @@ func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
 
 // --- ACK gating ----------------------------------------------------------------
 
+func TestRenderCoordinatorAckReadinessIsAttachmentScoped(t *testing.T) {
+	slow, healthy := &attachedClient{}, &attachedClient{}
+	var slowReady atomic.Bool
+	slowReady.Store(false)
+	wakes := make(chan renderWake, 2)
+	rc := newRenderCoordinator(renderCoordinatorOptions{
+		wake: func(w renderWake) { wakes <- w },
+	})
+	rc.ackReadyFor = func(ac *attachedClient) bool { return ac == healthy || slowReady.Load() }
+	rc.attach(slow)
+	rc.attach(healthy)
+	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
+	rc.fireCurrent(false)
+
+	wake := awaitTestValue(t, wakes, "healthy attachment did not receive an independent wake")
+	require.Contains(t, wake.attachmentLeases, healthy)
+	_, slowSelected := wake.attachmentLeases[slow]
+	require.False(t, slowSelected)
+	rc.mu.Lock()
+	require.True(t, rc.pending, "slow attachment must retain the shared mutation until its ACK window opens")
+	rc.mu.Unlock()
+
+	slowReady.Store(true)
+	rc.notifyAckForLease(rc.attachmentLease(slow))
+	wake = awaitTestValue(t, wakes, "slow attachment did not receive its deferred wake")
+	require.Contains(t, wake.attachmentLeases, slow)
+	rc.mu.Lock()
+	require.False(t, rc.pending, "the shared mutation must clear after every attachment catches up")
+	rc.mu.Unlock()
+}
+
 func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T) {
 	owner := &attachedClient{}
 	wakes := make(chan renderWake, 1)
@@ -924,7 +955,6 @@ func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
 		teardown func(rc *renderCoordinator, owner *attachedClient)
 	}{
 		{"detach", func(rc *renderCoordinator, owner *attachedClient) { rc.noteDetach(owner) }},
-		{"detach", func(rc *renderCoordinator, owner *attachedClient) { rc.noteDetach(owner) }},
 		{"session teardown", func(rc *renderCoordinator, _ *attachedClient) { rc.beginSessionTeardown().finish() }},
 	}
 	for _, tc := range cases {
@@ -1356,7 +1386,6 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 			name string
 			run  func(*renderCoordinator, *attachedClient)
 		}{
-			{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
 			{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
 		} {
 			t.Run(transition.name, func(t *testing.T) {

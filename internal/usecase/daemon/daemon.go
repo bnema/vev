@@ -163,11 +163,13 @@ type Daemon struct {
 	// afterAttachmentTransitionCoordinatorsLocked is a deterministic lock-order
 	// seam used by transition validation tests.
 	afterAttachmentTransitionCoordinatorsLocked func()
-	// afterMoveLifecycleReserved and afterMovePaneSourceSnapshot are test-only
-	// seams. They run before role/fence work and after the pre-fence source
+	// beforeMoveDispatch, afterMoveLifecycleReserved, and
+	// afterMovePaneSourceSnapshot are test-only seams. They run before dispatch
+	// admission, after lifecycle reservation, and after the pre-fence source
 	// attachment snapshot respectively. beforeMovePaneCommit runs inside the
 	// non-failing publication section. None is set in production, and none may
 	// perform external work while locks are held.
+	beforeMoveDispatch                        func()
 	afterMoveLifecycleReserved                func()
 	afterMoveLifecycleGateBeforeTeardownLocks func()
 	afterMovePaneSourceSnapshot               func()

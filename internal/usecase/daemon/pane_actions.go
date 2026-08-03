@@ -241,6 +241,11 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		return true
 	}
 	sess, tb := owner.session, owner.tab
+	// EOF teardown is a shared mutation just like an explicit close. Hold the
+	// dispatch boundary before any session/tab lock, then use the locked close
+	// helpers below without re-entering it.
+	sess.dispatchMu.Lock()
+	defer sess.dispatchMu.Unlock()
 	sess.mu.Lock()
 	ownedTab := slices.Contains(sess.tabs, tb)
 	if p.owner.Load() != owner {
@@ -285,11 +290,16 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	p.clearOwnerLocked()
 	p.mu.Unlock()
 	tb.mu.Unlock()
+	sess.invalidateViewsLocked()
 	sess.mu.Unlock()
-	sess.repairAttachmentViews()
 
 	if finalPane {
-		_ = d.closeTab(sess, tb, true)
+		for _, ac := range attachments {
+			if ac.overlays != nil {
+				ac.overlays.clearCopyModeForPane(p)
+			}
+		}
+		_ = d.closeTabLocked(sess, tb, true)
 		return true
 	}
 	d.applyTabLayout(sess, tb)
@@ -310,7 +320,25 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	return true
 }
 
+// closePane is the public close boundary for callers that are not already
+// inside session.runMutation. Mutation dispatchers use closePaneLocked.
 func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool) error {
+	if sess == nil {
+		return layout.ErrNotFound
+	}
+	sess.dispatchMu.Lock()
+	defer sess.dispatchMu.Unlock()
+	return d.closePaneLocked(sess, tb, id, ac, repaint)
+}
+
+// closePaneLocked requires sess.dispatchMu before entering any architecture
+// lock. It is used by existing runMutation callers to avoid nested dispatch
+// locking.
+func (d *Daemon) closePaneLocked(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool) error {
+	return d.closePaneLockedWithEffect(sess, tb, id, ac, repaint, nil)
+}
+
+func (d *Daemon) closePaneLockedWithEffect(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool, effect *attachmentEffectTicket) error {
 	if tb == nil {
 		return layout.ErrNotFound
 	}
@@ -330,7 +358,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 			}
 			viewer.pruneCaptureFrames(p)
 		}
-		return d.closeTab(sess, tb, repaint)
+		return d.closeTabLockedWithEffect(sess, tb, repaint, effect)
 	}
 	if err := tb.tree.Close(id); err != nil {
 		tb.mu.Unlock()
@@ -359,6 +387,10 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	if repaint {
 		if ac != nil {
 			d.invalidateRender(sess, ac, true, "pane_actions.go")
+		} else {
+			for _, viewer := range attachments {
+				d.invalidateRender(sess, viewer, true, "pane_actions.go")
+			}
 		}
 	}
 	return nil
@@ -459,7 +491,7 @@ func (d *Daemon) finishPaneFocusForClient(sess *session, ac *attachedClient, tb 
 	if moved {
 		d.exitCopyMode(ac)
 		if hasPlacement && pl.InStack {
-			d.refreshPaneTitleOnFocus(sess, newFocus)
+			d.refreshPaneTitleOnFocus(sess, newFocus, tb)
 		}
 	}
 	d.invalidateRender(sess, ac, true, producer)

@@ -42,6 +42,20 @@ func TestResolveOverflowObeysAxisConfigurationAndWalls(t *testing.T) {
 	}
 }
 
+func TestPrepareTabOverflowRejectsMissingExpectedSource(t *testing.T) {
+	d, sess, _, _ := newManualSessionWithPTYs(t, nil, nil)
+	target := sess.tabs[1]
+	target.mu.Lock()
+	target.size = domain.Size{Cols: 41, Rows: 10}
+	target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
+	target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+	target.mu.Unlock()
+
+	missing := &tab{stableID: "missing-source"}
+	_, ok := d.prepareTabOverflowForAttachment(sess, nil, missing, layout.Right, domain.Rect{Width: 20, Height: 10}, 1)
+	require.False(t, ok)
+}
+
 func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 	tests := []struct {
 		name       string

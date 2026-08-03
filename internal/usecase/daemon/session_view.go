@@ -93,9 +93,6 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		view.tabs = append(view.tabs, entry)
 	}
 	s.mu.Unlock()
-	if !view.attached {
-		view.attached = len(s.snapshotAttachmentViews()) != 0
-	}
 	return view
 }
 

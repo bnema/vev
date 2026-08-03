@@ -1550,7 +1550,7 @@ func TestPickerAttachmentEffectDeleteRemovesSelectedSessionAndRefreshes(t *testi
 	current.mu.Lock()
 	current.registerAttachmentLocked(ac)
 	current.mu.Unlock()
-	require.NotNil(t, d.attachCoordinator(current, nil, ac, true))
+	require.NotNil(t, d.attachCoordinator(current, ac, true))
 
 	d.enterPicker(current, ac)
 	d.handlePickerInput(ac, []byte("k"))

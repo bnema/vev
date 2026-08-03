@@ -500,6 +500,7 @@ type paletteExec struct {
 }
 
 func (e paletteExec) runAction(request daemonActionRequest) error {
+	request.effect = e.effect
 	if request.target.session == nil {
 		request.target = resolveDaemonActionTargetForAttachment(e.sess, e.ac)
 	}

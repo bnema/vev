@@ -70,7 +70,7 @@ func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attach
 }
 
 // current validates every immutable identity captured by the token. Membership
-// is the sole authority; there is no owner, replacement, or compatibility role.
+// is the sole authority; there is no owner, replacement, or compatibility distinction.
 func (t attachmentConnectionToken) current() bool {
 	return t.sess != nil && t.ac != nil &&
 		t.ac.connectionGeneration.Load() == t.generation &&
@@ -101,7 +101,7 @@ func (t attachmentConnectionToken) attachmentEffectCurrent() bool {
 }
 
 func beginAttachmentLeaseEffect(sess attachmentSession, ac *attachedClient, lease *attachmentLease) (*attachmentEffectTicket, bool) {
-	if sess == nil || ac == nil || lease == nil {
+	if sess == nil || ac == nil || lease == nil || lease.attachment != ac {
 		return nil, false
 	}
 	token := attachmentToken(sess, ac, ac.transport())

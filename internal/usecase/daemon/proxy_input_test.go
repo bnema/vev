@@ -516,7 +516,7 @@ func TestProxyAttachedCommandRejectsTargetsAndExecutesExactActiveSession(t *test
 	sess.tabs = append(sess.tabs, second)
 	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
-	d.attachCoordinator(sess, nil, ac, true)
+	d.attachCoordinator(sess, ac, true)
 
 	send := func(request ports.CommandRequest) ports.CommandResult {
 		payload, err := ports.MarshalCommandRequest(request)
@@ -620,7 +620,7 @@ func TestProxyPickerSelectionDialsOutsideLocksAndRevalidatesExactRoleAndKey(t *t
 	dialer.EXPECT().Dial(mock.Anything).Return(transport, nil).Once()
 	d.remoteDialerFactory = factory
 	d.remoteTransportMode = ports.RemoteTransportUDP
-	d.attachCoordinator(source, nil, ac, true)
+	d.attachCoordinator(source, ac, true)
 
 	token := source.attachmentToken(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
@@ -656,7 +656,7 @@ func TestProxyPickerSelectionDialsOutsideLocksAndRevalidatesExactRoleAndKey(t *t
 
 func TestRemotePickerEnterRoutesStructuredKeyThroughProxyOwnership(t *testing.T) {
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	d.attachCoordinator(local, nil, ac, true)
+	d.attachCoordinator(local, ac, true)
 	key := domain.RemoteSessionKey{Host: "arch", Name: "enter"}
 	transport := newProxyTestTransport()
 	transport.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
@@ -803,7 +803,7 @@ func TestRemotePickerRejectsReplacedLocalTab(t *testing.T) {
 
 func TestRemotePickerCanReselectWarmProxyAfterReturningLocal(t *testing.T) {
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	d.attachCoordinator(local, nil, ac, true)
+	d.attachCoordinator(local, ac, true)
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()
 	remote.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
@@ -895,7 +895,7 @@ func TestConnectionLoopRetriesRoleResolutionAcrossHandoff(t *testing.T) {
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	client := newProxyTestTransport()
 	ac.replaceTransport(client)
-	d.attachCoordinator(local, nil, ac, true)
+	d.attachCoordinator(local, ac, true)
 
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()
@@ -934,7 +934,7 @@ func TestConnectionLoopCleansCurrentProxyAfterHandoffReceiveError(t *testing.T) 
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	client := newProxyTestTransport()
 	ac.replaceTransport(client)
-	d.attachCoordinator(local, nil, ac, true)
+	d.attachCoordinator(local, ac, true)
 
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()
@@ -991,7 +991,7 @@ func TestConnectionLoopFollowsClientFromLocalToRemoteProxy(t *testing.T) {
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	client := newProxyTestTransport()
 	ac.replaceTransport(client)
-	d.attachCoordinator(local, nil, ac, true)
+	d.attachCoordinator(local, ac, true)
 
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	remote := newProxyTestTransport()

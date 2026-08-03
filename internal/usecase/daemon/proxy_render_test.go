@@ -101,7 +101,7 @@ func TestProxyRenderPaintsAfterLocalToRemoteHandoff(t *testing.T) {
 
 func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 	d, local, ac, sent := newManualSessionWithPTYs(t, newQuietPTY())
-	localCoordinator := d.attachCoordinator(local, nil, ac, true)
+	localCoordinator := d.attachCoordinator(local, ac, true)
 	localToken := attachmentToken(local, ac, ac.transport())
 	localToken.lease = localCoordinator.attachmentLease(ac)
 

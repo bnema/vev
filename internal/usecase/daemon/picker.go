@@ -423,7 +423,7 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if targetSess == ac.currentAttachmentSession() {
 		return
 	}
-	rc := d.attachCoordinator(targetSess, nil, nil, false)
+	rc := d.attachCoordinator(targetSess, nil, false)
 	rc.subscribePreviewFor(ac, generation, func(renderWake) {
 		if pickerPreviewCurrent(ac, targetSess, next, generation) {
 			if owner := ac.currentAttachmentSession(); owner != nil {
@@ -640,7 +640,7 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnecti
 		activateTargetTab:       true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
 	})
 	if err != nil {
-		// Losing the exact source role is a benign stale action, not a notice for
+		// Losing the exact source attachment is a benign stale action, not a notice for
 		// whichever attachment replaced the initiator.
 		if !token.attachmentCurrent() {
 			return nil
@@ -692,8 +692,8 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 }
 
 // switchToRemoteTargetForAttachment performs dialing after the initiating effect has
-// ended and without role or architecture locks. transitionAttachment then
-// freezes and revalidates the exact source role and exact structured-key proxy
+// ended and without attachment-effect or architecture locks. transitionAttachment then
+// freezes and revalidates the exact source attachment and exact structured-key proxy
 // before publishing ownership.
 func (d *Daemon) switchToRemoteTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, action string) error {
 	if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" {
@@ -1085,15 +1085,14 @@ func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) 
 
 // stealClientForTarget is retained for direct-ID callers and tests. Named
 // targets must use switchToTarget so resolution and commit share d.mu.
-func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
+func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) {
 	d.mu.Lock()
 	_, transition, switched := d.switchToActiveTargetLocked(from, ac, targetSess, target, sessionHandoffGuard{}, nil, "")
 	d.mu.Unlock()
 	if !switched {
-		return nil
+		return
 	}
 	d.deferAttachmentTransitionCleanups(transition)
-	return nil
 }
 
 // resumeStoppedAndSwitch is retained for direct callers and tests. It resolves

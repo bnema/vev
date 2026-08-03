@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/picker"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -149,6 +150,53 @@ func TestKillAllEmptyDaemonSignalsShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("kill all on empty daemon did not signal shutdown")
 	}
+}
+
+func TestCreateTabForAttachmentUsesRequestingAttachmentViewportAndTheme(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	firstTransport := &closeTrackingTransport{}
+	sess, first, err := d.route(ports.Hello{
+		Version:  ports.ProtocolVersion,
+		Intent:   ports.IntentNew,
+		Name:     "work",
+		ClientID: [16]byte{1},
+		Size:     domain.Size{Cols: 80, Rows: 24},
+	}, firstTransport)
+	require.NoError(t, err)
+	secondTransport := &closeTrackingTransport{}
+	_, second, err := d.route(ports.Hello{
+		Version:  ports.ProtocolVersion,
+		Intent:   ports.IntentAttach,
+		Name:     "work",
+		ClientID: [16]byte{2},
+		Proxied:  true,
+		Size:     domain.Size{Cols: 80, Rows: 24},
+	}, secondTransport)
+	require.NoError(t, err)
+	require.NotSame(t, first, second)
+
+	requesterTheme := themeui.Theme{
+		Foreground: themeui.BuiltinLight.Foreground,
+		Background: themeui.BuiltinLight.Background,
+		HasFG:      true,
+		HasBG:      true,
+		Known:      true,
+	}
+	second.setClientTheme(requesterTheme)
+	require.NoError(t, d.createTabForAttachment(sess, second, domain.Size{Cols: 80, Rows: 24}))
+
+	tb := sess.tabs[len(sess.tabs)-1]
+	tb.mu.Lock()
+	gotSize := tb.size
+	pane := tb.focusedPane()
+	tb.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, gotSize, "proxied sizing must come from the requesting attachment")
+	assertPaneDefaultColors(t, pane, requesterTheme.Foreground, requesterTheme.Background)
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	d.sessWg.Wait()
 }
 
 func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {

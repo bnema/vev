@@ -29,8 +29,9 @@ func detachMoveAttachmentsLocked(sess *session, transports map[*attachedClient]t
 	if sess == nil || len(sess.attachments) == 0 {
 		return nil
 	}
-	retired := make([]detachedAttachmentSnapshot, 0, len(sess.attachments))
-	for ac := range sess.attachments {
+	attachments := sess.snapshotAttachmentsLocked()
+	retired := make([]detachedAttachmentSnapshot, 0, len(attachments))
+	for _, ac := range attachments {
 		retired = append(retired, detachedAttachmentSnapshot{ac: ac, transport: transports[ac]})
 		ac.connectionGeneration.Add(1)
 		ac.setSession(nil)

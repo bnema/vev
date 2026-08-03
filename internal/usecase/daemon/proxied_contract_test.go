@@ -205,7 +205,7 @@ func TestProxyResizeUpdatesAttachmentViewport(t *testing.T) {
 func TestProxiedTransactionalResizeUsesReceivedContentGeometry(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := d.attachCoordinator(sess, ac, true)
 	lease := rc.attachmentLease(ac)
 	require.NotNil(t, lease)
 
@@ -262,7 +262,7 @@ func TestProxiedModeCannotChangeAcrossResume(t *testing.T) {
 func TestOutputResetRebasesFullWindowAndSchedulesBaseZeroPaint(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := d.attachCoordinator(sess, ac, true)
 	lease := rc.attachmentLease(ac)
 	require.NotNil(t, lease)
 
@@ -304,7 +304,7 @@ func TestOutputResetRequiresProxiedActiveRoleAndStrictPayload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 			ac.proxied = tt.proxied
-			d.attachCoordinator(sess, nil, ac, true)
+			d.attachCoordinator(sess, ac, true)
 			ac.sendMu.Lock()
 			ac.output.next, ac.output.acked = 4, 0
 			ac.sendMu.Unlock()
@@ -325,7 +325,7 @@ func TestOutputResetRequiresProxiedActiveRoleAndStrictPayload(t *testing.T) {
 func TestOutputResetRevalidatesTransportUnderSendLock(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	d.attachCoordinator(sess, nil, ac, true)
+	d.attachCoordinator(sess, ac, true)
 	ac.sendMu.Lock()
 	ac.output.next, ac.output.acked = 4, 0
 	ac.sendMu.Unlock()

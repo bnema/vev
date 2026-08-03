@@ -232,7 +232,7 @@ func (d *Daemon) focusDirProxied(sess *session, ac *attachedClient, dir layout.D
 	if target.pane != nil {
 		oldFocus = target.pane.id
 	}
-	span, err := d.focusDirAt(sess, target.tab, target.pane, dir)
+	span, err := d.focusDirAt(sess, target.tab, target.pane, dir, ac)
 	if err == nil {
 		if ac != nil {
 			d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "proxy_input.go")

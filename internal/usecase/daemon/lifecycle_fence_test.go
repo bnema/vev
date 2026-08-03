@@ -15,8 +15,9 @@ func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation
 	ac := &attachedClient{tr: transport}
 	ac.setSession(source)
 	source.mu.Lock()
-	require.True(t, source.registerAttachmentLocked(ac))
+	registered := source.registerAttachmentLocked(ac)
 	source.mu.Unlock()
+	require.True(t, registered)
 	sourceCoordinator := newRenderCoordinator(renderCoordinatorOptions{})
 	source.installRenderCoordinator(sourceCoordinator)
 	sourceCoordinator.attach(ac)
@@ -26,10 +27,11 @@ func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation
 	d.sessions[target.id] = target
 
 	checked := false
+	coordinatorUnlocked := false
 	d.afterAttachmentTransitionCoordinatorsLocked = func() {
-		if sourceCoordinator.mu.TryLock() {
+		coordinatorUnlocked = sourceCoordinator.mu.TryLock()
+		if coordinatorUnlocked {
 			sourceCoordinator.mu.Unlock()
-			t.Fatalf("source coordinator was not held during lease validation")
 		}
 		checked = true
 	}
@@ -45,10 +47,13 @@ func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation
 	unlockSessions()
 	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
+	if publication != nil {
+		publication.unlockCoordinators()
+	}
 	require.NoError(t, err)
+	require.False(t, coordinatorUnlocked, "source coordinator was not held during lease validation")
 	require.True(t, checked)
 	require.NotNil(t, publication)
-	publication.unlockCoordinators()
 }
 
 func TestAttachmentTokenRevalidatesTheCapturedTransportIncarnation(t *testing.T) {
@@ -58,8 +63,9 @@ func TestAttachmentTokenRevalidatesTheCapturedTransportIncarnation(t *testing.T)
 	sess := &session{sessionCore: sessionCore{id: domain.SessionID("work")}}
 	ac.setSession(sess)
 	sess.mu.Lock()
-	require.True(t, sess.registerAttachmentLocked(ac))
+	registered := sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
+	require.True(t, registered)
 
 	captured := make(chan struct{})
 	release := make(chan struct{})
