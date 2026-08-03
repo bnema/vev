@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -120,7 +121,7 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
-	hello := ports.Hello{Version: ports.ProtocolVersion + 1, Intent: ports.IntentAttach, Name: "work"}
+	hello := ports.Hello{Version: ports.ProtocolVersion + 1, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}
 	go func() {
 		f, err := server.Recv()
 		if err != nil {
