@@ -1278,7 +1278,7 @@ func TestCopyEnterAllocationBudget(t *testing.T) {
 			}
 
 			allocs := testing.AllocsPerRun(20, run)
-			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10%% of the attachment-aware allocation baseline")
+			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10% of the attachment-aware allocation baseline")
 		})
 	}
 }
