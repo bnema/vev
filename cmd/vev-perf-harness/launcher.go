@@ -332,7 +332,7 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, fail(err)
 	}
-	if len(role.Args) != 2 || (role.Args[0] != "_stdio" && role.Args[0] != "_udp-proxy") {
+	if len(role.Args) != 1 || (role.Args[0] != "_stdio" && role.Args[0] != "_udp-proxy") {
 		return nil, fail(fmt.Errorf("unsupported public peer command %q", role.Args))
 	}
 	route := peerRoute{mapping: m, command: role}
@@ -373,27 +373,27 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 set -eu
 case "$*" in
   *"_stdio"*)
-    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[12]q VEV_PERF_RUN=%[13]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio %[6]q
+    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[11]q VEV_PERF_RUN=%[12]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio
     ;;
   *"_udp-bootstrap"*)
-    rm -f %[7]q %[8]q %[9]q
-    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[12]q VEV_PERF_RUN=%[13]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _udp-proxy %[6]q >%[7]q 2>%[8]q &
+    rm -f %[6]q %[7]q %[8]q
+    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[11]q VEV_PERF_RUN=%[12]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _udp-proxy >%[6]q 2>%[7]q &
     peer=$!
-    printf '%%s\n' "$peer" > %[11]q
+    printf '%%s\n' "$peer" > %[10]q
     i=0
-    while [ ! -s %[7]q ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
-    test -s %[7]q
-    line=$(head -n 1 %[7]q)
-    printf '%%s\n' "$line" > %[9]q
+    while [ ! -s %[6]q ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
+    test -s %[6]q
+    line=$(head -n 1 %[6]q)
+    printf '%%s\n' "$line" > %[8]q
     set -- $line
     test "$1" = VEV-UDP
     test -n "$3"
-    printf 'VEV-UDP %%s %%s\n' %[10]d "$3"
+    printf 'VEV-UDP %%s %%s\n' %[9]d "$3"
     exit 0
     ;;
   *) echo 'vev harness ssh seam rejected non-vev command' >&2; exit 64 ;;
 esac
-`, m.TracePath, m.ProcessID, runtimeDir, filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, target, netemPort, route.pidPath, m.Scenario, m.Run)
+`, m.TracePath, m.ProcessID, runtimeDir, filepath.Join(runDir, "state"), l.bin, ready, stderr, target, netemPort, route.pidPath, m.Scenario, m.Run)
 	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
 		return nil, closeNetem(err)
 	}

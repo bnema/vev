@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -290,8 +292,15 @@ func TestRunCmdRejectsTooManyArgumentsBeforeDialing(t *testing.T) {
 }
 
 func TestRunCmdTimesOutPendingRequest(t *testing.T) {
-	timer := &cmdTestTimer{ch: make(chan time.Time, 1)}
-	clock := &cmdTestClock{timer: timer}
+	timerCh := make(chan time.Time, 1)
+	timer := portsmocks.NewMockTimer(t)
+	timer.EXPECT().C().Return(timerCh).Once()
+	timer.EXPECT().Stop().Return(true).Once()
+	delayCh := make(chan time.Duration, 1)
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().NewTimer(mock.Anything).Run(func(delay time.Duration) {
+		delayCh <- delay
+	}).Return(timer).Once()
 	recvStarted := make(chan struct{})
 	recvGate := make(chan struct{})
 	transport := &cmdTestTransport{recvStarted: recvStarted, recvGate: recvGate}
@@ -305,7 +314,10 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 		})
 	}()
 	<-recvStarted
-	timer.ch <- time.Time{}
+	if delay := <-delayCh; delay != daemon.CommandRequestTimeout {
+		t.Fatalf("command timer delay = %s, want %s", delay, daemon.CommandRequestTimeout)
+	}
+	timerCh <- time.Time{}
 	err := <-done
 	close(recvGate)
 	if ExitCode(err) != 3 || !errors.Is(err, daemon.ErrCommandRequestTimeout) {
@@ -317,20 +329,22 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 	}
 }
 
-type cmdTestTimer struct{ ch chan time.Time }
-
-func (t *cmdTestTimer) C() <-chan time.Time      { return t.ch }
-func (t *cmdTestTimer) Reset(time.Duration) bool { return false }
-func (t *cmdTestTimer) Stop() bool               { return true }
-
-type cmdTestClock struct{ timer *cmdTestTimer }
-
-func (c *cmdTestClock) Now() time.Time { return time.Time{} }
-func (c *cmdTestClock) NewTimer(delay time.Duration) ports.Timer {
-	if delay != daemon.CommandRequestTimeout {
-		panic("unexpected command timeout")
+func TestRunCmdZeroRequestIDReplyReturnsDaemonError(t *testing.T) {
+	const want = "daemon error"
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{
+		Code: ports.ErrInternal, Text: want,
+	})}}
+	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
+		stdout: io.Discard,
+		getenv: func(string) string { return "" },
+		dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+	})
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want daemon error %q", err, want)
 	}
-	return c.timer
+	if errors.Is(err, daemon.ErrCommandRequestTimeout) {
+		t.Fatalf("error = %v, want daemon error instead of timeout", err)
+	}
 }
 
 func TestRunCmdDoesNotAutostartAndClassifiesDialFailure(t *testing.T) {
@@ -416,16 +430,6 @@ func (t *cmdTestTransport) Recv() (ports.Frame, error) {
 	}
 	if t.recvGate != nil {
 		<-t.recvGate
-	}
-	if t.recv.Type == ports.MsgCommandResult && len(t.sent) != 0 {
-		result, err := ports.UnmarshalCommandResult(t.recv.Payload)
-		if err == nil && result.RequestID == 0 {
-			request, err := ports.UnmarshalCommandRequest(t.sent[0].Payload)
-			if err == nil {
-				result.RequestID = request.RequestID
-				return ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(result)}, t.recvErr
-			}
-		}
 	}
 	return t.recv, t.recvErr
 }

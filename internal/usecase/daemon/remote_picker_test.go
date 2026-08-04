@@ -444,6 +444,53 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	d.mu.Unlock()
 }
 
+func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "running"}},
+	}})
+	const sendErr = "remote attach send failed"
+	tr := &remotePickerSendErrorTransport{err: errors.New(sendErr)}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac.initOverlays()
+	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	sess := &session{sessionCore: sessionCore{id: "local", name: "local", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}}
+	publishTiledPaneOwners(sess, tb)
+	ac.setSession(sess)
+	d.sessions[sess.id] = sess
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
+	ac.overlays.pickerGeneration++
+	ac.overlays.pickerMu.Unlock()
+
+	gone := make(chan struct{})
+	d.afterClientGoneDetach = func() { close(gone) }
+	token := sess.attachmentToken(ac, tr)
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	token.effect = effect
+	defer effect.End()
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
+	target := picker.Target{Session: key.ID(), RemoteKey: &key}
+	err := d.sendRemoteAttachTargetForAttachment(token, target, key, sessionHandoffGuard{closePicker: true}, "picker-select")
+	require.EqualError(t, err, sendErr)
+	require.True(t, ac.overlays.pickerActive(), "failed control send must leave the picker open")
+	select {
+	case <-gone:
+		t.Fatal("failed control send reached clientGoneForAttachment")
+	default:
+	}
+	require.Same(t, sess, ac.currentAttachmentSession())
+}
+
+type remotePickerSendErrorTransport struct {
+	err error
+}
+
+func (t *remotePickerSendErrorTransport) Send(ports.Frame) error   { return t.err }
+func (*remotePickerSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*remotePickerSendErrorTransport) Close() error               { return nil }
+
 func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID) (*session, *attachedClient, chan ports.Frame) {
 	t.Helper()
 	tr, sends := newCapturingTransport(t)

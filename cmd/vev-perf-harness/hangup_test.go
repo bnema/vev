@@ -185,9 +185,8 @@ func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 		case "daemon":
 			command = roleCommand{Args: []string{"--daemon"}}
 		case "ssh_stdio_peer":
-			// An empty remote session requests an ephemeral session, avoiding a
-			// separate bootstrap client while still executing the traced _stdio mode.
-			command = roleCommand{Args: []string{"_stdio", ""}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}}
+			// The transport-neutral _stdio mode requests an ephemeral session.
+			command = roleCommand{Args: []string{"_stdio"}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}}
 		case "client":
 			command = roleCommand{Args: []string{"attach", "harness@127.0.0.1"}}
 		}

@@ -1194,11 +1194,15 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 	}
 	postWelcomeTicket.End()
 	paintToken := sess.attachmentToken(ac, tr)
-	painted := false
+	painted := make(chan bool, 1)
 	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
-		painted = d.firstPaintForTransition(paintToken)
+		painted <- d.firstPaintForTransition(paintToken)
 		return nil
-	}); err != nil || !painted || handshakeCtx.Err() != nil {
+	}); err != nil {
+		failAttachment()
+		return
+	}
+	if !<-painted || handshakeCtx.Err() != nil {
 		failAttachment()
 		return
 	}

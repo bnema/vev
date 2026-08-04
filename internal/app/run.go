@@ -161,32 +161,20 @@ func parseArgs(args []string) (command, error) {
 	case "--daemon-launcher":
 		return command{kind: kindDaemonLauncher}, nil
 	case "_stdio":
-		if len(args) > 2 {
-			return command{}, usagef("`_stdio` accepts at most one session name")
+		if len(args) != 1 {
+			return command{}, usagef("`_stdio` does not accept a session name")
 		}
-		cmd := command{kind: kindStdio}
-		if len(args) == 2 {
-			cmd.name = args[1]
-		}
-		return cmd, nil
+		return command{kind: kindStdio}, nil
 	case "_udp-bootstrap":
-		if len(args) > 2 {
-			return command{}, usagef("`_udp-bootstrap` accepts at most one session name")
+		if len(args) != 1 {
+			return command{}, usagef("`_udp-bootstrap` does not accept a session name")
 		}
-		cmd := command{kind: kindUDPBootstrap}
-		if len(args) == 2 {
-			cmd.name = args[1]
-		}
-		return cmd, nil
+		return command{kind: kindUDPBootstrap}, nil
 	case "_udp-proxy":
-		if len(args) > 2 {
-			return command{}, usagef("`_udp-proxy` accepts at most one session name")
+		if len(args) != 1 {
+			return command{}, usagef("`_udp-proxy` does not accept a session name")
 		}
-		cmd := command{kind: kindUDPProxy}
-		if len(args) == 2 {
-			cmd.name = args[1]
-		}
-		return cmd, nil
+		return command{kind: kindUDPProxy}, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -278,9 +266,9 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindStdio:
 		return runStdio(ctx)
 	case kindUDPBootstrap:
-		return runUDPBootstrap(ctx, cmd.name)
+		return runUDPBootstrap(ctx)
 	case kindUDPProxy:
-		return runUDPProxy(ctx, cmd.name, os.Stdout)
+		return runUDPProxy(ctx, os.Stdout)
 	case kindList:
 		return runList(ctx, cmd)
 	case kindHost:
@@ -1056,20 +1044,21 @@ func runStdio(ctx context.Context) (retErr error) {
 	// pipe drained by a small forwarding goroutine.
 	stdin, stdout := os.Stdin, os.Stdout
 	stdoutReader, stdoutWriter := io.Pipe()
+	forwardDone := make(chan struct{})
 	go func() {
+		defer close(forwardDone)
 		if _, err := io.Copy(stdout, stdoutReader); err != nil {
 			_ = stdoutReader.CloseWithError(err)
 		}
 	}()
 	defer func() {
 		_ = stdoutWriter.Close()
+		<-forwardDone
 		_ = stdoutReader.Close()
 	}()
-	stdio := sshstdio.NewTransport(nonClosingReader{Reader: stdin}, stdoutWriter, nil, sshstdio.WithRuntimeObserver(observer))
+	stdio := sshstdio.NewTransport(stdin, stdoutWriter, nil, sshstdio.WithRuntimeObserver(observer))
 	return runStdioProxy(ctx, stdio, transport, log)
 }
-
-type nonClosingReader struct{ io.Reader }
 
 var (
 	udpBootstrapTimeout = 5 * time.Second
@@ -1080,7 +1069,7 @@ var (
 
 // runUDPBootstrap starts a detached _udp-proxy, forwards its single readiness
 // line, and exits so SSH stdio can close without owning the UDP proxy lifetime.
-func runUDPBootstrap(ctx context.Context, _ string) error {
+func runUDPBootstrap(ctx context.Context) error {
 	// Always start a fresh proxy for a bootstrap request. A client attach begins
 	// with MsgHello, which must reach the daemon handshake path; reusing an
 	// already-running proxy would forward that Hello into the daemon connection's
@@ -1148,7 +1137,7 @@ func runUDPBootstrap(ctx context.Context, _ string) error {
 }
 
 // runUDPProxy is the detached long-lived remote-side datagram proxy.
-func runUDPProxy(ctx context.Context, _ string, ready io.Writer) (retErr error) {
+func runUDPProxy(ctx context.Context, ready io.Writer) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
 		return err

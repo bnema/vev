@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -68,4 +69,85 @@ func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
 	tracker.Complete(8, ports.CommandResult{RequestID: requestID, OK: true})
 	result := <-secondOutcome
 	require.True(t, result.Result.OK)
+
+	t.Run("wait outcomes", func(t *testing.T) {
+		failure := errors.New("transport failed")
+		tests := []struct {
+			name        string
+			setup       func(*testing.T, *CommandRequestTracker, uint64) (context.Context, ports.Clock, func())
+			wantErr     error
+			wantPending int
+		}{
+			{
+				name: "canceled context",
+				setup: func(_ *testing.T, _ *CommandRequestTracker, _ uint64) (context.Context, ports.Clock, func()) {
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					return ctx, newCommandTrackerTestClock(), nil
+				},
+				wantErr:     context.Canceled,
+				wantPending: 0,
+			},
+			{
+				name: "nil clock",
+				setup: func(_ *testing.T, _ *CommandRequestTracker, _ uint64) (context.Context, ports.Clock, func()) {
+					return context.Background(), nil, nil
+				},
+				wantErr:     ErrCommandRequestUnavailable,
+				wantPending: 1,
+			},
+			{
+				name: "fail",
+				setup: func(_ *testing.T, tracker *CommandRequestTracker, requestID uint64) (context.Context, ports.Clock, func()) {
+					tracker.Fail(requestID, 1, failure)
+					return context.Background(), newCommandTrackerTestClock(), nil
+				},
+				wantErr:     failure,
+				wantPending: 0,
+			},
+			{
+				name: "remove",
+				setup: func(_ *testing.T, tracker *CommandRequestTracker, requestID uint64) (context.Context, ports.Clock, func()) {
+					tracker.Remove(requestID, 1)
+					clock := newCommandTrackerTestClock()
+					return context.Background(), clock, func() {
+						timer := <-clock.timers
+						timer.fire()
+					}
+				},
+				wantErr:     ErrCommandRequestTimeout,
+				wantPending: 0,
+			},
+			{
+				name: "duplicate track",
+				setup: func(t *testing.T, tracker *CommandRequestTracker, requestID uint64) (context.Context, ports.Clock, func()) {
+					duplicate, ok := tracker.Track(requestID, 1)
+					require.False(t, ok)
+					require.Nil(t, duplicate)
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					return ctx, newCommandTrackerTestClock(), nil
+				},
+				wantErr:     context.Canceled,
+				wantPending: 0,
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				tracker := NewCommandRequestTracker()
+				requestID, outcome := tracker.Publish(1)
+				ctx, clock, drive := tt.setup(t, tracker, requestID)
+				waitDone := make(chan error, 1)
+				go func() {
+					_, err := tracker.Wait(ctx, clock, requestID, 1, outcome)
+					waitDone <- err
+				}()
+				if drive != nil {
+					drive()
+				}
+				require.ErrorIs(t, <-waitDone, tt.wantErr)
+				require.Equal(t, tt.wantPending, tracker.PendingCount())
+			})
+		}
+	})
 }

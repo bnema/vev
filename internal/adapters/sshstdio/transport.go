@@ -332,9 +332,9 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// Dial starts ssh target vev _stdio [session] and returns a Transport over the
-// child process' stdio. The subprocess is started with exec.Command argv, never
-// through a shell.
+// Dial starts ssh target vev _stdio and returns a Transport over the child
+// process' stdio. Session selection is carried in Hello. The subprocess is
+// started with exec.Command argv, never through a shell.
 func Dial(target, session string) (ports.Transport, error) {
 	return DialContext(context.Background(), target, session)
 }

@@ -129,13 +129,14 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, factory, clock)
 	addControlSession(d, "work", "t_work", "p_work")
-	tr, sends, releaseConn := newConn(t, commandFrame(t, ports.CommandRequest{
+	frame := commandFrame(t, ports.CommandRequest{
 		RequestID: 17, Slug: "new-tab", TargetSession: "work",
-	}))
+	})
+	tr, sends, releaseConn := newConn(t, frame)
 	defer releaseConn()
 	done := make(chan error, 1)
 	go func() {
-		done <- d.handleCommand(tr, commandFrame(t, ports.CommandRequest{RequestID: 17, Slug: "new-tab", TargetSession: "work"}))
+		done <- d.handleCommand(tr, frame)
 	}()
 	<-factory.entered
 	timer := <-clock.timers

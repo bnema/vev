@@ -18,8 +18,9 @@ import (
 )
 
 func TestBuildCommandUsesExecArgs(t *testing.T) {
-	// BuildCommand deliberately starts `ssh -- target 'vev' '_stdio' [session]`.
-	// Terminal color capability is carried in vev's Hello message, not in ssh env.
+	// BuildCommand deliberately starts `ssh -- target 'vev' '_stdio'`.
+	// Session selection and terminal color capability are carried in vev's Hello
+	// message, not in ssh env.
 	tests := []struct {
 		name    string
 		target  string

@@ -32,16 +32,16 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 				if !ok {
 					t.Fatalf("dialer type = %T, want %T", dialer, dgram.RemoteDialer{})
 				}
-				if got.Target != "remote.example" || got.Session != "" {
-					t.Fatalf("dialer = %+v, want target and no session metadata", got)
+				if got.Target != "remote.example" {
+					t.Fatalf("dialer target = %q, want %q", got.Target, "remote.example")
 				}
 			case stdioDialer:
 				got, ok := dialer.(stdioDialer)
 				if !ok {
 					t.Fatalf("dialer type = %T, want %T", dialer, stdioDialer{})
 				}
-				if got.target != "remote.example" || got.session != "" {
-					t.Fatalf("dialer = %+v, want target and no session metadata", got)
+				if got.target != "remote.example" {
+					t.Fatalf("dialer target = %q, want %q", got.target, "remote.example")
 				}
 			}
 		})
@@ -64,7 +64,7 @@ func TestDialerFactoryRejectsUnsupportedMode(t *testing.T) {
 }
 
 func TestStdioDialerUsesContextBeforeStartingSSH(t *testing.T) {
-	dialer := stdioDialer{target: "remote.example", session: "work"}
+	dialer := stdioDialer{target: "remote.example"}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 

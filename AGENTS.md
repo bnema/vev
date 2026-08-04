@@ -75,5 +75,5 @@ Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/
 - Named sessions survive headless and persist across daemon restarts.
 - The daemon starts on first use and exits when the last session ends.
 - Local attach sends `Hello`, receives `Welcome`, then pumps `Input`/`Resize` and `Output` frames.
-- Remote attach runs `ssh -- host vev _stdio [session]` and proxies the same protocol over stdio.
+- Remote attach runs `ssh -- host vev _stdio` and proxies the same protocol over stdio; session selection is carried in `Hello`.
 - Only one client may attach to a session; a new attach replaces the old client.

@@ -105,13 +105,18 @@ func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, o
 }
 
 func boundedDial(ctx context.Context, dialer ports.Dialer) (ports.Transport, error) {
+	// The dial context only bounds startup. A successful carriage outlives the
+	// handshake context; canceling that context after Welcome must not kill SSH.
+	dialCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	result := make(chan struct {
 		transport ports.Transport
 		err       error
 	}, 1)
 	go func() {
-		transport, err := dialer.Dial(ctx)
-		if ctx.Err() != nil && transport != nil {
+		transport, err := dialer.Dial(dialCtx)
+		if err != nil {
+			cancel()
+		} else if ctx.Err() != nil && transport != nil {
 			_ = transport.Close()
 		}
 		result <- struct {
@@ -123,6 +128,7 @@ func boundedDial(ctx context.Context, dialer ports.Dialer) (ports.Transport, err
 	case result := <-result:
 		return result.transport, result.err
 	case <-ctx.Done():
+		cancel()
 		return nil, ctx.Err()
 	}
 }

@@ -127,15 +127,15 @@ func (t *CommandRequestTracker) Remove(requestID, generation uint64) {
 // Complete accepts only the exact request generation. Unknown, late, and old
 // generation results are safe no-ops.
 func (t *CommandRequestTracker) Complete(generation uint64, result ports.CommandResult) {
-	t.finish(generation, result.RequestID, CommandRequestOutcome{Result: result})
+	t.finish(result.RequestID, generation, CommandRequestOutcome{Result: result})
 }
 
 // Fail completes the exact request with a transport or decode failure.
 func (t *CommandRequestTracker) Fail(requestID, generation uint64, err error) {
-	t.finish(generation, requestID, CommandRequestOutcome{Err: err})
+	t.finish(requestID, generation, CommandRequestOutcome{Err: err})
 }
 
-func (t *CommandRequestTracker) finish(generation, requestID uint64, outcome CommandRequestOutcome) {
+func (t *CommandRequestTracker) finish(requestID, generation uint64, outcome CommandRequestOutcome) {
 	if t == nil {
 		return
 	}

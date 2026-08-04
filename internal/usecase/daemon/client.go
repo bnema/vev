@@ -799,11 +799,19 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
 
-	entry := token.sess
-	// Rendering is attachment-scoped. Run it independently of the connection
-	// reader so a blocked transport cannot hold session dispatch or peers.
-	go d.paint(entry, ac, true, token.lease)
-	return true
+	sess, ok := localSession(token.sess)
+	if !ok {
+		return false
+	}
+	rc := sess.renderCoordinator()
+	if rc == nil {
+		return false
+	}
+	// Rendering is attachment-scoped. Schedule it through the coordinator so
+	// rapid resize frames coalesce under the attachment lease and deadline.
+	return rc.scheduleResizeForLease(size, ac, token.lease, func(uint64) {
+		go d.paint(sess, ac, true, token.lease)
+	}) != 0
 }
 
 // handleClientNotice maps the closed client-event enum to daemon-owned notice

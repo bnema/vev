@@ -107,6 +107,44 @@ func TestBoundedHandshakeCancellationDoesNotWaitForUninterruptibleOperation(t *t
 	awaitTestCompletion(t, operationDone, "handshake operation did not finish")
 }
 
+func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	paintStarted := make(chan struct{})
+	releasePaint := make(chan struct{})
+	paintDone := make(chan struct{})
+	d.afterAttachmentEffectAdmitted = func(attachmentConnectionToken) {
+		close(paintStarted)
+		<-ctx.Done()
+		<-releasePaint
+		close(paintDone)
+	}
+
+	tr := newHandshakeBlockingTransport(false)
+	handshakeDone := make(chan struct{})
+	go func() {
+		d.handleHelloWithContext(ctx, make(chan struct{}), func() {}, func() {}, tr,
+			mustHello(ports.IntentNew, "paint-cancel", domain.Size{Cols: 80, Rows: 24}))
+		close(handshakeDone)
+	}()
+
+	awaitTestCompletion(t, paintStarted, "first paint did not start")
+	cancel()
+	awaitTestCompletion(t, tr.closed, "handshake cancellation did not close the transport")
+	select {
+	case <-paintDone:
+		t.Fatal("first paint completed before cancellation returned")
+	default:
+	}
+	close(releasePaint)
+	awaitTestCompletion(t, paintDone, "delayed first paint did not finish")
+	awaitTestCompletion(t, handshakeDone, "handshake cancellation did not finish")
+}
+
 func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, nil, clock)

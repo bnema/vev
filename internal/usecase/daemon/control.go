@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -37,14 +38,7 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 
 	tracker := NewCommandRequestTracker()
 	const generation = uint64(1)
-	outcome, ok := tracker.Track(request.RequestID, generation)
-	if !ok {
-		return d.sendCommandResult(tr, ports.CommandResult{
-			RequestID: request.RequestID,
-			Code:      ports.ErrInternal,
-			Text:      "duplicate command request id",
-		})
-	}
+	outcome, _ := tracker.Track(request.RequestID, generation)
 	commandCtx := d.serveCtx
 	if commandCtx == nil {
 		commandCtx = context.Background()
@@ -60,15 +54,8 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 	if commandClock == nil {
 		commandClock = systemClock{}
 	}
-	result, waitErr := tracker.Wait(context.Background(), commandClock, request.RequestID, generation, outcome)
+	result, waitErr := tracker.Wait(commandCtx, commandClock, request.RequestID, generation, outcome)
 	if waitErr != nil {
-		if errors.Is(waitErr, ErrCommandRequestTimeout) {
-			return d.sendCommandResult(tr, ports.CommandResult{
-				RequestID: request.RequestID,
-				Code:      ports.ErrInternal,
-				Text:      waitErr.Error(),
-			})
-		}
 		return d.sendCommandResult(tr, ports.CommandResult{
 			RequestID: request.RequestID,
 			Code:      ports.ErrInternal,
@@ -132,7 +119,17 @@ func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandReque
 		return d.runControl(cmd, controlExec{ctx: ctx, d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
 	}
 
-	sess.dispatchMu.Lock()
+	for {
+		select {
+		case <-ctx.Done():
+			return commandFailure(ports.ErrInternal, ctx.Err().Error())
+		default:
+		}
+		if sess.dispatchMu.TryLock() {
+			break
+		}
+		runtime.Gosched()
+	}
 	defer sess.dispatchMu.Unlock()
 
 	tb, pane, code, text := resolveControlTarget(sess, cmd.Target, request)

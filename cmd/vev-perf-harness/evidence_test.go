@@ -44,7 +44,7 @@ func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
 			if err := os.WriteFile(m.TracePath, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			p, err := l.preparePeer(m, roleCommand{Args: []string{"_udp-proxy", "work"}, Transport: tc.tr})
+			p, err := l.preparePeer(m, roleCommand{Args: []string{"_udp-proxy"}, Transport: tc.tr})
 			if err != nil {
 				t.Fatal(err)
 			}

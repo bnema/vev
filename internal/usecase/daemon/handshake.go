@@ -102,6 +102,9 @@ func handshakeContextError(parent context.Context, timedOut <-chan struct{}, fal
 		return errors.Join(errHandshakeTimeout, context.DeadlineExceeded)
 	default:
 	}
+	if parent == nil {
+		return fallback
+	}
 	if err := parent.Err(); err != nil {
 		return err
 	}

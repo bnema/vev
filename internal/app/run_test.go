@@ -482,12 +482,13 @@ func TestParseArgs(t *testing.T) {
 		{name: "kill extra arg", args: []string{"kill", "work", "extra"}, wantErr: true},
 		{name: "daemon", args: []string{"--daemon"}, wantKind: kindDaemon},
 		{name: "stdio", args: []string{"_stdio"}, wantKind: kindStdio},
-		{name: "stdio with session", args: []string{"_stdio", "work"}, wantKind: kindStdio, wantName: "work"},
-		{name: "stdio preserves legacy unsafe name", args: []string{"_stdio", "my work"}, wantKind: kindStdio, wantName: "my work"},
-		{name: "stdio too many args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
-		{name: "udp bootstrap", args: []string{"_udp-bootstrap", "work"}, wantKind: kindUDPBootstrap, wantName: "work"},
-		{name: "udp proxy", args: []string{"_udp-proxy", "work"}, wantKind: kindUDPProxy, wantName: "work"},
-		{name: "udp proxy too many args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
+		{name: "stdio rejects session", args: []string{"_stdio", "work"}, wantErr: true},
+		{name: "stdio rejects extra args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
+		{name: "udp bootstrap", args: []string{"_udp-bootstrap"}, wantKind: kindUDPBootstrap},
+		{name: "udp bootstrap rejects session", args: []string{"_udp-bootstrap", "work"}, wantErr: true},
+		{name: "udp proxy", args: []string{"_udp-proxy"}, wantKind: kindUDPProxy},
+		{name: "udp proxy rejects session", args: []string{"_udp-proxy", "work"}, wantErr: true},
+		{name: "udp proxy rejects extra args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
 		{name: "help", args: []string{"--help"}, wantKind: kindHelp},
 		{name: "help subcommand", args: []string{"help"}, wantKind: kindHelp},
 		{name: "version", args: []string{"--version"}, wantKind: kindVersion},
@@ -1050,7 +1051,7 @@ func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
 
 	got := captureStdout(t, func() {
-		if err := runUDPBootstrap(context.Background(), "work"); err != nil {
+		if err := runUDPBootstrap(context.Background()); err != nil {
 			t.Fatalf("runUDPBootstrap() error = %v", err)
 		}
 	})
@@ -1075,7 +1076,7 @@ func TestRunUDPBootstrapReturnsReadinessEOF(t *testing.T) {
 	}
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
 
-	err := runUDPBootstrap(context.Background(), "work")
+	err := runUDPBootstrap(context.Background())
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("runUDPBootstrap() error = %v, want EOF", err)
 	}
@@ -1091,7 +1092,7 @@ func TestRunUDPBootstrapTimesOutWaitingForReadiness(t *testing.T) {
 	}
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
 
-	err := runUDPBootstrap(context.Background(), "work")
+	err := runUDPBootstrap(context.Background())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("runUDPBootstrap() error = %v, want deadline exceeded", err)
 	}

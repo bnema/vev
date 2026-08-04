@@ -46,7 +46,6 @@ func (f DialerFactory) DialerForRemote(target string, session string, mode ports
 
 type stdioDialer struct {
 	target   string
-	session  string
 	log      *slog.Logger
 	observer ports.SerializedRuntimeObserver
 }

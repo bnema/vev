@@ -200,6 +200,7 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 			tracker.Fail(requestID, generation, fmt.Errorf("decoding command reply: %w", decodeErr))
 			return
 		}
+		result.RequestID = requestID
 		tracker.Complete(generation, result)
 	}()
 	commandClock := deps.clock

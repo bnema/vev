@@ -682,15 +682,15 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionT
 	if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" || !d.remotePickerTargetReady(key) {
 		return errAttachmentTransition
 	}
-	if guard.closePicker {
-		d.closePicker(token.ac)
-	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: ports.MarshalAttachTarget(ports.AttachTarget{
 		Endpoint: key.Host,
 		Session:  key.Name,
 		Intent:   ports.IntentAttach,
 	})}); err != nil {
 		return err
+	}
+	if guard.closePicker {
+		d.closePicker(token.ac)
 	}
 	d.clientGoneForAttachment(token, false)
 	return nil
@@ -981,15 +981,14 @@ func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) 
 
 // stealClientForTarget is retained for direct-ID callers and tests. Named
 // targets must use switchToTarget so resolution and commit share d.mu.
-func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
+func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) {
 	d.mu.Lock()
 	_, transition, switched := d.switchToActiveTargetLocked(from, ac, targetSess, target, sessionHandoffGuard{}, nil, "")
 	d.mu.Unlock()
 	if !switched {
-		return nil
+		return
 	}
 	d.deferAttachmentTransitionCleanups(transition)
-	return nil
 }
 
 // resumeStoppedAndSwitch is retained for direct callers and tests. It resolves

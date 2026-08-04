@@ -396,9 +396,9 @@ func routeRoleArgs(s scenario, m processMapping, selected transport) roleCommand
 			return roleCommand{Args: remote}
 		}
 	case "ssh_stdio_peer":
-		return roleCommand{Args: []string{"_stdio", session}, Transport: transport{ID: s.Transport, Kind: "ssh_stdio"}}
+		return roleCommand{Args: []string{"_stdio"}, Transport: transport{ID: s.Transport, Kind: "ssh_stdio"}}
 	case "udp_peer":
-		return roleCommand{Args: []string{"_udp-proxy", session}, Transport: selected}
+		return roleCommand{Args: []string{"_udp-proxy"}, Transport: selected}
 	}
 	return roleCommand{}
 }
