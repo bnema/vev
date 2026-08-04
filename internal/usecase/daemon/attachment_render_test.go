@@ -97,7 +97,7 @@ func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) 
 	require.Equal(t, int32(2), probes.Load(), "retry must not require another external wake")
 }
 
-func TestAttachmentResizeKeepsSessionContentAndPeersFixed(t *testing.T) {
+func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
@@ -113,11 +113,9 @@ func TestAttachmentResizeKeepsSessionContentAndPeersFixed(t *testing.T) {
 		Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
 	}, secondTransport)
 	require.NoError(t, err)
+	require.True(t, sess.repairAttachmentView(second))
 
 	tb := sess.tabs[0]
-	tb.mu.Lock()
-	contentBefore := tb.size
-	tb.mu.Unlock()
 	firstSize := first.size
 	secondRevision := second.viewSnapshot().revision
 	secondEpoch := second.output.currentEpoch()
@@ -134,7 +132,7 @@ func TestAttachmentResizeKeepsSessionContentAndPeersFixed(t *testing.T) {
 	ticket.End()
 
 	tb.mu.Lock()
-	require.Equal(t, contentBefore, tb.size)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
 	tb.mu.Unlock()
 	require.Equal(t, firstSize, first.size)
 	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.size)
@@ -253,4 +251,149 @@ func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 		t.Fatal("second attachment waited for first attachment transport")
 	}
 	close(firstTransport.release)
+}
+
+func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	firstTransport, _ := newCapturingTransport(t)
+	sess, first, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work",
+		Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
+	}, firstTransport)
+	require.NoError(t, err)
+	secondTransport, _ := newCapturingTransport(t)
+	_, second, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+		Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
+	}, secondTransport)
+	require.NoError(t, err)
+	d.firstPaint(sess, second)
+
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 100, Rows: 38}, tb.size, "the newest attachment claim must win")
+	tb.mu.Unlock()
+
+	rc := sess.renderCoordinator()
+	firstLease := rc.attachmentLease(first)
+	secondLease := rc.attachmentLease(second)
+	require.True(t, rc.markAttachmentReady(firstLease))
+	require.True(t, rc.markAttachmentReady(secondLease))
+	resize := func(ac *attachedClient, tr ports.Transport, size domain.Size) {
+		token := sess.attachmentToken(ac, tr)
+		d.handleAttachmentClientFrame(token, ports.Frame{
+			Type:    ports.MsgResize,
+			Payload: mustMarshalResize(ports.Resize{Size: size}),
+		})
+	}
+	resize(second, secondTransport, domain.Size{Cols: 120, Rows: 50})
+
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
+	tb.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.size)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.size)
+
+	// A same-size resize is still a claim, so the smaller peer can take
+	// authority without changing its local window state first.
+	resize(second, secondTransport, domain.Size{Cols: 90, Rows: 30})
+	resize(first, firstTransport, domain.Size{Cols: 80, Rows: 24})
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, tb.size)
+	tb.mu.Unlock()
+
+	// The latest resize wins even when it is smaller than a live peer.
+	resize(first, firstTransport, domain.Size{Cols: 70, Rows: 20})
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 70, Rows: 18}, tb.size)
+	tb.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 70, Rows: 20}, first.size)
+	require.Equal(t, domain.Size{Cols: 90, Rows: 30}, second.size)
+
+	// Detaching the latest claimant falls back to the most recent remaining
+	// attachment claim rather than reverting to the historical maximum.
+	d.clientGone(sess, first, first.transport(), true)
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 90, Rows: 28}, tb.size)
+	tb.mu.Unlock()
+}
+
+func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {
+	d, sess, first, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	second := &attachedClient{output: newOutputStateStream()}
+	second.setSize(domain.Size{Cols: 90, Rows: 30})
+	second.setSession(sess)
+	require.True(t, sess.registerAttachment(second))
+
+	first.setSize(domain.Size{Cols: 120, Rows: 40})
+	var superseded bool
+	d.beforeSessionResizePublication = func() {
+		if superseded {
+			return
+		}
+		superseded = true
+		sess.claimGeometryOwner(second)
+	}
+	require.False(t, d.recalculateSessionGeometry(sess, first), "a newer attachment claim must reject the stale layout commit")
+
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size)
+	tb.mu.Unlock()
+
+	d.beforeSessionResizePublication = nil
+	require.True(t, d.recalculateSessionGeometry(sess, nil))
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 90, Rows: 28}, tb.size)
+	tb.mu.Unlock()
+}
+
+func TestAttachmentMoveReconcilesSourceGeometryAfterOwnerRemoval(t *testing.T) {
+	d, source, moved, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	peer := &attachedClient{output: newOutputStateStream()}
+	peer.setSize(domain.Size{Cols: 80, Rows: 24})
+	peer.setSession(source)
+	require.True(t, source.registerAttachment(peer))
+
+	moved.setSize(domain.Size{Cols: 120, Rows: 40})
+	_, claimed := source.claimGeometryOwner(moved)
+	require.True(t, claimed)
+	require.True(t, d.recalculateSessionGeometry(source, nil))
+
+	target := &session{
+		sessionCore: sessionCore{id: "target-geometry", name: "target-geometry"},
+		ctx:         source.ctx,
+		cancel:      func() {},
+		tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
+	}
+	d.mu.Lock()
+	d.sessions[target.id] = target
+	d.mu.Unlock()
+
+	result, err := d.transitionAttachment(attachmentTransitionRequest{
+		source:            source,
+		target:            target,
+		next:              moved,
+		expectedTransport: moved.transportSnapshot(),
+		ready:             true,
+	})
+	require.NoError(t, err)
+	d.deferAttachmentTransitionCleanups(result)
+	d.firstPaint(target, moved)
+
+	target.mu.Lock()
+	targetTab := target.tabs[0]
+	target.mu.Unlock()
+	targetTab.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 120, Rows: 38}, targetTab.size, "target geometry must use the moved attachment claim")
+	targetTab.mu.Unlock()
+
+	tb := source.tabs[0]
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, tb.size, "source geometry must fall back after a moved owner leaves")
+	tb.mu.Unlock()
+	require.Same(t, source, peer.currentSession())
+	require.Same(t, target, moved.currentSession())
 }

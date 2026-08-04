@@ -245,7 +245,7 @@ func (s *outputStateStream) sideEffectLocked(data []byte, echoAck uint64) (ports
 	_, epoch, viewRevision := s.fenceLocked()
 	size := domain.Size{Cols: 1, Rows: 1}
 	if s != nil && s.attachment != nil {
-		size = s.attachment.size
+		size = s.attachment.sizeSnapshot()
 	}
 	return marshalOutputState(data, epoch, 0, 0, echoAck, viewRevision, size, false)
 }

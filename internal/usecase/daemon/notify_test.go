@@ -607,7 +607,7 @@ func TestNotifyGlobalDoesNotStrandNoticeWhenFirstPaintRacesQueue(t *testing.T) {
 	sess.mu.Unlock()
 	paintDone := make(chan struct{})
 	go func() {
-		d.firstPaint(sess, ac, domain.Size{})
+		d.firstPaint(sess, ac)
 		close(paintDone)
 	}()
 
@@ -690,7 +690,7 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	sess.mu.Lock()
 	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
-	d.firstPaint(sess, ac, domain.Size{})
+	d.firstPaint(sess, ac)
 
 	drained := awaitToastCount(t, ac, 1)
 	require.Equal(t, domain.NoticeSnapshotWrite, drained[0].Code)
@@ -720,7 +720,7 @@ func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {
 	sess.mu.Lock()
 	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
-	d.firstPaint(sess, ac, domain.Size{})
+	d.firstPaint(sess, ac)
 
 	drained := awaitToastCount(t, ac, 1)
 	require.Equal(t, domain.NoticePersistDisabled, drained[0].Code)

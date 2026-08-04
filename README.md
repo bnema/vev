@@ -51,7 +51,7 @@ vev kill <name>                  kill a session (--all kills everything)
 
 The daemon starts on first use and exits with the last session. Ephemeral sessions are numbered, survive detach, and disappear with the daemon. Named sessions persist across daemon restarts and come back with their layout, recovered terminal transcript, and allowlisted processes.
 
-A session may have multiple attachments. The session owns the PTYs, VT state, tabs, panes, fixed PTY content size, and ordered mutations. Each attachment owns its window, view, copy mode, overlays, rendering/output state, and reconnect lifecycle, so attachments can focus different tabs or panes without changing one another's view. The first valid attachment establishes the session's PTY content size; later window resizes affect only that attachment.
+A session may have multiple attachments. The session owns the PTYs, VT state, tabs, panes, shared PTY content geometry, and ordered mutations. Each attachment owns its window, view, copy mode, overlays, rendering/output state, and reconnect lifecycle, so attachments can focus different tabs or panes without changing one another's view. The latest valid, non-superseded attachment attach, resume, or resize claim controls shared PTY geometry; detaching that attachment falls back to the most recently claimed remaining valid attachment while preserving every attachment's own outer window.
 
 ## Keys
 

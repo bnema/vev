@@ -294,27 +294,59 @@ func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
 
 	tr := &closeTrackingTransport{}
-	sess, ac, err := d.route(helloResumeCapable(ports.IntentEphemeral, "", 0), tr)
+	initial := helloResumeCapable(ports.IntentEphemeral, "", 0)
+	initial.Size = domain.Size{Cols: 120, Rows: 40}
+	sess, ac, err := d.route(initial, tr)
 	require.NoError(t, err)
 	require.True(t, sess.ephemeral)
 	token := ac.resumeToken
 	require.NotZero(t, token, "ephemeral sessions receive resume tokens")
 
+	peerHello := helloResumeCapable(ports.IntentAttach, sess.name, 0)
+	peerHello.ClientID = [16]byte{9}
+	peerHello.Size = domain.Size{Cols: 100, Rows: 30}
+	peer := &closeTrackingTransport{}
+	_, peerAC, err := d.route(peerHello, peer)
+	require.NoError(t, err)
+	require.Same(t, sess, peerAC.currentSession())
+	d.firstPaint(sess, peerAC)
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	beforeParkingSize := tb.size
+	tb.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 100, Rows: 28}, beforeParkingSize, "the later attachment claim should be current before parking")
+
 	d.clientGone(sess, ac, ac.transport(), false)
 	require.Equal(t, 1, sessionCount(d), "ephemeral link loss keeps session alive")
-	require.Empty(t, sess.snapshotAttachments())
+	attachments := sess.snapshotAttachments()
+	var peerRegistered bool
+	for _, candidate := range attachments {
+		require.NotSame(t, ac, candidate, "parked attachment remained registered")
+		if candidate == peerAC {
+			peerRegistered = true
+		}
+	}
+	require.True(t, peerRegistered, "the live peer attachment was removed while parking")
 	d.mu.Lock()
 	_, parked := d.parked[token]
 	d.mu.Unlock()
 	require.True(t, parked, "ephemeral resume-capable link loss is parked")
 
+	resumeHello := helloResumeCapable(ports.IntentResume, sess.name, token)
+	resumeHello.Size = domain.Size{Cols: 80, Rows: 24}
 	newTr := &closeTrackingTransport{}
-	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, sess.name, token), newTr)
+	resumedSess, resumedAC, err := d.route(resumeHello, newTr)
 	require.NoError(t, err)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
 	require.NotEqual(t, token, resumedAC.resumeToken, "resume rotates token")
 	require.Contains(t, sess.snapshotAttachments(), resumedAC)
+	d.firstPaint(sess, resumedAC)
+	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, peerAC.sizeSnapshot())
+	tb.mu.Lock()
+	resumedSize := tb.size
+	tb.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, resumedSize, "resume must make its new size the latest geometry claim")
 }
 
 // TestResumeParkedTokenReplacedDuringWaitFailsClosed covers the lifecycle race
@@ -1138,7 +1170,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
 	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
-	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
+	d.firstPaint(resumedSess, resumedAC)
 
 	sends := newTransport.Sends()
 	require.Len(t, sends, 1)

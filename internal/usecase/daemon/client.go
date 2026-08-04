@@ -66,7 +66,16 @@ type attachedClient struct {
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
-	size          domain.Size
+	// sizeMu lets shared-geometry snapshots read attachment windows without
+	// waiting behind a blocked transport send.
+	sizeMu                   sync.RWMutex
+	size                     domain.Size
+	geometryClaimSize        domain.Size // protected by sizeMu; shared geometry claim snapshot
+	geometryClaimInitialized bool        // protected by sizeMu; distinguishes legacy fixtures
+	// geometryClaim is an attachment-local monotonic claim sequence. The
+	// owning session publishes it whenever this attachment is attached,
+	// resumed, or explicitly resized.
+	geometryClaim atomic.Uint64
 	keys          *keys.Router
 	// view is attachment-local navigation state. It is never inferred from a
 	// session-wide active tab, so multiple attachments can observe different
@@ -139,6 +148,62 @@ func (p *pendingByteTimer) stop() {
 
 func (ac *attachedClient) initOverlays() {
 	ac.overlayOnce.Do(func() { ac.overlays = newOverlayRuntime(ac) })
+}
+
+func (ac *attachedClient) sizeSnapshot() domain.Size {
+	if ac == nil {
+		return domain.Size{}
+	}
+	ac.sizeMu.RLock()
+	defer ac.sizeMu.RUnlock()
+	return ac.size
+}
+
+func (ac *attachedClient) setSize(size domain.Size) {
+	if ac == nil {
+		return
+	}
+	ac.sizeMu.Lock()
+	ac.size = size
+	ac.sizeMu.Unlock()
+}
+
+func (ac *attachedClient) geometryClaimSizeSnapshot() domain.Size {
+	if ac == nil {
+		return domain.Size{}
+	}
+	ac.sizeMu.RLock()
+	claimSize, localSize := ac.geometryClaimSize, ac.size
+	initialized := ac.geometryClaimInitialized
+	ac.sizeMu.RUnlock()
+	if !initialized {
+		return localSize
+	}
+	return claimSize
+}
+
+// publishGeometryClaim makes the claim size and sequence visible as one
+// attachment-local publication under sizeMu.
+func (ac *attachedClient) publishGeometryClaim(size domain.Size, claim uint64) {
+	if ac == nil {
+		return
+	}
+	ac.sizeMu.Lock()
+	ac.geometryClaimSize = size
+	ac.geometryClaimInitialized = true
+	ac.geometryClaim.Store(claim)
+	ac.sizeMu.Unlock()
+}
+
+func (ac *attachedClient) clearGeometryClaim() {
+	if ac == nil {
+		return
+	}
+	ac.sizeMu.Lock()
+	ac.geometryClaimSize = domain.Size{}
+	ac.geometryClaimInitialized = true
+	ac.geometryClaim.Store(0)
+	ac.sizeMu.Unlock()
 }
 
 func (ac *attachedClient) currentAttachmentSession() *session { return ac.sess.Get() }
@@ -692,18 +757,18 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 	if token.sess == nil {
 		return false
 	}
-	d.firstPaintWithLease(token.sess, token.ac, token.ac.size, token.lease)
+	d.firstPaintWithLease(token.sess, token.ac, token.lease, true)
 	return true
 }
 
 // firstPaint guarantees the freshly attached client sees the full screen. The
-// session content geometry is fixed by the first valid Hello; an attachment's
-// window is rendered without resizing shared tabs or PTYs.
-func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
-	d.firstPaintWithLease(sess, ac, clientSize, nil)
+// shared session geometry is reconciled to the latest attachment claim before
+// each attachment gets its own outer-window paint.
+func (d *Daemon) firstPaint(sess *session, ac *attachedClient) {
+	d.firstPaintWithLease(sess, ac, nil, false)
 }
 
-func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, _ domain.Size, lease *attachmentLease) {
+func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, lease *attachmentLease, asyncGeometry bool) {
 	// Global notices raised while nothing was attached surface on this client.
 	// Drained before the early return below so a session without an active tab
 	// cannot swallow the queue.
@@ -712,9 +777,17 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, _ domain
 	if tb == nil {
 		return
 	}
+	if asyncGeometry {
+		// PTY.Resize is an external, non-cancelable operation. Do not hold the
+		// handshake on it; the first frame can use retained geometry and the
+		// shared invalidation will repaint every attachment after the claim wins.
+		d.recalculateSessionGeometryAndInvalidateAsync(sess, "client.go")
+	} else {
+		d.recalculateSessionGeometryAndInvalidate(sess, nil, "client.go")
+	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	// Activation still performs attachment-local warmup, but it must not turn a
-	// new window into a shared session resize.
+	// Floating activation may perform its own pane-local warmup after the shared
+	// session geometry has been reconciled above.
 	d.ensureFloatingWarm(sess, tb)
 	if lease == nil {
 		d.invalidateRenderNow(sess, ac, true, "client.go")
@@ -773,10 +846,10 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	d.requestTransactionalResize(sess, ac, sz, false)
 }
 
-// resizeAttachmentForLease changes only the sender's window/view. Session tab
-// geometry and PTY sizes are deliberately outside this mutation boundary.
-// Callers hold the attachment effect admission; output state is rebased before
-// the targeted redraw so every subsequent frame starts a new epoch.
+// resizeAttachmentForLease updates the sender's window/view, then makes that
+// attachment the latest shared tab/PTY geometry claimant. Callers hold the
+// attachment effect admission; output state is rebased before any redraw so
+// every subsequent frame starts a new epoch.
 func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size domain.Size) bool {
 	if token.ac == nil || !size.Valid() || !token.attachmentEffectCurrent() {
 		return false
@@ -787,24 +860,33 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 		ac.sendMu.Unlock()
 		return false
 	}
-	if ac.size == size {
-		ac.sendMu.Unlock()
-		return false
+	sameSize := ac.sizeSnapshot() == size
+	if !sameSize {
+		ac.setSize(size)
+		view := ac.viewSnapshot()
+		view.windowRows = size.Rows
+		view.windowSet = true
+		view.windowTop = 0
+		view.revision++
+		ac.publishView(view)
+		ac.rebaseOutput()
+		ac.pipelineCache = composeCacheInput{}
+		ac.pipelineScratch = composeCacheInput{}
 	}
-	ac.size = size
-	view := ac.viewSnapshot()
-	view.windowRows = size.Rows
-	view.windowSet = true
-	view.windowTop = 0
-	view.revision++
-	ac.publishView(view)
-	ac.rebaseOutput()
-	ac.pipelineCache = composeCacheInput{}
-	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
 
 	sess := token.sess
 	if sess == nil {
+		return false
+	}
+	// Shared PTY/layout geometry follows the latest accepted attachment claim.
+	// When this resize changes canonical geometry, the shared invalidation fans
+	// out a fresh frame to every attachment; otherwise only this attachment
+	// needs a viewport redraw.
+	if d.recalculateSessionGeometryAndInvalidate(sess, ac, "client.go") {
+		return true
+	}
+	if sameSize {
 		return false
 	}
 	rc := sess.renderCoordinator()

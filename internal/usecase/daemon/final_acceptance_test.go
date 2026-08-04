@@ -62,7 +62,7 @@ func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *test
 	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
 	require.Len(t, tabs, 3)
-	wantContent := domain.Size{Cols: 80, Rows: 23}
+	wantContent := domain.Size{Cols: 120, Rows: 38}
 	for _, tb := range tabs {
 		tb.mu.Lock()
 		gotTabSize := tb.size
@@ -155,11 +155,25 @@ func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing
 	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, second.size)
 	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.size, "peer resize crossed attachment boundary")
 	sess.mu.Lock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, sess.tabs[0].size, "attachment resize mutated shared session content")
+	tb := sess.tabs[0]
 	sess.mu.Unlock()
+	tb.mu.Lock()
+	sharedSize := tb.size
+	tb.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 120, Rows: 38}, sharedSize, "latest attachment resize must update shared session content")
 
 	d.clientGone(sess, first, first.transport(), true)
-	require.NotContains(t, sess.snapshotAttachments(), first)
-	require.Contains(t, sess.snapshotAttachments(), second, "detaching one attachment removed its peer")
+	attachments := sess.snapshotAttachments()
+	for _, candidate := range attachments {
+		require.NotSame(t, first, candidate, "detached attachment remained registered")
+	}
+	var peerRegistered bool
+	for _, candidate := range attachments {
+		if candidate == second {
+			peerRegistered = true
+			break
+		}
+	}
+	require.True(t, peerRegistered, "detaching one attachment removed its peer")
 	require.Same(t, sess, second.currentSession())
 }

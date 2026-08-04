@@ -16,9 +16,12 @@ vev keeps a server-side VT screen per pane: scroll regions (DECOM), insert mode,
 
 ## Session content size
 
-The first valid attachment establishes the session's fixed PTY content size. Each
-attachment may have a different outer window and viewport; resizing it changes
-only its attachment-local presentation and does not resize shared PTYs.
+The session's PTY content size follows the latest valid attach, resume, or
+resize claim. Invalid or stale claims do not change shared PTY geometry. Each
+attachment may have a different outer window and viewport; the winning claim
+changes shared PTYs while preserving the other attachments' own presentations.
+If the winning attachment detaches, the most recently claimed remaining valid
+attachment becomes authoritative.
 
 ## Recovery
 

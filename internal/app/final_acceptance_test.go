@@ -110,8 +110,9 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	awaitText(t, secondPump, size, "[SCROLL]")
 	assertNoTextAfterInput(t, firstPump, size, "[SCROLL]")
 
-	// A resize and an output reset are scoped to one attachment output stream;
-	// the shared tab's PTY/content geometry and the peer stream remain intact.
+	// The resize keeps its attachment-local output stream while recalculating
+	// shared PTY/content geometry from the latest valid attachment claim; the
+	// peer stream remains independent.
 	resizePayload, err := ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 100, Rows: 30}})
 	require.NoError(t, err)
 	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgResize, Payload: resizePayload}))

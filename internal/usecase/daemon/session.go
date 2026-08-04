@@ -398,7 +398,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
-	sz := ac.size
+	sz := ac.sizeSnapshot()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
@@ -484,7 +484,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 			cwd, term, env := source.cwd, source.terminal, copyEnvironment(source.env)
 			source.mu.Unlock()
 			var createErr error
-			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.size, term, env)
+			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.sizeSnapshot(), term, env)
 			return created, createErr
 		},
 	})
