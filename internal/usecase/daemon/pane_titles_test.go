@@ -16,7 +16,8 @@ func TestFormatPaneTitle(t *testing.T) {
 	tests := []struct {
 		name, process, terminal, fallback, want string
 	}{
-		{name: "process and terminal", process: "nvim", terminal: "project/main.go", fallback: "sh", want: "nvim: project/main.go"},
+		{name: "process prepends non-prefixed terminal title", process: "nvim", terminal: "project/main.go", fallback: "sh", want: "nvim: project/main.go"},
+		{name: "process does not duplicate its terminal-title prefix", process: "zot", terminal: "zot: session title", fallback: "sh", want: "zot: session title"},
 		{name: "process only", process: "nvim", fallback: "sh", want: "nvim"},
 		{name: "terminal only", terminal: "project/main.go", fallback: "sh", want: "project/main.go"},
 		{name: "fallback", fallback: "fish", want: "fish"},
