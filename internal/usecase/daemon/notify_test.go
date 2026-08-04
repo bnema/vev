@@ -21,16 +21,11 @@ import (
 func TestReportAttachmentErrorPreservesLocalOrNilScope(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	local := &session{sessionCore: sessionCore{id: "local", name: "local"}}
-	proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, defaultSize)
-	require.NoError(t, err)
-
 	d.reportAttachmentError(local, domain.UserWarn(domain.NoticeClipboard, "local failure", nil))
-	d.reportAttachmentError(proxy, domain.UserWarn(domain.NoticeClipboard, "proxy failure", nil))
 
 	history := d.notices.history()
-	require.Len(t, history, 2, "each attachment error must report exactly once")
-	require.Equal(t, local.id, history[1].SessionID)
-	require.Equal(t, domain.SessionID(""), history[0].SessionID)
+	require.Len(t, history, 1)
+	require.Equal(t, local.id, history[0].SessionID)
 }
 
 func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.T) {

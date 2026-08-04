@@ -23,7 +23,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/bnema/vev/pkg/safedir"
@@ -411,139 +410,6 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 // scriptRecv makes a transport yield frames in order, then wait for done
 // before returning EOF. The shared done channel coordinates proxy readers
 // without relying on scheduling or sleeps.
-func scriptRecv(tr *portsmocks.MockTransport, done <-chan struct{}, frames ...ports.Frame) *portsmocks.MockTransport_Recv_Call {
-	script := make(chan ports.Frame, len(frames))
-	for _, frame := range frames {
-		script <- frame
-	}
-	return tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
-		select {
-		case frame := <-script:
-			return frame, nil
-		case <-done:
-			return ports.Frame{}, io.EOF
-		}
-	})
-}
-
-func TestFirstHelloTransportReplacesRemoteEnvironment(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		session  string
-		wantName string
-	}{
-		{name: "stdio replaces environment", wantName: ""},
-		{name: "udp proxy replaces environment and retains session rewrite", session: "work", wantName: "work"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			original := ports.Hello{
-				Version:           ports.ProtocolVersion,
-				Intent:            ports.IntentAttach,
-				ClientID:          [16]byte{1},
-				ResumeToken:       2,
-				Size:              domain.Size{Cols: 80, Rows: 24},
-				TermEnv:           "client-term",
-				Cwd:               "/client",
-				TrueColor:         true,
-				MaxOutputInFlight: 8,
-				Env:               []string{"CLIENT=value"},
-			}
-			nonHello := ports.Frame{Type: ports.MsgInput, Payload: []byte("unchanged")}
-			transport := portsmocks.NewMockTransport(t)
-			done := make(chan struct{})
-			scriptRecv(transport, done,
-				ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(original)},
-				nonHello,
-			).Times(2)
-			wrapped := newFirstHelloTransport(transport, tt.session, []string{"REMOTE=one", "TOKEN=a=b=c"})
-
-			frame, err := wrapped.Recv()
-			require.NoError(t, err)
-			got, err := ports.UnmarshalHello(frame.Payload)
-			require.NoError(t, err)
-			original.Name = tt.wantName
-			original.Env = []string{"REMOTE=one", "TOKEN=a=b=c"}
-			require.Equal(t, original, got)
-
-			frame, err = wrapped.Recv()
-			require.NoError(t, err)
-			require.Equal(t, nonHello, frame)
-		})
-	}
-}
-
-func TestRunStdioProxyReplacesHelloEnvironmentAtDaemonBoundary(t *testing.T) {
-	original := remoteProxyHello()
-	client, daemon, sent := newRemoteProxyTransports(t, original)
-
-	err := runStdioProxy(context.Background(), client, daemon, []string{"REMOTE=one", "TOKEN=a=b=c"}, nil)
-	require.NoError(t, err)
-
-	got := firstHello(t, sent)
-	original.Env = []string{"REMOTE=one", "TOKEN=a=b=c"}
-	require.Equal(t, original, got)
-}
-
-func TestRunUDPProxyRuntimeReplacesHelloEnvironmentAndSessionAtDaemonBoundary(t *testing.T) {
-	original := remoteProxyHello()
-	client, daemon, sent := newRemoteProxyTransports(t, original)
-
-	err := runUDPProxyRuntime(context.Background(), "remote-work", client, daemon, []string{"REMOTE=udp", "TOKEN=a=b=c"}, nil)
-	require.NoError(t, err)
-
-	got := firstHello(t, sent)
-	original.Name = "remote-work"
-	original.Env = []string{"REMOTE=udp", "TOKEN=a=b=c"}
-	require.Equal(t, original, got)
-}
-
-func remoteProxyHello() ports.Hello {
-	return ports.Hello{
-		Version:           ports.ProtocolVersion,
-		Intent:            ports.IntentAttach,
-		ClientID:          [16]byte{1},
-		ResumeToken:       2,
-		Size:              domain.Size{Cols: 80, Rows: 24},
-		TermEnv:           "client-term",
-		Cwd:               "/client",
-		TrueColor:         true,
-		MaxOutputInFlight: 1,
-		Env:               []string{"CLIENT=value"},
-	}
-}
-
-func newRemoteProxyTransports(t *testing.T, hello ports.Hello) (*portsmocks.MockTransport, *portsmocks.MockTransport, <-chan ports.Frame) {
-	t.Helper()
-	client := portsmocks.NewMockTransport(t)
-	daemon := portsmocks.NewMockTransport(t)
-	clientDone := make(chan struct{})
-	daemonDone := make(chan struct{})
-	sent := make(chan ports.Frame, 1)
-
-	scriptRecv(client, clientDone, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}).Maybe()
-	client.EXPECT().Close().RunAndReturn(func() error {
-		close(clientDone)
-		return nil
-	}).Once()
-	daemon.EXPECT().Send(mock.Anything).RunAndReturn(func(frame ports.Frame) error {
-		sent <- frame
-		close(daemonDone)
-		return nil
-	}).Once()
-	scriptRecv(daemon, daemonDone).Once()
-	daemon.EXPECT().Close().Return(nil).Once()
-
-	return client, daemon, sent
-}
-
-func firstHello(t *testing.T, sent <-chan ports.Frame) ports.Hello {
-	t.Helper()
-	frame := <-sent
-	hello, err := ports.UnmarshalHello(frame.Payload)
-	require.NoError(t, err)
-	return hello
-}
-
 func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {
 	require.Equal(t, 32, udpProxyClientTransportOptions.MaxPending)
 }
@@ -579,9 +445,12 @@ func TestParseArgs(t *testing.T) {
 		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
 		{name: "attach preserves legacy unsafe name", args: []string{"attach", "my work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "my work"},
 		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
-		{name: "attach remote without session uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
-		{name: "attach remote with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
-		{name: "attach remote with session", args: []string{"attach", "user@example.com:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@example.com"},
+		{name: "attach remote host uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
+		{name: "attach remote host with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
+		{name: "attach remote host with session", args: []string{"attach", "user@example.com:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@example.com"},
+		{name: "attach remote ipv4 with session", args: []string{"attach", "user@192.0.2.10:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@192.0.2.10"},
+		{name: "attach remote ipv6 with session", args: []string{"attach", "user@[2001:db8::1]:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@[2001:db8::1]"},
+		{name: "attach remote invalid session", args: []string{"attach", "user@example.com:my work"}, wantErr: true, nonUsageErr: true},
 		{name: "attach extra arg", args: []string{"attach", "work", "extra"}, wantErr: true},
 		{name: "attach without name", args: []string{"attach"}, wantErr: true},
 		{name: "ls", args: []string{"ls"}, wantKind: kindList},
@@ -613,12 +482,13 @@ func TestParseArgs(t *testing.T) {
 		{name: "kill extra arg", args: []string{"kill", "work", "extra"}, wantErr: true},
 		{name: "daemon", args: []string{"--daemon"}, wantKind: kindDaemon},
 		{name: "stdio", args: []string{"_stdio"}, wantKind: kindStdio},
-		{name: "stdio with session", args: []string{"_stdio", "work"}, wantKind: kindStdio, wantName: "work"},
-		{name: "stdio preserves legacy unsafe name", args: []string{"_stdio", "my work"}, wantKind: kindStdio, wantName: "my work"},
-		{name: "stdio too many args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
-		{name: "udp bootstrap", args: []string{"_udp-bootstrap", "work"}, wantKind: kindUDPBootstrap, wantName: "work"},
-		{name: "udp proxy", args: []string{"_udp-proxy", "work"}, wantKind: kindUDPProxy, wantName: "work"},
-		{name: "udp proxy too many args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
+		{name: "stdio rejects session", args: []string{"_stdio", "work"}, wantErr: true},
+		{name: "stdio rejects extra args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
+		{name: "udp bootstrap", args: []string{"_udp-bootstrap"}, wantKind: kindUDPBootstrap},
+		{name: "udp bootstrap rejects session", args: []string{"_udp-bootstrap", "work"}, wantErr: true},
+		{name: "udp proxy", args: []string{"_udp-proxy"}, wantKind: kindUDPProxy},
+		{name: "udp proxy rejects session", args: []string{"_udp-proxy", "work"}, wantErr: true},
+		{name: "udp proxy rejects extra args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
 		{name: "help", args: []string{"--help"}, wantKind: kindHelp},
 		{name: "help subcommand", args: []string{"help"}, wantKind: kindHelp},
 		{name: "version", args: []string{"--version"}, wantKind: kindVersion},
@@ -633,13 +503,13 @@ func TestParseArgs(t *testing.T) {
 					t.Fatalf("parseArgs(%q) = %+v, want error", tt.args, got)
 				}
 				if tt.nonUsageErr {
-					var ue *usageError
-					if errors.As(err, &ue) {
+					_, usage := errors.AsType[*usageError](err)
+					if usage {
 						t.Fatalf("parseArgs(%q) error = *usageError, want non-usage error", tt.args)
 					}
 				} else {
-					var ue *usageError
-					if !errors.As(err, &ue) {
+					_, usage := errors.AsType[*usageError](err)
+					if !usage {
 						t.Fatalf("parseArgs(%q) error = %T, want *usageError", tt.args, err)
 					}
 				}
@@ -686,6 +556,31 @@ func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
 	_, err := parseArgs([]string{"new", "my work"})
 	if !errors.Is(err, domain.ErrInvalidSessionName) {
 		t.Fatalf("parseArgs new unsafe error = %v, want %v", err, domain.ErrInvalidSessionName)
+	}
+}
+
+func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		arg  string
+		want client.AttachRequest
+	}{
+		{name: "local host", arg: "work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "remote host", arg: "user@example.com:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "remote ipv4", arg: "user@192.0.2.10:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "remote ipv6", arg: "user@[2001:db8::1]:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, err := parseArgs([]string{"attach", tt.arg})
+			require.NoError(t, err)
+			connection, err := client.NewSessionConnection(portsmocks.NewMockTransport(t), client.SessionTarget{
+				Intent:      cmd.intent,
+				SessionName: cmd.name,
+			})
+			require.NoError(t, err)
+			require.Equal(t, tt.want, connection.AttachRequest())
+		})
 	}
 }
 
@@ -859,131 +754,6 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-func TestRunLocalAttachPromptsAndRestartsOnProtocolMismatch(t *testing.T) {
-	var prompts bytes.Buffer
-	answers := strings.NewReader("y\n")
-	attachCalls := 0
-	killCalls := 0
-
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(answers, &prompts),
-		attach: func(context.Context, uint8, string) error {
-			attachCalls++
-			if attachCalls == 1 {
-				return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-			}
-			return nil
-		},
-		killDaemon: func(context.Context) error {
-			killCalls++
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("runLocalAttachWithRecovery returned error: %v", err)
-	}
-	if attachCalls != 2 {
-		t.Fatalf("attach calls = %d, want 2", attachCalls)
-	}
-	if killCalls != 1 {
-		t.Fatalf("kill calls = %d, want 1", killCalls)
-	}
-	if got := prompts.String(); !strings.Contains(got, "Your vev version differs") || !strings.Contains(got, "kill it") {
-		t.Fatalf("prompt = %q, want version/kill prompt", got)
-	}
-}
-
-func TestRunLocalAttachPropagatesPromptError(t *testing.T) {
-	readErr := errors.New("read failed")
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(errorReader{err: readErr}, &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-		},
-		killDaemon: func(context.Context) error {
-			t.Fatal("killDaemon should not be called after prompt error")
-			return nil
-		},
-	})
-	if !errors.Is(err, readErr) {
-		t.Fatalf("error = %v, want wrapped %v", err, readErr)
-	}
-}
-
-func TestRunLocalAttachPropagatesKillError(t *testing.T) {
-	killErr := errors.New("kill failed")
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(strings.NewReader("y\n"), &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-		},
-		killDaemon: func(context.Context) error { return killErr },
-	})
-	if !errors.Is(err, killErr) {
-		t.Fatalf("error = %v, want %v", err, killErr)
-	}
-}
-
-func TestRunLocalAttachSettlesBeforeRetry(t *testing.T) {
-	var order []string
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(strings.NewReader("y\n"), &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			order = append(order, "attach")
-			if len(order) == 1 {
-				return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
-			}
-			return nil
-		},
-		killDaemon: func(context.Context) error {
-			order = append(order, "kill")
-			return nil
-		},
-		settleAfterKill: func(context.Context) error {
-			order = append(order, "settle")
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("runLocalAttachWithRecovery returned error: %v", err)
-	}
-	if got, want := strings.Join(order, ","), "attach,kill,settle,attach"; got != want {
-		t.Fatalf("order = %s, want %s", got, want)
-	}
-}
-
-type errorReader struct{ err error }
-
-func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
-
-func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
-	answers := strings.NewReader("n\n")
-	wantErr := &client.ProtocolError{Code: ports.ErrInternal, Text: "malformed hello"}
-	attachCalls := 0
-	killCalls := 0
-
-	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(answers, &bytes.Buffer{}),
-		attach: func(context.Context, uint8, string) error {
-			attachCalls++
-			return wantErr
-		},
-		killDaemon: func(context.Context) error {
-			killCalls++
-			return nil
-		},
-	})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("error = %v, want original %v", err, wantErr)
-	}
-	if attachCalls != 1 {
-		t.Fatalf("attach calls = %d, want 1", attachCalls)
-	}
-	if killCalls != 0 {
-		t.Fatalf("kill calls = %d, want 0", killCalls)
-	}
-}
-
 func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 	called := false
 	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", nil, runAttachDeps{
@@ -1073,7 +843,10 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 						t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
 					}
 					gotDialer = nd.name
-					gotRemote = request.Remote
+					gotRemote = deps.Remote
+					if request.Remote {
+						t.Fatal("remote carriage metadata must not be in the attach request")
+					}
 					gotClipboard = deps.Clipboard
 					if request.Intent != ports.IntentAttach || request.SessionName != "work" {
 						t.Fatalf("intent/name = %d/%q, want attach/work", request.Intent, request.SessionName)
@@ -1093,6 +866,92 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 			if gotClipboard != ports.ClipboardReader(clip) {
 				t.Fatalf("remote attach must thread the configured ClipboardReader through, got %#v", gotClipboard)
 			}
+		})
+	}
+}
+
+func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
+	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+	var calls int
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
+			calls++
+			require.NotNil(t, deps.Dialer)
+			if calls == 1 {
+				return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, calls, "a picker handoff must close the old connection and open a fresh direct connection")
+}
+
+func TestRunAttachWithDepsRejectsHandoffLoop(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+
+	calls := 0
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
+			calls++
+			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}}
+		},
+	})
+	require.ErrorContains(t, err, "attach handoff loop")
+	require.Equal(t, 1, calls)
+}
+
+func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+
+	localCalls, remoteCalls := 0, 0
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "", "", nil, runAttachDeps{
+		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			if deps.Remote {
+				remoteCalls++
+				require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "picked"}, request)
+				return nil
+			}
+			localCalls++
+			require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}, request)
+			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, localCalls, "the failed local picker attach must not retry locally")
+	require.Equal(t, 1, remoteCalls, "the selected target must be dialed and attached exactly once")
+}
+
+func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
+	tests := []struct {
+		name   string
+		target ports.AttachTarget
+	}{
+		{name: "invalid host", target: ports.AttachTarget{Endpoint: "remote host", Session: "work", Intent: ports.IntentAttach}},
+		{name: "invalid session", target: ports.AttachTarget{Endpoint: "remote.example", Session: "bad name", Intent: ports.IntentAttach}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := portsmocks.NewMockRemoteDialerFactory(t)
+			factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+			calls := 0
+			err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+				remoteDialerFactory: factory,
+				runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
+					calls++
+					return &client.AttachTargetError{Target: tt.target}
+				},
+			})
+			require.ErrorContains(t, err, "invalid remote attach handoff")
+			require.Equal(t, 1, calls)
 		})
 	}
 }
@@ -1153,7 +1012,10 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 				t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
 			}
 			gotDialer = nd.name
-			gotRemote = request.Remote
+			gotRemote = deps.Remote
+			if request.Remote {
+				t.Fatal("local carriage metadata must not be in the attach request")
+			}
 			gotClipboard = deps.Clipboard
 			if request.Intent != ports.IntentEphemeral || request.SessionName != "" {
 				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", request.Intent, request.SessionName)
@@ -1189,7 +1051,7 @@ func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
 
 	got := captureStdout(t, func() {
-		if err := runUDPBootstrap(context.Background(), "work"); err != nil {
+		if err := runUDPBootstrap(context.Background()); err != nil {
 			t.Fatalf("runUDPBootstrap() error = %v", err)
 		}
 	})
@@ -1214,7 +1076,7 @@ func TestRunUDPBootstrapReturnsReadinessEOF(t *testing.T) {
 	}
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
 
-	err := runUDPBootstrap(context.Background(), "work")
+	err := runUDPBootstrap(context.Background())
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("runUDPBootstrap() error = %v, want EOF", err)
 	}
@@ -1230,7 +1092,7 @@ func TestRunUDPBootstrapTimesOutWaitingForReadiness(t *testing.T) {
 	}
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
 
-	err := runUDPBootstrap(context.Background(), "work")
+	err := runUDPBootstrap(context.Background())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("runUDPBootstrap() error = %v, want deadline exceeded", err)
 	}

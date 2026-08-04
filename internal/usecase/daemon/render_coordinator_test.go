@@ -23,25 +23,30 @@ import (
 // coordinatorMockClock uses generated mocks while retaining deterministic timer
 // channels and recorded deadlines for coordinator scheduling assertions.
 type coordinatorMockClock struct {
-	clock  *portsmocks.MockClock
-	timers chan *coordinatorMockTimer
+	clock           *portsmocks.MockClock
+	timers          chan *coordinatorMockTimer
+	handshakeTimers chan *coordinatorMockTimer
 }
 
 type coordinatorMockTimer struct {
 	mock     *portsmocks.MockTimer
 	ch       chan time.Time
 	duration time.Duration
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 func newCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
 	t.Helper()
 	clk := &coordinatorMockClock{
-		clock:  portsmocks.NewMockClock(t),
-		timers: make(chan *coordinatorMockTimer, capacity),
+		clock:           portsmocks.NewMockClock(t),
+		timers:          make(chan *coordinatorMockTimer, capacity),
+		handshakeTimers: make(chan *coordinatorMockTimer, 1),
 	}
 	clk.clock.EXPECT().Now().Return(time.Time{}).Maybe()
 	clk.clock.EXPECT().NewTimer(mock.MatchedBy(func(d time.Duration) bool {
-		return d == urgentRenderDeadline ||
+		return d == ports.HandshakeTimeout ||
+			d == urgentRenderDeadline ||
 			(d >= minOutputRenderDeadline && d <= maxOutputRenderDeadline) ||
 			d == maxSyncUpdateDuration ||
 			d == time.Second ||
@@ -50,14 +55,21 @@ func newCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
 		timer := &coordinatorMockTimer{
 			mock:     portsmocks.NewMockTimer(t),
 			duration: d,
+			stopped:  make(chan struct{}),
 		}
 		timer.ch = make(chan time.Time, 1)
 		// A normal deadline reads C both in its worker and in the inert-clock
 		// guard; a watchdog reads it in its worker. The generated expectation
 		// makes every channel access observable without a hand-written Timer.
 		timer.mock.EXPECT().C().Maybe().Return((<-chan time.Time)(timer.ch))
-		timer.mock.EXPECT().Stop().Maybe().Return(true)
-		clk.timers <- timer
+		timer.mock.EXPECT().Stop().Run(func() {
+			timer.stopOnce.Do(func() { close(timer.stopped) })
+		}).Maybe().Return(true)
+		if d == ports.HandshakeTimeout {
+			clk.handshakeTimers <- timer
+		} else {
+			clk.timers <- timer
+		}
 		return timer.mock
 	}).Maybe()
 	return clk
@@ -217,6 +229,17 @@ func captureResizeCallbackDone(t *testing.T, rc *renderCoordinator) <-chan struc
 		t.Fatal("coordinator did not publish a resize callback completion")
 	}
 	return rc.resizeLane.token.done
+}
+
+func awaitHandshakeTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMockTimer {
+	t.Helper()
+	select {
+	case tm := <-clk.handshakeTimers:
+		return tm
+	default:
+		t.Fatal("handshake did not synchronously arm a fake-clock timer")
+		return nil
+	}
 }
 
 func awaitCoordinatorScheduledTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMockTimer {

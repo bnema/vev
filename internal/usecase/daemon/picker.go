@@ -86,12 +86,8 @@ func (d *Daemon) publishPicker(sess attachmentSession, ac *attachedClient, model
 func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
 	sessions := make([]attachmentSession, 0, len(d.sessions))
-	proxies := make(map[domain.SessionID]*proxySession)
-	for id, entry := range d.sessions {
+	for _, entry := range d.sessions {
 		sessions = append(sessions, entry)
-		if proxy, ok := entry.(*proxySession); ok {
-			proxies[id] = proxy
-		}
 	}
 	stopped := make([]stoppedSession, 0, len(d.stopped))
 	for _, s := range d.stopped {
@@ -114,8 +110,8 @@ func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picke
 	}
 	// One snapshot per live session: sorting and view building read the same
 	// capture, so comparators cannot observe a concurrent touchMRU or
-	// renameSession mid-sort. Proxy and remote-catalog locks are released before
-	// sorting and picker-row construction.
+	// renameSession mid-sort. Remote-catalog locks are released before sorting
+	// and picker-row construction.
 	live := make([]liveSnapshot, 0, len(sessions))
 	var current picker.SourceFilter
 	for _, entry := range sessions {
@@ -126,10 +122,7 @@ func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picke
 		}
 		snap := entry.snapshotView(opts)
 		if entry == cur {
-			if proxy, ok := entry.(*proxySession); ok {
-				key := proxy.key
-				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, RemoteKey: &key}
-			} else if _, ok := localSession(entry); ok && ac != nil {
+			if _, ok := localSession(entry); ok && ac != nil {
 				view := ac.viewSnapshot()
 				if view.tabID != "" {
 					current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: view.tabID}
@@ -175,19 +168,12 @@ func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picke
 	}
 	views := make([]picker.SessionView, 0, len(live)+len(stopped)+catalogRows)
 	for _, item := range live {
-		if proxy, ok := item.entry.(*proxySession); ok {
-			views = append(views, remoteProxyPickerView(proxy.key, item.view))
-			continue
-		}
 		views = append(views, item.view.pickerView())
 	}
 	for _, host := range catalog {
 		for _, session := range host.entry.Sessions {
 			key := domain.RemoteSessionKey{Host: host.entry.Host, Name: session.Name}
 			if key.Validate() != nil {
-				continue
-			}
-			if proxy, ok := proxies[key.ID()]; ok && proxy.key == key {
 				continue
 			}
 			views = append(views, remotePickerView(key, session, host.status, host.entry.FetchedAt))
@@ -640,7 +626,7 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnecti
 		activateTargetTab:       true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
 	})
 	if err != nil {
-		// Losing the exact source attachment is a benign stale action, not a notice for
+		// Losing the exact source role is a benign stale action, not a notice for
 		// whichever attachment replaced the initiator.
 		if !token.attachmentCurrent() {
 			return nil
@@ -676,14 +662,11 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	if token.sess == nil || token.ac == nil || token.effect == nil {
 		return nil
 	}
+	if target.RemoteKey != nil {
+		return d.sendRemoteAttachTargetForAttachment(token, target, *target.RemoteKey, guard, action)
+	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
-	if target.RemoteKey != nil {
-		return d.switchToRemoteTargetForAttachment(token, target, *target.RemoteKey, guard, action)
-	}
-	if token.sess.isProxy() && !target.Stopped {
-		return d.switchActiveTargetForAttachmentGuarded(token, target, guard, action)
-	}
 	sess, ok := localSession(token.sess)
 	if !ok {
 		return errAttachmentTransition
@@ -691,132 +674,45 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	return d.switchToTargetGuardedForAttachment(sess, token.ac, target, guard, &token, action)
 }
 
-// switchToRemoteTargetForAttachment performs dialing after the initiating effect has
-// ended and without attachment-effect or architecture locks. transitionAttachment then
-// freezes and revalidates the exact source attachment and exact structured-key proxy
-// before publishing ownership.
-func (d *Daemon) switchToRemoteTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, action string) error {
-	if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" {
+// sendRemoteAttachTargetForAttachment validates the catalog row and hands the
+// endpoint to the thin client. The daemon owns no remote session shadow: after
+// the target is sent, the local attachment is detached and the client opens a
+// fresh connection to the owning daemon.
+func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, _ string) error {
+	if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" || !d.remotePickerTargetReady(key) {
 		return errAttachmentTransition
 	}
-	ctx := d.serveCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	// Only the caller that observed neither a published proxy nor an in-flight
-	// constructor may own failure cleanup. Waiters and existing-proxy users must
-	// never tear down the shared link when their source transition goes stale.
-	d.mu.Lock()
-	_, alreadyPublished := d.sessions[key.ID()]
-	constructionInFlight := d.proxyConstructions[key] != nil
-	d.mu.Unlock()
-	ownsCandidate := !alreadyPublished && !constructionInFlight
-	proxy, err := d.openProxySession(ctx, key, token.ac.size)
-	if err != nil {
-		if !token.attachmentCurrent() {
-			return errAttachmentTransition
-		}
-		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't connect to that remote session", err)
-	}
-	if proxy == nil || proxy.key != key || proxy.id != key.ID() {
-		return errAttachmentTransition
-	}
-	proxy.mu.Lock()
-	candidateGeneration := proxy.generation
-	proxy.mu.Unlock()
-
-	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source: token.sess, target: proxy, next: token.ac,
-
-		expectedTransport: token.transport, sourceToken: &token, action: action,
-		preserveAttachment: proxy == token.sess, ready: true,
-	})
-	if err != nil {
-		if ownsCandidate {
-			d.discardUnattachedProxyGeneration(proxy, candidateGeneration)
-		}
-		return errAttachmentTransition
+	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: ports.MarshalAttachTarget(ports.AttachTarget{
+		Endpoint: key.Host,
+		Session:  key.Name,
+		Intent:   ports.IntentAttach,
+	})}); err != nil {
+		return err
 	}
 	if guard.closePicker {
-		fresh, admitted := token.ac.beginAttachmentEffect(transition.published)
-		if admitted {
-			d.closePicker(token.ac)
-			fresh.End()
-		}
+		d.closePicker(token.ac)
 	}
-	if proxy != token.sess {
-		token.ac.recordPreviousSession(token.sess)
-	}
-	d.deferAttachmentTransitionCleanups(transition)
-	if proxy == token.sess {
-		d.invalidateRender(proxy, token.ac, true, "picker.go")
-	} else {
-		d.firstPaintForTransition(transition.published)
-	}
+	d.clientGoneForAttachment(token, false)
 	return nil
 }
 
-// discardUnattachedProxyGeneration removes only a transition-owned candidate
-// that never acquired a client. It mirrors normal proxy teardown fencing but
-// deliberately does not arm the five-minute warm lifetime for an attachment
-// that was never published.
-func (d *Daemon) discardUnattachedProxyGeneration(proxy *proxySession, generation uint64) bool {
-	if d == nil || proxy == nil {
+func (d *Daemon) remotePickerTargetReady(key domain.RemoteSessionKey) bool {
+	if d == nil {
 		return false
 	}
-	d.mu.Lock()
-	if d.sessions[proxy.id] != proxy {
-		d.mu.Unlock()
-		return false
+	d.remoteCatalog.mu.Lock()
+	defer d.remoteCatalog.mu.Unlock()
+	for _, entry := range d.remoteCatalog.cache {
+		if entry.Host != key.Host {
+			continue
+		}
+		for _, session := range entry.Sessions {
+			if session.Name == key.Name {
+				return d.remoteCatalog.status[key.Host] != remoteHostVersionMismatch
+			}
+		}
 	}
-	proxy.sessionCore.mu.Lock()
-	if len(proxy.attachments) != 0 {
-		proxy.sessionCore.mu.Unlock()
-		d.mu.Unlock()
-		return false
-	}
-	proxy.mu.Lock()
-	if proxy.generation != generation || proxy.expired || proxy.warm != nil {
-		proxy.mu.Unlock()
-		proxy.sessionCore.mu.Unlock()
-		d.mu.Unlock()
-		return false
-	}
-	proxy.generation++
-	proxy.expired = true
-	cancel := proxy.cancel
-	transport := proxy.transport
-	coordinator := proxy.coordinator.Load()
-	proxy.mu.Unlock()
-	if !d.unregisterSessionLocked(proxy) {
-		proxy.sessionCore.mu.Unlock()
-		d.mu.Unlock()
-		return false
-	}
-	proxy.sessionCore.mu.Unlock()
-	empty := len(d.sessions) == 0
-	if empty {
-		d.closing = true
-	}
-	d.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	if transport != nil {
-		_ = transport.Close()
-	}
-	if coordinator != nil {
-		coordinator.beginSessionTeardown().finish()
-		coordinator.waitForTimerWorkers()
-	}
-	proxy.finish()
-	if empty {
-		d.doneOnce.Do(func() { close(d.done) })
-	} else {
-		d.refreshRemoteOpenPickers()
-	}
-	return true
+	return false
 }
 
 // switchToTargetGuarded is retained for daemon-internal and headless callers.
@@ -1122,7 +1018,6 @@ func (d *Daemon) killPickerTargetForAttachment(target picker.Target, token attac
 		return d.killPickerTarget(target)
 	}
 	if target.RemoteKey != nil {
-		d.enterRemoteKillConfirmation(token.sess, token.ac, target)
 		return nil
 	}
 	if target.Stopped {

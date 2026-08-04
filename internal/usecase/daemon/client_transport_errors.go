@@ -37,14 +37,6 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
-	if proxy, ok := token.sess.(*proxySession); ok {
-		if !d.detachIfAttachmentCurrent(token) {
-			return false
-		}
-		d.finishProxyClientGone(proxy, token.ac, token.transport.transport, explicit)
-		d.armProxyWarm(proxy)
-		return true
-	}
 	sess, ok := localSession(token.sess)
 	if !ok {
 		return false
@@ -124,48 +116,6 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
 }
 
-// detachProxyOnSendError is detachOnSendError for an attachment that has no
-// local session behind it. Proxy attachments own no resumable parking
-// lifecycle, so the remote link is retained as a warm headless session instead
-// of being parked for the same client to resume.
-func (d *Daemon) detachProxyOnSendError(p *proxySession, ac *attachedClient, failed ports.Transport) {
-	if d == nil || p == nil || ac == nil {
-		return
-	}
-	expected := transportSnapshot{}
-	oldTr := failed
-	if failed != nil {
-		expected = ac.transportSnapshot()
-		if expected.transport != failed {
-			return
-		}
-	} else {
-		oldTr = ac.transport()
-	}
-	if !d.detachProxyIfCurrentTransport(p, ac, expected) {
-		return
-	}
-	d.finishProxyClientGone(p, ac, oldTr, false)
-}
-
-// finishProxyClientGone retires external client ownership after the exact proxy
-// attachment has been unpublished. Warm-timer publication remains with the caller so
-// each detach path can arm once, after membership is empty.
-func (d *Daemon) finishProxyClientGone(p *proxySession, ac *attachedClient, failed ports.Transport, explicit bool) {
-	if rc := p.coordinator.Load(); rc != nil {
-		rc.noteDetach(ac)
-	}
-	if ac.overlays != nil {
-		d.closePicker(ac)
-	}
-	ac.clearPreviousSession()
-	if explicit {
-		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
-	}
-	_ = ac.closeCapturedTransport(failed)
-	d.log.Warn("detached proxy client", "host", p.key.Host, "session", p.key.Name, "explicit", explicit)
-}
-
 func (d *Daemon) detachOnAttachmentSendError(token attachmentConnectionToken, failed ports.Transport) {
 	d.detachOnAttachmentSendErrorUntil(token, failed, nil)
 }
@@ -174,13 +124,6 @@ func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToke
 	// A delayed sender may report after the client has rebound. Only the exact
 	// transport captured by this attachment is allowed to detach either lifecycle.
 	if failed == nil || failed != token.transport.transport {
-		return
-	}
-	if proxy, ok := token.sess.(*proxySession); ok {
-		if d.detachIfAttachmentCurrentUntil(token, done) {
-			d.finishProxyClientGone(proxy, token.ac, failed, false)
-			d.armProxyWarm(proxy)
-		}
 		return
 	}
 	sess, ok := localSession(token.sess)

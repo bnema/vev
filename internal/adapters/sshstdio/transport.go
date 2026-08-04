@@ -70,6 +70,8 @@ type transport struct {
 	operationCount int
 	closing        bool
 	operationsDone chan struct{}
+	closeOnce      sync.Once
+	closeErr       error
 
 	mu      sync.Mutex
 	readBuf []byte
@@ -160,22 +162,32 @@ func (t *transport) mapEOFError(err error) error {
 }
 
 func (t *transport) Close() error {
-	done := t.beginShutdown()
-	// Closing the reader first releases a Recv blocked in io.ReadFull even if
-	// the subprocess shutdown callback reports an error. This lets Recv emit
-	// its failed end mark before the process observer is closed.
-	var readErr error
-	if r, ok := t.r.(io.Closer); ok {
-		readErr = r.Close()
-	}
-	closeErr := t.close()
-	if done != nil {
-		<-done
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return readErr
+	t.closeOnce.Do(func() {
+		done := t.beginShutdown()
+		// Close owned streams before waiting for in-flight operations. The
+		// writer is what releases a Send blocked on a child stdin pipe; the
+		// reader releases a Recv blocked in io.ReadFull.
+		var writeErr, readErr error
+		if w, ok := t.w.(io.Closer); ok {
+			writeErr = w.Close()
+		}
+		if r, ok := t.r.(io.Closer); ok {
+			readErr = r.Close()
+		}
+		closeErr := t.close()
+		if done != nil {
+			<-done
+		}
+		switch {
+		case closeErr != nil:
+			t.closeErr = closeErr
+		case readErr != nil:
+			t.closeErr = readErr
+		default:
+			t.closeErr = writeErr
+		}
+	})
+	return t.closeErr
 }
 
 func (t *transport) beginObservedOperation() bool {
@@ -294,18 +306,14 @@ type CommandSpec struct {
 // BuildCommand constructs the local ssh subprocess argv without invoking a
 // local shell. OpenSSH sends the remote command as one string for the remote
 // user's shell to interpret, so every remote argv word is POSIX single-quoted.
-func BuildCommand(target, session string) CommandSpec {
-	return BuildCommandForMode(target, "_stdio", session)
+func BuildCommand(target, _ string) CommandSpec {
+	return BuildCommandForMode(target, "_stdio", "")
 }
 
 // BuildCommandForMode constructs the local ssh subprocess argv for a hidden vev
 // remote mode such as _stdio or _udp-bootstrap.
-func BuildCommandForMode(target, mode, session string) CommandSpec {
-	remote := []string{"vev", mode}
-	if session != "" {
-		remote = append(remote, session)
-	}
-	return BuildCommandForRemoteCommand(target, remote...)
+func BuildCommandForMode(target, mode, _ string) CommandSpec {
+	return BuildCommandForRemoteCommand(target, "vev", mode)
 }
 
 // BuildCommandForRemoteCommand constructs ssh argv for an arbitrary remote
@@ -324,9 +332,9 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// Dial starts ssh target vev _stdio [session] and returns a Transport over the
-// child process' stdio. The subprocess is started with exec.Command argv, never
-// through a shell.
+// Dial starts ssh target vev _stdio and returns a Transport over the child
+// process' stdio. Session selection is carried in Hello. The subprocess is
+// started with exec.Command argv, never through a shell.
 func Dial(target, session string) (ports.Transport, error) {
 	return DialContext(context.Background(), target, session)
 }

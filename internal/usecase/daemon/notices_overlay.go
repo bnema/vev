@@ -228,8 +228,6 @@ func (d *Daemon) yankNotice(entry attachmentSession, ac *attachedClient, n domai
 		if err != nil {
 			if sess, ok := localSession(entry); ok {
 				d.detachOnSendError(sess, ac, failed)
-			} else if proxy, ok := entry.(*proxySession); ok {
-				d.detachProxyOnSendError(proxy, ac, failed)
 			} else {
 				_ = ac.closeCapturedTransport(failed)
 			}

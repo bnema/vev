@@ -258,6 +258,7 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	}()
 
 	<-tr.welcomeEntered
+	handshakeTimer := awaitHandshakeTimer(t, clock)
 	welcome := <-tr.sends
 	require.Equal(t, ports.MsgWelcome, welcome.Type)
 	sess.mu.Lock()
@@ -283,6 +284,7 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	require.Zero(t, first.Base)
 	tr.finish()
 	<-done
+	awaitTestCompletion(t, handshakeTimer.stopped, "handshake timer was not canceled after publication")
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 }
 

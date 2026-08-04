@@ -17,10 +17,6 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error
 		return nil
 	}
 	pickerTarget := picker.Target{Session: target.core().id, TabIndex: -1}
-	if proxy, ok := target.(*proxySession); ok {
-		key := proxy.key
-		pickerTarget.RemoteKey = &key
-	}
 	return d.switchToTargetForAttachment(token, pickerTarget, sessionHandoffGuard{}, "back-session")
 }
 

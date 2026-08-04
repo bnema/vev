@@ -47,7 +47,6 @@ import (
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 	pdgram "github.com/bnema/vev/pkg/dgram"
@@ -162,32 +161,20 @@ func parseArgs(args []string) (command, error) {
 	case "--daemon-launcher":
 		return command{kind: kindDaemonLauncher}, nil
 	case "_stdio":
-		if len(args) > 2 {
-			return command{}, usagef("`_stdio` accepts at most one session name")
+		if len(args) != 1 {
+			return command{}, usagef("`_stdio` does not accept a session name")
 		}
-		cmd := command{kind: kindStdio}
-		if len(args) == 2 {
-			cmd.name = args[1]
-		}
-		return cmd, nil
+		return command{kind: kindStdio}, nil
 	case "_udp-bootstrap":
-		if len(args) > 2 {
-			return command{}, usagef("`_udp-bootstrap` accepts at most one session name")
+		if len(args) != 1 {
+			return command{}, usagef("`_udp-bootstrap` does not accept a session name")
 		}
-		cmd := command{kind: kindUDPBootstrap}
-		if len(args) == 2 {
-			cmd.name = args[1]
-		}
-		return cmd, nil
+		return command{kind: kindUDPBootstrap}, nil
 	case "_udp-proxy":
-		if len(args) > 2 {
-			return command{}, usagef("`_udp-proxy` accepts at most one session name")
+		if len(args) != 1 {
+			return command{}, usagef("`_udp-proxy` does not accept a session name")
 		}
-		cmd := command{kind: kindUDPProxy}
-		if len(args) == 2 {
-			cmd.name = args[1]
-		}
-		return cmd, nil
+		return command{kind: kindUDPProxy}, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -208,6 +195,14 @@ func parseArgs(args []string) (command, error) {
 		}
 		cmd := command{kind: kindAttach, intent: ports.IntentAttach, name: args[1]}
 		if target, session, ok := parseRemoteAttachTarget(args[1]); ok {
+			if err := domain.ValidateRemoteHostTarget(target); err != nil {
+				return command{}, err
+			}
+			if session != "" {
+				if err := domain.ValidateSessionName(session); err != nil {
+					return command{}, err
+				}
+			}
 			cmd.remoteTarget = target
 			cmd.name = session
 			if session == "" {
@@ -271,9 +266,9 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindStdio:
 		return runStdio(ctx)
 	case kindUDPBootstrap:
-		return runUDPBootstrap(ctx, cmd.name)
+		return runUDPBootstrap(ctx)
 	case kindUDPProxy:
-		return runUDPProxy(ctx, cmd.name, os.Stdout)
+		return runUDPProxy(ctx, os.Stdout)
 	case kindList:
 		return runList(ctx, cmd)
 	case kindHost:
@@ -788,6 +783,16 @@ func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error)
 	}
 }
 
+func validateRemoteAttachHandoff(target ports.AttachTarget) error {
+	if err := ports.ValidateAttachTarget(target); err != nil {
+		return err
+	}
+	if err := domain.ValidateRemoteHostTarget(target.Endpoint); err != nil {
+		return err
+	}
+	return domain.ValidateSessionName(target.Session)
+}
+
 // remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
 // the same validated transport selection used by direct remote attach.
 func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRuntimeObserver, transport string) (daemon.Option, error) {
@@ -804,6 +809,12 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 	), nil
 }
 
+type attachHandoffKey struct {
+	endpoint string
+	session  string
+	intent   uint8
+}
+
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == ports.IntentNew {
@@ -816,100 +827,85 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	if runClient == nil {
 		runClient = runClientWithDeps
 	}
-	if remoteTarget != "" {
-		mode, err := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
-		if err != nil {
-			return err
-		}
-		factory := deps.remoteDialerFactory
-		if factory == nil {
-			factory = defaultRemoteDialerFactory()
-		}
-		if log != nil {
-			log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
-		}
-		dialer, err := factory.DialerForRemote(remoteTarget, name, mode, log)
-		if err != nil {
-			return err
-		}
-		return runClient(ctx, client.Dependencies{
-			Dialer:            dialer,
-			Terminal:          term.New(),
-			Clock:             clock.New(),
-			Clipboard:         deps.clipboard,
-			Logger:            log,
-			RuntimeObserver:   deps.runtimeObserver,
-			RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
-		}, client.AttachRequest{Intent: intent, SessionName: name, Remote: true})
-	}
-
 	localDialer := deps.localDialer
 	if localDialer == nil {
 		localDialer = defaultLocalDialer
 	}
-	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
-		confirmer: confirm.NewConfirmer(os.Stdin, os.Stderr),
-		attach: func(ctx context.Context, intent uint8, name string) error {
+	mode, modeErr := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
+	factory := deps.remoteDialerFactory
+	seenHandoffs := make(map[attachHandoffKey]struct{})
+	if remoteTarget != "" {
+		if modeErr != nil {
+			return modeErr
+		}
+		if factory == nil {
+			factory = defaultRemoteDialerFactory()
+		}
+		seenHandoffs[attachHandoffKey{endpoint: remoteTarget, session: name, intent: intent}] = struct{}{}
+	}
+
+	for {
+		var err error
+		if remoteTarget != "" {
+			if log != nil {
+				log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
+			}
+			dialer, dialErr := factory.DialerForRemote(remoteTarget, name, mode, log)
+			if dialErr != nil {
+				return dialErr
+			}
+			err = runClient(ctx, client.Dependencies{
+				Dialer:            dialer,
+				Terminal:          term.New(),
+				Clock:             clock.New(),
+				Clipboard:         deps.clipboard,
+				Logger:            log,
+				RuntimeObserver:   deps.runtimeObserver,
+				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
+				Remote:            true,
+			}, client.AttachRequest{Intent: intent, SessionName: name})
+		} else {
 			if log != nil {
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
-			return runClient(ctx, client.Dependencies{
+			err = runClient(ctx, client.Dependencies{
 				Dialer:          localDialer(),
 				Terminal:        term.New(),
 				Clock:           clock.New(),
 				Logger:          log,
 				RuntimeObserver: deps.runtimeObserver,
+				Remote:          false,
 			}, client.AttachRequest{Intent: intent, SessionName: name})
-		},
-		killDaemon:      requestDaemonStop,
-		settleAfterKill: waitForDaemonStop,
-	})
-}
+		}
 
-type attachRecoveryDeps struct {
-	confirmer       confirm.Confirmer
-	attach          func(context.Context, uint8, string) error
-	killDaemon      func(context.Context) error
-	settleAfterKill func(context.Context) error
-}
-
-const (
-	daemonStopTimeout          = 2 * time.Second
-	daemonRestartSettle        = 50 * time.Millisecond
-	legacyMalformedHelloSignal = "malformed hello"
-)
-
-func runLocalAttachWithRecovery(ctx context.Context, intent uint8, name string, deps attachRecoveryDeps) error {
-	err := deps.attach(ctx, intent, name)
-	if !isDaemonVersionDrift(err) {
-		return err
-	}
-
-	ok, promptErr := deps.confirmer.Confirm("Your vev version differs from the running daemon; kill it and restart?")
-	if promptErr != nil {
-		return fmt.Errorf("vev: reading confirmation: %w", promptErr)
-	}
-	if !ok {
-		return err
-	}
-	if killErr := deps.killDaemon(ctx); killErr != nil {
-		return killErr
-	}
-	if deps.settleAfterKill != nil {
-		if settleErr := deps.settleAfterKill(ctx); settleErr != nil {
-			return settleErr
+		var handoff *client.AttachTargetError
+		if !errors.As(err, &handoff) {
+			return err
+		}
+		if handoff == nil {
+			return fmt.Errorf("vev: invalid remote attach handoff")
+		}
+		if err := validateRemoteAttachHandoff(handoff.Target); err != nil {
+			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
+		}
+		next := attachHandoffKey{endpoint: handoff.Target.Endpoint, session: handoff.Target.Session, intent: handoff.Target.Intent}
+		if _, seen := seenHandoffs[next]; seen {
+			return fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
+		}
+		seenHandoffs[next] = struct{}{}
+		remoteTarget = handoff.Target.Endpoint
+		name = handoff.Target.Session
+		intent = handoff.Target.Intent
+		if modeErr != nil {
+			return modeErr
+		}
+		if factory == nil {
+			factory = defaultRemoteDialerFactory()
 		}
 	}
-	return deps.attach(ctx, intent, name)
 }
 
-func isDaemonVersionDrift(err error) bool {
-	var protocolErr *client.ProtocolError
-	if !errors.As(err, &protocolErr) {
-		return false
-	}
-	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
-}
+const daemonStopTimeout = 2 * time.Second
 
 type localDaemonDialer struct {
 	dir      string
@@ -989,17 +985,6 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 	}
 }
 
-func waitForDaemonStop(ctx context.Context) error {
-	timer := time.NewTimer(daemonRestartSettle)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
 func requestDaemonStop(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
 	defer cancel()
@@ -1052,8 +1037,27 @@ func runStdio(ctx context.Context) (retErr error) {
 		return err
 	}
 	defer func() { _ = transport.Close() }()
-	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
-	return runStdioProxy(ctx, stdio, transport, os.Environ(), log)
+
+	// sshstdio.Close owns and closes writers that implement io.Closer so a
+	// blocked Send can unwind. Keep process-global stdin/stdout outside that
+	// ownership boundary: input is a non-closing view and output is an owned
+	// pipe drained by a small forwarding goroutine.
+	stdin, stdout := os.Stdin, os.Stdout
+	stdoutReader, stdoutWriter := io.Pipe()
+	forwardDone := make(chan struct{})
+	go func() {
+		defer close(forwardDone)
+		if _, err := io.Copy(stdout, stdoutReader); err != nil {
+			_ = stdoutReader.CloseWithError(err)
+		}
+	}()
+	defer func() {
+		_ = stdoutWriter.Close()
+		<-forwardDone
+		_ = stdoutReader.Close()
+	}()
+	stdio := sshstdio.NewTransport(stdin, stdoutWriter, nil, sshstdio.WithRuntimeObserver(observer))
+	return runStdioProxy(ctx, stdio, transport, log)
 }
 
 var (
@@ -1065,12 +1069,12 @@ var (
 
 // runUDPBootstrap starts a detached _udp-proxy, forwards its single readiness
 // line, and exits so SSH stdio can close without owning the UDP proxy lifetime.
-func runUDPBootstrap(ctx context.Context, session string) error {
+func runUDPBootstrap(ctx context.Context) error {
 	// Always start a fresh proxy for a bootstrap request. A client attach begins
 	// with MsgHello, which must reach the daemon handshake path; reusing an
 	// already-running proxy would forward that Hello into the daemon connection's
-	// post-handshake runConnLoop, where it is intentionally ignored. The new
-	// proxy publishes itself and retires any older registry entry once ready.
+	// post-handshake runConnLoop, where it is intentionally ignored. Every
+	// bootstrap starts a fresh byte-only carriage.
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -1083,9 +1087,6 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 		return err
 	}
 	args := []string{"_udp-proxy"}
-	if session != "" {
-		args = append(args, session)
-	}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		_ = w.Close()
@@ -1136,13 +1137,13 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 }
 
 // runUDPProxy is the detached long-lived remote-side datagram proxy.
-func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr error) {
+func runUDPProxy(ctx context.Context, ready io.Writer) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
-	log.Debug("udp proxy starting", "session", session)
+	log.Debug("udp carriage starting")
 
 	observer, observerCloser, err := newPerformanceTrace(clock.New())
 	if err != nil {
@@ -1173,13 +1174,9 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 	if !ok {
 		return errors.New("vev: udp proxy did not get a UDP address")
 	}
-	registry := dgram.NewProxyRegistry(filepath.Join(ipc.SocketDir(), "udp-proxies"))
-
 	var (
-		dg        *dgram.Transport
-		record    dgram.ProxyRecord
-		published bool
-		setupErr  error
+		dg       *dgram.Transport
+		setupErr error
 	)
 	pdgram.SecretDo(func() {
 		key := make([]byte, pdgram.KeySize)
@@ -1191,12 +1188,6 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		if setupErr != nil {
 			return
 		}
-		record = dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, KeyFingerprint: dgram.KeyFingerprint(key)}
-		if setupErr = registry.Publish(record); setupErr != nil {
-			return
-		}
-		published = true
-
 		readiness := append([]byte("VEV-UDP "), strconv.Itoa(addr.Port)...)
 		readiness = append(readiness, ' ')
 		readiness = base64.StdEncoding.AppendEncode(readiness, key)
@@ -1210,15 +1201,10 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		if dg != nil {
 			_ = dg.Close()
 		}
-		if published {
-			_ = registry.RemoveOwned(record)
-		}
 		return setupErr
 	}
 	defer func() { _ = dg.Close() }()
-	defer func() { _ = registry.RemoveOwned(record) }()
-
-	return runUDPProxyRuntime(ctx, session, dg, daemonTr, os.Environ(), log)
+	return runUDPProxyRuntime(ctx, dg, daemonTr, log)
 }
 
 const udpProxyIdleTTL = 15 * time.Minute
@@ -1309,66 +1295,14 @@ func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, erro
 	return nil, fmt.Errorf("no free UDP port in range %d-%d: %w", r.start, r.end, lastErr)
 }
 
-// firstHelloTransport applies proxy-owned values to exactly the first Hello
-// crossing a remote boundary. It intentionally leaves all later frames and
-// malformed Hellos untouched so proxying preserves the client stream.
-type firstHelloTransport struct {
-	ports.Transport
-	mu      sync.Mutex
-	seen    bool
-	session string
-	env     []string
+// runStdioProxy forwards the framed transport without interpreting protocol
+// messages. Session selection remains in the Hello sent by the thin client.
+func runStdioProxy(ctx context.Context, client, daemon ports.Transport, log *slog.Logger) error {
+	return proxyTransports(ctx, client, daemon, log)
 }
 
-func newFirstHelloTransport(transport ports.Transport, session string, env []string) *firstHelloTransport {
-	return &firstHelloTransport{
-		Transport: transport,
-		session:   session,
-		env:       append([]string(nil), env...),
-	}
-}
-
-func (t *firstHelloTransport) Recv() (ports.Frame, error) {
-	f, err := t.Transport.Recv()
-	if err != nil || f.Type != ports.MsgHello {
-		return f, err
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.seen {
-		return f, nil
-	}
-	t.seen = true
-
-	h, err := ports.UnmarshalHello(f.Payload)
-	if err != nil {
-		return f, nil
-	}
-	h.Env = append([]string(nil), t.env...)
-	if h.Name == "" {
-		h.Name = t.session
-	}
-	f.Payload = ports.MarshalHello(h)
-	return f, nil
-}
-
-// runStdioProxy applies the remote host environment before the stdio stream
-// reaches the daemon. Its explicit environment input keeps this host boundary
-// independently testable.
-func runStdioProxy(ctx context.Context, client, daemon ports.Transport, env []string, log *slog.Logger) error {
-	return proxyTransports(ctx, newFirstHelloTransport(client, "", env), daemon, log)
-}
-
-// runUDPProxyRuntime applies the remote host environment and selected session
-// before the datagram stream reaches the daemon.
-func runUDPProxyRuntime(ctx context.Context, session string, client, daemon ports.Transport, env []string, log *slog.Logger) error {
-	return dgram.ProxyRuntime{
-		Client:  newFirstHelloTransport(client, session, env),
-		Daemon:  daemon,
-		Log:     log,
-		IdleTTL: udpProxyIdleTTL,
-	}.Run(ctx)
+func runUDPProxyRuntime(ctx context.Context, client, daemon ports.Transport, log *slog.Logger) error {
+	return dgram.ProxyRuntime{Client: client, Daemon: daemon, Log: log, IdleTTL: udpProxyIdleTTL}.Run(ctx)
 }
 
 func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger) error {

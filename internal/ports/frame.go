@@ -1,5 +1,11 @@
 package ports
 
+import "time"
+
+// HandshakeTimeout bounds every transport handshake from connect through the
+// first committed publication.
+const HandshakeTimeout = 15 * time.Second
+
 // ProtocolVersion is the current vev IPC wire protocol version.
 const ProtocolVersion uint16 = 23
 

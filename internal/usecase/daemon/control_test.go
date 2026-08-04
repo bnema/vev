@@ -124,6 +124,56 @@ func (s *actionRunnerSpy) Run(request daemonActionRequest) error {
 	return s.err
 }
 
+func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
+	factory := &controlPTYFactory{entered: make(chan struct{}), release: make(chan struct{})}
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, factory, clock)
+	addControlSession(d, "work", "t_work", "p_work")
+	frame := commandFrame(t, ports.CommandRequest{
+		RequestID: 17, Slug: "new-tab", TargetSession: "work",
+	})
+	tr, sends, releaseConn := newConn(t, frame)
+	defer releaseConn()
+	done := make(chan error, 1)
+	go func() {
+		done <- d.handleCommand(tr, frame)
+	}()
+	<-factory.entered
+	timer := <-clock.timers
+	require.Equal(t, CommandRequestTimeout, timer.duration)
+	timer.ch <- time.Time{}
+	result := awaitCommandResult(t, sends)
+	require.Equal(t, uint64(17), result.RequestID)
+	require.Equal(t, ports.ErrInternal, result.Code)
+	require.Equal(t, ErrCommandRequestTimeout.Error(), result.Text)
+	require.NoError(t, <-done)
+	close(factory.release)
+}
+
+func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	tr := newBlockingControlSendTransport()
+	frame := commandFrame(t, ports.CommandRequest{RequestID: 41, Attached: true})
+	done := make(chan error, 1)
+	go func() { done <- d.handleCommand(tr, frame) }()
+
+	<-tr.started
+	timer := <-clock.timers
+	timer.ch <- time.Time{}
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errSendTimedOut)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("bounded control response did not return")
+	}
+	select {
+	case <-tr.closed:
+	default:
+		t.Fatal("timed-out control response did not close its transport")
+	}
+}
+
 func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	var logs bytes.Buffer
@@ -1270,6 +1320,33 @@ func (f *controlPTYFactory) close() {
 	for _, pty := range f.ptys {
 		_ = pty.Close()
 	}
+}
+
+type blockingControlSendTransport struct {
+	started chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newBlockingControlSendTransport() *blockingControlSendTransport {
+	return &blockingControlSendTransport{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (tr *blockingControlSendTransport) Send(ports.Frame) error {
+	tr.once.Do(func() { close(tr.started) })
+	<-tr.closed
+	return io.ErrClosedPipe
+}
+
+func (*blockingControlSendTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (tr *blockingControlSendTransport) Close() error {
+	tr.once.Do(func() { close(tr.started) })
+	select {
+	case <-tr.closed:
+	default:
+		close(tr.closed)
+	}
+	return nil
 }
 
 type commandSendErrorTransport struct {

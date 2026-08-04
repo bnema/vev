@@ -35,7 +35,6 @@ func (*coreNilAttachment) captureRenderState(*attachedClient, renderCaptureReque
 	return nil, false
 }
 func (*coreNilAttachment) validTargetTabLocked(int) bool { return false }
-func (*coreNilAttachment) isProxy() bool                 { return false }
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"sort"
 	"time"
@@ -20,34 +19,6 @@ const (
 	paletteRailBreakpoint = 96
 	paletteRailWidth      = 64
 )
-
-type proxyPaletteOwnership uint8
-
-const (
-	proxyPaletteRejected proxyPaletteOwnership = iota
-	proxyPaletteLocal
-	proxyPaletteRemote
-)
-
-// proxyPaletteCommandOwnership is exhaustive by policy: an unknown future
-// palette command is rejected until its proxy ownership is deliberately added.
-func proxyPaletteCommandOwnership(slug string) proxyPaletteOwnership {
-	switch slug {
-	case "new-tab", "close-tab",
-		"split-right", "split-left", "split-up", "split-down",
-		"consume-or-expel-pane-left", "consume-or-expel-pane-right",
-		"stack-pane", "toggle-stack", "toggle-floating-pane", "close-pane",
-		"focus-pane-left", "focus-pane-right", "focus-pane-up", "focus-pane-down",
-		"resize-pane", "grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes",
-		"next-tab", "previous-tab", "rename-tab":
-		return proxyPaletteRemote
-	case "new-session", "back-session", "jump-recent-session", "session-picker",
-		"notifications", "yank-last-notification", "detach":
-		return proxyPaletteLocal
-	default:
-		return proxyPaletteRejected
-	}
-}
 
 var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
 
@@ -180,7 +151,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		return
 	}
 	sess, local := localSession(entry)
-	proxy, remote := entry.(*proxySession)
 	var cmd command.Command
 	var sessionTarget palette.Result
 	var hasSessionTarget bool
@@ -344,66 +314,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
 			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
-		}
-		return
-	}
-	ownership := proxyPaletteCommandOwnership(cmd.Slug)
-	if remote && ownership == proxyPaletteRemote {
-		if !ac.closeExecutedPalette(generation, rawQuery) {
-			return
-		}
-		ctx := d.serveCtx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		result, err := proxy.sendCommand(ctx, d.clock, cmd.Slug, args)
-		if err != nil {
-			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, "remote command failed", err)
-			return
-		}
-		if !result.OK {
-			text := result.Text
-			if text == "" {
-				text = "remote command failed"
-			}
-			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, text, nil)
-			return
-		}
-		d.recordPaletteUse(cmd.Code)
-		d.invalidateRender(proxy, ac, true, "palette.go")
-		return
-	}
-	if remote && ownership == proxyPaletteLocal {
-		// Every local action supersedes this exact remote palette generation.
-		// Close it before role handoff or opening another overlay so a delayed
-		// action cannot leave the old palette rendered over the new state.
-		if !ac.closeExecutedPalette(generation, rawQuery) {
-			return
-		}
-		var err error
-		switch cmd.Slug {
-		case "new-session", "yank-last-notification":
-			err = cmd.Run(paletteExec{d: d, ac: ac, effect: effect, attachment: proxy}, args)
-			if err == nil {
-				d.recordPaletteUse(cmd.Code)
-			}
-		case "back-session":
-			if effect != nil {
-				err = d.backSessionForAttachment(effect.connectionToken())
-			}
-		case "detach":
-			if effect != nil && !d.clientGoneForAttachment(effect.connectionToken(), true) {
-				err = errAttachmentTransition
-			}
-		case "session-picker":
-			d.enterPicker(proxy, ac)
-		case "notifications":
-			d.enterNotices(proxy, ac)
-		default:
-			err = errors.New(cmd.Name + " is unavailable for a remote session")
-		}
-		if err != nil && !errors.Is(err, errAttachmentTransition) {
-			d.notify(nil, domain.NoticeError, domain.NoticeSessionUnavailable, err.Error(), nil)
 		}
 		return
 	}

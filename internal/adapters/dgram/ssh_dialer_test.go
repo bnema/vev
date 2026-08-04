@@ -33,7 +33,7 @@ func (p *fakeBootstrapProcess) Start() error                       { return p.st
 func (p *fakeBootstrapProcess) Kill() error                        { p.killed = true; return nil }
 func (p *fakeBootstrapProcess) Wait() error                        { p.waited = true; return p.waitErr }
 
-func withBootstrapStarter(t *testing.T, fn func(context.Context, string, string, io.Writer) bootstrapProcess) {
+func withBootstrapStarter(t *testing.T, fn func(context.Context, string, io.Writer) bootstrapProcess) {
 	t.Helper()
 	old := startUDPBootstrap
 	startUDPBootstrap = fn
@@ -71,7 +71,7 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 			if tt.name == "bootstrap wait failure" {
 				proc.waitErr = errors.New("exit status 255")
 			}
-			withBootstrapStarter(t, func(context.Context, string, string, io.Writer) bootstrapProcess { return proc })
+			withBootstrapStarter(t, func(context.Context, string, io.Writer) bootstrapProcess { return proc })
 			if tt.listen != nil {
 				withListenUDP(t, func(context.Context) (net.PacketConn, error) { return nil, tt.listen })
 			}
@@ -120,9 +120,9 @@ func TestListenUDPPacketUsesDualStackWildcard(t *testing.T) {
 func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
 	proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader("VEV-UDP 4444 " + key + "\n"))}
-	withBootstrapStarter(t, func(_ context.Context, target, session string, _ io.Writer) bootstrapProcess {
-		if target != "127.0.0.1" || session != "work" {
-			t.Fatalf("bootstrap target/session = %q/%q", target, session)
+	withBootstrapStarter(t, func(_ context.Context, target string, _ io.Writer) bootstrapProcess {
+		if target != "127.0.0.1" {
+			t.Fatalf("bootstrap target = %q", target)
 		}
 		return proc
 	})

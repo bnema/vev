@@ -614,8 +614,8 @@ func TestHarnessUsesPublicRoleCommandsAndPTYWorkloads(t *testing.T) {
 	}{
 		{"daemon", []string{"--daemon"}},
 		{"client", []string{"new", "perf-s-001"}},
-		{"ssh_stdio_peer", []string{"_stdio", "perf-s-001"}},
-		{"udp_peer", []string{"_udp-proxy", "perf-s-001"}},
+		{"ssh_stdio_peer", []string{"_stdio"}},
+		{"udp_peer", []string{"_udp-proxy"}},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
 			got := roleArgs(scenario{ID: "s", Transport: "local"}, processMapping{Role: tc.role, Run: 1})

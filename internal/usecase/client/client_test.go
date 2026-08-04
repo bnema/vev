@@ -182,7 +182,7 @@ func attachTestDependencies(transport ports.Transport, terminal ports.Terminal, 
 	return testDependencies(transportDialer{transport: transport}, terminal, clock, nil, nil)
 }
 
-const testPreWelcomeTimeout = 15 * time.Second
+const testPreWelcomeTimeout = ports.HandshakeTimeout
 
 func newHandshakeClock(t *testing.T, timerCount int) (*portsmocks.MockClock, <-chan chan time.Time) {
 	t.Helper()
@@ -197,6 +197,26 @@ func newHandshakeClock(t *testing.T, timerCount int) (*portsmocks.MockClock, <-c
 		return timer
 	}).Times(timerCount)
 	return clk, created
+}
+
+func TestRunBoundsBlockedDial(t *testing.T) {
+	clk, createdTimers := newHandshakeClock(t, 1)
+	started := make(chan struct{})
+	dialer := portsmocks.NewMockDialer(t)
+	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(ctx context.Context) (ports.Transport, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}).Once()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runTestClient(context.Background(), testDependencies(dialer, nil, clk, nil, nil), client.AttachRequest{Intent: ports.IntentAttach, SessionName: "main"})
+	}()
+	timerC := <-createdTimers
+	<-started
+	timerC <- time.Time{}
+	require.ErrorIs(t, <-errCh, context.DeadlineExceeded)
 }
 
 func TestRunBoundsPreWelcomeOperations(t *testing.T) {
@@ -216,11 +236,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			timerCount := 1
-			if tt.phase == "recv" {
-				timerCount = 2
-			}
-			clk, createdTimers := newHandshakeClock(t, timerCount)
+			clk, createdTimers := newHandshakeClock(t, 1)
 
 			term := portsmocks.NewMockTerminal(t)
 			term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
@@ -228,9 +244,10 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 
 			started := make(chan struct{})
 			closed := make(chan struct{})
+			var closeOnce sync.Once
 			operationExited := make(chan struct{})
 			tr := portsmocks.NewMockTransport(t)
-			tr.EXPECT().Close().Run(func() { close(closed) }).Return(nil).Once()
+			tr.EXPECT().Close().Run(func() { closeOnce.Do(func() { close(closed) }) }).Return(nil).Maybe()
 
 			block := func() error {
 				close(started)
@@ -260,21 +277,13 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			select {
 			case timerC = <-createdTimers:
 			case <-time.After(time.Second):
-				t.Fatal("pre-Welcome timer was not created")
+				t.Fatal("handshake timer was not created")
 			}
 			select {
 			case <-started:
 			case <-time.After(time.Second):
-				t.Fatal("pre-Welcome operation did not start")
+				t.Fatal("handshake operation did not start")
 			}
-			if tt.phase == "recv" {
-				select {
-				case timerC = <-createdTimers:
-				case <-time.After(time.Second):
-					t.Fatal("Welcome timer was not created")
-				}
-			}
-
 			if tt.end == "cancel" {
 				cancel()
 			} else {
@@ -285,12 +294,12 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			case err := <-errCh:
 				require.ErrorIs(t, err, tt.want)
 			case <-time.After(time.Second):
-				t.Fatal("Run did not return after pre-Welcome cancellation")
+				t.Fatal("Run did not return after handshake cancellation")
 			}
 			select {
 			case <-operationExited:
 			case <-time.After(time.Second):
-				t.Fatal("pre-Welcome operation leaked after Run returned")
+				t.Fatal("handshake operation leaked after Run returned")
 			}
 			tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
 		})
@@ -335,6 +344,31 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("hello frame was not sent")
 	}
+}
+
+func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	target := ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "local"}))},
+		recvItem{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(target))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"})
+	var handoff *client.AttachTargetError
+	require.ErrorAs(t, err, &handoff)
+	require.Equal(t, target, handoff.Target)
+	require.Equal(t, int32(1), restoreCount.Load(), "handoff must restore the terminal after closing the old connection")
 }
 
 func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {

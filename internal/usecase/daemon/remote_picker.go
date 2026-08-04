@@ -139,33 +139,6 @@ func remotePickerHostView(host string, status remoteHostStatus) picker.SessionVi
 	}
 }
 
-func remoteProxyPickerView(key domain.RemoteSessionKey, snap sessionView) picker.SessionView {
-	view := snap.pickerView()
-	// Proxy construction uses this same ID and label. Restating them from the
-	// structured key makes the cache-to-live row upgrade independent of mutable
-	// presentation or relayed metadata. Lifecycle is carried separately from
-	// presentation so a display-name change can never spoof expiry.
-	view.ID = key.ID()
-	view.Name = key.Display()
-	if snap.expired {
-		view.Name += " [expired]"
-	}
-	view.TargetName = ""
-	view.ExpectedCreatedAt = nil
-	view.RemoteKey = &key
-	view.RemoteAvailability = picker.RemoteFresh
-	view.RemoteDetail = remotePickerDetail(uint16(snap.tabCount))
-	view.ConnectOnly = true
-	view.RemoteAttachReady = true
-	if snap.expired {
-		view.RemoteAvailability = picker.RemoteStale
-		view.RemoteDetail = "expired"
-		view.RemoteAttachReady = false
-	}
-	view.CannotAcceptMoves = true
-	return view
-}
-
 func sortRemotePickerCatalog(entries []remotePickerCatalogEntry, ranks map[string]int) {
 	for i := range entries {
 		sort.Slice(entries[i].entry.Sessions, func(left, right int) bool {

@@ -39,8 +39,8 @@ func (p execBootstrapProcess) Kill() error                        { return p.cmd
 func (p execBootstrapProcess) Wait() error                        { return p.cmd.Wait() }
 
 var (
-	startUDPBootstrap = func(ctx context.Context, target, session string, stderr io.Writer) bootstrapProcess {
-		spec := sshstdio.BuildCommandForMode(target, "_udp-bootstrap", session)
+	startUDPBootstrap = func(ctx context.Context, target string, stderr io.Writer) bootstrapProcess {
+		spec := sshstdio.BuildCommandForMode(target, "_udp-bootstrap", "")
 		cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
 		cmd.Stderr = stderr
 		return execBootstrapProcess{cmd: cmd}
@@ -98,19 +98,18 @@ func (b *limitedBuffer) String() string { return string(b.buf) }
 // attach. SSH stdio is selected only through the explicit stdio transport mode.
 type RemoteDialer struct {
 	Target           string
-	Session          string
 	BootstrapTimeout time.Duration
 	ProbeTimeout     time.Duration
 	Log              *slog.Logger
 	RuntimeObserver  ports.SerializedRuntimeObserver
 }
 
-func NewRemoteDialer(target, session string) RemoteDialer {
-	return RemoteDialer{Target: target, Session: session, ProbeTimeout: defaultProbeTimeout}
+func NewRemoteDialer(target, _ string) RemoteDialer {
+	return RemoteDialer{Target: target, ProbeTimeout: defaultProbeTimeout}
 }
 
-func NewRemoteDialerWithLogger(target, session string, log *slog.Logger) RemoteDialer {
-	return RemoteDialer{Target: target, Session: session, ProbeTimeout: defaultProbeTimeout, Log: log}
+func NewRemoteDialerWithLogger(target, _ string, log *slog.Logger) RemoteDialer {
+	return RemoteDialer{Target: target, ProbeTimeout: defaultProbeTimeout, Log: log}
 }
 
 func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
@@ -129,7 +128,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	defer bootstrapCancel()
 
 	var stderr limitedBuffer
-	proc := startUDPBootstrap(bootstrapCtx, d.Target, d.Session, &stderr)
+	proc := startUDPBootstrap(bootstrapCtx, d.Target, &stderr)
 	stdout, err := proc.StdoutPipe()
 	if err != nil {
 		return nil, udpUnavailable("bootstrap stdout", err, &stderr)

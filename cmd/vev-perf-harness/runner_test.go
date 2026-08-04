@@ -256,10 +256,10 @@ func TestHarnessRoutesEveryRemoteFixtureThroughItsDeclaredPeer(t *testing.T) {
 			if !equalStrings(client.Args, []string{"attach", "harness@127.0.0.1"}) {
 				t.Fatalf("client did not use ephemeral public remote attach: %q", client.Args)
 			}
-			if tc.peer == "ssh_stdio_peer" && !equalStrings(peer.Args, []string{"_stdio", "perf-route-002"}) {
+			if tc.peer == "ssh_stdio_peer" && !equalStrings(peer.Args, []string{"_stdio"}) {
 				t.Fatalf("ssh peer command=%q", peer.Args)
 			}
-			if tc.peer == "udp_peer" && !equalStrings(peer.Args, []string{"_udp-proxy", "perf-route-002"}) {
+			if tc.peer == "udp_peer" && !equalStrings(peer.Args, []string{"_udp-proxy"}) {
 				t.Fatalf("udp peer command=%q", peer.Args)
 			}
 			if peer.Transport.RTTMS != tc.wantRTT || peer.Transport.LossPercent != tc.wantLoss {

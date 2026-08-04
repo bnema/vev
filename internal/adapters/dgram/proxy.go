@@ -50,8 +50,8 @@ type proxyCopyDirection struct {
 	dst              ports.Transport
 	recvKind         proxyCopyErrKind
 	sendKind         proxyCopyErrKind
-	retryRecoverable bool
 	transform        func(ports.Frame) ports.Frame
+	retryRecoverable bool
 }
 
 func (p ProxyRuntime) Run(ctx context.Context) error {

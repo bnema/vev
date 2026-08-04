@@ -85,6 +85,13 @@ type attachedClient struct {
 	previousSession Guarded[attachmentSession]
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
+	// routeCreatedSession marks a session created by this attachment's route.
+	// A handshake that never commits Welcome must tear down that exact empty
+	// session, while an attachment routed to an existing session must not.
+	routeCreatedSession bool
+	// routeSessionPurge distinguishes a brand-new session from a restored
+	// stopped session when failed-handshake cleanup removes the live instance.
+	routeSessionPurge bool
 	// beforeAttachmentTokenValidation is a deterministic lifecycle-race seam
 	// used only by package tests.
 	beforeAttachmentTokenValidation func()
@@ -136,9 +143,7 @@ func (ac *attachedClient) initOverlays() {
 
 func (ac *attachedClient) currentAttachmentSession() attachmentSession { return ac.sess.Get() }
 
-// currentSession is the explicit local-only narrowing used until proxy-aware
-// consumers are introduced. Local PTY/tab paths must treat non-local entries as
-// unavailable rather than infer proxy behavior.
+// currentSession narrows the attachment to its owning local session.
 func (ac *attachedClient) currentSession() *session {
 	sess, _ := localSession(ac.currentAttachmentSession())
 	return sess
@@ -337,31 +342,6 @@ func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportS
 		return errAttachmentTransition
 	}
 	err := expected.transport.Send(f)
-	if err != nil {
-		ticket.reportTransportFailure(expected)
-	}
-	ticket.endTransportSend()
-	return err
-}
-
-// sendExpectedSideEffectForAttachment captures the output epoch, view revision,
-// and window while sendMu is held. A resize or handoff therefore cannot put a
-// side-effect frame from the old attachment state onto the new transport state.
-func (ac *attachedClient) sendExpectedSideEffectForAttachment(expected transportSnapshot, data []byte, echoAck uint64, ticket *attachmentEffectTicket) error {
-	ac.sendMu.Lock()
-	defer ac.sendMu.Unlock()
-	if ticket == nil {
-		return errAttachmentTransition
-	}
-	if err := ac.beginExpectedTransportSendLocked(expected, ticket); err != nil {
-		return errAttachmentTransition
-	}
-	ac.output.lockView()
-	defer ac.output.unlockView()
-	frame, err := ac.output.sideEffectLocked(data, echoAck)
-	if err == nil {
-		err = expected.transport.Send(frame)
-	}
 	if err != nil {
 		ticket.reportTransportFailure(expected)
 	}
@@ -608,8 +588,7 @@ func (d *Daemon) ensureRenderCoordinatorPrelocked(sess *session) *renderCoordina
 }
 
 // ensureAttachmentRenderCoordinatorPrelocked publishes the coordinator for an
-// exact attachment implementation. The caller holds entry.core().mu; proxy
-// VT state is deliberately not touched here.
+// exact attachment implementation. The caller holds entry.core().mu.
 func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSession) *renderCoordinator {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
 		return rc
@@ -704,10 +683,6 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 		// to be reused by the destination.
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
-	}
-	if _, ok := token.sess.(*proxySession); ok {
-		// Remote ordinary output arrives independently after the proxy Welcome.
-		return true
 	}
 	sess, ok := localSession(token.sess)
 	if !ok {
@@ -819,19 +794,24 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	view.windowTop = 0
 	view.revision++
 	ac.publishView(view)
+	ac.rebaseOutput()
 	ac.pipelineCache = composeCacheInput{}
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
 
-	entry := token.sess
-	// Rendering is attachment-scoped. Run it independently of the connection
-	// reader so a blocked transport cannot hold session dispatch or peers.
-	if proxy, ok := entry.(*proxySession); ok {
-		_, _ = proxy.resize(size)
-		return true
+	sess, ok := localSession(token.sess)
+	if !ok {
+		return false
 	}
-	go d.paint(entry, ac, true, token.lease)
-	return true
+	rc := sess.renderCoordinator()
+	if rc == nil {
+		return false
+	}
+	// Rendering is attachment-scoped. Schedule it through the coordinator so
+	// rapid resize frames coalesce under the attachment lease and deadline.
+	return rc.scheduleResizeForLease(size, ac, token.lease, func(uint64) {
+		go d.paint(sess, ac, true, token.lease)
+	}) != 0
 }
 
 // handleClientNotice maps the closed client-event enum to daemon-owned notice

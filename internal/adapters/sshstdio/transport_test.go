@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 )
 
 func TestBuildCommandUsesExecArgs(t *testing.T) {
-	// BuildCommand deliberately starts `ssh -- target 'vev' '_stdio' [session]`.
-	// Terminal color capability is carried in vev's Hello message, not in ssh env.
+	// BuildCommand deliberately starts `ssh -- target 'vev' '_stdio'`.
+	// Session selection and terminal color capability are carried in vev's Hello
+	// message, not in ssh env.
 	tests := []struct {
 		name    string
 		target  string
@@ -26,9 +28,8 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 		want    []string
 	}{
 		{name: "no session", target: "user@example.com", want: []string{"--", "user@example.com", "'vev' '_stdio'"}},
-		{name: "session shell metacharacters are quoted in remote command", target: "user@example.com", session: "work; rm -rf /", want: []string{"--", "user@example.com", "'vev' '_stdio' 'work; rm -rf /'"}},
-		{name: "single quote in session is posix escaped", target: "user@example.com", session: "it's fine", want: []string{"--", "user@example.com", "'vev' '_stdio' 'it'\\''s fine'"}},
-		{name: "target kept as single local arg after option terminator", target: "user@host; touch /tmp/pwn", session: "work", want: []string{"--", "user@host; touch /tmp/pwn", "'vev' '_stdio' 'work'"}},
+		{name: "session is carried by Hello rather than ssh command", target: "user@example.com", session: "work; rm -rf /", want: []string{"--", "user@example.com", "'vev' '_stdio'"}},
+		{name: "target kept as single local arg after option terminator", target: "user@host; touch /tmp/pwn", session: "work", want: []string{"--", "user@host; touch /tmp/pwn", "'vev' '_stdio'"}},
 	}
 
 	for _, tt := range tests {
@@ -51,7 +52,7 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 
 func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
 	got := BuildCommandForMode("user@example.com", "_udp-bootstrap", "work")
-	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap' 'work'"}
+	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap'"}
 	if got.Path != "ssh" {
 		t.Fatalf("Path = %q, want ssh", got.Path)
 	}
@@ -105,6 +106,42 @@ func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCloseInterruptsBlockedSend(t *testing.T) {
+	writer := &blockedWriter{started: make(chan struct{}), released: make(chan struct{})}
+	transport := NewTransport(nil, writer, nil)
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("blocked")}) }()
+	<-writer.started
+	if err := transport.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := <-sendDone; err == nil {
+		t.Fatal("Send() error = nil after Close()")
+	}
+}
+
+type blockedWriter struct {
+	started  chan struct{}
+	released chan struct{}
+	once     sync.Once
+}
+
+func (w *blockedWriter) Write([]byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.released
+	return 0, io.ErrClosedPipe
+}
+
+func (w *blockedWriter) Close() error {
+	select {
+	case <-w.released:
+	default:
+		close(w.released)
+	}
+	return nil
 }
 
 func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {

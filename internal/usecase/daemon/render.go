@@ -291,9 +291,8 @@ func (b *runtimeMarkBatch) flush() {
 }
 
 func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, lease *attachmentLease) {
-	// Local sessions retain their tab/PTY preparation below. Proxy sessions
-	// enter the same attachment pipeline but supply their VT snapshot through
-	// attachmentSession.captureRenderState.
+	// Session-owned PTY preparation remains local; attachment rendering is
+	// captured through attachmentSession.captureRenderState.
 	sess, local := localSession(entry)
 	marks := d.newRuntimeMarkBatch()
 	if lease != nil {

@@ -664,6 +664,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	}()
 
 	awaitTestCompletion(t, tr.welcomeEntered, "timed out waiting for Welcome send")
+	handshakeTimer := awaitHandshakeTimer(t, clock)
 	welcome := awaitFrame(t, tr.sends, ports.MsgWelcome)
 	require.Equal(t, ports.MsgWelcome, welcome.Type)
 	sess := firstSession(d)
@@ -694,6 +695,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	require.Zero(t, first.Base, "the first post-Welcome frame is full")
 	tr.finish()
 	awaitTestCompletion(t, done, "timed out waiting for Welcome handler completion")
+	awaitTestCompletion(t, handshakeTimer.stopped, "handshake timer was not canceled after publication")
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 }
 

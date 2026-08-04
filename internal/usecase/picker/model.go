@@ -43,7 +43,7 @@ type SessionView struct {
 	RemoteAttachReady  bool
 	// CannotAcceptMoves reports whether this session cannot receive a moved tab
 	// or pane. False for ordinary local (and stopped) sessions; true for
-	// restricted proxy sessions.
+	// restricted remote rows.
 	CannotAcceptMoves bool
 }
 

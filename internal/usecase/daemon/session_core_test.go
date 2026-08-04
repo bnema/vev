@@ -31,7 +31,6 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 	core := sess.core()
 	require.Same(t, &sess.sessionCore, core)
 	require.Same(t, sess, mustLocalSession(t, attachmentSession(sess)))
-	require.False(t, sess.isProxy())
 	require.Equal(t, sessionCapabilities{}, core.caps, "zero-value local sessions must retain all local capabilities")
 
 	core.mu.Lock()
