@@ -271,8 +271,8 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *atta
 		if !beginClipboardOwnerSend(item.owner, ticket, expected) {
 			return errAttachmentTransition
 		}
-		unlockView := ac.output.lockView()
-		defer unlockView()
+		ac.output.lockView()
+		defer ac.output.unlockView()
 		frame, err := ac.output.sideEffectLocked(item.seq, ac.echoAck.Load())
 		if err == nil {
 			if owned {

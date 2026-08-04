@@ -356,8 +356,8 @@ func (ac *attachedClient) sendExpectedSideEffectForAttachment(expected transport
 	if err := ac.beginExpectedTransportSendLocked(expected, ticket); err != nil {
 		return errAttachmentTransition
 	}
-	unlockView := ac.output.lockView()
-	defer unlockView()
+	ac.output.lockView()
+	defer ac.output.unlockView()
 	frame, err := ac.output.sideEffectLocked(data, echoAck)
 	if err == nil {
 		err = expected.transport.Send(frame)
@@ -408,8 +408,8 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if !ac.transportSnapshotCurrent(expected) {
 			return expected.transport, errTransportReplaced
 		}
-		unlockView := ac.output.lockView()
-		defer unlockView()
+		ac.output.lockView()
+		defer ac.output.unlockView()
 		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
 		if err == nil {
 			err = owned.SendSynchronous(frame)
@@ -422,8 +422,8 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if !ac.transportSnapshotCurrent(expected) {
 			return errTransportReplaced
 		}
-		unlockView := ac.output.lockView()
-		defer unlockView()
+		ac.output.lockView()
+		defer ac.output.unlockView()
 		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
 		if err != nil {
 			return err

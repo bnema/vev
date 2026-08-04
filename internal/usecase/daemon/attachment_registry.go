@@ -48,9 +48,16 @@ func (ac *attachedClient) publishView(view attachmentView) {
 	ac.viewMu.Lock()
 	// Rebase while viewMu is held, before the new revision becomes visible.
 	// Output fences take the same lock, so no side effect can pair the new
-	// ViewRevision with the previous output epoch.
+	// ViewRevision with the previous output epoch. Test/headless fixtures may
+	// leave output.attachment unset; use the stream-local lock for those.
 	if ac.output != nil && ac.view.revision != view.revision {
-		ac.output.rebaseLocked()
+		if ac.output.attachment == ac {
+			ac.output.rebaseLocked()
+		} else {
+			ac.output.stateMu.Lock()
+			ac.output.rebaseLocked()
+			ac.output.stateMu.Unlock()
+		}
 	}
 	ac.view = view
 	ac.viewMu.Unlock()

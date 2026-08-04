@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 
 	"github.com/bnema/vev/internal/domain"
@@ -30,18 +31,33 @@ type outputStateStream struct {
 	forceSnapshot        bool
 	initialized          bool
 	attachment           *attachedClient
+	stateMu              sync.Mutex
 }
 
 // lockView serializes an attachment's view publication with every output
 // state transition. It deliberately does not take sendMu: callers that hold
 // architecture locks can publish a view without reversing the paint path's
 // sendMu -> session lock order.
-func (s *outputStateStream) lockView() func() {
-	if s == nil || s.attachment == nil {
-		return func() {}
+func (s *outputStateStream) lockView() {
+	if s == nil {
+		return
+	}
+	if s.attachment == nil {
+		s.stateMu.Lock()
+		return
 	}
 	s.attachment.viewMu.Lock()
-	return s.attachment.viewMu.Unlock
+}
+
+func (s *outputStateStream) unlockView() {
+	if s == nil {
+		return
+	}
+	if s.attachment == nil {
+		s.stateMu.Unlock()
+		return
+	}
+	s.attachment.viewMu.Unlock()
 }
 
 func newOutputStateStream(windowSize ...uint8) *outputStateStream {
@@ -76,8 +92,8 @@ type preparedOutput struct {
 }
 
 func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
-	unlockView := s.lockView()
-	defer unlockView()
+	s.lockView()
+	defer s.unlockView()
 	if s.epoch == 0 {
 		s.epoch = 1
 	}
@@ -113,8 +129,8 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame
 	if p == nil || p.stream == nil || p.attempted {
 		return nil
 	}
-	unlockView := p.stream.lockView()
-	defer unlockView()
+	p.stream.lockView()
+	defer p.stream.unlockView()
 	p.attempted = true
 	if !p.currentLocked() {
 		return nil
@@ -148,8 +164,8 @@ func (p *preparedOutput) commitNoSend() {
 	if p == nil || p.stream == nil || p.attempted {
 		return
 	}
-	unlockView := p.stream.lockView()
-	defer unlockView()
+	p.stream.lockView()
+	defer p.stream.unlockView()
 	p.attempted = true
 	if !p.currentLocked() || len(p.data) != 0 {
 		return
@@ -164,8 +180,8 @@ func (p *preparedOutput) commit() {
 }
 
 func (s *outputStateStream) currentEpoch() uint64 {
-	unlockView := s.lockView()
-	defer unlockView()
+	s.lockView()
+	defer s.unlockView()
 	return s.currentEpochLocked()
 }
 
@@ -218,8 +234,8 @@ func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision ui
 // an attachment is present, callers must hold its sendMu; attachment-bound
 // sends use sideEffectLocked after validating their transport incarnation.
 func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) (ports.Frame, error) {
-	unlockView := s.lockView()
-	defer unlockView()
+	s.lockView()
+	defer s.unlockView()
 	return s.sideEffectLocked(data, echoAck)
 }
 
@@ -239,8 +255,8 @@ func (s *outputStateStream) ack(epoch, state uint64) {
 	if s == nil {
 		return
 	}
-	unlockView := s.lockView()
-	defer unlockView()
+	s.lockView()
+	defer s.unlockView()
 	if epoch != s.currentEpochLocked() || state > s.next || state <= s.acked {
 		return
 	}
@@ -252,8 +268,8 @@ func (s *outputStateStream) rebase() {
 	if s == nil {
 		return
 	}
-	unlockView := s.lockView()
-	defer unlockView()
+	s.lockView()
+	defer s.unlockView()
 	s.rebaseLocked()
 }
 
@@ -291,8 +307,8 @@ func (s *outputStateStream) syncCapacityLocked() {
 	if s == nil {
 		return
 	}
-	unlockView := s.lockView()
-	defer unlockView()
+	s.lockView()
+	defer s.unlockView()
 	s.maxOutstandingAtomic.Store(s.maxOutstanding)
 	s.publishOutstanding()
 }
@@ -308,7 +324,7 @@ func (s *outputStateStream) outstanding() uint64 {
 	if s == nil {
 		return 0
 	}
-	unlockView := s.lockView()
-	defer unlockView()
+	s.lockView()
+	defer s.unlockView()
 	return s.next - s.acked
 }
