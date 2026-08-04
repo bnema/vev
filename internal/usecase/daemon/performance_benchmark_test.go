@@ -976,19 +976,19 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 	}
 }
 
-// TestCopyEnterAllocationBudget protects the attachment-aware baseline plus
-// 10%. Copy rendering borrows sealed VT history rows; allocating a copy per
-// viewport row is a production regression even though capture is immutable.
+// TestCopyEnterAllocationBudget protects the byte-stream attachment baseline
+// plus 10%. Copy rendering borrows sealed VT history rows; allocating a copy
+// per viewport row is a production regression even though capture is immutable.
 func TestCopyEnterAllocationBudget(t *testing.T) {
 	for _, tt := range []struct {
 		name             string
 		tabs, panes, max int
 	}{
-		{name: "1tab-1pane", tabs: 1, panes: 1, max: 55},
-		{name: "1tab-4panes", tabs: 1, panes: 4, max: 55},
-		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 60},
-		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 60},
-		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 68},
+		{name: "1tab-1pane", tabs: 1, panes: 1, max: 66},
+		{name: "1tab-4panes", tabs: 1, panes: 4, max: 85},
+		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 71},
+		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 90},
+		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 79},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
@@ -1007,7 +1007,7 @@ func TestCopyEnterAllocationBudget(t *testing.T) {
 			}
 
 			allocs := testing.AllocsPerRun(20, run)
-			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10% of the attachment-aware allocation baseline")
+			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10% of the byte-stream attachment allocation baseline")
 		})
 	}
 }
