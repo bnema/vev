@@ -1247,9 +1247,41 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 	}
 }
 
-// TestCopyEnterAllocationBudget protects the parent baseline plus 10%. Copy
-// rendering borrows sealed VT history rows; allocating a copy per viewport row
-// is a production regression even though the capture itself remains immutable.
+// TestCopyEnterAllocationBudget protects the attachment-aware baseline plus
+// 10%. Copy rendering borrows sealed VT history rows; allocating a copy per
+// viewport row is a production regression even though capture is immutable.
+func TestCopyEnterAllocationBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		tabs, panes, max int
+	}{
+		{name: "1tab-1pane", tabs: 1, panes: 1, max: 55},
+		{name: "1tab-4panes", tabs: 1, panes: 4, max: 55},
+		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 60},
+		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 60},
+		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 68},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
+			run := func() {
+				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+				fixture.ac.ackOutputState(fixture.ac.output.next)
+			}
+
+			// Always exercise and validate copy entry. The race detector adds
+			// instrumentation allocations which are not reported by the parent
+			// benchmark, so its allocation count cannot represent this budget.
+			run()
+			require.True(t, fixture.copyModeActive(), "copy entry must install a history-backed mode")
+			if !copyEnterAllocationBudgetEnabled {
+				return
+			}
+
+			allocs := testing.AllocsPerRun(20, run)
+			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10%% of the attachment-aware allocation baseline")
+		})
+	}
+}
 
 func TestPerformanceFixturePaintLiveUsesPrecomputedAlternatingWrites(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{})
@@ -1598,6 +1630,12 @@ func (f *performanceFixture) searchMatches() int {
 		return 0
 	}
 	return len(f.ac.overlays.copyMode.Searches)
+}
+
+func (f *performanceFixture) copyModeActive() bool {
+	f.ac.overlays.copyMu.Lock()
+	defer f.ac.overlays.copyMu.Unlock()
+	return f.ac.overlays.copyMode != nil && f.ac.overlays.copyDocument != nil && f.ac.overlays.copyDocument.Len() >= 10_000
 }
 
 func (f *performanceFixture) resize() {
