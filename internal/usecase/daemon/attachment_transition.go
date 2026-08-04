@@ -70,8 +70,9 @@ func transitionSourceTokenCurrentLocked(token attachmentConnectionToken, source 
 }
 
 type attachmentTransitionResult struct {
-	published attachmentConnectionToken
-	cleanups  []renderLifecycleCleanup
+	published             attachmentConnectionToken
+	cleanups              []renderLifecycleCleanup
+	sourceGeometrySession *session
 }
 
 type attachmentTransitionParticipants struct {
@@ -146,7 +147,14 @@ func (d *Daemon) publishAttachmentTransition(req attachmentTransitionRequest) (a
 			return attachmentTransitionResult{}, err
 		}
 	}
-	return d.transitionAttachmentLocked(req)
+	result, err := d.transitionAttachmentLocked(req)
+	if err != nil {
+		return result, err
+	}
+	if req.source != nil && req.target != nil && req.source != req.target {
+		result.sourceGeometrySession = req.source
+	}
+	return result, nil
 }
 
 func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachmentTransitionResult, error) {
@@ -167,6 +175,9 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	result, err := d.publishAttachmentTransition(req)
 	if err != nil {
 		return result, err
+	}
+	if result.sourceGeometrySession != nil {
+		d.recalculateSessionGeometryAndInvalidate(result.sourceGeometrySession, nil, "attachment_transition.go")
 	}
 	return result, nil
 }

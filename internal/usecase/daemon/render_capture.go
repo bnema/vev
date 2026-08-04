@@ -275,7 +275,7 @@ func captureLocalRenderState(
 	view := ac.viewSnapshot()
 	window := domain.Size{}
 	if view.windowSet {
-		window = ac.size
+		window = ac.sizeSnapshot()
 	}
 	*state = capturedRenderState{
 		attachment: ac, lease: lease, view: view, window: window,

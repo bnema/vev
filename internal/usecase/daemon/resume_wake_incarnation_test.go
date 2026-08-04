@@ -63,7 +63,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	// replacement transport has completed Welcome.
 	rc.opts.wake = originalWake
 	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
-	d.firstPaint(sess, ac, ac.size)
+	d.firstPaint(sess, ac)
 	require.NotEmpty(t, newTransport.Sends())
 }
 

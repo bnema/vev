@@ -190,7 +190,12 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	if publication.source != req.target {
 		unregisterAttachmentSessionLocked(publication.source, req.next)
 	}
-	registerAttachmentSessionLocked(req.target, req.next)
+	registered := registerAttachmentSessionLocked(req.target, req.next)
+	if !registered && publication.source == req.target && !req.preserveAttachment {
+		// A same-session rebind keeps membership but still represents a fresh
+		// attachment claim with the replacement transport's current size.
+		req.target.claimGeometryOwnerLocked(req.next, req.next.sizeSnapshot())
+	}
 	publication.nextGeneration = req.next.connectionGeneration.Add(1)
 	req.next.setSession(req.target)
 }

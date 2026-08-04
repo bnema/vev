@@ -582,6 +582,10 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 		if valid && d.beforeSessionResizePublication != nil {
 			d.beforeSessionResizePublication()
 		}
+		// Claim publication and shared geometry commit use one fence. The hook
+		// above remains outside the fence so tests and lifecycle callbacks can
+		// publish a newer claim; the final validation then rejects this stale plan.
+		sess.geometryMu.Lock()
 		if valid && sess.ctx != nil && sess.ctx.Err() != nil {
 			valid = false
 		}
@@ -600,6 +604,7 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 				plan.tab.size = plan.size
 			}
 		}
+		sess.geometryMu.Unlock()
 		for i := len(tabs) - 1; i >= 0; i-- {
 			tabs[i].mu.Unlock()
 		}
@@ -661,11 +666,20 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 		return false
 	}
 	snap := rc.resizeSnapshot()
+	geometryClaim := snap.geometryClaim
+	if geometryClaim == 0 {
+		var claimed bool
+		geometryClaim, claimed = sess.claimGeometryOwnerForSize(ac, snap.size)
+		if !claimed {
+			return false
+		}
+	}
 	connectionGeneration := ac.connectionGeneration.Load()
 	connection := ac.transportSnapshot()
 	current := func() bool {
 		return ac.connectionGeneration.Load() == connectionGeneration &&
 			ac.transportSnapshotCurrent(connection) &&
+			sess.geometryClaimTokenCurrent(ac, geometryClaim) &&
 			rc.resizeCurrentForLease(epoch, ac, lease, false)
 	}
 	if !current() {
@@ -687,7 +701,7 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 		ac.sendMu.Unlock()
 		return false
 	}
-	ac.size = snap.size
+	ac.setSize(snap.size)
 	ac.sendMu.Unlock()
 	if !current() {
 		return false
@@ -870,12 +884,21 @@ func (d *Daemon) requestTransactionalResizeForLease(sess *session, ac *attachedC
 	if rc == nil || !rc.leaseCurrent(lease, true) {
 		return false
 	}
+	geometryClaim, claimed := sess.claimGeometryOwnerForSize(ac, size)
+	if !claimed {
+		return false
+	}
 	if immediate {
-		epoch := rc.recordResizeRequestForLease(size, ac, lease)
+		epoch := rc.recordResizeRequestForLeaseWithClaim(size, ac, lease, geometryClaim)
 		if epoch == 0 {
+			sess.releaseGeometryClaim(ac, geometryClaim)
 			return false
 		}
 		return d.runResizeTransaction(sess, ac, lease, epoch)
 	}
-	return rc.scheduleResizeForLease(size, ac, lease, func(epoch uint64) { d.runResizeTransaction(sess, ac, lease, epoch) }) != 0
+	epoch := rc.scheduleResizeForLeaseWithClaim(size, ac, lease, geometryClaim, func(epoch uint64) { d.runResizeTransaction(sess, ac, lease, epoch) })
+	if epoch == 0 {
+		sess.releaseGeometryClaim(ac, geometryClaim)
+	}
+	return epoch != 0
 }

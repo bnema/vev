@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/require"
 )
@@ -114,9 +115,14 @@ func (*acceptanceRemoteTerminal) Flush() error                     { return nil 
 func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 	outputs := make(chan string, 4)
 	factory := &acceptanceRemoteFactory{outputs: outputs}
+	hostStore := portsmocks.NewMockRemoteHostStore(t)
+	for _, host := range []string{"direct.example", "picker.example", "picked.example"} {
+		hostStore.EXPECT().Remember(host).Return(nil).Once()
+	}
 	localCalls := 0
 	terminals := make([]*acceptanceRemoteTerminal, 0, 3)
 	deps := runAttachDeps{
+		hostStore: hostStore,
 		localDialer: func() ports.Dialer {
 			localCalls++
 			return acceptanceRemoteDialer{}

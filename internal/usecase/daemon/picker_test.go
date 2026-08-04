@@ -913,7 +913,7 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	require.Equal(t, sourcePane.id, targetPane.id, "target deliberately reuses pane-1")
 	sourcePane.screen.Write([]byte("SOURCE"))
 	client := vt.NewScreen(80, 25)
-	d.firstPaint(source, ac, ac.size)
+	d.firstPaint(source, ac)
 	sourceOutput := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 	ac.ackOutputState(sourceOutput.Epoch, sourceOutput.New)
 
@@ -956,10 +956,10 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	d.sessions[sess1.id] = sess1
 	d.sessions[sess2.id] = sess2
 
-	d.firstPaint(sess1, ac1, ac1.size)
+	d.firstPaint(sess1, ac1)
 	awaitFrame(t, sends1, ports.MsgOutput)
 	d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id})
-	d.firstPaint(sess2, ac1, ac1.size)
+	d.firstPaint(sess2, ac1)
 	awaitFrame(t, sends1, ports.MsgOutput)
 	require.Same(t, sess2, ac1.currentSession())
 	for len(sends1) > 0 {

@@ -77,5 +77,5 @@ Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/
 - Each connection has a 15-second handshake budget from connect through the initial committed publication.
 - Local and remote attach use the same `Hello`/`Welcome` session protocol, then pump `Input`/`Resize` and `Output` frames over a byte-only Transport.
 - Remote attach opens a direct connection to the selected daemon over UDP by default; `VEV_REMOTE_TRANSPORT=stdio` explicitly selects an SSH-only carriage.
-- A session owns shared PTYs, VT state, tabs, panes, fixed PTY content size, and ordered mutations. Each attachment owns its window/view, copy and overlay state, rendering/output state, and reconnect lifecycle.
+- A session owns shared PTYs, VT state, tabs, panes, PTY content geometry selected by the latest valid attachment claim, and ordered mutations. Each attachment owns its window/view, copy and overlay state, rendering/output state, and reconnect lifecycle; when the latest claimant detaches, the most recently claimed remaining attachment becomes authoritative.
 - Command requests have a 10-second result deadline and are tracked per connection.

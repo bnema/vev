@@ -10,10 +10,14 @@ const maxResizeRetryAttempts = 3
 // Resize deadlines and retries retain coordinator-owned attachment, epoch, and
 // token validation at every callback effect boundary.
 func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
-	return c.recordResizeRequestForLease(size, source, c.attachmentLease(source))
+	return c.recordResizeRequestForLeaseWithClaim(size, source, c.attachmentLease(source), 0)
 }
 
 func (c *renderCoordinator) recordResizeRequestForLease(size domain.Size, source *attachedClient, lease *attachmentLease) uint64 {
+	return c.recordResizeRequestForLeaseWithClaim(size, source, lease, 0)
+}
+
+func (c *renderCoordinator) recordResizeRequestForLeaseWithClaim(size domain.Size, source *attachedClient, lease *attachmentLease, geometryClaim uint64) uint64 {
 	c.mu.Lock()
 	if !c.leaseCurrentLocked(lease, false) || lease.attachment != source {
 		c.mu.Unlock()
@@ -22,6 +26,7 @@ func (c *renderCoordinator) recordResizeRequestForLease(size domain.Size, source
 	_, retry := c.retryLane.replaceLocked()
 	c.resize.epoch++
 	c.resize.size, c.resize.source, c.resize.lease = size, source, lease
+	c.resize.geometryClaim = geometryClaim
 	c.resize.retryAttempts = 0
 	epoch := c.resize.epoch
 	c.mu.Unlock()
@@ -30,7 +35,11 @@ func (c *renderCoordinator) recordResizeRequestForLease(size domain.Size, source
 }
 
 func (c *renderCoordinator) scheduleResizeForLease(size domain.Size, source *attachedClient, lease *attachmentLease, run func(uint64)) uint64 {
-	epoch := c.recordResizeRequestForLease(size, source, lease)
+	return c.scheduleResizeForLeaseWithClaim(size, source, lease, 0, run)
+}
+
+func (c *renderCoordinator) scheduleResizeForLeaseWithClaim(size domain.Size, source *attachedClient, lease *attachmentLease, geometryClaim uint64, run func(uint64)) uint64 {
+	epoch := c.recordResizeRequestForLeaseWithClaim(size, source, lease, geometryClaim)
 	if epoch == 0 {
 		return 0
 	}

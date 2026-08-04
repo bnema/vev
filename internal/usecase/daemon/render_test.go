@@ -81,7 +81,7 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 			floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
 			installTestFloating(testAttachmentTab(sess), floating, true)
 
-			d.firstPaint(sess, ac, tc.clientSize)
+			d.firstPaint(sess, ac)
 
 			frame := awaitFrame(t, sends, ports.MsgOutput)
 			output, err := ports.UnmarshalOutput(frame.Payload)

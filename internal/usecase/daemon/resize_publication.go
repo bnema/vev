@@ -96,7 +96,7 @@ func (d *Daemon) publishResizeCommit(members []resizeMember, sess *session, ac *
 		return false
 	}
 	if ac != nil {
-		ac.size = size
+		ac.setSize(size)
 	}
 	fences.Release()
 	if ac != nil {

@@ -43,7 +43,7 @@ func TestStartupClaimRecordsAndToastsPendingNotices(t *testing.T) {
 		Size:    domain.Size{Cols: 80, Rows: 24},
 	}, tr)
 	require.NoError(t, err)
-	d.firstPaint(sess, ac, ac.size)
+	d.firstPaint(sess, ac)
 
 	toasts := awaitToastCount(t, ac, 1)
 	require.Equal(t, domain.NoticeSnapshotWrite, toasts[0].Code)

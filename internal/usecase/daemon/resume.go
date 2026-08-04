@@ -373,6 +373,9 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	captured := ac.transportSnapshot().transport
 	ac.setSession(nil)
 	d.mu.Unlock()
+	if sess != nil {
+		d.recalculateSessionGeometryAndInvalidate(sess, nil, "resume.go")
+	}
 	d.watchParkedTimer(token, rearmed)
 	if captured != nil {
 		_ = ac.closeCapturedTransport(ac.revokeTransport(captured))
@@ -513,6 +516,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
+	d.recalculateSessionGeometryAndInvalidate(sess, nil, "resume.go")
 	d.unregisterPreview(ac)
 	if !d.parkAttachment(sess, ac) {
 		// Detach already published; retire the captured link exactly once so
@@ -611,7 +615,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.output.maxOutstanding = uint64(normalizeOutputWindow(h.MaxOutputInFlight))
 	ac.output.maxOutstandingAtomic.Store(ac.output.maxOutstanding)
 	ac.replaceTransport(tr)
-	ac.size = sz
+	ac.setSize(sz)
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
 	// The resumed session's snapshot is the sole source for future PTY children.

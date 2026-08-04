@@ -7,10 +7,11 @@ SSH-only carriage explicitly when UDP is unavailable. vev must be installed on
 the remote host.
 
 The session remains shared across all attachments. It owns PTYs, VT state, tabs,
-panes, a fixed PTY content size, and ordered mutations. Each attachment keeps
+panes, shared PTY content geometry, and ordered mutations. Each attachment keeps
 its own window size, selected tab and pane, copy mode, overlays, render/output
 acknowledgements, and reconnect state. Reconnecting one attachment resumes that
-attachment without replacing or changing its peers.
+attachment without replacing its peers or changing their attachment-local
+windows/views; its latest claim may still update shared PTY geometry.
 
 ## Connection limits
 
@@ -20,8 +21,10 @@ attachment without replacing or changing its peers.
 - Each command request has a 10-second deadline for its result. A timeout
   abandons only that request; it does not complete a later request with a stale
   result.
-- The first valid attachment establishes the session's PTY content size. A
-  later attachment can resize its own window without resizing shared PTYs.
+- Shared PTY content geometry follows the latest valid, non-superseded attach,
+  resume, or resize claim. A later attachment can therefore replace the current
+  shared geometry; if the winning attachment detaches, the most recently
+  claimed remaining valid attachment becomes authoritative.
 
 ## UDP operation
 
