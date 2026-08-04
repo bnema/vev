@@ -96,6 +96,7 @@ func (d *Daemon) dialProxyHandshake(parent context.Context, p *proxySession, int
 	p.mu.Lock()
 	resumeToken := p.resumeToken
 	clientID := p.clientID
+	size := p.contentSize
 	p.mu.Unlock()
 	resume := intent == ports.IntentResume
 	if !resume {
@@ -120,6 +121,7 @@ func (d *Daemon) dialProxyHandshake(parent context.Context, p *proxySession, int
 		ClientID:          clientID,
 		ResumeToken:       resumeToken,
 		Name:              p.key.Name,
+		Size:              size,
 		MaxOutputInFlight: proxyOutputWindow(transport),
 	}
 	if err := p.sendGeneration(generation, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
@@ -239,9 +241,6 @@ func validateProxyWelcome(frame ports.Frame, sessionName string) (ports.Welcome,
 	welcome, err := ports.UnmarshalWelcome(frame.Payload)
 	if err != nil {
 		return ports.Welcome{}, fmt.Errorf("proxy session: decode welcome: %w", err)
-	}
-	if welcome.Capabilities&ports.CapabilityProxied == 0 {
-		return ports.Welcome{}, errors.New("proxy session: remote did not negotiate proxied capability")
 	}
 	if welcome.SessionID == "" || welcome.SessionName != sessionName {
 		return ports.Welcome{}, fmt.Errorf("proxy session: welcome identity mismatch: got %q", welcome.SessionName)
