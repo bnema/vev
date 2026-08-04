@@ -251,13 +251,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		rememberOnce.Do(func() {
 			learnerStarted = true
-			rememberWG.Add(1)
-			go func() {
-				defer rememberWG.Done()
+			rememberWG.Go(func() {
 				if err := r.remoteHostLearner.RememberRemoteHost(); err != nil {
 					r.logger.Warn("remembering remote host failed", "err", err)
 				}
-			}()
+			})
 		})
 	}
 	defer func() {
@@ -839,7 +837,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			// Before the asynchronous sender starts, preserve transport ordering by
 			// requesting the reset synchronously after the initial Theme publication.
 			closed, resetErr := boundedPreWelcome(ctx, clk, transport, func() error {
-				return transport.Send(ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: size})})
+				payload, err := ports.MarshalResize(ports.Resize{Size: size})
+				if err != nil {
+					return err
+				}
+				return transport.Send(ports.Frame{Type: ports.MsgResize, Payload: payload})
 			})
 			if resetErr != nil {
 				resetResult := welcomedResult(fmt.Errorf("requesting reconnect reconciliation: %w", resetErr))
@@ -883,8 +885,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if serr != nil {
 			return fmt.Errorf("reading terminal size for reconnect reconciliation: %w", serr)
 		}
+		payload, err := ports.MarshalResize(ports.Resize{Size: size})
+		if err != nil {
+			return fmt.Errorf("encoding terminal size for reconnect reconciliation: %w", err)
+		}
 		select {
-		case sendCh <- ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: size})}:
+		case sendCh <- ports.Frame{Type: ports.MsgResize, Payload: payload}:
 			awaitingReconnectReset = true
 			return nil
 		case <-loopCtx.Done():
@@ -1097,16 +1103,7 @@ func newCumulativeAckQueue() *cumulativeAckQueue {
 	return &cumulativeAckQueue{wake: make(chan struct{}, 1)}
 }
 
-func (q *cumulativeAckQueue) offer(values ...uint64) {
-	epoch, state := uint64(1), uint64(0)
-	switch len(values) {
-	case 1:
-		state = values[0]
-	case 2:
-		epoch, state = values[0], values[1]
-	default:
-		return
-	}
+func (q *cumulativeAckQueue) offer(epoch, state uint64) {
 	if epoch == 0 || state == 0 {
 		return
 	}
@@ -1144,7 +1141,19 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 	}
 	sendAck := func() bool {
 		epoch, state := acks.take()
-		return state == 0 || send(ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{Epoch: epoch, State: state})})
+		if state == 0 {
+			return true
+		}
+		payload, err := ports.MarshalAck(ports.Ack{Epoch: epoch, State: state})
+		if err != nil {
+			select {
+			case errCh <- fmt.Errorf("encoding output ACK: %w", err):
+			default:
+			}
+			cancel()
+			return false
+		}
+		return send(ports.Frame{Type: ports.MsgAck, Payload: payload})
 	}
 	for {
 		select {
@@ -1742,7 +1751,12 @@ func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.
 			if !ok {
 				return
 			}
-			frame := ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: sz})}
+			payload, err := ports.MarshalResize(ports.Resize{Size: sz})
+			if err != nil {
+				log.Error("encoding terminal resize", "error", err)
+				continue
+			}
+			frame := ports.Frame{Type: ports.MsgResize, Payload: payload}
 			select {
 			case out <- frame:
 			case <-ctx.Done():

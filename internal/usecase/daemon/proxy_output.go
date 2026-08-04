@@ -81,9 +81,13 @@ func (d *Daemon) handleProxyOutput(p *proxySession, generation uint64, out ports
 		}
 	}
 	if ack != 0 {
+		payload, err := ports.MarshalAck(ports.Ack{Epoch: out.Epoch, State: ack})
+		if err != nil {
+			return fmt.Errorf("proxy output ACK: %w", err)
+		}
 		if err := p.sendGeneration(generation, ports.Frame{
 			Type:    ports.MsgAck,
-			Payload: ports.MarshalAck(ports.Ack{Epoch: out.Epoch, State: ack}),
+			Payload: payload,
 		}); err != nil {
 			return fmt.Errorf("proxy output ACK: %w: %w", errProxyLinkSend, err)
 		}

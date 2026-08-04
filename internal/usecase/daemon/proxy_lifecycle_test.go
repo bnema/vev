@@ -1216,7 +1216,7 @@ func TestOpenProxySessionSameKeyWaiterCanCancel(t *testing.T) {
 	require.Equal(t, 1, awaitTestValue(t, factory.calls, "leader did not dial"))
 	_ = requireProxyHello(t, first)
 
-	base, cancel := context.WithCancel(context.Background())
+	base, cancel := context.WithCancel(t.Context())
 	observed := &proxyConstructionWaitContext{Context: base, observed: make(chan struct{})}
 	waiter := openProxyForTest(d, observed, key)
 	select {
@@ -1409,7 +1409,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, clock := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport, false)
+		generation, _ := p.installTransport(transport)
 		token, timer := armWarmTimer(t, d, p, clock)
 
 		require.True(t, d.markProxyReplaced(p, generation, transport))
@@ -1433,7 +1433,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, clock := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport, false)
+		generation, _ := p.installTransport(transport)
 
 		require.True(t, d.markProxyReplaced(p, generation, transport))
 		timer := awaitTestValue(t, clock.timers, "replacement did not arm a warm timer")
@@ -1450,7 +1450,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, _ := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport, false)
+		generation, _ := p.installTransport(transport)
 
 		require.False(t, d.markProxyReplaced(p, generation-1, transport))
 		require.False(t, proxyExpired(p))

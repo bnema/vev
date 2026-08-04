@@ -67,7 +67,6 @@ func (t *datagramTestTransport) Recv() (ports.Frame, error) {
 func (t *datagramTestTransport) Close() error { t.once.Do(func() { close(t.recv) }); return nil }
 
 func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
-	t.Skip("fixture is coupled to pre-refactor attach paint timing")
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
@@ -82,30 +81,35 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, sess, routed)
 
+	// route publishes membership only; mark the attachment ready before the
+	// direct pipeline paints so coordinator admission is deterministic.
+	rc := sess.renderCoordinator()
+	require.NotNil(t, rc)
+	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
+
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(sess, ac, false, nil)
 	first := awaitFrame(t, tr.sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), out.New)
+
+	sess.tabs[0].focusedPane().screen.Write([]byte("\rB"))
+	d.paint(sess, ac, false, nil)
 	updated := awaitFrame(t, tr.sends, ports.MsgOutput)
 	out, err = ports.UnmarshalOutput(updated.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), out.New)
-
-	// Before the MsgAck, the renderer has already advanced along the ordered
-	// output dependency chain, so an unchanged repaint is a no-op.
-	d.paint(sess, ac, false, nil)
-	requireNoOutputFrame(t, tr.sends)
-
-	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{State: out.New})}
+	// Both states were emitted before the MsgAck; the ordered dependency chain
+	// must therefore remain valid without waiting for renderer acknowledgement.
+	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(ports.Ack{Epoch: out.Epoch, State: out.New})}
 	require.NoError(t, tr.Close())
 	d.runConnLoop(ac)
 
 	// The production MsgAck path retires retained states without moving the
 	// renderer baseline backward.
 	d.paint(sess, ac, false, nil)
-	requireNoOutputFrame(t, tr.sends)
+	require.Empty(t, tr.sends)
 }
 
 func TestPaintExplicitlyUsesAsyncTransportCapability(t *testing.T) {
@@ -151,7 +155,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	client := vt.NewScreen(80, 25)
 	d.paint(sess, ac, true, nil)
 	first := mustApplyOutput(t, client, awaitFrame(t, tr.sends, ports.MsgOutput))
-	ac.ackOutputState(first.New)
+	ac.ackOutputState(first.Epoch, first.New)
 
 	// Preserve the frame after one scroll while inducing a real VT scroll
 	// damage event before each production paint. On main, both unacknowledged
@@ -231,7 +235,7 @@ func TestLocalOutputAckDoesNotMoveRendererShadowBackward(t *testing.T) {
 	d.paint(sess, ac, false, nil)
 	awaitFrame(t, sends, ports.MsgOutput)
 
-	ac.ackOutputState(out.New)
+	ac.ackOutputState(out.Epoch, out.New)
 	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, sends)
 }
@@ -300,7 +304,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 			d.paint(sess, ac, true, nil)
 			client := vt.NewScreen(80, 24)
 			initial := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
-			ac.ackOutputState(initial.New)
+			ac.ackOutputState(initial.Epoch, initial.New)
 
 			d.sessWg.Add(1)
 			pane.onExit = func() {}

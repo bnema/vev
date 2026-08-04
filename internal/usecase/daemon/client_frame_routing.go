@@ -256,13 +256,13 @@ func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	return true
 }
 
-func (d *Daemon) ackOutput(token attachmentConnectionToken, values ...uint64) bool {
+func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64) bool {
 	ac := token.ac
 	if token.effect == nil || token.effect.ended.Load() {
 		return false
 	}
 	ac.sendMu.Lock()
-	ac.output.ack(values...)
+	ac.output.ack(epoch, state)
 	ac.sendMu.Unlock()
 	if rc := token.sess.core().coordinator.Load(); rc != nil {
 		rc.notifyAckForLease(token.lease)

@@ -974,9 +974,10 @@ func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	ac := &attachedClient{output: newOutputStateStream()}
 	ac.output.next = 3
-	ac.ackOutputState(3)
-	ac.ackOutputState(2)
-	ac.ackOutputState(4)
+	epoch := ac.output.currentEpoch()
+	ac.ackOutputState(epoch, 3)
+	ac.ackOutputState(epoch, 2)
+	ac.ackOutputState(epoch, 4)
 	require.Equal(t, uint64(3), ac.output.acked, "stale or future ACKs must not move output state incorrectly")
 
 	ac.sendMu.Lock()
@@ -1083,7 +1084,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, first.Base)
 	require.Equal(t, uint64(1), first.New)
-	resumedAC.ackOutputState(first.New)
+	resumedAC.ackOutputState(first.Epoch, first.New)
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(resumedSess, resumedAC, false, nil)

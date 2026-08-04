@@ -575,7 +575,7 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			fixture.resetMetrics()
 			for b.Loop() {
 				run(fixture)
-				fixture.ac.ackOutputState(fixture.ac.output.next)
+				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 			}
 			metrics := fixture.metrics()
 			if payload := fixture.output.lastPayload(); payload != nil {
@@ -594,12 +594,12 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 func benchmarkDaemonCopySearch(b *testing.B, fixture *performanceFixture, run func(*performanceFixture)) {
 	b.Helper()
 	fixture.d.enterCopyMode(fixture.sess, fixture.ac)
-	fixture.ac.ackOutputState(fixture.ac.output.next)
+	fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		run(fixture)
-		fixture.ac.ackOutputState(fixture.ac.output.next)
+		fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 	}
 	b.StopTimer()
 	if fixture.searchMatches() == 0 {
@@ -969,7 +969,7 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: tt.panes, historyRows: 10_000})
 			allocs := testing.AllocsPerRun(20, func() {
 				fixture.paintLive()
-				fixture.ac.ackOutputState(fixture.ac.output.next)
+				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 			})
 			require.LessOrEqual(t, allocs, float64(38), "live paint must reuse attachment-owned render scratch across warm paints")
 		})
@@ -994,7 +994,7 @@ func TestCopyEnterAllocationBudget(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
 			run := func() {
 				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
-				fixture.ac.ackOutputState(fixture.ac.output.next)
+				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 			}
 
 			// Always exercise and validate copy entry. The race detector adds

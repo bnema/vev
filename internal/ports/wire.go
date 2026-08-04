@@ -27,6 +27,11 @@ var errTrailingBytes = errors.New("ports: unexpected trailing bytes in payload")
 
 var errInvalidBoolean = errors.New("ports: invalid boolean flag")
 
+const (
+	outputHeaderLen       = 5*8 + 2*2 + 1
+	outputPayloadOverhead = outputHeaderLen + 4
+)
+
 // ErrInvalidSize reports a terminal size that cannot be represented by the
 // protocol or would exceed the bounded screen area.
 var ErrInvalidSize = errors.New("ports: invalid terminal size")
@@ -512,7 +517,7 @@ func ValidateOutput(m Output) error {
 	if err := ValidateSize(m.Size); err != nil {
 		return fmt.Errorf("%w: size", ErrInvalidOutput)
 	}
-	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxFrameLen-1-45-4 {
+	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxFrameLen-1-outputPayloadOverhead {
 		return ErrInvalidOutput
 	}
 	return nil
@@ -568,12 +573,8 @@ func preflightHello(b []byte) error {
 	if version == 21 {
 		return ErrInvalidHello
 	}
-	intent, err := r.getUint8()
-	if err != nil {
+	if _, err := r.getUint8(); err != nil {
 		return err
-	}
-	if intent != IntentEphemeral && intent != IntentNew && intent != IntentAttach && intent != IntentResume {
-		return ErrInvalidHello
 	}
 	if len(r.b) < 16 {
 		return errShortPayload
@@ -585,16 +586,11 @@ func preflightHello(b []byte) error {
 	if err := r.skipString(); err != nil {
 		return err
 	}
-	cols, err := r.getUint16()
-	if err != nil {
+	if _, err := r.getUint16(); err != nil {
 		return err
 	}
-	rows, err := r.getUint16()
-	if err != nil {
+	if _, err := r.getUint16(); err != nil {
 		return err
-	}
-	if err := ValidateSize(domain.Size{Cols: int(cols), Rows: int(rows)}); err != nil {
-		return fmt.Errorf("%w: size", ErrInvalidHello)
 	}
 	if err := r.skipString(); err != nil {
 		return err
@@ -638,9 +634,6 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	if h.Version, err = r.getUint16(); err != nil {
 		return Hello{}, err
 	}
-	if h.Version == 21 {
-		return Hello{}, ErrInvalidHello
-	}
 	if h.Intent, err = r.getUint8(); err != nil {
 		return Hello{}, err
 	}
@@ -664,12 +657,6 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	h.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
-	if h.Intent != IntentEphemeral && h.Intent != IntentNew && h.Intent != IntentAttach && h.Intent != IntentResume {
-		return Hello{}, ErrInvalidHello
-	}
-	if err := ValidateSize(h.Size); err != nil {
-		return Hello{}, fmt.Errorf("%w: size", ErrInvalidHello)
-	}
 	if h.TermEnv, err = r.getString(); err != nil {
 		return Hello{}, err
 	}
@@ -777,14 +764,14 @@ func UnmarshalClientNotice(b []byte) (ClientNotice, error) {
 }
 
 // MarshalResize encodes m into a Resize message payload.
-func MarshalResize(m Resize) []byte {
+func MarshalResize(m Resize) ([]byte, error) {
 	if err := ValidateSize(m.Size); err != nil {
-		return nil
+		return nil, err
 	}
 	w := payloadWriter{}
 	w.putUint16(uint16(m.Size.Cols))
 	w.putUint16(uint16(m.Size.Rows))
-	return w.b
+	return w.b, nil
 }
 
 // MarshalTheme encodes m into a 57-byte fixed-width Theme message payload.
@@ -950,17 +937,14 @@ func UnmarshalPong(b []byte) (Pong, error) {
 }
 
 // MarshalAck encodes m into an epoch/state Ack payload.
-func MarshalAck(m Ack) []byte {
-	if m.Epoch == 0 {
-		m.Epoch = 1
-	}
+func MarshalAck(m Ack) ([]byte, error) {
 	if err := ValidateAck(m); err != nil {
-		return nil
+		return nil, err
 	}
 	w := payloadWriter{}
 	w.putUint64(m.Epoch)
 	w.putUint64(m.State)
-	return w.b
+	return w.b, nil
 }
 
 // UnmarshalAck decodes an epoch/state Ack payload.
@@ -1055,18 +1039,9 @@ func UnmarshalErrorMsg(b []byte) (ErrorMsg, error) {
 
 // MarshalOutput encodes m into the epoch/base/new/echo/viewRevision/
 // size/full/data message layout.
-func MarshalOutput(m Output) []byte {
-	if m.Epoch == 0 {
-		m.Epoch = 1
-	}
-	if m.Size == (domain.Size{}) {
-		m.Size = domain.Size{Cols: 1, Rows: 1}
-	}
-	if m.New != 0 && m.Base == 0 {
-		m.Full = true
-	}
+func MarshalOutput(m Output) ([]byte, error) {
 	if err := ValidateOutput(m); err != nil {
-		return nil
+		return nil, err
 	}
 	w := payloadWriter{}
 	w.putUint64(m.Epoch)
@@ -1078,17 +1053,16 @@ func MarshalOutput(m Output) []byte {
 	w.putUint16(uint16(m.Size.Rows))
 	w.putBool(m.Full)
 	w.putLongBytes(m.Data)
-	return w.b
+	return w.b, nil
 }
 
 // UnmarshalOutput strictly decodes one final Output payload. Header semantics
 // are validated before the length-prefixed data is copied.
 func UnmarshalOutput(b []byte) (Output, error) {
-	const outputHeaderLen = 45
 	if len(b) > MaxFrameLen-1 {
 		return Output{}, ErrInvalidOutput
 	}
-	if len(b) < outputHeaderLen+4 {
+	if len(b) < outputPayloadOverhead {
 		return Output{}, errShortPayload
 	}
 	r := payloadReader{b: b}

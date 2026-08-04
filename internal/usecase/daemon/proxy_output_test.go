@@ -8,6 +8,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func newProxyOutputAttachment(t *testing.T, proxy *proxySession, id byte) (*attachedClient, *proxyTestTransport) {
+	t.Helper()
+	transport := newProxyTestTransport()
+	ac := &attachedClient{tr: transport, output: newOutputStateStream(), size: proxy.contentSize}
+	ac.output.attachment = ac
+	ac.clientID[0] = id
+	ac.setSession(proxy)
+	proxy.sessionCore.mu.Lock()
+	require.True(t, proxy.registerAttachmentLocked(ac))
+	proxy.sessionCore.mu.Unlock()
+	return ac, transport
+}
+
 func TestProxyOutputRejectsStaleStateAndRequestsOneReset(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -62,32 +75,25 @@ func TestProxyOutputFansOutToEveryLiveAttachment(t *testing.T) {
 
 	attachments := make([]*proxyTestTransport, 0, 2)
 	for id := byte(1); id <= 2; id++ {
-		clientTransport := newProxyTestTransport()
-		ac := &attachedClient{tr: clientTransport, output: newOutputStateStream(), size: proxy.contentSize}
-		ac.output.attachment = ac
-		ac.clientID[0] = id
-		ac.setSession(proxy)
-		proxy.sessionCore.mu.Lock()
-		require.True(t, proxy.registerAttachmentLocked(ac))
-		proxy.sessionCore.mu.Unlock()
+		_, clientTransport := newProxyOutputAttachment(t, proxy, id)
 		attachments = append(attachments, clientTransport)
 	}
 
 	result, err := d.handleLinkFrame(proxy, 1, ports.Frame{
 		Type:    ports.MsgOutput,
-		Payload: ports.MarshalOutput(ports.Output{Epoch: 3, Base: 0, New: 1, Full: true, Data: []byte("full")}),
+		Payload: mustMarshalOutput(ports.Output{Epoch: 3, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("full")}),
 	})
 	require.NoError(t, err)
 	require.Equal(t, proxyLinkResume, result)
 	for _, transport := range attachments {
-		frame := <-transport.sent
+		frame := awaitTestValue(t, transport.sent, "proxy attachment did not receive output")
 		require.Equal(t, ports.MsgOutput, frame.Type)
 		out, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
 		require.Zero(t, out.New, "local proxy forwarding must not create a second ACK path")
 		require.Equal(t, []byte("full"), out.Data)
 	}
-	ackFrame := <-remote.sent
+	ackFrame := awaitTestValue(t, remote.sent, "proxy remote did not receive output acknowledgement")
 	require.Equal(t, ports.MsgAck, ackFrame.Type)
 }
 
@@ -99,37 +105,23 @@ func TestProxyOutputAttachAfterStreamReceivesCurrentFullOutput(t *testing.T) {
 	proxy.linkGeneration = 1
 	d := &Daemon{}
 
-	firstTransport := newProxyTestTransport()
-	first := &attachedClient{tr: firstTransport, output: newOutputStateStream(), size: proxy.contentSize}
-	first.output.attachment = first
-	first.clientID[0] = 1
-	first.setSession(proxy)
-	proxy.sessionCore.mu.Lock()
-	require.True(t, proxy.registerAttachmentLocked(first))
-	proxy.sessionCore.mu.Unlock()
+	_, firstTransport := newProxyOutputAttachment(t, proxy, 1)
 
 	handle := func(output ports.Output) {
 		t.Helper()
-		result, err := d.handleLinkFrame(proxy, 1, ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(output)})
+		result, err := d.handleLinkFrame(proxy, 1, ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(output)})
 		require.NoError(t, err)
 		require.Equal(t, proxyLinkResume, result)
 	}
-	handle(ports.Output{Epoch: 3, Base: 0, New: 1, Full: true, Data: []byte("before attach")})
-	<-firstTransport.sent
-	<-remote.sent
+	handle(ports.Output{Epoch: 3, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("before attach")})
+	_ = awaitTestValue(t, firstTransport.sent, "first proxy attachment did not receive output")
+	_ = awaitTestValue(t, remote.sent, "proxy remote did not receive first acknowledgement")
 
-	secondTransport := newProxyTestTransport()
-	second := &attachedClient{tr: secondTransport, output: newOutputStateStream(), size: proxy.contentSize}
-	second.output.attachment = second
-	second.clientID[0] = 2
-	second.setSession(proxy)
-	proxy.sessionCore.mu.Lock()
-	require.True(t, proxy.registerAttachmentLocked(second))
-	proxy.sessionCore.mu.Unlock()
+	_, secondTransport := newProxyOutputAttachment(t, proxy, 2)
 
-	handle(ports.Output{Epoch: 4, Base: 0, New: 1, Full: true, Data: []byte("current full")})
+	handle(ports.Output{Epoch: 4, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("current full")})
 	for _, transport := range []*proxyTestTransport{firstTransport, secondTransport} {
-		frame := <-transport.sent
+		frame := awaitTestValue(t, transport.sent, "proxy attachment did not receive current output")
 		require.Equal(t, ports.MsgOutput, frame.Type)
 		out, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
@@ -137,7 +129,7 @@ func TestProxyOutputAttachAfterStreamReceivesCurrentFullOutput(t *testing.T) {
 		require.False(t, out.Full, "local proxy side effects must remain stateless")
 		require.Equal(t, []byte("current full"), out.Data)
 	}
-	ackFrame := <-remote.sent
+	ackFrame := awaitTestValue(t, remote.sent, "proxy remote did not receive current acknowledgement")
 	require.Equal(t, ports.MsgAck, ackFrame.Type)
 }
 
@@ -147,26 +139,20 @@ func TestProxyOutputInvalidStateNeverForwardsBytes(t *testing.T) {
 	remote := newProxyTestTransport()
 	proxy.transport = remote
 	proxy.linkGeneration = 1
-	clientTransport := newProxyTestTransport()
-	ac := &attachedClient{tr: clientTransport, output: newOutputStateStream(), size: proxy.contentSize}
-	ac.output.attachment = ac
-	ac.setSession(proxy)
-	proxy.sessionCore.mu.Lock()
-	require.True(t, proxy.registerAttachmentLocked(ac))
-	proxy.sessionCore.mu.Unlock()
+	_, clientTransport := newProxyOutputAttachment(t, proxy, 1)
 	d := &Daemon{}
 
 	_, err = d.handleLinkFrame(proxy, 1, ports.Frame{
 		Type:    ports.MsgOutput,
-		Payload: ports.MarshalOutput(ports.Output{Epoch: 3, Base: 0, New: 1, Full: true, Data: []byte("full")}),
+		Payload: mustMarshalOutput(ports.Output{Epoch: 3, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("full")}),
 	})
 	require.NoError(t, err)
-	<-clientTransport.sent
-	<-remote.sent
+	_ = awaitTestValue(t, clientTransport.sent, "proxy attachment did not receive initial output")
+	_ = awaitTestValue(t, remote.sent, "proxy remote did not receive initial acknowledgement")
 
 	result, err := d.handleLinkFrame(proxy, 1, ports.Frame{
 		Type:    ports.MsgOutput,
-		Payload: ports.MarshalOutput(ports.Output{Epoch: 3, Base: 0, New: 1, Full: true, Data: []byte("stale")}),
+		Payload: mustMarshalOutput(ports.Output{Epoch: 3, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("stale")}),
 	})
 	require.NoError(t, err)
 	require.Equal(t, proxyLinkResume, result)
@@ -175,6 +161,6 @@ func TestProxyOutputInvalidStateNeverForwardsBytes(t *testing.T) {
 		t.Fatalf("stale proxy output forwarded as %v", frame.Type)
 	default:
 	}
-	reset := <-remote.sent
+	reset := awaitTestValue(t, remote.sent, "proxy remote did not receive reset request")
 	require.Equal(t, ports.MsgOutputResetRequest, reset.Type)
 }

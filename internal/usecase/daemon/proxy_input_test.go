@@ -496,7 +496,7 @@ func TestProxyAttachedCommandTimeoutCancelAndGenerationReplacement(t *testing.T)
 		request := requireProxyCommandRequest(t, link)
 		_ = awaitTestValue(t, clock.timers, "command did not arm timeout")
 		oldGeneration := proxy.linkGeneration
-		newGeneration, _ := proxy.installTransport(newProxyTestTransport(), false)
+		newGeneration, _ := proxy.installTransport(newProxyTestTransport())
 		require.Greater(t, newGeneration, oldGeneration)
 		require.Error(t, awaitTestValue(t, done, "replacement did not cancel command"))
 		_, err := d.handleLinkFrame(proxy, oldGeneration, commandResultFrame(ports.CommandResult{RequestID: request.RequestID, OK: true}))

@@ -102,7 +102,7 @@ func (d *Daemon) dialProxyHandshake(parent context.Context, p *proxySession, int
 	if !resume {
 		resumeToken = 0
 	}
-	generation, previous := p.installTransport(transport, resume)
+	generation, previous := p.installTransport(transport)
 	if previous != nil && previous != transport {
 		_ = previous.Close()
 	}
@@ -248,20 +248,6 @@ func validateProxyWelcome(frame ports.Frame, sessionName string) (ports.Welcome,
 	return welcome, nil
 }
 
-func validateProxyInitialMeta(frame ports.Frame, sessionName string) (ports.SessionMeta, error) {
-	if frame.Type != ports.MsgSessionMeta {
-		return ports.SessionMeta{}, fmt.Errorf("proxy session: second server frame is %d, want SessionMeta", frame.Type)
-	}
-	meta, err := ports.UnmarshalSessionMeta(frame.Payload)
-	if err != nil {
-		return ports.SessionMeta{}, fmt.Errorf("proxy session: decode initial metadata: %w", err)
-	}
-	if meta.SessionName != sessionName {
-		return ports.SessionMeta{}, fmt.Errorf("proxy session: metadata identity mismatch: got %q", meta.SessionName)
-	}
-	return meta, nil
-}
-
 func recvProxyHandshakeFrame(ctx context.Context, transport ports.Transport) (ports.Frame, error) {
 	result := make(chan proxyRecvResult, 1)
 	go func() {
@@ -281,7 +267,7 @@ func recvProxyHandshakeFrame(ctx context.Context, transport ports.Transport) (po
 	}
 }
 
-func (p *proxySession) installTransport(transport ports.Transport, _ bool) (uint64, ports.Transport) {
+func (p *proxySession) installTransport(transport ports.Transport) (uint64, ports.Transport) {
 	// Link replacement participates in the same sender serialization as every
 	// frame. A request can therefore only be published wholly before the
 	// generation changes or wholly after it.
@@ -315,17 +301,6 @@ func (p *proxySession) retireTransport(generation uint64, transport ports.Transp
 	if current {
 		p.failPendingCommandsLocked(errProxyCommandUnavailable)
 	}
-}
-
-// Every proxy Transport.Send path is serialized by sendMu: Hello, input,
-// resize, ACK/reset, ping/pong, and command traffic. The leaf proxy lock is
-// held only long enough to revalidate
-// the immutable link snapshot; I/O happens after releasing it.
-func (p *proxySession) sendCurrent(frame ports.Frame) error {
-	p.mu.Lock()
-	generation := p.linkGeneration
-	p.mu.Unlock()
-	return p.sendGeneration(generation, frame)
 }
 
 func (p *proxySession) sendGeneration(generation uint64, frame ports.Frame) error {

@@ -66,6 +66,10 @@ func (p *proxySession) resize(size domain.Size) (changed, sent bool) {
 	if p == nil || !size.Valid() {
 		return false, false
 	}
+	payload, err := ports.MarshalResize(ports.Resize{Size: size})
+	if err != nil {
+		return false, false
+	}
 	p.mu.Lock()
 	if p.contentSize == size {
 		available := p.transport != nil
@@ -77,7 +81,7 @@ func (p *proxySession) resize(size domain.Size) (changed, sent bool) {
 	p.mu.Unlock()
 	return true, p.sendGeneration(generation, ports.Frame{
 		Type:    ports.MsgResize,
-		Payload: ports.MarshalResize(ports.Resize{Size: size}),
+		Payload: payload,
 	}) == nil
 }
 

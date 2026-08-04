@@ -117,17 +117,19 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 
 func TestHelloEnvironmentCodec(t *testing.T) {
 	t.Run("literal wire layout", func(t *testing.T) {
-		got := MarshalHello(Hello{
+		msg := Hello{
 			Version: ProtocolVersion,
+			Size:    domain.Size{Cols: 1, Rows: 1},
 			Env:     []string{"A=B", "XY=123"},
-		})
+		}
+		got := MarshalHello(msg)
 		want := []byte{
 			0x00, 0x17, 0x00, // version, intent
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
 			0x00, 0x00, // name
-			0x00, 0x00, 0x00, 0x00, // size
+			0x00, 0x01, 0x00, 0x01, // size
 			0x00, 0x00, // TERM
 			0x00, 0x00, // cwd
 			0x00, 0x00, // true color, max output in flight
@@ -136,8 +138,11 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			0x00, 0x00, 0x00, 0x06, 'X', 'Y', '=', '1', '2', '3',
 		}
 		require.Equal(t, want, got)
-		assertAllPrefixesFail(t, got, UnmarshalHello)
-		assertTrailingGarbageFails(t, got, UnmarshalHello)
+		decoded, err := UnmarshalHello(want)
+		require.NoError(t, err)
+		require.Equal(t, msg, decoded)
+		assertAllPrefixesFail(t, want, UnmarshalHello)
+		assertTrailingGarbageFails(t, want, UnmarshalHello)
 	})
 
 	t.Run("lossless order and values", func(t *testing.T) {
@@ -343,7 +348,10 @@ func TestResizeGoldenAndRoundTrip(t *testing.T) {
 	msg := Resize{Size: domain.Size{Cols: 100, Rows: 40}}
 	want := []byte{0x00, 0x64, 0x00, 0x28}
 
-	got := MarshalResize(msg)
+	got, err := MarshalResize(msg)
+	if err != nil {
+		t.Fatalf("MarshalResize() error = %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("MarshalResize() = %#v, want %#v", got, want)
 	}
@@ -612,7 +620,10 @@ func TestOutputGoldenAndRoundTrip(t *testing.T) {
 	msg := Output{Epoch: 1, Base: 0, New: 2, Echo: 3, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("hello\n")}
 	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x06, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a}
 
-	got := MarshalOutput(msg)
+	got, err := MarshalOutput(msg)
+	if err != nil {
+		t.Fatalf("MarshalOutput() error = %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("MarshalOutput() = %#v, want %#v", got, want)
 	}
@@ -632,7 +643,10 @@ func TestAckGoldenAndRoundTrip(t *testing.T) {
 	msg := Ack{Epoch: 1, State: 0x0102030405060708}
 	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
 
-	got := MarshalAck(msg)
+	got, err := MarshalAck(msg)
+	if err != nil {
+		t.Fatalf("MarshalAck() error = %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("MarshalAck() = %#v, want %#v", got, want)
 	}

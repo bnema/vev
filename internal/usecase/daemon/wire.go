@@ -21,11 +21,15 @@ func frameError(code uint16, text string) ports.Frame {
 	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Code: code, Text: text})}
 }
 
-func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) ports.Frame {
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
+func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) (ports.Frame, error) {
+	payload, err := ports.MarshalOutput(ports.Output{
 		Epoch: 1, Base: baseState, New: state, Echo: echoAck,
 		Size: domain.Size{Cols: 1, Rows: 1}, Full: state != 0 && baseState == 0, Data: b,
-	})}
+	})
+	if err != nil {
+		return ports.Frame{}, err
+	}
+	return ports.Frame{Type: ports.MsgOutput, Payload: payload}, nil
 }
 
 func frameDetached(reason uint8) ports.Frame {

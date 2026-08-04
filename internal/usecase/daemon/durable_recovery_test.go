@@ -812,7 +812,7 @@ func TestAttachWaitsForRestore(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name}, nil)
+		_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
 		result <- err
 	}()
 

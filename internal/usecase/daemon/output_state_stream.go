@@ -32,6 +32,18 @@ type outputStateStream struct {
 	attachment           *attachedClient
 }
 
+// lockView serializes an attachment's view publication with every output
+// state transition. It deliberately does not take sendMu: callers that hold
+// architecture locks can publish a view without reversing the paint path's
+// sendMu -> session lock order.
+func (s *outputStateStream) lockView() func() {
+	if s == nil || s.attachment == nil {
+		return func() {}
+	}
+	s.attachment.viewMu.Lock()
+	return s.attachment.viewMu.Unlock
+}
+
 func newOutputStateStream(windowSize ...uint8) *outputStateStream {
 	window := uint8(maxUnackedOutputStates)
 	if len(windowSize) > 0 {
@@ -64,11 +76,13 @@ type preparedOutput struct {
 }
 
 func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
+	unlockView := s.lockView()
+	defer unlockView()
 	if s.epoch == 0 {
 		s.epoch = 1
 	}
 	if reset && s.initialized {
-		s.rebase()
+		s.rebaseLocked()
 	}
 	reset = reset || s.forceSnapshot || !s.initialized
 	if s.next == ^uint64(0) {
@@ -79,7 +93,7 @@ func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Dama
 		return nil, err
 	}
 	s.initialized = true
-	generation, epoch, viewRevision := s.fence()
+	generation, epoch, viewRevision := s.fenceLocked()
 	return &preparedOutput{
 		stream:               s,
 		draw:                 draw,
@@ -96,11 +110,13 @@ func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Dama
 }
 
 func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame) error) error {
-	if p == nil || p.attempted {
+	if p == nil || p.stream == nil || p.attempted {
 		return nil
 	}
+	unlockView := p.stream.lockView()
+	defer unlockView()
 	p.attempted = true
-	if !p.current() {
+	if !p.currentLocked() {
 		return nil
 	}
 	if len(data) == 0 {
@@ -112,7 +128,11 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame
 	if p.reset {
 		base = 0
 	}
-	out := marshalOutputState(data, p.epoch, base, p.next, echoAck, p.viewRevision, p.size, p.reset)
+	out, err := marshalOutputState(data, p.epoch, base, p.next, echoAck, p.viewRevision, p.size, p.reset)
+	if err != nil {
+		p.stream.forceSnapshot = true
+		return err
+	}
 	if err := send(out); err != nil {
 		p.stream.forceSnapshot = true
 		return err
@@ -125,11 +145,13 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(ports.Frame
 }
 
 func (p *preparedOutput) commitNoSend() {
-	if p == nil || p.attempted {
+	if p == nil || p.stream == nil || p.attempted {
 		return
 	}
+	unlockView := p.stream.lockView()
+	defer unlockView()
 	p.attempted = true
-	if !p.current() || len(p.data) != 0 {
+	if !p.currentLocked() || len(p.data) != 0 {
 		return
 	}
 	p.commit()
@@ -142,79 +164,84 @@ func (p *preparedOutput) commit() {
 }
 
 func (s *outputStateStream) currentEpoch() uint64 {
+	unlockView := s.lockView()
+	defer unlockView()
+	return s.currentEpochLocked()
+}
+
+func (s *outputStateStream) currentEpochLocked() uint64 {
 	if s.epoch == 0 {
 		s.epoch = 1
 	}
 	return s.epoch
 }
 
-func (s *outputStateStream) fence() (uint64, uint64, uint64) {
+func (s *outputStateStream) fenceLocked() (uint64, uint64, uint64) {
 	if s == nil {
 		return 0, 1, 0
 	}
 	generation, revision := uint64(0), uint64(0)
 	if s.attachment != nil {
 		generation = s.attachment.connectionGeneration.Load()
-		revision = s.attachment.viewSnapshot().revision
+		revision = s.attachment.view.revision
 	}
-	return generation, s.currentEpoch(), revision
+	return generation, s.currentEpochLocked(), revision
 }
 
-func (s *outputStateStream) preparedCurrent(generation, epoch, viewRevision, base uint64) bool {
-	if s == nil || s.currentEpoch() != epoch || s.generation != generation || s.next != base {
+func (s *outputStateStream) preparedCurrentLocked(generation, epoch, viewRevision, base uint64) bool {
+	if s == nil || s.currentEpochLocked() != epoch || s.generation != generation || s.next != base {
 		return false
 	}
 	if s.attachment == nil {
 		return true
 	}
-	return s.attachment.viewSnapshot().revision == viewRevision
+	return s.attachment.view.revision == viewRevision
 }
 
-func (p *preparedOutput) current() bool {
-	return p != nil && p.stream != nil && p.stream.preparedCurrent(p.generation, p.epoch, p.viewRevision, p.base) &&
+func (p *preparedOutput) currentLocked() bool {
+	return p != nil && p.stream != nil && p.stream.preparedCurrentLocked(p.generation, p.epoch, p.viewRevision, p.base) &&
 		(p.stream.attachment == nil || p.stream.attachment.connectionGeneration.Load() == p.connectionGeneration)
 }
 
-func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool) ports.Frame {
-	if !size.Valid() {
-		size = domain.Size{Cols: 1, Rows: 1}
-	}
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
+func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool) (ports.Frame, error) {
+	payload, err := ports.MarshalOutput(ports.Output{
 		Epoch: epoch, Base: base, New: next, Echo: echoAck, ViewRevision: viewRevision,
 		Size: size, Full: full, Data: data,
-	})}
+	})
+	if err != nil {
+		return ports.Frame{}, err
+	}
+	return ports.Frame{Type: ports.MsgOutput, Payload: payload}, nil
 }
 
 // sideEffect builds an output frame without advancing the state stream. When
 // an attachment is present, callers must hold its sendMu; attachment-bound
 // sends use sideEffectLocked after validating their transport incarnation.
-func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) ports.Frame {
+func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) (ports.Frame, error) {
+	unlockView := s.lockView()
+	defer unlockView()
 	return s.sideEffectLocked(data, echoAck)
 }
 
-func (s *outputStateStream) sideEffectLocked(data []byte, echoAck uint64) ports.Frame {
-	_, epoch, viewRevision := s.fence()
+// sideEffectLocked requires the attachment view lock for both frame creation
+// and transport emission. Keeping that lock across the send prevents a view
+// publication from overtaking a frame that was fenced just before it.
+func (s *outputStateStream) sideEffectLocked(data []byte, echoAck uint64) (ports.Frame, error) {
+	_, epoch, viewRevision := s.fenceLocked()
 	size := domain.Size{Cols: 1, Rows: 1}
-	if s != nil && s.attachment != nil && s.attachment.size.Valid() {
+	if s != nil && s.attachment != nil {
 		size = s.attachment.size
 	}
 	return marshalOutputState(data, epoch, 0, 0, echoAck, viewRevision, size, false)
 }
 
-func (s *outputStateStream) ack(values ...uint64) {
+func (s *outputStateStream) ack(epoch, state uint64) {
 	if s == nil {
 		return
 	}
-	epoch, state := s.currentEpoch(), uint64(0)
-	switch len(values) {
-	case 1:
-		state = values[0]
-	case 2:
-		epoch, state = values[0], values[1]
-	default:
-		return
-	}
-	if epoch != s.currentEpoch() || state > s.next || state <= s.acked {
+	unlockView := s.lockView()
+	defer unlockView()
+	if epoch != s.currentEpochLocked() || state > s.next || state <= s.acked {
 		return
 	}
 	s.acked = state
@@ -225,7 +252,18 @@ func (s *outputStateStream) rebase() {
 	if s == nil {
 		return
 	}
-	epoch := s.currentEpoch()
+	unlockView := s.lockView()
+	defer unlockView()
+	s.rebaseLocked()
+}
+
+// rebaseLocked is called while the attachment view lock is held. Publishing
+// the next view revision takes this path before making that revision visible.
+func (s *outputStateStream) rebaseLocked() {
+	if s == nil {
+		return
+	}
+	epoch := s.currentEpochLocked()
 	if epoch == ^uint64(0) {
 		return
 	}
@@ -253,6 +291,8 @@ func (s *outputStateStream) syncCapacityLocked() {
 	if s == nil {
 		return
 	}
+	unlockView := s.lockView()
+	defer unlockView()
 	s.maxOutstandingAtomic.Store(s.maxOutstanding)
 	s.publishOutstanding()
 }
@@ -264,4 +304,11 @@ func (s *outputStateStream) atCapacity() bool {
 	return s.outstandingAtomic.Load() >= s.maxOutstandingAtomic.Load()
 }
 
-func (s *outputStateStream) outstanding() uint64 { return s.next - s.acked }
+func (s *outputStateStream) outstanding() uint64 {
+	if s == nil {
+		return 0
+	}
+	unlockView := s.lockView()
+	defer unlockView()
+	return s.next - s.acked
+}

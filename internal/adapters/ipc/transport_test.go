@@ -140,7 +140,7 @@ func TestTransportManySmallFramesBackToBack(t *testing.T) {
 	}
 	// Vary a couple to prove ordering and content are both preserved.
 	frames[7] = ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("hop")})}
-	frames[150] = ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 5, Rows: 6}})}
+	frames[150] = ports.Frame{Type: ports.MsgResize, Payload: mustMarshalResize(ports.Resize{Size: domain.Size{Cols: 5, Rows: 6}})}
 
 	var wg sync.WaitGroup
 	wg.Go(func() {

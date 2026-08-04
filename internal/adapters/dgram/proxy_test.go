@@ -105,7 +105,7 @@ func TestProxyRuntimeClampsDatagramHelloOutputWindowAndPreservesControl(t *testi
 			}
 
 			input := ports.Frame{Type: ports.MsgInput, Payload: []byte("still flowing")}
-			ack := ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{State: 7})}
+			ack := ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(ports.Ack{Epoch: 1, State: 7})}
 			client.recv <- recvResult{frame: input}
 			client.recv <- recvResult{frame: ack}
 			for _, want := range []ports.Frame{input, ack} {

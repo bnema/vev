@@ -3,6 +3,7 @@ package ports
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -13,9 +14,13 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 	if ProtocolVersion != 23 {
 		t.Fatalf("ProtocolVersion = %d, want 23", ProtocolVersion)
 	}
-	payload := MarshalHello(Hello{Version: 21, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
-	if _, err := UnmarshalHello(payload); err == nil {
-		t.Fatal("UnmarshalHello accepted protocol v21")
+	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
+	if len(payload) < 2 {
+		t.Fatal("MarshalHello produced a truncated valid payload")
+	}
+	binary.BigEndian.PutUint16(payload, 21)
+	if _, err := UnmarshalHello(payload); !errors.Is(err, ErrInvalidHello) {
+		t.Fatalf("UnmarshalHello(v21) error = %v, want ErrInvalidHello", err)
 	}
 }
 
@@ -62,7 +67,10 @@ func TestFinalHelloSemanticValidation(t *testing.T) {
 func TestFinalResizeGoldenStrict(t *testing.T) {
 	msg := Resize{Size: domain.Size{Cols: 80, Rows: 24}}
 	want := []byte{0, 80, 0, 24}
-	got := MarshalResize(msg)
+	got, err := MarshalResize(msg)
+	if err != nil {
+		t.Fatalf("MarshalResize() error = %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Resize bytes = %x, want %x", got, want)
 	}
@@ -73,8 +81,8 @@ func TestFinalResizeGoldenStrict(t *testing.T) {
 	assertAllPrefixesFail(t, got, UnmarshalResize)
 	assertTrailingGarbageFails(t, got, UnmarshalResize)
 	for _, size := range []domain.Size{{}, {Cols: 513, Rows: 512}} {
-		if got := MarshalResize(Resize{Size: size}); got != nil {
-			t.Fatalf("MarshalResize(%+v) = %x, want nil", size, got)
+		if got, err := MarshalResize(Resize{Size: size}); err == nil || got != nil {
+			t.Fatalf("MarshalResize(%+v) = (%x, %v), want nil payload and error", size, got, err)
 		}
 	}
 }
@@ -93,7 +101,10 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 		0, 80, 0, 24, 1,
 		0, 0, 0, 2, 'o', 'k',
 	}
-	got := MarshalOutput(msg)
+	got, err := MarshalOutput(msg)
+	if err != nil {
+		t.Fatalf("MarshalOutput() error = %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Output bytes = %x, want %x", got, want)
 	}
@@ -107,7 +118,19 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 
 func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
 	valid := Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true}
-	payload := MarshalOutput(valid)
+	for _, bad := range []Output{
+		{},
+		{Epoch: 1, Base: 0, New: 1, Size: valid.Size},
+		{Epoch: 1, Base: 0, New: 1, Full: true},
+	} {
+		if got, err := MarshalOutput(bad); err == nil || got != nil {
+			t.Fatalf("MarshalOutput(%+v) = (%x, %v), want nil payload and error", bad, got, err)
+		}
+	}
+	payload, err := MarshalOutput(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tt := range []struct {
 		name   string
 		mutate func([]byte)
@@ -132,7 +155,10 @@ func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
 func TestFinalAckGoldenStrict(t *testing.T) {
 	msg := Ack{Epoch: 2, State: 7}
 	want := []byte{0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 7}
-	got := MarshalAck(msg)
+	got, err := MarshalAck(msg)
+	if err != nil {
+		t.Fatalf("MarshalAck() error = %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Ack bytes = %x, want %x", got, want)
 	}
@@ -144,6 +170,9 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 	assertTrailingGarbageFails(t, got, UnmarshalAck)
 	if _, err := UnmarshalAck(make([]byte, 16)); err == nil {
 		t.Fatal("UnmarshalAck accepted zero epoch")
+	}
+	if got, err := MarshalAck(Ack{State: 7}); err == nil || got != nil {
+		t.Fatalf("MarshalAck accepted zero epoch: payload=%x err=%v", got, err)
 	}
 }
 

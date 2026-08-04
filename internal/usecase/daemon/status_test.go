@@ -1507,7 +1507,7 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		frameInput([]byte("\x1b ")),
 		frameInput([]byte("CNT\r")),
 		frameInput([]byte("\x1b1")),
-		ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
+		ports.Frame{Type: ports.MsgResize, Payload: mustMarshalResize(ports.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
 	)
 
 	var hg sync.WaitGroup

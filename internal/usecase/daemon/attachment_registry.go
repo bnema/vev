@@ -46,6 +46,12 @@ func (ac *attachedClient) publishView(view attachmentView) {
 		return
 	}
 	ac.viewMu.Lock()
+	// Rebase while viewMu is held, before the new revision becomes visible.
+	// Output fences take the same lock, so no side effect can pair the new
+	// ViewRevision with the previous output epoch.
+	if ac.output != nil && ac.view.revision != view.revision {
+		ac.output.rebaseLocked()
+	}
 	ac.view = view
 	ac.viewMu.Unlock()
 }
@@ -326,6 +332,7 @@ func (s *session) prepareAttachmentViewsForRemovedTabLocked(removed *tab, index 
 			view.paneID = ""
 			view.bookmark = 0
 			view.liveBottom = true
+			view.revision++
 			ac.publishView(view)
 		}
 	}

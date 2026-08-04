@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/require"
 )
 
 func registryTestSession() *session {
@@ -71,6 +73,67 @@ func TestAttachmentRegistryRepairsRemovedStableTarget(t *testing.T) {
 	if after.revision <= before.revision || !after.liveBottom {
 		t.Fatalf("repaired view revision/liveBottom = %d/%v, want revision increase and live bottom", after.revision, after.liveBottom)
 	}
+}
+
+func TestTabForAttachmentRepairRebasesOutputBeforePublishingRevision(t *testing.T) {
+	sess := registryTestSession()
+	ac := registryTestAttachment(1)
+	ac.size = domain.Size{Cols: 80, Rows: 23}
+	ac.output = newOutputStateStream()
+	ac.output.attachment = ac
+	require.True(t, sess.registerAttachment(ac))
+	require.True(t, sess.selectAttachmentTab(ac, "tab-b"))
+
+	before := ac.viewSnapshot()
+	beforeEpoch := ac.output.currentEpoch()
+	require.NoError(t, sess.runMutation(func() error {
+		sess.mu.Lock()
+		sess.tabs = sess.tabs[:1]
+		sess.mu.Unlock()
+		return nil
+	}))
+
+	require.Same(t, sess.tabs[0], sess.tabForAttachment(ac))
+	after := ac.viewSnapshot()
+	require.Greater(t, after.revision, before.revision)
+	require.Greater(t, ac.output.currentEpoch(), beforeEpoch)
+	frame, err := ac.output.sideEffect([]byte("x"), 0)
+	require.NoError(t, err)
+	output, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, after.revision, output.ViewRevision)
+	require.Equal(t, ac.output.currentEpoch(), output.Epoch)
+}
+
+func TestPrepareRemovedTabViewRebasesOutputBeforeSideEffect(t *testing.T) {
+	sess := registryTestSession()
+	ac := registryTestAttachment(1)
+	ac.size = domain.Size{Cols: 80, Rows: 23}
+	ac.output = newOutputStateStream()
+	ac.output.attachment = ac
+	require.True(t, sess.registerAttachment(ac))
+	require.True(t, sess.selectAttachmentTab(ac, "tab-b"))
+
+	before := ac.viewSnapshot()
+	beforeEpoch := ac.output.currentEpoch()
+	sess.mu.Lock()
+	sess.prepareAttachmentViewsForRemovedTabLocked(sess.tabs[1], 1)
+	sess.tabs = sess.tabs[:1]
+	sess.mu.Unlock()
+
+	after := ac.viewSnapshot()
+	require.Equal(t, domain.TabStableID("tab-a"), after.tabID)
+	require.Equal(t, domain.PaneStableID(""), after.paneID)
+	require.Equal(t, before.revision+1, after.revision)
+	require.Greater(t, ac.output.currentEpoch(), beforeEpoch)
+
+	frame, err := ac.output.sideEffect([]byte("replacement"), 0)
+	require.NoError(t, err)
+	output, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, after.revision, output.ViewRevision)
+	require.NotEqual(t, beforeEpoch, output.Epoch)
+	require.Equal(t, ac.output.currentEpoch(), output.Epoch)
 }
 
 func TestAttachmentRegistryViewMutationIsSerialized(t *testing.T) {

@@ -69,7 +69,7 @@ func TestOutputStateStreamCapacityProbeDoesNotRaceWithSend(t *testing.T) {
 	<-probed
 	require.True(t, stream.atCapacity())
 
-	stream.ack(1)
+	stream.ack(1, 1)
 	require.False(t, stream.atCapacity())
 	stream.rebase()
 	require.False(t, stream.atCapacity())
@@ -183,11 +183,24 @@ func TestPreparedOutputDropsReplacedConnectionAndView(t *testing.T) {
 	}
 }
 
+func TestOutputStateAckRequiresCurrentEpoch(t *testing.T) {
+	stream := newOutputStateStream()
+	stream.next = 2
+	stream.ack(2, 1)
+	require.Zero(t, stream.acked, "a stale epoch must not retire output state")
+	stream.ack(1, 1)
+	require.Equal(t, uint64(1), stream.acked)
+	stream.ack(1, 3)
+	require.Equal(t, uint64(1), stream.acked, "a future state must not advance the ACK window")
+}
+
 func TestOutputStateSideEffectsDoNotAdvanceEpochStateOrACK(t *testing.T) {
 	stream := newOutputStateStream()
 	stream.ack(1, 0)
 	beforeEpoch, beforeNext, beforeAck := stream.epoch, stream.next, stream.acked
-	out, err := ports.UnmarshalOutput(stream.sideEffect([]byte("pty"), 9).Payload)
+	frame, err := stream.sideEffect([]byte("pty"), 9)
+	require.NoError(t, err)
+	out, err := ports.UnmarshalOutput(frame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, beforeEpoch, out.Epoch)
 	require.Zero(t, out.Base)
@@ -274,7 +287,7 @@ func TestOutputStateStreamRepeatedUnackedScrollRemainsClientCorrect(t *testing.T
 	require.NoError(t, err)
 	require.True(t, ok)
 	mustApplyOutput(t, client, first)
-	stream.ack(1)
+	stream.ack(1, 1)
 
 	scrolled := renderer.NewFrame(4, 3)
 	fillOutputStateRows(scrolled, []string{"BBBB", "CCCC", "N   "})
@@ -321,7 +334,11 @@ func outputStateFrame(stream *outputStateStream, data []byte, reset bool, echoAc
 	if reset {
 		base = 0
 	}
-	return frameOutputState(data, base, stream.next, echoAck)
+	frame, err := frameOutputState(data, base, stream.next, echoAck)
+	if err != nil {
+		panic(err)
+	}
+	return frame
 }
 
 func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Frame, damage []renderer.Damage, reset bool, echoAck uint64) (ports.Frame, bool, error) {

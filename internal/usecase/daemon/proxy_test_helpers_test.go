@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/stretchr/testify/require"
 )
@@ -87,8 +88,8 @@ func proxyWelcome(name string, token uint64, capabilities uint32) ports.Frame {
 }
 
 func proxyHandshakeSnapshot() ports.Frame {
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		Epoch: 1, Base: 0, New: 1, Full: true, Data: []byte("remote initial\n"),
+	return ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("remote initial\n"),
 	})}
 }
 

@@ -1256,6 +1256,9 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 // the session for ephemeral/new intents.
 func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
 	sz := h.Size
+	if !sz.Valid() {
+		return nil, nil, &protoErr{ports.ErrInternal, "invalid terminal size"}
+	}
 	term := terminalEnv{TrueColor: h.TrueColor}
 
 	// A non-zero token is an authoritative resume credential. If it is unknown,
@@ -1304,10 +1307,6 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 	}
-	if !sz.Valid() {
-		return nil, nil, &protoErr{ports.ErrInternal, "invalid terminal size"}
-	}
-
 	d.mu.Lock()
 	// Shutdown/create interlock: once shutdown has begun (last session removed,
 	// or shutdownAll started) no new session may be created and no attach may

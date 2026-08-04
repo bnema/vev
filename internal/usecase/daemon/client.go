@@ -276,11 +276,11 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
-func (ac *attachedClient) ackOutputState(values ...uint64) {
+func (ac *attachedClient) ackOutputState(epoch, state uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	if ac.output != nil {
-		ac.output.ack(values...)
+		ac.output.ack(epoch, state)
 	}
 }
 
@@ -356,8 +356,12 @@ func (ac *attachedClient) sendExpectedSideEffectForAttachment(expected transport
 	if err := ac.beginExpectedTransportSendLocked(expected, ticket); err != nil {
 		return errAttachmentTransition
 	}
-	frame := ac.output.sideEffectLocked(data, echoAck)
-	err := expected.transport.Send(frame)
+	unlockView := ac.output.lockView()
+	defer unlockView()
+	frame, err := ac.output.sideEffectLocked(data, echoAck)
+	if err == nil {
+		err = expected.transport.Send(frame)
+	}
 	if err != nil {
 		ticket.reportTransportFailure(expected)
 	}
@@ -404,7 +408,12 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if !ac.transportSnapshotCurrent(expected) {
 			return expected.transport, errTransportReplaced
 		}
-		err := owned.SendSynchronous(ac.output.sideEffectLocked(b, ac.echoAck.Load()))
+		unlockView := ac.output.lockView()
+		defer unlockView()
+		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
+		if err == nil {
+			err = owned.SendSynchronous(frame)
+		}
 		return expected.transport, err
 	}
 	return d.boundedSendWith(expected.transport, func() error {
@@ -413,7 +422,13 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if !ac.transportSnapshotCurrent(expected) {
 			return errTransportReplaced
 		}
-		return expected.transport.Send(ac.output.sideEffectLocked(b, ac.echoAck.Load()))
+		unlockView := ac.output.lockView()
+		defer unlockView()
+		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
+		if err != nil {
+			return err
+		}
+		return expected.transport.Send(frame)
 	})
 }
 
@@ -804,7 +819,6 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	view.windowTop = 0
 	view.revision++
 	ac.publishView(view)
-	ac.rebaseOutput()
 	ac.pipelineCache = composeCacheInput{}
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
@@ -812,8 +826,7 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	entry := token.sess
 	// Rendering is attachment-scoped. Run it independently of the connection
 	// reader so a blocked transport cannot hold session dispatch or peers.
-	if _, ok := entry.(*proxySession); ok {
-		proxy := entry.(*proxySession)
+	if proxy, ok := entry.(*proxySession); ok {
 		_, _ = proxy.resize(size)
 		return true
 	}
