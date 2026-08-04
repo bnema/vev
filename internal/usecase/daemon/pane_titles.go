@@ -24,7 +24,11 @@ type paneTitleState struct {
 
 func formatPaneTitle(processName, terminalTitle, fallback string) string {
 	if processName != "" && terminalTitle != "" {
-		return processName + ": " + terminalTitle
+		prefix := processName + ": "
+		if strings.HasPrefix(terminalTitle, prefix) {
+			return terminalTitle
+		}
+		return prefix + terminalTitle
 	}
 	if processName != "" {
 		return processName
