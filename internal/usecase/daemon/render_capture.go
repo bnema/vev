@@ -35,17 +35,16 @@ type renderCaptureScratch struct {
 }
 
 type damageReceipt struct {
-	pane        *pane
-	proxy       *proxySession
-	proxyScreen *proxyScreenState
-	generation  uint64
+	pane       *pane
+	generation uint64
 }
 
 type capturedRenderState struct {
 	attachment         *attachedClient // identity only; never dereferenced by composition
 	lease              *attachmentLease
+	view               attachmentView
+	window             domain.Size
 	reset              bool
-	contentOnly        bool
 	layout             capturedTabLayout
 	panes              []capturedPaneRenderState
 	floating           capturedFloatingRenderState
@@ -225,6 +224,13 @@ func captureLocalRenderState(
 		return nil, false
 	}
 
+	// A reset is an attachment-local capture boundary. The shared pane damage
+	// receipt may have been acknowledged by another fan-out attachment before
+	// this capture runs, so retaining this attachment's prior pane snapshots
+	// would compose an old frame with a fresh reset epoch.
+	if reset {
+		ac.captureFrames = nil
+	}
 	scratch := &ac.renderScratch
 	scratch.statusTabs = append(scratch.statusTabs[:0], bars.status.tabs...)
 	bars.status.tabs = scratch.statusTabs
@@ -266,8 +272,14 @@ func captureLocalRenderState(
 		layoutSnap.dividers = scratch.dividers
 	}
 	state := &scratch.state
+	view := ac.viewSnapshot()
+	window := domain.Size{}
+	if view.windowSet {
+		window = ac.size
+	}
 	*state = capturedRenderState{
-		attachment: ac, lease: lease, reset: reset, contentOnly: ac.proxied, bars: bars, theme: bars.theme,
+		attachment: ac, lease: lease, view: view, window: window,
+		reset: reset, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
 		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},

@@ -21,9 +21,10 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 	for range cap(normal) {
 		normal <- ports.Frame{Type: ports.MsgInput}
 	}
+	const epoch = 7
 	acks := newCumulativeAckQueue()
 	for state := uint64(1); state <= maxUnackedOutputStatesForTest; state++ {
-		acks.offer(state)
+		acks.offer(epoch, state)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -36,7 +37,8 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 	require.Equal(t, ports.MsgAck, first.Type)
 	ack, err := ports.UnmarshalAck(first.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(maxUnackedOutputStatesForTest), ack.AckedStateNum)
+	require.Equal(t, uint64(epoch), ack.Epoch)
+	require.Equal(t, uint64(maxUnackedOutputStatesForTest), ack.State)
 }
 
 const maxUnackedOutputStatesForTest = 8

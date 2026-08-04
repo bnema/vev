@@ -280,7 +280,7 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	output := awaitFrame(t, tr.sends, ports.MsgOutput)
 	first, err := ports.UnmarshalOutput(output.Payload)
 	require.NoError(t, err)
-	require.Zero(t, first.BaseStateNum)
+	require.Zero(t, first.Base)
 	tr.finish()
 	<-done
 	requireNoCoordinatorOutputFrame(t, tr.sends)
@@ -974,9 +974,10 @@ func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	ac := &attachedClient{output: newOutputStateStream()}
 	ac.output.next = 3
-	ac.ackOutputState(3)
-	ac.ackOutputState(2)
-	ac.ackOutputState(4)
+	epoch := ac.output.currentEpoch()
+	ac.ackOutputState(epoch, 3)
+	ac.ackOutputState(epoch, 2)
+	ac.ackOutputState(epoch, 4)
 	require.Equal(t, uint64(3), ac.output.acked, "stale or future ACKs must not move output state incorrectly")
 
 	ac.sendMu.Lock()
@@ -988,8 +989,8 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	ac.sendMu.Unlock()
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(5), out.BaseStateNum, "output should remain incremental unless an explicit reset is requested")
-	require.Equal(t, uint64(6), out.NewStateNum)
+	require.Equal(t, uint64(5), out.Base, "output should remain incremental unless an explicit reset is requested")
+	require.Equal(t, uint64(6), out.New)
 
 	ac.sendMu.Lock()
 	reset = true
@@ -998,8 +999,8 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	ac.sendMu.Unlock()
 	fullOut, err := ports.UnmarshalOutput(full.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(0), fullOut.BaseStateNum)
-	require.Equal(t, uint64(7), fullOut.NewStateNum)
+	require.Equal(t, uint64(0), fullOut.Base)
+	require.Equal(t, uint64(7), fullOut.New)
 }
 
 func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
@@ -1081,9 +1082,9 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	require.Len(t, sends, 1)
 	first, err := ports.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
-	require.Zero(t, first.BaseStateNum)
-	require.Equal(t, uint64(maxUnackedOutputStates+1), first.NewStateNum)
-	resumedAC.ackOutputState(first.NewStateNum)
+	require.Zero(t, first.Base)
+	require.Equal(t, uint64(1), first.New)
+	resumedAC.ackOutputState(first.Epoch, first.New)
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(resumedSess, resumedAC, false, nil)
@@ -1091,7 +1092,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	require.Len(t, sends, 2)
 	second, err := ports.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
-	require.Equal(t, first.NewStateNum, second.BaseStateNum)
+	require.Equal(t, first.New, second.Base)
 }
 
 func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
@@ -1141,7 +1142,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.Len(t, sends, 1)
 	output, err := ports.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
-	require.Zero(t, output.BaseStateNum, "resume must start with a complete frame")
+	require.Zero(t, output.Base, "resume must start with a complete frame")
 	terminal := vt.NewScreen(resumedAC.size.Cols, resumedAC.size.Rows)
 	terminal.Write(output.Data)
 	contents := strings.Join(frameRows(terminal.Frame), "\n")
@@ -1445,13 +1446,13 @@ func TestRawTerminalSideEffectsAreOutputStateNeutral(t *testing.T) {
 	require.NoError(t, err)
 	second, err := ports.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
-	require.Zero(t, first.BaseStateNum)
-	require.Zero(t, first.NewStateNum)
-	require.Zero(t, second.BaseStateNum)
-	require.Zero(t, second.NewStateNum)
+	require.Zero(t, first.Base)
+	require.Zero(t, first.New)
+	require.Zero(t, second.Base)
+	require.Zero(t, second.New)
 }
 
-func TestSequencedInputDoesNotPrematurelyEchoAck(t *testing.T) {
+func TestSequencedInputDoesNotPrematurelyEcho(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})

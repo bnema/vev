@@ -375,10 +375,13 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.Contains(t, firstToast, "┌")
 	require.Contains(t, firstToast, "probing UDP path")
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 1,
-		NewStateNum:  2,
-		Data:         []byte("daemon incremental"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 1,
+		Base:  0,
+		New:   2,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Full:  true,
+		Data:  []byte("daemon incremental"),
 	})}}
 	redrawn := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, redrawn, "daemon incremental")
@@ -391,44 +394,53 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 
 	beforeAwaitingReset := out.String()
 	beforeStatelessFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 0,
-		NewStateNum:  0,
-		Data:         []byte("stateless side effect"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 1,
+		Base:  0,
+		New:   0,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Data:  []byte("stateless side effect"),
 	})}}
 	require.Eventually(t, func() bool {
 		return strings.Contains(out.String(), "stateless side effect") && flushes.Load() > beforeStatelessFlushes
 	}, time.Second, time.Millisecond)
 
 	afterStateless := out.String()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 2,
-		NewStateNum:  3,
-		Data:         []byte("intervening incremental"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 1,
+		Base:  2,
+		New:   3,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Data:  []byte("intervening incremental"),
 	})}}
-	requireAckedState(t, tr.sends, 3)
-	require.Equal(t, afterStateless, out.String(), "stateless output must not satisfy pending reset reconciliation")
+	requireAckedState(t, tr.sends, 1, 3)
+	require.Contains(t, out.String(), "intervening incremental")
 	require.Contains(t, afterStateless[len(beforeAwaitingReset):], "stateless side effect")
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 0,
-		NewStateNum:  4,
-		Data:         []byte("authoritative reset"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 2,
+		Base:  0,
+		New:   4,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Full:  true,
+		Data:  []byte("authoritative reset"),
 	})}}
-	requireAckedState(t, tr.sends, 4)
+	requireAckedState(t, tr.sends, 2, 4)
 	require.Eventually(t, func() bool { return strings.Contains(out.String(), "authoritative reset") }, time.Second, time.Millisecond)
 	require.NotContains(t, out.String()[len(beforeAwaitingReset):], strings.Repeat(" ", reconnectToastBoundsFor(term.size, "probing UDP path").Width))
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 4,
-		NewStateNum:  5,
-		Data:         []byte("increment after reset"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 2,
+		Base:  4,
+		New:   5,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Data:  []byte("increment after reset"),
 	})}}
 	require.Eventually(t, func() bool {
 		return strings.Contains(out.String(), "increment after reset") && flushes.Load() > beforeIncrementFlushes
 	}, time.Second, time.Millisecond)
-	requireAckedState(t, tr.sends, 5)
+	requireAckedState(t, tr.sends, 2, 5)
 
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
@@ -462,37 +474,46 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 
 	beforeReset := out.String()
 	for _, output := range []ports.Output{
-		{BaseStateNum: 1, NewStateNum: 2, Data: []byte("first skipped increment")},
-		{BaseStateNum: 2, NewStateNum: 3, Data: []byte("second skipped increment")},
+		{Epoch: 1, Base: 1, New: 2, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("first skipped increment")},
+		{Epoch: 1, Base: 2, New: 3, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("second skipped increment")},
 	} {
-		tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(output)}}
-		requireAckedState(t, tr.sends, output.NewStateNum)
+		tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(output)}}
 		require.Equal(t, beforeReset, out.String())
 	}
+	requireSentFrame(t, tr.sends, "output reset request", func(frame ports.Frame) bool {
+		return frame.Type == ports.MsgOutputResetRequest
+	})
+	_, sentAck := tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgAck })
+	require.False(t, sentAck, "discarded output must not be ACKed")
 
 	beforeResetFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 0,
-		NewStateNum:  4,
-		Data:         []byte("stage transition reset"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 2,
+		Base:  0,
+		New:   4,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Full:  true,
+		Data:  []byte("stage transition reset"),
 	})}}
 	redrawn := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, redrawn, "stage transition reset")
 	require.Contains(t, redrawn, offlineMessage)
 	require.Eventually(t, func() bool { return flushes.Load() > beforeResetFlushes }, time.Second, time.Millisecond)
-	requireAckedState(t, tr.sends, 4)
+	requireAckedState(t, tr.sends, 2, 4)
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 4,
-		NewStateNum:  5,
-		Data:         []byte("stage increment after reset"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 2,
+		Base:  4,
+		New:   5,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Data:  []byte("stage increment after reset"),
 	})}}
 	incremental := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, incremental, "stage increment after reset")
 	require.Contains(t, incremental, offlineMessage)
 	require.Eventually(t, func() bool { return flushes.Load() > beforeIncrementFlushes }, time.Second, time.Millisecond)
-	requireAckedState(t, tr.sends, 5)
+	requireAckedState(t, tr.sends, 2, 5)
 
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
@@ -537,17 +558,19 @@ func requireResize(t *testing.T, sends *reconnectToastSentFrames) ports.Resize {
 	return resize
 }
 
-func requireAckedState(t *testing.T, sends *reconnectToastSentFrames, state uint64) {
+func requireAckedState(t *testing.T, sends *reconnectToastSentFrames, epoch, state uint64) {
 	t.Helper()
-	frame := requireSentFrame(t, sends, fmt.Sprintf("ACK for state %d", state), func(frame ports.Frame) bool {
+	frame := requireSentFrame(t, sends, fmt.Sprintf("ACK for epoch %d state %d", epoch, state), func(frame ports.Frame) bool {
 		if frame.Type != ports.MsgAck {
 			return false
 		}
 		ack, err := ports.UnmarshalAck(frame.Payload)
-		return err == nil && ack.AckedStateNum >= state
+		return err == nil && ack.Epoch == epoch && ack.State >= state
 	})
-	_, err := ports.UnmarshalAck(frame.Payload)
+	ack, err := ports.UnmarshalAck(frame.Payload)
 	require.NoError(t, err)
+	require.Equal(t, epoch, ack.Epoch)
+	require.GreaterOrEqual(t, ack.State, state)
 }
 
 func requireAttachResult(t *testing.T, results <-chan attachResult) attachResult {
@@ -652,10 +675,13 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	require.Eventually(t, func() bool { return flushes.Load() > beforeStatus }, time.Second, time.Millisecond)
 	beforeOutput := flushes.Load()
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-		BaseStateNum: 1,
-		NewStateNum:  2,
-		Data:         []byte("daemon output behind local reconnect status"),
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 1,
+		Base:  0,
+		New:   2,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Full:  true,
+		Data:  []byte("daemon output behind local reconnect status"),
 	})}}
 
 	select {
@@ -664,7 +690,7 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for terminal-flushed observation")
 	}
-	requireAckedState(t, tr.sends, 2)
+	requireAckedState(t, tr.sends, 1, 2)
 	require.Greater(t, flushes.Load(), beforeOutput, "daemon output must be flushed before ACK")
 
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
@@ -701,13 +727,16 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 			}
 
 			const output = "local status output remains visible"
-			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-				BaseStateNum: 1,
-				NewStateNum:  2,
-				Data:         []byte(output),
+			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+				Epoch: 1,
+				Base:  0,
+				New:   2,
+				Size:  domain.Size{Cols: 1, Rows: 1},
+				Full:  true,
+				Data:  []byte(output),
 			})}}
 			require.Eventually(t, func() bool { return strings.Contains(out.String(), output) }, time.Second, time.Millisecond)
-			requireAckedState(t, tr.sends, 2)
+			requireAckedState(t, tr.sends, 1, 2)
 			_, sentResize := tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgResize })
 			require.False(t, sentResize, "local reconnect status must not request a daemon reset")
 
@@ -766,10 +795,13 @@ func TestReconnectOverlayRedrawFailureDoesNotObserveOrAckOutput(t *testing.T) {
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 			requireReconnectToastOutput(t, out.completed)
 			arm()
-			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
-				BaseStateNum: 1,
-				NewStateNum:  2,
-				Data:         []byte("daemon output before failed redraw"),
+			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+				Epoch: 1,
+				Base:  0,
+				New:   2,
+				Size:  domain.Size{Cols: 1, Rows: 1},
+				Full:  true,
+				Data:  []byte("daemon output before failed redraw"),
 			})}}
 
 			result := requireAttachResult(t, resultCh)

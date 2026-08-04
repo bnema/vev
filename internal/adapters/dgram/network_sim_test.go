@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
@@ -451,7 +452,7 @@ func TestTransportFloodClassification(t *testing.T) {
 			}
 		}
 		b.mu.Unlock()
-		primer := ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("primer")})
+		primer := mustMarshalOutput(ports.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("primer")})
 		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: primer}); err != nil {
 			t.Fatal(err)
 		}
@@ -528,10 +529,12 @@ func TestTransportFloodClassification(t *testing.T) {
 			}
 		})
 		for state := 1; state < outputCount; state++ {
-			payload := ports.MarshalOutput(ports.Output{
-				BaseStateNum: uint64(state),
-				NewStateNum:  uint64(state + 1),
-				Data:         bytes.Repeat([]byte{byte(state + 1)}, outputDataBytes),
+			payload := mustMarshalOutput(ports.Output{
+				Epoch: 1,
+				Base:  uint64(state),
+				New:   uint64(state + 1),
+				Size:  domain.Size{Cols: 1, Rows: 1},
+				Data:  bytes.Repeat([]byte{byte(state + 1)}, outputDataBytes),
 			})
 			if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
 				t.Fatal(err)
@@ -631,7 +634,7 @@ func TestTransportFloodClassification(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					latestState = max(latestState, output.NewStateNum)
+					latestState = max(latestState, output.New)
 				default:
 					goto drainedOutput
 				}
@@ -851,10 +854,13 @@ func floodState(sender, receiver *Transport, link *simulatedLink) floodTransport
 }
 
 func floodOutputPayload(baseState, mtu int) []byte {
-	return ports.MarshalOutput(ports.Output{
-		BaseStateNum: uint64(baseState),
-		NewStateNum:  uint64(baseState + 1),
-		Data:         make([]byte, floodRecordMTUs*mtu),
+	return mustMarshalOutput(ports.Output{
+		Epoch: 1,
+		Base:  uint64(baseState),
+		New:   uint64(baseState + 1),
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Full:  baseState == 0,
+		Data:  make([]byte, floodRecordMTUs*mtu),
 	})
 }
 
@@ -866,8 +872,8 @@ func TestFloodOutputPayloadIsIncrementalStateBearingOutput(t *testing.T) {
 		if err != nil {
 			t.Fatalf("state %d: %v", state, err)
 		}
-		if output.BaseStateNum != uint64(state) || output.NewStateNum != uint64(state+1) {
-			t.Fatalf("output state = %d -> %d, want %d -> %d", output.BaseStateNum, output.NewStateNum, state, state+1)
+		if output.Base != uint64(state) || output.New != uint64(state+1) {
+			t.Fatalf("output state = %d -> %d, want %d -> %d", output.Base, output.New, state, state+1)
 		}
 		minimumBytes := floodRecordMTUs * mtu
 		if len(output.Data) < minimumBytes || len(payload) < minimumBytes {

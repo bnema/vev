@@ -218,9 +218,9 @@ func TestProxyANSIBenchmarkFixtures(t *testing.T) {
 			state := newProxyANSIApplyState(t)
 
 			ack, reset, changed := state.apply(ports.Output{
-				BaseStateNum: 0,
-				NewStateNum:  1,
-				Data:         fixture.data,
+				Base: 0,
+				New:  1,
+				Data: fixture.data,
 			})
 
 			require.Equal(t, uint64(1), ack)
@@ -251,21 +251,21 @@ func (s *proxyANSIApplyState) apply(out ports.Output) (ack uint64, requestReset,
 	data := append([]byte(nil), out.Data...)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if out.NewStateNum == 0 {
+	if out.New == 0 {
 		s.screen.Write(data)
 		return 0, false, len(data) != 0
 	}
-	if out.BaseStateNum == 0 {
-		if !s.awaitingReset && out.NewStateNum <= s.appliedState {
+	if out.Base == 0 {
+		if !s.awaitingReset && out.New <= s.appliedState {
 			return 0, false, false
 		}
 		s.screen = vt.NewScreen(s.screen.Frame.Width, s.screen.Frame.Height)
 		s.screen.Write(data)
-		s.appliedState = out.NewStateNum
+		s.appliedState = out.New
 		s.awaitingReset = false
-		return out.NewStateNum, false, true
+		return out.New, false, true
 	}
-	if s.awaitingReset || out.BaseStateNum != s.appliedState || out.NewStateNum != out.BaseStateNum+1 {
+	if s.awaitingReset || out.Base != s.appliedState || out.New != out.Base+1 {
 		if !s.awaitingReset {
 			s.awaitingReset = true
 			requestReset = true
@@ -273,8 +273,8 @@ func (s *proxyANSIApplyState) apply(out ports.Output) (ack uint64, requestReset,
 		return 0, requestReset, false
 	}
 	s.screen.Write(data)
-	s.appliedState = out.NewStateNum
-	return out.NewStateNum, false, len(data) != 0
+	s.appliedState = out.New
+	return out.New, false, len(data) != 0
 }
 
 type proxyANSIBenchmarkFixture struct {
@@ -304,277 +304,6 @@ func proxyANSIBenchmarkFixtures() []proxyANSIBenchmarkFixture {
 		{name: "fragmented-truecolor-styled-line", data: styledLine},
 		{name: "full-width-40-row-scroll", data: scroll},
 	}
-}
-
-type proxyPipelineFixture struct {
-	name     string
-	newFrame func() renderer.Frame
-	damage   []renderer.Damage
-	mutate   func(renderer.Frame, int)
-}
-
-func proxyPipelineFixtures() []proxyPipelineFixture {
-	const width, height = 120, 40
-	return []proxyPipelineFixture{
-		{
-			name:     "one-cell",
-			newFrame: func() renderer.Frame { return renderer.NewFrame(width, height) },
-			damage:   []renderer.Damage{{Kind: renderer.DamageText, X: 59, Y: 19, Width: 1, Height: 1}},
-			mutate: func(frame renderer.Frame, i int) {
-				cell := frame.At(59, 19)
-				cell.Rune = rune('a' + i%26)
-				frame.Set(59, 19, cell)
-			},
-		},
-		{
-			name:     "full-line",
-			newFrame: func() renderer.Frame { return renderer.NewFrame(width, height) },
-			damage:   []renderer.Damage{{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1}},
-			mutate: func(frame renderer.Frame, i int) {
-				for x := range frame.Width {
-					frame.Set(x, 0, renderer.Cell{Rune: rune('a' + (x+i)%26), Style: renderer.DefaultStyle()})
-				}
-			},
-		},
-		{
-			name:     "styled-line",
-			newFrame: func() renderer.Frame { return renderer.NewFrame(width, height) },
-			damage:   []renderer.Damage{{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1}},
-			mutate: func(frame renderer.Frame, i int) {
-				for fragment := range 12 {
-					style := renderer.DefaultStyle()
-					style.Bold = fragment%2 == 0
-					style.HasForegroundRGB = true
-					style.ForegroundRGB = renderer.RGB{R: uint8(fragment * 17), G: uint8(fragment * 13), B: uint8(fragment * 7)}
-					for x := fragment * 10; x < (fragment+1)*10; x++ {
-						frame.Set(x, 0, renderer.Cell{Rune: rune('a' + (fragment+i)%26), Style: style})
-					}
-				}
-			},
-		},
-		{
-			name: "full-width-scroll",
-			newFrame: func() renderer.Frame {
-				frame := renderer.NewFrame(width, height)
-				for y := range height {
-					for x, r := range performanceFullWidthRow(width, 0, y) {
-						frame.Set(x, y, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
-					}
-				}
-				return frame
-			},
-			damage: []renderer.Damage{
-				{Kind: renderer.DamageScrollUp, X: 0, Y: 0, Width: width, Height: height, Count: 1},
-				{Kind: renderer.DamageText, X: 0, Y: height - 1, Width: width, Height: 1},
-			},
-			mutate: func(frame renderer.Frame, i int) {
-				frame.ScrollUp(0, frame.Height-1, 1)
-				for x := range frame.Width {
-					frame.Set(x, frame.Height-1, renderer.Cell{Rune: rune('a' + i%26), Style: renderer.DefaultStyle()})
-				}
-			},
-		},
-	}
-}
-
-func TestProxyPipelineFixturesProduceEquivalentFrames(t *testing.T) {
-	for _, fixture := range proxyPipelineFixtures() {
-		t.Run(fixture.name, func(t *testing.T) {
-			ansiFrame := fixture.newFrame()
-			structuredFrame := ansiFrame.Clone()
-			ansiRenderer := renderer.New(renderer.Capabilities{})
-			ansiState := newProxyANSIApplyState(t)
-			ansiSender := proxyPipelineANSISender(ansiState)
-			initialANSI, err := ansiRenderer.Prepare(ansiFrame, nil, true)
-			require.NoError(t, err)
-			require.NoError(t, ansiSender(ports.Frame{
-				Type: ports.MsgOutput,
-				Payload: ports.MarshalOutput(ports.Output{
-					BaseStateNum: 0,
-					NewStateNum:  1,
-					Data:         initialANSI.Bytes(),
-				}),
-			}))
-			initialANSI.Commit()
-
-			structuredState := newProxyScreenState(frameSize(structuredFrame))
-			structuredStream := newStructuredOutputStream(newOutputStateStream())
-			initialStructured, err := structuredStream.prepare(structuredFrame, nil, cursorOut{}, true, 0)
-			require.NoError(t, err)
-			require.NoError(t, initialStructured.send(proxyPipelineStructuredSender(structuredState)))
-			require.Equal(t, uint64(1), ansiState.appliedState)
-			require.Equal(t, uint64(1), structuredState.stateNum)
-			requireProxyPipelineFramesEqual(t, ansiState.screen.Frame, structuredState.frame)
-
-			for i := 0; i < 3; i++ {
-				fixture.mutate(ansiFrame, i)
-				fixture.mutate(structuredFrame, i)
-				ansiDraw, err := ansiRenderer.Prepare(ansiFrame, fixture.damage, false)
-				require.NoError(t, err)
-				next := ansiState.appliedState + 1
-				require.NoError(t, ansiSender(ports.Frame{
-					Type: ports.MsgOutput,
-					Payload: ports.MarshalOutput(ports.Output{
-						BaseStateNum: ansiState.appliedState,
-						NewStateNum:  next,
-						Data:         ansiDraw.Bytes(),
-					}),
-				}))
-				ansiDraw.Commit()
-
-				structuredDraw, err := structuredStream.prepare(structuredFrame, fixture.damage, cursorOut{}, false, 0)
-				require.NoError(t, err)
-				require.NoError(t, structuredDraw.send(proxyPipelineStructuredSender(structuredState)))
-				require.Equal(t, next, ansiState.appliedState)
-				require.Equal(t, next, structuredState.stateNum)
-				requireProxyPipelineFramesEqual(t, ansiState.screen.Frame, structuredState.frame)
-				requireProxyPipelineFramesEqual(t, ansiFrame, ansiState.screen.Frame)
-				requireProxyPipelineFramesEqual(t, structuredFrame, structuredState.frame)
-			}
-		})
-	}
-}
-
-func requireProxyPipelineFramesEqual(t *testing.T, want, got renderer.Frame) {
-	t.Helper()
-	require.Equal(t, want.Width, got.Width)
-	require.Equal(t, want.Height, got.Height)
-	for y := range want.Height {
-		for x := range want.Width {
-			require.Truef(t, want.At(x, y).Equal(got.At(x, y)), "cell %d,%d differs: want %+v got %+v", x, y, want.At(x, y), got.At(x, y))
-		}
-	}
-}
-
-func proxyPipelineANSISender(state *proxyANSIApplyState) func(ports.Frame) error {
-	return func(frame ports.Frame) error {
-		if frame.Type != ports.MsgOutput {
-			return fmt.Errorf("ANSI benchmark sender received frame type %d", frame.Type)
-		}
-		out, err := ports.UnmarshalOutput(frame.Payload)
-		if err != nil {
-			return err
-		}
-		ack, reset, changed := state.apply(out)
-		if ack != out.NewStateNum || reset || !changed {
-			return fmt.Errorf("ANSI benchmark apply = ack %d, reset %t, changed %t; want ack %d", ack, reset, changed, out.NewStateNum)
-		}
-		return nil
-	}
-}
-
-func proxyPipelineStructuredSender(state *proxyScreenState) func(ports.Frame) error {
-	return func(frame ports.Frame) error {
-		if frame.Type != ports.MsgScreenUpdate {
-			return fmt.Errorf("structured benchmark sender received frame type %d", frame.Type)
-		}
-		update, err := ports.UnmarshalScreenUpdate(frame.Payload)
-		if err != nil {
-			return err
-		}
-		if err := state.Apply(update); err != nil {
-			return err
-		}
-		generation := state.generation
-		if !state.AcknowledgeDamage(generation) {
-			return fmt.Errorf("structured benchmark damage acknowledgement failed at generation %d", generation)
-		}
-		return nil
-	}
-}
-
-func BenchmarkProxyPipeline(b *testing.B) {
-	for _, fixture := range proxyPipelineFixtures() {
-		b.Run(fixture.name, func(b *testing.B) {
-			b.Run("ansi-pipeline", func(b *testing.B) {
-				benchmarkProxyANSIPipeline(b, fixture)
-			})
-			b.Run("structured-pipeline", func(b *testing.B) {
-				benchmarkProxyStructuredPipeline(b, fixture)
-			})
-		})
-	}
-}
-
-func benchmarkProxyANSIPipeline(b *testing.B, fixture proxyPipelineFixture) {
-	b.Helper()
-	frame := fixture.newFrame()
-	ansiRenderer := renderer.New(renderer.Capabilities{})
-	ansiState := newProxyANSIApplyState(b)
-	ansiSender := proxyPipelineANSISender(ansiState)
-	initial, err := ansiRenderer.Prepare(frame, nil, true)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if err := ansiSender(ports.Frame{
-		Type: ports.MsgOutput,
-		Payload: ports.MarshalOutput(ports.Output{
-			BaseStateNum: 0,
-			NewStateNum:  1,
-			Data:         initial.Bytes(),
-		}),
-	}); err != nil {
-		b.Fatal(err)
-	}
-	initial.Commit()
-
-	var wireBytes int
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		fixture.mutate(frame, i)
-		draw, err := ansiRenderer.Prepare(frame, fixture.damage, false)
-		if err != nil {
-			b.Fatal(err)
-		}
-		next := ansiState.appliedState + 1
-		payload := ports.MarshalOutput(ports.Output{
-			BaseStateNum: ansiState.appliedState,
-			NewStateNum:  next,
-			Data:         draw.Bytes(),
-		})
-		if err := ansiSender(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
-			b.Fatal(err)
-		}
-		draw.Commit()
-		wireBytes += len(payload)
-	}
-	b.StopTimer()
-	b.ReportMetric(float64(wireBytes)/float64(b.N), "wirebytes/op")
-}
-
-func benchmarkProxyStructuredPipeline(b *testing.B, fixture proxyPipelineFixture) {
-	b.Helper()
-	frame := fixture.newFrame()
-	stream := newStructuredOutputStream(newOutputStateStream())
-	state := newProxyScreenState(frameSize(frame))
-	sender := proxyPipelineStructuredSender(state)
-	initial, err := stream.prepare(frame, nil, cursorOut{}, true, 0)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if err := initial.send(sender); err != nil {
-		b.Fatal(err)
-	}
-
-	var wireBytes, spans int
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		fixture.mutate(frame, i)
-		prepared, err := stream.prepare(frame, fixture.damage, cursorOut{}, false, 0)
-		if err != nil {
-			b.Fatal(err)
-		}
-		wireBytes += len(prepared.data)
-		spans += len(prepared.update.Spans)
-		if err := prepared.send(sender); err != nil {
-			b.Fatal(err)
-		}
-	}
-	b.StopTimer()
-	b.ReportMetric(float64(wireBytes)/float64(b.N), "wirebytes/op")
-	b.ReportMetric(float64(spans)/float64(b.N), "spans/op")
 }
 
 func TestPerformanceFixtureCounters(t *testing.T) {
@@ -751,9 +480,9 @@ func BenchmarkProxyANSIApply(b *testing.B) {
 			for b.Loop() {
 				next := state.appliedState + 1
 				ack, reset, changed := state.apply(ports.Output{
-					BaseStateNum: state.appliedState,
-					NewStateNum:  next,
-					Data:         fixture.data,
+					Base: state.appliedState,
+					New:  next,
+					Data: fixture.data,
 				})
 				if ack != next || reset || !changed {
 					b.Fatalf("apply output = ack %d, reset %t, changed %t; want ack %d, reset false, changed true", ack, reset, changed, next)
@@ -846,7 +575,7 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			fixture.resetMetrics()
 			for b.Loop() {
 				run(fixture)
-				fixture.ac.ackOutputState(fixture.ac.output.next)
+				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 			}
 			metrics := fixture.metrics()
 			if payload := fixture.output.lastPayload(); payload != nil {
@@ -865,12 +594,12 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 func benchmarkDaemonCopySearch(b *testing.B, fixture *performanceFixture, run func(*performanceFixture)) {
 	b.Helper()
 	fixture.d.enterCopyMode(fixture.sess, fixture.ac)
-	fixture.ac.ackOutputState(fixture.ac.output.next)
+	fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		run(fixture)
-		fixture.ac.ackOutputState(fixture.ac.output.next)
+		fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 	}
 	b.StopTimer()
 	if fixture.searchMatches() == 0 {
@@ -1240,32 +969,32 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: tt.panes, historyRows: 10_000})
 			allocs := testing.AllocsPerRun(20, func() {
 				fixture.paintLive()
-				fixture.ac.ackOutputState(fixture.ac.output.next)
+				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 			})
 			require.LessOrEqual(t, allocs, float64(38), "live paint must reuse attachment-owned render scratch across warm paints")
 		})
 	}
 }
 
-// TestCopyEnterAllocationBudget protects the attachment-aware baseline plus
-// 10%. Copy rendering borrows sealed VT history rows; allocating a copy per
-// viewport row is a production regression even though capture is immutable.
+// TestCopyEnterAllocationBudget protects the byte-stream attachment baseline
+// plus 10%. Copy rendering borrows sealed VT history rows; allocating a copy
+// per viewport row is a production regression even though capture is immutable.
 func TestCopyEnterAllocationBudget(t *testing.T) {
 	for _, tt := range []struct {
 		name             string
 		tabs, panes, max int
 	}{
-		{name: "1tab-1pane", tabs: 1, panes: 1, max: 55},
-		{name: "1tab-4panes", tabs: 1, panes: 4, max: 55},
-		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 60},
-		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 60},
-		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 68},
+		{name: "1tab-1pane", tabs: 1, panes: 1, max: 66},
+		{name: "1tab-4panes", tabs: 1, panes: 4, max: 85},
+		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 71},
+		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 90},
+		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 79},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
 			run := func() {
 				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
-				fixture.ac.ackOutputState(fixture.ac.output.next)
+				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
 			}
 
 			// Always exercise and validate copy entry. The race detector adds
@@ -1278,7 +1007,7 @@ func TestCopyEnterAllocationBudget(t *testing.T) {
 			}
 
 			allocs := testing.AllocsPerRun(20, run)
-			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10% of the attachment-aware allocation baseline")
+			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10% of the byte-stream attachment allocation baseline")
 		})
 	}
 }

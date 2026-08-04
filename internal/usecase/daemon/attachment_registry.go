@@ -17,6 +17,7 @@ type attachmentView struct {
 	paneID     domain.PaneStableID
 	windowTop  int
 	windowRows int
+	windowSet  bool
 	bookmark   vt.RowID
 	liveBottom bool
 	revision   uint64
@@ -45,6 +46,19 @@ func (ac *attachedClient) publishView(view attachmentView) {
 		return
 	}
 	ac.viewMu.Lock()
+	// Rebase while viewMu is held, before the new revision becomes visible.
+	// Output fences take the same lock, so no side effect can pair the new
+	// ViewRevision with the previous output epoch. Test/headless fixtures may
+	// leave output.attachment unset; use the stream-local lock for those.
+	if ac.output != nil && ac.view.revision != view.revision {
+		if ac.output.attachment == ac {
+			ac.output.rebaseLocked()
+		} else {
+			ac.output.stateMu.Lock()
+			ac.output.rebaseLocked()
+			ac.output.stateMu.Unlock()
+		}
+	}
 	ac.view = view
 	ac.viewMu.Unlock()
 }
@@ -241,6 +255,7 @@ func (s *session) repairAttachmentViewLocked(ac *attachedClient, view attachment
 		view.paneID = ""
 		view.windowTop = 0
 		view.windowRows = 0
+		view.windowSet = false
 		view.bookmark = 0
 		view.liveBottom = true
 		return view
@@ -293,7 +308,7 @@ func (s *session) repairAttachmentView(ac *attachedClient) bool {
 	}
 	before := ac.viewSnapshot()
 	after := s.repairAttachmentViewLocked(ac, before)
-	if before.tabID == after.tabID && before.paneID == after.paneID && before.windowTop == after.windowTop && before.windowRows == after.windowRows && before.bookmark == after.bookmark && before.liveBottom == after.liveBottom {
+	if before.tabID == after.tabID && before.paneID == after.paneID && before.windowTop == after.windowTop && before.windowRows == after.windowRows && before.windowSet == after.windowSet && before.bookmark == after.bookmark && before.liveBottom == after.liveBottom {
 		return false
 	}
 	after.revision++
@@ -324,6 +339,7 @@ func (s *session) prepareAttachmentViewsForRemovedTabLocked(removed *tab, index 
 			view.paneID = ""
 			view.bookmark = 0
 			view.liveBottom = true
+			view.revision++
 			ac.publishView(view)
 		}
 	}
@@ -369,7 +385,7 @@ func (s *session) tabForAttachment(ac *attachedClient) *tab {
 	}
 	view := ac.viewSnapshot()
 	repaired := s.repairAttachmentViewLocked(ac, view)
-	if repaired.tabID != view.tabID || repaired.paneID != view.paneID || repaired.windowTop != view.windowTop || repaired.windowRows != view.windowRows || repaired.bookmark != view.bookmark || repaired.liveBottom != view.liveBottom {
+	if repaired.tabID != view.tabID || repaired.paneID != view.paneID || repaired.windowTop != view.windowTop || repaired.windowRows != view.windowRows || repaired.windowSet != view.windowSet || repaired.bookmark != view.bookmark || repaired.liveBottom != view.liveBottom {
 		repaired.revision++
 		ac.publishView(repaired)
 	}
@@ -476,7 +492,7 @@ func (s *session) updateAttachmentView(ac *attachedClient, update func(*attachme
 		next = s.repairAttachmentViewLocked(ac, next)
 		next.revision++
 		ac.publishView(next)
-		changed = next.tabID != before.tabID || next.paneID != before.paneID || next.windowTop != before.windowTop || next.windowRows != before.windowRows || next.bookmark != before.bookmark || next.liveBottom != before.liveBottom
+		changed = next.tabID != before.tabID || next.paneID != before.paneID || next.windowTop != before.windowTop || next.windowRows != before.windowRows || next.windowSet != before.windowSet || next.bookmark != before.bookmark || next.liveBottom != before.liveBottom
 		return nil
 	})
 	return changed

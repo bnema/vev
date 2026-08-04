@@ -146,30 +146,6 @@ func newRegisteredLifecycleProxy(t *testing.T, clock ports.Clock) (*Daemon, *pro
 	return d, proxy, transport
 }
 
-func TestNewProxySessionUsesProxyScreenSizeLimit(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		size  domain.Size
-		valid bool
-	}{
-		{name: "largest valid content", size: domain.Size{Cols: 512, Rows: 514}, valid: true},
-		{name: "one cell over content limit", size: domain.Size{Cols: 512, Rows: 515}},
-		{name: "1000x1000", size: domain.Size{Cols: 1000, Rows: 1000}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			proxy, err := newProxySession(domain.RemoteSessionKey{Host: "arch", Name: "work"}, test.size)
-			if !test.valid {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, contentSize(test.size, false), proxy.contentSize)
-			require.Equal(t, test.size.Cols, proxy.screen.frame.Width)
-			require.Equal(t, test.size.Rows-tabChromeRows, proxy.screen.frame.Height)
-		})
-	}
-}
-
 func TestProxyWarmLifecycleFollowsAttachmentTransitions(t *testing.T) {
 	clock := newProxyLifecycleClock()
 	d, local, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
@@ -255,7 +231,7 @@ func TestProxyWarmReattachCancelsAndStaleTimerCannotRemoveProxy(t *testing.T) {
 
 	ac := &attachedClient{}
 	proxy.sessionCore.mu.Lock()
-	proxy.sessionCore.registerAttachmentLocked(ac)
+	proxy.registerAttachmentLocked(ac)
 	proxy.sessionCore.mu.Unlock()
 	d.cancelProxyWarmForAttachment(proxy, ac)
 	awaitTestCompletion(t, firstToken.done, "first proxy warm lifecycle did not complete")
@@ -266,8 +242,8 @@ func TestProxyWarmReattachCancelsAndStaleTimerCannotRemoveProxy(t *testing.T) {
 	d.mu.Unlock()
 
 	proxy.sessionCore.mu.Lock()
-	for _, attachment := range proxy.sessionCore.snapshotAttachmentsLocked() {
-		proxy.sessionCore.unregisterAttachmentLocked(attachment)
+	for _, attachment := range proxy.snapshotAttachmentsLocked() {
+		proxy.unregisterAttachmentLocked(attachment)
 	}
 	proxy.sessionCore.mu.Unlock()
 	d.armProxyWarm(proxy)
@@ -425,9 +401,7 @@ func TestProxyResumeBackoffResetsAfterStableConnection(t *testing.T) {
 	handshakeTimer := awaitTestValue(t, clock.timers, "stable resume handshake did not arm its timeout")
 	require.Equal(t, proxyHandshakeTimeout, handshakeTimer.delay)
 	_ = requireProxyHello(t, resumed)
-	resumed.recv <- proxyRecv{frame: proxyWelcome(proxy.key.Name, 2, ports.CapabilityResume|ports.CapabilityProxied)}
-	resumed.recv <- proxyRecv{frame: proxyMeta(proxy.key.Name)}
-	resumed.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	resumed.recv <- proxyRecv{frame: proxyWelcome(proxy.key.Name, 2, ports.CapabilityResume)}
 	require.Eventually(t, func() bool {
 		proxy.mu.Lock()
 		defer proxy.mu.Unlock()
@@ -466,11 +440,11 @@ func TestProxyLinkStateDisplayAndExactGeneration(t *testing.T) {
 	require.Equal(t, proxy.name+" [dead]", proxy.statusSegments(false).session)
 }
 
-func TestIncomingDirectAttachPreservesProxiedRemoteAttachment(t *testing.T) {
+func TestIncomingDirectAttachTerminatesRemoteAttachment(t *testing.T) {
 	d := newTestDaemon(t, nil, newProxyLifecycleClock())
 	sess := &session{sessionCore: sessionCore{id: "work", name: "work"}}
 	oldTransport := newProxyTestTransport()
-	old := &attachedClient{tr: oldTransport, output: newOutputStateStream(), proxied: true}
+	old := &attachedClient{tr: oldTransport, output: newOutputStateStream()}
 	old.initOverlays()
 	old.setSession(sess)
 	sess.registerAttachment(old)
@@ -1192,9 +1166,7 @@ func TestOpenProxySessionSerializesSameKeyAttachConstruction(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	first := newProxyTestTransport()
 	second := newProxyTestTransport()
-	second.recv <- proxyRecv{frame: proxyWelcome(key.Name, 2, ports.CapabilityProxied)}
-	second.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	second.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	second.recv <- proxyRecv{frame: proxyWelcome(key.Name, 2, ports.CapabilityResume)}
 	factory := newProxyConstructionFactory(first, second)
 	d := newProxyTestDaemon(t, factory, nil)
 
@@ -1219,9 +1191,7 @@ func TestOpenProxySessionSerializesSameKeyAttachConstruction(t *testing.T) {
 		_ = requireProxyHello(t, second)
 	}
 
-	first.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	first.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	first.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	first.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	leaderResult := awaitTestValue(t, leader, "leader construction did not finish")
 	waiterResult := awaitTestValue(t, waiter, "waiter construction did not finish")
 	require.NoError(t, leaderResult.err)
@@ -1246,7 +1216,7 @@ func TestOpenProxySessionSameKeyWaiterCanCancel(t *testing.T) {
 	require.Equal(t, 1, awaitTestValue(t, factory.calls, "leader did not dial"))
 	_ = requireProxyHello(t, first)
 
-	base, cancel := context.WithCancel(context.Background())
+	base, cancel := context.WithCancel(t.Context())
 	observed := &proxyConstructionWaitContext{Context: base, observed: make(chan struct{})}
 	waiter := openProxyForTest(d, observed, key)
 	select {
@@ -1261,9 +1231,7 @@ func TestOpenProxySessionSameKeyWaiterCanCancel(t *testing.T) {
 	require.Nil(t, waiterResult.proxy)
 	require.Equal(t, 1, factory.callCount())
 
-	first.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityProxied)}
-	first.recv <- proxyRecv{frame: proxyMeta(key.Name)}
-	first.recv <- proxyRecv{frame: proxyHandshakeSnapshot()}
+	first.recv <- proxyRecv{frame: proxyWelcome(key.Name, 1, ports.CapabilityResume)}
 	leaderResult := awaitTestValue(t, leader, "leader construction did not finish")
 	require.NoError(t, leaderResult.err)
 	stopProxy(t, leaderResult.proxy)
@@ -1325,7 +1293,7 @@ func proxyWarmToken(p *proxySession) (*proxyWarmTimer, uint64) {
 
 func setProxyLifecycleClient(p *proxySession, ac *attachedClient) {
 	p.sessionCore.mu.Lock()
-	p.sessionCore.registerAttachmentLocked(ac)
+	p.registerAttachmentLocked(ac)
 	p.sessionCore.mu.Unlock()
 }
 
@@ -1441,7 +1409,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, clock := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport, false)
+		generation, _ := p.installTransport(transport)
 		token, timer := armWarmTimer(t, d, p, clock)
 
 		require.True(t, d.markProxyReplaced(p, generation, transport))
@@ -1465,7 +1433,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, clock := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport, false)
+		generation, _ := p.installTransport(transport)
 
 		require.True(t, d.markProxyReplaced(p, generation, transport))
 		timer := awaitTestValue(t, clock.timers, "replacement did not arm a warm timer")
@@ -1482,7 +1450,7 @@ func TestMarkProxyReplacedWarmTimerOwnership(t *testing.T) {
 		d, p, _ := newProxyLifecycleFixture(t)
 		transport := newProxyTestTransport()
 		t.Cleanup(func() { _ = transport.Close() })
-		generation, _ := p.installTransport(transport, false)
+		generation, _ := p.installTransport(transport)
 
 		require.False(t, d.markProxyReplaced(p, generation-1, transport))
 		require.False(t, proxyExpired(p))

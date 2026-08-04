@@ -535,17 +535,13 @@ func (d *Daemon) releasePreparedSessionGates(plans []*preparedTabLayout) {
 // coordinator admits the epoch before any tab size, rectangle, VT screen,
 // snapshot dirtiness, or resize telemetry becomes visible.
 func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, admit func() bool) ([]resizeMember, bool) {
-	return d.applySessionLayoutWithMode(sess, size, false, current, admit)
-}
-
-func (d *Daemon) applySessionLayoutWithMode(sess *session, size domain.Size, proxied bool, current, admit func() bool) ([]resizeMember, bool) {
 	if sess == nil {
 		return nil, false
 	}
 	sess.layoutApplyMu.Lock()
 	defer sess.layoutApplyMu.Unlock()
 
-	target := contentSize(size, proxied)
+	target := contentSize(size)
 	for {
 		if sess.ctx != nil && sess.ctx.Err() != nil {
 			return nil, false
@@ -676,7 +672,7 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 		return false
 	}
 	d.exitCopyMode(ac)
-	failed, ok := d.applySessionLayoutWithMode(sess, snap.size, ac.proxied, current, func() bool {
+	failed, ok := d.applySessionLayout(sess, snap.size, current, func() bool {
 		return rc.resizeCurrentForLease(epoch, ac, lease, true)
 	})
 	if !ok {

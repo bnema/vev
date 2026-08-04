@@ -915,7 +915,7 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	client := vt.NewScreen(80, 25)
 	d.firstPaint(source, ac, ac.size)
 	sourceOutput := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
-	ac.ackOutputState(sourceOutput.NewStateNum)
+	ac.ackOutputState(sourceOutput.Epoch, sourceOutput.New)
 
 	targetPane.screen.Write([]byte("TARGET"))
 	targetPane.screen.ClearDamage() // TARGET is already rendered and has no pending VT damage.
@@ -927,7 +927,7 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	d.backSession(source, ac)
 	firstReset := awaitFrame(t, sends, ports.MsgOutput)
 	out := mustApplyOutput(t, client, firstReset)
-	require.Zero(t, out.BaseStateNum, "the first target frame must be the reset, not an eventual repair")
+	require.Zero(t, out.Base, "the first target frame must be the reset, not an eventual repair")
 	frame := strings.Join(frameRows(client.Frame), "\n")
 	require.NotContains(t, frame, "SOURCE", "first target reset must not reuse source capture")
 	require.Contains(t, frame, "TARGET", "first target reset must immediately show clean target VT state")

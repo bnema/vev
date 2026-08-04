@@ -214,7 +214,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	second := awaitFrame(t, sends, ports.MsgOutput)
 	secondOutput, err := ports.UnmarshalOutput(second.Payload)
 	require.NoError(t, err)
-	require.Zero(t, secondOutput.BaseStateNum, "tab switch must emit the complete target frame first")
+	require.Zero(t, secondOutput.Base, "tab switch must emit the complete target frame first")
 	terminal.Write(secondOutput.Data)
 	require.NotContains(t, strings.Join(frameRows(terminal.Frame), "\n"), "source", "the first target-tab frame must not retain source pane cells")
 }

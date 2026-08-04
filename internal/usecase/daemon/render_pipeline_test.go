@@ -59,7 +59,7 @@ func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 		require.NoError(t, transport.Send(frame))
 		output, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
-		require.Equal(t, frame.Payload, ports.MarshalOutput(output), "output payload must remain byte exact")
+		require.Equal(t, frame.Payload, mustMarshalOutput(output), "output payload must remain byte exact")
 		terminal.Write(output.Data)
 	}
 	require.Equal(t, len(frames), transport.next)
@@ -128,6 +128,9 @@ func TestPaintACKBlockedDoesNotDestructivelyCapture(t *testing.T) {
 	t.Cleanup(release)
 	d, sess, _, sends := newManualSessionWithPTYs(t, pty)
 	ac := sess.snapshotAttachments()[0]
+	// Resolve the initial attachment view before filling the output window; a
+	// first target repair is an epoch boundary by design.
+	require.NotNil(t, sess.tabForAttachment(ac))
 	ac.sendMu.Lock()
 	ac.output.next = ac.output.maxOutstanding
 	ac.output.acked = 0
@@ -252,8 +255,8 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	require.Equal(t, uint64(1), ac.output.next)
 	out, err := ports.UnmarshalOutput((<-sends).Payload)
 	require.NoError(t, err)
-	require.Zero(t, out.BaseStateNum)
-	require.Equal(t, uint64(1), out.NewStateNum)
+	require.Zero(t, out.Base)
+	require.Equal(t, uint64(1), out.New)
 }
 
 func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T) {

@@ -271,12 +271,15 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *atta
 		if !beginClipboardOwnerSend(item.owner, ticket, expected) {
 			return errAttachmentTransition
 		}
-		frame := ac.output.sideEffect(item.seq, ac.echoAck.Load())
-		var err error
-		if owned {
-			err = ownedTransport.SendSynchronous(frame)
-		} else {
-			err = expected.transport.Send(frame)
+		ac.output.lockView()
+		defer ac.output.unlockView()
+		frame, err := ac.output.sideEffectLocked(item.seq, ac.echoAck.Load())
+		if err == nil {
+			if owned {
+				err = ownedTransport.SendSynchronous(frame)
+			} else {
+				err = expected.transport.Send(frame)
+			}
 		}
 		if err != nil {
 			ticket.reportTransportFailure(expected)

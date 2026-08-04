@@ -16,7 +16,7 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 	// Do not acknowledge client-side echo prediction here: input has only been
 	// accepted/routed, not necessarily echoed by the PTY and incorporated into a
 	// rendered screen state. Until prediction is implemented against rendered
-	// output state, EchoAck must remain conservative.
+	// output state, Echo must remain conservative.
 	d.handleInput(sess, ac, data)
 }
 
@@ -486,16 +486,6 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 	case keys.ActionOpenPalette:
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
-		if !proxiedJumpSearchesOtherSessions(h.ac.proxied) {
-			_ = sess.runMutation(func() error {
-				if idx, ok := oldestAttentionTab(sess); ok && sess.switchAttachmentTabForDispatch(h.ac, idx) {
-					h.d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(h.ac), false, h.ac, nil)
-					h.d.invalidateRender(sess, h.ac, true, "input.go")
-				}
-				return nil
-			})
-			return
-		}
 		if effect == nil {
 			if err := h.d.jumpAttention(sess, h.ac); err != nil {
 				h.d.reportError(sess, err)
@@ -550,12 +540,7 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 }
 
 func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *attachmentEffectTicket) {
-	var err error
-	if h.ac.proxied {
-		err = h.d.focusDirProxied(sess, h.ac, dir)
-	} else {
-		err = h.d.focusDir(sess, h.ac, dir, effect)
-	}
+	err := h.d.focusDir(sess, h.ac, dir, effect)
 	if err != nil && !errors.Is(err, errAttachmentTransition) && !errors.Is(err, errNoNeighbor) {
 		h.d.reportError(sess, err)
 	}

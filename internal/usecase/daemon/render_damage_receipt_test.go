@@ -11,6 +11,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestResetCaptureRefreshesPaneAfterPeerAcknowledgesSharedDamage(t *testing.T) {
+	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	p := sess.tabs[0].focusedPane()
+	p.mu.Lock()
+	p.screen.ClearDamage()
+	p.screen.Write([]byte("before"))
+	p.mu.Unlock()
+
+	ac.sendMu.Lock()
+	state, ok := captureRenderState(sess, ac, renderCaptureRequest{reset: false})
+	require.True(t, ok)
+	before := state.panes[0].frame.Clone()
+	ac.sendMu.Unlock()
+
+	p.mu.Lock()
+	p.screen.Write([]byte("after"))
+	damage := p.screen.CaptureDamage()
+	p.screen.AcknowledgeDamage(damage.Generation)
+	p.mu.Unlock()
+
+	ac.sendMu.Lock()
+	state, ok = captureRenderState(sess, ac, renderCaptureRequest{reset: true})
+	ac.sendMu.Unlock()
+	require.True(t, ok)
+	require.NotEqual(t, before, state.panes[0].frame, "reset capture must not reuse the pane snapshot retained before shared damage was acknowledged")
+}
+
 func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 	p := sess.tabs[0].focusedPane()

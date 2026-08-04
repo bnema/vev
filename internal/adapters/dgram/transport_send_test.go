@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 	"github.com/stretchr/testify/require"
@@ -113,7 +114,7 @@ func TestOutputPacingSendsAtMostOneOversizedFramePerTick(t *testing.T) {
 	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("prime")}); err != nil {
 		t.Fatal(err)
 	}
-	large := ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: make([]byte, 24*a.mtu)})
+	large := mustMarshalOutput(ports.Output{Epoch: 1, Base: 1, New: 2, Size: domain.Size{Cols: 1, Rows: 1}, Data: make([]byte, 24*a.mtu)})
 	for range 2 {
 		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: large}); err != nil {
 			t.Fatal(err)
@@ -121,7 +122,7 @@ func TestOutputPacingSendsAtMostOneOversizedFramePerTick(t *testing.T) {
 	}
 	waitForManualTimers(t, clk, 4)
 	previousPackets := len(aPC.in)
-	for tick := 0; tick < 128; tick++ {
+	for tick := range 128 {
 		clk.advance(initialPacingRTT)
 		time.Sleep(time.Millisecond)
 		packets := len(aPC.in)
@@ -154,7 +155,7 @@ func TestPacedInitialSendTimestampsFinalFragmentCompletion(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- a.Send(large) }()
 	start := clk.Now()
-	for tick := 0; tick < 128; tick++ {
+	for range 128 {
 		a.mu.Lock()
 		p := a.pending[1]
 		if p != nil && p.initialInFlight && !p.last.IsZero() {
@@ -220,11 +221,11 @@ func TestOwnedSynchronousMaxSideEffectCompletesThroughConcurrentPacedWork(t *tes
 	}
 	a.mu.Unlock()
 	go a.resendPending()
-	sideEffect := ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{Data: make([]byte, 100*1024)})}
+	sideEffect := ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: make([]byte, 100*1024)})}
 	done := make(chan error, 1)
 	go func() { done <- a.SendSynchronous(sideEffect) }()
 
-	for tick := 0; tick < 512; tick++ {
+	for range 512 {
 		clk.advance(initialPacingRTT)
 		time.Sleep(time.Millisecond)
 		select {
@@ -328,7 +329,7 @@ func TestCloseUnblocksQueuedSynchronousFrames(t *testing.T) {
 		frame ports.Frame
 	}{
 		{name: "control", frame: ports.Frame{Type: ports.MsgPing}},
-		{name: "terminal side effect", frame: ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{Data: []byte("osc")})}},
+		{name: "terminal side effect", frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("osc")})}},
 	}
 	for _, tt := range frames {
 		t.Run(tt.name, func(t *testing.T) {

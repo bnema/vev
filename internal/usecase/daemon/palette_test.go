@@ -373,7 +373,7 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
 	require.NoError(t, err)
-	require.Zero(t, firstOutput.BaseStateNum, "stopped-session first paint must reset moving output state")
+	require.Zero(t, firstOutput.Base, "stopped-session first paint must reset moving output state")
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -679,7 +679,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
 	require.NoError(t, err)
-	require.Zero(t, firstOutput.BaseStateNum, "new-session first paint must reset moving output state")
+	require.Zero(t, firstOutput.Base, "new-session first paint must reset moving output state")
 	finalRepaint := awaitFrame(t, sends, ports.MsgOutput)
 	finalOutput, err := ports.UnmarshalOutput(finalRepaint.Payload)
 	require.NoError(t, err)

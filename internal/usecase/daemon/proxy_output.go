@@ -6,104 +6,100 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// applyScreenUpdateForGeneration applies one semantic screen update while
-// holding only the proxy leaf lock. A link generation fence prevents a stale
-// receive goroutine from advancing a replacement link's screen.
-func (p *proxySession) applyScreenUpdateForGeneration(generation uint64, update ports.ScreenUpdate) (ack uint64, requestReset, changed bool) {
-	if p == nil {
-		return 0, false, false
-	}
+// applyOutputForGeneration validates the remote ordinary output dependency
+// chain without retaining a second terminal or renderer state. Bytes are
+// forwarded only after a full frame establishes the current remote stream.
+func (p *proxySession) applyOutputForGeneration(generation uint64, out ports.Output) (ack uint64, requestReset, changed bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.linkGeneration != generation || p.screen == nil {
+	if p.linkGeneration != generation {
 		return 0, false, false
 	}
-
-	// The wire codec validates all semantic bounds. Geometry is still checked
-	// here because it is attachment state, not merely a wire property: a
-	// remote paint for the wrong content rectangle cannot be applied locally.
-	if update.Size != p.contentSize {
-		return 0, p.requestScreenResetLocked(), false
-	}
-	if update.Kind == ports.ScreenUpdateSnapshot {
-		// A base-zero paint may only move the consumer forward. This floor is
-		// retained across resume and resize, so resetRequested never authorizes
-		// replaying a stale snapshot.
-		if update.NewStateNum <= p.appliedState {
-			return 0, p.requestScreenResetLocked(), false
+	invalid := func() (uint64, bool, bool) {
+		if p.outputResetRequested {
+			return 0, false, false
 		}
-		if err := p.screen.Apply(update); err != nil {
-			return 0, p.requestScreenResetLocked(), false
+		p.outputResetRequested = true
+		return 0, true, false
+	}
+	if out.Epoch == 0 {
+		return invalid()
+	}
+	if out.New == 0 {
+		// New == 0 is an ordinary byte side effect, not a state transition.
+		// Match the thin client: it is accepted before the first state-bearing
+		// frame, and thereafter only within the current epoch.
+		if out.Base != 0 || out.Full || (p.outputReady && out.Epoch != p.outputEpoch) {
+			return invalid()
 		}
-		p.appliedState = update.NewStateNum
-		p.screenReady = true
-		p.resetRequested = false
-		return update.NewStateNum, false, true
+		return 0, false, len(out.Data) != 0
 	}
-
-	if !p.screenReady || p.resetRequested || update.BaseStateNum != p.appliedState || update.NewStateNum != update.BaseStateNum+1 {
-		return 0, p.requestScreenResetLocked(), false
+	if !p.outputReady {
+		if out.Base != 0 || !out.Full {
+			return invalid()
+		}
+		p.outputEpoch = out.Epoch
+		p.outputState = out.New
+		p.outputReady = true
+		p.outputResetRequested = false
+		return out.New, false, len(out.Data) != 0
 	}
-	before := p.screen.cursorOut
-	if err := p.screen.Apply(update); err != nil {
-		return 0, p.requestScreenResetLocked(), false
+	if out.Epoch < p.outputEpoch {
+		return invalid()
 	}
-	p.appliedState = update.NewStateNum
-	return update.NewStateNum, false, update.Scroll != nil || len(update.Spans) != 0 || before != update.Cursor
+	if out.Epoch == p.outputEpoch {
+		if p.outputResetRequested || out.Full || out.Base != p.outputState || out.New != out.Base+1 {
+			return invalid()
+		}
+		p.outputState = out.New
+		return out.New, false, len(out.Data) != 0
+	}
+	if out.Base != 0 || !out.Full {
+		return invalid()
+	}
+	p.outputEpoch = out.Epoch
+	p.outputState = out.New
+	p.outputResetRequested = false
+	return out.New, false, len(out.Data) != 0
 }
 
-func (p *proxySession) requestScreenResetLocked() bool {
-	if p.resetRequested {
-		p.screenReady = false
-		return false
-	}
-	p.screenReady = false
-	p.resetRequested = true
-	return true
-}
-
-// handleProxyScreenUpdate completes screen handling after apply has released
-// proxy.mu. Transport I/O and render invalidation never run under that lock.
-func (d *Daemon) handleProxyScreenUpdate(p *proxySession, generation uint64, update ports.ScreenUpdate) error {
-	marks := d.newRuntimeMarkBatch()
-	ack, requestReset, changed := p.applyScreenUpdateForGeneration(generation, update)
-	if ack != 0 {
-		if err := p.sendGeneration(generation, ports.Frame{
-			Type:    ports.MsgAck,
-			Payload: ports.MarshalAck(ports.Ack{AckedStateNum: ack}),
-		}); err != nil {
-			return fmt.Errorf("proxy screen ACK: %w: %w", errProxyLinkSend, err)
-		}
-	}
+// handleProxyOutput forwards ordinary remote terminal bytes to the local
+// attachment and acknowledges a state-bearing frame only after forwarding.
+func (d *Daemon) handleProxyOutput(p *proxySession, generation uint64, out ports.Output) error {
+	ack, requestReset, changed := p.applyOutputForGeneration(generation, out)
 	if requestReset {
 		if err := p.sendGeneration(generation, ports.Frame{
 			Type:    ports.MsgOutputResetRequest,
 			Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 		}); err != nil {
-			return fmt.Errorf("proxy screen reset request: %w: %w", errProxyLinkSend, err)
+			return fmt.Errorf("proxy output reset request: %w: %w", errProxyLinkSend, err)
 		}
-		marks.diagnostic(ports.RuntimeScreenResetRequested, 0, 0)
 	}
-	// The reset send released proxy sendMu and apply released proxy.mu before
-	// observer I/O; a blocked sink cannot hold either protocol ownership lock.
-	marks.flush()
-	if !changed || !p.currentLinkGeneration(generation) {
-		return nil
+	if changed {
+		if err := d.handleProxySideEffect(p, generation, out); err != nil {
+			return err
+		}
 	}
-
-	for _, ac := range snapshotAttachmentSession(p) {
-		d.invalidateRender(p, ac, false, "proxy_output.go")
+	if ack != 0 {
+		payload, err := ports.MarshalAck(ports.Ack{Epoch: out.Epoch, State: ack})
+		if err != nil {
+			return fmt.Errorf("proxy output ACK: %w", err)
+		}
+		if err := p.sendGeneration(generation, ports.Frame{
+			Type:    ports.MsgAck,
+			Payload: payload,
+		}); err != nil {
+			return fmt.Errorf("proxy output ACK: %w: %w", errProxyLinkSend, err)
+		}
 	}
 	return nil
 }
 
 func (p *proxySession) resetOutputStateLocked() {
-	p.appliedState = 0
-	p.screenReady = false
-	p.resetRequested = false
-	if p.screen != nil {
-		p.screen.stateNum = 0
-	}
+	p.outputEpoch = 0
+	p.outputState = 0
+	p.outputReady = false
+	p.outputResetRequested = false
 }
 
 func (p *proxySession) currentLinkGeneration(generation uint64) bool {

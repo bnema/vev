@@ -7,12 +7,21 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
+func mustMarshalOutput(m ports.Output) []byte {
+	payload, err := ports.MarshalOutput(m)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
 var transcript = []ports.Frame{
-	{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
-	{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 7, Data: []byte("\x1b[2;1HTWO")})},
+	{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
+	{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{Epoch: 1, Base: 1, New: 2, Echo: 7, Size: domain.Size{Cols: 80, Rows: 24}, Data: []byte("\x1b[2;1HTWO")})},
 }
 
 // Transcript returns a deep copy of the canonical replay transcript so an

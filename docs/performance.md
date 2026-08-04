@@ -48,10 +48,9 @@ retransmits, pending, ACK RTT) remain separate from duration calculations.
 
 ### Historical proxy ANSI baseline
 
-Before the structured path, proxied state-bearing screen updates transported ANSI
-and were applied through the local proxy VT parser. In the candidate, proxied
-state-bearing frames are `MsgScreenUpdate`; this parser benchmark remains a
-historical diagnostic. Ordinary local output remains the ANSI `MsgOutput`
+Before this refactor, proxied state-bearing screen updates transported ANSI
+and were applied through the local proxy VT parser. This parser benchmark remains
+a historical diagnostic. Ordinary local output remains the ANSI `MsgOutput`
 guardrail.
 
 The binaries were built from clean, exact commits in temporary clones so their
@@ -100,67 +99,6 @@ go test ./pkg/renderer -run '^$' -bench '^BenchmarkRenderer' -benchmem -count=10
 
 The candidate guardrail completed with Go 1.26.5; its ten-repetition output is
 retained at `/tmp/vev-perf-results/candidate-2b48abf9-renderer.txt`.
-
-### Comparable proxy pipeline benchmark
-
-`BenchmarkProxyPipeline` is a local comparison harness, not a network or
-public-CLI result. Its four fixtures—one-cell, full-line, styled-line, and
-full-width scroll—use semantically paired initial and mutated `renderer.Frame`
-values. Snapshot/full-paint setup is completed before the timed steady-state
-loop; the loop applies the same mutation and consecutive state transitions on
-both sides.
-
-The `ansi-pipeline` slice measures `Renderer.Prepare`/bytes,
-`MarshalOutput`, a real benchmark sender that performs the simulated transport,
-`UnmarshalOutput`, `proxyANSIApplyState.apply`, and `Commit`. The
-`structured-pipeline` slice measures `structuredOutputStream.prepare` (including
-`MarshalScreenUpdate`), a real benchmark sender that performs the simulated
-transport, `UnmarshalScreenUpdate`, `proxyScreenState.Apply`, damage
-acknowledgement, and `prepared.send` commit. Both slices are local and exclude
-network effects. `wirebytes/op` is the complete message payload size excluding
-connection framing; unlike the historical table above, it includes the
-`MsgOutput` or `MsgScreenUpdate` payload header. `B/op` is the benchmark
-allocator metric; explicitly, `B/op != wirebytes/op`. `spans/op` is reported
-separately for structured updates. Run it with:
-
-```sh
-cd /tmp/vev-perf-candidate-2b48abf9-clone
-go test ./internal/usecase/daemon -run '^$' \
-  -bench '^BenchmarkProxyPipeline$' -benchmem -count=10 \
-  | tee /tmp/vev-perf-results/candidate-2b48abf9-proxy-pipeline.txt
-```
-
-Measured candidate medians from that command (Go 1.26.5, Linux/amd64):
-
-| fixture | ANSI ns/op | structured ns/op | ANSI B/op | structured B/op | ANSI wirebytes/op | structured wirebytes/op |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| one-cell | 530.55 | 1,016.5 | 192 | 888 | 37 | 71 |
-| full-line | 8,637.5 | 22,187.5 | 674 | 19,928 | 154 | 190 |
-| styled-line | 10,565.5 | 25,682 | 1,652 | 24,952 | 388 | 432 |
-| full-width-scroll | 55,713.5 | 73,858 | 760 | 19,944 | 177 | 196 |
-
-The component diagnostics completed ten repetitions with separate
-commands; their raw output is retained under `/tmp/vev-perf-results/`:
-
-```sh
-cd /tmp/vev-perf-candidate-2b48abf9-clone
-go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkProxyANSIApply$' -benchmem -count=10 \
-  | tee /tmp/vev-perf-results/candidate-2b48abf9-proxy-ansi.txt
-go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkStructuredOutputPrepare$' -benchmem -count=10 \
-  | tee /tmp/vev-perf-results/candidate-2b48abf9-structured-prepare.txt
-go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkProxyScreenStateApply$' -benchmem -count=10 \
-  | tee /tmp/vev-perf-results/candidate-2b48abf9-screen-apply.txt
-```
-
-Their medians are respectively 107.45/5,107/6,561.5/251,126.5 ns/op for
-ANSI one-cell/full-line/styled-line/scroll rows as reported in the raw file;
-structured prepare medians are 673/16,928/23,220.5/61,424.5 ns/op and decoded
-apply medians are 53.29/1,225/1,234/3,659.5 ns/op. These remain component
-diagnostics, not head-to-head pipeline comparisons.
-
-The 35-scenario public-CLI harness A/B matrix remains the adoption gate. This
-local pipeline benchmark does not replace that gate and this document records
-no unmeasured result or conclusion.
 
 ### Public-CLI transport runs
 

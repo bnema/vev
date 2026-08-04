@@ -281,17 +281,6 @@ func (b *runtimeMarkBatch) span(start, end ports.RuntimeMarkKind, bytes uint64) 
 	}
 }
 
-// diagnostic records a completed measurement for observer I/O after the
-// render transaction releases attachment ownership.
-func (b *runtimeMarkBatch) diagnostic(kind ports.RuntimeMarkKind, bytes, fragments uint64) {
-	if b == nil || b.observer == nil {
-		return
-	}
-	mark := ports.NewRuntimeMark("daemon", kind, bytes, true)
-	mark.Fragments = fragments
-	b.marks = append(b.marks, mark)
-}
-
 func (b *runtimeMarkBatch) flush() {
 	if b == nil || b.observer == nil {
 		return
@@ -479,15 +468,23 @@ func offsetPlacement(pl layout.Placement, dx, dy int) layout.Placement {
 }
 
 func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, dimmer themeui.Dimmer) {
-	rows := min(r.Height, src.Height)
-	cols := min(r.Width, src.Width)
-	for y := range rows {
-		for x := range cols {
-			cell := src.At(x, y)
+	startX, startY := max(r.X, 0), max(r.Y, 0)
+	endX, endY := min(r.X+r.Width, dst.Width), min(r.Y+r.Height, dst.Height)
+	for y := startY; y < endY; y++ {
+		sy := y - r.Y
+		if sy < 0 || sy >= src.Height {
+			continue
+		}
+		for x := startX; x < endX; x++ {
+			sx := x - r.X
+			if sx < 0 || sx >= src.Width {
+				continue
+			}
+			cell := src.At(sx, sy)
 			if dim {
 				cell.Style = dimmer.Dim(cell.Style)
 			}
-			dst.Set(r.X+x, r.Y+y, cell)
+			dst.Set(x, y, cell)
 		}
 	}
 }
@@ -502,9 +499,12 @@ func drawDividers(frame renderer.Frame, dividers []layout.Divider, dy int, style
 		if d.Dir == layout.Vertical {
 			glyph = '─'
 		}
-		y0 := d.Rect.Y + dy
-		for y := y0; y < y0+d.Rect.Height; y++ {
-			for x := d.Rect.X; x < d.Rect.X+d.Rect.Width; x++ {
+		y0 := max(d.Rect.Y+dy, 0)
+		y1 := min(d.Rect.Y+dy+d.Rect.Height, frame.Height)
+		x0 := max(d.Rect.X, 0)
+		x1 := min(d.Rect.X+d.Rect.Width, frame.Width)
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
 				frame.Set(x, y, renderer.Cell{Rune: glyph, Style: style})
 			}
 		}

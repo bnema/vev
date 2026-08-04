@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -20,9 +21,9 @@ func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
 	require.True(t, ok)
 	firstOut, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(0), firstOut.BaseStateNum)
-	require.Equal(t, uint64(1), firstOut.NewStateNum)
-	require.Equal(t, uint64(7), firstOut.EchoAck)
+	require.Equal(t, uint64(0), firstOut.Base)
+	require.Equal(t, uint64(1), firstOut.New)
+	require.Equal(t, uint64(7), firstOut.Echo)
 
 	secondFrame := firstFrame.Clone()
 	secondFrame.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
@@ -31,8 +32,8 @@ func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
 	require.True(t, ok)
 	secondOut, err := ports.UnmarshalOutput(second.Payload)
 	require.NoError(t, err)
-	require.Equal(t, firstOut.NewStateNum, secondOut.BaseStateNum)
-	require.Equal(t, uint64(2), secondOut.NewStateNum)
+	require.Equal(t, firstOut.New, secondOut.Base)
+	require.Equal(t, uint64(2), secondOut.New)
 	require.Equal(t, uint64(2), stream.outstanding())
 }
 
@@ -68,10 +69,146 @@ func TestOutputStateStreamCapacityProbeDoesNotRaceWithSend(t *testing.T) {
 	<-probed
 	require.True(t, stream.atCapacity())
 
-	stream.ack(1)
+	stream.ack(1, 1)
 	require.False(t, stream.atCapacity())
 	stream.rebase()
 	require.False(t, stream.atCapacity())
+}
+
+func TestOutputStateStreamEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *testing.T) {
+	frame := renderer.NewFrame(3, 1)
+	fillOutputStateRows(frame, []string{"abc"})
+	newAttachment := func() *outputStateStream {
+		stream := newOutputStateStream()
+		ac := &attachedClient{output: stream, size: domain.Size{Cols: 3, Rows: 1}}
+		stream.attachment = ac
+		return stream
+	}
+
+	first := newAttachment()
+	second := newAttachment()
+	firstPrepared, err := first.prepare(frame, nil, true)
+	require.NoError(t, err)
+	var firstFrame ports.Frame
+	require.NoError(t, firstPrepared.send(firstPrepared.data, 0, func(frame ports.Frame) error {
+		firstFrame = frame
+		return nil
+	}))
+	firstOutput, err := ports.UnmarshalOutput(firstFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), firstOutput.Epoch)
+	require.Equal(t, uint64(1), firstOutput.New)
+	require.True(t, firstOutput.Full)
+	first.ack(firstOutput.Epoch, firstOutput.New)
+
+	secondPrepared, err := second.prepare(frame, nil, true)
+	require.NoError(t, err)
+	require.NoError(t, secondPrepared.send(secondPrepared.data, 0, func(ports.Frame) error { return nil }))
+	require.Equal(t, uint64(1), second.epoch)
+	require.Equal(t, uint64(1), second.next)
+	require.Equal(t, uint64(1), first.next)
+
+	changed := frame.Clone()
+	changed.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
+	pending, err := first.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
+	require.NoError(t, err)
+	first.rebase()
+	require.Equal(t, uint64(2), first.epoch)
+	require.Zero(t, first.next)
+	require.Zero(t, first.acked)
+	var staleSent bool
+	require.NoError(t, pending.send(pending.data, 0, func(ports.Frame) error {
+		staleSent = true
+		return nil
+	}))
+	require.False(t, staleSent)
+	require.Zero(t, first.next)
+	first.ack(1, 1)
+	require.Zero(t, first.acked, "an ACK from the retired epoch must not advance the new epoch")
+
+	reset, err := first.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
+	require.NoError(t, err)
+	var resetFrame ports.Frame
+	require.NoError(t, reset.send(reset.data, 0, func(frame ports.Frame) error {
+		resetFrame = frame
+		return nil
+	}))
+	resetOutput, err := ports.UnmarshalOutput(resetFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), resetOutput.Epoch)
+	require.Zero(t, resetOutput.Base)
+	require.Equal(t, uint64(1), resetOutput.New)
+	require.True(t, resetOutput.Full)
+}
+
+func TestPreparedOutputDropsReplacedConnectionAndView(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*attachedClient)
+	}{
+		{name: "connection generation", change: func(ac *attachedClient) { ac.connectionGeneration.Add(1) }},
+		{name: "view revision", change: func(ac *attachedClient) {
+			ac.viewMu.Lock()
+			ac.view.revision++
+			ac.viewMu.Unlock()
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := newOutputStateStream()
+			ac := &attachedClient{output: stream, size: domain.Size{Cols: 3, Rows: 1}}
+			stream.attachment = ac
+			frame := renderer.NewFrame(3, 1)
+			fillOutputStateRows(frame, []string{"abc"})
+			initial, err := stream.prepare(frame, nil, true)
+			require.NoError(t, err)
+			require.NoError(t, initial.send(initial.data, 0, func(ports.Frame) error { return nil }))
+			changed := frame.Clone()
+			changed.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
+			pending, err := stream.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
+			require.NoError(t, err)
+			tt.change(ac)
+			var sent bool
+			require.NoError(t, pending.send(pending.data, 0, func(ports.Frame) error {
+				sent = true
+				return nil
+			}))
+			require.False(t, sent)
+			require.Equal(t, uint64(1), stream.next)
+
+			retry, err := stream.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
+			require.NoError(t, err)
+			require.NoError(t, retry.send(retry.data, 0, func(ports.Frame) error { return nil }))
+			require.Equal(t, uint64(2), stream.next)
+		})
+	}
+}
+
+func TestOutputStateAckRequiresCurrentEpoch(t *testing.T) {
+	stream := newOutputStateStream()
+	stream.next = 2
+	stream.ack(2, 1)
+	require.Zero(t, stream.acked, "a stale epoch must not retire output state")
+	stream.ack(1, 1)
+	require.Equal(t, uint64(1), stream.acked)
+	stream.ack(1, 3)
+	require.Equal(t, uint64(1), stream.acked, "a future state must not advance the ACK window")
+}
+
+func TestOutputStateSideEffectsDoNotAdvanceEpochStateOrACK(t *testing.T) {
+	stream := newOutputStateStream()
+	stream.ack(1, 0)
+	beforeEpoch, beforeNext, beforeAck := stream.epoch, stream.next, stream.acked
+	frame, err := stream.sideEffect([]byte("pty"), 9)
+	require.NoError(t, err)
+	out, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, beforeEpoch, out.Epoch)
+	require.Zero(t, out.Base)
+	require.Zero(t, out.New)
+	require.False(t, out.Full)
+	require.Equal(t, uint64(9), out.Echo)
+	require.Equal(t, beforeNext, stream.next)
+	require.Equal(t, beforeAck, stream.acked)
 }
 
 func TestOutputStateStreamFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T) {
@@ -108,8 +245,8 @@ func TestOutputStateStreamFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T
 	}))
 	out, err := ports.UnmarshalOutput(sent.Payload)
 	require.NoError(t, err)
-	require.Zero(t, out.BaseStateNum, "retry after ambiguous send failure must be dependency-free")
-	require.Equal(t, uint64(2), out.NewStateNum, "state numbers remain monotonic across rebases")
+	require.Zero(t, out.Base, "retry after ambiguous send failure must be dependency-free")
+	require.Equal(t, uint64(2), out.New, "state numbers remain monotonic across rebases")
 	require.Equal(t, uint64(2), stream.next, "successful retry advances the chain exactly once")
 	require.NoError(t, retry.send(retry.data, 0, func(ports.Frame) error {
 		t.Fatal("completed output sent twice")
@@ -150,7 +287,7 @@ func TestOutputStateStreamRepeatedUnackedScrollRemainsClientCorrect(t *testing.T
 	require.NoError(t, err)
 	require.True(t, ok)
 	mustApplyOutput(t, client, first)
-	stream.ack(1)
+	stream.ack(1, 1)
 
 	scrolled := renderer.NewFrame(4, 3)
 	fillOutputStateRows(scrolled, []string{"BBBB", "CCCC", "N   "})
@@ -197,7 +334,11 @@ func outputStateFrame(stream *outputStateStream, data []byte, reset bool, echoAc
 	if reset {
 		base = 0
 	}
-	return frameOutputState(data, base, stream.next, echoAck)
+	frame, err := frameOutputState(data, base, stream.next, echoAck)
+	if err != nil {
+		panic(err)
+	}
+	return frame
 }
 
 func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Frame, damage []renderer.Damage, reset bool, echoAck uint64) (ports.Frame, bool, error) {
@@ -234,7 +375,7 @@ func TestOutputStateStreamResizeFrameThenNoopAndDamageAreDifferential(t *testing
 	require.True(t, ok)
 	resizeOutput, err := ports.UnmarshalOutput(resized.Payload)
 	require.NoError(t, err)
-	require.Zero(t, resizeOutput.BaseStateNum, "resize must emit the one reset frame")
+	require.Zero(t, resizeOutput.Base, "resize must emit the one reset frame")
 	screen.ClearDamage()
 
 	_, ok, err = drawOutputState(t, stream, screen.Frame, screen.Damage(), false, 0)
@@ -247,7 +388,7 @@ func TestOutputStateStreamResizeFrameThenNoopAndDamageAreDifferential(t *testing
 	require.True(t, ok)
 	damageOutput, err := ports.UnmarshalOutput(damaged.Payload)
 	require.NoError(t, err)
-	require.Equal(t, resizeOutput.NewStateNum, damageOutput.BaseStateNum, "later damage must remain incremental")
+	require.Equal(t, resizeOutput.New, damageOutput.Base, "later damage must remain incremental")
 }
 
 func TestOutputStateStreamDefaultsAndNormalizesWindow(t *testing.T) {

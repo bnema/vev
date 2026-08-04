@@ -36,12 +36,9 @@ type attachedClient struct {
 	tr                   ports.Transport
 	transportIncarnation uint64
 	output               *outputStateStream
-	// screenOutput is allocated only for proxied attachments and shares output's
-	// state-number/ACK window. Both streams are serialized by sendMu.
-	screenOutput *structuredOutputStream
-	overlays     *overlayRuntime
-	overlayOnce  sync.Once
-	clientID     [16]byte
+	overlays             *overlayRuntime
+	overlayOnce          sync.Once
+	clientID             [16]byte
 	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
 	// the linearization gate for every attachment-bound observable operation. An attachment
 	// transition freezes and drains this gate before changing either generation
@@ -55,10 +52,7 @@ type attachedClient struct {
 	// credential instead of consuming it.
 	resumeClaimToken uint64
 	parked           bool
-	// proxied is negotiated once by Hello and remains immutable for this
-	// attachment, including across transport resume.
-	proxied bool
-	echoAck atomic.Uint64
+	echoAck          atomic.Uint64
 	// prepareFailureFallback prevents a direct fallback paint from recursively
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.
@@ -69,13 +63,6 @@ type attachedClient struct {
 	pipelineCache   composeCacheInput
 	pipelineScratch composeCacheInput
 	renderScratch   renderCaptureScratch // only touched while sendMu is held
-	// proxyCapture retains the last captured proxy frame for damage-aware
-	// updates. It is attachment-owned and only touched while sendMu is held.
-	proxyCapture proxyCapture
-	// sessionMeta is the last authoritative metadata snapshot successfully sent
-	// on a proxied attachment. It is only read or written while sendMu is held.
-	sessionMeta     ports.SessionMeta
-	sessionMetaSent bool
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
@@ -289,50 +276,23 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
-func (ac *attachedClient) ackOutputState(state uint64) {
+func (ac *attachedClient) ackOutputState(epoch, state uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	ac.output.ack(state)
-}
-
-// ensureScreenOutput is called while sendMu owns the attachment. Production
-// constructors allocate this at attachment creation; the lazy path keeps
-// hand-built test attachments faithful when they set proxied after creation.
-func (ac *attachedClient) ensureScreenOutput() *structuredOutputStream {
-	if ac == nil || !ac.proxied || ac.output == nil {
-		return nil
-	}
-	if ac.screenOutput == nil {
-		ac.screenOutput = newStructuredOutputStream(ac.output)
-	}
-	return ac.screenOutput
-}
-
-// discardProxyCapture abandons a candidate that was not emitted. The next
-// capture clones the authoritative screen once, avoiding replaying pending
-// scroll damage onto an already-captured failed candidate.
-func (ac *attachedClient) discardProxyCapture() {
-	if ac != nil && ac.proxied {
-		ac.proxyCapture = proxyCapture{}
+	if ac.output != nil {
+		ac.output.ack(epoch, state)
 	}
 }
 
-// rebaseOutput resets both wire representations while retaining the shared
-// state-number chain. Callers hold sendMu (or the activation barrier).
+// rebaseOutput resets only this attachment's output representations. Callers
+// hold sendMu (or the activation barrier).
 func (ac *attachedClient) rebaseOutput() {
 	if ac == nil {
 		return
 	}
-	if ac.proxied {
-		ac.ensureScreenOutput()
-	}
 	if ac.output != nil {
 		ac.output.rebase()
 	}
-	if ac.screenOutput != nil {
-		ac.screenOutput.rebase()
-	}
-	ac.proxyCapture = proxyCapture{}
 }
 
 var errTransportReplaced = errors.New("client transport was replaced")
@@ -384,6 +344,31 @@ func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportS
 	return err
 }
 
+// sendExpectedSideEffectForAttachment captures the output epoch, view revision,
+// and window while sendMu is held. A resize or handoff therefore cannot put a
+// side-effect frame from the old attachment state onto the new transport state.
+func (ac *attachedClient) sendExpectedSideEffectForAttachment(expected transportSnapshot, data []byte, echoAck uint64, ticket *attachmentEffectTicket) error {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	if ticket == nil {
+		return errAttachmentTransition
+	}
+	if err := ac.beginExpectedTransportSendLocked(expected, ticket); err != nil {
+		return errAttachmentTransition
+	}
+	ac.output.lockView()
+	defer ac.output.unlockView()
+	frame, err := ac.output.sideEffectLocked(data, echoAck)
+	if err == nil {
+		err = expected.transport.Send(frame)
+	}
+	if err != nil {
+		ticket.reportTransportFailure(expected)
+	}
+	ticket.endTransportSend()
+	return err
+}
+
 // boundedSend sends f to ac with a deadline watchdog: if the send (including
 // waiting on sendMu behind a wedged paint) does not complete within
 // detachNotifyTimeout, the transport is force-closed, failing the in-flight
@@ -413,24 +398,37 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 }
 
 func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
-	frame := ac.output.sideEffect(b, ac.echoAck.Load())
 	expected := ac.transportSnapshot()
 	if expected.transport == nil {
 		return nil, errors.New("client transport is nil")
 	}
-	ac.sendMu.Lock()
-	if !ac.transportSnapshotCurrent(expected) {
-		ac.sendMu.Unlock()
-		return expected.transport, errTransportReplaced
-	}
 	if owned, ok := expected.transport.(ports.OwnedSynchronousTransport); ok {
-		err := owned.SendSynchronous(frame)
-		ac.sendMu.Unlock()
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		if !ac.transportSnapshotCurrent(expected) {
+			return expected.transport, errTransportReplaced
+		}
+		ac.output.lockView()
+		defer ac.output.unlockView()
+		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
+		if err == nil {
+			err = owned.SendSynchronous(frame)
+		}
 		return expected.transport, err
 	}
-	ac.sendMu.Unlock()
 	return d.boundedSendWith(expected.transport, func() error {
-		return ac.sendExpectedTransport(expected, frame)
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		if !ac.transportSnapshotCurrent(expected) {
+			return errTransportReplaced
+		}
+		ac.output.lockView()
+		defer ac.output.unlockView()
+		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
+		if err != nil {
+			return err
+		}
+		return expected.transport.Send(frame)
 	})
 }
 
@@ -523,7 +521,6 @@ type attachClientOptions struct {
 	clientID          [16]byte
 	resumeCapable     bool
 	maxOutputInFlight uint8
-	proxied           bool
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -567,14 +564,12 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		tr:            tr,
 		output:        output,
 		size:          sz,
+		view:          attachmentView{windowRows: sz.Rows, windowSet: true},
 		clientID:      opts.clientID,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
-		proxied:       opts.proxied,
 	}
-	if opts.proxied {
-		ac.screenOutput = newStructuredOutputStream(output)
-	}
+	output.attachment = ac
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
 	return ac
@@ -648,6 +643,7 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry attachmentSess
 					d.paint(entry, attachment, fanoutReset, lease)
 				} else if len(attachments) > 1 {
 					go d.paint(entry, attachment, fanoutReset, lease)
+
 				} else {
 					d.paint(entry, attachment, fanoutReset, lease)
 				}
@@ -709,8 +705,8 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
 	}
-	if proxy, ok := token.sess.(*proxySession); ok {
-		d.firstProxyPaintWithLease(proxy, token.ac, token.lease)
+	if _, ok := token.sess.(*proxySession); ok {
+		// Remote ordinary output arrives independently after the proxy Welcome.
 		return true
 	}
 	sess, ok := localSession(token.sess)
@@ -721,15 +717,14 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 	return true
 }
 
-// firstPaint guarantees the freshly attached client sees the full screen: if
-// the tab size differs from the client's it resizes first, then immediately
-// emits a full redraw. It is retained for direct test/headless setup; active
-// attachment transitions use firstPaintForTransition with their exact lease.
+// firstPaint guarantees the freshly attached client sees the full screen. The
+// session content geometry is fixed by the first valid Hello; an attachment's
+// window is rendered without resizing shared tabs or PTYs.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
 	d.firstPaintWithLease(sess, ac, clientSize, nil)
 }
 
-func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSize domain.Size, lease *attachmentLease) {
+func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, _ domain.Size, lease *attachmentLease) {
 	// Global notices raised while nothing was attached surface on this client.
 	// Drained before the early return below so a session without an active tab
 	// cannot swallow the queue.
@@ -738,29 +733,14 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, clientSi
 	if tb == nil {
 		return
 	}
-	tb.mu.Lock()
-	wsz := tb.size
-	tb.mu.Unlock()
-
-	outerResizeAccepted := false
-	if clientSize.Valid() && wsz != contentSize(clientSize, ac.proxied) {
-		if lease == nil {
-			outerResizeAccepted = d.resizeForFirstPaint(sess, ac, clientSize)
-		} else {
-			outerResizeAccepted = d.requestTransactionalResizeForLease(sess, ac, lease, clientSize, true)
-		}
-	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	// Activation can synchronously resize a retained floating pane. An accepted
-	// synchronous outer request already includes that pane and emits the reset,
-	// but activation still performs its warmup work.
-	activationResized := d.activateTabAfterResizeForLease(sess, tb, outerResizeAccepted, ac, lease)
-	if !outerResizeAccepted && !activationResized {
-		if lease == nil {
-			d.invalidateRenderNow(sess, ac, true, "client.go")
-		} else if rc := sess.renderCoordinator(); rc != nil && rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"}) {
-			rc.fireCurrentForLease(lease)
-		}
+	// Activation still performs attachment-local warmup, but it must not turn a
+	// new window into a shared session resize.
+	d.ensureFloatingWarm(sess, tb)
+	if lease == nil {
+		d.invalidateRenderNow(sess, ac, true, "client.go")
+	} else if rc := sess.renderCoordinator(); rc != nil && rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"}) {
+		rc.fireCurrentForLease(lease)
 	}
 }
 
@@ -812,6 +792,46 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	d.requestTransactionalResize(sess, ac, sz, false)
+}
+
+// resizeAttachmentForLease changes only the sender's window/view. Session tab
+// geometry and PTY sizes are deliberately outside this mutation boundary.
+// Callers hold the attachment effect admission; output state is rebased before
+// the targeted redraw so every subsequent frame starts a new epoch.
+func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size domain.Size) bool {
+	if token.ac == nil || !size.Valid() || !token.attachmentEffectCurrent() {
+		return false
+	}
+	ac := token.ac
+	ac.sendMu.Lock()
+	if !token.attachmentEffectCurrent() || !ac.transportSnapshotCurrent(token.transport) {
+		ac.sendMu.Unlock()
+		return false
+	}
+	if ac.size == size {
+		ac.sendMu.Unlock()
+		return false
+	}
+	ac.size = size
+	view := ac.viewSnapshot()
+	view.windowRows = size.Rows
+	view.windowSet = true
+	view.windowTop = 0
+	view.revision++
+	ac.publishView(view)
+	ac.pipelineCache = composeCacheInput{}
+	ac.pipelineScratch = composeCacheInput{}
+	ac.sendMu.Unlock()
+
+	entry := token.sess
+	// Rendering is attachment-scoped. Run it independently of the connection
+	// reader so a blocked transport cannot hold session dispatch or peers.
+	if proxy, ok := entry.(*proxySession); ok {
+		_, _ = proxy.resize(size)
+		return true
+	}
+	go d.paint(entry, ac, true, token.lease)
+	return true
 }
 
 // handleClientNotice maps the closed client-event enum to daemon-owned notice

@@ -574,6 +574,46 @@ func tabCount(sess *session) int {
 
 // --- handshake --------------------------------------------------------------
 
+func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		size domain.Size
+	}{
+		{name: "zero columns", size: domain.Size{Cols: 0, Rows: 24}},
+		{name: "zero rows", size: domain.Size{Cols: 80, Rows: 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pty, release := newBlockingPTY(t)
+			defer release()
+			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+
+			transport := &closeTrackingTransport{}
+			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), transport)
+			require.NoError(t, err)
+			token := ac.resumeToken
+			d.clientGone(sess, ac, transport, false)
+
+			d.mu.Lock()
+			parked := d.parked[token]
+			d.mu.Unlock()
+			require.NotNil(t, parked)
+
+			invalid := helloResumeCapable(ports.IntentResume, "work", token)
+			invalid.Size = tt.size
+			_, _, err = d.route(invalid, &closeTrackingTransport{})
+			var protocolErr *protoErr
+			require.ErrorAs(t, err, &protocolErr)
+			require.Equal(t, ports.ErrInternal, protocolErr.code)
+
+			d.mu.Lock()
+			require.Same(t, parked, d.parked[token], "invalid resume must not consume the parked attachment")
+			d.mu.Unlock()
+			require.Same(t, transport, ac.transport(), "invalid resume must not bind a replacement transport")
+		})
+	}
+}
+
 func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
@@ -651,7 +691,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	output := awaitFrame(t, tr.sends, ports.MsgOutput)
 	first, err := ports.UnmarshalOutput(output.Payload)
 	require.NoError(t, err)
-	require.Zero(t, first.BaseStateNum, "the first post-Welcome frame is full")
+	require.Zero(t, first.Base, "the first post-Welcome frame is full")
 	tr.finish()
 	awaitTestCompletion(t, done, "timed out waiting for Welcome handler completion")
 	requireNoCoordinatorOutputFrame(t, tr.sends)

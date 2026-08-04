@@ -408,7 +408,7 @@ func TestAttachHappyPath(t *testing.T) {
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: "main"}))},
-		recvItem{f: frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Data: []byte("hello world")}))},
+		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(ports.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("hello world")}))},
 		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
 	)
 	defer unblock()

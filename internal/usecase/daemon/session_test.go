@@ -171,7 +171,6 @@ func TestCreateTabForAttachmentUsesRequestingAttachmentViewportAndTheme(t *testi
 		Intent:   ports.IntentAttach,
 		Name:     "work",
 		ClientID: [16]byte{2},
-		Proxied:  true,
 		Size:     domain.Size{Cols: 80, Rows: 24},
 	}, secondTransport)
 	require.NoError(t, err)
@@ -192,7 +191,7 @@ func TestCreateTabForAttachmentUsesRequestingAttachmentViewportAndTheme(t *testi
 	gotSize := tb.size
 	pane := tb.focusedPane()
 	tb.mu.Unlock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, gotSize, "proxied sizing must come from the requesting attachment")
+	require.Equal(t, contentSize(domain.Size{Cols: 80, Rows: 24}), gotSize, "sizing must come from the requesting attachment")
 	assertPaneDefaultColors(t, pane, requesterTheme.Foreground, requesterTheme.Background)
 
 	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
