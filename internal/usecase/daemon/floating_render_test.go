@@ -595,7 +595,7 @@ func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	installTestFloating(tb, p, true)
 	ac := &attachedClient{}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{client: ac}, tabs: []*tab{tb}}
+	sess := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}}
 	base := barState{}
 	cfg := domain.FloatingConfig{Width: 100, Height: 100}
 
@@ -617,7 +617,7 @@ func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 		cache := composeCacheInput{}
 		for range 500 {
 			ac.sendMu.Lock()
-			state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{bars: base, floatingCfg: cfg})
+			state, ok := captureRenderState(sess, ac, renderCaptureRequest{bars: base, floatingCfg: cfg})
 			ac.sendMu.Unlock()
 			require.True(t, ok)
 			out := composeFrame(*state, cache)

@@ -182,7 +182,7 @@ func uncertainDamage(damage []renderer.Damage, width, height int) bool {
 	return false
 }
 
-type primaryCaptureRequest struct {
+type renderCaptureRequest struct {
 	bars            barState
 	overlays        capturedOverlayRenderState
 	preview         picker.Preview
@@ -193,14 +193,14 @@ type primaryCaptureRequest struct {
 	lease           *attachmentLease
 }
 
-// captureLocalPrimaryRenderState is the ownership boundary for a local primary
+// captureLocalRenderState is the ownership boundary for a local attachment
 // render transaction. Callers hold attachment sendMu; this function then follows
 // session -> tab -> pane lock order. ACK-blocked capture returns before touching
 // VT damage, and every captured pane records a receipt for successful emission.
-func captureLocalPrimaryRenderState(
+func captureLocalRenderState(
 	sess *session,
 	ac *attachedClient,
-	request primaryCaptureRequest,
+	request renderCaptureRequest,
 ) (*capturedRenderState, bool) {
 	bars := request.bars
 	overlays := request.overlays
@@ -212,12 +212,18 @@ func captureLocalPrimaryRenderState(
 		return nil, false
 	}
 	sess.mu.Lock()
-	if sess.client != ac || sess.active < 0 || sess.active >= len(sess.tabs) {
-		sess.mu.Unlock()
+	_, owned := sess.attachments[ac]
+	sess.mu.Unlock()
+	if !owned {
 		return nil, false
 	}
-	tb := sess.tabs[sess.active]
-	sess.mu.Unlock()
+	tb, focusedPane := sess.paneForAttachment(ac)
+	if tb == nil {
+		tb = sess.tabForAttachment(ac)
+	}
+	if tb == nil {
+		return nil, false
+	}
 
 	scratch := &ac.renderScratch
 	scratch.statusTabs = append(scratch.statusTabs[:0], bars.status.tabs...)
@@ -238,8 +244,8 @@ func captureLocalPrimaryRenderState(
 	defer tb.mu.Unlock()
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	var focus layout.PaneID
-	if tb.tree != nil {
-		focus = tb.tree.Focus
+	if focusedPane != nil && tb.panes[focusedPane.id] == focusedPane {
+		focus = focusedPane.id
 	}
 	layoutSnap := tabLayoutSnapshot{
 		area: area, focus: focus, placements: scratch.placements,
@@ -247,6 +253,7 @@ func captureLocalPrimaryRenderState(
 	}
 	if scratch.layoutTab != tb || scratch.layoutGeneration != tb.layoutGeneration || scratch.layoutArea != area || scratch.layoutFocus != focus {
 		layoutSnap = solveTabLayoutLocked(tb)
+		layoutSnap.focus = focus
 		scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
 		scratch.dividers = append(scratch.dividers[:0], layoutSnap.dividers...)
 		scratch.layoutTab = tb
@@ -324,10 +331,10 @@ func captureLocalPrimaryRenderState(
 	return state, true
 }
 
-// capturePrimaryRenderState preserves the focused local test seam. Production
-// rendering delegates through attachmentSession.capturePrimary.
-func capturePrimaryRenderState(sess *session, ac *attachedClient, request primaryCaptureRequest) (*capturedRenderState, bool) {
-	return captureLocalPrimaryRenderState(sess, ac, request)
+// captureRenderState preserves the focused local test seam. Production
+// rendering delegates through attachmentSession.captureRenderState.
+func captureRenderState(sess *session, ac *attachedClient, request renderCaptureRequest) (*capturedRenderState, bool) {
+	return captureLocalRenderState(sess, ac, request)
 }
 
 // copyRankedRecentInto preserves the non-nil empty slice that selects

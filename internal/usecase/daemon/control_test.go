@@ -37,7 +37,7 @@ func TestPaletteAndControlShareExplicitDaemonActionTarget(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
 			sess := addControlSession(d, "work", "t_work", "p_work")
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
 			pane := tb.focusedPane()
 			tb.mu.Unlock()
@@ -78,9 +78,7 @@ func TestConsumeOrExpelControlSelfTargetsNonFocusedPane(t *testing.T) {
 
 	require.True(t, result.OK, result.Text)
 	require.Empty(t, result.Output)
-	h.session.mu.Lock()
-	require.Zero(t, h.session.active, "--self must not change the active tab")
-	h.session.mu.Unlock()
+	require.Zero(t, testAttachmentTabIndex(h.session), "--self must not change the attachment tab")
 	h.tab.mu.Lock()
 	require.Equal(t, layout.PaneID("pane-3"), h.tab.tree.Focus, "a moved explicit target becomes focused")
 	require.Equal(t, beforeGeneration+1, h.tab.layoutGeneration)
@@ -93,7 +91,7 @@ func TestConsumeOrExpelControlEdgeNoopReturnsOKAndPreservesFocus(t *testing.T) {
 	ac := &attachedClient{}
 	ac.setSession(h.session)
 	h.session.mu.Lock()
-	h.session.client = ac
+	h.session.registerAttachmentLocked(ac)
 	h.session.mu.Unlock()
 	invalidations := make(chan renderInvalidation, 1)
 	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -240,7 +238,7 @@ func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
 	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, second)
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
 	result := sendCommand(t, d, ports.CommandRequest{
@@ -256,7 +254,7 @@ func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
 	require.Empty(t, second.name)
 	second.mu.Unlock()
 	sess.mu.Lock()
-	require.Zero(t, sess.active)
+	require.Zero(t, testAttachmentTabIndexLocked(sess))
 	sess.mu.Unlock()
 }
 
@@ -272,7 +270,7 @@ func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) 
 	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, second)
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
 	result := sendCommand(t, d, ports.CommandRequest{
@@ -282,7 +280,7 @@ func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) 
 
 	require.True(t, result.OK, result.Text)
 	sess.mu.Lock()
-	activeIndex := sess.active
+	activeIndex := testAttachmentTabIndexLocked(sess)
 	sess.mu.Unlock()
 	require.Zero(t, activeIndex)
 	active.mu.Lock()
@@ -309,7 +307,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	invoking.ctx, invoking.cancel = context.WithCancel(d.serveCtx)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, invoking)
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
 	rename := sendCommand(t, d, ports.CommandRequest{
@@ -383,7 +381,7 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 					sess := addControlSession(d, "work", "t_work", "p_work")
 					require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
 					require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-down", TargetSession: "work"}).OK)
-					tb := sess.activeTab()
+					tb := testAttachmentTab(sess)
 					tb.mu.Lock()
 					generation := tb.layoutGeneration
 					tb.mu.Unlock()
@@ -403,7 +401,7 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 					require.Equal(t, snapshotGeneration+1, sess.snapshotGeneration, "one accepted action has one snapshot dirty boundary")
 					sess.snapshotMu.Unlock()
 					sess.mu.Lock()
-					require.Nil(t, sess.client, "one-shots must work headless")
+					require.Empty(t, sess.snapshotAttachmentsLocked(), "one-shots must work headless")
 					sess.mu.Unlock()
 				})
 			}
@@ -422,7 +420,7 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 	locator.ctx, locator.cancel = context.WithCancel(d.serveCtx)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, locator)
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 	active.mu.Lock()
 	before := active.layoutGeneration
@@ -439,7 +437,7 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 	require.Zero(t, locator.layoutGeneration)
 	locator.mu.Unlock()
 	sess.mu.Lock()
-	require.Zero(t, sess.active)
+	require.Zero(t, testAttachmentTabIndexLocked(sess))
 	sess.mu.Unlock()
 }
 
@@ -449,7 +447,7 @@ func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	tb.size.Cols = 41
 	tb.bumpLayoutGenerationLocked()
@@ -468,7 +466,7 @@ func TestHandleCommandSelfListPanesUsesInvokingTab(t *testing.T) {
 	invoking.ctx, invoking.cancel = context.WithCancel(d.serveCtx)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, invoking)
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
 	result := sendCommand(t, d, ports.CommandRequest{
@@ -539,7 +537,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 		second.ctx, second.cancel = context.WithCancel(d.serveCtx)
 		sess.mu.Lock()
 		sess.tabs = append(sess.tabs, second)
-		sess.active = 1
+		selectTestAttachmentTabLocked(sess, 1)
 		sess.mu.Unlock()
 
 		result := sendCommand(t, d, ports.CommandRequest{Slug: "close-tab", TargetSession: "work"})
@@ -547,7 +545,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 		require.True(t, result.OK, result.Text)
 		sess.mu.Lock()
 		require.Len(t, sess.tabs, 1)
-		require.Equal(t, "t_first", sess.tabs[0].stableID)
+		require.Equal(t, "t_second", sess.tabs[0].stableID)
 		sess.mu.Unlock()
 	})
 }
@@ -560,7 +558,7 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 		verify func(*testing.T, *Daemon, *session)
 	}{
 		{name: "split focused pane", slug: "split-right", verify: func(t *testing.T, _ *Daemon, sess *session) {
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
 			defer tb.mu.Unlock()
 			require.Len(t, tb.panes, 2)
@@ -569,10 +567,10 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 			sess.mu.Lock()
 			defer sess.mu.Unlock()
 			require.Len(t, sess.tabs, 2)
-			require.Equal(t, 1, sess.active)
+			require.Equal(t, 0, testAttachmentTabIndexLocked(sess))
 		}},
 		{name: "rename tab", slug: "rename-tab", args: []string{"logs"}, verify: func(t *testing.T, _ *Daemon, sess *session) {
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
 			defer tb.mu.Unlock()
 			require.Equal(t, "logs", tb.name)
@@ -613,7 +611,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	d.mu.Unlock()
 	require.NotNil(t, created)
 	created.mu.Lock()
-	require.Nil(t, created.client)
+	require.Empty(t, created.snapshotAttachmentsLocked())
 	require.Equal(t, "/tmp/work", created.cwd)
 	require.Equal(t, []string{"INHERITED=yes"}, created.env)
 	require.True(t, created.terminal.TrueColor)
@@ -622,7 +620,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 118, Rows: 38}, tb.size)
 	tb.mu.Unlock()
-	require.Nil(t, source.client)
+	require.Empty(t, source.snapshotAttachments())
 
 	taken := sendCommand(t, d, ports.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
 	require.False(t, taken.OK)
@@ -674,7 +672,7 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	work := addControlSession(d, "work", "t_work", "p_work")
 	work.ephemeral = false
-	work.client = &attachedClient{}
+	work.registerAttachment(&attachedClient{})
 	work.mruAt.Store(2)
 	tb := newTabWithStableID("t_work_2", "p_work_2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	tb.ctx, tb.cancel = context.WithCancel(d.serveCtx)
@@ -762,7 +760,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	target.ctx, target.cancel = context.WithCancel(d.serveCtx)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, target)
-	sess.active = 0
+	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 	original := target.tree.Focus
 
@@ -808,12 +806,33 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	require.True(t, awaitCommandResult(t, secondSends).OK)
 
 	sess.mu.Lock()
-	require.Zero(t, sess.active, "self commands must not select the invoking tab")
+	require.Zero(t, testAttachmentTabIndexLocked(sess), "self commands must not select the invoking tab")
 	sess.mu.Unlock()
 	target.mu.Lock()
 	defer target.mu.Unlock()
 	require.Len(t, target.panes, 2)
 	require.NotEqual(t, original, target.tree.Focus, "second command must execute after the split creates its right neighbor")
+}
+
+func TestControlMoveRejectsMissingAttachmentCapability(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := addControlSession(d, "work", "t_work", "p_work")
+	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+	tb := source.tabs[0]
+	tb.mu.Lock()
+	pane := tb.focusedPane()
+	tb.mu.Unlock()
+	ac := &attachedClient{tr: &closeTrackingTransport{}}
+	ac.setSession(source)
+
+	source.mu.Lock()
+	require.True(t, source.registerAttachmentLocked(ac))
+	target := daemonActionTarget{session: source, attachment: ac, tab: tb, pane: pane}
+	require.True(t, source.unregisterAttachmentLocked(ac))
+	source.mu.Unlock()
+
+	err := (controlExec{d: d, sess: source, tab: tb, target: target}).MovePane(destination.name, destination.tabs[0].stableID)
+	require.ErrorIs(t, err, errMoveStaleTarget)
 }
 
 func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.T) {
@@ -824,7 +843,7 @@ func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.
 	publishTiledPaneOwners(source, inactive)
 	source.mu.Lock()
 	source.tabs = append(source.tabs, inactive)
-	source.active = 0
+	selectTestAttachmentTabLocked(source, 0)
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
@@ -859,7 +878,7 @@ func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 	publishTiledPaneOwners(source, inactive)
 	source.mu.Lock()
 	source.tabs = append(source.tabs, inactive)
-	source.active = 0
+	selectTestAttachmentTabLocked(source, 0)
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
@@ -891,27 +910,29 @@ func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	source := addControlSession(d, "work", "t_first", "p_first")
+	publishTiledPaneOwners(source, source.tabs[0])
 	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
 	publishTiledPaneOwners(source, second)
 	source.mu.Lock()
 	source.tabs = append(source.tabs, second)
-	source.active = 1
+	selectTestAttachmentTabLocked(source, 0)
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
 	result := sendCommand(t, d, ports.CommandRequest{
-		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work",
+		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work", Self: false,
+		TargetTab: "t_second", TargetPane: "p_second",
 	})
 	require.True(t, result.OK, result.Text)
 
 	source.mu.Lock()
 	require.Len(t, source.tabs, 1)
-	require.Equal(t, "t_first", source.tabs[0].stableID)
+	require.Equal(t, "t_second", source.tabs[0].stableID)
 	source.mu.Unlock()
 	destination.mu.Lock()
 	require.Len(t, destination.tabs, 2)
-	require.Equal(t, "t_second", destination.tabs[1].stableID)
+	require.Equal(t, "t_first", destination.tabs[1].stableID)
 	destination.mu.Unlock()
 }
 
@@ -923,7 +944,7 @@ func TestHandleCommandMoveTabSelfUsesStableTab(t *testing.T) {
 	publishTiledPaneOwners(source, second)
 	source.mu.Lock()
 	source.tabs = append(source.tabs, second)
-	source.active = 0
+	selectTestAttachmentTabLocked(source, 0)
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
@@ -1093,12 +1114,12 @@ func TestHandleCommandMovePaneStableIDsLocateSessionWithoutSelfRedirect(t *testi
 	publishTiledPaneOwners(source, inactive)
 	source.mu.Lock()
 	source.tabs = append(source.tabs, inactive)
-	source.active = 1
+	selectTestAttachmentTabLocked(source, 1)
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
 	result := sendCommand(t, d, ports.CommandRequest{
-		Slug: "move-pane", Args: []string{"dest", "t_dest"},
+		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "old-name", TargetTab: "t_inactive", TargetPane: "p_inactive",
 	})
 	require.True(t, result.OK, result.Text)
@@ -1126,7 +1147,7 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 	left.mu.Lock()
 	left.name = "left"
 	left.tabs[0].stableID = "left-moved"
-	left.active = 0
+	selectTestAttachmentTabLocked(left, 0)
 	left.mu.Unlock()
 
 	right := addMoveTabTestSession(d, "right", "right-stays")
@@ -1135,7 +1156,7 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 	publishTiledPaneOwners(right, rightMoved)
 	right.mu.Lock()
 	right.tabs = append(right.tabs, rightMoved)
-	right.active = 1
+	selectTestAttachmentTabLocked(right, 1)
 	right.mu.Unlock()
 
 	leftFrame := commandFrame(t, ports.CommandRequest{
@@ -1179,7 +1200,7 @@ func addNamedMoveDestination(d *Daemon, name, tabID, paneID string) *session {
 	tb := newTabWithStableID(tabID, paneID, newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
 	tb.ctx, tb.cancel = context.WithCancel(ctx)
 	sess := &session{sessionCore: sessionCore{id: domain.SessionID("sess-" + name), name: name, incarnation: domain.IncarnationID{5},
-		ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0,
+		ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb},
 	}
 	publishTiledPaneOwners(sess, tb)
 	d.mu.Lock()

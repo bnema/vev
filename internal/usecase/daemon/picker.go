@@ -52,7 +52,7 @@ func (d *Daemon) togglePickerSort() {
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
 func (d *Daemon) enterPicker(sess attachmentSession, ac *attachedClient) {
-	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	model := d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
 }
 
@@ -83,7 +83,7 @@ func (d *Daemon) publishPicker(sess attachmentSession, ac *attachedClient, model
 
 // pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
 // knows nothing about picker intent; picker.New owns all destination policy.
-func (d *Daemon) pickerViews(cur attachmentSession) ([]picker.SessionView, picker.SourceFilter) {
+func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
 	sessions := make([]attachmentSession, 0, len(d.sessions))
 	proxies := make(map[domain.SessionID]*proxySession)
@@ -119,13 +119,23 @@ func (d *Daemon) pickerViews(cur attachmentSession) ([]picker.SessionView, picke
 	live := make([]liveSnapshot, 0, len(sessions))
 	var current picker.SourceFilter
 	for _, entry := range sessions {
+		if entry == cur && ac != nil {
+			if local, ok := localSession(entry); ok {
+				local.repairAttachmentView(ac)
+			}
+		}
 		snap := entry.snapshotView(opts)
 		if entry == cur {
 			if proxy, ok := entry.(*proxySession); ok {
 				key := proxy.key
 				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, RemoteKey: &key}
-			} else if snap.active >= 0 && snap.active < len(snap.tabs) {
-				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.active].id}
+			} else if _, ok := localSession(entry); ok && ac != nil {
+				view := ac.viewSnapshot()
+				if view.tabID != "" {
+					current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: view.tabID}
+				}
+			} else if len(snap.tabs) > 0 {
+				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.defaultTab].id}
 			}
 		}
 		live = append(live, liveSnapshot{entry: entry, view: snap})
@@ -201,8 +211,8 @@ func (d *Daemon) pickerViews(cur attachmentSession) ([]picker.SessionView, picke
 	return views, current
 }
 
-func (d *Daemon) newPickerModel(cur attachmentSession, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
-	views, attachedCurrent := d.pickerViews(cur)
+func (d *Daemon) newPickerModel(cur attachmentSession, ac *attachedClient, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
+	views, attachedCurrent := d.pickerViews(cur, ac)
 	if intent == pickerNavigate && current == (picker.SourceFilter{}) {
 		current = attachedCurrent
 	}
@@ -248,7 +258,7 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 	}
 }
 
-func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*roleEffectTicket) {
+func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
 	sess := ac.currentAttachmentSession()
 	if sess == nil {
 		return
@@ -293,7 +303,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		return
 	}
 	if result.action == 'x' {
-		var effect *roleEffectTicket
+		var effect *attachmentEffectTicket
 		if len(effects) != 0 {
 			effect = effects[0]
 		}
@@ -301,7 +311,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			var err error
 			if effect != nil {
 				effect.bindActionEnd(d, "picker-delete")
-				err = d.killPickerTargetForRole(target, effect.roleToken())
+				err = d.killPickerTargetForAttachment(target, effect.connectionToken())
 			} else {
 				err = d.killPickerTarget(target)
 			}
@@ -310,7 +320,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			}
 		}
 		if effect != nil && effect.ended.Load() {
-			fresh, admitted := ac.beginRoleEffect(effect.token)
+			fresh, admitted := ac.beginAttachmentEffect(effect.token)
 			if !admitted {
 				return
 			}
@@ -349,7 +359,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		}
 		var err error
 		if len(effects) != 0 && effects[0] != nil {
-			err = d.switchToTargetForRole(effects[0].roleToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
+			err = d.switchToTargetForAttachment(effects[0].connectionToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
 		} else if local, ok := localSession(sess); ok {
 			d.closePicker(ac)
 			err = d.switchToTarget(local, ac, target)
@@ -413,7 +423,7 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if targetSess == ac.currentAttachmentSession() {
 		return
 	}
-	rc := d.attachCoordinator(targetSess, nil, nil, false)
+	rc := d.attachCoordinator(targetSess, nil, false)
 	rc.subscribePreviewFor(ac, generation, func(renderWake) {
 		if pickerPreviewCurrent(ac, targetSess, next, generation) {
 			if owner := ac.currentAttachmentSession(); owner != nil {
@@ -489,9 +499,7 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 			continue
 		}
 		sess.mu.Lock()
-		if sess.client != nil {
-			clients = append(clients, sess.client)
-		}
+		clients = append(clients, sess.snapshotAttachmentsLocked()...)
 		sess.mu.Unlock()
 	}
 	d.mu.Unlock()
@@ -519,6 +527,9 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 // generation guards terminal parked cleanup even when a refresh replaced the
 // model within that generation.
 func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
+	if ac == nil || ac.overlays == nil {
+		return false
+	}
 	ac.overlays.pickerMu.Lock()
 	if model != nil && (ac.overlays.picker != model || ac.overlays.pickerGeneration != generation) || model == nil && generation != 0 && ac.overlays.pickerGeneration != generation {
 		ac.overlays.pickerMu.Unlock()
@@ -573,12 +584,12 @@ type sessionHandoffGuard struct {
 	closePicker    bool
 }
 
-// switchActiveTargetForRole hands a frame-bound navigation request to the
+// switchActiveTargetForAttachment hands a frame-bound navigation request to the
 // centralized transition. The transition releases admission at its freeze seam
 // and revalidates the exact initiating token before changing target focus or
 // attachment ownership.
-func (d *Daemon) switchActiveTargetForRole(token attachmentRoleToken, target picker.Target) error {
-	return d.switchActiveTargetForRoleGuarded(token, target, sessionHandoffGuard{}, "jump-attention")
+func (d *Daemon) switchActiveTargetForAttachment(token attachmentConnectionToken, target picker.Target) error {
+	return d.switchActiveTargetForAttachmentGuarded(token, target, sessionHandoffGuard{}, "jump-attention")
 }
 
 func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence {
@@ -603,15 +614,15 @@ func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence 
 	return fence
 }
 
-func (d *Daemon) switchActiveTargetForRoleGuarded(token attachmentRoleToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.sess == nil || token.ac == nil || token.role != attachmentActive {
+func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
+	if token.sess == nil || token.ac == nil {
 		return nil
 	}
 	d.mu.Lock()
 	targetSess, ok := localSession(d.sessions[target.Session])
 	d.mu.Unlock()
 	if !ok {
-		if !token.activeCurrent() {
+		if !token.attachmentCurrent() {
 			return nil
 		}
 		d.invalidateRender(token.sess, token.ac, true, "picker.go")
@@ -623,21 +634,21 @@ func (d *Daemon) switchActiveTargetForRoleGuarded(token attachmentRoleToken, tar
 
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: token.sess, target: targetSess, next: token.ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: token.transport, sourceToken: &token, action: action,
 		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
 		activateTargetTab:       true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
 	})
 	if err != nil {
-		// Losing the exact source role is a benign stale action, not a notice for
+		// Losing the exact source attachment is a benign stale action, not a notice for
 		// whichever attachment replaced the initiator.
-		if !token.activeCurrent() {
+		if !token.attachmentCurrent() {
 			return nil
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", err)
 	}
 	if guard.closePicker {
-		fresh, admitted := token.ac.beginRoleEffect(transition.published)
+		fresh, admitted := token.ac.beginAttachmentEffect(transition.published)
 		if admitted {
 			d.closePicker(token.ac)
 			fresh.End()
@@ -657,34 +668,34 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 	return d.switchToTargetGuarded(from, ac, target, sessionHandoffGuard{})
 }
 
-// switchToTargetForRole is the sole client-originated navigation entry. The
+// switchToTargetForAttachment is the sole client-originated navigation entry. The
 // intent captures the exact initiating capability before admission is released;
 // every active, stopped, and same-session target then uses transitionAttachment
 // for frozen, atomic source-token preflight.
-func (d *Daemon) switchToTargetForRole(token attachmentRoleToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.sess == nil || token.ac == nil || token.role != attachmentActive || token.effect == nil {
+func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
+	if token.sess == nil || token.ac == nil || token.effect == nil {
 		return nil
 	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
 	if target.RemoteKey != nil {
-		return d.switchToRemoteTargetForRole(token, target, *target.RemoteKey, guard, action)
+		return d.switchToRemoteTargetForAttachment(token, target, *target.RemoteKey, guard, action)
 	}
 	if token.sess.isProxy() && !target.Stopped {
-		return d.switchActiveTargetForRoleGuarded(token, target, guard, action)
+		return d.switchActiveTargetForAttachmentGuarded(token, target, guard, action)
 	}
 	sess, ok := localSession(token.sess)
 	if !ok {
 		return errAttachmentTransition
 	}
-	return d.switchToTargetGuardedForRole(sess, token.ac, target, guard, &token, action)
+	return d.switchToTargetGuardedForAttachment(sess, token.ac, target, guard, &token, action)
 }
 
-// switchToRemoteTargetForRole performs dialing after the initiating effect has
-// ended and without role or architecture locks. transitionAttachment then
-// freezes and revalidates the exact source role and exact structured-key proxy
+// switchToRemoteTargetForAttachment performs dialing after the initiating effect has
+// ended and without attachment-effect or architecture locks. transitionAttachment then
+// freezes and revalidates the exact source attachment and exact structured-key proxy
 // before publishing ownership.
-func (d *Daemon) switchToRemoteTargetForRole(token attachmentRoleToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, action string) error {
+func (d *Daemon) switchToRemoteTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, action string) error {
 	if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" {
 		return errAttachmentTransition
 	}
@@ -702,7 +713,7 @@ func (d *Daemon) switchToRemoteTargetForRole(token attachmentRoleToken, target p
 	ownsCandidate := !alreadyPublished && !constructionInFlight
 	proxy, err := d.openProxySession(ctx, key, token.ac.size)
 	if err != nil {
-		if !token.activeCurrent() {
+		if !token.attachmentCurrent() {
 			return errAttachmentTransition
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't connect to that remote session", err)
@@ -716,9 +727,9 @@ func (d *Daemon) switchToRemoteTargetForRole(token attachmentRoleToken, target p
 
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: token.sess, target: proxy, next: token.ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: token.transport, sourceToken: &token, action: action,
-		preserveRole: proxy == token.sess, ready: true,
+		preserveAttachment: proxy == token.sess, ready: true,
 	})
 	if err != nil {
 		if ownsCandidate {
@@ -727,7 +738,7 @@ func (d *Daemon) switchToRemoteTargetForRole(token attachmentRoleToken, target p
 		return errAttachmentTransition
 	}
 	if guard.closePicker {
-		fresh, admitted := token.ac.beginRoleEffect(transition.published)
+		fresh, admitted := token.ac.beginAttachmentEffect(transition.published)
 		if admitted {
 			d.closePicker(token.ac)
 			fresh.End()
@@ -759,7 +770,7 @@ func (d *Daemon) discardUnattachedProxyGeneration(proxy *proxySession, generatio
 		return false
 	}
 	proxy.sessionCore.mu.Lock()
-	if proxy.client != nil {
+	if len(proxy.attachments) != 0 {
 		proxy.sessionCore.mu.Unlock()
 		d.mu.Unlock()
 		return false
@@ -810,17 +821,17 @@ func (d *Daemon) discardUnattachedProxyGeneration(proxy *proxySession, generatio
 
 // switchToTargetGuarded is retained for daemon-internal and headless callers.
 func (d *Daemon) switchToTargetGuarded(from *session, ac *attachedClient, target picker.Target, guard sessionHandoffGuard) error {
-	return d.switchToTargetGuardedForRole(from, ac, target, guard, nil, "")
+	return d.switchToTargetGuardedForAttachment(from, ac, target, guard, nil, "")
 }
 
-func (d *Daemon) switchToTargetGuardedForRole(from *session, ac *attachedClient, target picker.Target, guard sessionHandoffGuard, sourceToken *attachmentRoleToken, action string) error {
+func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedClient, target picker.Target, guard sessionHandoffGuard, sourceToken *attachmentConnectionToken, action string) error {
 	if target.Name != "" {
 		ctx := d.serveCtx
 		if ctx == nil {
 			ctx = context.Background()
 		}
 		if err := d.waitForTargetRestore(ctx, target.Name); err != nil {
-			if sourceToken != nil && !sourceToken.activeCurrent() {
+			if sourceToken != nil && !sourceToken.attachmentCurrent() {
 				return errAttachmentTransition
 			}
 			d.invalidateRender(from, ac, true, "picker.go")
@@ -854,7 +865,7 @@ func (d *Daemon) switchToTargetGuardedForRole(from *session, ac *attachedClient,
 	d.mu.Unlock()
 
 	if !switched {
-		if sourceToken != nil && !sourceToken.activeCurrent() {
+		if sourceToken != nil && !sourceToken.attachmentCurrent() {
 			return errAttachmentTransition
 		}
 		if guard.expectedSource != nil {
@@ -865,7 +876,7 @@ func (d *Daemon) switchToTargetGuardedForRole(from *session, ac *attachedClient,
 	}
 	if guard.closePicker {
 		if sourceToken != nil {
-			fresh, admitted := ac.beginRoleEffect(transition.published)
+			fresh, admitted := ac.beginAttachmentEffect(transition.published)
 			if admitted {
 				d.closePicker(ac)
 				fresh.End()
@@ -877,14 +888,14 @@ func (d *Daemon) switchToTargetGuardedForRole(from *session, ac *attachedClient,
 	d.deferAttachmentTransitionCleanups(transition)
 	if targetSess == from {
 		if sourceToken != nil {
-			fresh, admitted := ac.beginRoleEffect(transition.published)
+			fresh, admitted := ac.beginAttachmentEffect(transition.published)
 			if admitted {
-				d.activateTab(from, from.activeTab())
+				d.activateTabAfterResizeForLease(from, from.tabForAttachment(ac), false, ac, transition.published.lease)
 				d.invalidateRender(from, ac, true, "picker.go")
 				fresh.End()
 			}
 		} else {
-			d.activateTab(from, from.activeTab())
+			d.activateTabAfterResizeForLease(from, from.tabForAttachment(ac), false, ac, nil)
 			d.invalidateRender(from, ac, true, "picker.go")
 		}
 	} else {
@@ -915,7 +926,7 @@ func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*sessi
 
 // switchToActiveTargetLocked commits an active target handoff through the
 // centralized attachment transition. Caller holds d.mu.
-func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target, guard sessionHandoffGuard, sourceToken *attachmentRoleToken, action string) (*session, attachmentTransitionResult, bool) {
+func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target, guard sessionHandoffGuard, sourceToken *attachmentConnectionToken, action string) (*session, attachmentTransitionResult, bool) {
 	if d.sessions[target.Session] != targetSess {
 		return nil, attachmentTransitionResult{}, false
 	}
@@ -923,30 +934,35 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		if sourceToken == nil {
 			targetSess.mu.Lock()
 			defer targetSess.mu.Unlock()
-			if targetSess.client != ac || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
+			_, attached := targetSess.attachments[ac]
+			if !attached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
 				return nil, attachmentTransitionResult{}, false
 			}
-			targetSess.active = target.TabIndex
+			if !targetSess.activateAttachmentViewLocked(ac, target.TabIndex) {
+				return nil, attachmentTransitionResult{}, false
+			}
 			return targetSess, attachmentTransitionResult{}, true
 		}
 		d.mu.Unlock()
 		transition, err := d.transitionAttachment(attachmentTransitionRequest{
 			source: from, target: targetSess, next: ac,
-			expectedRole: attachmentActive, targetRole: attachmentActive,
+
 			expectedTransport: sourceToken.transport, sourceToken: sourceToken, action: action,
-			activateTargetTab: true, targetTabIndex: target.TabIndex, preserveRole: true,
+			activateTargetTab: true, targetTabIndex: target.TabIndex, preserveAttachment: true,
 		})
 		d.mu.Lock()
 		return targetSess, transition, err == nil
 	}
 
 	unlock := lockAttachmentSessions(from, targetSess)
-	if from.client != ac || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) {
+	_, sourceAttached := from.attachments[ac]
+	if !sourceAttached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) {
 		unlock()
 		return nil, attachmentTransitionResult{}, false
 	}
 	if guard.expectedSource != nil {
-		if from.active < 0 || from.active >= len(from.tabs) || from.tabs[from.active] != guard.expectedSource {
+		view := ac.viewSnapshot()
+		if domain.TabStableID(guard.expectedSource.stableID) != view.tabID {
 			unlock()
 			return nil, attachmentTransitionResult{}, false
 		}
@@ -968,11 +984,10 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		expectedTransport = sourceToken.transport
 	}
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source:                from,
-		target:                targetSess,
-		next:                  ac,
-		expectedRole:          attachmentActive,
-		targetRole:            attachmentActive,
+		source: from,
+		target: targetSess,
+		next:   ac,
+
 		expectedTransport:     expectedTransport,
 		sourceToken:           sourceToken,
 		action:                action,
@@ -994,7 +1009,7 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // resumeStoppedAndSwitchLocked creates the stopped representation and commits
 // the handoff while d.mu is held. Creation failure leaves the source client
 // and stopped record untouched.
-func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession, sourceToken *attachmentRoleToken, guard sessionHandoffGuard, action string) (*session, attachmentTransitionResult, bool, error) {
+func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession, sourceToken *attachmentConnectionToken, guard sessionHandoffGuard, action string) (*session, attachmentTransitionResult, bool, error) {
 	if stopped.record.Name != "" && stopped.state == ports.SessionBroken {
 		return nil, attachmentTransitionResult{}, false, &protoErr{ports.ErrInternal, "session durable state is broken: " + target.Name}
 	}
@@ -1003,7 +1018,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		var targetSess *session
 		d.mu.Unlock()
 		transition, err := d.transitionAttachment(attachmentTransitionRequest{
-			source: from, next: ac, expectedRole: attachmentActive, targetRole: attachmentActive,
+			source: from, next: ac,
 			expectedTransport: sourceToken.transport, sourceToken: sourceToken, action: action,
 			expectedSourceTab: guard.expectedSource, copySourceEnvironment: true, ready: true,
 			createTargetLocked: func() (*session, error) {
@@ -1034,7 +1049,8 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	}
 
 	from.mu.Lock()
-	if from.client != ac {
+	_, attached := from.attachments[ac]
+	if !attached {
 		from.mu.Unlock()
 		return nil, attachmentTransitionResult{}, false, nil
 	}
@@ -1051,7 +1067,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	d.mu.Unlock()
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: from, target: targetSess, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), ready: true,
 	})
 	d.mu.Lock()
@@ -1069,15 +1085,14 @@ func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) 
 
 // stealClientForTarget is retained for direct-ID callers and tests. Named
 // targets must use switchToTarget so resolution and commit share d.mu.
-func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
+func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) {
 	d.mu.Lock()
 	_, transition, switched := d.switchToActiveTargetLocked(from, ac, targetSess, target, sessionHandoffGuard{}, nil, "")
 	d.mu.Unlock()
 	if !switched {
-		return nil
+		return
 	}
 	d.deferAttachmentTransitionCleanups(transition)
-	return transition.displaced.ac
 }
 
 // resumeStoppedAndSwitch is retained for direct callers and tests. It resolves
@@ -1102,7 +1117,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	return true
 }
 
-func (d *Daemon) killPickerTargetForRole(target picker.Target, token attachmentRoleToken) error {
+func (d *Daemon) killPickerTargetForAttachment(target picker.Target, token attachmentConnectionToken) error {
 	if token.ac == nil {
 		return d.killPickerTarget(target)
 	}
@@ -1113,9 +1128,9 @@ func (d *Daemon) killPickerTargetForRole(target picker.Target, token attachmentR
 	if target.Stopped {
 		token.effect.bindActionEnd(d, "picker-delete")
 		token.effect.End()
-		frozen := freezeRoleEffectGates(token.ac)
+		frozen := freezeAttachmentEffectGates(token.ac)
 		defer frozen.unfreeze()
-		if !d.sourceRoleTokenCurrentFrozen(token) {
+		if !d.sourceAttachmentTokenCurrentFrozen(token) {
 			return nil
 		}
 		return d.killPickerTarget(target)
@@ -1126,7 +1141,7 @@ func (d *Daemon) killPickerTargetForRole(target picker.Target, token attachmentR
 	if !ok {
 		return nil
 	}
-	return d.killSessionForRole(targetSess, ports.ReasonSessionKilled, true, token, "picker-delete")
+	return d.killSessionForAttachment(targetSess, ports.ReasonSessionKilled, true, token, "picker-delete")
 }
 
 func (d *Daemon) killPickerTarget(target picker.Target) error {

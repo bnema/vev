@@ -14,7 +14,8 @@ func TestCoordinatorRejectsStaleAttachmentInvalidationAfterReplacement(t *testin
 	old := &attachedClient{}
 	replacement := &attachedClient{}
 	rc.attach(old)
-	rc.noteReplace(old, replacement)
+	rc.noteDetach(old)
+	rc.attach(replacement)
 
 	// This models a stale resize callback that passed its sendMu generation
 	// check immediately before a replacement was published.

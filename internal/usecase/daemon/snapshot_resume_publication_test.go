@@ -141,65 +141,6 @@ func cloneCheckpointRef(ref *domain.CheckpointRef) *domain.CheckpointRef {
 	return &clone
 }
 
-func TestNamedSessionPublishesNextCheckpointAfterClientSnatch(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	repository := newSnapshotLifecycleRepository(t)
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	WithSnapshotRepository(repository)(d)
-	store, _ := newMockStore(t)
-	WithStore(t, store)(d)
-	startSnapshotEncodeWorker(t, d)
-	t.Cleanup(func() {
-		d.snapsEnabled = false
-		release()
-		d.sessWg.Wait()
-	})
-
-	firstTransport := &closeTrackingTransport{}
-	sess, firstClient, err := d.route(snapshotLifecycleHello(ports.IntentNew, "work"), firstTransport)
-	require.NoError(t, err)
-
-	sess.activeTab().focusedPane().screen.Write([]byte("first checkpoint"))
-	markSnapshotDirty(sess)
-	require.True(t, d.scheduleSnapshot(sess))
-	awaitSnapshotIdle(t, sess)
-	d.snapshotNoticeMu.Lock()
-	firstFailure := d.snapshotActiveFailureSignature
-	d.snapshotNoticeMu.Unlock()
-	attempts, publicationErrors := repository.results()
-	require.Len(t, attempts, 1)
-	require.NoError(t, publicationErrors[0])
-	require.Empty(t, firstFailure)
-	require.False(t, sess.snapDirty.Load())
-	firstRecord := snapshotLifecycleRecord(t, d, sess.name)
-	require.NotNil(t, firstRecord.Committed)
-	require.Equal(t, uint64(1), firstRecord.Committed.Generation)
-
-	secondTransport := &closeTrackingTransport{}
-	snatchedSession, secondClient, err := d.route(snapshotLifecycleHello(ports.IntentAttach, "work"), secondTransport)
-	require.NoError(t, err)
-	require.Same(t, sess, snatchedSession, "client snatch must retain the live session")
-	require.NotSame(t, firstClient, secondClient, "client B must displace client A")
-
-	sess.activeTab().focusedPane().screen.Write([]byte("second checkpoint"))
-	markSnapshotDirty(sess)
-	require.True(t, d.scheduleFinalSnapshot(sess))
-	awaitSnapshotIdle(t, sess)
-	attempts, publicationErrors = repository.results()
-	require.Len(t, attempts, 2)
-	require.NoError(t, publicationErrors[1])
-	require.False(t, sess.snapDirty.Load())
-
-	secondRecord := snapshotLifecycleRecord(t, d, sess.name)
-	require.NotNil(t, secondRecord.Committed)
-	require.Equal(t, firstRecord.Committed.Generation+1, secondRecord.Committed.Generation,
-		"client snatch must not reset or conflict with the repository generation")
-	generation, err := repository.LoadCheckpoint(context.Background(), sess.incarnation, sess.name, *secondRecord.Committed)
-	require.NoError(t, err)
-	require.Equal(t, firstRecord.Committed, generation.ParentCheckpoint,
-		"the post-snatch checkpoint must retain the committed parent")
-}
-
 func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing.T) {
 	keeperPTY, releaseKeeper := newBlockingPTY(t)
 	firstPTY, releaseFirst := newBlockingPTY(t)
@@ -223,7 +164,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	sess, _, err := d.route(snapshotLifecycleHello(ports.IntentNew, "work"), &closeTrackingTransport{})
 	require.NoError(t, err)
 
-	sess.activeTab().focusedPane().screen.Write([]byte("first checkpoint"))
+	testAttachmentTab(sess).focusedPane().screen.Write([]byte("first checkpoint"))
 	markSnapshotDirty(sess)
 	require.True(t, d.scheduleSnapshot(sess))
 	awaitSnapshotClean(t, sess)
@@ -247,7 +188,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	require.NotSame(t, sess, resumed, "stopped-session attach must create a new live runtime")
 	require.Equal(t, sess.incarnation, resumed.incarnation, "resume must retain durable incarnation authority")
 
-	resumed.activeTab().focusedPane().screen.Write([]byte("checkpoint after resume"))
+	testAttachmentTab(resumed).focusedPane().screen.Write([]byte("checkpoint after resume"))
 	markSnapshotDirty(resumed)
 	require.True(t, d.scheduleSnapshot(resumed))
 	awaitSnapshotIdle(t, resumed)

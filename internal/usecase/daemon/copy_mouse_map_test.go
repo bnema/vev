@@ -71,7 +71,7 @@ func TestCopyMouseGeometryUsesClientFrameExactlyOnce(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 
 	tb.mu.Lock()
 	geometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), 0, 1)

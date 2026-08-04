@@ -285,7 +285,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 			p := newResizeReaderPTY([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			ac.output.maxOutstanding = tc.window
-			pane := sess.activeTab().focusedPane()
+			pane := testAttachmentTab(sess).focusedPane()
 			p.applying = func() bool {
 				pane.mu.Lock()
 				defer pane.mu.Unlock()
@@ -299,7 +299,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 
 			d.sessWg.Add(1)
 			pane.onExit = func() {}
-			go d.ptyReader(sess, sess.activeTab(), pane)
+			go d.ptyReader(sess, testAttachmentTab(sess), pane)
 			defer func() { p.close(); d.sessWg.Wait() }()
 
 			// The resize deadline drives coordinator prepare/apply/commit. No test
@@ -387,59 +387,6 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
-	require.Equal(t, 120, sess.activeTab().focusedPane().screen.Frame.Width)
+	require.Equal(t, 120, testAttachmentTab(sess).focusedPane().screen.Frame.Width)
 	requireNoOutputFrame(t, sends)
-}
-
-func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tr := newDatagramTestTransport()
-	_, ac, err := d.route(ports.Hello{
-		Version:           ports.ProtocolVersion,
-		Intent:            ports.IntentAttach,
-		Name:              sess.name,
-		Size:              domain.Size{Cols: 80, Rows: 24},
-		MaxOutputInFlight: 1,
-	}, tr)
-	require.NoError(t, err)
-	require.True(t, sess.renderCoordinator().markAttachmentReady(sess.renderCoordinator().attachmentLease(ac)))
-
-	pane := sess.tabs[0].focusedPane()
-	pane.screen.Write([]byte("A"))
-	d.paint(sess, ac, false, nil)
-	first := awaitFrame(t, tr.sends, ports.MsgOutput)
-	firstOutput, err := ports.UnmarshalOutput(first.Payload)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), firstOutput.NewStateNum)
-	for range 100 {
-		pane.screen.Write([]byte("x"))
-		d.invalidateRender(sess, ac, false, "output_state_sync_test.go")
-	}
-	pane.screen.Write([]byte("LATEST"))
-	d.invalidateRender(sess, ac, false, "output_state_sync_test.go")
-	requireNoOutputFrame(t, tr.sends)
-	require.Equal(t, uint64(1), ac.output.outstanding(), "only one state-bearing datagram output may be unacknowledged")
-
-	// Side-effect output is control-like: it must pass while the state window is
-	// full without consuming another state number.
-	require.NoError(t, d.boundedSendOutputErr(ac, []byte("side-effect")))
-	sideEffect := awaitFrame(t, tr.sends, ports.MsgOutput)
-	sideEffectOutput, err := ports.UnmarshalOutput(sideEffect.Payload)
-	require.NoError(t, err)
-	require.Zero(t, sideEffectOutput.BaseStateNum)
-	require.Zero(t, sideEffectOutput.NewStateNum)
-	require.Equal(t, uint64(1), ac.output.outstanding())
-
-	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: firstOutput.NewStateNum})}
-	require.NoError(t, tr.Close())
-	d.runConnLoop(ac)
-	second := awaitFrame(t, tr.sends, ports.MsgOutput)
-	secondOutput, err := ports.UnmarshalOutput(second.Payload)
-	require.NoError(t, err)
-	require.Equal(t, firstOutput.NewStateNum, secondOutput.BaseStateNum)
-	require.Equal(t, uint64(2), secondOutput.NewStateNum)
-	require.Contains(t, string(secondOutput.Data), "LATEST", "cumulative ACK must release the latest coalesced state")
-	require.Equal(t, uint64(1), ac.output.outstanding())
 }

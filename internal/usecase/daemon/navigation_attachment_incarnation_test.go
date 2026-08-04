@@ -18,7 +18,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 			rebind: func(t *testing.T, d *Daemon, source *session, ac *attachedClient) {
 				result, err := d.transitionAttachment(attachmentTransitionRequest{
 					source: source, target: source, next: ac,
-					expectedRole: attachmentActive, targetRole: attachmentActive,
+
 					expectedTransport: ac.transportSnapshot(), ready: true,
 				})
 				require.NoError(t, err)
@@ -31,7 +31,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 				ac.replaceTransport(&closeTrackingTransport{})
 				current := source.attachmentToken(ac, ac.transport())
 				current.lease = source.renderCoordinator().attachmentLease(ac)
-				ac.publishRoleCapability(current)
+				ac.publishAttachmentCapability(current)
 			},
 		},
 	}
@@ -47,16 +47,16 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 			d.sessions[target.id] = target
 			d.mu.Unlock()
 
-			rc := d.attachCoordinator(source, nil, ac, true)
+			rc := d.attachCoordinator(source, ac, true)
 			token := source.attachmentToken(ac, ac.transport())
 			token.lease = rc.attachmentLease(ac)
-			ac.publishRoleCapability(token)
-			effect, admitted := ac.beginRoleEffect(token)
+			ac.publishAttachmentCapability(token)
+			effect, admitted := ac.beginAttachmentEffect(token)
 			require.True(t, admitted)
 
 			ended := make(chan struct{})
 			release := make(chan struct{})
-			d.afterActionRoleEffectEnded = func(action string) {
+			d.afterActionAttachmentEffectEnded = func(action string) {
 				if action == "test-handoff" {
 					close(ended)
 					<-release
@@ -64,7 +64,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 			}
 			done := make(chan error, 1)
 			go func() {
-				done <- d.switchToTargetForRole(effect.roleToken(), picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "test-handoff")
+				done <- d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "test-handoff")
 			}()
 			awaitTestCompletion(t, ended, "test handoff did not release its role ticket")
 			tt.rebind(t, d, source, ac)
@@ -73,8 +73,8 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 
 			require.Same(t, source, ac.currentSession())
 			target.mu.Lock()
-			require.Nil(t, target.client)
-			require.Zero(t, target.active)
+			require.Empty(t, target.snapshotAttachmentsLocked())
+			require.Zero(t, testAttachmentTabIndexLocked(target))
 			target.mu.Unlock()
 		})
 	}

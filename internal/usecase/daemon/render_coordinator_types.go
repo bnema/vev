@@ -51,17 +51,19 @@ type renderWake struct {
 	reset     bool
 	urgent    bool
 	coalesced int
-	// lease is snapshotted under coordinator ownership. The wake consumer must
-	// compose only for this exact active attachment incarnation, never by
-	// rereading session.client after an attach publication.
-	lease *attachmentLease
+	// lease is optional coordinator-owned lifecycle safety for an attachment
+	// specific wake. Shared wakes leave it nil and snapshot live attachment
+	// leases at dispatch time; each paint then revalidates its exact connection
+	// incarnation.
+	lease            *attachmentLease
+	attachmentLeases map[*attachedClient]*attachmentLease
 	// watchdog marks a flush forced by the synchronized-output watchdog.
 	watchdog bool
 }
 
-// attachmentLease is the sole lifecycle identity for a primary render
-// attachment. It is only mutated while renderCoordinator.mu is held; callbacks
-// carry its pointer and must revalidate it before every side effect.
+// attachmentLease is the lifecycle identity for one render attachment. It is
+// only mutated while renderCoordinator.mu is held; callbacks carry its pointer
+// and must revalidate it before every side effect.
 type attachmentLease struct {
 	attachment *attachedClient
 	ready      bool

@@ -5,6 +5,9 @@ import "github.com/bnema/vev/internal/ports"
 // clientGone detaches ac if it is still the session's current client. The
 // session remains registered and headless after the client is gone.
 func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	if sess == nil || ac == nil {
+		return
+	}
 	expected := transportSnapshot{}
 	if failed != nil {
 		expected = ac.transportSnapshot()
@@ -28,14 +31,14 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 	d.finishClientGone(sess, ac, failed, explicit)
 }
 
-func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) bool {
+func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explicit bool) bool {
 	if token.effect == nil {
 		return false
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
 	if proxy, ok := token.sess.(*proxySession); ok {
-		if !d.detachIfRoleCurrent(token) {
+		if !d.detachIfAttachmentCurrent(token) {
 			return false
 		}
 		d.finishProxyClientGone(proxy, token.ac, token.transport.transport, explicit)
@@ -50,7 +53,7 @@ func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) boo
 	if !explicit {
 		parkingToken = d.markParkingInFlight(sess, token.ac)
 	}
-	if !d.detachIfRoleCurrent(token) {
+	if !d.detachIfAttachmentCurrent(token) {
 		d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
 		return false
 	}
@@ -59,6 +62,9 @@ func (d *Daemon) clientGoneForRole(token attachmentRoleToken, explicit bool) boo
 }
 
 func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	if sess == nil || ac == nil {
+		return
+	}
 	if d.afterClientGoneDetach != nil {
 		d.afterClientGoneDetach()
 	}
@@ -143,8 +149,8 @@ func (d *Daemon) detachProxyOnSendError(p *proxySession, ac *attachedClient, fai
 }
 
 // finishProxyClientGone retires external client ownership after the exact proxy
-// role has been unpublished. Warm-timer publication remains with the caller so
-// each detach path can arm once, after p.client is nil.
+// attachment has been unpublished. Warm-timer publication remains with the caller so
+// each detach path can arm once, after membership is empty.
 func (d *Daemon) finishProxyClientGone(p *proxySession, ac *attachedClient, failed ports.Transport, explicit bool) {
 	if rc := p.coordinator.Load(); rc != nil {
 		rc.noteDetach(ac)
@@ -160,18 +166,18 @@ func (d *Daemon) finishProxyClientGone(p *proxySession, ac *attachedClient, fail
 	d.log.Warn("detached proxy client", "host", p.key.Host, "session", p.key.Name, "explicit", explicit)
 }
 
-func (d *Daemon) detachOnRoleSendError(token attachmentRoleToken, failed ports.Transport) {
-	d.detachOnRoleSendErrorUntil(token, failed, nil)
+func (d *Daemon) detachOnAttachmentSendError(token attachmentConnectionToken, failed ports.Transport) {
+	d.detachOnAttachmentSendErrorUntil(token, failed, nil)
 }
 
-func (d *Daemon) detachOnRoleSendErrorUntil(token attachmentRoleToken, failed ports.Transport, done func() <-chan struct{}) {
+func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToken, failed ports.Transport, done func() <-chan struct{}) {
 	// A delayed sender may report after the client has rebound. Only the exact
-	// transport captured by this role is allowed to detach either lifecycle.
+	// transport captured by this attachment is allowed to detach either lifecycle.
 	if failed == nil || failed != token.transport.transport {
 		return
 	}
 	if proxy, ok := token.sess.(*proxySession); ok {
-		if d.detachIfRoleCurrentUntil(token, done) {
+		if d.detachIfAttachmentCurrentUntil(token, done) {
 			d.finishProxyClientGone(proxy, token.ac, failed, false)
 			d.armProxyWarm(proxy)
 		}
@@ -182,30 +188,30 @@ func (d *Daemon) detachOnRoleSendErrorUntil(token attachmentRoleToken, failed po
 		return
 	}
 	parkingToken := d.markParkingInFlight(sess, token.ac)
-	if d.detachIfRoleCurrentUntil(token, done) {
+	if d.detachIfAttachmentCurrentUntil(token, done) {
 		d.finishSendErrorDetach(sess, token.ac, failed)
 		return
 	}
 	d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
 }
 
-// reserveRoleSendErrorCleanup accounts for cleanup before End releases the
-// role gate. This closes the WaitGroup Add/Wait race with terminal teardown;
+// reserveAttachmentSendErrorCleanup accounts for cleanup before End releases the
+// attachment gate. This closes the WaitGroup Add/Wait race with terminal teardown;
 // the returned launch function must be invoked immediately after ticket End.
-func (d *Daemon) reserveRoleSendErrorCleanup(token attachmentRoleToken, failed ports.Transport) func() {
+func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentConnectionToken, failed ports.Transport) func() {
 	d.attachmentCleanupWg.Add(1)
 	return func() {
 		go func() {
 			defer d.attachmentCleanupWg.Done()
-			if d.afterRoleSendErrorCleanup != nil {
-				defer d.afterRoleSendErrorCleanup()
+			if d.afterAttachmentSendErrorCleanup != nil {
+				defer d.afterAttachmentSendErrorCleanup()
 			}
-			if d.beforeRoleSendErrorCleanup != nil {
-				d.beforeRoleSendErrorCleanup(token)
+			if d.beforeAttachmentSendErrorCleanup != nil {
+				d.beforeAttachmentSendErrorCleanup(token)
 			}
-			deadline := newRoleEffectDrainDeadline(d.clock)
+			deadline := newAttachmentEffectDrainDeadline(d.clock)
 			defer deadline.stop()
-			d.detachOnRoleSendErrorUntil(token, failed, deadline.Done)
+			d.detachOnAttachmentSendErrorUntil(token, failed, deadline.Done)
 		}()
 	}
 }

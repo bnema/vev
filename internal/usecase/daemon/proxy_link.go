@@ -651,18 +651,27 @@ func (d *Daemon) runProxyTransport(ctx context.Context, p *proxySession, generat
 	}
 }
 
-// handleProxySideEffect forwards a stateless remote effect to the exact local
-// attachment that currently owns this proxy. Role admission and transport
-// incarnation checks make a stale handoff a harmless drop rather than a send
-// to the client's next session.
+// handleProxySideEffect fans out a stateless remote effect to every attachment
+// currently owning this proxy. Each attachment gets an independent capability,
+// effect ticket, output snapshot, and exact transport-incarnation fence.
 func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out ports.Output) error {
 	if p == nil || !p.currentLinkGeneration(generation) {
 		return nil
 	}
-	p.sessionCore.mu.Lock()
-	ac := p.client
-	p.sessionCore.mu.Unlock()
-	if ac == nil || ac.output == nil {
+	var sendErr error
+	for _, ac := range snapshotAttachmentSession(p) {
+		if !p.currentLinkGeneration(generation) {
+			break
+		}
+		if err := d.sendProxySideEffect(p, generation, ac, out); err != nil && sendErr == nil {
+			sendErr = err
+		}
+	}
+	return sendErr
+}
+
+func (d *Daemon) sendProxySideEffect(p *proxySession, generation uint64, ac *attachedClient, out ports.Output) error {
+	if p == nil || ac == nil || ac.output == nil || !p.currentLinkGeneration(generation) {
 		return nil
 	}
 	expected := ac.transportSnapshot()
@@ -670,19 +679,22 @@ func (d *Daemon) handleProxySideEffect(p *proxySession, generation uint64, out p
 		return nil
 	}
 	token := attachmentToken(p, ac, expected.transport)
-	if token.role != attachmentActive || token.sess != p {
+	if token.sess != p || !token.current() {
 		return nil
 	}
-	ticket, admitted := ac.beginRoleEffect(token)
+	ticket, admitted := ac.beginAttachmentEffect(token)
 	if !admitted {
 		return nil
 	}
 	defer ticket.End()
-	if !p.currentLinkGeneration(generation) {
+	if !p.currentLinkGeneration(generation) || !token.current() {
 		return nil
 	}
 	frame := ac.output.sideEffect(out.Data, ac.echoAck.Load())
-	if err := ac.sendExpectedTransportForRole(expected, frame, ticket); err != nil {
+	if !p.currentLinkGeneration(generation) || !token.current() {
+		return nil
+	}
+	if err := ac.sendExpectedTransportForAttachment(expected, frame, ticket); err != nil {
 		if errors.Is(err, errAttachmentTransition) {
 			return nil
 		}

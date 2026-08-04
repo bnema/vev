@@ -45,8 +45,8 @@ func TestCopyModeLifecycleActivateTabClearsRuntime(t *testing.T) {
 	seedCopyInteractionLocked(ac.overlays, ac.overlays.copyPane, ac.overlays.copyDocument)
 	ac.overlays.copyMu.Unlock()
 
-	require.True(t, sess.switchTab(1))
-	d.activateTab(sess, sess.activeTab())
+	require.True(t, selectTestAttachmentTab(sess, 1))
+	d.activateTab(sess, testAttachmentTab(sess))
 
 	require.False(t, ac.overlays.copyActive())
 	ac.overlays.copyMu.Lock()
@@ -80,7 +80,7 @@ func TestActivateTabAfterResizePathAndCopyModeLifecycle(t *testing.T) {
 
 			d.enterCopyMode(sess, ac)
 			require.True(t, ac.overlays.copyActive())
-			d.activateTabAfterResizeForLease(sess, sess.activeTab(), true, ac, lease)
+			d.activateTabAfterResizeForLease(sess, testAttachmentTab(sess), true, ac, lease)
 
 			require.False(t, ac.overlays.copyActive())
 			require.Equal(t, tt.leaseBacked, <-path)
@@ -90,7 +90,7 @@ func TestActivateTabAfterResizePathAndCopyModeLifecycle(t *testing.T) {
 
 func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	d, sess, _, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	closingPTY := portsmocks.NewMockPTY(t)
 	closingPTY.EXPECT().Close().Return(nil).Once()
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
@@ -98,7 +98,7 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	tb.panes["pane-2"] = closing
 	ac := &attachedClient{output: newOutputStateStream()}
 	ac.initOverlays()
-	sess.client = ac
+	sess.registerAttachment(ac)
 	ac.setSession(sess)
 	closing.mu.Lock()
 	document := scopy.NewDocument(scopy.NewSnapshot(closing.history, closing.screen.Frame, closing.screen.LineBounds(), nil), domain.DefaultWordSeparators)
@@ -126,7 +126,7 @@ func TestCopyModeLifecycleCloseOnlyPaneInTabClearsRecoveredClientState(t *testin
 			release()
 		}
 	}()
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p := tb.focusedPane()
 	d.enterCopyMode(sess, ac)
 	require.True(t, ac.overlays.copyActive())
@@ -143,7 +143,7 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 			release()
 		}
 	}()
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p := tb.focusedPane()
 	p.mu.Lock()
 	document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil), domain.DefaultWordSeparators)
@@ -185,7 +185,7 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	renderSnapshot := ac.overlays.SnapshotForRender()
 	candidateWasRenderable := renderSnapshot.copyActive
 	renderSnapshot.Unlock()
-	require.True(t, sess.switchTab(1))
+	require.True(t, selectTestAttachmentTab(sess, 1))
 	close(resume)
 	resumed = true
 
@@ -225,7 +225,7 @@ func TestCopyModeLifecyclePublicationEpochRejectsReleaseAndPaneClose(t *testing.
 					release()
 				}
 			}()
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			p := tb.focusedPane()
 
 			// A real press is required: the motion publication must inherit this
@@ -285,7 +285,7 @@ func TestCopyModeLifecycleFloatingCloseDuringPublicationDoesNotResurrect(t *test
 			release()
 		}
 	}()
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
 	installTestFloating(tb, floating, true)
 	tb.mu.Lock()
@@ -356,7 +356,7 @@ func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.
 		{
 			name: "inactive tab",
 			invalidate: func(sess *session, _ *tab, _ *pane) {
-				require.True(t, sess.switchTab(1))
+				require.True(t, selectTestAttachmentTab(sess, 1))
 			},
 		},
 	} {
@@ -367,7 +367,7 @@ func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.
 					release()
 				}
 			}()
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			p := tb.focusedPane()
 			p.mu.Lock()
 			document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil), domain.DefaultWordSeparators)

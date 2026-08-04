@@ -181,7 +181,9 @@ func (h *coordinatorHarness) armedTimers(t *testing.T) []*coordinatorMockTimer {
 // deterministic contract failure, not a slow behavior to poll for.
 func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
-	return awaitTestValue(t, ch, "coordinator did not publish a wake after fake-clock advancement")
+	wake := awaitTestValue(t, ch, "coordinator did not publish a wake after fake-clock advancement")
+	wake.attachmentLeases = nil
+	return wake
 }
 
 func requireNoWake(t *testing.T, ch chan renderWake) {
@@ -376,6 +378,37 @@ func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
 
 // --- ACK gating ----------------------------------------------------------------
 
+func TestRenderCoordinatorAckReadinessIsAttachmentScoped(t *testing.T) {
+	slow, healthy := &attachedClient{}, &attachedClient{}
+	var slowReady atomic.Bool
+	slowReady.Store(false)
+	wakes := make(chan renderWake, 2)
+	rc := newRenderCoordinator(renderCoordinatorOptions{
+		wake: func(w renderWake) { wakes <- w },
+	})
+	rc.ackReadyFor = func(ac *attachedClient) bool { return ac == healthy || slowReady.Load() }
+	rc.attach(slow)
+	rc.attach(healthy)
+	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
+	rc.fireCurrent(false)
+
+	wake := awaitTestValue(t, wakes, "healthy attachment did not receive an independent wake")
+	require.Contains(t, wake.attachmentLeases, healthy)
+	_, slowSelected := wake.attachmentLeases[slow]
+	require.False(t, slowSelected)
+	rc.mu.Lock()
+	require.True(t, rc.pending, "slow attachment must retain the shared mutation until its ACK window opens")
+	rc.mu.Unlock()
+
+	slowReady.Store(true)
+	rc.notifyAckForLease(rc.attachmentLease(slow))
+	wake = awaitTestValue(t, wakes, "slow attachment did not receive its deferred wake")
+	require.Contains(t, wake.attachmentLeases, slow)
+	rc.mu.Lock()
+	require.False(t, rc.pending, "the shared mutation must clear after every attachment catches up")
+	rc.mu.Unlock()
+}
+
 func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T) {
 	owner := &attachedClient{}
 	wakes := make(chan renderWake, 1)
@@ -407,8 +440,7 @@ func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T
 	epoch := awaitTestValue(t, resizeDone, "ack readiness re-entry blocked resize metadata")
 	require.Equal(t, uint64(1), epoch)
 	wake := awaitWake(t, wakes)
-	require.Same(t, owner, wake.lease.attachment)
-	wake.lease = nil
+	require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
 	require.Equal(t, renderWake{coalesced: 1}, wake)
 	awaitTestCompletion(t, fireDone, "fire did not return after wake")
 }
@@ -749,7 +781,8 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 
 func TestRenderCoordinatorPreviewSubscription(t *testing.T) {
 	h := newCoordinatorHarness(t)
-	h.rc.subscribePreview(func(w renderWake) { h.previews <- w })
+	viewer := &attachedClient{}
+	h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
 
 	h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
 	timers := h.armedTimers(t)
@@ -760,7 +793,7 @@ func TestRenderCoordinatorPreviewSubscription(t *testing.T) {
 	require.Equal(t, owner, preview, "a subscribed preview observes the same coalesced wake")
 	requireNoWake(t, h.previews)
 
-	h.rc.teardownPreview()
+	h.rc.teardownPreviewFor(viewer, 1)
 	h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
 	timers = h.armedTimers(t)
 	require.NotEmpty(t, timers, "invalidate must arm a deadline timer")
@@ -795,24 +828,24 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 			timers[0].ch <- time.Time{}
 
 			preview := awaitWake(t, h.previews)
-			if tc.attach {
-				require.NotNil(t, preview.lease.attachment)
-			}
-			preview.lease = nil
 			require.Equal(t, renderWake{coalesced: 1}, preview,
 				"the viewer preview must receive target output without target ACK capacity")
-			requireNoWake(t, h.wakes)
 			requireNoWake(t, h.previews)
+			if tc.attach {
+				requireNoWake(t, h.wakes)
+			} else {
+				wake := awaitWake(t, h.wakes)
+				require.Equal(t, renderWake{coalesced: 1}, wake)
+				require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
+			}
 
 			h.ackReady.Store(true)
 			h.rc.notifyAck()
-			wake := awaitWake(t, h.wakes)
 			if tc.attach {
-				require.NotNil(t, wake.lease.attachment)
+				wake := awaitWake(t, h.wakes)
+				require.Equal(t, renderWake{coalesced: 1}, wake,
+					"the target frame remains pending for its ACK")
 			}
-			wake.lease = nil
-			require.Equal(t, renderWake{coalesced: 1}, wake,
-				"the target primary frame remains pending for its own ACK")
 			requireNoWake(t, h.previews)
 		})
 	}
@@ -837,9 +870,10 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 		require.Len(t, timers, 1)
 		timers[0].ch <- time.Time{}
 		preview := awaitWake(t, h.previews)
-		require.Nil(t, preview.lease, "headless preview wakes must not retain a revoked primary lease")
 		require.Equal(t, renderWake{coalesced: 1}, preview)
-		requireNoWake(t, h.wakes)
+		wake := awaitWake(t, h.wakes)
+		require.Equal(t, renderWake{coalesced: 1}, wake)
+		require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
 
 		h.rc.mu.Lock()
 		require.False(t, h.rc.pending)
@@ -847,9 +881,7 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 		require.False(t, h.rc.ackDeferred)
 		require.False(t, h.rc.deadlineDue)
 		require.Zero(t, h.rc.coalesced)
-		require.True(t, h.rc.primaryDetachedLocked())
-		require.NotNil(t, h.rc.lease)
-		require.False(t, h.rc.lease.active)
+		require.Empty(t, h.rc.attachments)
 		h.rc.mu.Unlock()
 	}
 
@@ -863,7 +895,7 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 	timers[0].ch <- time.Time{}
 	wake := awaitWake(t, h.wakes)
 	require.True(t, wake.reset)
-	require.Same(t, replacement, wake.lease.attachment)
+	require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
 }
 
 func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
@@ -872,7 +904,10 @@ func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
 		transition func(*renderCoordinator, *attachedClient, *attachedClient)
 	}{
 		{"target detach", func(rc *renderCoordinator, target, _ *attachedClient) { rc.noteDetach(target) }},
-		{"target replacement", func(rc *renderCoordinator, target, replacement *attachedClient) { rc.noteReplace(target, replacement) }},
+		{"target detach and attach", func(rc *renderCoordinator, target, replacement *attachedClient) {
+			rc.noteDetach(target)
+			rc.attach(replacement)
+		}},
 		{"target teardown", func(rc *renderCoordinator, _ *attachedClient, _ *attachedClient) { rc.beginSessionTeardown().finish() }},
 	}
 	for _, tc := range cases {
@@ -920,7 +955,6 @@ func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
 		teardown func(rc *renderCoordinator, owner *attachedClient)
 	}{
 		{"detach", func(rc *renderCoordinator, owner *attachedClient) { rc.noteDetach(owner) }},
-		{"park", func(rc *renderCoordinator, owner *attachedClient) { rc.notePark(owner) }},
 		{"session teardown", func(rc *renderCoordinator, _ *attachedClient) { rc.beginSessionTeardown().finish() }},
 	}
 	for _, tc := range cases {
@@ -955,7 +989,7 @@ func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
 		stale := h.armedTimers(t)
 		require.NotEmpty(t, stale, "invalidate must arm a deadline timer")
 
-		h.rc.noteReplace(owner, replacement)
+		h.rc.noteDetach(owner)
 		h.rc.attach(replacement)
 		for _, timer := range stale {
 			timer.ch <- time.Time{}
@@ -1035,11 +1069,11 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 						case "detach":
 							h.rc.noteDetach(staleOwner)
 						case "park":
-							h.rc.notePark(staleOwner)
+							h.rc.noteDetach(staleOwner)
 						case "session teardown":
 							h.rc.beginSessionTeardown().finish()
 						case "replacement":
-							h.rc.noteReplace(staleOwner, freshOwner)
+							h.rc.noteDetach(staleOwner)
 							h.rc.attach(freshOwner)
 							require.Equal(t, uint64(2), h.rc.recordResizeRequest(sz(100, 50), freshOwner))
 						}
@@ -1116,7 +1150,7 @@ func TestProducerInvalidations(t *testing.T) {
 			name: "floating toggle to visible",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
 				fp := newPaneWithStableID(layout.PaneID("floating"), "float-producer", newQuietPTY(), domain.Size{Cols: 40, Rows: 10})
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				tb.floating.pane = fp
 				tb.floating.state = floatingHidden
@@ -1134,7 +1168,7 @@ func TestProducerInvalidations(t *testing.T) {
 				ac.proxied = true
 				sess.tabs[1].attention = true
 				daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionJumpAttention, nil)
-				require.Equal(t, 1, activeTabIndex(sess))
+				require.Equal(t, 1, testAttachmentTabIndex(sess))
 			},
 		},
 		{
@@ -1275,7 +1309,7 @@ func TestConcurrentPaintInitializesOverlayUnderSendOwnership(t *testing.T) {
 func TestStartPaneGoroutinesAccountsForOneReader(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	require.NotNil(t, tb)
 	d.startPaneGoroutines(sess, tb, tb.focusedPane())
 	release()
@@ -1289,41 +1323,6 @@ func TestStartPaneGoroutinesAccountsForOneReader(t *testing.T) {
 func requireWorkerExit(t *testing.T, done <-chan struct{}) {
 	t.Helper()
 	awaitTestCompletion(t, done, "cancelled coordinator timer worker did not exit")
-}
-
-func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstall(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	defer releasePTY()
-	d, sess, owner, ownerSends := newManualSessionWithPTYs(t, p)
-	replacementTransport, replacementSends := newCapturingTransport(t)
-	replacement := &attachedClient{tr: replacementTransport, output: newOutputStateStream(), size: owner.size}
-	replacement.initOverlays()
-	replacement.setSession(sess)
-
-	clock := newCoordinatorMockClock(t, 2)
-	d.clock = clock.clock
-	rc := newRenderCoordinator(renderCoordinatorOptions{
-		clock: clock.clock,
-		wake: func(w renderWake) {
-			// This is the production ownership boundary: composition must use
-			// the coordinator's captured attachment, never sess.client.
-			d.paint(sess, w.lease.attachment, w.reset, w.lease)
-		},
-		ackReady: func() bool { return true },
-	})
-	rc.attach(owner)
-	sess.installRenderCoordinator(rc)
-	rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
-	timer := awaitCoordinatorScheduledTimer(t, clock)
-
-	// Model attachClient's publication window exactly: sess.client is new,
-	// but coordinator replacement has not yet invalidated the old deadline.
-	sess.mu.Lock()
-	sess.client = replacement
-	sess.mu.Unlock()
-	timer.ch <- time.Time{}
-	requireNoCoordinatorOutputFrame(t, replacementSends)
-	requireNoCoordinatorOutputFrame(t, ownerSends)
 }
 
 func TestRenderCoordinatorResizeLaneRejectsStaleToken(t *testing.T) {
@@ -1388,7 +1387,6 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 			run  func(*renderCoordinator, *attachedClient)
 		}{
 			{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
-			{"park", func(rc *renderCoordinator, ac *attachedClient) { rc.notePark(ac) }},
 		} {
 			t.Run(transition.name, func(t *testing.T) {
 				h := newCoordinatorHarness(t)
@@ -1417,10 +1415,11 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 				h.rc.mu.Unlock()
 				h.rc.noteSyncEnd(p, 1)
 				preview := awaitWake(t, h.previews)
-				preview.lease = nil
 				require.Equal(t, renderWake{urgent: true, coalesced: 1}, preview)
 				requireNoWake(t, h.previews)
-				requireNoWake(t, h.wakes)
+				wake := awaitWake(t, h.wakes)
+				require.Equal(t, renderWake{urgent: true, coalesced: 1}, wake)
+				require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
 			})
 		}
 	})
@@ -1431,7 +1430,8 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 		h.rc.attach(old)
 		h.rc.noteSyncBegin(p, 1)
 		watchdog := h.armedTimers(t)[0]
-		h.rc.noteReplace(old, replacement, false)
+		h.rc.noteDetach(old)
+		h.rc.attachWithReadiness(replacement, false)
 		require.False(t, h.rc.markAttachmentReady(h.rc.attachmentLease(old)), "old attachment Welcome is stale")
 		require.True(t, h.rc.markAttachmentReady(h.rc.attachmentLease(replacement)))
 
@@ -1455,7 +1455,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 		wake := awaitWake(t, h.wakes)
 		require.True(t, wake.reset)
 		require.True(t, wake.urgent)
-		require.Same(t, replacement, wake.lease.attachment)
+		require.Nil(t, wake.lease, "shared wakes do not carry an attachment lease")
 		requireNoWake(t, h.wakes)
 	})
 

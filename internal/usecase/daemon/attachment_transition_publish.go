@@ -1,10 +1,14 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import (
+	"slices"
 
-// transitionSourcePreflightLocked validates an initiating role while its gate
-// is frozen and d.mu is held. No caller may create or delete a target before
-// this succeeds.
+	"github.com/bnema/vev/internal/domain"
+)
+
+// transitionSourcePreflightLocked validates an initiating connection while its
+// effect gate is frozen and d.mu is held. No target is created before this
+// succeeds.
 func (d *Daemon) transitionSourcePreflightLocked(req attachmentTransitionRequest) bool {
 	if req.sourceToken == nil || req.source == nil || req.source.core() == nil || d.sessions[req.source.core().id] != req.source {
 		return false
@@ -14,19 +18,18 @@ func (d *Daemon) transitionSourcePreflightLocked(req attachmentTransitionRequest
 	req.source.core().mu.Lock()
 	defer req.source.core().mu.Unlock()
 	coordinator := req.source.core().coordinator.Load()
-	if coordinator == nil {
-		return false
+	if coordinator != nil {
+		coordinator.mu.Lock()
+		defer coordinator.mu.Unlock()
 	}
-	coordinator.mu.Lock()
-	defer coordinator.mu.Unlock()
 	if !transitionSourceTokenCurrentLocked(*req.sourceToken, req.source, coordinator, req) {
 		return false
 	}
 	return transitionSourceTabCurrentLocked(req.source, req.expectedSourceTab)
 }
 
-func (d *Daemon) sourceRoleTokenCurrentFrozen(token attachmentRoleToken) bool {
-	if token.sess == nil || token.ac == nil || token.role != attachmentActive {
+func (d *Daemon) sourceAttachmentTokenCurrentFrozen(token attachmentConnectionToken) bool {
+	if token.sess == nil || token.ac == nil {
 		return false
 	}
 	d.mu.Lock()
@@ -39,15 +42,11 @@ func (d *Daemon) sourceRoleTokenCurrentFrozen(token attachmentRoleToken) bool {
 	token.sess.core().mu.Lock()
 	defer token.sess.core().mu.Unlock()
 	coordinator := token.sess.core().coordinator.Load()
-	if coordinator == nil {
-		return false
+	if coordinator != nil {
+		coordinator.mu.Lock()
+		defer coordinator.mu.Unlock()
 	}
-	coordinator.mu.Lock()
-	defer coordinator.mu.Unlock()
-	req := attachmentTransitionRequest{
-		source: token.sess, next: token.ac, expectedRole: token.role,
-		expectedTransport: token.transport,
-	}
+	req := attachmentTransitionRequest{source: token.sess, next: token.ac, expectedTransport: token.transport}
 	return transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
 }
 
@@ -60,7 +59,7 @@ func transitionSourceTabCurrentForRequestLocked(source attachmentSession, expect
 		return true
 	}
 	local, ok := localSession(source)
-	if !ok || local.active < 0 || local.active >= len(local.tabs) || local.tabs[local.active] != expected {
+	if !ok || !containsTab(local.tabs, expected) {
 		return false
 	}
 	expected.mu.Lock()
@@ -68,28 +67,25 @@ func transitionSourceTabCurrentForRequestLocked(source attachmentSession, expect
 	return transferExpected || expected.floating.state != floatingVisible
 }
 
+func containsTab(tabs []*tab, want *tab) bool {
+	return slices.Contains(tabs, want)
+}
+
 // transitionAttachmentLocked is the publication half of transitionAttachment.
-// Caller holds d.mu after the lock-free gate freeze/drain has completed.
+// Caller holds d.mu after the lock-free effect freeze/drain.
 func (d *Daemon) transitionAttachmentLocked(req attachmentTransitionRequest) (attachmentTransitionResult, error) {
 	d.notices.routingMu.Lock()
 	defer d.notices.routingMu.Unlock()
 	return d.transitionAttachmentRoutedLocked(req)
 }
 
-// attachmentPublication is the validated, coordinator-locked input to the
-// non-failing ownership and lease publication step. Its caller continues to
-// own d.mu, notices.routingMu, and the ordered source/target session locks.
 type attachmentPublication struct {
 	req                 attachmentTransitionRequest
 	source              attachmentSession
-	old                 *attachedClient
-	sourceCoordinator   *renderCoordinator
 	targetCoordinator   *renderCoordinator
+	sourceCoordinator   *renderCoordinator
 	releaseCoordinators func()
-	displacedTransport  transportSnapshot
-	terminalDisplaced   bool
 	nextGeneration      uint64
-	displacedGeneration uint64
 }
 
 func (p *attachmentPublication) unlockCoordinators() {
@@ -114,11 +110,9 @@ func attachmentLifecycleCurrentLocked(entry attachmentSession, fence *attachment
 		domain.TabStableID(target.tabs[fence.tabIndex].stableID) == fence.tabID
 }
 
-// validateAttachmentTransitionPrelocked performs every fallible transition
-// check without acquiring d.mu, notices.routingMu, or either session lock.
-// The caller holds those locks in that order, with session locks ordered by ID.
-// On success the returned validation retains the ordered coordinator locks
-// through publishAttachmentTransitionPrelocked.
+// validateAttachmentTransitionPrelocked performs every fallible check before
+// the non-failing membership and lease publication. Caller holds d.mu,
+// notices.routingMu, and ordered source/target session locks.
 func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionRequest) (*attachmentPublication, error) {
 	source := req.source
 	if source == nil {
@@ -129,56 +123,60 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	}
 	sourceCore := source.core()
 	targetCore := req.target.core()
-	if sourceCore == nil || targetCore == nil ||
-		!req.preflighted || !req.roleEffectsFrozen ||
-		!validAttachmentTransitionRole(req.expectedRole, true) || !validAttachmentTransitionRole(req.targetRole, false) ||
-		req.next == nil || d.closing ||
-		d.sessions[sourceCore.id] != source || d.sessions[targetCore.id] != req.target ||
+	if sourceCore == nil || targetCore == nil || !req.preflighted || !req.attachmentEffectsFrozen ||
+		req.next == nil || d.closing || d.sessions[sourceCore.id] != source || d.sessions[targetCore.id] != req.target ||
 		req.expectedTransport.transport == nil || !req.next.transportSnapshotCurrent(req.expectedTransport) ||
-		req.preserveRole && req.sourceToken == nil {
+		req.preserveAttachment && req.sourceToken == nil {
 		return nil, errAttachmentTransition
 	}
 
-	var targetCoordinator *renderCoordinator
-	if req.targetRole == attachmentActive {
-		targetCoordinator = d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
-	}
 	sourceCoordinator := sourceCore.coordinator.Load()
-	if attachmentSessionRoleLocked(source, req.next) != req.expectedRole ||
-		!req.next.transportSnapshotCurrent(req.expectedTransport) {
+	targetCoordinator := d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
+	// transitionSourceTokenCurrentLocked also reads the source lease. Hold the
+	// source coordinator lock before calling it, following session -> coordinator
+	// ordering and preventing a lease rebind from racing validation.
+	releaseCoordinators := lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator)
+	if d.afterAttachmentTransitionCoordinatorsLocked != nil {
+		d.afterAttachmentTransitionCoordinatorsLocked()
+	}
+	if req.sourceToken != nil && !transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) {
+		releaseCoordinators()
+		return nil, errAttachmentTransition
+	}
+	if source != req.target && !attachmentRegisteredLocked(source, req.next) {
+		releaseCoordinators()
+		return nil, errAttachmentTransition
+	}
+	if !req.preserveAttachment && source != req.target && attachmentRegisteredLocked(req.target, req.next) {
+		releaseCoordinators()
+		return nil, errAttachmentTransition
+	}
+	if req.preserveAttachment && !attachmentRegisteredLocked(req.target, req.next) {
+		releaseCoordinators()
+		return nil, errAttachmentTransition
+	}
+	if !attachmentLifecycleCurrentLocked(req.target, req.expectedTargetLifecycle) ||
+		req.activateTargetTab && !req.target.validTargetTabLocked(req.targetTabIndex) ||
+		req.sourceToken != nil && !transitionSourceTabCurrentForRequestLocked(source, req.expectedSourceTab, req.transferExpectedSourceTab) {
+		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
 
-	old := targetCore.client
-	if old != req.expectedTargetCurrent || source != req.target && old == req.next {
-		return nil, errAttachmentTransition
-	}
 	publication := &attachmentPublication{
-		req: req, source: source, old: old,
+		req: req, source: source,
 		sourceCoordinator: sourceCoordinator, targetCoordinator: targetCoordinator,
-		releaseCoordinators: lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator),
-	}
-	invalid := req.sourceToken != nil && (!transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) ||
-		!transitionSourceTabCurrentForRequestLocked(source, req.expectedSourceTab, req.transferExpectedSourceTab))
-	invalid = invalid || targetCoordinator != nil && !req.preserveRole && !targetCoordinator.canReplaceLocked(old, req.next)
-	invalid = invalid || req.sourceToken == nil && source != req.target && req.expectedRole == attachmentActive && sourceCoordinator != nil &&
-		(sourceCoordinator.lease == nil || !sourceCoordinator.lease.active || sourceCoordinator.lease.attachment != req.next)
-	invalid = invalid || !attachmentLifecycleCurrentLocked(req.target, req.expectedTargetLifecycle)
-	invalid = invalid || req.activateTargetTab && !req.target.activateTargetLocked(req.targetTabIndex)
-	if invalid {
-		publication.unlockCoordinators()
-		return nil, errAttachmentTransition
+		releaseCoordinators: releaseCoordinators,
 	}
 	return publication, nil
 }
 
-// applyTargetStateLocked commits navigation metadata before role ownership, as
-// part of the same locked publication. It reports role-preserving transitions.
+// applyTargetStateLocked commits attachment-local navigation metadata and
+// shared environment state as part of the same publication.
 func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool {
 	req := publication.req
-	if req.targetRole == attachmentActive {
+	if req.activateTargetTab {
 		if target, ok := localSession(req.target); ok {
-			d.demoteParkedActiveForSessionLocked(target)
+			target.activateAttachmentViewLocked(req.next, req.targetTabIndex)
 		}
 	}
 	if req.copySourceEnvironment {
@@ -189,113 +187,58 @@ func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool
 			target.env = copyEnvironment(source.env)
 		}
 	}
-	return req.preserveRole
+	return req.preserveAttachment
 }
 
-// publishAttachmentOwnershipLocked atomically changes session membership,
-// generations, and currentSession while all role gates remain frozen.
+// publishAttachmentOwnershipLocked adds/removes only the exact attachment.
+// Existing target attachments and their independent views/transports remain
+// untouched.
 func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	req := publication.req
-	if req.targetRole == attachmentActive && publication.old != nil && publication.old != req.next {
-		publication.displacedTransport = publication.old.transportSnapshot()
-		// A proxied daemon attachment has no local snatched UI and must never
-		// linger in that role. Replacing it is terminal so its owning local proxy
-		// receives ReasonReplaced and cannot kick the direct user back later.
-		publication.terminalDisplaced = publication.old.proxied
-	}
 	if publication.source != req.target {
-		if publication.source.core().client == req.next {
-			publication.source.core().client = nil
-		}
-		delete(publication.source.core().snatched, req.next)
+		unregisterAttachmentSessionLocked(publication.source, req.next)
 	}
-	if req.targetRole == attachmentActive {
-		delete(req.target.core().snatched, req.next)
-		if publication.old != nil && publication.old != req.next {
-			if publication.terminalDisplaced {
-				delete(req.target.core().snatched, publication.old)
-			} else {
-				addSnatchedLocked(req.target, publication.old)
-			}
-		}
-		req.target.core().client = req.next
-	} else {
-		addSnatchedLocked(req.target, req.next)
-	}
-	publication.nextGeneration = req.next.roleGeneration.Add(1)
-	if publication.old != nil && publication.old != req.next && req.targetRole == attachmentActive {
-		publication.displacedGeneration = publication.old.roleGeneration.Add(1)
-		if publication.terminalDisplaced {
-			publication.old.setSession(nil)
-			publication.old.invalidateFrozenRoleCapability()
-		}
-	}
+	registerAttachmentSessionLocked(req.target, req.next)
+	publication.nextGeneration = req.next.connectionGeneration.Add(1)
 	req.next.setSession(req.target)
 }
 
-// buildAttachmentPostcommitPlanLocked binds coordinator lifecycle cleanup and
-// constructs the exact published tokens after ownership has committed.
 func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) attachmentTransitionResult {
 	req := publication.req
 	result := attachmentTransitionResult{}
-	if publication.source != req.target && req.expectedRole == attachmentActive && publication.sourceCoordinator != nil {
+	if publication.source != req.target && publication.sourceCoordinator != nil {
 		result.cleanups = append(result.cleanups, publication.sourceCoordinator.beginDetachLocked(req.next))
 	}
 	var lease *attachmentLease
-	if publication.targetCoordinator != nil {
-		var cleanup renderLifecycleCleanup
-		cleanup, lease = publication.targetCoordinator.beginReplaceLocked(publication.old, req.next, req.ready)
-		result.cleanups = append(result.cleanups, cleanup)
-	}
-	result.published = attachmentRoleToken{
-		sess:       req.target,
-		ac:         req.next,
-		role:       req.targetRole,
-		generation: publication.nextGeneration,
-		transport:  req.expectedTransport,
-		lease:      lease,
-		rebase:     publication.source != req.target && req.expectedRole == attachmentActive,
-	}
-	if publication.displacedGeneration != 0 {
-		if publication.terminalDisplaced {
-			result.terminalDisplaced = detachedAttachmentSnapshot{ac: publication.old, transport: publication.displacedTransport}
+	if publication.targetCoordinator != nil && !req.preserveAttachment {
+		if publication.source == req.target {
+			lease = publication.targetCoordinator.rebindAttachmentWithReadinessLocked(req.next, req.ready)
 		} else {
-			result.displaced = attachmentRoleToken{
-				sess:       req.target,
-				ac:         publication.old,
-				role:       attachmentSnatched,
-				generation: publication.displacedGeneration,
-				transport:  publication.displacedTransport,
-			}
-			result.displacedInterrupted = req.expectedTargetTransportInterrupted
+			lease = publication.targetCoordinator.attachWithReadinessLocked(req.next, req.ready)
 		}
 	}
-	// Membership, currentSession, lease, generation, and both exact admission
-	// capabilities become visible as one frozen publication. The gates remain
-	// frozen until every architecture lock has been released.
-	if req.roleEffectsFrozen {
-		req.next.publishFrozenRoleCapability(result.published)
-		if result.displaced.ac != nil {
-			result.displaced.ac.publishFrozenRoleCapability(result.displaced)
-		}
+	result.published = attachmentConnectionToken{
+		sess: req.target, ac: req.next,
+		generation: publication.nextGeneration,
+		transport:  req.expectedTransport, lease: lease,
+		rebase: publication.source != req.target,
+	}
+	if req.attachmentEffectsFrozen {
+		req.next.publishFrozenAttachmentCapability(result.published)
 	}
 	return result
 }
 
-// publishAttachmentTransitionPrelocked performs only non-failing metadata,
-// ownership, generation, and coordinator-lease publication. The caller retains
-// every lock required by validateAttachmentTransitionPrelocked.
 func (d *Daemon) publishAttachmentTransitionPrelocked(publication *attachmentPublication) attachmentTransitionResult {
-	if d.applyTargetStateLocked(publication) {
+	if publication.req.preserveAttachment {
+		d.applyTargetStateLocked(publication)
 		return attachmentTransitionResult{published: *publication.req.sourceToken}
 	}
 	publishAttachmentOwnershipLocked(publication)
+	d.applyTargetStateLocked(publication)
 	return buildAttachmentPostcommitPlanLocked(publication)
 }
 
-// transitionAttachmentRoutedLocked is the ordinary lock-acquiring wrapper for
-// the composable prelocked validation/publication seam. Caller holds d.mu and
-// notices.routingMu; this function acquires ordered source/target session locks.
 func (d *Daemon) transitionAttachmentRoutedLocked(req attachmentTransitionRequest) (attachmentTransitionResult, error) {
 	source := req.source
 	if source == nil {
@@ -315,15 +258,7 @@ func (d *Daemon) transitionAttachmentRoutedLocked(req attachmentTransitionReques
 	return d.publishAttachmentTransitionPrelocked(publication), nil
 }
 
-func validAttachmentTransitionRole(role attachmentRole, expected bool) bool {
-	if role == attachmentActive || role == attachmentSnatched {
-		return true
-	}
-	return expected && role == attachmentDetached
-}
-
 // lockAttachmentSessions gives every two-session transition one stable order.
-// Session IDs are immutable and unique while their lifecycles are registered.
 func lockAttachmentSessions(a, b attachmentSession) func() {
 	aCore := attachmentSessionCore(a)
 	bCore := attachmentSessionCore(b)
@@ -347,7 +282,7 @@ func lockAttachmentSessions(a, b attachmentSession) func() {
 }
 
 // lockAttachmentCoordinators follows the same immutable session-ID order as
-// lockAttachmentSessions. Callers already hold the ordered session locks.
+// lockAttachmentSessions. Callers already hold ordered session locks.
 func lockAttachmentCoordinators(a attachmentSession, aCoordinator *renderCoordinator, b attachmentSession, bCoordinator *renderCoordinator) func() {
 	if aCoordinator == nil && bCoordinator == nil {
 		return func() {}

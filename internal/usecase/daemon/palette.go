@@ -174,7 +174,7 @@ func (d *Daemon) recordPaletteUse(code string) {
 	d.paletteRecent = recent
 }
 
-func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*roleEffectTicket) {
+func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
 	entry := ac.currentAttachmentSession()
 	if entry == nil {
 		return
@@ -189,7 +189,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var generation uint64
 	var rawQuery string
 	changed, cancel, execute := false, false, false
-	var effect *roleEffectTicket
+	var effect *attachmentEffectTicket
 	if len(effects) != 0 {
 		effect = effects[0]
 	}
@@ -305,7 +305,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		var err error
 		if effect != nil {
-			err = d.switchToTargetForRole(effect.roleToken(), target, sessionHandoffGuard{}, "palette-session")
+			err = d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{}, "palette-session")
 		} else if local {
 			err = d.switchToTarget(sess, ac, target)
 		} else {
@@ -389,10 +389,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			}
 		case "back-session":
 			if effect != nil {
-				err = d.backSessionForRole(effect.roleToken())
+				err = d.backSessionForAttachment(effect.connectionToken())
 			}
 		case "detach":
-			if effect != nil && !d.clientGoneForRole(effect.roleToken(), true) {
+			if effect != nil && !d.clientGoneForAttachment(effect.connectionToken(), true) {
 				err = errAttachmentTransition
 			}
 		case "session-picker":
@@ -413,17 +413,17 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		return
 	}
-	roleHandoff := cmd.Slug == "back-session" || cmd.Slug == "detach"
-	if !roleHandoff && !ac.closeExecutedPalette(generation, rawQuery) {
+	attachmentHandoff := cmd.Slug == "back-session" || cmd.Slug == "detach"
+	if !attachmentHandoff && !ac.closeExecutedPalette(generation, rawQuery) {
 		return
 	}
 	sess.dispatchMu.Lock()
 	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect, redrawClosedPalette: true}, args)
 	sess.dispatchMu.Unlock()
-	if roleHandoff {
+	if attachmentHandoff {
 		if current := ac.currentSession(); current != nil {
 			currentToken := current.attachmentToken(ac, ac.transport())
-			fresh, admitted := ac.beginRoleEffect(currentToken)
+			fresh, admitted := ac.beginAttachmentEffect(currentToken)
 			if ac.closeExecutedPalette(generation, rawQuery) {
 				d.invalidateRender(current, ac, true, "palette.go")
 			}
@@ -495,13 +495,14 @@ type paletteExec struct {
 	ac                  *attachedClient
 	recent              []recentSession
 	actions             daemonActionRunner
-	effect              *roleEffectTicket
+	effect              *attachmentEffectTicket
 	redrawClosedPalette bool
 }
 
 func (e paletteExec) runAction(request daemonActionRequest) error {
+	request.effect = e.effect
 	if request.target.session == nil {
-		request.target = resolveDaemonActionTarget(e.sess)
+		request.target = resolveDaemonActionTargetForAttachment(e.sess, e.ac)
 	}
 	runner := e.actions
 	if runner == nil {
@@ -532,7 +533,7 @@ func (e paletteExec) CreateSession() error {
 	if entry == nil {
 		entry = e.sess
 	}
-	e.d.enterTransitionPrompt(entry, e.ac, " Create session ", "", func(name string, token attachmentRoleToken) error {
+	e.d.enterTransitionPrompt(entry, e.ac, " Create session ", "", func(name string, token attachmentConnectionToken) error {
 		if token.ac == nil {
 			sess, ok := e.localSession()
 			if !ok {
@@ -540,7 +541,7 @@ func (e paletteExec) CreateSession() error {
 			}
 			return e.d.createSessionAndSwitch(sess, e.ac, name)
 		}
-		return e.d.createSessionAndSwitchForRole(token, name)
+		return e.d.createSessionAndSwitchForAttachment(token, name)
 	})
 	return nil
 }
@@ -580,27 +581,27 @@ func (e paletteExec) ClosePane() error {
 }
 
 func (e paletteExec) OpenMovePanePicker() error {
-	target := resolveDaemonActionTarget(e.sess)
+	target := resolveDaemonActionTargetForAttachment(e.sess, e.ac)
 	if target.tab == nil || target.pane == nil {
 		return errMovePaneInvalid
 	}
 	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMovePane, moveSourceLocator{
-		Session: sessionMoveLocator(e.sess),
-		TabID:   domain.TabStableID(target.tab.stableID),
-		PaneID:  domain.PaneStableID(target.pane.stableID),
-		Client:  e.ac,
+		Session:    sessionMoveLocator(e.sess),
+		TabID:      domain.TabStableID(target.tab.stableID),
+		PaneID:     domain.PaneStableID(target.pane.stableID),
+		Attachment: e.ac,
 	})
 }
 
 func (e paletteExec) OpenMoveTabPicker() error {
-	target := resolveDaemonActionTarget(e.sess)
+	target := resolveDaemonActionTargetForAttachment(e.sess, e.ac)
 	if target.tab == nil {
 		return errMovePaneInvalid
 	}
 	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMoveTab, moveSourceLocator{
-		Session: sessionMoveLocator(e.sess),
-		TabID:   domain.TabStableID(target.tab.stableID),
-		Client:  e.ac,
+		Session:    sessionMoveLocator(e.sess),
+		TabID:      domain.TabStableID(target.tab.stableID),
+		Attachment: e.ac,
 	})
 }
 
@@ -639,7 +640,7 @@ func (e paletteExec) ToggleFloatingPane() error {
 
 func (e paletteExec) BackSession() error {
 	if e.effect != nil {
-		return e.d.backSessionForRole(e.effect.roleToken())
+		return e.d.backSessionForAttachment(e.effect.connectionToken())
 	}
 	e.d.backSession(e.sess, e.ac)
 	return nil
@@ -647,7 +648,7 @@ func (e paletteExec) BackSession() error {
 
 func (e paletteExec) Detach() error {
 	if e.effect != nil {
-		if !e.d.clientGoneForRole(e.effect.roleToken(), true) {
+		if !e.d.clientGoneForAttachment(e.effect.connectionToken(), true) {
 			return errAttachmentTransition
 		}
 		return nil
@@ -672,12 +673,22 @@ func (e paletteExec) RenameSession() error {
 }
 
 func (e paletteExec) RenameTab() error {
-	tb := e.sess.activeTab()
+	tb := e.sess.tabForAttachment(e.ac)
+	if e.ac == nil {
+		tb = e.sess.firstTab()
+	}
 	if tb == nil {
 		return nil
 	}
 	e.sess.mu.Lock()
-	currentName := tabDisplayName(tb, e.sess.active)
+	index := 0
+	for i, candidate := range e.sess.tabs {
+		if candidate == tb {
+			index = i
+			break
+		}
+	}
+	currentName := tabDisplayName(tb, index)
 	e.sess.mu.Unlock()
 	e.d.enterPrompt(e.sess, e.ac, " Rename tab ", currentName, func(name string) error {
 		return e.runAction(daemonActionRequest{kind: daemonActionRenameTab, target: daemonActionTarget{session: e.sess, tab: tb}, name: name})
@@ -733,7 +744,7 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	}
 	var err error
 	if e.effect != nil {
-		err = e.d.switchToTargetForRole(e.effect.roleToken(), picker.Target{Session: target.id, TabIndex: -1}, sessionHandoffGuard{}, "palette-recent-session")
+		err = e.d.switchToTargetForAttachment(e.effect.connectionToken(), picker.Target{Session: target.id, TabIndex: -1}, sessionHandoffGuard{}, "palette-recent-session")
 	} else {
 		sess, ok := e.localSession()
 		if !ok {

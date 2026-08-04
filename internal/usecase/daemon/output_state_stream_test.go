@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"runtime"
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
@@ -33,6 +34,44 @@ func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
 	require.Equal(t, firstOut.NewStateNum, secondOut.BaseStateNum)
 	require.Equal(t, uint64(2), secondOut.NewStateNum)
 	require.Equal(t, uint64(2), stream.outstanding())
+}
+
+func TestOutputStateStreamCapacityProbeDoesNotRaceWithSend(t *testing.T) {
+	stream := newOutputStateStream(1)
+	frame := renderer.NewFrame(3, 1)
+	fillOutputStateRows(frame, []string{"abc"})
+	prepared, err := stream.prepare(frame, nil, true)
+	require.NoError(t, err)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- prepared.send(prepared.data, 0, func(ports.Frame) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	probed := make(chan struct{})
+	go func() {
+		for range 100_000 {
+			_ = stream.atCapacity()
+			runtime.Gosched()
+		}
+		close(probed)
+	}()
+	close(release)
+	require.NoError(t, <-sendDone)
+	<-probed
+	require.True(t, stream.atCapacity())
+
+	stream.ack(1)
+	require.False(t, stream.atCapacity())
+	stream.rebase()
+	require.False(t, stream.atCapacity())
 }
 
 func TestOutputStateStreamFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T) {

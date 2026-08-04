@@ -434,7 +434,7 @@ func TestYankLastNotificationWithEmptyHistoryShowsWarnToast(t *testing.T) {
 func TestProxyYankLastNotificationEmptyHistoryUsesAttachmentScope(t *testing.T) {
 	d, proxy, ac, _, handler := newProxyInputHarness(t)
 	handler.enterPalette()
-	d.handlePaletteInput(ac, []byte("YLN\r"), handler.roleToken.effect)
+	d.handlePaletteInput(ac, []byte("YLN\r"), handler.connectionToken.effect)
 
 	history := d.notices.history()
 	require.Len(t, history, 1)
@@ -444,7 +444,7 @@ func TestProxyYankLastNotificationEmptyHistoryUsesAttachmentScope(t *testing.T) 
 
 func TestProxyNoticeYankSendFailureDetachesAndArmsWarmExpiry(t *testing.T) {
 	d, proxy, ac, _, handler := newProxyInputHarness(t)
-	handler.roleToken.effect.End()
+	handler.connectionToken.effect.End()
 	client, ok := ac.transport().(*proxyTestTransport)
 	require.True(t, ok)
 	client.sendFails.Store(true)

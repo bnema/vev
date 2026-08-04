@@ -48,7 +48,7 @@ type overlayRuntime struct {
 	promptMu               sync.Mutex
 	prompt                 *promptui.Model
 	promptSubmit           func(string) error
-	promptTransitionSubmit func(string, attachmentRoleToken) error
+	promptTransitionSubmit func(string, attachmentConnectionToken) error
 	promptPending          []byte
 
 	resizeMu      sync.Mutex
@@ -242,118 +242,12 @@ func (rt *overlayRuntime) clearCopyModeForPane(p *pane) bool {
 	return active || prePublication
 }
 
-// clearForSnatch clears each overlay family independently. Every family
-// revalidates the displaced role generation while holding only its own mutex,
-// so cleanup can neither participate in cross-family lock inversion nor erase
-// state published by a later promotion.
-func (d *Daemon) clearForSnatch(token attachmentRoleToken) bool {
-	if token.ac == nil || token.ac.overlays == nil {
-		return false
-	}
-	rt := token.ac.overlays
-	current := func() bool {
-		return token.ac.roleGeneration.Load() == token.generation && token.ac.transportSnapshotCurrent(token.transport)
-	}
-	afterFamily := func(family string) {
-		if d.afterSnatchOverlayFamily != nil {
-			d.afterSnatchOverlayFamily(family)
-		}
-	}
-
-	rt.pickerMu.Lock()
-	if !current() {
-		rt.pickerMu.Unlock()
-		return false
-	}
-	previewSession := rt.pickerPreviewSession
-	previewGeneration := rt.pickerPreviewGeneration
-	pickerInstance := remotePickerInstance{ac: token.ac, generation: rt.pickerGeneration, model: rt.picker}
-	rt.picker = nil
-	rt.pickerIntent = pickerNavigate
-	rt.pickerSource = moveSourceLocator{}
-	rt.pickerPending = nil
-	rt.pickerESC.stop()
-	rt.pickerPreviewGeneration++
-	rt.pickerPreview = nil
-	rt.pickerPreviewSession = nil
-	rt.pickerMu.Unlock()
-	afterFamily("picker")
-	// Subscription teardown may enter a coordinator and therefore runs outside
-	// every overlay-family lock.
-	d.teardownPreviewSubscription(token.ac, previewSession, previewGeneration)
-	if pickerInstance.model != nil {
-		d.remotePickerClosed(pickerInstance)
-	}
-
-	rt.paletteMu.Lock()
-	if !current() {
-		rt.paletteMu.Unlock()
-		return false
-	}
-	token.ac.clearPaletteLocked()
-	rt.paletteMu.Unlock()
-	afterFamily("palette")
-
-	rt.promptMu.Lock()
-	if !current() {
-		rt.promptMu.Unlock()
-		return false
-	}
-	rt.prompt = nil
-	rt.promptSubmit = nil
-	rt.promptTransitionSubmit = nil
-	rt.promptPending = nil
-	rt.promptMu.Unlock()
-	afterFamily("prompt")
-
-	rt.resizeMu.Lock()
-	if !current() {
-		rt.resizeMu.Unlock()
-		return false
-	}
-	rt.resizeActive = false
-	rt.resizePending = nil
-	rt.resizeESC.stop()
-	rt.resizeMu.Unlock()
-	afterFamily("resize")
-
-	rt.copyMu.Lock()
-	if !current() {
-		rt.copyMu.Unlock()
-		return false
-	}
-	d.stopCopyPendingTimerLocked(token.ac)
-	rt.copyPending = nil
-	rt.clearCopyModeLocked()
-	rt.statusFeedback = ""
-	rt.copyMu.Unlock()
-	afterFamily("copy")
-
-	rt.noticeMu.Lock()
-	if !current() {
-		rt.noticeMu.Unlock()
-		return false
-	}
-	for i := range rt.noticeToasts {
-		rt.noticeToasts[i].timer.stop()
-	}
-	rt.noticeToasts = nil
-	rt.noticeOverflow = 0
-	rt.noticeSeq++
-	rt.noticesOverlay = nil
-	rt.noticesPending = nil
-	rt.noticesESC.stop()
-	rt.noticeMu.Unlock()
-	afterFamily("notice")
-	return true
-}
-
-func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte, effects ...*roleEffectTicket) bool {
+func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte, effects ...*attachmentEffectTicket) bool {
 	if rt == nil || rt.ac == nil {
 		return false
 	}
 	ac := rt.ac
-	var effect *roleEffectTicket
+	var effect *attachmentEffectTicket
 	if len(effects) != 0 {
 		effect = effects[0]
 	}

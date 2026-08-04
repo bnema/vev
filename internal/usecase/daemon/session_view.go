@@ -34,7 +34,7 @@ type sessionView struct {
 	name              string
 	ephemeral         bool
 	createdAt         int64
-	active            int
+	defaultTab        int
 	mruAt             uint64
 	attached          bool
 	tabCount          int
@@ -53,16 +53,18 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		opts.tabDetails = true
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Session-level listings use the first ordered tab as their deterministic
+	// default. Interactive callers pass an attachment and resolve its stable
+	// view separately.
 	view := sessionView{
 		id:                s.id,
 		incarnation:       s.incarnation,
 		name:              s.name,
 		ephemeral:         s.ephemeral,
 		createdAt:         s.createdAt,
-		active:            s.active,
+		defaultTab:        0,
 		mruAt:             s.mruAt.Load(),
-		attached:          s.client != nil,
+		attached:          len(s.attachments) != 0,
 		tabCount:          len(s.tabs),
 		cannotAcceptMoves: s.capabilities().cannotAcceptMoves,
 	}
@@ -90,6 +92,7 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		}
 		view.tabs = append(view.tabs, entry)
 	}
+	s.mu.Unlock()
 	return view
 }
 
@@ -101,7 +104,7 @@ func (view sessionView) pickerView() picker.SessionView {
 		Incarnation:       view.incarnation,
 		Name:              view.name,
 		TargetName:        view.name,
-		Active:            view.active,
+		Active:            view.defaultTab,
 		Tabs:              make([]picker.TabEntry, 0, len(view.tabs)),
 		CannotAcceptMoves: view.cannotAcceptMoves,
 	}

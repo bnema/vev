@@ -144,45 +144,41 @@ type Daemon struct {
 	// after publishResizeCommit acquires attachment sendMu and before it acquires
 	// owner fences. Tests must not perform external work from this callback.
 	afterResizeCommitSendLocked func()
-	// afterSnatchOverlayFamily is a deterministic structural lock seam. It runs
-	// after one overlay-family mutex is released and before the next is taken.
-	afterSnatchOverlayFamily func(string)
-	// afterSnatchedEscapeAccepted observes a standalone ESC after parser state
-	// is consumed and before its captured role and transport are revalidated.
-	afterSnatchedEscapeAccepted func()
-	// afterSnatchedEscapeAttempt reports whether that callback acquired its exact
-	// role capability after revalidation.
-	afterSnatchedEscapeAttempt func(bool)
 	// afterConnectionSessionSnapshot is a deterministic test seam after the
 	// connection loop reads its current session and before it captures that role.
 	afterConnectionSessionSnapshot func(attachmentSession)
-	// afterActiveFrameDispatch is a deterministic test seam after the connection
-	// loop's first role check and before a decoded active frame takes effect.
-	afterActiveFrameDispatch func(attachmentRoleToken)
-	// afterRoleEffectParticipantsSnapshotted observes immutable role-gate
+	// afterAttachmentFrameDispatch is a deterministic test seam after the
+	// connection loop snapshots a token and before a decoded frame takes effect.
+	afterAttachmentFrameDispatch func(attachmentConnectionToken)
+	// afterAttachmentEffectParticipantsSnapshotted observes immutable role-gate
 	// participants after architecture preflight locks are released and before
 	// the globally ordered freeze begins.
-	afterRoleEffectParticipantsSnapshotted func(string, []*attachedClient)
-	// afterRoleEffectGateFrozen observes each participant after it is frozen in
+	afterAttachmentEffectParticipantsSnapshotted func(string, []*attachedClient)
+	// afterAttachmentEffectGateFrozen observes each participant after it is frozen in
 	// immutable identity order and before drain/publication continues.
-	afterRoleEffectGateFrozen func(string, *attachedClient)
-	// afterRoleEffectsFrozen observes the lock-free boundary after all affected
+	afterAttachmentEffectGateFrozen func(string, *attachedClient)
+	// afterAttachmentEffectsFrozen observes the lock-free boundary after all affected
 	// attachment gates are frozen and drained, before architecture publication.
-	afterRoleEffectsFrozen func()
-	// afterMoveLifecycleReserved and afterMovePaneSourceSnapshot are test-only
-	// seams. They run before role/fence work and after the pre-fence source
+	afterAttachmentEffectsFrozen func()
+	// afterAttachmentTransitionCoordinatorsLocked is a deterministic lock-order
+	// seam used by transition validation tests.
+	afterAttachmentTransitionCoordinatorsLocked func()
+	// beforeMoveDispatch, afterMoveLifecycleReserved, and
+	// afterMovePaneSourceSnapshot are test-only seams. They run before dispatch
+	// admission, after lifecycle reservation, and after the pre-fence source
 	// attachment snapshot respectively. beforeMovePaneCommit runs inside the
 	// non-failing publication section. None is set in production, and none may
 	// perform external work while locks are held.
+	beforeMoveDispatch                        func()
 	afterMoveLifecycleReserved                func()
 	afterMoveLifecycleGateBeforeTeardownLocks func()
 	afterMovePaneSourceSnapshot               func()
 	afterMoveTabSourceSnapshot                func()
 	beforeMovePaneCommit                      func()
 	beforeMoveTabCommit                       func()
-	// afterDetachRoleEffectsFrozen observes terminal detach after it wins the
+	// afterDetachAttachmentEffectsFrozen observes terminal detach after it wins the
 	// attachment gate but before it checks session ownership.
-	afterDetachRoleEffectsFrozen func()
+	afterDetachAttachmentEffectsFrozen func()
 	// beforeClientGoneDetach pauses clientGone after the stale-transport
 	// precheck and before exact transport/incarnation detach validation.
 	beforeClientGoneDetach func()
@@ -200,49 +196,38 @@ type Daemon struct {
 	// afterParkingWaitArmed observes waitParkingInFlight after it has resolved a
 	// matching in-flight entry and before it blocks on done.
 	afterParkingWaitArmed func()
-	// afterSnatchedUnrouteBeforePark pauses parkSnatchedAttachment and
-	// cleanupInterruptedSnatchedAttachment after exact snatched ownership is
-	// removed and before parkAttachmentAs. The parking-in-flight marker must
-	// already be published so a concurrent same-token resume can wait the gap.
-	afterSnatchedUnrouteBeforePark func()
 	// beforeResumeParkedSendMu pauses resumeParked after the initial parked
 	// lookup and before the attachment send lock, so tests can consume or
 	// replace the credential while the handshake waits.
 	beforeResumeParkedSendMu func()
-	// afterDisplacedCleanupStarted observes deferred displaced cleanup before it
-	// synchronizes with the attachment gate.
-	afterDisplacedCleanupStarted func()
-	// beforeReclaimFirstPaint observes a committed reclaim after displaced cleanup
-	// is queued and before its generation-bound reset first paint is admitted.
-	beforeReclaimFirstPaint func(attachmentRoleToken)
-	// afterRoleEffectAdmitted is a deterministic test seam after a frame/paint
+	// afterAttachmentEffectAdmitted is a deterministic test seam after a frame/paint
 	// reserves its exact capability and before its first observable mutation.
-	afterRoleEffectAdmitted func(attachmentRoleToken)
+	afterAttachmentEffectAdmitted func(attachmentConnectionToken)
 	// beforeFirstPaintSendWait is a test-only seam immediately before a
 	// transition first paint waits for the attachment send lock.
-	beforeFirstPaintSendWait func(attachmentRoleToken)
+	beforeFirstPaintSendWait func(attachmentConnectionToken)
 	// afterDelayedKeyEffectAttempt observes whether a timer callback acquired a
 	// fresh exact capability before producing PTY, action, or overlay effects.
 	afterDelayedKeyEffectAttempt func(bool)
-	// afterActionRoleEffectEnded observes action-specific admission release. It
+	// afterActionAttachmentEffectEnded observes action-specific admission release. It
 	// is a deterministic seam for proving no role-bound mutation follows release.
-	afterActionRoleEffectEnded func(string)
-	// beforeRoleSendErrorCleanup pauses asynchronous render-failure retirement
+	afterActionAttachmentEffectEnded func(string)
+	// beforeAttachmentSendErrorCleanup pauses asynchronous render-failure retirement
 	// after the render ticket ends and before exact lifecycle validation.
-	beforeRoleSendErrorCleanup func(attachmentRoleToken)
-	afterRoleSendErrorCleanup  func()
-	ptys                       ports.PTYFactory
-	clock                      ports.Clock
-	log                        *slog.Logger
-	runtimeObserver            ports.RuntimeObserver
-	baseEnv                    []string
-	shell                      string
-	shellArgs                  []string
-	shellOverride              bool
-	persistEnabled             bool
-	catalogue                  ports.Catalogue
-	catalogueRecords           []domain.CatalogueRecord
-	catalogueRecordsProvided   bool
+	beforeAttachmentSendErrorCleanup func(attachmentConnectionToken)
+	afterAttachmentSendErrorCleanup  func()
+	ptys                             ports.PTYFactory
+	clock                            ports.Clock
+	log                              *slog.Logger
+	runtimeObserver                  ports.RuntimeObserver
+	baseEnv                          []string
+	shell                            string
+	shellArgs                        []string
+	shellOverride                    bool
+	persistEnabled                   bool
+	catalogue                        ports.Catalogue
+	catalogueRecords                 []domain.CatalogueRecord
+	catalogueRecordsProvided         bool
 	// snapshotRepository is the sole checkpoint storage contract.
 	snapshotRepository      ports.SnapshotRepository
 	recovery                *recoveryusecase.Coordinator
@@ -339,9 +324,9 @@ type Daemon struct {
 type parkedAttachment struct {
 	sess             *session
 	ac               *attachedClient
-	role             attachmentRole
 	pickerGeneration uint64
 	timer            ports.Timer
+	claimed          bool
 	done             chan struct{}
 	doneOnce         sync.Once
 }
@@ -1012,7 +997,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 			State:     ports.SessionRunning,
 			Ephemeral: s.ephemeral,
 			Tabs:      uint16(len(s.tabs)),
-			Attached:  s.client != nil,
+			Attached:  len(s.attachments) != 0,
 		}
 		liveNames[s.name] = struct{}{}
 		s.mu.Unlock()
@@ -1119,68 +1104,58 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	expected := ac.transportSnapshot()
 	welcomeToken := sess.attachmentToken(ac, tr)
 	welcomeToken.lease = lease
-	welcomeTicket, admitted := ac.beginRoleEffect(welcomeToken)
-	validRole := welcomeToken.role == attachmentSnatched || welcomeToken.role == attachmentActive && lease != nil
-	if expected.transport != tr || !admitted || !validRole {
+	welcomeTicket, admitted := ac.beginAttachmentEffect(welcomeToken)
+	if expected.transport != tr || !admitted || welcomeToken.ac == nil {
 		if admitted {
 			welcomeTicket.End()
 		}
-		if welcomeToken.role == attachmentSnatched {
-			d.parkOrDropSnatchedAttachment(welcomeToken)
-		} else {
+		if !d.abortResumeClaim(ac) {
 			d.clientGone(sess, ac, tr, false)
 		}
 		return
 	}
-	if err := ac.sendExpectedTransportForRole(expected, frameWelcome(sess, ac), welcomeTicket); err != nil {
+	if err := ac.sendExpectedTransportForAttachment(expected, frameWelcome(sess, ac), welcomeTicket); err != nil {
 		welcomeTicket.End()
-		if welcomeToken.role == attachmentSnatched {
-			d.parkOrDropSnatchedAttachment(welcomeToken)
-		} else {
+		if !d.abortResumeClaim(ac) {
 			d.clientGone(sess, ac, tr, false)
 		}
 		return
 	}
-	// Welcome is the only effect allowed to retain the route-time role. Release
-	// it before discovering post-handshake authority so a replacement blocked
-	// behind the send can publish its generation and lease first.
+	if !d.commitResumeClaim(ac) {
+		welcomeTicket.End()
+		if !d.abortResumeClaim(ac) {
+			d.clientGone(sess, ac, tr, false)
+		}
+		return
+	}
+	// Release Welcome's effect before discovering post-handshake authority so a
+	// replacement blocked behind the send can publish its generation and lease.
 	welcomeTicket.End()
-	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentRoleEffect(sess, tr)
+	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentAttachmentEffect(sess, tr)
 	if !admitted {
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	if postWelcomeToken.role == attachmentSnatched {
-		if err := d.sendInitialSnatchedPanel(postWelcomeToken, postWelcomeTicket); err != nil {
-			postWelcomeTicket.End()
-			d.parkOrDropSnatchedAttachment(postWelcomeToken)
-			return
-		}
-		postWelcomeTicket.End()
-		d.runConnLoop(ac)
-		_ = tr.Close()
-		return
-	}
 	postWelcomeLease := postWelcomeToken.lease
-	if postWelcomeToken.role != attachmentActive || rc == nil || postWelcomeLease == nil {
+	if postWelcomeToken.ac == nil {
 		postWelcomeTicket.End()
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
 	if ac.proxied {
-		meta, ok := sess.sessionMetaSnapshot()
+		meta, ok := sess.sessionMetaSnapshotFor(ac)
 		metaFrame, metaErr := frameSessionMeta(meta)
-		if !ok || metaErr != nil || ac.sendExpectedTransportForRole(postWelcomeToken.transport, metaFrame, postWelcomeTicket) != nil {
+		if !ok || metaErr != nil || ac.sendExpectedTransportForAttachment(postWelcomeToken.transport, metaFrame, postWelcomeTicket) != nil {
 			postWelcomeTicket.End()
 			d.clientGone(sess, ac, tr, false)
 			return
 		}
 		ac.markSessionMetaSent(meta)
 	}
-	if !rc.markAttachmentReady(postWelcomeLease) {
+	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
 		postWelcomeTicket.End()
-		// The attachment was displaced or detached while Welcome was in flight;
-		// never let this stale handshake emit an Output frame.
+		// The attachment was detached while Welcome was in flight; never let
+		// this stale handshake emit an Output frame.
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
@@ -1223,10 +1198,9 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	ac := d.prepareAttachedClientLocked(tr, sz, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
-		target:            sess,
-		next:              ac,
-		expectedRole:      attachmentDetached,
-		targetRole:        attachmentActive,
+		target: sess,
+		next:   ac,
+
 		expectedTransport: ac.transportSnapshot(),
 		ready:             false,
 	})

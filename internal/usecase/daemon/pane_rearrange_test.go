@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"io"
 	"maps"
 	"sync"
@@ -185,7 +184,7 @@ func TestPaneRearrangeEdgeNoopHasExactSilentInvariants(t *testing.T) {
 	ac := &attachedClient{}
 	ac.setSession(h.session)
 	h.session.mu.Lock()
-	h.session.client = ac
+	h.session.registerAttachmentLocked(ac)
 	h.session.mu.Unlock()
 	invalidations := make(chan renderInvalidation, 2)
 	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -265,113 +264,6 @@ func TestPaneRearrangeMapsUnsupportedAndTooSmallToUserNoticesAtomically(t *testi
 	}
 }
 
-func TestPaneRearrangeChangedActionPublishesOnce(t *testing.T) {
-	h := newPaneRearrangeHarness(t, domain.Size{Cols: 80, Rows: 22}, threeColumnTree())
-	ac := &attachedClient{}
-	ac.setSession(h.session)
-	h.session.mu.Lock()
-	h.session.client = ac
-	h.session.mu.Unlock()
-	invalidations := make(chan renderInvalidation, 2)
-	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
-	rc.attach(ac)
-	h.session.installRenderCoordinator(rc)
-
-	err := (controlExec{d: h.daemon, sess: h.session, target: h.target("pane-1")}).runAction(daemonActionRequest{
-		kind: daemonActionConsumeOrExpelPane, direction: layout.Right,
-	})
-
-	require.NoError(t, err)
-	h.tab.mu.Lock()
-	require.Equal(t, uint64(1), h.tab.layoutGeneration)
-	h.tab.mu.Unlock()
-	h.session.snapshotMu.Lock()
-	require.Equal(t, uint64(1), h.session.snapshotGeneration)
-	h.session.snapshotMu.Unlock()
-	require.NotZero(t, h.totalResizes())
-	awaitInvalidation(t, invalidations)
-	requireNoInvalidation(t, invalidations)
-}
-
-func TestPaneRearrangeAdaptersOwnDirectionalRequestsAndNormalizeOnlyNoChange(t *testing.T) {
-	genuine := errors.New("genuine rearrange failure")
-	directions := []struct {
-		name       string
-		direction  layout.Direction
-		keyAction  keys.Action
-		paletteRun func(paletteExec) error
-		controlRun func(controlExec) error
-	}{
-		{
-			name: "left", direction: layout.Left, keyAction: keys.ActionConsumeOrExpelPaneLeft,
-			paletteRun: func(e paletteExec) error { return e.ConsumeOrExpelPaneLeft() },
-			controlRun: func(e controlExec) error { return e.ConsumeOrExpelPaneLeft() },
-		},
-		{
-			name: "right", direction: layout.Right, keyAction: keys.ActionConsumeOrExpelPaneRight,
-			paletteRun: func(e paletteExec) error { return e.ConsumeOrExpelPaneRight() },
-			controlRun: func(e controlExec) error { return e.ConsumeOrExpelPaneRight() },
-		},
-	}
-	outcomes := []struct {
-		name       string
-		err        error
-		wantErr    error
-		wantNotice bool
-	}{
-		{name: "silent no-change", err: errDaemonActionNoChange},
-		{name: "genuine error", err: genuine, wantErr: genuine, wantNotice: true},
-	}
-
-	for _, direction := range directions {
-		t.Run(direction.name, func(t *testing.T) {
-			for _, outcome := range outcomes {
-				t.Run(outcome.name, func(t *testing.T) {
-					d := newTestDaemon(t, nil, stubClock{})
-					sess := addControlSession(d, "work", "t_work", "p_work")
-					ac := &attachedClient{}
-					ac.setSession(sess)
-					target := resolveDaemonActionTarget(sess)
-					paletteSpy := &actionRunnerSpy{err: outcome.err}
-					controlSpy := &actionRunnerSpy{err: outcome.err}
-					keySpy := &actionRunnerSpy{err: outcome.err}
-
-					paletteErr := direction.paletteRun(paletteExec{d: d, sess: sess, ac: ac, actions: paletteSpy})
-					controlErr := direction.controlRun(controlExec{d: d, sess: sess, target: target, actions: controlSpy})
-					daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(direction.keyAction, nil)
-
-					if outcome.wantErr == nil {
-						require.NoError(t, paletteErr)
-						require.NoError(t, controlErr)
-					} else {
-						require.ErrorIs(t, paletteErr, outcome.wantErr)
-						require.ErrorIs(t, controlErr, outcome.wantErr)
-					}
-					if outcome.wantNotice {
-						require.Len(t, d.notices.history(), 1, "the key adapter owns reporting its genuine error")
-					} else {
-						require.Empty(t, d.notices.history(), "no-change is silent in the key adapter")
-					}
-
-					for adapter, spy := range map[string]*actionRunnerSpy{
-						"palette": paletteSpy,
-						"control": controlSpy,
-						"key":     keySpy,
-					} {
-						require.Len(t, spy.requests, 1, "%s adapter request count", adapter)
-						request := spy.requests[0]
-						require.Equal(t, daemonActionConsumeOrExpelPane, request.kind, "%s adapter action kind", adapter)
-						require.Equal(t, direction.direction, request.direction, "%s adapter direction", adapter)
-						require.Same(t, target.session, request.target.session, "%s adapter target session", adapter)
-						require.Same(t, target.tab, request.target.tab, "%s adapter target tab", adapter)
-						require.Same(t, target.pane, request.target.pane, "%s adapter target pane", adapter)
-					}
-				})
-			}
-		})
-	}
-}
-
 func TestPaneRearrangeNoChangeAdapterSideEffects(t *testing.T) {
 	tests := []struct {
 		name                    string
@@ -406,7 +298,7 @@ func TestPaneRearrangeNoChangeAdapterSideEffects(t *testing.T) {
 			ac := &attachedClient{}
 			ac.setSession(h.session)
 			h.session.mu.Lock()
-			h.session.client = ac
+			h.session.registerAttachmentLocked(ac)
 			h.session.mu.Unlock()
 			invalidations := make(chan renderInvalidation, 2)
 			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})

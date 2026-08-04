@@ -48,7 +48,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	ac := &attachedClient{output: newOutputStateStream()}
 	failed := &ownedSwapErrorTransport{ac: ac, replacement: replacement, err: sendErr, sent: make(chan ports.Frame, 1)}
 	ac.replaceTransport(failed)
-	sess := &session{sessionCore: sessionCore{name: "work", client: ac}}
+	sess := &session{sessionCore: sessionCore{name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}}
 	ac.setSession(sess)
 
 	used, err := d.boundedSendOutputErrTransport(ac, []byte("copy"))
@@ -60,7 +60,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	require.NoError(t, decodeErr)
 	require.Equal(t, []byte("copy"), out.Data)
 	d.detachOnSendError(sess, ac, used)
-	require.Same(t, ac, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), ac)
 	require.False(t, replacement.Closed())
 }
 
@@ -108,7 +108,7 @@ func TestCopySearchModalGeometry(t *testing.T) {
 func TestCopyModeDocumentCarriesPaneRowIDs(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	pane := sess.activeTab().focusedPane()
+	pane := testAttachmentTab(sess).focusedPane()
 	appendHistoryRow(t, pane.history, testRow("history"))
 	pane.screen.Write([]byte("live"))
 	historyID := pane.history.View().RowID(0)
@@ -128,7 +128,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	pane := tb.focusedPane()
 	pane.mu.Lock()
 	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds(), nil)
@@ -162,7 +162,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	sess.name = "work"
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.focusedPane().screen = vt.NewScreen(12, 3)
 	tb.focusedPane().screen.Write([]byte("live"))
 	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen.Frame, tb.focusedPane().screen.LineBounds(), nil)
@@ -441,7 +441,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		if sess == nil {
 			return false
 		}
-		win := sess.activeTab()
+		win := testAttachmentTab(sess)
 		if win == nil {
 			return false
 		}
@@ -458,7 +458,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	ac := sess.client
+	ac := sess.snapshotAttachments()[0]
 	require.NotNil(t, ac)
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitCoordinatorOutput(t, sends, clk.timers, "while advancing render clock", "controllable timers did not produce an output frame")
@@ -662,7 +662,7 @@ func TestHandleCopyInputUsesImmutableSnapshotWithoutPaneLock(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	pane := sess.activeTab().focusedPane()
+	pane := testAttachmentTab(sess).focusedPane()
 	pane.screen.Write([]byte("live"))
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -729,7 +729,7 @@ func installFloatingCopyFixture(t *testing.T, sess *session, size domain.Size) *
 	floatingPTY, releaseFloating := newBlockingPTY(t)
 	t.Cleanup(releaseFloating)
 	fp := newPane("floating", floatingPTY, size)
-	installTestFloating(sess.activeTab(), fp, true)
+	installTestFloating(testAttachmentTab(sess), fp, true)
 	return fp
 }
 
@@ -748,7 +748,7 @@ func TestCopyModeCapturesSourceAndRetainsItAcrossFocusMove(t *testing.T) {
 			normal, releaseNormal := newBlockingPTYWithWrites(t, normalWrites)
 			defer releaseNormal()
 			d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			second := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 5})
 			tb.mu.Lock()
 			tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
@@ -856,7 +856,7 @@ func TestFloatingExitClearsCopyModeBeforeRepaint(t *testing.T) {
 	normal, releaseNormal := newBlockingPTY(t)
 	defer releaseNormal()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	fp := installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
 	fp.screen.Write([]byte("flt-live"))
 

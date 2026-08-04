@@ -83,7 +83,7 @@ func TestRemotePickerMerge(t *testing.T) {
 	d.remoteCatalog.status["learned"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
 
-	views, _ := d.pickerViews(local)
+	views, _ := d.pickerViews(local, nil)
 
 	require.Equal(t, []string{"local", "work@pinned", "alpha@pinned", "alpha@learned", "stopped"}, pickerViewNames(views))
 	require.False(t, views[0].Stopped)
@@ -113,7 +113,7 @@ func TestRemotePickerDedupeUsesExactKeyAndKeepsLiveID(t *testing.T) {
 		},
 	}})
 
-	views, _ := d.pickerViews(nil)
+	views, _ := d.pickerViews(nil, nil)
 
 	require.Len(t, views, 1)
 	require.Equal(t, key.ID(), views[0].ID)
@@ -132,7 +132,7 @@ func TestRemotePickerSnapshotsDoNotRetainProxyLock(t *testing.T) {
 	}
 	d.sessions[key.ID()] = proxy
 
-	views, _ := d.pickerViews(nil)
+	views, _ := d.pickerViews(nil, nil)
 
 	require.Len(t, views, 1)
 	require.True(t, proxy.mu.TryLock(), "picker construction must release the proxy leaf lock")
@@ -162,7 +162,7 @@ func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 			d.remoteCatalog.status["arch"] = test.status
 			d.remoteCatalog.mu.Unlock()
 
-			views, _ := d.pickerViews(nil)
+			views, _ := d.pickerViews(nil, nil)
 
 			require.Len(t, views, 1)
 			require.Equal(t, test.want, views[0].RemoteAvailability)
@@ -182,7 +182,7 @@ func TestRemotePickerStaleDetailUsesLastSuccessfulFetch(t *testing.T) {
 	d.remoteCatalog.failure["arch"] = failedAt
 	d.remoteCatalog.mu.Unlock()
 
-	views, _ := d.pickerViews(nil)
+	views, _ := d.pickerViews(nil, nil)
 
 	require.Len(t, views, 1)
 	require.Equal(t, "stale since "+fetchedAt.Format(time.RFC3339), views[0].RemoteDetail)
@@ -206,7 +206,7 @@ func TestRemotePickerNoCacheHostFailuresRemainVisible(t *testing.T) {
 			d.remoteCatalog.failure["arch"] = time.Unix(50, 0)
 			d.remoteCatalog.mu.Unlock()
 
-			views, _ := d.pickerViews(nil)
+			views, _ := d.pickerViews(nil, nil)
 
 			require.Len(t, views, 1)
 			require.Equal(t, "arch", views[0].Name)
@@ -233,7 +233,7 @@ func TestRemotePickerGroupedSortTreatsProxiesAsLiveSessions(t *testing.T) {
 	d.sessions[proxy.id] = proxy
 	d.sessions[named.id] = named
 
-	views, _ := d.pickerViews(nil)
+	views, _ := d.pickerViews(nil, nil)
 
 	require.Equal(t, []string{"named", "work@arch", "1"}, pickerViewNames(views))
 }
@@ -539,7 +539,7 @@ func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID) (
 	ac.initOverlays()
 	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	tb.stableID = string(id) + "-tab"
-	sess := &session{sessionCore: sessionCore{id: id, name: string(id), client: ac}, tabs: []*tab{tb}, active: 0}
+	sess := &session{sessionCore: sessionCore{id: id, name: string(id), attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}}
 	publishTiledPaneOwners(sess, tb)
 	ac.setSession(sess)
 	d.sessions[id] = sess
@@ -555,7 +555,7 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 
 	for _, owner := range []*attachedClient{first, second} {
 		owner.overlays.pickerMu.Lock()
-		owner.overlays.picker = d.newPickerModel(firstSession, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: "second", TabID: "second-tab"})
+		owner.overlays.picker = d.newPickerModel(firstSession, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: "second", TabID: "second-tab"})
 		owner.overlays.pickerIntent = pickerNavigate
 		owner.overlays.pickerGeneration++
 		instance := remotePickerInstance{ac: owner, generation: owner.overlays.pickerGeneration, model: owner.overlays.picker}
@@ -600,7 +600,7 @@ func TestRemotePickerTeardownLifecycle(t *testing.T) {
 			d := newRemotePickerDaemon(nil)
 			sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 			ac.resumeCapable = test.resumeCapable
-			model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+			model := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 			d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
 			ac.overlays.pickerMu.Lock()
 			generation := ac.overlays.pickerGeneration
@@ -639,7 +639,7 @@ func TestParkedPickerExpiryClosesCapturedGenerationAndCancelsRefresh(t *testing.
 	d.clock = clock
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 	ac.resumeCapable = true
-	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
 	request := receiveRemotePicker(t, catalog.requests, "catalog request")
 
 	require.True(t, d.parkAttachment(sess, ac))
@@ -659,7 +659,7 @@ func TestParkedPickerRetirementClosesCapturedGenerationOnly(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 	ac.resumeCapable = true
-	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
 	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
 	ac.overlays.pickerMu.Lock()
 	refreshed := ac.overlays.picker
@@ -686,10 +686,10 @@ func TestParkedPickerTokenReplacementRetiresPreviousGeneration(t *testing.T) {
 	firstSession, first, _ := addRemoteRefreshPickerOwner(t, d, "first")
 	secondSession, second, _ := addRemoteRefreshPickerOwner(t, d, "second")
 	first.resumeCapable, second.resumeCapable = true, true
-	d.publishPicker(firstSession, first, d.newPickerModel(firstSession, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	d.publishPicker(firstSession, first, d.newPickerModel(firstSession, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
 	require.True(t, d.parkAttachment(firstSession, first))
 	token := first.resumeToken
-	d.publishPicker(secondSession, second, d.newPickerModel(secondSession, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	d.publishPicker(secondSession, second, d.newPickerModel(secondSession, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
 	second.resumeToken = token
 	require.True(t, d.parkAttachment(secondSession, second))
 
@@ -706,7 +706,7 @@ func TestParkedPickerResumePreservesGeneration(t *testing.T) {
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 	ac.resumeCapable = true
 	ac.clientID = [16]byte{1, 2, 3, 4}
-	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
 	ac.overlays.pickerMu.Lock()
 	model, generation := ac.overlays.picker, ac.overlays.pickerGeneration
 	ac.overlays.pickerMu.Unlock()
@@ -728,7 +728,7 @@ func TestStaleParkedPickerExpiryPreservesNewGeneration(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 	ac.resumeCapable = true
-	d.publishPicker(sess, ac, d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
 	require.True(t, d.parkAttachment(sess, ac))
 	token := ac.resumeToken
 	d.mu.Lock()
@@ -736,7 +736,7 @@ func TestStaleParkedPickerExpiryPreservesNewGeneration(t *testing.T) {
 	d.mu.Unlock()
 	require.NotNil(t, parked)
 
-	newer := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	newer := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, newer, pickerNavigate, moveSourceLocator{})
 	d.expireParked(token, parked)
 	ac.overlays.pickerMu.Lock()
@@ -752,7 +752,7 @@ func TestRemoteRefreshPreservesRemoteCursorAcrossCacheToProxyUpgrade(t *testing.
 		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: key.Name, State: "running"}},
 	}})
 	owner.overlays.pickerMu.Lock()
-	owner.overlays.picker = d.newPickerModel(ownerSession, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: key.ID(), RemoteKey: &key})
+	owner.overlays.picker = d.newPickerModel(ownerSession, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{Session: key.ID(), RemoteKey: &key})
 	owner.overlays.pickerIntent = pickerNavigate
 	before, ok := owner.overlays.picker.Cursor()
 	_, beforeSelectable := owner.overlays.picker.Selected()
@@ -861,44 +861,10 @@ func TestRemoteRefreshCannotStartAfterLastPickerCloseWins(t *testing.T) {
 	}
 }
 
-func TestRemotePickerPublishCannotRegisterAfterSnatchClear(t *testing.T) {
-	d := newRemotePickerDaemon(nil)
-	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	ac.roleGeneration.Store(1)
-	model := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-	registrationReached := make(chan struct{})
-	allowRegistration := make(chan struct{})
-	registrationWait := make(chan error, 1)
-	ac.overlays.beforeRemotePickerRegistration = func() {
-		close(registrationReached)
-		registrationWait <- waitRemotePickerClose(allowRegistration, "picker registration release")
-	}
-	published := make(chan struct{})
-	go func() {
-		d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
-		close(published)
-	}()
-	receiveRemotePickerClose(t, registrationReached, "picker registration")
-
-	token := attachmentRoleToken{
-		sess: sess, ac: ac, role: attachmentSnatched,
-		generation: 1, transport: ac.transportSnapshot(),
-	}
-	require.True(t, d.clearForSnatch(token))
-	close(allowRegistration)
-	require.NoError(t, receiveRemotePicker(t, registrationWait, "picker registration release"))
-	receiveRemotePickerClose(t, published, "picker publication")
-
-	d.remoteCatalog.mu.Lock()
-	_, registered := d.remoteCatalog.pickers[ac]
-	d.remoteCatalog.mu.Unlock()
-	require.False(t, registered, "a picker cleared before delayed registration must not become a refresh owner")
-}
-
 func TestRemotePickerStaleAfterCloseCannotRemoveReopenedPicker(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	first := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	first := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, first, pickerNavigate, moveSourceLocator{})
 
 	staleClose := d.pickerListInputState(ac)
@@ -906,7 +872,7 @@ func TestRemotePickerStaleAfterCloseCannotRemoveReopenedPicker(t *testing.T) {
 	staleClose.closeLocked()
 	ac.overlays.pickerMu.Unlock()
 
-	reopened := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	reopened := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, reopened, pickerNavigate, moveSourceLocator{})
 	staleClose.afterClose()
 
@@ -922,7 +888,7 @@ func TestRemotePickerStaleAfterCloseCannotRemoveReopenedPicker(t *testing.T) {
 func TestRemotePickerStaleRefreshCannotOverwriteReopenedModel(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	first := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	first := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, first, pickerNavigate, moveSourceLocator{})
 
 	rebuildReached := make(chan struct{})
@@ -940,7 +906,7 @@ func TestRemotePickerStaleRefreshCannotOverwriteReopenedModel(t *testing.T) {
 	receiveRemotePickerClose(t, rebuildReached, "picker rebuild")
 
 	d.closePicker(ac)
-	reopened := d.newPickerModel(sess, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	reopened := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, reopened, pickerNavigate, moveSourceLocator{})
 	close(allowPublication)
 	require.NoError(t, receiveRemotePicker(t, publicationWait, "picker publication release"))

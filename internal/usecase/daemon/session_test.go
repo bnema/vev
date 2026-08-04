@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/picker"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -31,55 +32,6 @@ func expectFloatingPrewarmOpen(factory *portsmocks.MockPTYFactory, normalSize do
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
-
-func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	first, releaseFirst := newBlockingPTY(t)
-	defer releaseFirst()
-	second, releaseSecond := newBlockingPTY(t)
-	defer releaseSecond()
-	f := portsmocks.NewMockPTYFactory(t)
-	var dirs []string
-	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, _ []string, dir string, _ domain.Size) (ports.PTY, error) {
-			dirs = append(dirs, dir)
-			if len(dirs) == 1 {
-				return first, nil
-			}
-			return second, nil
-		},
-	).Twice()
-	floating := newQuietPTY()
-	expectFloatingPrewarmOpen(f, normalSize, floating)
-
-	d := newTestDaemon(t, f, stubClock{})
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
-
-	sess, ac, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  ports.IntentNew,
-		Name:    "work",
-		Size:    sz,
-		TermEnv: "xterm-256color",
-		Cwd:     "/tmp/work",
-	}, tr)
-	require.NoError(t, err)
-	require.NotNil(t, ac)
-	require.Equal(t, "/tmp/work", sess.cwd)
-
-	require.NoError(t, d.createTab(sess, sz))
-	require.Equal(t, []string{"/tmp/work", "/tmp/work"}, dirs)
-	requireFloatingInitialized(t, sess.activeTab())
-	_ = d.killSession(sess, ports.ReasonSessionKilled, false)
-	releaseFirst()
-	releaseSecond()
-	d.sessWg.Wait()
-	// Teardown may cancel a queued prewarm before it enters Open; an opened
-	// prewarm is closed by teardownFloating.
-}
 
 func TestHandshakeEphemeralHappy(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
@@ -200,6 +152,53 @@ func TestKillAllEmptyDaemonSignalsShutdown(t *testing.T) {
 	}
 }
 
+func TestCreateTabForAttachmentUsesRequestingAttachmentViewportAndTheme(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	firstTransport := &closeTrackingTransport{}
+	sess, first, err := d.route(ports.Hello{
+		Version:  ports.ProtocolVersion,
+		Intent:   ports.IntentNew,
+		Name:     "work",
+		ClientID: [16]byte{1},
+		Size:     domain.Size{Cols: 80, Rows: 24},
+	}, firstTransport)
+	require.NoError(t, err)
+	secondTransport := &closeTrackingTransport{}
+	_, second, err := d.route(ports.Hello{
+		Version:  ports.ProtocolVersion,
+		Intent:   ports.IntentAttach,
+		Name:     "work",
+		ClientID: [16]byte{2},
+		Proxied:  true,
+		Size:     domain.Size{Cols: 80, Rows: 24},
+	}, secondTransport)
+	require.NoError(t, err)
+	require.NotSame(t, first, second)
+
+	requesterTheme := themeui.Theme{
+		Foreground: themeui.BuiltinLight.Foreground,
+		Background: themeui.BuiltinLight.Background,
+		HasFG:      true,
+		HasBG:      true,
+		Known:      true,
+	}
+	second.setClientTheme(requesterTheme)
+	require.NoError(t, d.createTabForAttachment(sess, second, domain.Size{Cols: 80, Rows: 24}))
+
+	tb := sess.tabs[len(sess.tabs)-1]
+	tb.mu.Lock()
+	gotSize := tb.size
+	pane := tb.focusedPane()
+	tb.mu.Unlock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, gotSize, "proxied sizing must come from the requesting attachment")
+	assertPaneDefaultColors(t, pane, requesterTheme.Foreground, requesterTheme.Background)
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	d.sessWg.Wait()
+}
+
 func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	defer release1()
@@ -283,53 +282,6 @@ func TestEphemeralNumberingReuse(t *testing.T) {
 
 // --- attach replace ---------------------------------------------------------
 
-func TestAttachReplaceKeepsOldClientSnatched(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-
-	// Client A creates and attaches to ephemeral "0".
-	trA, sendsA, releaseA := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(trA) })
-	awaitFrame(t, sendsA, ports.MsgWelcome)
-	awaitFrame(t, sendsA, ports.MsgOutput)
-	sess := firstSession(d)
-	require.NotNil(t, sess)
-	sess.mu.Lock()
-	acA := sess.client
-	sess.mu.Unlock()
-	require.NotNil(t, acA)
-	// The transport observes Send before the render transaction releases sendMu.
-	// Wait for that contract boundary before replacing A; otherwise the test can
-	// intentionally classify the in-flight first paint as an interrupted render.
-	acA.sendMu.Lock()
-	require.Same(t, trA, acA.transportSnapshot().transport)
-	acA.sendMu.Unlock()
-
-	// Client B attaches to the same session, displacing A.
-	trB, sendsB, releaseB := newConn(t, mustHello(ports.IntentAttach, "0", domain.Size{Cols: 80, Rows: 24}))
-	hg.Go(func() { d.handleConn(trB) })
-	awaitFrame(t, sendsB, ports.MsgWelcome)
-	d.attachmentCleanupWg.Wait()
-
-	// B is now the sole active client while A remains a live snatched member.
-	sess.mu.Lock()
-	require.NotNil(t, sess.client)
-	require.NotSame(t, acA, sess.client)
-	_, oldSnatched := sess.snatched[acA]
-	sess.mu.Unlock()
-	require.True(t, oldSnatched)
-	require.Same(t, sess, acA.currentSession())
-
-	releaseA()
-	releaseB()
-	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
-	releasePTY()
-	hg.Wait()
-	d.sessWg.Wait()
-	d.waitNotifies()
-}
-
 // --- detach semantics -------------------------------------------------------
 
 func TestDetachKeepsEphemeralHeadless(t *testing.T) {
@@ -351,7 +303,7 @@ func TestDetachKeepsEphemeralHeadless(t *testing.T) {
 	require.NotNil(t, sess)
 	sess.mu.Lock()
 	require.True(t, sess.ephemeral)
-	require.Nil(t, sess.client, "ephemeral session is headless after detach")
+	require.Empty(t, sess.snapshotAttachmentsLocked(), "ephemeral session is headless after detach")
 	sess.mu.Unlock()
 
 	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -398,7 +350,7 @@ func TestDetachKeepsNamed(t *testing.T) {
 	require.Equal(t, 1, sessionCount(d), "named session survives detach")
 	sess := firstSession(d)
 	sess.mu.Lock()
-	require.Nil(t, sess.client, "named session is headless after detach")
+	require.Empty(t, sess.snapshotAttachmentsLocked(), "named session is headless after detach")
 	sess.mu.Unlock()
 
 	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -1035,29 +987,6 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 	}
 }
 
-func TestCloseActiveTabActivatesDestinationFloatingPane(t *testing.T) {
-	d, sess, ac, _, releases := newManualTabSession(t, 2)
-	sess.mu.Lock()
-	sess.client = ac
-	sess.mu.Unlock()
-	d.ptys = newBlockingOpenFactory(t, d)
-	defer releases[0]()
-	defer releases[1]()
-	sess.mu.Lock()
-	first, closing := sess.tabs[0], sess.tabs[1]
-	sess.active = 1
-	sess.mu.Unlock()
-	first.mu.Lock()
-	stale := first.takeFloatingLocked()
-	first.mu.Unlock()
-	closeFloatingPane(stale)
-
-	require.NoError(t, d.closeTab(sess, closing, false))
-
-	require.Same(t, first, sess.activeTab())
-	requireFloatingInitialized(t, first)
-}
-
 func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p, release := newBlockingPTY(t)
@@ -1619,13 +1548,16 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	got := ac.currentSession()
 	require.NotNil(t, got)
 	sourceCoordinator.mu.Lock()
-	require.NotNil(t, sourceCoordinator.lease)
-	require.False(t, sourceCoordinator.lease.active, "source callbacks must be stale after handoff")
+	require.Empty(t, sourceCoordinator.attachments, "source callbacks must be stale after handoff")
+	require.Empty(t, sourceCoordinator.leases, "source leases must be retired after handoff")
 	sourceCoordinator.mu.Unlock()
 	destinationCoordinator := got.renderCoordinator()
 	require.NotNil(t, destinationCoordinator, "destination coordinator precedes first paint")
 	destinationCoordinator.mu.Lock()
-	require.Same(t, ac, destinationCoordinator.lease.attachment)
+	require.Contains(t, destinationCoordinator.attachments, ac)
+	lease := destinationCoordinator.leases[ac]
+	require.NotNil(t, lease)
+	require.Same(t, ac, lease.attachment)
 	destinationCoordinator.mu.Unlock()
 	ac.sendMu.Lock()
 	require.Equal(t, uint64(1), ac.output.next-ac.output.acked, "only the destination first paint may follow the rebase")

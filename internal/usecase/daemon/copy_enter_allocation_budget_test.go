@@ -3,5 +3,5 @@
 package daemon
 
 // copyEnterAllocationBudgetEnabled keeps the allocation gate aligned with the
-// non-race parent benchmark, whose allocation baseline defines the budget.
+// non-race benchmark, whose allocation baseline defines the budget.
 const copyEnterAllocationBudgetEnabled = true

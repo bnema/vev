@@ -57,9 +57,10 @@ func TestProxiedHandshakeOrdersWelcomeMetadataAndBaseZeroContent(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	sess.activeTab().mu.Lock()
-	actualContentSize := sess.activeTab().size
-	sess.activeTab().mu.Unlock()
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	actualContentSize := tb.size
+	tb.mu.Unlock()
 	require.Equal(t, contentSize, actualContentSize, "proxied geometry must not subtract chrome a second time")
 
 	release()
@@ -94,9 +95,10 @@ func TestOrdinaryHandshakeRetainsChromeAndNoMetadata(t *testing.T) {
 
 	sess := firstSession(d)
 	require.NotNil(t, sess)
-	sess.activeTab().mu.Lock()
-	actualContentSize := sess.activeTab().size
-	sess.activeTab().mu.Unlock()
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	actualContentSize := tb.size
+	tb.mu.Unlock()
 	require.Equal(t, tabSize(viewport), actualContentSize)
 	requireNoOutputFrame(t, sends)
 
@@ -127,7 +129,7 @@ func TestProxiedRemotePaintSendsMetadataBeforeScreen(t *testing.T) {
 	require.True(t, applyTestScreenText(proxy, 0, 0, "remote"))
 
 	ac.sendMu.Lock()
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.True(t, d.emitFrame(proxy, ac, state, composed))
@@ -143,7 +145,7 @@ func TestProxiedRemotePaintSendsMetadataBeforeScreen(t *testing.T) {
 func TestProxiedPaintPublishesAbsoluteVisibleCursorStyle(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	pane := sess.activeTab().focusedPane()
+	pane := testAttachmentTab(sess).focusedPane()
 	pane.mu.Lock()
 	pane.screen.Write([]byte("\x1b[3;6H\x1b[0 q"))
 	pane.mu.Unlock()
@@ -203,13 +205,13 @@ func TestProxyResizeUpdatesAttachmentViewport(t *testing.T) {
 func TestProxiedTransactionalResizeUsesReceivedContentGeometry(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := d.attachCoordinator(sess, ac, true)
 	lease := rc.attachmentLease(ac)
 	require.NotNil(t, lease)
 
 	want := domain.Size{Cols: 100, Rows: 12}
 	require.True(t, d.requestTransactionalResizeForLease(sess, ac, lease, want, true))
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	require.Equal(t, want, tb.size)
 	tb.mu.Unlock()
@@ -260,7 +262,7 @@ func TestProxiedModeCannotChangeAcrossResume(t *testing.T) {
 func TestOutputResetRebasesFullWindowAndSchedulesBaseZeroPaint(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := d.attachCoordinator(sess, ac, true)
 	lease := rc.attachmentLease(ac)
 	require.NotNil(t, lease)
 
@@ -270,7 +272,7 @@ func TestOutputResetRebasesFullWindowAndSchedulesBaseZeroPaint(t *testing.T) {
 	ac.sendMu.Unlock()
 
 	token := sess.attachmentToken(ac, ac.transport())
-	require.False(t, d.handleActiveClientFrame(token, ports.Frame{
+	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{
 		Type:    ports.MsgOutputResetRequest,
 		Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 	}))
@@ -302,16 +304,16 @@ func TestOutputResetRequiresProxiedActiveRoleAndStrictPayload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 			ac.proxied = tt.proxied
-			d.attachCoordinator(sess, nil, ac, true)
+			d.attachCoordinator(sess, ac, true)
 			ac.sendMu.Lock()
 			ac.output.next, ac.output.acked = 4, 0
 			ac.sendMu.Unlock()
 
 			token := sess.attachmentToken(ac, ac.transport())
 			if tt.staleRole {
-				token.role = attachmentSnatched
+				token.generation++
 			}
-			require.False(t, d.handleActiveClientFrame(token, ports.Frame{Type: ports.MsgOutputResetRequest, Payload: tt.payload}))
+			require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgOutputResetRequest, Payload: tt.payload}))
 			ac.sendMu.Lock()
 			acked := ac.output.acked
 			ac.sendMu.Unlock()
@@ -323,7 +325,7 @@ func TestOutputResetRequiresProxiedActiveRoleAndStrictPayload(t *testing.T) {
 func TestOutputResetRevalidatesTransportUnderSendLock(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	ac.proxied = true
-	d.attachCoordinator(sess, nil, ac, true)
+	d.attachCoordinator(sess, ac, true)
 	ac.sendMu.Lock()
 	ac.output.next, ac.output.acked = 4, 0
 	ac.sendMu.Unlock()
@@ -331,11 +333,11 @@ func TestOutputResetRevalidatesTransportUnderSendLock(t *testing.T) {
 
 	admitted := make(chan struct{})
 	var once sync.Once
-	d.afterRoleEffectAdmitted = func(attachmentRoleToken) { once.Do(func() { close(admitted) }) }
+	d.afterAttachmentEffectAdmitted = func(attachmentConnectionToken) { once.Do(func() { close(admitted) }) }
 	ac.sendMu.Lock()
 	done := make(chan bool, 1)
 	go func() {
-		done <- d.handleActiveClientFrame(token, ports.Frame{
+		done <- d.handleAttachmentClientFrame(token, ports.Frame{
 			Type:    ports.MsgOutputResetRequest,
 			Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
 		})

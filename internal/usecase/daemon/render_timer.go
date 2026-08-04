@@ -81,7 +81,7 @@ func (s *timerSupervisor) startLocked(token *timerToken, timerC <-chan time.Time
 func (s *timerSupervisor) wait() { s.workers.Wait() }
 
 // stopDetachedTimer is intentionally non-blocking. Ordinary lifecycle and
-// replacement transitions may cancel/stop stale workers but callback stacks
+// attachment transitions may cancel/stop stale workers but callback stacks
 // never wait for a worker to finish.
 func stopDetachedTimer(token *timerToken) {
 	if token != nil && token.timer != nil {

@@ -78,7 +78,7 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 	title := d.refreshPaneTitle(sess, "pane-1")
 	require.Equal(t, "vim", title)
 
-	p := sess.activeTab().focusedPane()
+	p := testAttachmentTab(sess).focusedPane()
 	p.mu.Lock()
 	p.screen.Write([]byte("\x1b]2;project/main.go\a"))
 	p.refreshTerminalTitleLocked()
@@ -87,6 +87,27 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 
 	require.Equal(t, "vim: project/main.go", title)
 	require.Equal(t, "vim", p.title.processName)
+}
+
+func TestRefreshPaneTitleUsesProvidedOwningTab(t *testing.T) {
+	secondPTY := portsmocks.NewMockPTY(t)
+	secondPTY.EXPECT().ForegroundPgid().Return(222, nil).Once()
+	_, sess, _, _ := newManualSessionWithPTYs(t, nil)
+	second := newTabWithStableID("second-tab", "second-pane", secondPTY, domain.Size{Cols: 80, Rows: 23})
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, second)
+	sess.mu.Unlock()
+	d := newTestDaemon(t, nil, stubClock{})
+	d.procComm = func(pid int) (string, error) {
+		require.Equal(t, 222, pid)
+		return "vim", nil
+	}
+
+	require.Equal(t, "vim", d.refreshPaneTitle(sess, "pane-1", second))
+	secondPane := second.panes["pane-1"]
+	secondPane.mu.Lock()
+	require.Equal(t, "vim", secondPane.title.processName)
+	secondPane.mu.Unlock()
 }
 
 func TestRefreshPaneTitleCachesByTTLAndRefreshesOnFocus(t *testing.T) {
@@ -142,7 +163,7 @@ func TestRefreshFloatingPaneTitleUsesShellFallbackForEmptyCommand(t *testing.T) 
 
 func TestRefreshPaneTitleUpdatesNormalPaneShellFallback(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, nil)
-	p := sess.activeTab().focusedPane()
+	p := testAttachmentTab(sess).focusedPane()
 
 	d.shell = "/usr/bin/fish"
 	require.Equal(t, "fish", d.refreshPaneTitle(sess, "pane-1"))
@@ -170,7 +191,7 @@ func TestRefreshPaneTitleLookupFailureKeepsProcessNameEmpty(t *testing.T) {
 	d := newTestDaemon(t, nil, clk)
 	d.shell = "/usr/bin/fish"
 	d.procComm = func(int) (string, error) { return "", errors.New("unused") }
-	p := sess.activeTab().focusedPane()
+	p := testAttachmentTab(sess).focusedPane()
 
 	p.mu.Lock()
 	p.screen.Write([]byte("\x1b]2;terminal\a"))

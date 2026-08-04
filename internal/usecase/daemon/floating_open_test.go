@@ -130,11 +130,11 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 			tb.mu.Unlock()
 			require.NotNil(t, floating)
 			sess.mu.Lock()
-			sess.client = &attachedClient{}
+			sess.registerAttachmentLocked(&attachedClient{})
 			sess.mu.Unlock()
 			require.Equal(t, tt.desiredVisible, d.paneRenderable(sess, tb, floating), "installed popup renderability must follow its retained visibility")
 			sess.mu.Lock()
-			sess.client = nil
+			clearAttachmentsForTestLocked(sess)
 			sess.mu.Unlock()
 			select {
 			case <-pty.readerStarted:
@@ -228,7 +228,7 @@ func TestFloatingOpenErrorReleasesReturnedPTYBeforePublishingFailure(t *testing.
 			ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 			ac.initOverlays()
 			sessCtx, cancelSession := context.WithCancel(t.Context())
-			sess := &session{sessionCore: sessionCore{id: "floating-open-error", name: "work", client: ac}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancelSession}
+			sess := &session{sessionCore: sessionCore{id: "floating-open-error", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancelSession}
 			ac.setSession(sess)
 
 			// Close must be safe to run before failure publication and without

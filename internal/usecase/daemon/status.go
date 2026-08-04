@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -181,6 +182,10 @@ type statusTab struct {
 }
 
 func (s *session) statusSegments(includeTerminalTitle bool) statusSnapshot {
+	return s.statusSegmentsFor(nil, includeTerminalTitle)
+}
+
+func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle bool) statusSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name := s.name
@@ -188,9 +193,19 @@ func (s *session) statusSegments(includeTerminalTitle bool) statusSnapshot {
 		name += "*"
 	}
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
+	activeIndex := 0
+	if ac != nil {
+		view := ac.viewSnapshot()
+		for i, tb := range s.tabs {
+			if domain.TabStableID(tb.stableID) == view.tabID {
+				activeIndex = i
+				break
+			}
+		}
+	}
 	for i, tb := range s.tabs {
 		name := tabDisplayName(tb, i)
-		active := i == s.active
+		active := i == activeIndex
 		attention := tb.attention && (!active || tb.attentionVisiblePaint)
 		snap.tabs[i] = statusTab{name: name, paneTitle: tb.focusedPaneTitle(includeTerminalTitle), active: active, attention: attention}
 	}
@@ -236,6 +251,10 @@ func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hi
 // attachment implementation. Bar scripts remain local-session-only because
 // their existing execution contract depends on local tabs and PTYs.
 func (d *Daemon) barStateForAttachmentPaletteHints(cur attachmentSession, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
+	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, recent)
+}
+
+func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur attachmentSession, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
 	if attachmentSessionCore(cur) == nil {
 		cur = nil
 	}
@@ -249,7 +268,11 @@ func (d *Daemon) barStateForAttachmentPaletteHints(cur attachmentSession, status
 		if d != nil {
 			includeTerminalTitle = d.currentTabsConfig().TerminalTitle
 		}
-		state.status = cur.statusSegments(includeTerminalTitle)
+		if local, ok := localSession(cur); ok {
+			state.status = local.statusSegmentsFor(ac, includeTerminalTitle)
+		} else {
+			state.status = cur.statusSegments(includeTerminalTitle)
+		}
 	}
 	if local, ok := localSession(cur); ok && d != nil {
 		state.topRight, state.bottomRight = d.barScriptSnapshot(local)
@@ -269,6 +292,10 @@ func (d *Daemon) barStateFor(cur *session, statusFeedback string) barState {
 }
 
 func (d *Daemon) barStateBase(cur *session, statusFeedback string) barState {
+	return d.barStateBaseFor(cur, nil, statusFeedback)
+}
+
+func (d *Daemon) barStateBaseFor(cur *session, ac *attachedClient, statusFeedback string) barState {
 	state := barState{statusFeedback: statusFeedback}
 	if d != nil {
 		state.attentionFrame = d.attentionFrame()
@@ -278,7 +305,7 @@ func (d *Daemon) barStateBase(cur *session, statusFeedback string) barState {
 		if d != nil {
 			includeTerminalTitle = d.currentTabsConfig().TerminalTitle
 		}
-		state.status = cur.statusSegments(includeTerminalTitle)
+		state.status = cur.statusSegmentsFor(ac, includeTerminalTitle)
 	}
 	if d != nil {
 		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)

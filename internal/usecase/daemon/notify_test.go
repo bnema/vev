@@ -55,102 +55,9 @@ func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.
 	}
 }
 
-func TestHandleClientNoticeSerializesReplacement(t *testing.T) {
-	d, sess, old, _ := newNoticeFixture(t, newNoticeClock())
-
-	enteredMutation := make(chan struct{})
-	releaseMutation := make(chan struct{})
-	d.notices.beforeClientNoticeMutation = func() {
-		close(enteredMutation)
-		<-releaseMutation
-	}
-	t.Cleanup(func() {
-		select {
-		case <-releaseMutation:
-		default:
-			close(releaseMutation)
-		}
-	})
-
-	noticeDone := make(chan struct{})
-	go func() {
-		d.handleClientNotice(sess, old, ports.ClientNotice{Action: ports.ClientNoticeClipboardFallback})
-		close(noticeDone)
-	}()
-	<-enteredMutation // old has validated ownership and holds routingMu
-	if d.notices.routingMu.TryLock() {
-		d.notices.routingMu.Unlock()
-		t.Fatal("client notice mutation must retain routingMu through publication")
-	}
-
-	tr, _ := newCapturingTransport(t)
-	replaced := make(chan *attachedClient, 1)
-	go func() {
-		current, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
-		replaced <- current
-	}()
-
-	// Releasing the mutation lets the already-validated notice publish before
-	// replacement can own the session. Snatch cleanup then clears the displaced
-	// attachment's presentation state without moving the notice to the new one.
-	close(releaseMutation)
-	<-noticeDone
-	current := <-replaced
-	d.attachmentCleanupWg.Wait()
-
-	history := d.notices.history()
-	require.Len(t, history, 1)
-	require.Equal(t, domain.NoticeClipboard, history[0].Code)
-	oldToasts, _ := visibleToasts(old)
-	require.Empty(t, oldToasts)
-	newToasts, _ := visibleToasts(current)
-	require.Empty(t, newToasts)
-	sess.mu.Lock()
-	require.Same(t, current, sess.client)
-	sess.mu.Unlock()
-}
-
-func TestHandleClientNoticeRejectsReplacedClient(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		setup  func(*Daemon, *attachedClient, domain.SessionID)
-		notice ports.ClientNotice
-	}{
-		{
-			name:   "record",
-			notice: ports.ClientNotice{Action: ports.ClientNoticeClipboardFallback},
-		},
-		{
-			name: "dismiss",
-			setup: func(d *Daemon, ac *attachedClient, sid domain.SessionID) {
-				d.showToast(ac, notice(domain.NoticeConnection, "connection degraded", sid))
-			},
-			notice: ports.ClientNotice{Action: ports.ClientNoticeLinkConnected},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			d, sess, old, _ := newNoticeFixture(t, newNoticeClock())
-			if tt.setup != nil {
-				tt.setup(d, old, sess.id)
-			}
-			tr, _ := newCapturingTransport(t)
-			current, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
-			d.attachmentCleanupWg.Wait()
-
-			d.handleClientNotice(sess, old, tt.notice)
-
-			require.Empty(t, d.notices.history(), "a replaced client must not record notices")
-			oldToasts, _ := visibleToasts(old)
-			require.Empty(t, oldToasts, "snatch cleanup must remove displaced notice presentation")
-			currentToasts, _ := visibleToasts(current)
-			require.Empty(t, currentToasts)
-		})
-	}
-}
-
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
-	d.attachCoordinator(sess, nil, ac, true)
+	d.attachCoordinator(sess, ac, true)
 	tr, ok := ac.tr.(*portsmocks.MockTransport)
 	require.True(t, ok, "attached client transport must be a MockTransport")
 	frames := []ports.Frame{
@@ -379,7 +286,7 @@ func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attach
 	for _, pane := range tb.panes {
 		pane.ctx, pane.cancel = wctx, wcancel
 	}
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", client: ac}, ctx: sctx, cancel: cancel, tabs: []*tab{tb}}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: []*tab{tb}}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
@@ -521,7 +428,7 @@ func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 
 	other := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	other.initOverlays()
-	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", client: other}, ctx: sess.ctx, cancel: func() {}}
+	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{other: {}}}, ctx: sess.ctx, cancel: func() {}}
 	other.setSession(sess2)
 	d.mu.Lock()
 	d.sessions[sess2.id] = sess2
@@ -606,7 +513,7 @@ func TestNotifySessionScopedReleasesRoutingBeforeRepaint(t *testing.T) {
 func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	d, sessA, oldA, _ := newNoticeFixture(t, newNoticeClock())
 	sessA.mu.Lock()
-	sessA.client = nil
+	clearAttachmentsForTestLocked(sessA)
 	sessA.mu.Unlock()
 
 	clientB := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
@@ -628,7 +535,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	require.Empty(t, oldToasts, "a detached session must not paint a toast")
 
 	sessB.mu.Lock()
-	sessB.client = clientB
+	sessB.registerAttachmentLocked(clientB)
 	sessB.mu.Unlock()
 	d.drainPendingForFirstPaint(sessB, clientB)
 	bToasts, _ := visibleToasts(clientB)
@@ -638,7 +545,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	require.Equal(t, "global announcement", bToasts[0].Message)
 
 	sessA.mu.Lock()
-	sessA.client = oldA
+	sessA.registerAttachmentLocked(oldA)
 	sessA.mu.Unlock()
 	d.drainPendingForFirstPaint(sessA, oldA)
 	aToasts, _ := visibleToasts(oldA)
@@ -652,7 +559,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	secondA.initOverlays()
 	secondA.setSession(sessA)
 	sessA.mu.Lock()
-	sessA.client = secondA
+	sessA.registerAttachmentLocked(secondA)
 	sessA.mu.Unlock()
 	d.drainPendingForFirstPaint(sessA, secondA)
 	secondToasts, _ := visibleToasts(secondA)
@@ -664,7 +571,7 @@ func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
 
 	second := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	second.initOverlays()
-	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", client: second}, ctx: sess.ctx, cancel: func() {}}
+	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{second: {}}}, ctx: sess.ctx, cancel: func() {}}
 	second.setSession(sess2)
 	d.mu.Lock()
 	d.sessions[sess2.id] = sess2
@@ -682,7 +589,7 @@ func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
 func TestNotifyGlobalDoesNotStrandNoticeWhenFirstPaintRacesQueue(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	routeObserved := make(chan struct{})
@@ -701,7 +608,7 @@ func TestNotifyGlobalDoesNotStrandNoticeWhenFirstPaintRacesQueue(t *testing.T) {
 	// Publish the attachment and start firstPaint while global routing still
 	// owns its gate. firstPaint must wait for the queue, then drain it.
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	paintDone := make(chan struct{})
 	go func() {
@@ -744,52 +651,14 @@ func TestNotifyGlobalSerializesDetachWithDelivery(t *testing.T) {
 	toasts, _ := visibleToasts(ac)
 	require.Len(t, toasts, 1)
 	sess.mu.Lock()
-	require.Nil(t, sess.client)
-	sess.mu.Unlock()
-}
-
-func TestNotifyGlobalSerializesReplacementWithDelivery(t *testing.T) {
-	d, sess, old, _ := newNoticeFixture(t, newNoticeClock())
-
-	routeObserved := make(chan struct{})
-	releaseRoute := make(chan struct{})
-	d.notices.beforeGlobalDelivery = func() {
-		close(routeObserved)
-		<-releaseRoute
-	}
-	globalDone := make(chan struct{})
-	go func() {
-		d.NotifyGlobal(domain.NoticeWarn, domain.NoticeConfigReload, "config reload failed", nil)
-		close(globalDone)
-	}()
-	<-routeObserved // old is selected and routingMu is held
-
-	tr, _ := newCapturingTransport(t)
-	replaced := make(chan *attachedClient, 1)
-	go func() {
-		ac, _, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
-		replaced <- ac
-	}()
-	close(releaseRoute)
-	<-globalDone
-	current := <-replaced
-	d.attachmentCleanupWg.Wait()
-
-	// Replacement publishes only after delivery, then snatch cleanup removes
-	// the displaced attachment's presentation state.
-	oldToasts, _ := visibleToasts(old)
-	require.Empty(t, oldToasts)
-	newToasts, _ := visibleToasts(current)
-	require.Empty(t, newToasts)
-	sess.mu.Lock()
-	require.Same(t, current, sess.client)
+	require.Empty(t, sess.snapshotAttachmentsLocked())
 	sess.mu.Unlock()
 }
 
 func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
@@ -797,7 +666,7 @@ func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.
 	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
 
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.drainPendingForFirstPaint(sess, ac)
 
@@ -813,7 +682,7 @@ func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.
 func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite, "snapshot write failed", nil)
@@ -824,7 +693,7 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 
 	// Re-attach and let firstPaint drain the pending queue.
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.firstPaint(sess, ac, domain.Size{})
 
@@ -841,7 +710,7 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	cause := errors.New("open store.db: permission denied")
@@ -854,7 +723,7 @@ func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {
 
 	// Re-attach and let firstPaint drain the pending queue.
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.firstPaint(sess, ac, domain.Size{})
 

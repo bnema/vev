@@ -9,6 +9,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func clearAttachmentsForTest(sess *session) {
+	for _, ac := range sess.snapshotAttachments() {
+		sess.unregisterAttachment(ac)
+	}
+}
+
+func clearAttachmentsForTestLocked(sess *session) {
+	for _, ac := range sess.snapshotAttachmentsLocked() {
+		sess.unregisterAttachmentLocked(ac)
+	}
+}
+
 func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 	sess := &session{}
 	sess.id = domain.SessionID("local")
@@ -24,8 +36,8 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 
 	core.mu.Lock()
 	require.False(t, sess.mu.TryLock(), "sessionCore.mu must be the mutex promoted as session.mu")
-	core.client = ac
-	require.Equal(t, attachmentActive, sess.attachmentRoleLocked(ac))
+	core.registerAttachmentLocked(ac)
+	require.Equal(t, true, sess.attachmentRegisteredLocked(ac))
 	sess.tabs = append(sess.tabs, &tab{name: "logs"})
 	require.Len(t, sess.tabs, 2)
 	core.mu.Unlock()
@@ -37,7 +49,7 @@ func TestSessionCorePreservesLocalIdentityAndPromotedMutex(t *testing.T) {
 func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.T) {
 	sess := &session{
 		sessionCore: sessionCore{id: domain.SessionID("local"), name: "work"},
-		tabs:        []*tab{{name: "shell"}},
+		tabs:        []*tab{{stableID: "tab-shell", name: "shell"}},
 	}
 	ac := &attachedClient{}
 
@@ -45,9 +57,9 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 	// promoted core mutex. snapshotView must observe the same mutex before it
 	// can publish either field.
 	sess.core().mu.Lock()
-	sess.tabs = append(sess.tabs, &tab{name: "logs"})
-	sess.active = 1
-	sess.client = ac
+	sess.tabs = append(sess.tabs, &tab{stableID: "tab-logs", name: "logs"})
+	sess.registerAttachmentLocked(ac)
+	sess.activateAttachmentViewLocked(ac, 1)
 
 	preCall := make(chan struct{})
 	allowCall := make(chan struct{})
@@ -71,13 +83,14 @@ func TestSessionSnapshotViewUsesPromotedMutexForLocalTabAndRoleState(t *testing.
 		t.Fatal("snapshotView completed while sessionCore.mu guarded local session state")
 	case <-timer.C:
 	}
-	require.Equal(t, attachmentActive, sess.attachmentRoleLocked(ac))
+	require.Equal(t, true, sess.attachmentRegisteredLocked(ac))
 	sess.core().mu.Unlock()
 
 	view := awaitTestValue(t, snapshotted, "snapshotView did not complete after sessionCore.mu was released")
 	require.True(t, view.attached)
 	require.Equal(t, 2, view.tabCount)
-	require.Equal(t, 1, view.active)
+	require.Equal(t, 0, view.defaultTab)
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
 }
 
 func TestLocalCreateThenKillRemovesLiveRegistryEntry(t *testing.T) {
@@ -132,45 +145,6 @@ func TestSessionCoreLockOrderUsesImmutableIDs(t *testing.T) {
 	first.core().mu.Unlock()
 	require.True(t, second.core().mu.TryLock())
 	second.core().mu.Unlock()
-}
-
-func TestInitialMetadataSkipsInvalidSnapshot(t *testing.T) {
-	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  ports.IntentNew,
-		Name:    "remote-work",
-		Size:    defaultSize,
-	}
-	tr := newWelcomeBlockingTransport(t)
-	done := make(chan struct{})
-	go func() {
-		d.handleHello(tr.tr, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
-		close(done)
-	}()
-
-	awaitTestCompletion(t, tr.welcomeEntered, "handshake did not send Welcome")
-	sess := firstSession(d)
-	require.NotNil(t, sess)
-	sess.mu.Lock()
-	sess.active = len(sess.tabs)
-	sess.mu.Unlock()
-	// finish (not just release) also closes recvDone, so runConnLoop's Recv
-	// fails immediately after the first paint and the handshake goroutine
-	// returns instead of blocking on further input.
-	tr.finish()
-	awaitTestCompletion(t, done, "invalid metadata snapshot did not end the handshake")
-
-	welcome := <-tr.sends
-	require.Equal(t, ports.MsgWelcome, welcome.Type)
-	select {
-	case frame := <-tr.sends:
-		t.Fatalf("invalid metadata snapshot was sent as frame type %d", frame.Type)
-	default:
-	}
-
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
-	d.sessWg.Wait()
 }
 
 func mustLocalSession(t *testing.T, entry attachmentSession) *session {

@@ -94,7 +94,7 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	p2, release2 := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1, p2)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	d.ptys = newBlockingOpenFactory(t, d)
 	defer release1()
@@ -109,8 +109,8 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
-	require.Equal(t, 1, activeTabIndex(sess))
-	requireFloatingInitialized(t, sess.activeTab())
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
+	requireFloatingInitialized(t, testAttachmentTab(sess))
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
@@ -138,7 +138,7 @@ func TestRemotePaletteClosesBeforeOpeningLocalOverlay(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			d, _, ac, link, handler := newProxyInputHarness(t)
 			handler.enterPalette()
-			d.handlePaletteInput(ac, []byte(test.code+"\r"), handler.roleToken.effect)
+			d.handlePaletteInput(ac, []byte(test.code+"\r"), handler.connectionToken.effect)
 
 			require.False(t, ac.overlays.paletteActive(), "stale remote palette remained active")
 			require.True(t, test.active(ac.overlays), "replacement local overlay was not opened")
@@ -317,7 +317,7 @@ func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *t
 	d.handleInput(current, ac, []byte("recent\r"))
 
 	require.Same(t, target, ac.currentSession())
-	require.Same(t, ac, target.client, "canonical handoff reuses the attached client")
+	require.Contains(t, target.snapshotAttachments(), ac, "canonical handoff reuses the attached client")
 	require.False(t, ac.overlays.paletteActive())
 	require.Empty(t, d.paletteRecent, "session selections are not command recency")
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -340,7 +340,7 @@ func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *te
 
 	require.Same(t, current, ac.currentSession(), "failed resume must retain the source attachment")
 	current.mu.Lock()
-	require.Same(t, ac, current.client)
+	require.Contains(t, current.snapshotAttachmentsLocked(), ac)
 	current.mu.Unlock()
 	require.True(t, ac.overlays.paletteActive())
 	ac.overlays.paletteMu.Lock()
@@ -361,14 +361,14 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	generation := ac.roleGeneration.Load()
+	generation := ac.connectionGeneration.Load()
 	d.handleInput(current, ac, []byte("stopped\r"))
 
 	resumed := ac.currentSession()
 	require.Equal(t, "stopped", resumed.name)
 	require.Equal(t, int64(42), resumed.createdAt)
-	require.Equal(t, attachmentActive, resumed.attachmentRole(ac))
-	require.Greater(t, ac.roleGeneration.Load(), generation, "stopped-session handoff must publish through the attachment transition")
+	require.Equal(t, true, resumed.attachmentRegistered(ac))
+	require.Greater(t, ac.connectionGeneration.Load(), generation, "stopped-session handoff must publish through the attachment transition")
 	require.False(t, ac.overlays.paletteActive())
 	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
@@ -440,7 +440,7 @@ func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
 	d.handleInput(sess, ac, []byte("next\r"))
 
 	require.False(t, ac.overlays.paletteActive())
-	require.Equal(t, 1, activeTabIndex(sess))
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -486,7 +486,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	invalidations := installPaletteInvalidationObserver(current)
 	d.enterPalette(current, ac)
 	d.handlePaletteInput(ac, []byte("BSK"))
-	d.afterActionRoleEffectEnded = func(action string) {
+	d.afterActionAttachmentEffectEnded = func(action string) {
 		if action == "back-session" {
 			d.mu.Lock()
 			delete(d.sessions, target.core().id)
@@ -495,7 +495,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	}
 
 	token := current.attachmentToken(ac, ac.transport())
-	effect, admitted := ac.beginRoleEffect(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	d.handlePaletteInput(ac, []byte("\r"), effect)
 
@@ -505,7 +505,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	require.True(t, invalidation.reset)
 }
 
-func TestPaletteDeniedPostHandoffRoleEffectClosesAndInvalidates(t *testing.T) {
+func TestPaletteDeniedPostHandoffAttachmentEffectClosesAndInvalidates(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
@@ -514,10 +514,10 @@ func TestPaletteDeniedPostHandoffRoleEffectClosesAndInvalidates(t *testing.T) {
 	d.enterPalette(sess, ac)
 	d.handlePaletteInput(ac, []byte("BSK"))
 	// Make the attachment token detached while retaining currentSession. The
-	// no-op BSK command succeeds, but its post-execution beginRoleEffect is
+	// no-op BSK command succeeds, but its post-execution beginAttachmentEffect is
 	// deterministically denied.
 	sess.mu.Lock()
-	sess.client = nil
+	clearAttachmentsForTestLocked(sess)
 	sess.mu.Unlock()
 
 	d.handlePaletteInput(ac, []byte("\r"))
@@ -639,7 +639,7 @@ func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	installTestFloating(tb, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
@@ -671,7 +671,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.True(t, ac.overlays.promptActive())
 	require.Contains(t, string(promptOutput.Data), "Create session")
 
-	generation := ac.roleGeneration.Load()
+	generation := ac.connectionGeneration.Load()
 	d.handleInput(sess, ac, []byte("scratch\r"))
 	// The submit first paints the newly attached session while the prompt is
 	// still open, then handlePromptInput closes the prompt and repaints the
@@ -685,15 +685,15 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, 2, sessionCount(d))
-	require.Nil(t, sess.client)
+	require.Empty(t, sess.snapshotAttachments())
 	newSess := ac.currentSession()
 	require.NotNil(t, newSess)
 	require.NotSame(t, sess, newSess)
 	require.Equal(t, "scratch", newSess.name)
 	require.False(t, newSess.ephemeral)
-	require.Same(t, ac, newSess.client)
-	require.Equal(t, attachmentActive, newSess.attachmentRole(ac))
-	require.Greater(t, ac.roleGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
+	require.Contains(t, newSess.snapshotAttachments(), ac)
+	require.Equal(t, true, newSess.attachmentRegistered(ac))
+	require.Greater(t, ac.connectionGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
 	require.Contains(t, string(finalOutput.Data), "scratch")
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }
@@ -701,7 +701,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.registerAttachmentLocked(ac)
 	sess.mu.Unlock()
 	defer releases[0]()
 	defer releases[1]()
@@ -1125,9 +1125,9 @@ func TestPaletteExecMethods(t *testing.T) {
 	exec := paletteExec{d: d, sess: sess, ac: ac}
 
 	require.NoError(t, exec.NextTab())
-	require.Equal(t, 1, activeTabIndex(sess))
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
 	require.NoError(t, exec.PrevTab())
-	require.Equal(t, 0, activeTabIndex(sess))
+	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	sess.ephemeral = true
 	require.NoError(t, exec.RenameSession())
 	require.True(t, ac.overlays.promptActive())

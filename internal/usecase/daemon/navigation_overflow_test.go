@@ -42,6 +42,20 @@ func TestResolveOverflowObeysAxisConfigurationAndWalls(t *testing.T) {
 	}
 }
 
+func TestPrepareTabOverflowRejectsMissingExpectedSource(t *testing.T) {
+	d, sess, _, _ := newManualSessionWithPTYs(t, nil, nil)
+	target := sess.tabs[1]
+	target.mu.Lock()
+	target.size = domain.Size{Cols: 41, Rows: 10}
+	target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
+	target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+	target.mu.Unlock()
+
+	missing := &tab{stableID: "missing-source"}
+	_, ok := d.prepareTabOverflowForAttachment(sess, nil, missing, layout.Right, domain.Rect{Width: 20, Height: 10}, 1)
+	require.False(t, ok)
+}
+
 func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -58,7 +72,7 @@ func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
 			sess.mu.Lock()
-			sess.active = tt.start
+			selectTestAttachmentTabLocked(sess, tt.start)
 			target := sess.tabs[tt.wantActive]
 			source := sess.tabs[tt.start]
 			sess.mu.Unlock()
@@ -71,11 +85,11 @@ func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 
 			daemonKeyHandler{d: d, ac: ac}.Action(tt.action, nil)
 
-			require.Equal(t, tt.wantActive, activeTabIndex(sess))
+			require.Equal(t, tt.wantActive, testAttachmentTabIndex(sess))
 			target.mu.Lock()
 			require.Equal(t, tt.wantFocus, target.tree.Focus)
 			target.mu.Unlock()
-			require.NotSame(t, source, sess.activeTab())
+			require.NotSame(t, source, testAttachmentTab(sess))
 		})
 	}
 }
@@ -93,7 +107,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 		target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: focus}
 		target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 		target.mu.Unlock()
-		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name}, ctx: t.Context(), cancel: func() {}, tabs: tabs, active: active}
+		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name}, ctx: t.Context(), cancel: func() {}, tabs: tabs}
 	}
 	charlie := newSession("live-charlie", "charlie", 1, "pane-2")
 	echo := newSession("live-echo", "echo", 1, "pane-2")
@@ -130,7 +144,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	}
 
 	for _, target := range []*session{charlie, echo} {
-		require.Equal(t, 1, activeTabIndex(target), "switch preserves the target active tab")
+		require.Equal(t, 0, testAttachmentTabIndex(target), "new attachment starts at the deterministic first tab")
 		target.tabs[1].mu.Lock()
 		require.Equal(t, layout.PaneID("pane-2"), target.tabs[1].tree.Focus, "switch preserves the target pane focus")
 		target.tabs[1].mu.Unlock()
@@ -149,11 +163,11 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	}
 	d.mu.Unlock()
 	alpha.mu.Lock()
-	attached := alpha.client
+	attached := alpha.snapshotAttachmentsLocked()
 	alpha.mu.Unlock()
 	require.True(t, stopped, "vertical overflow leaves the stopped session stopped")
 	require.False(t, bravoLive, "the stopped session is absent from the live registry")
-	require.Same(t, ac, attached, "the source session owns the genuinely attached client after returning")
+	require.Contains(t, attached, ac, "the source session owns the genuinely attached client after returning")
 }
 
 func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
@@ -172,10 +186,10 @@ func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
 
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, ac, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), ac)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -196,10 +210,10 @@ func TestVerticalOverflowRevalidatesFloatingSourceBeforeHandoff(t *testing.T) {
 	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, alpha.tabs[0], target), errNoNeighbor)
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, ac, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), ac)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -208,7 +222,7 @@ func TestVerticalOverflowRejectsStaleSourceTab(t *testing.T) {
 	alpha.mu.Lock()
 	alpha.name = "alpha"
 	expectedSource := alpha.tabs[0]
-	alpha.active = 1
+	selectTestAttachmentTabLocked(alpha, 1)
 	alpha.mu.Unlock()
 	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
@@ -218,10 +232,10 @@ func TestVerticalOverflowRejectsStaleSourceTab(t *testing.T) {
 	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, expectedSource, picker.Target{Session: charlie.id, TabIndex: -1}), errNoNeighbor)
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, ac, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), ac)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -251,16 +265,16 @@ func TestVerticalOverflowTreatsDisplacedSourceClientAsNoNeighbor(t *testing.T) {
 	require.True(t, ok)
 	replacement := &attachedClient{}
 	alpha.mu.Lock()
-	alpha.client = replacement
+	alpha.registerAttachmentLocked(replacement)
 	alpha.mu.Unlock()
 
 	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, alpha.tabs[0], target), errNoNeighbor)
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
-	require.Same(t, replacement, alpha.client)
+	require.Contains(t, alpha.snapshotAttachmentsLocked(), replacement)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
-	require.Nil(t, charlie.client)
+	require.Empty(t, charlie.snapshotAttachmentsLocked())
 	charlie.mu.Unlock()
 }
 
@@ -314,7 +328,7 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 			continue
 		}
 		candidate.mu.Lock()
-		if candidate.client == ac {
+		if attachmentRegisteredLocked(candidate, ac) {
 			owners = append(owners, candidate)
 		}
 		candidate.mu.Unlock()
@@ -351,41 +365,7 @@ func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t
 
 			daemonKeyHandler{d: d, ac: ac}.Action(tt.dir, nil)
 
-			require.Equal(t, 0, activeTabIndex(sess))
-		})
-	}
-}
-
-func TestCommitTabOverflowRevalidatesTabPointerIdentities(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(sess *session, candidate tabOverflowCandidate)
-	}{
-		{name: "source no longer active", mutate: func(sess *session, _ tabOverflowCandidate) {
-			sess.mu.Lock()
-			sess.active = 1
-			sess.mu.Unlock()
-		}},
-		{name: "target entry replaced", mutate: func(sess *session, candidate tabOverflowCandidate) {
-			sess.mu.Lock()
-			sess.tabs[1] = newTab(nil, candidate.target.size)
-			sess.mu.Unlock()
-		}},
-		{name: "source gains visible floating pane", mutate: func(_ *session, candidate tabOverflowCandidate) {
-			installTestFloating(candidate.source, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
-		}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d, sess, _, _ := newManualSessionWithPTYs(t, nil, nil)
-			candidate, ok := d.prepareTabOverflow(sess, sess.tabs[0], layout.Right, domain.Rect{Width: 80, Height: 23}, 1)
-			require.True(t, ok)
-			tt.mutate(sess, candidate)
-			activeBeforeCommit := activeTabIndex(sess)
-
-			require.False(t, d.commitTabOverflow(sess, candidate))
-			require.Equal(t, activeBeforeCommit, activeTabIndex(sess))
+			require.Equal(t, 0, testAttachmentTabIndex(sess))
 		})
 	}
 }

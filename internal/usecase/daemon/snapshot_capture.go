@@ -13,7 +13,9 @@ func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapsh
 		name:        sess.name,
 		incarnation: sess.incarnation,
 		createdAt:   uint64(sess.createdAt),
-		active:      uint16(max(sess.active, 0)),
+		// Snapshot format retains a deterministic first-tab default; it is not
+		// an interactive attachment selection.
+		defaultTab: 0,
 	}
 	ephemeral := sess.ephemeral
 	fallbackCwd := sess.cwd

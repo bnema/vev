@@ -59,7 +59,7 @@ type composedRenderFrame struct {
 
 // composeFrame is pure with respect to daemon ownership: it consumes only the
 // capture, the last committed cache, and an independent attachment-owned
-// scratch cache. It returns a replacement cache without mutating committed.
+// scratch cache. It returns a new cache without mutating committed.
 const inactivePaneForegroundDimming = 55
 
 func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...composeCacheInput) composedRenderFrame {
@@ -459,7 +459,7 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		return false
 	}
 	entry.core().mu.Lock()
-	owned := entry.core().client == ac
+	_, owned := entry.core().attachments[ac]
 	entry.core().mu.Unlock()
 	if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
@@ -532,13 +532,13 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		sendTr = sendTransport.transport
 		if ac.proxied {
 			if sess, ok := localSession(entry); ok {
-				sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.roleEffect)
+				sendErr = ac.sendSessionMetaIfChanged(sess, sendTransport, marks.attachmentEffect)
 			} else if proxy, ok := entry.(*proxySession); ok {
 				meta, metaOK := proxy.sessionMetaSnapshot()
 				if !metaOK {
 					sendErr = errSessionMetaUnavailable
 				} else {
-					sendErr = ac.sendSessionMetaSnapshot(meta, sendTransport, marks.roleEffect)
+					sendErr = ac.sendSessionMetaSnapshot(meta, sendTransport, marks.attachmentEffect)
 				}
 			}
 		}
@@ -548,21 +548,29 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 				sendErr = errors.New("client transport is nil")
 			}
 			if sendErr == nil {
-				send := sendTr.Send
-				if async, ok := sendTr.(ports.AsyncTransport); ok {
-					send = async.SendAsync
-				}
-				interruptible := marks.roleEffect != nil && marks.roleEffect.beginTransportSend(sendTransport)
-				if ac.proxied {
-					sendErr = preparedScreen.send(send)
-				} else {
-					sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
-				}
-				if interruptible {
-					if sendErr != nil {
-						marks.roleEffect.reportTransportFailure(sendTransport)
+				interruptible := false
+				if marks.attachmentEffect != nil {
+					interruptible = marks.attachmentEffect.beginTransportSend(sendTransport)
+					if !interruptible {
+						sendErr = errAttachmentTransition
 					}
-					marks.roleEffect.endTransportSend()
+				}
+				if sendErr == nil {
+					send := sendTr.Send
+					if async, ok := sendTr.(ports.AsyncTransport); ok {
+						send = async.SendAsync
+					}
+					if ac.proxied {
+						sendErr = preparedScreen.send(send)
+					} else {
+						sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
+					}
+				}
+				if marks.attachmentEffect != nil && interruptible {
+					if sendErr != nil {
+						marks.attachmentEffect.reportTransportFailure(sendTransport)
+					}
+					marks.attachmentEffect.endTransportSend()
 				}
 			}
 			endEmit(uint64(len(data)), sendErr == nil)
@@ -611,7 +619,7 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		// A transport failure may invalidate the role gate. Release this render's
 		// admission first. Detachment freezes the gate and therefore cannot mutate
 		// ownership until any enclosing admitted operation has also ended.
-		if marks.roleEffect == nil {
+		if marks.attachmentEffect == nil {
 			if sess, ok := localSession(entry); ok {
 				d.detachOnSendError(sess, ac, sendTr)
 			} else if proxy, ok := entry.(*proxySession); ok {
@@ -619,11 +627,11 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 			}
 		} else {
 			// Capture the exact admitted capability, including its coordinator
-			// lease, before End permits a replacement publication. Reserve cleanup
-			// accounting before End so terminal Wait cannot race a later Add.
-			token := marks.roleEffect.roleToken()
-			launchCleanup := d.reserveRoleSendErrorCleanup(token, sendTr)
-			marks.roleEffect.End()
+			// lease, before End permits a new attachment publication. Reserve
+			// cleanup accounting before End so terminal Wait cannot race a later Add.
+			token := marks.attachmentEffect.connectionToken()
+			launchCleanup := d.reserveAttachmentSendErrorCleanup(token, sendTr)
+			marks.attachmentEffect.End()
 			launchCleanup()
 		}
 	}

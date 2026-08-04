@@ -54,7 +54,7 @@ func TestResizeAndRetryCallbacksRejectSameObjectLeaseReplacement(t *testing.T) {
 			done := tc.done(t, rc)
 			require.NotNil(t, done)
 
-			rc.notePark(ac)
+			rc.noteDetach(ac)
 			rc.attach(ac) // resume the exact same object under a new incarnation
 			timer.ch <- time.Time{}
 			awaitTestCompletion(t, done, "stale callback did not complete")

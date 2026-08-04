@@ -64,7 +64,7 @@ func TestBarScriptRefreshIntervalClampingTickAndLastGoodOnFailure(t *testing.T) 
 	r := &fakeBarRunner{outs: []string{"top1", "bot1", "top2", "bot2"}}
 	d := newBarRefreshTestDaemon(r, 100*time.Millisecond)
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 120, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 120, Rows: 24}})
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), false))
 	waitBarRefreshIdle(t, d)
@@ -85,17 +85,16 @@ func TestBarScriptRefreshIntervalClampingTickAndLastGoodOnFailure(t *testing.T) 
 	require.Equal(t, "bot2", state.bottomRight)
 }
 
-func TestBarScriptContextUsesActivePaneSessionAndClientCols(t *testing.T) {
+func TestBarScriptContextUsesFirstOrderedPaneAndClientCols(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top", "bottom"}}
 	d := newBarRefreshTestDaemon(r, time.Second)
 	sess := newBarRefreshTestSession()
 	sess.name = "work"
 	sess.cwd = "/repo"
-	sess.client = &attachedClient{size: domain.Size{Cols: 132, Rows: 40}}
-	sess.active = 1
-	sess.tabs[1].size = domain.Size{Cols: 132, Rows: 38}
-	active := sess.tabs[1].focusedPane()
-	active.stableID = "pane-active"
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 132, Rows: 40}})
+	sess.tabs[0].size = domain.Size{Cols: 132, Rows: 38}
+	active := sess.tabs[0].focusedPane()
+	active.stableID = "pane-default"
 	active.pty = newScriptPTY(nil)
 	d.procCwd = func(pid int) (string, error) {
 		require.Equal(t, 4242, pid)
@@ -107,8 +106,8 @@ func TestBarScriptContextUsesActivePaneSessionAndClientCols(t *testing.T) {
 	require.Len(t, r.calls, 2)
 	for _, call := range r.calls {
 		require.Equal(t, "work", call.Session)
-		require.Equal(t, "tab-active", call.Tab)
-		require.Equal(t, "pane-active", call.Pane)
+		require.Equal(t, "tab-inactive", call.Tab)
+		require.Equal(t, "pane-default", call.Pane)
 		require.Equal(t, "/pane-repo", call.PaneCWD)
 		require.Equal(t, 132, call.Cols)
 	}
@@ -131,7 +130,7 @@ func TestBarScriptRefreshSkipsRunnerWhenCommandsDisabled(t *testing.T) {
 	d.barScripts.cfg.topRight = ""
 	d.barScripts.cfg.bottomRight = ""
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 	d.barScripts.outputs[sess.id] = barScriptOutputs{topRight: "old", bottomRight: "old"}
 
 	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
@@ -146,7 +145,7 @@ func TestDefaultBarConfigDoesNotInvokeRunner(t *testing.T) {
 	d := newBarRefreshTestDaemon(r, time.Second)
 	d.barScripts.cfg = barConfigFromDomain(domain.Defaults().Bar)
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
 	require.Empty(t, r.calls)
@@ -156,7 +155,7 @@ func TestBarScriptForcedRefreshRespectsMinimumInterval(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
 	d := newBarRefreshTestDaemon(r, 5*time.Second)
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
 	waitBarRefreshIdle(t, d)
@@ -173,7 +172,7 @@ func TestBarScriptContextChangeDebouncesUntilMinimumInterval(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
 	d := newBarRefreshTestDaemon(r, 5*time.Second)
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Now(), false))
 	waitBarRefreshIdle(t, d)
@@ -191,7 +190,7 @@ func TestBarScriptRefreshForcesWhenContextChanges(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
 	d := newBarRefreshTestDaemon(r, 5*time.Second)
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), false))
 	waitBarRefreshIdle(t, d)
@@ -219,7 +218,7 @@ func TestRefreshBarScriptsAllSessionsForcesRun(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bottom1"}}
 	d := newBarRefreshTestDaemon(r, 60*time.Second)
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 	d.sessions = map[domain.SessionID]attachmentSession{sess.id: sess}
 
 	// Verifies refreshBarScriptsAllSessions iterates every live session and
@@ -252,7 +251,7 @@ func TestBarScriptFailureLogsAndRetainsLastGood(t *testing.T) {
 	d := newBarRefreshTestDaemon(r, time.Second)
 	d.log = slog.New(slog.NewTextHandler(&logs, nil))
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
 	waitBarRefreshIdle(t, d)
@@ -287,7 +286,7 @@ func TestBarScriptRunConsumesPendingAfterRunningClears(t *testing.T) {
 	r := newBlockingBarRunner([]string{"top1", "bottom1", "top2", "bottom2"})
 	d := newBarRefreshTestDaemon(r, time.Second)
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
 	select {
@@ -337,7 +336,7 @@ func TestBarScriptFailureLogsOnceUntilSignatureChanges(t *testing.T) {
 	d.log = logger
 	d.baseEnv = []string{"PATH=/usr/bin"}
 	sess := newBarRefreshTestSession()
-	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	readBuf := func() string {
 		mu.Lock()
@@ -420,11 +419,11 @@ func TestBarScriptRefreshIsPerSession(t *testing.T) {
 	a := newBarRefreshTestSession()
 	a.id = "a"
 	a.name = "a"
-	a.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	a.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 	b := newBarRefreshTestSession()
 	b.id = "b"
 	b.name = "b"
-	b.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	b.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 	require.True(t, d.refreshBarScriptsIfDue(a, time.Unix(0, 0), false))
 	waitBarRefreshIdle(t, d)
@@ -587,7 +586,7 @@ func newBarRefreshTestSession() *session {
 	inactive := newTabWithStableID("tab-inactive", "pane-inactive", nil, domain.Size{Cols: 80, Rows: 22})
 	active := newTabWithStableID("tab-active", "pane-active", nil, domain.Size{Cols: 80, Rows: 22})
 	active.tree.Focus = layout.PaneID("pane-1")
-	return &session{sessionCore: sessionCore{id: "s", name: "s"}, cwd: "/tmp", tabs: []*tab{inactive, active}, active: 0, ctx: context.Background()}
+	return &session{sessionCore: sessionCore{id: "s", name: "s"}, cwd: "/tmp", tabs: []*tab{inactive, active}, ctx: context.Background()}
 }
 
 func waitBarRefreshIdle(t *testing.T, d *Daemon) {
@@ -645,7 +644,7 @@ func TestBarScriptsUseSessionEnvNotDaemonBaseEnv(t *testing.T) {
 			d.baseEnv = tc.baseEnv
 			sess := newBarRefreshTestSession()
 			sess.env = tc.sessEnv
-			sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+			sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
 
 			require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
 			waitBarRefreshIdle(t, d)

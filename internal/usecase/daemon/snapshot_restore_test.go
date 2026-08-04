@@ -233,7 +233,7 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	require.False(t, restored.snapDirty.Load(), "a loaded generation must begin clean")
 	require.Equal(t, uint64(9), restored.snapshotPublishedGeneration, "the loaded manifest is the repository generation head")
 	require.True(t, restored.terminal.TrueColor, "restored sessions must retain startup terminal capability for future panes")
-	require.Equal(t, 0, restored.active)
+	require.Equal(t, 0, testAttachmentTabIndex(restored))
 	require.Equal(t, "/snapshot/cwd", restored.cwd)
 	require.Len(t, restored.tabs, 1)
 	tab := restored.tabs[0]

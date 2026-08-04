@@ -53,13 +53,13 @@ func resolveOverflow(dir layout.Direction, cfg domain.NavConfig, position, count
 // overflowSourceEligible validates that directional overflow still originates
 // from the active tiled tab. The session-to-tab lock order matches tab overflow
 // commit and leaves no lock held across a session handoff.
-func overflowSourceEligible(sess *session, expectedSource *tab) bool {
+func overflowSourceEligible(sess *session, ac *attachedClient, expectedSource *tab) bool {
 	if sess == nil || expectedSource == nil {
 		return false
 	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	if sess.active < 0 || sess.active >= len(sess.tabs) || sess.tabs[sess.active] != expectedSource {
+	if ac == nil || !attachmentRegisteredLocked(sess, ac) || domain.TabStableID(expectedSource.stableID) != ac.viewSnapshot().tabID {
 		return false
 	}
 	expectedSource.mu.Lock()
@@ -134,18 +134,26 @@ type tabOverflowCandidate struct {
 	targetOldFocus layout.PaneID
 }
 
-// prepareTabOverflow captures tab identities under the session lock and uses
-// EntryPane's pure lookup before any active-tab state is changed.
-func (d *Daemon) prepareTabOverflow(sess *session, expectedSource *tab, dir layout.Direction, span domain.Rect, delta int) (tabOverflowCandidate, bool) {
+func (d *Daemon) prepareTabOverflowForAttachment(sess *session, ac *attachedClient, expectedSource *tab, dir layout.Direction, span domain.Rect, delta int) (tabOverflowCandidate, bool) {
 	if sess == nil || expectedSource == nil || (delta != -1 && delta != 1) {
 		return tabOverflowCandidate{}, false
 	}
 	sess.mu.Lock()
-	if sess.active < 0 || sess.active >= len(sess.tabs) || sess.tabs[sess.active] != expectedSource {
+	if ac != nil && (!attachmentRegisteredLocked(sess, ac) || domain.TabStableID(expectedSource.stableID) != ac.viewSnapshot().tabID) {
 		sess.mu.Unlock()
 		return tabOverflowCandidate{}, false
 	}
-	sourceIndex := sess.active
+	sourceIndex := -1
+	for i, tb := range sess.tabs {
+		if tb == expectedSource {
+			sourceIndex = i
+			break
+		}
+	}
+	if sourceIndex < 0 {
+		sess.mu.Unlock()
+		return tabOverflowCandidate{}, false
+	}
 	targetIndex := sourceIndex + delta
 	if targetIndex < 0 || targetIndex >= len(sess.tabs) {
 		sess.mu.Unlock()
@@ -189,17 +197,14 @@ func (d *Daemon) prepareTabOverflow(sess *session, expectedSource *tab, dir layo
 	}, true
 }
 
-// commitTabOverflow atomically revalidates the source and target tab entries.
-// The target layout and selected pane are revalidated while locked before the
-// focus and active-tab mutations become visible together.
-func (d *Daemon) commitTabOverflow(sess *session, candidate tabOverflowCandidate) bool {
+func (d *Daemon) commitTabOverflowForAttachment(sess *session, ac *attachedClient, candidate tabOverflowCandidate) bool {
 	if sess == nil || candidate.source == nil || candidate.target == nil {
 		return false
 	}
 	sess.mu.Lock()
 	targetIndex := candidate.sourceIndex + candidate.delta
-	if candidate.sourceIndex < 0 || candidate.sourceIndex >= len(sess.tabs) || targetIndex < 0 || targetIndex >= len(sess.tabs) ||
-		sess.active != candidate.sourceIndex || sess.tabs[candidate.sourceIndex] != candidate.source || sess.tabs[targetIndex] != candidate.target {
+	if (ac != nil && (!attachmentRegisteredLocked(sess, ac) || domain.TabStableID(candidate.source.stableID) != ac.viewSnapshot().tabID)) || candidate.sourceIndex < 0 || candidate.sourceIndex >= len(sess.tabs) || targetIndex < 0 || targetIndex >= len(sess.tabs) ||
+		sess.tabs[candidate.sourceIndex] != candidate.source || sess.tabs[targetIndex] != candidate.target {
 		sess.mu.Unlock()
 		return false
 	}
@@ -234,10 +239,10 @@ func (d *Daemon) commitTabOverflow(sess *session, candidate tabOverflowCandidate
 	}
 	candidate.target.tree = targetTree
 	candidate.target.bumpLayoutGenerationLocked()
-	sess.active = targetIndex
 	candidate.target.mu.Unlock()
 	candidate.source.mu.Unlock()
 	sess.mu.Unlock()
+	sess.selectAttachmentTab(ac, domain.TabStableID(candidate.target.stableID))
 	d.applyTabLayout(sess, candidate.target)
 	return true
 }

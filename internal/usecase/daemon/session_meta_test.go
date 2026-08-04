@@ -116,6 +116,25 @@ func TestSessionMetaShadowUpdatesOnlyAfterSuccessfulSend(t *testing.T) {
 	require.False(t, ac.sessionMetaSent)
 }
 
+func TestProxiedAttachedCommandMutationFailureDoesNotReportExecution(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	ac.proxied = true
+	d.attachCoordinator(sess, ac, true)
+	d.ptys = failingPTYFactory{err: errors.New("tab open failed")}
+	token := sess.attachmentToken(ac, ac.transport())
+
+	result := d.executeAttachedCommand(token, ports.CommandRequest{
+		Version: ports.ProtocolVersion, RequestID: 41, Attached: true, Slug: "new-tab",
+	})
+
+	require.False(t, result.OK)
+	require.Equal(t, ports.ErrInternal, result.Code)
+	require.Contains(t, result.Text, "tab open failed")
+	sess.mu.Lock()
+	require.Len(t, sess.tabs, 1, "failed attached command must not publish a new tab")
+	sess.mu.Unlock()
+}
+
 func TestProxiedAttachedCommandValidationPreservesRequestID(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -192,12 +211,12 @@ func TestProxiedAttachedCommandValidationPreservesRequestID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
 			ac.proxied = true
-			d.attachCoordinator(sess, nil, ac, true)
+			d.attachCoordinator(sess, ac, true)
 			payload, err := ports.MarshalCommandRequest(tt.request)
 			require.NoError(t, err)
 
 			token := sess.attachmentToken(ac, ac.transport())
-			require.False(t, d.handleActiveClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
+			require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
 
 			reply := awaitFrame(t, sends, ports.MsgCommandResult)
 			result, err := ports.UnmarshalCommandResult(reply.Payload)

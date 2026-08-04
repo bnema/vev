@@ -27,7 +27,7 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	p.mu.Unlock()
 
 	ac.sendMu.Lock()
-	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 		bars:        barState{},
 		overlays:    capturedOverlayRenderState{},
 		preview:     pickerPreviewEmpty(),
@@ -61,7 +61,7 @@ func TestCaptureComposeEmitAcknowledgesCollapsedPaneDamageOnlyAfterEmission(t *t
 	collapsed.screen.Write([]byte("hidden damage"))
 
 	ac.sendMu.Lock()
-	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{bars: barState{}})
+	state, ok := captureRenderState(sess, ac, renderCaptureRequest{bars: barState{}})
 	require.True(t, ok)
 	collapsedReceipt := false
 	for _, receipt := range state.receipts {
@@ -95,7 +95,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			fail: func(_ *composedRenderFrame, ac *attachedClient) { ac.replaceTransport(cacheFailTransport{}) },
 			restore: func(sess *session, ac *attachedClient, healthy ports.Transport) {
 				sess.mu.Lock()
-				sess.client = ac
+				sess.registerAttachmentLocked(ac)
 				sess.mu.Unlock()
 				ac.setSession(sess)
 				ac.replaceTransport(healthy)
@@ -107,7 +107,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			// Prepare failures now schedule recovery through the coordinator;
 			// retain the failed transaction here until this test explicitly retries.
 			d.clock = newNoticeClock()
-			d.attachCoordinator(sess, nil, ac, true)
+			d.attachCoordinator(sess, ac, true)
 			healthy := ac.transport()
 			p := sess.tabs[0].focusedPane()
 
@@ -143,7 +143,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 func TestPrepareFailureNotifiesAndSchedulesRecovery(t *testing.T) {
 	clock := newNoticeClock()
 	d, sess, ac, _ := newNoticeFixture(t, clock)
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := d.attachCoordinator(sess, ac, true)
 	var producers []string
 	rc.opts.onInvalidate = func(inv renderInvalidation) {
 		// Both the notice repaint and the explicit recovery must re-enter only
@@ -223,7 +223,7 @@ func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClient) (*capturedRenderState, composedRenderFrame) {
 	t.Helper()
 	ac.sendMu.Lock() // emitFrame releases the transaction lock.
-	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 		bars:        barState{},
 		overlays:    capturedOverlayRenderState{},
 		preview:     pickerPreviewEmpty(),

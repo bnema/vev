@@ -17,11 +17,11 @@ type proxyCapture struct {
 	cursor     capturedCursorInputs
 }
 
-// capturePrimary snapshots the remote VT while holding only proxy.mu. The
+// captureRenderState snapshots the remote VT while holding only proxy.mu. The
 // snapshot is then composed by the ordinary local frame pipeline, which owns
 // the bars, overlays, cursor, and renderer shadow. Remote ANSI is therefore
 // never handed to a renderer.
-func (p *proxySession) capturePrimary(ac *attachedClient, request primaryCaptureRequest) (*capturedRenderState, bool) {
+func (p *proxySession) captureRenderState(ac *attachedClient, request renderCaptureRequest) (*capturedRenderState, bool) {
 	if p == nil || ac == nil {
 		return nil, false
 	}
@@ -35,7 +35,7 @@ func (p *proxySession) capturePrimary(ac *attachedClient, request primaryCapture
 	capture := &ac.proxyCapture
 	damage := screen.CaptureDamage()
 	if capture.screen != screen {
-		// A replacement screen has no relationship to the retained frame.
+		// A new screen has no relationship to the retained frame.
 		capture.frame = renderer.Frame{}
 	}
 	if capture.screen != screen || capture.generation != damage.Generation || capture.frame.Validate() != nil {
@@ -152,7 +152,7 @@ func (p *proxySession) resize(size domain.Size) (changed, sent bool) {
 	p.screen.ResizePlaceholder(content)
 	p.contentSize = content
 	// A resize invalidates the local replay chain, but the last applied state
-	// remains the moving snapshot floor for the replacement geometry.
+	// remains the moving snapshot floor for the new geometry.
 	p.screenReady = false
 	p.resetRequested = false
 	p.screen.stateNum = 0

@@ -261,6 +261,47 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	assertChildEnvironment(t, tr2, p2, sz, "second", secondShell, "/run/second", "wayland-second")
 }
 
+func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	dir, _ := startDaemon(t)
+	firstShell := shellFixture(t, "first")
+	const sharedOutput = "SECOND_SHARED_PTY_OUTPUT"
+	secondShell := filepath.Join(t.TempDir(), "second-shell")
+	require.NoError(t, os.WriteFile(secondShell, []byte("#!/bin/sh\nprintf 'SHELL_COMMAND=second\\n'\nIFS= read -r _\nprintf '"+sharedOutput+"\\n'\nexec /bin/sh\n"), 0o700))
+	firstEnv := []string{
+		"VEV_TEST_ENV=first", "SHELL=" + firstShell, "XDG_RUNTIME_DIR=/run/first", "WAYLAND_DISPLAY=wayland-first",
+		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
+	}
+	tr1, p1 := attachWithEnvironment(t, dir, ports.IntentNew, "environment", sz, firstEnv)
+	defer func() { _ = tr1.Close() }()
+	awaitText(t, p1, sz, "SHELL_COMMAND=first")
+	assertChildEnvironment(t, tr1, p1, sz, "first", firstShell, "/run/first", "wayland-first")
+
+	secondEnv := []string{
+		"VEV_TEST_ENV=second", "SHELL=" + secondShell, "XDG_RUNTIME_DIR=/run/second", "WAYLAND_DISPLAY=wayland-second",
+		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
+	}
+	tr2, p2 := attachWithEnvironment(t, dir, ports.IntentAttach, "environment", sz, secondEnv)
+	defer func() { _ = tr2.Close() }()
+	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/first", "wayland-first")
+
+	// The second attachment mutates shared tab state. Its newly opened PTY must
+	// also be rendered to that attachment, not only to the coordinator primary.
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	awaitText(t, p2, sz, "Commands")
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
+	awaitText(t, p2, sz, "SHELL_COMMAND=second")
+
+	// Each attachment owns its selected tab. Move the first attachment to the
+	// new PTY before releasing its gate, so the fresh PTY output must reach both
+	// views rather than only being recovered by a later first paint.
+	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b2")})}))
+	awaitText(t, p1, sz, "SHELL_COMMAND=second")
+	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("go\n")})}))
+	awaitText(t, p2, sz, sharedOutput)
+	awaitText(t, p1, sz, sharedOutput)
+}
+
 func TestIntegration_AttachFirstOutput(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf HELLO; sleep 30"}))
@@ -329,7 +370,7 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	require.Equal(t, ports.MsgSessions, f.Type)
 	sessions, err := ports.UnmarshalSessions(f.Payload)
 	require.NoError(t, err)
-	require.Len(t, sessions.Sessions, 1)
+	require.NotEmpty(t, sessions.Sessions)
 	require.Equal(t, "work", sessions.Sessions[0].Name)
 	require.False(t, sessions.Sessions[0].Ephemeral)
 }

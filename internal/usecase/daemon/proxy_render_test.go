@@ -25,7 +25,7 @@ func TestProxyCaptureRetainsOwnedFrameAcrossSafeDamage(t *testing.T) {
 	proxy.mu.Unlock()
 
 	ac := &attachedClient{}
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{})
 	require.True(t, ok)
 	require.Equal(t, "abcdefghijkl", proxyFrameText(state.panes[0].frame))
 	commitDamageReceipts(state.receipts)
@@ -43,7 +43,7 @@ func TestProxyCaptureRetainsOwnedFrameAcrossSafeDamage(t *testing.T) {
 	proxy.mu.Unlock()
 
 	cellsBefore := &ac.proxyCapture.frame.Cells[0]
-	state, ok = proxy.capturePrimary(ac, primaryCaptureRequest{})
+	state, ok = proxy.captureRenderState(ac, renderCaptureRequest{})
 	require.True(t, ok)
 	require.Equal(t, "abcdeZghijkl", proxyFrameText(state.panes[0].frame))
 	require.Equal(t, cellsBefore, &ac.proxyCapture.frame.Cells[0], "safe span damage must update the retained frame")
@@ -59,7 +59,7 @@ func TestProxyRenderComposesRemoteVTUnderExactlyOneLocalChrome(t *testing.T) {
 	changed := applyTestScreenText(proxy, 1, 2, "remote")
 	require.True(t, changed)
 
-	state, ok := proxy.capturePrimary(&attachedClient{}, primaryCaptureRequest{
+	state, ok := proxy.captureRenderState(&attachedClient{}, renderCaptureRequest{
 		bars:  barState{status: proxy.statusSegments(false)},
 		reset: true,
 	})
@@ -91,7 +91,7 @@ func TestProxyRenderPaintsAfterLocalToRemoteHandoff(t *testing.T) {
 	ac := &attachedClient{tr: transport, output: newOutputStateStream(), size: domain.Size{Cols: 16, Rows: 6}}
 	ac.setSession(proxy)
 	proxy.sessionCore.mu.Lock()
-	proxy.client = ac
+	proxy.sessionCore.registerAttachmentLocked(ac)
 	proxy.sessionCore.mu.Unlock()
 
 	d.paint(proxy, ac, true, nil)
@@ -101,7 +101,7 @@ func TestProxyRenderPaintsAfterLocalToRemoteHandoff(t *testing.T) {
 
 func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 	d, local, ac, sent := newManualSessionWithPTYs(t, newQuietPTY())
-	localCoordinator := d.attachCoordinator(local, nil, ac, true)
+	localCoordinator := d.attachCoordinator(local, ac, true)
 	localToken := attachmentToken(local, ac, ac.transport())
 	localToken.lease = localCoordinator.attachmentLease(ac)
 
@@ -118,7 +118,7 @@ func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 
 	toProxy, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: local, target: proxy, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &localToken,
 		action: "test transition", ready: true,
 	})
@@ -129,7 +129,7 @@ func TestProxyRenderTransitionsPaintBothLocalAndRemoteSessions(t *testing.T) {
 
 	toLocal, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: proxy, target: local, next: ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: ac.transportSnapshot(), sourceToken: &toProxy.published,
 		action: "test transition", ready: true,
 	})
@@ -269,7 +269,7 @@ func TestProxyResizeUsesReducedRemoteGeometryOnce(t *testing.T) {
 	default:
 	}
 
-	state, ok := proxy.capturePrimary(&attachedClient{}, primaryCaptureRequest{reset: true})
+	state, ok := proxy.captureRenderState(&attachedClient{}, renderCaptureRequest{reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.Equal(t, 10, composed.frame.Height, "local viewport remains full-sized")
@@ -296,7 +296,7 @@ func newAttachedProxyFixture(t *testing.T, d *Daemon, clientTr ports.Transport, 
 	ac := &attachedClient{tr: clientTr, output: newOutputStateStream(), size: domain.Size{Cols: 16, Rows: 6}}
 	ac.setSession(proxy)
 	proxy.sessionCore.mu.Lock()
-	proxy.client = ac
+	proxy.sessionCore.registerAttachmentLocked(ac)
 	proxy.sessionCore.mu.Unlock()
 	return proxy, ac
 }
@@ -318,7 +318,7 @@ func TestProxyStructuredSendFailureRetainsProxyDamage(t *testing.T) {
 	require.True(t, applyTestScreenText(proxy, 0, 0, "pending"))
 
 	ac.sendMu.Lock()
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{reset: true})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	require.True(t, d.emitFrame(proxy, ac, state, composed))
@@ -373,7 +373,7 @@ func TestProxyPrepareFailureRepaintsWithoutLocalSession(t *testing.T) {
 	proxy, ac := newAttachedProxyFixture(t, d, clientTr, newProxyTestTransport())
 
 	ac.sendMu.Lock() // emitFrame releases the transaction lock.
-	state, ok := proxy.capturePrimary(ac, primaryCaptureRequest{bars: barState{status: proxy.statusSegments(false)}, reset: true})
+	state, ok := proxy.captureRenderState(ac, renderCaptureRequest{bars: barState{status: proxy.statusSegments(false)}, reset: true})
 	require.True(t, ok)
 	composed := composeFrame(*state, composeCacheInput{})
 	// A malformed frame is what makes outputStateStream.prepare fail.
@@ -394,9 +394,9 @@ func TestProxySendErrorDetachesProxyAttachment(t *testing.T) {
 	d.paint(proxy, ac, true, nil)
 
 	proxy.sessionCore.mu.Lock()
-	client := proxy.client
+	attachments := proxy.sessionCore.snapshotAttachmentsLocked()
 	proxy.sessionCore.mu.Unlock()
-	require.Nil(t, client, "a failed send must release the proxy attachment")
+	require.Empty(t, attachments, "a failed send must release the proxy attachment")
 	require.Nil(t, ac.currentAttachmentSession(), "the client must no longer point at the proxy")
 }
 

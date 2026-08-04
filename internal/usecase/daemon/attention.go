@@ -23,13 +23,16 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	}
 
 	sess.mu.Lock()
-	visible := sess.client != nil && sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
 	if !tb.attention {
 		tb.attentionAt = now
 	}
 	tb.attention = true
-	if visible {
-		tb.attentionVisiblePaint = true
+	for _, attachment := range sess.snapshotAttachmentsLocked() {
+		view := attachment.viewSnapshot()
+		if domain.TabStableID(tb.stableID) == view.tabID {
+			tb.attentionVisiblePaint = true
+			break
+		}
 	}
 	sess.mu.Unlock()
 
@@ -47,16 +50,16 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 // happened — it also covers "no target exists", which is routine and not an
 // error. Only a failure to reach a target that does exist is a genuine error.
 func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {
-	return d.jumpAttentionForRole(sess, ac, attachmentRoleToken{})
+	return d.jumpAttentionForAttachment(sess, ac, attachmentConnectionToken{})
 }
 
-func (d *Daemon) jumpAttentionForRole(sess *session, ac *attachedClient, token attachmentRoleToken) error {
+func (d *Daemon) jumpAttentionForAttachment(sess *session, ac *attachedClient, token attachmentConnectionToken) error {
 	if sess == nil || ac == nil {
 		return nil
 	}
 	if idx, ok := oldestAttentionTab(sess); ok {
-		if sess.switchTab(idx) {
-			d.activateTab(sess, sess.activeTab())
+		if sess.switchAttachmentTab(ac, idx) {
+			d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(ac), false, ac, token.lease)
 			d.invalidateRender(sess, ac, true, "attention.go")
 		}
 		return nil
@@ -70,7 +73,7 @@ func (d *Daemon) jumpAttentionForRole(sess *session, ac *attachedClient, token a
 	if token.ac == nil {
 		return d.switchToTarget(sess, ac, pickerTarget)
 	}
-	return d.switchActiveTargetForRole(token, pickerTarget)
+	return d.switchActiveTargetForAttachment(token, pickerTarget)
 }
 
 func oldestAttentionTab(sess *session) (int, bool) {
@@ -127,10 +130,7 @@ func oldestAttentionTabWithTime(sess *session) (int, time.Time, bool) {
 }
 
 func (d *Daemon) repaintAttachedClients(sess *session) {
-	sess.mu.Lock()
-	ac := sess.client
-	sess.mu.Unlock()
-	if ac != nil {
+	for _, ac := range sess.snapshotAttachments() {
 		d.invalidateRender(sess, ac, false, "attention.go")
 	}
 }
@@ -145,13 +145,14 @@ func (d *Daemon) repaintAllAttachedClients() {
 	}
 }
 
-func (s *session) ackAttention(tb *tab, visible bool) bool {
-	if tb == nil {
+func (s *session) ackAttention(tb *tab, ac *attachedClient, visible bool) bool {
+	if tb == nil || ac == nil {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active < 0 || s.active >= len(s.tabs) || s.tabs[s.active] != tb || !tb.attention {
+	view := ac.viewSnapshot()
+	if domain.TabStableID(tb.stableID) != view.tabID || !tb.attention {
 		return false
 	}
 	if tb.attentionVisiblePaint && !visible {

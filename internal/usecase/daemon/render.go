@@ -26,8 +26,8 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 		return false
 	}
 	sess.mu.Lock()
-	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
-	attached := sess.client != nil
+	active := sess.attachmentViewsTabLocked(tb)
+	attached := len(sess.attachments) != 0
 	sess.mu.Unlock()
 
 	// The normal attached render path needs no cross-session picker lookup.
@@ -63,17 +63,16 @@ func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
 	sessions := localSessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 	for _, sess := range sessions {
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
-		if ac == nil || ac.overlays == nil {
-			continue
-		}
-		ac.overlays.pickerMu.Lock()
-		preview := ac.overlays.pickerPreview == tb
-		ac.overlays.pickerMu.Unlock()
-		if preview {
-			return true
+		for _, ac := range sess.snapshotAttachments() {
+			if ac == nil || ac.overlays == nil {
+				continue
+			}
+			ac.overlays.pickerMu.Lock()
+			preview := ac.overlays.pickerPreview == tb
+			ac.overlays.pickerMu.Unlock()
+			if preview {
+				return true
+			}
 		}
 	}
 	return false
@@ -259,9 +258,9 @@ func (d *Daemon) observeRuntime(kind ports.RuntimeMarkKind, bytes uint64, valid 
 // paint owns attachment sendMu while it captures, composes, and emits; JSONL
 // observer I/O must therefore happen only after that ownership is released.
 type runtimeMarkBatch struct {
-	observer   ports.RuntimeObserver
-	marks      []ports.RuntimeMark
-	roleEffect *roleEffectTicket
+	observer         ports.RuntimeObserver
+	marks            []ports.RuntimeMark
+	attachmentEffect *attachmentEffectTicket
 }
 
 func (d *Daemon) newRuntimeMarkBatch() runtimeMarkBatch {
@@ -305,22 +304,22 @@ func (b *runtimeMarkBatch) flush() {
 func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, lease *attachmentLease) {
 	// Local sessions retain their tab/PTY preparation below. Proxy sessions
 	// enter the same attachment pipeline but supply their VT snapshot through
-	// attachmentSession.capturePrimary.
+	// attachmentSession.captureRenderState.
 	sess, local := localSession(entry)
 	marks := d.newRuntimeMarkBatch()
 	if lease != nil {
 		token := attachmentToken(entry, ac, ac.transport())
 		token.lease = lease
-		ticket, admitted := ac.beginRoleEffect(token)
+		ticket, admitted := ac.beginAttachmentEffect(token)
 		if !admitted {
 			return
 		}
-		marks.roleEffect = ticket
+		marks.attachmentEffect = ticket
 		defer ticket.End()
 	}
 	var tb *tab
 	if local {
-		tb = sess.activeTab()
+		tb = sess.tabForAttachment(ac)
 		if tb == nil {
 			return
 		}
@@ -331,7 +330,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	// published identity while holding it so a deadline captured before an
 	// attach/replace cannot emit on either the old or new output chain.
 	entry.core().mu.Lock()
-	owned := entry.core().client == ac
+	_, owned := entry.core().attachments[ac]
 	entry.core().mu.Unlock()
 	if !owned || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
@@ -382,12 +381,12 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 	if statusFeedback == "" && overlays.resizeActive {
 		statusFeedback = "resize: h/j/k/l or arrows · = equalize · q/esc/enter exit"
 	}
-	bars := d.barStateForAttachmentPaletteHints(entry, statusFeedback, overlays.paletteHints, overlays.paletteRecent)
+	bars := d.barStateForAttachmentPaletteHintsFor(entry, ac, statusFeedback, overlays.paletteHints, overlays.paletteRecent)
 	applied := ac.getAppliedTheme()
 	bars.theme = applied.Raw
 	if local {
 		attentionVisible := pulseVisible(bars.attentionFrame)
-		repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
+		repaintAttachedClients = sess.ackAttention(tb, ac, attentionVisible)
 	}
 
 	paletteCfg := d.currentPaletteConfig()
@@ -405,7 +404,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 		hasFloating := tb.floating.state == floatingVisible && floating != nil
 		tb.mu.Unlock()
 		for _, id := range titleIDs {
-			d.refreshPaneTitle(sess, id)
+			d.refreshPaneTitle(sess, id, tb)
 		}
 		if hasFloating {
 			d.refreshPaneDisplayTitle(sess, floating, false)
@@ -418,7 +417,7 @@ func (d *Daemon) paint(entry attachmentSession, ac *attachedClient, reset bool, 
 		resizeActive: overlays.resizeActive, statusFeedback: statusFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
-	state, ok := entry.capturePrimary(ac, primaryCaptureRequest{
+	state, ok := entry.captureRenderState(ac, renderCaptureRequest{
 		bars:            bars,
 		overlays:        capturedOverlays,
 		preview:         preview,

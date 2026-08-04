@@ -42,36 +42,36 @@ func (p *proxySession) sendInput(raw []byte) error {
 // proxy. Local UI actions never reach the link. Every remote-owned action is
 // sent using the exact bytes supplied by keys.Router.
 type proxyKeyHandler struct {
-	d         *Daemon
-	proxy     *proxySession
-	ac        *attachedClient
-	roleToken attachmentRoleToken
+	d               *Daemon
+	proxy           *proxySession
+	ac              *attachedClient
+	connectionToken attachmentConnectionToken
 }
 
-func (h proxyKeyHandler) acquireRoleEffect() (*roleEffectTicket, bool, bool) {
+func (h proxyKeyHandler) acquireAttachmentEffect() (*attachmentEffectTicket, bool, bool) {
 	if h.proxy == nil || h.ac == nil {
 		return nil, false, false
 	}
-	if h.roleToken.ac == nil {
+	if h.connectionToken.ac == nil {
 		return nil, false, false
 	}
-	if h.roleToken.sess != h.proxy || h.roleToken.ac != h.ac {
+	if h.connectionToken.sess != h.proxy || h.connectionToken.ac != h.ac {
 		return nil, false, false
 	}
-	if effect := h.roleToken.effect; effect != nil && !effect.ended.Load() {
+	if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
 		return effect, false, true
 	}
-	effect, admitted := h.roleToken.ac.beginRoleEffect(h.roleToken)
+	effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
 	if h.d != nil && h.d.afterDelayedKeyEffectAttempt != nil {
 		h.d.afterDelayedKeyEffectAttempt(admitted)
 	}
 	if !admitted {
 		return nil, false, false
 	}
-	if h.d != nil && h.d.afterRoleEffectAdmitted != nil {
-		token := h.roleToken
+	if h.d != nil && h.d.afterAttachmentEffectAdmitted != nil {
+		token := h.connectionToken
 		token.effect = effect
-		h.d.afterRoleEffectAdmitted(token)
+		h.d.afterAttachmentEffectAdmitted(token)
 	}
 	return effect, true, true
 }
@@ -86,7 +86,7 @@ func (h proxyKeyHandler) sendOwned(raw []byte) {
 }
 
 func (h proxyKeyHandler) send(raw []byte) {
-	effect, owned, ok := h.acquireRoleEffect()
+	effect, owned, ok := h.acquireAttachmentEffect()
 	if !ok {
 		return
 	}
@@ -101,14 +101,14 @@ func (h proxyKeyHandler) Forward(raw []byte) { h.send(raw) }
 func (h proxyKeyHandler) Mouse(event mouse.Event) { h.send(event.Raw) }
 
 func (h proxyKeyHandler) Action(action keys.Action, raw []byte) {
-	effect, owned, ok := h.acquireRoleEffect()
+	effect, owned, ok := h.acquireAttachmentEffect()
 	if !ok {
 		return
 	}
 	if owned {
 		defer effect.End()
 	}
-	h.roleToken.effect = effect
+	h.connectionToken.effect = effect
 	switch action {
 	case keys.ActionOpenPalette:
 		h.enterPalette()
@@ -176,7 +176,7 @@ func (h proxyKeyHandler) enterPalette() {
 // navigation. A pending tab on the proxy remains remote-owned; without one,
 // the local daemon may move the client to another local session.
 func (h proxyKeyHandler) jumpLocalAttention() {
-	if h.d == nil || h.roleToken.ac == nil || h.roleToken.effect == nil {
+	if h.d == nil || h.connectionToken.ac == nil || h.connectionToken.effect == nil {
 		return
 	}
 	target, ok := h.d.oldestOtherSessionAttention(nil)
@@ -190,12 +190,12 @@ func (h proxyKeyHandler) jumpLocalAttention() {
 		return
 	}
 
-	token := h.roleToken
+	token := h.connectionToken
 	token.effect.bindActionEnd(h.d, "proxy-jump-attention")
 	token.effect.End()
 	transition, err := h.d.transitionAttachment(attachmentTransitionRequest{
 		source: h.proxy, target: targetSession, next: h.ac,
-		expectedRole: attachmentActive, targetRole: attachmentActive,
+
 		expectedTransport: token.transport, sourceToken: &token,
 		action: "proxy-jump-attention", activateTargetTab: true,
 		targetTabIndex: target.tabIndex, ready: true,
@@ -227,34 +227,32 @@ func proxiedJumpSearchesOtherSessions(proxied bool) bool { return !proxied }
 // but never follows OverflowSessions. The local proxy daemon is the only owner
 // allowed to change the selected session.
 func (d *Daemon) focusDirProxied(sess *session, ac *attachedClient, dir layout.Direction) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	oldFocus := layout.PaneID("")
 	if target.pane != nil {
 		oldFocus = target.pane.id
 	}
-	span, err := d.focusDirAt(sess, target.tab, target.pane, dir)
+	span, err := d.focusDirAt(sess, target.tab, target.pane, dir, ac)
 	if err == nil {
 		if ac != nil {
 			d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "proxy_input.go")
 		}
 		return nil
 	}
-	if !errors.Is(err, errNoNeighbor) || target.tab == nil || !overflowSourceEligible(sess, target.tab) {
+	if !errors.Is(err, errNoNeighbor) || target.tab == nil || !overflowSourceEligible(sess, ac, target.tab) {
 		return err
 	}
 
-	sess.mu.Lock()
-	position, count := sess.active, len(sess.tabs)
-	sess.mu.Unlock()
+	position, count := sess.tabIndexForAttachment(ac)
 	step := resolveOverflow(dir, proxiedNavConfig(d.currentNavConfig()), position, count)
 	if step.kind != overflowTabs {
 		return errNoNeighbor
 	}
-	candidate, ok := d.prepareTabOverflow(sess, target.tab, dir, span, step.delta)
-	if !ok || !d.commitTabOverflow(sess, candidate) {
+	candidate, ok := d.prepareTabOverflowForAttachment(sess, ac, target.tab, dir, span, step.delta)
+	if !ok || !d.commitTabOverflowForAttachment(sess, ac, candidate) {
 		return errNoNeighbor
 	}
-	d.activateTab(sess, candidate.target)
+	sess.selectAttachmentTab(ac, domain.TabStableID(candidate.target.stableID))
 	if ac != nil {
 		d.finishPaneFocusForClient(sess, ac, candidate.target, candidate.targetOldFocus, "proxy_input.go")
 	}

@@ -178,14 +178,8 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 	if d == nil || sess == nil || tb == nil {
 		return false
 	}
-	// A headless session has no actual terminal destination. Deferring warmup
-	// until firstPaint keeps restored tabs cold and avoids launching children
-	// merely because a tab was manipulated during teardown.
-	if ac == nil {
-		sess.mu.Lock()
-		ac = sess.client
-		sess.mu.Unlock()
-	}
+	// A headless session has no attachment-local copy mode to clear. Keep its
+	// geometry work session-wide instead of choosing an arbitrary attachment.
 	if rc := sess.renderCoordinator(); rc != nil && rc.opts.onActivateTabAfterResize != nil {
 		rc.opts.onActivateTabAfterResize(lease != nil)
 	}
@@ -195,11 +189,24 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 			return false
 		}
 	}
-	d.exitCopyMode(ac)
+	d.ensureFloatingWarm(sess, tb)
 	if ac == nil {
+		for _, attachment := range sess.snapshotAttachments() {
+			d.exitCopyMode(attachment)
+		}
+		if outerResizeAccepted {
+			return false
+		}
+		tb.mu.Lock()
+		hasFloating := tb.floating.pane != nil
+		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+		tb.mu.Unlock()
+		if hasFloating {
+			return d.requestTransactionalResize(sess, nil, size, true)
+		}
 		return false
 	}
-	d.ensureFloatingWarm(sess, tb)
+	d.exitCopyMode(ac)
 	if outerResizeAccepted {
 		return false
 	}
@@ -222,7 +229,10 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	if d == nil || sess == nil {
 		return domain.UserErr(domain.NoticeFloatingSpawn, "couldn't open floating pane: no active session", nil)
 	}
-	tb := sess.activeTab()
+	tb := sess.tabForAttachment(ac)
+	if ac == nil {
+		tb = sess.firstTab()
+	}
 	if tb == nil {
 		return domain.UserErr(domain.NoticeFloatingSpawn, "couldn't open floating pane: no active tab", layout.ErrNotFound)
 	}
@@ -478,13 +488,19 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	d.reapplyThemeSession(sess)
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
+		attachments := sess.snapshotAttachments()
+		if len(attachments) == 0 {
+			// A headless resize may commit while Open is warming. Reconcile the
+			// visible floating geometry even without an attachment callback.
+			d.applyVisibleFloatingLayout(sess, tb, nil)
+			return
+		}
 		tb.mu.Lock()
 		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 		tb.mu.Unlock()
-		d.requestTransactionalResize(sess, ac, size, true)
+		for _, ac := range attachments {
+			d.requestTransactionalResize(sess, ac, size, true)
+		}
 	}
 }
 
@@ -515,15 +531,14 @@ func (d *Daemon) reapInstalledFloating(p *pane) {
 			return
 		}
 		closeFloatingPane(p)
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
-		if ac != nil {
+		attachments := sess.snapshotAttachments()
+		copyCleared := false
+		for _, ac := range attachments {
 			ac.pruneCaptureFrames(p)
-		}
-		copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
-		if ac != nil && (visible || copyCleared) {
-			d.invalidateRender(sess, ac, true, "floating.go")
+			copyCleared = ac.overlays.clearCopyModeForPane(p) || copyCleared
+			if visible || copyCleared {
+				d.invalidateRender(sess, ac, true, "floating.go")
+			}
 		}
 		return
 	}

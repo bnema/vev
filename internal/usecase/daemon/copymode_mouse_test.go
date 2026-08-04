@@ -26,7 +26,7 @@ func mouseCopyHarness(t *testing.T, rows ...string) (*Daemon, *session, *attache
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	clock := &manualMouseClock{now: time.Unix(1, 0)}
 	d.clock = clock
-	pane := sess.activeTab().focusedPane()
+	pane := testAttachmentTab(sess).focusedPane()
 	for i, row := range rows {
 		copy(pane.screen.Frame.Row(i), testRow(row))
 	}
@@ -41,7 +41,7 @@ func copyMouseInput(d *Daemon, sess *session, ac *attachedClient, raw string) {
 func TestCopyDoubleClick(t *testing.T) {
 	t.Run("same normalized position within interval selects word", func(t *testing.T) {
 		d, sess, ac, clock := mouseCopyHarness(t, "a界 beta")
-		pane := sess.activeTab().focusedPane()
+		pane := testAttachmentTab(sess).focusedPane()
 		d.exitCopyMode(ac)
 		pane.mu.Lock()
 		row := pane.screen.Frame.Row(0)
@@ -324,7 +324,7 @@ func TestCopyWordSelectionYanksExactOSC52(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clock := &manualMouseClock{now: time.Unix(1, 0)}
 	d.clock = clock
-	copy(sess.activeTab().focusedPane().screen.Frame.Row(0), testRow("alpha beta"))
+	copy(testAttachmentTab(sess).focusedPane().screen.Frame.Row(0), testRow("alpha beta"))
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 
@@ -348,11 +348,11 @@ func TestCopyPointerAndClickResetOnCopyExitAndReplacement(t *testing.T) {
 		{name: "escape", run: func(d *Daemon, _ *session, ac *attachedClient) { d.handleCopyInput(ac, []byte("\x1bx")) }},
 		{name: "yank", run: func(d *Daemon, _ *session, ac *attachedClient) { d.handleCopyInput(ac, []byte("y")) }},
 		{name: "replacement publication", run: func(d *Daemon, sess *session, ac *attachedClient) {
-			p := sess.activeTab().focusedPane()
+			p := testAttachmentTab(sess).focusedPane()
 			p.mu.Lock()
 			doc := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil), domain.DefaultWordSeparators)
 			p.mu.Unlock()
-			require.True(t, d.publishCopyMode(sess, ac, sess.activeTab(), p, doc, nil, nil))
+			require.True(t, d.publishCopyMode(sess, ac, testAttachmentTab(sess), p, doc, nil, nil))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

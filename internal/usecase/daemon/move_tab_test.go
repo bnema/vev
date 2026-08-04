@@ -27,13 +27,13 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			moved.name = "preserved-name"
 			remaining := source.tabs[1]
 			remaining.stableID = "remaining-tab"
-			source.active = 0
+			selectTestAttachmentTab(source, 0)
 
 			destinationCtx, destinationCancel := context.WithCancel(d.serveCtx)
 			t.Cleanup(destinationCancel)
 			destinationTab := newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 100, Rows: 30})
 			destinationTab.ctx, destinationTab.cancel = context.WithCancel(destinationCtx)
-			destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{9}, ephemeral: destinationEphemeral}, ctx: destinationCtx, cancel: destinationCancel, tabs: []*tab{destinationTab}, active: 0}
+			destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{9}, ephemeral: destinationEphemeral}, ctx: destinationCtx, cancel: destinationCancel, tabs: []*tab{destinationTab}}
 			publishTiledPaneOwners(destination, destinationTab)
 
 			floating := newPaneWithStableID("floating", "floating-stable", floatingPTY, domain.Size{Cols: 20, Rows: 8})
@@ -53,7 +53,7 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			oldWorkerCtx := moved.ctx
 			oldTree := moved.tree
 			oldPanes := moved.panes
-			beforeDestinationActive := destination.tabs[destination.active]
+			beforeDestinationActive := destination.tabs[testAttachmentTabIndex(destination)]
 
 			err := d.moveTab(moveTabRequest{
 				Source:      moveSessionLocator{ID: source.id, Incarnation: source.incarnation},
@@ -63,10 +63,10 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, []*tab{remaining}, source.tabs)
-			require.Zero(t, source.active)
-			require.Same(t, remaining, source.tabs[source.active])
+			require.Zero(t, testAttachmentTabIndex(source))
+			require.Same(t, remaining, source.tabs[testAttachmentTabIndex(source)])
 			require.Equal(t, []*tab{destinationTab, moved}, destination.tabs)
-			require.Same(t, beforeDestinationActive, destination.tabs[destination.active], "moved tab stays in the background")
+			require.Same(t, beforeDestinationActive, destination.tabs[testAttachmentTabIndex(destination)], "moved tab stays in the background")
 			require.Equal(t, destinationTab.size, moved.size, "destination geometry becomes authoritative")
 			require.Equal(t, "preserved-name", moved.name)
 			require.Same(t, oldTree, moved.tree)
@@ -85,85 +85,6 @@ func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {
 			require.NoError(t, moved.ctx.Err(), "replacement tab worker context belongs to live destination")
 		})
 	}
-}
-
-func TestMoveTabFinalSourceVisibleFloatingPreservesRuntimeAndFollowsClient(t *testing.T) {
-	d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	moved := source.tabs[0]
-	moved.stableID = "moved-tab"
-	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
-	destination := addMoveTabTestSession(d, "destination", "destination-tab")
-
-	floatingPTY := newQuietPTY()
-	floating := newPaneWithStableID("floating", "floating-stable", floatingPTY, domain.Size{Cols: 20, Rows: 8})
-	floatingCtx, floatingCancel := context.WithCancel(d.paneProcessCtx)
-	t.Cleanup(floatingCancel)
-	floating.ctx, floating.cancel = floatingCtx, floatingCancel
-	moved.mu.Lock()
-	moved.floating = floatingSlot{state: floatingVisible, pane: floating, desiredVisible: true, generation: 7}
-	moved.mu.Unlock()
-	publishPaneOwner(floating, source, moved, 7)
-	d.applyTabLayout(source, moved)
-
-	beforeScreen := floating.screen
-	beforeHistory := floating.history
-	beforeContext := floating.ctx
-	beforeOwnerGeneration := floating.ownerGeneration
-
-	require.NoError(t, d.moveTab(moveTabRequest{
-		Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),
-		Destination: moveSessionLocator{ID: destination.id, Incarnation: destination.incarnation},
-	}))
-
-	require.Same(t, moved, destination.tabs[destination.active])
-	require.Same(t, client, destination.client)
-	require.Same(t, destination, client.currentSession())
-	moved.mu.Lock()
-	require.Equal(t, floatingVisible, moved.floating.state)
-	require.True(t, moved.floating.desiredVisible)
-	require.Equal(t, uint64(7), moved.floating.generation)
-	require.Same(t, floating, moved.floating.pane)
-	moved.mu.Unlock()
-	expectedGeometry := calculateContentFloatingGeometry(moved.size, d.currentFloatingConfig())
-	floating.mu.Lock()
-	require.Same(t, floatingPTY, floating.pty)
-	require.Same(t, beforeScreen, floating.screen)
-	require.Same(t, beforeHistory, floating.history)
-	require.Equal(t, beforeContext, floating.ctx)
-	require.Equal(t, expectedGeometry, floating.popupGeometry)
-	require.Equal(t, expectedGeometry.Inner, floating.rect)
-	require.Equal(t, beforeOwnerGeneration+1, floating.ownerGeneration)
-	floating.mu.Unlock()
-	owner := floating.ownerSnapshot()
-	require.Same(t, destination, owner.session)
-	require.Same(t, moved, owner.tab)
-	require.Equal(t, floating.ownerGeneration, owner.generation)
-	require.Equal(t, uint64(7), owner.floatingSlotGeneration)
-	require.NoError(t, floating.ctx.Err(), "floating process context remains live")
-}
-
-func TestMoveTabFinalSourceClientFollowsAndActivatesMovedTab(t *testing.T) {
-	d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	moved := source.tabs[0]
-	moved.stableID = "moved-tab"
-	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
-	rebased := false
-	client.renderStages.handoffRebase = func() { rebased = true }
-	destination := addMoveTabTestSession(d, "destination", "destination-tab")
-	oldDestinationActive := destination.tabs[0]
-
-	require.NoError(t, d.moveTab(moveTabRequest{
-		Source: moveSessionLocator{ID: source.id, Incarnation: source.incarnation}, SourceTabID: domain.TabStableID(moved.stableID),
-		Destination: moveSessionLocator{ID: destination.id, Incarnation: destination.incarnation},
-	}))
-
-	require.Nil(t, source.tabs)
-	require.Same(t, destination, client.currentSession())
-	require.Same(t, client, destination.client)
-	require.Equal(t, attachmentActive, destination.attachmentRole(client))
-	require.Equal(t, []*tab{oldDestinationActive, moved}, destination.tabs)
-	require.Same(t, moved, destination.tabs[destination.active], "final-source follower activates the moved tab")
-	require.True(t, rebased)
 }
 
 func TestMoveTabRejectsSameSessionStaleMembershipAndWarming(t *testing.T) {
@@ -231,7 +152,7 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 			d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
 			moved := source.tabs[0]
 			moved.stableID = "moved-tab"
-			require.NotNil(t, d.attachCoordinator(source, nil, client, true))
+			require.NotNil(t, d.attachCoordinator(source, client, true))
 			destination := addMoveTabTestSession(d, "destination", "destination-tab")
 			floating := newPaneWithStableID("floating", "floating-stable", newQuietPTY(), domain.Size{Cols: 20, Rows: 8})
 			moved.mu.Lock()
@@ -241,7 +162,7 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 
 			source.layoutApplyMu.Lock()
 			admitted := make(chan struct{})
-			d.afterRoleEffectGateFrozen = func(action string, ac *attachedClient) {
+			d.afterAttachmentEffectGateFrozen = func(action string, ac *attachedClient) {
 				if action == "move-tab" && ac == client {
 					close(admitted)
 				}
@@ -262,7 +183,7 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 			require.Error(t, awaitTestValue(t, moveDone, "stale floating transfer did not return"))
 			require.NotContains(t, destination.tabs, moved)
 			require.Same(t, source, floating.ownerSnapshot().session)
-			d.afterRoleEffectGateFrozen = nil
+			d.afterAttachmentEffectGateFrozen = nil
 		})
 	}
 }
@@ -487,12 +408,12 @@ func (r *moveTabPurgeRepository) DeleteIncarnation(_ context.Context, id domain.
 	sourceFenceUnlocked := r.source.layoutApplyMu.TryLock()
 	destinationFenceUnlocked := r.destination.layoutApplyMu.TryLock()
 	tabFenceUnlocked := r.moved.layoutApplyMu.TryLock()
-	roleUnlocked := r.client.roleEffects.mu.TryLock()
-	roleStable := roleUnlocked && r.client.roleEffects.phase == roleEffectsStable
+	roleUnlocked := r.client.attachmentEffects.mu.TryLock()
+	roleStable := roleUnlocked && r.client.attachmentEffects.phase == attachmentEffectsStable
 	r.outside = daemonUnlocked && routingUnlocked && sourceUnlocked && destinationUnlocked && tabUnlocked && paneUnlocked &&
 		sourceFenceUnlocked && destinationFenceUnlocked && tabFenceUnlocked && roleStable
 	if roleUnlocked {
-		r.client.roleEffects.mu.Unlock()
+		r.client.attachmentEffects.mu.Unlock()
 	}
 	if tabFenceUnlocked {
 		r.moved.layoutApplyMu.Unlock()
@@ -532,7 +453,7 @@ func (r *moveTabPurgeRepository) DeleteIncarnation(_ context.Context, id domain.
 
 func TestMoveTabFinalNamedSourcePurgesAfterDestinationAdmissionAndFailureDoesNotRollback(t *testing.T) {
 	d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
+	require.NotNil(t, d.attachCoordinator(source, client, true))
 	source.incarnation = domain.IncarnationID{4}
 	moved := source.tabs[0]
 	moved.stableID = "moved-tab"
@@ -572,7 +493,7 @@ func addMoveTabTestSession(d *Daemon, id domain.SessionID, tabID string) *sessio
 	ctx, cancel := context.WithCancel(d.serveCtx)
 	tb := newTabWithStableID(tabID, tabID+"-pane", newQuietPTY(), domain.Size{Cols: 80, Rows: 23})
 	tb.ctx, tb.cancel = context.WithCancel(ctx)
-	sess := &session{sessionCore: sessionCore{id: id, name: string(id), incarnation: domain.IncarnationID{5}, ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}, active: 0}
+	sess := &session{sessionCore: sessionCore{id: id, name: string(id), incarnation: domain.IncarnationID{5}, ephemeral: true}, ctx: ctx, cancel: cancel, tabs: []*tab{tb}}
 	publishTiledPaneOwners(sess, tb)
 	d.mu.Lock()
 	d.sessions[sess.id] = sess

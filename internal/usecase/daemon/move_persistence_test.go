@@ -177,7 +177,7 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 			}
 			d, source, client, _ := newManualSessionWithPTYs(t, ptys...)
 			if tt.finalSource {
-				source.client = nil
+				clearAttachmentsForTest(source)
 				client.setSession(nil)
 			}
 			source.incarnation = domain.IncarnationID{1}

@@ -20,11 +20,11 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 	d.handleInput(sess, ac, data)
 }
 
-func (d *Daemon) handleSequencedInputForRole(token attachmentRoleToken, _ uint64, data []byte) {
-	if !token.activeEffect() {
+func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionToken, _ uint64, data []byte) {
+	if !token.attachmentEffectCurrent() {
 		return
 	}
-	d.handleInputForRole(token, data)
+	d.handleInputForAttachment(token, data)
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
@@ -40,19 +40,19 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	)
 }
 
-func (d *Daemon) handleInputForRole(token attachmentRoleToken, data []byte) {
+func (d *Daemon) handleInputForAttachment(token attachmentConnectionToken, data []byte) {
 	ac := token.ac
 	ac.initOverlays()
 	if proxy, ok := token.sess.(*proxySession); ok {
-		handler := proxyKeyHandler{d: d, proxy: proxy, ac: ac, roleToken: token}
+		handler := proxyKeyHandler{d: d, proxy: proxy, ac: ac, connectionToken: token}
 		ac.mouseScan.Scan(data,
 			func(ev mouse.Event) {
-				if token.activeEffect() && !proxyMouseOwnedLocally(ac.overlays) {
+				if token.attachmentEffectCurrent() && !proxyMouseOwnedLocally(ac.overlays) {
 					handler.Mouse(ev)
 				}
 			},
 			func(b []byte) {
-				if !token.activeEffect() || ac.overlays.HandleInput(d, b, token.effect) || !token.activeEffect() {
+				if !token.attachmentEffectCurrent() || ac.overlays.HandleInput(d, b, token.effect) || !token.attachmentEffectCurrent() {
 					return
 				}
 				ac.keys.RouteWithHandler(b, handler)
@@ -62,26 +62,30 @@ func (d *Daemon) handleInputForRole(token attachmentRoleToken, data []byte) {
 	}
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) {
-			if token.activeEffect() {
+			if token.attachmentEffectCurrent() {
 				d.handleMouse(ac, ev)
 			}
 		},
 		func(b []byte) {
-			if !token.activeEffect() {
+			if !token.attachmentEffectCurrent() {
 				return
 			}
 			if ac.overlays.HandleInput(d, b, token.effect) {
 				return
 			}
-			if !token.activeEffect() {
+			if !token.attachmentEffectCurrent() {
 				return
 			}
-			ac.keys.RouteWithHandler(b, daemonKeyHandler{d: d, ac: ac, roleToken: token})
+			ac.keys.RouteWithHandler(b, daemonKeyHandler{d: d, ac: ac, connectionToken: token})
 		},
 	)
 }
 
 func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
+	d.handleMouseMutation(ac, ev)
+}
+
+func (d *Daemon) handleMouseMutation(ac *attachedClient, ev mouse.Event) {
 	frameEvent := ev
 	ac.initOverlays()
 	rt := ac.overlays
@@ -93,7 +97,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		invalidateRejectedLeftPointer(rt, ev)
 		return
 	}
-	tb := sess.activeTab()
+	tb := sess.tabForAttachment(ac)
 	if tb == nil {
 		invalidateRejectedLeftPointer(rt, ev)
 		return
@@ -108,97 +112,157 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		return
 	}
 
-	tb.mu.Lock()
+	// Copy-mode publication deliberately revalidates outside the dispatch lock:
+	// a concurrent release or pane close must be able to invalidate its candidate.
+	var routed mouseRoute
+	_ = sess.runMutation(func() error {
+		routed = d.routeMouseMutation(sess, ac, ev)
+		return nil
+	})
+	if routed.handled {
+		return
+	}
+	if routed.p == nil {
+		invalidateRejectedLeftPointer(rt, ev)
+		return
+	}
+	if ev.Button == mouse.Left && ev.Type == mouse.Press && d.handleFreshCopyPress(sess, ac, routed.tb, routed.p, frameEvent) {
+		return
+	}
+	d.handleTerminalMouse(sess, ac, routed.p, routed.event, routed.translated, routed.hoveredFocused)
+}
+
+type mouseRoute struct {
+	tb             *tab
+	p              *pane
+	event          mouse.Event
+	translated     bool
+	hoveredFocused bool
+	handled        bool
+}
+
+func (d *Daemon) routeMouseMutation(sess *session, ac *attachedClient, ev mouse.Event) mouseRoute {
+	route := mouseRoute{event: ev, hoveredFocused: true}
+	tb := sess.tabForAttachment(ac)
+	if tb == nil {
+		route.handled = true
+		return route
+	}
+	route.tb = tb
 	contentRow := ev.Row - clientTopBarRows
+	tb.mu.Lock()
 	floating, floatingGeometry, floatingVisible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
 	if floatingVisible {
 		if !pointInRect(ev.Col, contentRow, floatingGeometry.Inner) {
 			tb.mu.Unlock()
-			invalidateRejectedLeftPointer(rt, ev)
-			return
+			route.handled = true
+			return route
 		}
 		tb.mu.Unlock()
-		if ev.Button == mouse.Left && ev.Type == mouse.Press && d.handleFreshCopyPress(sess, ac, tb, floating, frameEvent) {
-			return
-		}
-		ev = translateMouseEvent(ev, floatingGeometry.Inner.X, floatingGeometry.Inner.Y)
-		d.handleTerminalMouse(sess, ac, floating, ev, true, true)
-		return
+		route.p = floating
+		route.event = translateMouseEvent(ev, floatingGeometry.Inner.X, floatingGeometry.Inner.Y)
+		route.translated = true
+		return route
 	}
 	pl, hit := hitTestPlacementLocked(tb, ev.Col, contentRow)
 	multi := len(tb.panes) > 1
-	focusedID := layout.PaneID("")
-	if tb.tree != nil {
-		focusedID = tb.tree.Focus
-	}
+	focusedID := mouseFocusedPaneIDLocked(ac, tb)
 	if hit && pointInRect(ev.Col, contentRow, pl.TitleBar) {
 		if !isMouseFocusPress(ev) {
 			tb.mu.Unlock()
-			invalidateRejectedLeftPointer(rt, ev)
-			return
+			route.handled = true
+			return route
 		}
-		oldFocus := focusedID
-		layoutChanged := focusPlacementLocked(tb, pl.ID)
 		tb.mu.Unlock()
-		if layoutChanged {
-			d.applyTabLayout(sess, tb)
+		_, focused := d.focusMousePane(sess, ac, tb, pl.ID)
+		if focused == nil {
+			route.handled = true
+			return route
 		}
-		// A title bar never routes to terminal content. Clear any pre-existing
-		// left-button candidate before handling the focus result, including when
-		// this press leaves the same pane focused.
-		invalidateRejectedLeftPointer(rt, ev)
-		if pl.ID != oldFocus {
+		invalidateRejectedLeftPointer(ac.overlays, ev)
+		if pl.ID != focusedID {
 			d.exitCopyMode(ac)
 			d.refreshPaneTitleOnFocus(sess, pl.ID)
 		}
 		d.invalidateRender(sess, ac, true, "input.go")
-		return
+		route.handled = true
+		return route
 	}
-	var p *pane
-	translated := false
-	hoveredFocused := true
 	if hit && !pl.Collapsed && pointInRect(ev.Col, contentRow, pl.Content) {
 		oldFocus := focusedID
-		layoutChanged := false
-		if isMouseFocusPress(ev) {
-			layoutChanged = focusPlacementLocked(tb, pl.ID)
-		}
-		p = tb.panes[pl.ID]
-		hoveredFocused = pl.ID == oldFocus
+		shouldFocus := isMouseFocusPress(ev)
+		p := tb.panes[pl.ID]
+		hoveredFocused := pl.ID == oldFocus
 		tb.mu.Unlock()
-		if layoutChanged {
-			d.applyTabLayout(sess, tb)
+		if shouldFocus {
+			_, p = d.focusMousePane(sess, ac, tb, pl.ID)
 		}
 		if p == nil {
-			invalidateRejectedLeftPointer(rt, ev)
-			return
+			route.handled = true
+			return route
 		}
-		if isMouseFocusPress(ev) && pl.ID != oldFocus {
+		if shouldFocus && pl.ID != oldFocus {
 			d.exitCopyMode(ac)
 			d.refreshPaneTitleOnFocus(sess, pl.ID)
 			d.invalidateRender(sess, ac, true, "input.go")
 		}
+		route.p = p
+		route.hoveredFocused = hoveredFocused
 		if multi {
-			ev = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
-			translated = true
+			route.event = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
+			route.translated = true
 		}
-	} else {
-		if multi {
-			tb.mu.Unlock()
-			invalidateRejectedLeftPointer(rt, ev)
-			return
-		}
-		p = tb.focusedPane()
+		return route
+	}
+	if multi {
 		tb.mu.Unlock()
-		if p == nil {
-			invalidateRejectedLeftPointer(rt, ev)
-			return
+		route.handled = true
+		return route
+	}
+	tb.mu.Unlock()
+	_, route.p = sess.paneForAttachment(ac)
+	return route
+}
+
+func mouseFocusedPaneIDLocked(ac *attachedClient, tb *tab) layout.PaneID {
+	if ac != nil && tb != nil {
+		view := ac.viewSnapshot()
+		if domain.TabStableID(tb.stableID) == view.tabID {
+			for _, p := range tb.panes {
+				if p != nil && domain.PaneStableID(p.stableID) == view.paneID {
+					return p.id
+				}
+			}
 		}
 	}
-	if ev.Button == mouse.Left && ev.Type == mouse.Press && d.handleFreshCopyPress(sess, ac, tb, p, frameEvent) {
-		return
+	if tb == nil || tb.tree == nil {
+		return ""
 	}
-	d.handleTerminalMouse(sess, ac, p, ev, translated, hoveredFocused)
+	return tb.tree.Focus
+}
+
+// focusMousePane runs inside the caller's session mutation boundary.
+func (d *Daemon) focusMousePane(sess *session, ac *attachedClient, tb *tab, id layout.PaneID) (bool, *pane) {
+	var changed bool
+	var focused *pane
+	tb.mu.Lock()
+	if tb.tree != nil {
+		focused = tb.panes[id]
+		if focused != nil {
+			changed = focusPlacementLocked(tb, id)
+		}
+	}
+	tb.mu.Unlock()
+	if focused == nil {
+		return false, nil
+	}
+	sess.mu.Lock()
+	sess.setAttachmentPaneLocked(ac, tb, focused)
+	sess.mu.Unlock()
+	if changed {
+		d.applyTabLayout(sess, tb)
+	}
+	return changed, focused
 }
 
 func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane, ev mouse.Event, translated, hoveredFocused bool) {
@@ -215,18 +279,24 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 		if !mouseSGR || ev.Row == 0 || ev.Row > childRows {
 			return
 		}
-		if translated {
-			d.writeToPane(sess, p, ev.Raw)
-		} else {
-			d.writeToPane(sess, p, sgrRowOffset(ev.Raw, -clientTopBarRows))
-		}
+		_ = sess.runMutation(func() error {
+			if translated {
+				d.writeToPane(sess, p, ev.Raw)
+			} else {
+				d.writeToPane(sess, p, sgrRowOffset(ev.Raw, -clientTopBarRows))
+			}
+			return nil
+		})
 		return
 	}
 
 	switch ev.Button {
 	case mouse.WheelUp:
 		if altScreen {
-			d.writeToPane(sess, p, []byte("\x1b[A\x1b[A\x1b[A"))
+			_ = sess.runMutation(func() error {
+				d.writeToPane(sess, p, []byte("\x1b[A\x1b[A\x1b[A"))
+				return nil
+			})
 			return
 		}
 		if !hoveredFocused {
@@ -236,7 +306,10 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 		d.copyWheel(sess, ac, -3)
 	case mouse.WheelDown:
 		if altScreen {
-			d.writeToPane(sess, p, []byte("\x1b[B\x1b[B\x1b[B"))
+			_ = sess.runMutation(func() error {
+				d.writeToPane(sess, p, []byte("\x1b[B\x1b[B\x1b[B"))
+				return nil
+			})
 		}
 	}
 }
@@ -315,34 +388,34 @@ func sgrOffset(raw []byte, colDelta, rowDelta int) []byte {
 }
 
 type daemonKeyHandler struct {
-	d         *Daemon
-	ac        *attachedClient
-	actions   daemonActionRunner
-	roleToken attachmentRoleToken
+	d               *Daemon
+	ac              *attachedClient
+	actions         daemonActionRunner
+	connectionToken attachmentConnectionToken
 }
 
-// acquireRoleEffect preserves a synchronous frame's existing admission and
-// gives delayed router callbacks a fresh ticket for the exact captured role.
-// Direct/headless callers without a role token retain their existing behavior.
-func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool) {
-	if h.roleToken.ac != nil {
-		if effect := h.roleToken.effect; effect != nil && !effect.ended.Load() {
-			sess, _ := localSession(h.roleToken.sess)
+// acquireAttachmentEffect preserves a synchronous frame's existing admission and
+// gives delayed router callbacks a fresh ticket for the exact captured attachment.
+// Direct/headless callers without an attachment token retain their existing behavior.
+func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffectTicket, bool) {
+	if h.connectionToken.ac != nil {
+		if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
+			sess, _ := localSession(h.connectionToken.sess)
 			return sess, effect, false
 		}
-		effect, admitted := h.roleToken.ac.beginRoleEffect(h.roleToken)
+		effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
 		if h.d.afterDelayedKeyEffectAttempt != nil {
 			h.d.afterDelayedKeyEffectAttempt(admitted)
 		}
 		if !admitted {
 			return nil, nil, false
 		}
-		if h.d.afterRoleEffectAdmitted != nil {
-			token := h.roleToken
+		if h.d.afterAttachmentEffectAdmitted != nil {
+			token := h.connectionToken
 			token.effect = effect
-			h.d.afterRoleEffectAdmitted(token)
+			h.d.afterAttachmentEffectAdmitted(token)
 		}
-		sess, ok := localSession(h.roleToken.sess)
+		sess, ok := localSession(h.connectionToken.sess)
 		if !ok {
 			effect.End()
 			return nil, nil, false
@@ -350,32 +423,35 @@ func (h daemonKeyHandler) acquireRoleEffect() (*session, *roleEffectTicket, bool
 		return sess, effect, true
 	}
 	sess := h.ac.currentSession()
-	if sess == nil || sess.attachmentRole(h.ac) == attachmentSnatched {
+	if sess == nil {
 		return nil, nil, false
 	}
 	return sess, nil, false
 }
 
 func (h daemonKeyHandler) Forward(data []byte) {
-	sess, effect, owned := h.acquireRoleEffect()
+	sess, effect, owned := h.acquireAttachmentEffect()
 	if sess == nil {
 		return
 	}
 	if owned {
 		defer effect.End()
 	}
-	tb := sess.activeTab()
-	if tb == nil {
-		return
-	}
-	tb.mu.Lock()
-	p := tb.terminalTargetLocked()
-	tb.mu.Unlock()
-	h.d.writeToPane(sess, p, data)
+	_ = sess.runMutation(func() error {
+		tb := sess.tabForAttachment(h.ac)
+		if tb == nil {
+			return nil
+		}
+		tb.mu.Lock()
+		p := tb.terminalTargetLocked()
+		tb.mu.Unlock()
+		h.d.writeToPane(sess, p, data)
+		return nil
+	})
 }
 
 func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
-	sess, effect, owned := h.acquireRoleEffect()
+	sess, effect, owned := h.acquireAttachmentEffect()
 	if sess == nil {
 		return
 	}
@@ -383,12 +459,15 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		defer effect.End()
 	}
 	runAction := func(request daemonActionRequest) {
-		request.target = resolveDaemonActionTarget(sess)
+		request.effect = effect
 		runner := h.actions
 		if runner == nil {
 			runner = daemonActions{d: h.d}
 		}
-		if err := runner.Run(request); err != nil {
+		if err := sess.runMutation(func() error {
+			request.target = resolveDaemonActionTargetForAttachment(sess, h.ac)
+			return runner.Run(request)
+		}); err != nil {
 			if errors.Is(err, errDaemonActionNoChange) {
 				return
 			}
@@ -408,10 +487,13 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
 		if !proxiedJumpSearchesOtherSessions(h.ac.proxied) {
-			if idx, ok := oldestAttentionTab(sess); ok && sess.switchTab(idx) {
-				h.d.activateTab(sess, sess.activeTab())
-				h.d.invalidateRender(sess, h.ac, true, "input.go")
-			}
+			_ = sess.runMutation(func() error {
+				if idx, ok := oldestAttentionTab(sess); ok && sess.switchAttachmentTabForDispatch(h.ac, idx) {
+					h.d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(h.ac), false, h.ac, nil)
+					h.d.invalidateRender(sess, h.ac, true, "input.go")
+				}
+				return nil
+			})
 			return
 		}
 		if effect == nil {
@@ -421,13 +503,13 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 			return
 		}
 		effect.bindActionEnd(h.d, "jump-attention")
-		token := h.roleToken
+		token := h.connectionToken
 		token.effect = effect
-		if err := h.d.jumpAttentionForRole(sess, h.ac, token); err != nil {
+		if err := h.d.jumpAttentionForAttachment(sess, h.ac, token); err != nil {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionToggleFloatingPane:
-		if err := h.d.toggleFloating(sess, h.ac); err != nil {
+		if err := sess.runMutation(func() error { return h.d.toggleFloating(sess, h.ac) }); err != nil {
 			h.d.log.Warn("toggle floating pane failed", "err", err)
 			h.d.reportError(sess, err)
 		}
@@ -457,14 +539,17 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:
 		idx := int(action - keys.ActionSwitchTab1)
-		if sess.switchTab(idx) {
-			h.d.activateTab(sess, sess.activeTab())
-			h.d.invalidateRender(sess, h.ac, true, "input.go")
-		}
+		_ = sess.runMutation(func() error {
+			if sess.switchAttachmentTabForDispatch(h.ac, idx) {
+				h.d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(h.ac), false, h.ac, nil)
+				h.d.invalidateRender(sess, h.ac, true, "input.go")
+			}
+			return nil
+		})
 	}
 }
 
-func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *roleEffectTicket) {
+func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *attachmentEffectTicket) {
 	var err error
 	if h.ac.proxied {
 		err = h.d.focusDirProxied(sess, h.ac, dir)

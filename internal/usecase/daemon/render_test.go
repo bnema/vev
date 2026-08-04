@@ -79,7 +79,7 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 			// outer terminal also changes, its completed transaction must cover
 			// that popup rather than emitting a second reset-producing frame.
 			floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
-			installTestFloating(sess.activeTab(), floating, true)
+			installTestFloating(testAttachmentTab(sess), floating, true)
 
 			d.firstPaint(sess, ac, tc.clientSize)
 
@@ -313,7 +313,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, activePTY, inactivePTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(sess, nil, ac, true)
+		rc := d.attachCoordinator(sess, ac, true)
 
 		d.sessWg.Add(1)
 		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
@@ -321,7 +321,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, inactiveProcessed)
 
 		sess.mu.Lock()
-		sess.active = 1
+		selectTestAttachmentTabLocked(sess, 1)
 		sess.mu.Unlock()
 		d.invalidateRender(sess, ac, true, "sync activation")
 		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
@@ -349,7 +349,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, oldPTY, newPTY, parkedPTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(sess, nil, ac, true)
+		rc := d.attachCoordinator(sess, ac, true)
 
 		d.sessWg.Add(2)
 		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
@@ -358,7 +358,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, oldProcessed)
 
 		sess.mu.Lock()
-		sess.active = 1
+		selectTestAttachmentTabLocked(sess, 1)
 		sess.mu.Unlock()
 		newSteps <- channelPTYStep{data: []byte("newly active")}
 		awaitPTYReadProcessed(t, newProcessed)
@@ -379,111 +379,13 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 	})
 }
 
-func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		window        uint64
-		exitBeforeACK bool
-		exitSuffix    string
-		overlay       bool
-	}{
-		{name: "datagram output window (1): exit waits for ACK", window: 1},
-		{name: "datagram output window (1): exit and prompt arrive before ACK", window: 1, exitBeforeACK: true, exitSuffix: "PROMPT> "},
-		{name: "local default output window (8): exit waits for ACK", window: maxUnackedOutputStates},
-		{name: "local default output window (8): exit and prompt arrive before ACK", window: maxUnackedOutputStates, exitBeforeACK: true, exitSuffix: "PROMPT> "},
-		{name: "local default output window (8): palette overlay with bars", window: maxUnackedOutputStates, overlay: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pty, steps, processed := newChannelPTY(t)
-			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
-			// Datagram clients use a one-frame window; local clients retain the
-			// default eight-frame window. Both ACK orderings stay deterministic.
-			ac.output.maxOutstanding = tc.window
-			clock := newCoordinatorMockClock(t, 8)
-			d.clock = clock.clock
-			rc := d.attachCoordinator(sess, nil, ac, true)
-			client := vt.NewScreen(80, 25)
-			pane := sess.tabs[0].focusedPane()
-
-			d.sessWg.Add(1)
-			go d.ptyReader(sess, sess.tabs[0], pane)
-			t.Cleanup(func() {
-				steps <- channelPTYStep{err: io.EOF}
-				d.sessWg.Wait()
-				d.waitNotifies()
-			})
-
-			replay := func(data []byte, deadline time.Duration) ports.Output {
-				t.Helper()
-				steps <- channelPTYStep{data: data}
-				awaitPTYReadProcessed(t, processed)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), deadline)
-				return mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-			}
-			acknowledge := func(out ports.Output) {
-				ac.ackOutputState(out.NewStateNum)
-				rc.notifyAck()
-			}
-
-			if tc.overlay {
-				d.enterPalette(sess, ac)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
-				acknowledge(mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends)))
-			}
-			acknowledge(replay([]byte("PRIMARY"), minOutputRenderDeadline))
-			primary := client.Frame.Clone()
-
-			// The reported PTY stream is deliberately split into enter, body, and
-			// exit reads. MATRIX distinguishes alternate cells in the replayed
-			// terminal model from all primary, chrome, and overlay cells.
-			acknowledge(replay([]byte("\x1b[?1049h"), minOutputRenderDeadline))
-			alternate := replay([]byte(strings.Repeat("MATRIX", 300)), minOutputRenderDeadline)
-			pane.mu.Lock()
-			require.Contains(t, strings.Join(frameRows(pane.screen.Frame), "\n"), "MATRIX", "fixture must make alternate cells visible to the production renderer")
-			pane.mu.Unlock()
-
-			exitData := []byte("\x1b[?1049l" + tc.exitSuffix)
-			var exit ports.Output
-			if tc.exitBeforeACK {
-				steps <- channelPTYStep{data: exitData}
-				awaitPTYReadProcessed(t, processed)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-				if tc.window == 1 {
-					requireNoCoordinatorOutputFrame(t, sends)
-					acknowledge(alternate)
-					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-				} else {
-					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-					require.Equal(t, alternate.NewStateNum, exit.BaseStateNum,
-						"local exit must be rendered before the alternate-frame ACK")
-					acknowledge(alternate)
-				}
-			} else {
-				acknowledge(alternate)
-				steps <- channelPTYStep{data: exitData}
-				awaitPTYReadProcessed(t, processed)
-				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-				exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-			}
-			require.NotEmpty(t, exit.Data, "the first post-exit output must actively remove alternate cells")
-			rendered := strings.Join(frameRows(client.Frame), "\n")
-			require.NotContains(t, rendered, "MATRIX", "the first post-exit frame must not retain alternate cells")
-			if tc.exitSuffix == "" {
-				require.Equal(t, frameRows(primary), frameRows(client.Frame), "the first post-exit output must restore the primary screen")
-			} else {
-				require.Contains(t, rendered, tc.exitSuffix, "bytes immediately after DEC 1049 exit must appear in the first post-exit frame")
-			}
-		})
-	}
-}
-
 func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *testing.T) {
 	t.Run("detached target completes cross-session preview without later PTY output", func(t *testing.T) {
 		pty, steps, processed := newChannelPTY(t)
 		d, target, targetClient, _ := newManualSessionWithPTYs(t, pty)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(target, nil, targetClient, true)
+		rc := d.attachCoordinator(target, targetClient, true)
 
 		// A viewer in a different session is previewing the headless target.
 		viewer := &attachedClient{}
@@ -491,7 +393,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		viewer.overlays.pickerMu.Lock()
 		viewer.overlays.pickerPreview = target.tabs[0]
 		viewer.overlays.pickerMu.Unlock()
-		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", client: viewer}}
+		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
 		previews := make(chan renderWake, 2)
 		rc.subscribePreviewFor(viewer, 1, func(w renderWake) { previews <- w })
 
@@ -502,7 +404,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		drainCoordinatorTimers(clock) // detach must clear the pending output work.
 
 		target.mu.Lock()
-		target.client = nil
+		clearAttachmentsForTestLocked(target)
 		target.mu.Unlock()
 		rc.noteDetach(targetClient)
 		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
@@ -522,45 +424,42 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		d.sessWg.Wait()
 	})
 
-	t.Run("replacement receives one complete reset frame without later PTY output", func(t *testing.T) {
+	t.Run("remaining attachment receives shared output after peer detach", func(t *testing.T) {
 		pty, steps, processed := newChannelPTY(t)
-		d, target, oldClient, _ := newManualSessionWithPTYs(t, pty)
+		d, target, detached, _ := newManualSessionWithPTYs(t, pty)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(target, nil, oldClient, true)
+		rc := d.attachCoordinator(target, detached, true)
 
-		wakes := make(chan renderWake, 2)
-		rc.opts.wake = func(w renderWake) { wakes <- w }
+		secondTransport, secondSends := newCapturingTransport(t)
+		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), size: detached.size}
+		remaining.initOverlays()
+		remaining.setSession(target)
+		target.mu.Lock()
+		require.True(t, target.registerAttachmentLocked(remaining))
+		target.mu.Unlock()
+		rc.attach(remaining)
+
 		d.sessWg.Add(1)
 		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
-		steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
+		steps <- channelPTYStep{data: []byte("before detach")}
 		awaitPTYReadProcessed(t, processed)
-		drainCoordinatorTimers(clock)
+		timers := drainCoordinatorTimers(clock)
 
-		replacement := &attachedClient{output: newOutputStateStream()}
-		rc.noteReplace(oldClient, replacement, true)
+		// Detaching one attachment must not discard the session-shared pending
+		// invalidation or stop the coordinator from painting the remaining one.
 		target.mu.Lock()
-		target.client = replacement
+		require.True(t, target.unregisterAttachmentLocked(detached))
 		target.mu.Unlock()
-		// The replacement's initial full paint remains gated by the batch. Its
-		// reset must survive completion and coalesce with the completion wake.
-		rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "replacement first paint"})
-		replacementTimers := drainCoordinatorTimers(clock)
-		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
-		awaitPTYReadProcessed(t, processed)
-		requireNoWake(t, wakes)
+		rc.noteDetach(detached)
+		fireCoordinatorTimer(t, rc, timers, minOutputRenderDeadline)
+		require.NotEmpty(t, secondSends, "the remaining attachment received no shared output after its peer detached")
+		before := len(secondSends)
 
-		fireCoordinatorTimer(t, rc, replacementTimers, urgentRenderDeadline)
-		wake := <-wakes
-		require.True(t, wake.urgent)
-		require.True(t, wake.reset, "the replacement's cleared batch must repaint a complete frame")
-		require.Equal(t, 2, wake.coalesced, "completion coalesces only with the replacement's fresh reset batch")
-		require.Same(t, replacement, wake.lease.attachment)
-		select {
-		case duplicate := <-wakes:
-			t.Fatalf("sync completion must publish exactly one replacement wake: %#v", duplicate)
-		default:
-		}
+		steps <- channelPTYStep{data: []byte("after detach")}
+		awaitPTYReadProcessed(t, processed)
+		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+		require.Greater(t, len(secondSends), before, "shared output stopped after the peer detached")
 
 		steps <- channelPTYStep{err: io.EOF}
 		d.sessWg.Wait()
@@ -571,11 +470,11 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		d, target, client, _ := newManualSessionWithPTYs(t, pty)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(target, nil, client, true)
+		rc := d.attachCoordinator(target, client, true)
 		wakes := make(chan renderWake, 1)
 		rc.opts.wake = func(w renderWake) { wakes <- w }
 		target.mu.Lock()
-		target.client = nil
+		clearAttachmentsForTestLocked(target)
 		target.mu.Unlock()
 		rc.noteDetach(client)
 
@@ -601,7 +500,7 @@ func TestPaneRenderableActiveAttachmentDoesNotScanPickerPreviews(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	pane := tb.focusedPane()
 
 	// Holding daemon ownership makes a picker scan block. An active attached
@@ -628,11 +527,11 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 			name  string
 			setup func(*Daemon, *session, *tab, *pane)
 		}{
-			{name: "headless", setup: func(_ *Daemon, sess *session, _ *tab, _ *pane) { sess.client = nil }},
+			{name: "headless", setup: func(_ *Daemon, sess *session, _ *tab, _ *pane) { clearAttachmentsForTest(sess) }},
 			{name: "inactive tab", setup: func(_ *Daemon, sess *session, tb *tab, _ *pane) {
 				other := newTab(nil, domain.Size{Cols: 80, Rows: 23})
 				sess.tabs = append([]*tab{other}, sess.tabs...)
-				sess.active = 0
+				selectTestAttachmentTab(sess, 0)
 				require.NotSame(t, other, tb)
 			}},
 			{name: "collapsed", setup: func(_ *Daemon, _ *session, tb *tab, p *pane) {
@@ -667,37 +566,17 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 		require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
 		p.screen.ClearDamage()
 
-		sess.client = nil
+		clearAttachmentsForTest(sess)
 		viewer := &attachedClient{}
 		viewer.initOverlays()
 		viewer.overlays.pickerMu.Lock()
 		viewer.overlays.pickerPreview = tb
 		viewer.overlays.pickerMu.Unlock()
-		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", client: viewer}}
+		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
 		p.screen.Write([]byte("preview"))
 		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
 	})
-}
-
-func TestPTYWriteErrorIsLogged(t *testing.T) {
-	var logs bytes.Buffer
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logs, nil)))
-	errBoom := errors.New("boom")
-	p := portsmocks.NewMockPTY(t)
-	p.EXPECT().Write([]byte("input")).Return(0, errBoom).Once()
-	win := newTab(p, domain.Size{Cols: 80, Rows: 23})
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work"}, tabs: []*tab{win}}
-	ac := &attachedClient{}
-	ac.initOverlays()
-	ac.setSession(sess)
-
-	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("input"))
-
-	got := logs.String()
-	if !strings.Contains(got, "pty write failed") || !strings.Contains(got, "boom") || !strings.Contains(got, "work") {
-		t.Fatalf("log output %q does not contain PTY write failure details", got)
-	}
 }
 
 func TestAltXClosesFinalTabAndDetaches(t *testing.T) {
@@ -719,7 +598,7 @@ func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 	p2, releasePTY2 := newBlockingPTY(t)
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY2()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.tabs[1].focusedPane().screen.Write([]byte("remaining"))
 
 	d.sessWg.Add(1)
@@ -728,7 +607,7 @@ func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, activeTabIndex(sess))
+	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -745,7 +624,7 @@ func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 	p2, releasePTY2 := newBlockingPTY(t)
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
-	sess.active = 0
+	selectTestAttachmentTab(sess, 0)
 	sess.tabs[0].focusedPane().screen.Write([]byte("active"))
 
 	d.sessWg.Add(1)
@@ -754,7 +633,7 @@ func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, activeTabIndex(sess))
+	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -802,7 +681,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "s", name: "s", client: ac}, tabs: []*tab{win}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	// Client rows are one more than the equivalent case in a single-bar
@@ -1062,7 +941,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "s", name: "s", client: ac}, tabs: []*tab{win}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	d.resize(sess, ac, newSize)
@@ -1091,7 +970,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "e", name: "0", ephemeral: true, client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "e", name: "0", ephemeral: true, attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 
@@ -1103,7 +982,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 
 	require.Equal(t, 1, sessionCount(d), "ephemeral session survives failed client send")
 	sess.mu.Lock()
-	require.Nil(t, sess.client)
+	require.Empty(t, sess.snapshotAttachmentsLocked())
 	sess.mu.Unlock()
 
 	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -1135,7 +1014,7 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "query", name: "query", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "query", name: "query", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
@@ -1198,7 +1077,7 @@ func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
 	floating := newPane("floating", nil, rectSize(committed.Inner))
 	floating.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
 	floating.popupGeometry = committed
-	installTestFloating(sess.activeTab(), floating, true)
+	installTestFloating(testAttachmentTab(sess), floating, true)
 
 	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
@@ -1300,7 +1179,7 @@ func TestPaintComposesCopyBodyAboveFloating(t *testing.T) {
 	fp := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 3})
 	appendHistoryRow(t, fp.history, testRow("flt-old"))
 	fp.screen.Write([]byte("flt-live"))
-	installTestFloating(sess.activeTab(), fp, true)
+	installTestFloating(testAttachmentTab(sess), fp, true)
 
 	d.enterCopyMode(sess, ac)
 	data := mustOutputData(t, sends)

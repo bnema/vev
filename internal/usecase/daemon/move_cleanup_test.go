@@ -9,6 +9,23 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
+func TestDetachMoveAttachmentsUsesStableSnapshotOrder(t *testing.T) {
+	first := &attachedClient{clientID: [16]byte{1}}
+	second := &attachedClient{clientID: [16]byte{2}}
+	sess := &session{sessionCore: sessionCore{attachments: map[*attachedClient]struct{}{second: {}, first: {}}}}
+	frozen := freezeAttachmentEffectGates(first, second)
+	require.True(t, frozen.acquired)
+	defer frozen.unfreeze()
+
+	sess.mu.Lock()
+	retired := detachMoveAttachmentsLocked(sess, nil)
+	sess.mu.Unlock()
+
+	require.Len(t, retired, 2)
+	require.Same(t, first, retired[0].ac)
+	require.Same(t, second, retired[1].ac)
+}
+
 func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	movedPTY, releaseMoved := newBlockingPTY(t)
 	remainingPTY, releaseRemaining := newBlockingPTY(t)
@@ -18,7 +35,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	defer releaseDestination()
 
 	d, source, client, _ := newManualSessionWithPTYs(t, movedPTY, remainingPTY)
-	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
+	require.NotNil(t, d.attachCoordinator(source, client, true))
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
@@ -26,9 +43,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	client.captureFrames = map[*pane]capturedPaneRenderState{moved: {}}
 	client.sendMu.Unlock()
 
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
-		active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)
 	d.mu.Lock()
@@ -43,7 +58,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	require.NotNil(t, rc)
 	lease := rc.attachmentLease(client)
 	epoch := rc.recordResizeRequestForLease(client.size, client, lease)
-	ticket, admitted := beginActiveLeaseEffect(source, client, lease)
+	ticket, admitted := beginAttachmentLeaseEffect(source, client, lease)
 	require.True(t, admitted)
 	defer ticket.End()
 
@@ -102,20 +117,18 @@ func TestMovePaneCleanupUsesCommitPointSourceAttachmentToken(t *testing.T) {
 	sourceTab.stableID = "source-tab"
 	remainingTab.stableID = "remaining-tab"
 	moved := sourceTab.focusedPane()
-	require.NotNil(t, d.attachCoordinator(source, nil, displaced, true))
+	require.NotNil(t, d.attachCoordinator(source, displaced, true))
 
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
-		active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	destinationTab := destination.tabs[0]
 	publishTiledPaneOwners(destination, destinationTab)
 	d.mu.Lock()
 	d.sessions[destination.id] = destination
 	d.mu.Unlock()
 
-	// Both clients carry state tied specifically to the pane. The displaced
-	// client was captured before the fence wait; the replacement is the only
-	// attachment that may be cleaned after commit.
+	// Both clients carry state tied specifically to the pane. The existing
+	// attachment and the concurrently registered attachment remain independent;
+	// moving one exact attachment must not clean the other.
 	displaced.overlays.copyMu.Lock()
 	displaced.overlays.copyPane = moved
 	displaced.overlays.copyMode = &scopy.Mode{}
@@ -163,27 +176,27 @@ func TestMovePaneCleanupUsesCommitPointSourceAttachmentToken(t *testing.T) {
 	awaitTestCompletion(t, snapshot, "move did not capture its pre-fence source attachment")
 
 	source.mu.Lock()
-	source.client = replacement
+	source.registerAttachmentLocked(replacement)
 	source.mu.Unlock()
 	close(releaseSnapshot)
 	source.layoutApplyMu.Unlock()
 	require.NoError(t, awaitTestValue(t, moveDone, "move did not finish after source fence release"))
 
 	displaced.overlays.copyMu.Lock()
-	require.NotNil(t, displaced.overlays.copyMode, "displaced source client was incorrectly cleaned")
-	require.Same(t, moved, displaced.overlays.copyPane)
+	require.Nil(t, displaced.overlays.copyMode, "moved attachment copy mode was not cleaned")
+	require.Nil(t, displaced.overlays.copyPane)
 	displaced.overlays.copyMu.Unlock()
 	displaced.sendMu.Lock()
 	_, displacedCaptured := displaced.captureFrames[moved]
 	displaced.sendMu.Unlock()
-	require.True(t, displacedCaptured, "displaced source capture was incorrectly pruned")
+	require.False(t, displacedCaptured, "moved attachment capture was not pruned")
 
 	replacement.overlays.copyMu.Lock()
-	require.Nil(t, replacement.overlays.copyMode, "current source client copy mode was not cleaned")
-	require.Nil(t, replacement.overlays.copyPane)
+	require.NotNil(t, replacement.overlays.copyMode, "independent attachment copy mode was cleaned")
+	require.Same(t, moved, replacement.overlays.copyPane)
 	replacement.overlays.copyMu.Unlock()
 	replacement.sendMu.Lock()
 	_, replacementCaptured := replacement.captureFrames[moved]
 	replacement.sendMu.Unlock()
-	require.False(t, replacementCaptured, "current source capture was not pruned")
+	require.True(t, replacementCaptured, "independent attachment capture was pruned")
 }

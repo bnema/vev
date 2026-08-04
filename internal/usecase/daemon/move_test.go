@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"os"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -49,7 +48,7 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 	defer release2()
 	d, source, _, _ := newManualSessionWithPTYs(t, p1)
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.mu.Unlock()
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
@@ -57,7 +56,7 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 	movedCtx, movedCancel := context.WithCancel(d.paneProcessCtx)
 	moved.ctx, moved.cancel = movedCtx, movedCancel
 
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}, active: 0}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
 	destinationTab := destination.tabs[0]
 	destinationTab.stableID = "destination-tab"
 	publishTiledPaneOwners(destination, destinationTab)
@@ -81,47 +80,6 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 	require.NoError(t, moved.ctx.Err(), "retiring the source must not cancel the transferred pane process")
 }
 
-func TestMovePaneFinalSourceClientFollowsDestination(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	defer release1()
-	defer release2()
-	d, source, client, _ := newManualSessionWithPTYs(t, p1)
-	sourceTab := source.tabs[0]
-	sourceTab.stableID = "source-tab"
-	moved := sourceTab.focusedPane()
-	movedTabCtx, movedTabCancel := context.WithCancel(d.paneProcessCtx)
-	moved.ctx, moved.cancel = movedTabCtx, movedTabCancel
-
-	rc := d.attachCoordinator(source, nil, client, true)
-	require.NotNil(t, rc)
-	var rebased atomic.Bool
-	client.renderStages.handoffRebase = func() { rebased.Store(true) }
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}, active: 0}
-	destinationTab := destination.tabs[0]
-	destinationTab.stableID = "destination-tab"
-	publishTiledPaneOwners(destination, destinationTab)
-	d.mu.Lock()
-	d.sessions[destination.id] = destination
-	d.mu.Unlock()
-
-	err := d.movePane(movePaneRequest{
-		Source:           moveSessionLocator{ID: source.id},
-		SourceTabID:      domain.TabStableID(sourceTab.stableID),
-		SourcePaneID:     domain.PaneStableID(moved.stableID),
-		Destination:      moveSessionLocator{ID: destination.id},
-		DestinationTabID: domain.TabStableID(destinationTab.stableID),
-	})
-	require.NoError(t, err)
-	require.Nil(t, source.tabs)
-	require.Same(t, destination, client.currentSession())
-	require.Same(t, client, destination.client)
-	require.Equal(t, attachmentActive, destination.attachmentRole(client))
-	require.Same(t, destinationTab, destination.tabs[destination.active])
-	require.True(t, rebased.Load(), "final-source follower must rebase output before its first paint")
-	require.NoError(t, moved.ctx.Err(), "transferred pane process must remain alive")
-}
-
 func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing.T) {
 	movedPTY := newQuietPTY()
 	d, source, active, _ := newManualSessionWithPTYs(t, movedPTY)
@@ -129,7 +87,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 	require.NoError(t, err)
 	require.NoError(t, clip.Close())
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.clipFiles = []string{clip.Name()}
 	source.mu.Unlock()
 	active.setSession(nil)
@@ -140,9 +98,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 	movedTab.stableID = "source-tab"
 
 	destinationPTY := newQuietPTY()
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
-		active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	publishTiledPaneOwners(destination, destination.tabs[0])
 	d.mu.Lock()
 	d.sessions[destination.id] = destination
@@ -179,7 +135,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	movedPTY := newQuietPTY()
 	d, source, _, _ := newManualSessionWithPTYs(t, movedPTY)
 	source.mu.Lock()
-	source.client = nil
+	clearAttachmentsForTestLocked(source)
 	source.mu.Unlock()
 	moved := source.tabs[0].focusedPane()
 	movedTab := source.tabs[0]
@@ -190,9 +146,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	parked.initOverlays()
 	require.True(t, d.parkAttachment(source, parked))
 	destinationPTY := newQuietPTY()
-	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})},
-		active: 0,
-	}
+	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	publishTiledPaneOwners(destination, destination.tabs[0])
 	d.mu.Lock()
 	d.sessions[destination.id] = destination

@@ -114,7 +114,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	if err := prepareSnapshotChunkCache(capture); err != nil {
 		return ports.SnapshotPublication{}, err
 	}
-	manifest := snapcodec.Manifest{Generation: capture.generation, IncarnationID: capture.incarnation, ParentCheckpoint: capture.parentCheckpoint, Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.ManifestTab, 0, len(capture.tabs))}
+	manifest := snapcodec.Manifest{Generation: capture.generation, IncarnationID: capture.incarnation, ParentCheckpoint: capture.parentCheckpoint, Name: capture.name, CreatedAt: capture.createdAt, Active: capture.defaultTab, Tabs: make([]snapcodec.ManifestTab, 0, len(capture.tabs))}
 	objects := make([]ports.SnapshotObject, 0)
 	capture.sealedRefs = make(map[*vt.HistoryChunk]snapcodec.ObjectRef)
 	for _, tab := range capture.tabs {

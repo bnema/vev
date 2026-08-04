@@ -42,7 +42,7 @@ type snapshotCapture struct {
 	name                 string
 	incarnation          domain.IncarnationID
 	createdAt            uint64
-	active               uint16
+	defaultTab           uint16
 	tabs                 []snapshotCaptureTab
 	publicationContext   context.Context
 	sealedRefs           map[*vt.HistoryChunk]snapcodec.ObjectRef // set by the single encoder worker

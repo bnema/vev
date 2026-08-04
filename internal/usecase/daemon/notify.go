@@ -267,9 +267,9 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 	if sess != nil {
 		d.notices.routingMu.Lock()
 		sess.mu.Lock()
-		ac := sess.client
+		attachments := sess.snapshotAttachmentsLocked()
 		sess.mu.Unlock()
-		if ac == nil {
+		if len(attachments) == 0 {
 			d.notices.queueGlobal(n)
 			d.notices.routingMu.Unlock()
 			return
@@ -277,11 +277,14 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 		if d.notices.beforeSessionDelivery != nil {
 			d.notices.beforeSessionDelivery()
 		}
-		// Publish the toast while detach is excluded, then release routing before
-		// repainting. Rendering can report another notice and re-enter routing.
-		published := d.publishToast(ac, n)
+		published := make([]*attachedClient, 0, len(attachments))
+		for _, ac := range attachments {
+			if d.publishToast(ac, n) {
+				published = append(published, ac)
+			}
+		}
 		d.notices.routingMu.Unlock()
-		if published {
+		for _, ac := range published {
 			d.repaintForNotice(ac)
 		}
 		return
@@ -308,14 +311,12 @@ func (d *Daemon) deliverGlobal(n domain.Notification) {
 	}
 	targets := make([]*attachedClient, 0, len(sessions))
 	for _, s := range sessions {
-		core := s.core()
-		core.mu.Lock()
-		ac := core.client
-		core.mu.Unlock()
-		if ac == nil || !d.publishToast(ac, n) {
-			continue
+		for _, ac := range snapshotAttachmentSession(s) {
+			if !d.publishToast(ac, n) {
+				continue
+			}
+			targets = append(targets, ac)
 		}
-		targets = append(targets, ac)
 	}
 	if len(targets) == 0 {
 		if d.notices.beforeQueueGlobal != nil {
@@ -338,7 +339,7 @@ func (d *Daemon) drainPendingForFirstPaint(sess *session, ac *attachedClient) {
 	d.notices.routingMu.Lock()
 
 	sess.mu.Lock()
-	current := sess.client == ac
+	current := attachmentRegisteredLocked(sess, ac)
 	sess.mu.Unlock()
 	if !current {
 		d.notices.routingMu.Unlock()
@@ -365,14 +366,6 @@ func (d *Daemon) drainPendingForFirstPaint(sess *session, ac *attachedClient) {
 // NotifyGlobal raises a daemon-wide notice from outside the daemon package.
 func (d *Daemon) NotifyGlobal(sev domain.NoticeSeverity, code domain.NoticeCode, msg string, cause error) {
 	d.notify(nil, sev, code, msg, cause)
-}
-
-// showToast publishes a notice into one client's toast stack and repaints only
-// after the state mutation is complete.
-func (d *Daemon) showToast(ac *attachedClient, n domain.Notification) {
-	if d.publishToast(ac, n) {
-		d.repaintForNotice(ac)
-	}
 }
 
 // publishToast durably mutates one client's toast state without repainting.

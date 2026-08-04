@@ -31,7 +31,7 @@ func TestInjectClipboardPathTargetsVisibleFloatingPane(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, normal)
 	floating := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 5})
 	floating.screen.Write([]byte("\x1b[?2004h"))
-	installTestFloating(sess.activeTab(), floating, true)
+	installTestFloating(testAttachmentTab(sess), floating, true)
 
 	d.injectClipboardPath(sess, "/tmp/image.png")
 
@@ -203,15 +203,15 @@ func chunkReadPTY(t *testing.T, chunks ...[]byte) *portsmocks.MockPTY {
 }
 
 func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClient, tr ports.Transport) {
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := d.attachCoordinator(sess, ac, true)
 	token := sess.attachmentToken(ac, tr)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishRoleCapability(token)
+	ac.publishAttachmentCapability(token)
 }
 
 func clipboardOwnerLease(t *testing.T, sess *session) paneEffectLease {
 	t.Helper()
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	p := tb.terminalTargetLocked()
 	tb.mu.Unlock()
@@ -231,7 +231,7 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "clip", name: "clip", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "clip", name: "clip", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -265,7 +265,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "clip-big", name: "clip-big", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "clip-big", name: "clip-big", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -290,7 +290,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "clip-bad", name: "clip-bad", client: ac}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	sess := &session{sessionCore: sessionCore{id: "clip-bad", name: "clip-bad", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	publishTiledPaneOwners(sess, win)
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -354,7 +354,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 	sess.mu.Unlock()
 	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
 
-	sourceTab := sess.activeTab()
+	sourceTab := testAttachmentTab(sess)
 	p := sourceTab.focusedPane()
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
@@ -363,7 +363,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 	d.clipboardWorker(sess)
 
 	require.Zero(t, oldTransport.sendCount(), "clipboard queued by the former pane owner reached its client")
-	require.Same(t, ac, sess.client, "stale clipboard send handling detached the former owner's client")
+	require.Contains(t, sess.snapshotAttachments(), ac, "stale clipboard send handling detached the former owner's client")
 }
 
 type movingClipboardErrorTransport struct {
@@ -419,10 +419,10 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 		close(workerDone)
 	}()
 	require.Eventually(t, func() bool {
-		return ac.roleEffects.inFlightCount() == 1
+		return ac.attachmentEffects.inFlightCount() == 1
 	}, time.Second, time.Millisecond, "clipboard send was not admitted before waiting on sendMu")
 
-	sourceTab := sess.activeTab()
+	sourceTab := testAttachmentTab(sess)
 	p := sourceTab.focusedPane()
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
@@ -432,7 +432,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
 
 	require.Zero(t, oldTransport.sendCount(), "clipboard send was not revalidated immediately before transport I/O")
-	require.Same(t, ac, sess.client)
+	require.Contains(t, sess.snapshotAttachments(), ac)
 }
 
 func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
@@ -453,7 +453,7 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	}()
 	awaitTestCompletion(t, oldTransport.started, "clipboard send did not start")
 
-	sourceTab := sess.activeTab()
+	sourceTab := testAttachmentTab(sess)
 	p := sourceTab.focusedPane()
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
@@ -461,42 +461,12 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	close(oldTransport.release)
 	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
 
-	require.Same(t, ac, sess.client, "a send error from the pane's retired owner detached its client")
+	require.Contains(t, sess.snapshotAttachments(), ac, "a send error from the pane's retired owner detached its client")
 	select {
 	case <-oldTransport.closed:
 		t.Fatal("a send error from the pane's retired owner closed its client transport")
 	default:
 	}
-}
-
-func TestQueuedClipboardBeforeSnatchDropsExactStaleCapability(t *testing.T) {
-	d, sess, old, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
-	oldTransport := &staleClipboardErrorTransport{}
-	old.replaceTransport(oldTransport)
-	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
-	token.lease = rc.attachmentLease(old)
-	old.publishRoleCapability(token)
-
-	sess.mu.Lock()
-	sess.clipboardWorkerRunning = true
-	sess.mu.Unlock()
-	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
-
-	newTransport := &closeTrackingTransport{}
-	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), size: old.size}
-	next.initOverlays()
-	_, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess, next: next, expectedRole: attachmentDetached, targetRole: attachmentActive,
-		expectedTransport: next.transportSnapshot(), ready: true,
-	})
-	require.NoError(t, err)
-
-	d.clipboardWorker(sess)
-	require.Zero(t, oldTransport.sendCount(), "stale queued work reached its captured failing transport")
-	require.Empty(t, newTransport.Sends(), "stale queued work was redirected to the replacement")
-	require.Same(t, next, sess.client, "stale clipboard send handling detached the current client")
-	require.False(t, newTransport.Closed())
 }
 
 func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {

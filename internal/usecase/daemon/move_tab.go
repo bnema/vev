@@ -10,8 +10,8 @@ import (
 type moveTabAdmission struct {
 	tab                *tab
 	sourceIndex        int
-	sourceClient       *attachedClient
-	sourceSnatched     []*attachedClient
+	sourceAttachments  []*attachedClient
+	sourceTransports   map[*attachedClient]transportSnapshot
 	layoutGeneration   uint64
 	floatingState      floatingState
 	floatingPane       *pane
@@ -27,14 +27,9 @@ type moveTabCommit struct {
 	source              *session
 	destination         *session
 	admission           moveTabAdmission
-	handoffFrozen       bool
-	sourceRolesFrozen   bool
-	frozenRoles         frozenRoleEffectGates
-	handoffReq          attachmentTransitionRequest
-	handoffPublication  *attachmentPublication
-	handoffResult       attachmentTransitionResult
+	sourceEffectsFrozen bool
+	frozenEffects       frozenAttachmentEffectGates
 	syncCleanup         syncTimerCleanup
-	sourceCleanupToken  attachmentRoleToken
 	oldTabCancel        context.CancelFunc
 	sourceEmpty         bool
 	retiredParked       []parkedAttachmentRetirement
@@ -44,27 +39,6 @@ type moveTabCommit struct {
 	destMetadata        domain.CatalogueMetadataUpdate
 	destMetadataValid   bool
 	err                 error
-}
-
-func (d *Daemon) snapshotSnatchedRoleParticipants(sess *session, admitted []*attachedClient) ([]*attachedClient, []roleTransportInterrupt) {
-	if sess == nil || len(admitted) == 0 {
-		return nil, nil
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	clients := append([]*attachedClient(nil), admitted...)
-	interrupts := make([]roleTransportInterrupt, 0, len(clients))
-	for _, ac := range clients {
-		if ac == nil {
-			continue
-		}
-		if transport := ac.transportSnapshot(); transport.transport != nil {
-			interrupts = append(interrupts, roleTransportInterrupt{ac: ac, transport: transport})
-		}
-	}
-	return clients, interrupts
 }
 
 func (d *Daemon) moveTab(req moveTabRequest) (result error) {
@@ -82,6 +56,20 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 	if source == destination {
 		return errMovePaneInvalid
 	}
+	// Dispatch admission must precede lifecycle reservation. A final close holds
+	// dispatchMu while it waits for teardown ownership; reserving first would let
+	// that close wait on a move which is itself blocked on dispatchMu.
+	if d.beforeMoveDispatch != nil {
+		d.beforeMoveDispatch()
+	}
+	unlockDispatch := lockMoveDispatch(source, destination)
+	dispatchHeld := true
+	defer func() {
+		if dispatchHeld {
+			unlockDispatch()
+		}
+	}()
+
 	reservation, err := d.reserveMoveLifecycles(source, destination)
 	if err != nil {
 		return errMoveStaleTarget
@@ -95,13 +83,6 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 	if d.afterMoveLifecycleReserved != nil {
 		d.afterMoveLifecycleReserved()
 	}
-	unlockDispatch := lockMoveDispatch(source, destination)
-	dispatchHeld := true
-	defer func() {
-		if dispatchHeld {
-			unlockDispatch()
-		}
-	}()
 
 	admission, err := d.snapshotMoveTabAdmission(req, source, destination)
 	if err != nil {
@@ -111,59 +92,35 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		d.afterMoveTabSourceSnapshot()
 	}
 	commit := moveTabCommit{req: req, source: source, destination: destination, admission: *admission}
-	var frozen frozenRoleEffectGates
-	if admission.finalSource && admission.sourceClient != nil {
-		transport := admission.sourceClient.transportSnapshot()
-		token := source.attachmentToken(admission.sourceClient, transport.transport)
-		if token.role != attachmentActive || token.transport.transport == nil {
-			return errMovePaneInvalid
-		}
-		commit.handoffReq = attachmentTransitionRequest{
-			source: source, target: destination, next: admission.sourceClient,
-			expectedRole: attachmentActive, targetRole: attachmentActive,
-			expectedTransport: token.transport, sourceToken: &token,
-			expectedSourceTab: admission.tab, transferExpectedSourceTab: true, ready: true, action: "move-tab",
-		}
-		var participants attachmentTransitionParticipants
-		commit.handoffReq, participants, err = d.snapshotAttachmentTransition(commit.handoffReq)
-		if err != nil {
-			return err
-		}
-		snatchedClients, snatchedInterrupts := d.snapshotSnatchedRoleParticipants(source, admission.sourceSnatched)
-		participants.clients = append(participants.clients, snatchedClients...)
-		participants.interrupts = append(participants.interrupts, snatchedInterrupts...)
-		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: participants.interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
-			if d.afterRoleEffectGateFrozen != nil {
-				d.afterRoleEffectGateFrozen("move-tab", ac)
+	var frozen frozenAttachmentEffectGates
+	if admission.finalSource && len(admission.sourceAttachments) != 0 {
+		interrupts := make([]attachmentTransportInterrupt, 0, len(admission.sourceAttachments))
+		for _, ac := range admission.sourceAttachments {
+			if transport := admission.sourceTransports[ac]; transport.transport != nil {
+				interrupts = append(interrupts, attachmentTransportInterrupt{ac: ac, transport: transport})
 			}
-		}}, participants.clients...)
+		}
+		frozen = freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{interrupts: interrupts, nonblocking: true, afterFrozen: func(ac *attachedClient) {
+			if d.afterAttachmentEffectGateFrozen != nil {
+				d.afterAttachmentEffectGateFrozen("move-tab", ac)
+			}
+		}}, admission.sourceAttachments...)
 		if !frozen.acquired || !frozen.drained {
 			frozen.unfreeze()
 			return errMovePaneInvalid
 		}
-		commit.handoffFrozen = true
-		commit.sourceRolesFrozen = true
-		commit.handoffReq.roleEffectsFrozen = true
-	} else if admission.finalSource && len(admission.sourceSnatched) > 0 {
-		clients, interrupts := d.snapshotSnatchedRoleParticipants(source, admission.sourceSnatched)
-		frozen = freezeRoleEffectGatesWith(roleEffectFreezeOptions{interrupts: interrupts, nonblocking: true}, clients...)
-		if !frozen.acquired || !frozen.drained {
-			frozen.unfreeze()
-			return errMovePaneInvalid
-		}
-		commit.sourceRolesFrozen = true
+		commit.sourceEffectsFrozen = true
 	}
-	commit.frozenRoles = frozen
-	rolesFrozen := commit.sourceRolesFrozen
+	commit.frozenEffects = frozen
+	effectsFrozen := commit.sourceEffectsFrozen
 	defer func() {
-		if rolesFrozen {
+		if effectsFrozen {
 			frozen.unfreeze()
 		}
 	}()
 
 	fences := newMoveTabResizeFences(source, destination, admission.tab)
 	if !fences.acquire(func() bool { return commit.publishLocked(d, fences.panes) }) {
-		commit.releasePublication()
 		if commit.err != nil {
 			return commit.err
 		}
@@ -177,15 +134,13 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		destinationTab:           admission.tab,
 		movedPane:                firstMovePane(admission.panes),
 		movedPanes:               admission.panes,
-		sourceCleanupToken:       commit.sourceCleanupToken,
-		handoffResult:            commit.handoffResult,
+		sourceAttachments:        admission.sourceAttachments,
 		syncCleanup:              commit.syncCleanup,
-		frozenRoles:              frozen,
-		rolesFrozen:              rolesFrozen,
+		frozenEffects:            frozen,
+		effectsFrozen:            effectsFrozen,
 		unlockDispatch:           unlockDispatch,
 		reservation:              reservation,
 		oldTabCancel:             commit.oldTabCancel,
-		sourceTabWasActive:       !commit.sourceEmpty,
 		sourceTabRemoved:         true,
 		sourceEmpty:              commit.sourceEmpty,
 		retiredParked:            commit.retiredParked,
@@ -195,7 +150,7 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		destinationMetadata:      commit.destMetadata,
 		destinationMetadataValid: commit.destMetadataValid,
 	}
-	rolesFrozen = false
+	effectsFrozen = false
 	dispatchHeld = false
 	reservationHeld = false
 	postcommit.execute(d)
@@ -213,11 +168,17 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 	if !moveSessionLocatorCurrentLocked(source, req.Source) || !moveSessionLocatorCurrentLocked(destination, req.Destination) {
 		return nil, errMoveStaleTarget
 	}
-	moved := findMoveTabLocked(source, req.SourceTabID)
-	if moved == nil || destination.active < 0 || destination.active >= len(destination.tabs) {
+	if req.Attachment != nil && !attachmentRegisteredLocked(source, req.Attachment) {
 		return nil, errMoveStaleTarget
 	}
-	destinationActive := destination.tabs[destination.active]
+	if req.AttachmentToken.ac != nil && (req.AttachmentToken.ac != req.Attachment || !moveAttachmentTokenCurrentLocked(req.AttachmentToken, source)) {
+		return nil, errMoveStaleTarget
+	}
+	moved := findMoveTabLocked(source, req.SourceTabID)
+	if moved == nil || len(destination.tabs) == 0 {
+		return nil, errMoveStaleTarget
+	}
+	destinationActive := destination.tabs[0]
 	destinationActive.mu.Lock()
 	destinationSize := destinationActive.size
 	destinationActive.mu.Unlock()
@@ -240,21 +201,18 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 		panes = append(panes, moved.floating.pane)
 	}
 	idx := indexMoveTabLocked(source, moved)
+	attachments := source.snapshotAttachmentsLocked()
+	transports := make(map[*attachedClient]transportSnapshot, len(attachments))
+	for _, ac := range attachments {
+		transports[ac] = ac.transportSnapshot()
+	}
 	return &moveTabAdmission{
-		tab: moved, sourceIndex: idx,
-		sourceClient: source.client, sourceSnatched: snapshotMoveSnatchedLocked(source),
+		tab: moved, sourceIndex: idx, sourceAttachments: attachments, sourceTransports: transports,
 		layoutGeneration: moved.layoutGeneration, floatingState: moved.floating.state,
 		floatingPane: moved.floating.pane, floatingGeneration: moved.floating.generation,
 		panes: panes, destinationActive: destinationActive, destinationSize: destinationSize,
 		finalSource: len(source.tabs) == 1,
 	}, nil
-}
-
-func (c *moveTabCommit) releasePublication() {
-	if c.handoffPublication != nil {
-		c.handoffPublication.unlockCoordinators()
-		c.handoffPublication = nil
-	}
 }
 
 func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
@@ -271,39 +229,21 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 	if !moveSessionLocatorCurrentLocked(c.source, c.req.Source) || !moveSessionLocatorCurrentLocked(c.destination, c.req.Destination) {
 		return false
 	}
+	if c.req.Attachment != nil && !attachmentRegisteredLocked(c.source, c.req.Attachment) {
+		return false
+	}
+	if c.req.AttachmentToken.ac != nil && (c.req.AttachmentToken.ac != c.req.Attachment || !moveAttachmentTokenCurrentLocked(c.req.AttachmentToken, c.source)) {
+		return false
+	}
 	moved := c.admission.tab
 	if indexMoveTabLocked(c.source, moved) != c.admission.sourceIndex || findMoveTabLocked(c.destination, c.req.SourceTabID) != nil ||
 		len(c.source.tabs) == 1 != c.admission.finalSource {
 		return false
 	}
-	// Attachment validation inspects the expected source tab and therefore must
-	// precede moved.mu. The resize fences and ordered session locks keep topology
-	// stable until the tab/pane checks below complete.
-	if c.handoffFrozen {
-		if c.source.client != c.admission.sourceClient || !sameMoveSnatchedLocked(c.source, c.admission.sourceSnatched) {
-			return false
-		}
-		publication, err := d.validateAttachmentTransitionPrelocked(c.handoffReq)
-		if err != nil {
-			c.err = err
-			return false
-		}
-		c.handoffPublication = publication
-		defer c.releasePublication()
+	if c.admission.finalSource && !sameMoveAttachmentsLocked(c.source, c.admission.sourceAttachments) {
+		return false
 	}
-	var retirement frozenMoveAttachmentRetirement
-	if c.admission.finalSource {
-		if c.source.client != c.admission.sourceClient || !sameMoveSnatchedLocked(c.source, c.admission.sourceSnatched) ||
-			(c.admission.sourceClient != nil) != c.handoffFrozen {
-			return false
-		}
-		var retirementOK bool
-		retirement, retirementOK = prepareFrozenMoveAttachmentRetirementLocked(c.source, c.admission.sourceSnatched, c.frozenRoles)
-		if !retirementOK {
-			return false
-		}
-	}
-	if c.destination.active < 0 || c.destination.active >= len(c.destination.tabs) || c.destination.tabs[c.destination.active] != c.admission.destinationActive {
+	if len(c.destination.tabs) == 0 || c.destination.tabs[0] != c.admission.destinationActive {
 		return false
 	}
 	c.admission.destinationActive.mu.Lock()
@@ -329,17 +269,10 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 	}
 
 	idx := c.admission.sourceIndex
-	c.source.tabs = append(c.source.tabs[:idx], c.source.tabs[idx+1:]...)
-	if len(c.source.tabs) == 0 {
-		c.source.active = -1
-	} else if c.source.active > idx {
-		c.source.active--
-	} else if c.source.active == idx {
-		if idx >= len(c.source.tabs) {
-			idx = len(c.source.tabs) - 1
-		}
-		c.source.active = idx
+	if len(c.source.tabs) > 1 {
+		c.source.prepareAttachmentViewsForRemovedTabLocked(moved, idx)
 	}
+	c.source.tabs = append(c.source.tabs[:idx], c.source.tabs[idx+1:]...)
 	c.destination.tabs = append(c.destination.tabs, moved)
 	moved.size = c.admission.destinationSize
 	moved.bumpLayoutGenerationLocked()
@@ -366,26 +299,13 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 	if d.beforeMoveTabCommit != nil {
 		d.beforeMoveTabCommit()
 	}
-	if c.handoffPublication != nil {
-		c.destination.active = len(c.destination.tabs) - 1
-		c.handoffResult = d.publishAttachmentTransitionPrelocked(c.handoffPublication)
-		c.handoffPublication.unlockCoordinators()
-		c.handoffPublication = nil
-	}
-	// Attachment publication retains source/destination coordinator locks.
-	// Release those first, then migrate synchronized-output batches exactly as
-	// Move pane does, while pane parsing remains fenced.
 	for _, change := range ownerChanges {
 		c.syncCleanup.append(d.migratePaneSyncOwnerLocked(change.pane, change.oldOwner, change.newOwner))
 	}
-	if c.handoffResult.published.ac != nil {
-		c.sourceCleanupToken = c.handoffResult.published
-	} else if c.source.client != nil {
-		c.sourceCleanupToken = c.source.attachmentTokenLocked(c.source.client)
-	}
 	if len(c.source.tabs) == 0 {
 		d.unregisterSessionLocked(c.source)
-		c.retiredAttachments = retireEmptyMoveSessionLocked(c.source, retirement)
+		c.retiredAttachments = detachMoveAttachmentsLocked(c.source, c.admission.sourceTransports)
+		c.source.tabs = nil
 		d.purgeParkingForSessionLocked(c.source)
 		c.retiredParked = d.purgeParkedForSessionLocked(c.source)
 	}

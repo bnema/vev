@@ -13,8 +13,8 @@ type attachmentSession interface {
 	core() *sessionCore
 	snapshotView(viewOptions) sessionView
 	statusSegments(includeTerminalTitle bool) statusSnapshot
-	capturePrimary(*attachedClient, primaryCaptureRequest) (*capturedRenderState, bool)
-	activateTargetLocked(tabIndex int) bool
+	captureRenderState(*attachedClient, renderCaptureRequest) (*capturedRenderState, bool)
+	validTargetTabLocked(tabIndex int) bool
 	isProxy() bool
 }
 
@@ -24,16 +24,20 @@ type attachmentSession interface {
 type sessionCore struct {
 	mu sync.Mutex
 
-	id          domain.SessionID
-	name        string
-	ephemeral   bool
-	caps        sessionCapabilities
-	client      *attachedClient
-	snatched    map[*attachedClient]struct{}
-	createdAt   int64
-	incarnation domain.IncarnationID
-	mruAt       atomic.Uint64
-	coordinator atomic.Pointer[renderCoordinator]
+	id        domain.SessionID
+	name      string
+	ephemeral bool
+	caps      sessionCapabilities
+	// attachments is the session-owned membership registry. Connection
+	// generation and effect state remain attachment-local; admission and view
+	// code use this collection as their membership source.
+	attachments      map[*attachedClient]struct{}
+	attachmentOrder  map[*attachedClient]uint64
+	nextAttachmentID uint64
+	createdAt        int64
+	incarnation      domain.IncarnationID
+	mruAt            atomic.Uint64
+	coordinator      atomic.Pointer[renderCoordinator]
 }
 
 func (s *session) core() *sessionCore {
@@ -45,20 +49,18 @@ func (s *session) core() *sessionCore {
 
 func (s *session) isProxy() bool { return false }
 
-func (s *session) capturePrimary(ac *attachedClient, req primaryCaptureRequest) (*capturedRenderState, bool) {
-	return captureLocalPrimaryRenderState(s, ac, req)
+func (s *session) captureRenderState(ac *attachedClient, req renderCaptureRequest) (*capturedRenderState, bool) {
+	return captureLocalRenderState(s, ac, req)
 }
 
-// activateTargetLocked validates and selects a local tab. Caller holds s.mu.
-func (s *session) activateTargetLocked(tabIndex int) bool {
+// validTargetTabLocked validates a target tab index without changing any
+// attachment view. Client-facing navigation updates attachment views through
+// selectAttachmentTab.
+func (s *session) validTargetTabLocked(tabIndex int) bool {
 	if tabIndex < 0 {
 		return true
 	}
-	if tabIndex >= len(s.tabs) {
-		return false
-	}
-	s.active = tabIndex
-	return true
+	return tabIndex < len(s.tabs)
 }
 
 // localSession narrows an attachment entry for operations that own local PTYs,

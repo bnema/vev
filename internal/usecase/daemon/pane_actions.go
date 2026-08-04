@@ -10,7 +10,7 @@ import (
 )
 
 func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Direction) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	err := d.splitPaneAt(sess, target.tab, target.pane, dir)
 	if err == nil && ac != nil {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
@@ -131,7 +131,7 @@ func placementContent(placements []layout.Placement, id layout.PaneID) domain.Re
 func rectSize(r domain.Rect) domain.Size { return domain.Size{Cols: r.Width, Rows: r.Height} }
 
 func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	err := d.stackPaneAt(sess, target.tab, target.pane)
 	if err == nil && ac != nil {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
@@ -146,7 +146,7 @@ func (d *Daemon) stackPaneAt(sess *session, tb *tab, target *pane) error {
 }
 
 func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
-	target := resolveDaemonActionTarget(sess)
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	err := d.toggleStackAt(sess, target.tab, target.pane)
 	if err == nil && ac != nil {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
@@ -190,18 +190,15 @@ func (d *Daemon) closeFocusedPane(sess *session, ac *attachedClient) error {
 		}
 		return nil
 	}
-	tb := sess.activeTab()
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
+	tb := target.tab
 	if tb == nil {
 		return layout.ErrNotFound
 	}
-	tb.mu.Lock()
-	if tb.tree == nil {
-		tb.mu.Unlock()
+	if target.pane == nil {
 		return layout.ErrNotFound
 	}
-	id := tb.tree.Focus
-	tb.mu.Unlock()
-	return d.closePane(sess, tb, id, ac, true)
+	return d.closePane(sess, tb, target.pane.id, ac, true)
 }
 
 // reapPane retains the explicit-owner entry point for focused close tests. PTY
@@ -244,6 +241,11 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		return true
 	}
 	sess, tb := owner.session, owner.tab
+	// EOF teardown is a shared mutation just like an explicit close. Hold the
+	// dispatch boundary before any session/tab lock, then use the locked close
+	// helpers below without re-entering it.
+	sess.dispatchMu.Lock()
+	defer sess.dispatchMu.Unlock()
 	sess.mu.Lock()
 	ownedTab := slices.Contains(sess.tabs, tb)
 	if p.owner.Load() != owner {
@@ -254,7 +256,7 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		sess.mu.Unlock()
 		return true
 	}
-	ac := sess.client
+	attachments := sess.snapshotAttachmentsLocked()
 	sessionName := sess.name
 	tb.mu.Lock()
 	if p.owner.Load() != owner {
@@ -288,15 +290,23 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	p.clearOwnerLocked()
 	p.mu.Unlock()
 	tb.mu.Unlock()
+	sess.invalidateViewsLocked()
 	sess.mu.Unlock()
 
 	if finalPane {
-		_ = d.closeTab(sess, tb, true)
+		for _, ac := range attachments {
+			if ac.overlays != nil {
+				ac.overlays.clearCopyModeForPane(p)
+			}
+		}
+		_ = d.closeTabLocked(sess, tb, true)
 		return true
 	}
 	d.applyTabLayout(sess, tb)
-	if ac != nil {
-		ac.overlays.clearCopyModeForPane(p)
+	for _, ac := range attachments {
+		if ac.overlays != nil {
+			ac.overlays.clearCopyModeForPane(p)
+		}
 		ac.pruneCaptureFrames(p)
 	}
 	if rc := sess.renderCoordinator(); rc != nil {
@@ -304,21 +314,36 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	}
 	closePaneProcess(p)
 	d.log.Info("pane closed", "session", sessionName, "pane", p.id)
-	if ac != nil {
+	for _, ac := range attachments {
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	return true
 }
 
+// closePane is the public close boundary for callers that are not already
+// inside session.runMutation. Mutation dispatchers use closePaneLocked.
 func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool) error {
+	if sess == nil {
+		return layout.ErrNotFound
+	}
+	sess.dispatchMu.Lock()
+	defer sess.dispatchMu.Unlock()
+	return d.closePaneLocked(sess, tb, id, ac, repaint)
+}
+
+// closePaneLocked requires sess.dispatchMu before entering any architecture
+// lock. It is used by existing runMutation callers to avoid nested dispatch
+// locking.
+func (d *Daemon) closePaneLocked(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool) error {
+	return d.closePaneLockedWithEffect(sess, tb, id, ac, repaint, nil)
+}
+
+func (d *Daemon) closePaneLockedWithEffect(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool, effect *attachmentEffectTicket) error {
 	if tb == nil {
 		return layout.ErrNotFound
 	}
-	if ac == nil {
-		sess.mu.Lock()
-		ac = sess.client
-		sess.mu.Unlock()
-	}
+	// A nil attachment denotes a session-wide close with an explicit pane target.
+	attachments := sess.snapshotAttachments()
 	tb.mu.Lock()
 	p := tb.panes[id]
 	if p == nil || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, id) {
@@ -327,10 +352,13 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	}
 	if len(layout.LeafIDs(tb.tree.Root)) <= 1 {
 		tb.mu.Unlock()
-		if ac != nil {
-			ac.overlays.clearCopyModeForPane(p)
+		for _, viewer := range attachments {
+			if viewer.overlays != nil {
+				viewer.overlays.clearCopyModeForPane(p)
+			}
+			viewer.pruneCaptureFrames(p)
 		}
-		return d.closeTab(sess, tb, repaint)
+		return d.closeTabLockedWithEffect(sess, tb, repaint, effect)
 	}
 	if err := tb.tree.Close(id); err != nil {
 		tb.mu.Unlock()
@@ -339,11 +367,16 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	delete(tb.panes, id)
 	tb.bumpLayoutGenerationLocked()
 	tb.mu.Unlock()
+	sess.mu.Lock()
+	sess.invalidateViewsLocked()
+	sess.mu.Unlock()
 	d.applyTabLayout(sess, tb)
 
-	if ac != nil {
-		ac.overlays.clearCopyModeForPane(p)
-		ac.pruneCaptureFrames(p)
+	for _, viewer := range attachments {
+		if viewer.overlays != nil {
+			viewer.overlays.clearCopyModeForPane(p)
+		}
+		viewer.pruneCaptureFrames(p)
 	}
 
 	if rc := sess.renderCoordinator(); rc != nil {
@@ -354,18 +387,22 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	if repaint {
 		if ac != nil {
 			d.invalidateRender(sess, ac, true, "pane_actions.go")
+		} else {
+			for _, viewer := range attachments {
+				d.invalidateRender(sess, viewer, true, "pane_actions.go")
+			}
 		}
 	}
 	return nil
 }
 
-func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction, effect *roleEffectTicket) error {
-	target := resolveDaemonActionTarget(sess)
+func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction, effect *attachmentEffectTicket) error {
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	oldFocus := layout.PaneID("")
 	if target.pane != nil {
 		oldFocus = target.pane.id
 	}
-	span, err := d.focusDirAt(sess, target.tab, target.pane, dir)
+	span, err := d.focusDirAt(sess, target.tab, target.pane, dir, ac)
 	if err == nil {
 		if ac != nil {
 			d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "pane_actions.go")
@@ -375,7 +412,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	if !errors.Is(err, errNoNeighbor) || target.tab == nil {
 		return err
 	}
-	if !overflowSourceEligible(sess, target.tab) {
+	if !overflowSourceEligible(sess, ac, target.tab) {
 		return errNoNeighbor
 	}
 
@@ -385,24 +422,22 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 			return errNoNeighbor
 		}
 		if effect != nil {
-			return d.switchToTargetForRole(effect.roleToken(), sessionTarget, sessionHandoffGuard{expectedSource: target.tab}, "overflow-session")
+			return d.switchToTargetForAttachment(effect.connectionToken(), sessionTarget, sessionHandoffGuard{expectedSource: target.tab}, "overflow-session")
 		}
 		return d.commitSessionOverflow(sess, ac, target.tab, sessionTarget)
 	}
 
-	sess.mu.Lock()
-	position, count := sess.active, len(sess.tabs)
-	sess.mu.Unlock()
+	position, count := sess.tabIndexForAttachment(ac)
 	step := resolveOverflow(dir, cfg, position, count)
 	if step.kind != overflowTabs {
 		return err
 	}
-	candidate, ok := d.prepareTabOverflow(sess, target.tab, dir, span, step.delta)
-	if !ok || !d.commitTabOverflow(sess, candidate) {
+	candidate, ok := d.prepareTabOverflowForAttachment(sess, ac, target.tab, dir, span, step.delta)
+	if !ok || !d.commitTabOverflowForAttachment(sess, ac, candidate) {
 		return errNoNeighbor
 	}
-	d.activateTab(sess, candidate.target)
 	if ac != nil {
+		sess.selectAttachmentTab(ac, domain.TabStableID(candidate.target.stableID))
 		d.finishPaneFocusForClient(sess, ac, candidate.target, candidate.targetOldFocus, "pane_actions.go")
 	}
 	return nil
@@ -412,22 +447,76 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 // successful directional focus move. Keep copy-mode exit before the optional
 // stack title refresh, and both before render invalidation.
 func (d *Daemon) finishPaneFocusForClient(sess *session, ac *attachedClient, tb *tab, oldFocus layout.PaneID, producer string) {
-	tb.mu.Lock()
-	newFocus := tb.tree.Focus
-	pl, hasPlacement := focusedPlacementLocked(tb)
-	tb.mu.Unlock()
-	if newFocus != oldFocus {
+	var newFocus layout.PaneID
+	var newPane *pane
+	var pl layout.Placement
+	var hasPlacement bool
+	beforePaneID := domain.PaneStableID("")
+	if ac != nil {
+		beforePaneID = ac.viewSnapshot().paneID
+	}
+	if tb != nil {
+		tb.mu.Lock()
+		if ac != nil {
+			view := ac.viewSnapshot()
+			if domain.TabStableID(tb.stableID) == view.tabID {
+				for _, candidate := range tb.panes {
+					if candidate != nil && domain.PaneStableID(candidate.stableID) == view.paneID {
+						newPane = candidate
+						break
+					}
+				}
+			}
+		} else {
+			newPane = tb.focusedPane()
+			if newPane != nil {
+				newFocus = newPane.id
+			}
+		}
+		if newPane != nil {
+			newFocus = newPane.id
+			pl, hasPlacement = panePlacementLocked(tb, newFocus)
+		}
+		tb.mu.Unlock()
+	}
+
+	moved := newFocus != oldFocus
+	if ac != nil && newPane != nil {
+		sess.mu.Lock()
+		sess.setAttachmentPaneLocked(ac, tb, newPane)
+		sess.mu.Unlock()
+		after := ac.viewSnapshot()
+		moved = beforePaneID != after.paneID
+	}
+	if moved {
 		d.exitCopyMode(ac)
 		if hasPlacement && pl.InStack {
-			d.refreshPaneTitleOnFocus(sess, newFocus)
+			d.refreshPaneTitleOnFocus(sess, newFocus, tb)
 		}
 	}
 	d.invalidateRender(sess, ac, true, producer)
 }
 
-func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction) (domain.Rect, error) {
+func panePlacementLocked(tb *tab, id layout.PaneID) (layout.Placement, bool) {
+	placements, ok := solvedPlacementsLocked(tb)
+	if !ok {
+		return layout.Placement{}, false
+	}
+	for _, placement := range placements {
+		if placement.ID == id {
+			return placement, true
+		}
+	}
+	return layout.Placement{}, false
+}
+
+func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction, initiating ...*attachedClient) (domain.Rect, error) {
 	if tb == nil || target == nil {
 		return domain.Rect{}, layout.ErrNotFound
+	}
+	var ac *attachedClient
+	if len(initiating) > 0 {
+		ac = initiating[0]
 	}
 	tb.mu.Lock()
 	if tb.tree == nil || tb.panes[target.id] != target || !layout.ContainsLeaf(tb.tree.Root, target.id) {
@@ -439,13 +528,24 @@ func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Dir
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	span, _ := candidate.FocusSpan(area)
 	err := candidate.FocusDir(dir, area)
-	committed := err == nil && candidate.Focus != tb.tree.Focus
+	currentFocus := tb.focusedPane()
+	committed := err == nil && currentFocus != nil && candidate.Focus != currentFocus.id
+	var focusedPane *pane
 	if committed {
+		focusedPane = tb.panes[candidate.Focus]
 		tb.tree = candidate
 		tb.bumpLayoutGenerationLocked()
 	}
 	tb.mu.Unlock()
 	if committed {
+		if ac != nil {
+			d.exitCopyMode(ac)
+		}
+		if sess != nil && ac != nil && focusedPane != nil {
+			sess.mu.Lock()
+			sess.setAttachmentPaneLocked(ac, tb, focusedPane)
+			sess.mu.Unlock()
+		}
 		d.applyTabLayout(sess, tb)
 	}
 	if errors.Is(err, layout.ErrNoPane) {

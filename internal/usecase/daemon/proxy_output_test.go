@@ -987,6 +987,69 @@ func TestProxySideEffectForwardsOSC52ToCurrentThinClient(t *testing.T) {
 	}
 }
 
+func TestProxySideEffectFansOutToEveryActiveAttachment(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	remote := newProxyTestTransport()
+	firstTransport := newProxyTestTransport()
+	proxy, first := newAttachedProxyFixture(t, d, firstTransport, remote)
+	secondTransport := newProxyTestTransport()
+	second := &attachedClient{tr: secondTransport, output: newOutputStateStream()}
+	second.setSession(proxy)
+	proxy.sessionCore.mu.Lock()
+	require.True(t, proxy.sessionCore.registerAttachmentLocked(second))
+	proxy.sessionCore.mu.Unlock()
+	first.echoAck.Store(11)
+	second.echoAck.Store(22)
+
+	result, err := d.handleLinkFrame(proxy, 1, proxySideEffectFrame([]byte("effect")))
+	require.Equal(t, proxyLinkResume, result)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		ch   <-chan ports.Frame
+		ack  uint64
+	}{
+		{name: "first", ch: firstTransport.sent, ack: 11},
+		{name: "second", ch: secondTransport.sent, ack: 22},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			frame := awaitTestValue(t, tc.ch, tc.name+" attachment did not receive side effect")
+			out, err := ports.UnmarshalOutput(frame.Payload)
+			require.NoError(t, err)
+			require.Equal(t, tc.ack, out.EchoAck)
+			require.Equal(t, []byte("effect"), out.Data)
+		})
+	}
+}
+
+func TestProxySideEffectSkipsStaleAttachmentAndForwardsLiveAttachment(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	remote := newProxyTestTransport()
+	staleTransport := newProxyTestTransport()
+	proxy, stale := newAttachedProxyFixture(t, d, staleTransport, remote)
+	liveTransport := newProxyTestTransport()
+	live := &attachedClient{tr: liveTransport, output: newOutputStateStream()}
+	live.setSession(proxy)
+	proxy.sessionCore.mu.Lock()
+	require.True(t, proxy.sessionCore.registerAttachmentLocked(live))
+	proxy.sessionCore.mu.Unlock()
+	staleToken := attachmentToken(proxy, stale, stale.transport())
+	staleEffect, admitted := stale.beginAttachmentEffect(staleToken)
+	require.True(t, admitted)
+	staleEffect.End()
+	stale.connectionGeneration.Add(1)
+
+	result, err := d.handleLinkFrame(proxy, 1, proxySideEffectFrame([]byte("effect")))
+	require.Equal(t, proxyLinkResume, result)
+	require.NoError(t, err)
+	awaitTestValue(t, liveTransport.sent, "live attachment did not receive side effect")
+	select {
+	case frame := <-staleTransport.sent:
+		t.Fatalf("stale attachment received side effect: %v", frame.Type)
+	default:
+	}
+}
+
 func TestProxySideEffectRejectsStateBearingAndMalformedMsgOutput(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1031,10 +1094,10 @@ func TestProxySideEffectDropsStaleGenerationAndRole(t *testing.T) {
 	}
 
 	token := attachmentToken(proxy, ac, ac.transport())
-	ticket, admitted := ac.beginRoleEffect(token)
+	ticket, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	ticket.End()
-	ac.roleGeneration.Add(1)
+	ac.connectionGeneration.Add(1)
 	result, err = d.handleLinkFrame(proxy, 1, frame)
 	require.Equal(t, proxyLinkResume, result)
 	require.NoError(t, err)

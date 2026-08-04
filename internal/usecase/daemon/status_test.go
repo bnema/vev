@@ -31,10 +31,10 @@ func (*coreNilAttachment) snapshotView(viewOptions) sessionView {
 	return sessionView{}
 }
 func (*coreNilAttachment) statusSegments(bool) statusSnapshot { return statusSnapshot{} }
-func (*coreNilAttachment) capturePrimary(*attachedClient, primaryCaptureRequest) (*capturedRenderState, bool) {
+func (*coreNilAttachment) captureRenderState(*attachedClient, renderCaptureRequest) (*capturedRenderState, bool) {
 	return nil, false
 }
-func (*coreNilAttachment) activateTargetLocked(int) bool { return false }
+func (*coreNilAttachment) validTargetTabLocked(int) bool { return false }
 func (*coreNilAttachment) isProxy() bool                 { return false }
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
@@ -46,7 +46,7 @@ func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
 	defer releasePTY()
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeLight})
 
-	win := sess.activeTab()
+	win := testAttachmentTab(sess)
 	left := win.focusedPane()
 	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
 	win.mu.Lock()
@@ -89,13 +89,13 @@ func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
 func TestStatusCompositionGolden(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
-	_, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	_, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
 	defer releasePTY2()
-	sess.active = 1
+	selectTestAttachmentTab(sess, 1)
 	sess.name = "work"
 
-	win := sess.activeTab()
+	win := testAttachmentTab(sess)
 	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 	win.focusedPane().screen.Write([]byte("hello"))
@@ -106,7 +106,7 @@ func TestStatusCompositionGolden(t *testing.T) {
 		panes: []capturedPaneRenderState{{
 			id: win.focusedPane().id, frame: win.focusedPane().screen.Frame.Clone(), placement: layout.Placement{ID: win.focusedPane().id, Content: domain.Rect{Width: 12, Height: 2}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
 		}},
-		bars: barState{status: sess.statusSegments(true)},
+		bars: barState{status: sess.statusSegmentsFor(ac, true)},
 	}
 	composed := composeFrame(frameState, composeCacheInput{})
 	frame, damage := composed.frame, composed.damage
@@ -418,7 +418,7 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	_, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer release()
-	win := sess.activeTab()
+	win := testAttachmentTab(sess)
 	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 	ac.setThemeForTest(themeui.Theme{
@@ -462,7 +462,7 @@ func TestApplyThemePropagatesToFloatingPane(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
 	installTestFloating(tb, floating, true)
 	clientTheme := ports.Theme{
@@ -541,7 +541,7 @@ func TestAttachClientAppliesForcedThemeBeforeMsgTheme(t *testing.T) {
 			}
 			tr, _ := newCapturingTransport(t)
 
-			ac, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+			ac, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 			require.NoError(t, err)
 
 			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
@@ -581,7 +581,7 @@ func TestAttachClientClearsStaleColorSchemeOnReplacement(t *testing.T) {
 	assertSessionColorScheme(t, sess, true)
 
 	tr, _ := newCapturingTransport(t)
-	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	require.NoError(t, err)
 
 	assertSessionColorSchemeUnknown(t, sess)
@@ -690,11 +690,11 @@ func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
 	})
 	tr, _ := newCapturingTransport(t)
 
-	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+	_, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	require.NoError(t, err)
 
 	var got []byte
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
 	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got)
@@ -710,7 +710,7 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	})
 
 	// Sanity: the tab answers OSC 10/11 while ac is attached.
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	var before []byte
 	tb.focusedPane().screen.OnResponse = func(b []byte) { before = append(before, b...) }
 	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
@@ -724,40 +724,6 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	require.Empty(t, got, "OSC 10/11 queries must be swallowed once the client that reported these colors is gone")
 }
 
-func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	defer release()
-	d.applyTheme(sess, ac, ports.Theme{
-		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
-		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-	})
-
-	// Simulate the race window inside clientGone/detachOnSendError: the old
-	// client has already been detached (detachIfCurrent succeeded), but
-	// before resetScreenDefaultColors runs a new client attaches and applies
-	// its own theme.
-	require.True(t, sess.detachIfCurrent(ac))
-
-	tr, _ := newCapturingTransport(t)
-	newAC, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
-	require.NoError(t, err)
-	d.applyTheme(sess, newAC, ports.Theme{
-		HasForeground: true, Foreground: renderer.RGB{R: 20, G: 21, B: 22},
-		HasBackground: true, Background: renderer.RGB{R: 23, G: 24, B: 25},
-	})
-
-	// The late reset from the old client's detach path must not wipe the
-	// new client's freshly applied colors.
-	d.resetScreenDefaultColors(sess)
-
-	tb := sess.activeTab()
-	var got []byte
-	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
-	require.NotEmpty(t, got, "a newer client's screen default colors must survive a stale detach's reset")
-}
-
 func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
@@ -769,7 +735,7 @@ func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 
 	d.detachOnSendError(sess, ac, ac.transport())
 
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	var got []byte
 	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
 	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
@@ -788,31 +754,11 @@ func TestDetachOnSendErrorParkPreservesScreenDefaultColors(t *testing.T) {
 
 	d.detachOnSendError(sess, ac, ac.transport())
 
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	var got []byte
 	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
 	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, got, "parked clients resume the same attachment, so screen default colors must be preserved")
-}
-
-func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	d, sess, old, _ := newManualSessionWithPTYs(t, p)
-	defer release()
-	tr, _ := newCapturingTransport(t)
-	_, _, err := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
-	require.NoError(t, err)
-
-	d.applyTheme(sess, old, ports.Theme{
-		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
-		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-	})
-
-	var got []byte
-	tb := sess.activeTab()
-	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
-	require.Empty(t, got)
 }
 
 func TestStatusMarksEphemeralSession(t *testing.T) {
@@ -821,7 +767,7 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 	defer release()
 	sess.name = "0"
 	sess.ephemeral = true
-	win := sess.activeTab()
+	win := testAttachmentTab(sess)
 	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 
@@ -888,7 +834,7 @@ func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	sess.name = "work"
-	win := sess.activeTab()
+	win := testAttachmentTab(sess)
 	win.focusedPane().screen.Resize(30, 2)
 	win.size = domain.Size{Cols: 30, Rows: 2}
 
@@ -960,7 +906,7 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	_, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
 	defer releasePTY2()
-	win := sess.activeTab()
+	win := testAttachmentTab(sess)
 	win.focusedPane().screen.Resize(18, 2)
 	win.size = domain.Size{Cols: 18, Rows: 2}
 	sess.mu.Lock()
@@ -1139,7 +1085,7 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 	capture := func(bars barState) capturedRenderState {
 		t.Helper()
-		state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 			bars:        bars,
 			overlays:    capturedOverlayRenderState{},
 			preview:     picker.Preview{},

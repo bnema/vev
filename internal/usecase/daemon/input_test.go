@@ -27,6 +27,59 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+type blockingInputActionRunner struct {
+	admitted chan<- struct{}
+	release  <-chan struct{}
+	mu       *sync.Mutex
+	order    *[]string
+}
+
+func (r *blockingInputActionRunner) Run(daemonActionRequest) error {
+	close(r.admitted)
+	<-r.release
+	r.mu.Lock()
+	*r.order = append(*r.order, "keyboard")
+	r.mu.Unlock()
+	return nil
+}
+
+func TestAttachedKeyboardMutationSharesDispatchBoundaryWithCommand(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	ac := &attachedClient{}
+	ac.setSession(sess)
+
+	var orderMu sync.Mutex
+	var order []string
+	admitted := make(chan struct{})
+	release := make(chan struct{})
+	runner := &blockingInputActionRunner{admitted: admitted, release: release, mu: &orderMu, order: &order}
+	handler := daemonKeyHandler{d: d, ac: ac, actions: runner}
+	keyboardDone := make(chan struct{})
+	go func() {
+		handler.Action(keys.ActionGrowPaneWidth, nil)
+		close(keyboardDone)
+	}()
+	<-admitted
+	require.False(t, sess.dispatchMu.TryLock(), "keyboard mutation must hold the session dispatch boundary")
+
+	commandDone := make(chan struct{})
+	go func() {
+		_ = sess.runMutation(func() error {
+			orderMu.Lock()
+			order = append(order, "command")
+			orderMu.Unlock()
+			return nil
+		})
+		close(commandDone)
+	}()
+	close(release)
+	<-keyboardDone
+	<-commandDone
+
+	require.Equal(t, []string{"keyboard", "command"}, order)
+}
+
 func TestConfiguredConsumeOrExpelActionsRouteThroughDaemonInput(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -53,7 +106,7 @@ func TestConfiguredConsumeOrExpelActionsRouteThroughDaemonInput(t *testing.T) {
 			ac.setSession(h.session)
 			ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
 			h.session.mu.Lock()
-			h.session.client = ac
+			h.session.registerAttachmentLocked(ac)
 			h.session.mu.Unlock()
 			invalidations := make(chan renderInvalidation, 1)
 			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -82,7 +135,7 @@ func TestConfiguredConsumeOrExpelEdgeActionIsSilent(t *testing.T) {
 	ac.setSession(h.session)
 	ac.keys = keys.NewRouter(h.daemon.clock, daemonKeyHandler{d: h.daemon, ac: ac}, &h.daemon.bindings)
 	h.session.mu.Lock()
-	h.session.client = ac
+	h.session.registerAttachmentLocked(ac)
 	h.session.mu.Unlock()
 	invalidations := make(chan renderInvalidation, 1)
 	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
@@ -129,253 +182,8 @@ func TestConsumeOrExpelKeyActionPreservesRearrangementWarning(t *testing.T) {
 	}
 }
 
-func TestResizeActionAdaptersSubmitEquivalentRequests(t *testing.T) {
-	tests := []struct {
-		name    string
-		action  keys.Action
-		palette func(paletteExec) error
-		control func(controlExec) error
-	}{
-		{"grow width", keys.ActionGrowPaneWidth, func(e paletteExec) error { return e.GrowPaneWidth() }, func(e controlExec) error { return e.GrowPaneWidth() }},
-		{"shrink width", keys.ActionShrinkPaneWidth, func(e paletteExec) error { return e.ShrinkPaneWidth() }, func(e controlExec) error { return e.ShrinkPaneWidth() }},
-		{"grow height", keys.ActionGrowPaneHeight, func(e paletteExec) error { return e.GrowPaneHeight() }, func(e controlExec) error { return e.GrowPaneHeight() }},
-		{"shrink height", keys.ActionShrinkPaneHeight, func(e paletteExec) error { return e.ShrinkPaneHeight() }, func(e controlExec) error { return e.ShrinkPaneHeight() }},
-		{"equalize", keys.ActionEqualizePanes, func(e paletteExec) error { return e.EqualizePanes() }, func(e controlExec) error { return e.EqualizePanes() }},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d := newTestDaemon(t, nil, stubClock{})
-			sess := addControlSession(d, "work", "t_work", "p_work")
-			ac := &attachedClient{}
-			ac.setSession(sess)
-			target := resolveDaemonActionTarget(sess)
-			keySpy := &actionRunnerSpy{}
-			paletteSpy := &actionRunnerSpy{}
-			controlSpy := &actionRunnerSpy{}
-
-			daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(tt.action, nil)
-			require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, actions: paletteSpy}))
-			require.NoError(t, tt.control(controlExec{d: d, sess: sess, target: target, actions: controlSpy}))
-
-			require.Len(t, keySpy.requests, 1)
-			require.Equal(t, keySpy.requests, paletteSpy.requests)
-			require.Equal(t, keySpy.requests, controlSpy.requests)
-			require.Same(t, sess, keySpy.requests[0].target.session)
-			require.Same(t, target.tab, keySpy.requests[0].target.tab)
-			require.Same(t, target.pane, keySpy.requests[0].target.pane)
-		})
-	}
-}
-
-func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
-	type adapterState struct {
-		tree               *layout.Tree
-		placements         []layout.Placement
-		ptySizes           map[layout.PaneID][]domain.Size
-		generationDelta    uint64
-		snapshotDirtyDelta uint64
-	}
-	tests := []struct {
-		name    string
-		action  keys.Action
-		palette func(paletteExec) error
-		control func(controlExec) error
-	}{
-		{"grow width", keys.ActionGrowPaneWidth, func(e paletteExec) error { return e.GrowPaneWidth() }, func(e controlExec) error { return e.GrowPaneWidth() }},
-		{"shrink width", keys.ActionShrinkPaneWidth, func(e paletteExec) error { return e.ShrinkPaneWidth() }, func(e controlExec) error { return e.ShrinkPaneWidth() }},
-		{"grow height", keys.ActionGrowPaneHeight, func(e paletteExec) error { return e.GrowPaneHeight() }, func(e controlExec) error { return e.GrowPaneHeight() }},
-		{"shrink height", keys.ActionShrinkPaneHeight, func(e paletteExec) error { return e.ShrinkPaneHeight() }, func(e controlExec) error { return e.ShrinkPaneHeight() }},
-		{"equalize", keys.ActionEqualizePanes, func(e paletteExec) error { return e.EqualizePanes() }, func(e controlExec) error { return e.EqualizePanes() }},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			run := func(t *testing.T, adapter string, attached bool) adapterState {
-				t.Helper()
-				ptys := map[layout.PaneID]*resizeActionPTY{
-					"pane-1": {}, "pane-2": {}, "pane-3": {},
-				}
-				d, sess, ac, _ := newManualSessionWithPTYs(t, ptys["pane-1"])
-				tb := sess.activeTab()
-				p2 := newPane("pane-2", ptys["pane-2"], tb.size)
-				p3 := newPane("pane-3", ptys["pane-3"], tb.size)
-				tb.mu.Lock()
-				tb.panes[p2.id] = p2
-				tb.panes[p3.id] = p3
-				tb.tree = &layout.Tree{
-					Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
-						layout.NewLeaf("pane-1"),
-						{Kind: layout.Split, Dir: layout.Vertical, Weight: 2, Children: []*layout.Node{
-							layout.NewLeaf("pane-2"), layout.NewLeaf("pane-3"),
-						}},
-					}},
-					Focus: "pane-2",
-				}
-				tb.tree.Root.Children[0].Weight = 1
-				tb.tree.Root.Children[1].Children[0].Weight = 1
-				tb.tree.Root.Children[1].Children[1].Weight = 2
-				generation := tb.layoutGeneration
-				tb.mu.Unlock()
-				sess.snapEligible.Store(true)
-				sess.snapshotMu.Lock()
-				dirty := sess.snapshotGeneration
-				sess.snapshotMu.Unlock()
-
-				invalidations := make(chan renderInvalidation, 2)
-				rc := newRenderCoordinator(renderCoordinatorOptions{
-					wake:         func(renderWake) {},
-					onInvalidate: func(inv renderInvalidation) { invalidations <- inv },
-				})
-				sess.installRenderCoordinator(rc)
-				if attached {
-					rc.attach(ac)
-				} else {
-					sess.mu.Lock()
-					sess.client = nil
-					sess.mu.Unlock()
-				}
-
-				switch adapter {
-				case "key":
-					daemonKeyHandler{d: d, ac: ac}.Action(tt.action, nil)
-				case "palette":
-					require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, ac: ac}))
-				case "control":
-					target := resolveDaemonActionTarget(sess)
-					require.NoError(t, tt.control(controlExec{d: d, sess: sess, target: target}))
-				default:
-					t.Fatalf("unknown adapter %q", adapter)
-				}
-
-				tb.mu.Lock()
-				tree := tb.tree.Clone()
-				gotGeneration := tb.layoutGeneration
-				placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
-				tb.mu.Unlock()
-				require.True(t, ok)
-				sess.snapshotMu.Lock()
-				gotDirty := sess.snapshotGeneration
-				sess.snapshotMu.Unlock()
-
-				gotPTY := make(map[layout.PaneID][]domain.Size, len(ptys))
-				for id, pty := range ptys {
-					gotPTY[id] = pty.Sizes()
-				}
-				for _, placement := range placements {
-					require.Equal(t, []domain.Size{{Cols: placement.Content.Width, Rows: placement.Content.Height}}, gotPTY[placement.ID], "canonical PTY resize for %s", placement.ID)
-				}
-				if attached {
-					awaitInvalidation(t, invalidations)
-					requireNoInvalidation(t, invalidations)
-				} else {
-					requireNoInvalidation(t, invalidations)
-				}
-				return adapterState{tree: tree, placements: placements, ptySizes: gotPTY, generationDelta: gotGeneration - generation, snapshotDirtyDelta: gotDirty - dirty}
-			}
-
-			keyState := run(t, "key", true)
-			require.Equal(t, uint64(1), keyState.generationDelta)
-			require.Equal(t, uint64(1), keyState.snapshotDirtyDelta)
-			require.Equal(t, keyState, run(t, "palette", true))
-			require.Equal(t, keyState, run(t, "control", true))
-			headless := run(t, "control", false)
-			require.Equal(t, uint64(1), headless.generationDelta)
-			require.Equal(t, uint64(1), headless.snapshotDirtyDelta)
-			require.Equal(t, keyState, headless)
-		})
-	}
-}
-
-type resizeActionPTY struct {
-	mu    sync.Mutex
-	sizes []domain.Size
-}
-
-func (*resizeActionPTY) Read([]byte) (int, error)     { return 0, nil }
-func (*resizeActionPTY) Write(b []byte) (int, error)  { return len(b), nil }
-func (*resizeActionPTY) Close() error                 { return nil }
-func (*resizeActionPTY) Pid() int                     { return 0 }
-func (*resizeActionPTY) ForegroundPgid() (int, error) { return 0, nil }
-func (p *resizeActionPTY) Resize(size domain.Size) error {
-	p.mu.Lock()
-	p.sizes = append(p.sizes, size)
-	p.mu.Unlock()
-	return nil
-}
-
-func (p *resizeActionPTY) Sizes() []domain.Size {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]domain.Size(nil), p.sizes...)
-}
-
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
-
-func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
-	writes1 := make(chan []byte, 1)
-	writes2 := make(chan []byte, 1)
-	writes3 := make(chan []byte, 1)
-	p1, releasePTY1 := newBlockingPTYWithWrites(t, writes1)
-	p2, releasePTY2 := newBlockingPTYWithWrites(t, writes2)
-	p3, releasePTY3 := newBlockingPTYWithWrites(t, writes3)
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2, p3), stubClock{})
-	tr, sends, releaseConn := newConn(t,
-		mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}),
-		frameInput([]byte("\x1b ")),
-		frameInput([]byte("CNT\r")),
-		frameInput([]byte("\x1b ")),
-		frameInput([]byte("CNT\r")),
-		frameInput([]byte("\x1b1")),
-		frameInput([]byte("A")),
-		frameInput([]byte("\x1b2")),
-		frameInput([]byte("B")),
-		frameInput([]byte("\x1b3")),
-		frameInput([]byte("C")),
-	)
-
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgOutput)
-
-	require.Eventually(t, func() bool {
-		sessions := listSessions(t, d)
-		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 3
-	}, 2*time.Second, 5*time.Millisecond)
-	require.Eventually(t, func() bool { return len(writes1) == 1 }, 2*time.Second, 5*time.Millisecond)
-	requirePTYWrite(t, writes1, []byte("A"))
-	require.Eventually(t, func() bool { return len(writes2) == 1 }, 2*time.Second, 5*time.Millisecond)
-	requirePTYWrite(t, writes2, []byte("B"))
-	require.Eventually(t, func() bool { return len(writes3) == 1 }, 2*time.Second, 5*time.Millisecond)
-	requirePTYWrite(t, writes3, []byte("C"))
-
-	d.mu.Lock()
-	var sess *session
-	for _, candidate := range d.sessions {
-		if local, ok := localSession(candidate); ok {
-			sess = local
-			break
-		}
-	}
-	d.mu.Unlock()
-	require.NotNil(t, sess)
-	sess.mu.Lock()
-	tabs := append([]*tab(nil), sess.tabs...)
-	sess.mu.Unlock()
-	require.Len(t, tabs, 3)
-	for _, tb := range tabs {
-		requireFloatingInitialized(t, tb)
-	}
-
-	releaseConn()
-	releasePTY1()
-	releasePTY2()
-	releasePTY3()
-	hg.Wait()
-	d.sessWg.Wait()
-}
 
 func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil, nil)
@@ -401,7 +209,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	// Use the real key action: it requests the mandatory complete repaint for
 	// the first target-tab frame.
 	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2, nil)
-	require.Equal(t, 1, activeTabIndex(sess))
+	require.Equal(t, 1, testAttachmentTabIndex(sess))
 
 	second := awaitFrame(t, sends, ports.MsgOutput)
 	secondOutput, err := ports.UnmarshalOutput(second.Payload)
@@ -496,7 +304,7 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	floating := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 5})
 	floating.ctx = floatingCtx
 	floating.screen.Write([]byte("popup-content"))
-	installTestFloating(sess.activeTab(), floating, false)
+	installTestFloating(testAttachmentTab(sess), floating, false)
 
 	// Establish the client shadow while the retained popup is hidden.
 	d.paint(sess, ac, true, nil)
@@ -518,7 +326,7 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1bf"))
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 	require.NotContains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	require.Equal(t, floatingHidden, tb.floating.state)
 	require.Same(t, floating, tb.floating.pane)
@@ -586,7 +394,7 @@ func TestFloatingKeyboardRoutesVisibleAndHiddenInput(t *testing.T) {
 			defer releaseNormal()
 			defer releaseFloating()
 			d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
-			installTestFloating(sess.activeTab(), newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), tc.visible)
+			installTestFloating(testAttachmentTab(sess), newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), tc.visible)
 
 			daemonKeyHandler{d: d, ac: ac}.Forward(tc.input)
 			if tc.visible {
@@ -608,7 +416,7 @@ func TestFloatingBracketedPasteAndGlobalActions(t *testing.T) {
 	defer releaseNormal()
 	defer releaseFloating()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
-	installTestFloating(sess.activeTab(), newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), true)
+	installTestFloating(testAttachmentTab(sess), newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), true)
 
 	paste := []byte("\x1b[200~paste\x1bf\x1b[201~")
 	d.handleInput(sess, ac, paste)
@@ -626,7 +434,7 @@ func TestFloatingStaysTerminalTargetAfterDirectionalFocus(t *testing.T) {
 	defer releaseNormal()
 	defer releaseFloating()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	second := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 5})
 	tb.mu.Lock()
 	tb.size = domain.Size{Cols: 81, Rows: 5}
@@ -658,7 +466,7 @@ func TestActionFocusPaneAtEdgeStaysSilent(t *testing.T) {
 // the user as a notice instead of being silently discarded.
 func TestActionFocusPaneGenuineErrorReportsNoticeInternal(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	tb.tree = nil
 	tb.mu.Unlock()
@@ -675,7 +483,7 @@ func TestActionFocusPaneGenuineErrorReportsNoticeInternal(t *testing.T) {
 
 func TestFloatingVisibilityRemainsIndependentAcrossTabSwitches(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-	first := sess.activeTab()
+	first := testAttachmentTab(sess)
 	second := newTab(nil, first.size)
 	installTestFloating(first, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
 	installTestFloating(second, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
@@ -699,7 +507,7 @@ func TestFloatingMouseTranslatesSGRToInnerCoordinates(t *testing.T) {
 	floatingPTY := portsmocks.NewMockPTY(t)
 	floatingPTY.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	tb.size = domain.Size{Cols: 100, Rows: 20}
 	tb.mu.Unlock()
@@ -716,7 +524,7 @@ func TestFloatingMouseIgnoresBorderAndOutside(t *testing.T) {
 	normal := portsmocks.NewMockPTY(t)
 	floatingPTY := portsmocks.NewMockPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	tb.size = domain.Size{Cols: 100, Rows: 20}
 	tb.mu.Unlock()
@@ -736,7 +544,7 @@ func TestResponsiveDrawerFloatingMouseRoutesOnlyInnerClientCells(t *testing.T) {
 	floatingPTY := portsmocks.NewMockPTY(t)
 	floatingPTY.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	complete := domain.Size{Cols: 79, Rows: 25}
 	content := tabSize(complete)
 	geometry := calculateContentFloatingGeometry(content, d.currentFloatingConfig())
@@ -760,7 +568,7 @@ func TestResponsiveDrawerCopyMouseMapsInnerAndPinsDragAwayFromChrome(t *testing.
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	complete := domain.Size{Cols: 79, Rows: 25}
 	content := tabSize(complete)
 	geometry := calculateContentFloatingGeometry(content, d.currentFloatingConfig())
@@ -960,12 +768,12 @@ func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 					release()
 				}
 			}()
-			sess.active = tc.start
+			selectTestAttachmentTab(sess, tc.start)
 
 			d.handleInput(sess, ac, []byte("\x1b "))
 			d.handleInput(sess, ac, tc.query)
 
-			require.Equal(t, tc.wantIndex, activeTabIndex(sess))
+			require.Equal(t, tc.wantIndex, testAttachmentTabIndex(sess))
 		})
 	}
 }
@@ -1015,7 +823,7 @@ func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
 	// A displaced attachment makes the previously valid handoff stale by the
 	// time switchToTarget commits it.
 	current.mu.Lock()
-	current.client = nil
+	clearAttachmentsForTestLocked(current)
 	current.mu.Unlock()
 
 	d.backSession(current, ac)
@@ -1200,14 +1008,14 @@ func TestAltXClosesActiveTabAndSelectsRemaining(t *testing.T) {
 	p2, releasePTY2 := newBlockingPTY(t)
 	p3, releasePTY3 := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2, p3)
-	sess.active = 1
+	selectTestAttachmentTab(sess, 1)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	d.handleInput(sess, ac, []byte("CLT\r"))
 
 	require.Equal(t, 1, sessionCount(d))
 	require.Len(t, sess.tabs, 2)
-	require.Equal(t, 1, activeTabIndex(sess), "closing middle tab selects the next remaining tab")
+	require.Equal(t, 1, testAttachmentTabIndex(sess), "closing middle tab selects the next remaining tab")
 	d.handleInput(sess, ac, []byte("Z"))
 	require.Eventually(t, func() bool { return len(writes) == 1 }, 2*time.Second, 5*time.Millisecond)
 	requirePTYWrite(t, writes, []byte("Z"))
@@ -1224,7 +1032,7 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b "))
 	d.handleInput(sess, ac, []byte("DET\r"))
 
-	require.Nil(t, sess.client)
+	require.Empty(t, sess.snapshotAttachments())
 	f := awaitFrame(t, sends, ports.MsgDetached)
 	det, err := ports.UnmarshalDetached(f.Payload)
 	require.NoError(t, err)
@@ -1258,7 +1066,7 @@ func TestRNTOpensPromptAndRenamesActiveTab(t *testing.T) {
 			release()
 		}
 	}()
-	sess.active = 1
+	selectTestAttachmentTab(sess, 1)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1639,7 +1447,7 @@ func TestMouseWheelOverUnfocusedPaneDoesNotFocusAndForwardsChildMouse(t *testing
 	p2.EXPECT().Write([]byte("\x1b[<64;1;1M")).Return(len("\x1b[<64;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
 	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 	tb.mu.Lock()
@@ -1663,7 +1471,7 @@ func TestRejectedLeftReleaseInvalidatesFreshPointerBeforeMotion(t *testing.T) {
 		{
 			name: "split divider",
 			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, _ *[]byte) []byte {
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 				tb.mu.Lock()
 				tb.size = domain.Size{Cols: 41, Rows: 10}
@@ -1676,7 +1484,7 @@ func TestRejectedLeftReleaseInvalidatesFreshPointerBeforeMotion(t *testing.T) {
 		{
 			name: "split title bar",
 			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, _ *[]byte) []byte {
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 				tb.mu.Lock()
 				tb.size = domain.Size{Cols: 41, Rows: 10}
@@ -1689,7 +1497,7 @@ func TestRejectedLeftReleaseInvalidatesFreshPointerBeforeMotion(t *testing.T) {
 		{
 			name: "floating exterior",
 			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, press *[]byte) []byte {
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
 				installTestFloating(tb, floating, true)
 				tb.mu.Lock()
@@ -1749,7 +1557,7 @@ func TestPressAtFormerStackTitleRowIsTreatedAsExpandedContent(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 9})
 	p3 := newPane("pane-3", nil, domain.Size{Cols: 20, Rows: 1})
 	tb.mu.Lock()
@@ -1821,7 +1629,7 @@ func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {
 			p2.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
 			d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
 			d.procComm = nil
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.focusedPane().screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 			tb.mu.Lock()
 			tb.size = tc.size
@@ -1844,7 +1652,7 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Maybe()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	for i := range 10 {
 		copy(tb.focusedPane().screen.Frame.Row(i), testRow(string(rune('a'+i))))
 	}
@@ -1878,7 +1686,7 @@ func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
 	p2.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
 	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 	tb.mu.Lock()
@@ -1905,7 +1713,7 @@ func TestMouseGatedWhileNoticesOverlayActive(t *testing.T) {
 	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
 	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 	tb.mu.Lock()
@@ -1935,7 +1743,7 @@ func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 4}).Return(nil).Maybe()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 3})
 	tb.mu.Lock()
 	tb.size = domain.Size{Cols: 20, Rows: 5}
@@ -1954,7 +1762,7 @@ func TestActiveCopyPressOnOtherPaneFocusesAndExitsBeforeFutureInput(t *testing.T
 	p1, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
-	tb := sess.activeTab()
+	tb := testAttachmentTab(sess)
 	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 	tb.mu.Lock()
 	tb.size = domain.Size{Cols: 41, Rows: 10}
@@ -2053,8 +1861,8 @@ func TestActiveCopyMouseIgnoresStalePointerResets(t *testing.T) {
 			name: "press-owned release rejects mapping",
 			prepare: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) mouse.Event {
 				t.Helper()
-				p := sess.activeTab().focusedPane()
-				tb := sess.activeTab()
+				p := testAttachmentTab(sess).focusedPane()
+				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				geometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), 1, 2)
 				tb.mu.Unlock()
@@ -2069,7 +1877,7 @@ func TestActiveCopyMouseIgnoresStalePointerResets(t *testing.T) {
 			name: "current geometry disappears",
 			prepare: func(t *testing.T, _ *Daemon, sess *session, _ *attachedClient) mouse.Event {
 				t.Helper()
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				tb.tree = nil
 				tb.mu.Unlock()
@@ -2080,7 +1888,7 @@ func TestActiveCopyMouseIgnoresStalePointerResets(t *testing.T) {
 			name: "fresh press rejects document mapping",
 			prepare: func(t *testing.T, _ *Daemon, sess *session, _ *attachedClient) mouse.Event {
 				t.Helper()
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				tb.size.Rows = 40 // valid layout coordinate, outside the old document.
 				tb.mu.Unlock()
@@ -2109,7 +1917,7 @@ func TestActiveCopyMouseIgnoresStalePointerResets(t *testing.T) {
 			}
 			defer func() { d.beforeCopyMouseMap = nil }()
 
-			d.handleActiveCopyMouse(sess, ac, sess.activeTab(), ev)
+			d.handleActiveCopyMouse(sess, ac, testAttachmentTab(sess), ev)
 
 			ac.overlays.copyMu.Lock()
 			defer ac.overlays.copyMu.Unlock()
@@ -2128,7 +1936,7 @@ func TestActiveCopyMouseRejectsViewportChangeAfterMappingSnapshot(t *testing.T) 
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	pane := sess.activeTab().focusedPane()
+	pane := testAttachmentTab(sess).focusedPane()
 	for range 8 {
 		appendHistoryRow(t, pane.history, testRow("history"))
 	}
@@ -2162,13 +1970,13 @@ func TestFreshCopyPressUsesFrameAbsoluteHitTestGeometry(t *testing.T) {
 		{
 			name: "mono",
 			setup: func(_ *testing.T, _ *Daemon, sess *session) (*pane, mouse.Event) {
-				return sess.activeTab().focusedPane(), mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 1}
+				return testAttachmentTab(sess).focusedPane(), mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 1}
 			},
 		},
 		{
 			name: "split",
 			setup: func(_ *testing.T, _ *Daemon, sess *session) (*pane, mouse.Event) {
-				tb := sess.activeTab()
+				tb := testAttachmentTab(sess)
 				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 				tb.mu.Lock()
 				tb.size = domain.Size{Cols: 41, Rows: 10}
@@ -2182,8 +1990,8 @@ func TestFreshCopyPressUsesFrameAbsoluteHitTestGeometry(t *testing.T) {
 			name: "floating",
 			setup: func(t *testing.T, d *Daemon, sess *session) (*pane, mouse.Event) {
 				p := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
-				installTestFloating(sess.activeTab(), p, true)
-				tb := sess.activeTab()
+				installTestFloating(testAttachmentTab(sess), p, true)
+				tb := testAttachmentTab(sess)
 				tb.mu.Lock()
 				_, geometry, visible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
 				tb.mu.Unlock()
@@ -2197,7 +2005,7 @@ func TestFreshCopyPressUsesFrameAbsoluteHitTestGeometry(t *testing.T) {
 			defer release()
 			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 			wantPane, ev := tc.setup(t, d, sess)
-			tb := sess.activeTab()
+			tb := testAttachmentTab(sess)
 			tb.mu.Lock()
 			wantGeometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), ev.Col, ev.Row)
 			tb.mu.Unlock()

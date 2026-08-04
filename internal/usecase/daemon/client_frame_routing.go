@@ -8,37 +8,36 @@ import (
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
-const connectionRoleAttempts = 8
+const connectionSnapshotAttempts = 8
 
-// currentConnectionRole retries the lock-free session-to-role snapshot when a
-// handoff lands between those reads. The role gate still performs the final
+// currentAttachmentConnection retries the lock-free session-to-role snapshot when a
+// handoff lands between those reads. The attachment gate still performs the final
 // mutation admission after this function returns.
-func (d *Daemon) currentConnectionRole(ac *attachedClient, tr ports.Transport) (attachmentSession, attachmentRoleToken, bool) {
-	for range connectionRoleAttempts {
+func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (attachmentSession, attachmentConnectionToken, bool) {
+	for range connectionSnapshotAttempts {
 		if !ac.currentTransportIs(tr) {
 			break
 		}
 		sess := ac.currentAttachmentSession()
 		if sess == nil {
-			return nil, attachmentRoleToken{}, false
+			return nil, attachmentConnectionToken{}, false
 		}
 		if d.afterConnectionSessionSnapshot != nil {
 			d.afterConnectionSessionSnapshot(sess)
 		}
 		token := attachmentToken(sess, ac, tr)
-		if token.role == attachmentDetached || ac.currentAttachmentSession() != sess {
+		if token.ac == nil || ac.currentAttachmentSession() != sess {
 			runtime.Gosched()
 			continue
 		}
 		return sess, token, true
 	}
-	return nil, attachmentRoleToken{}, false
+	return nil, attachmentConnectionToken{}, false
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
-// until detach, EOF, or a transport error. Role is resolved after every Recv so
-// a transport displaced while blocked in Recv immediately adopts its restricted
-// snatched routing rather than executing one stale active frame.
+// until detach, EOF, or a transport error. The attachment generation is
+// resolved after every Recv so a stale transport cannot execute a new frame.
 func (d *Daemon) runConnLoop(ac *attachedClient) {
 	tr := ac.transport()
 	if tr == nil {
@@ -50,14 +49,12 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		}
 		f, err := tr.Recv()
 		if err != nil {
-			for range connectionRoleAttempts {
-				sess, token, ok := d.currentConnectionRole(ac, tr)
+			for range connectionSnapshotAttempts {
+				sess, _, ok := d.currentAttachmentConnection(ac, tr)
 				if !ok {
 					return
 				}
-				if token.role == attachmentSnatched {
-					d.parkOrDropSnatchedAttachment(token)
-				} else if proxy, ok := sess.(*proxySession); ok {
+				if proxy, ok := sess.(*proxySession); ok {
 					d.detachProxyOnSendError(proxy, ac, tr)
 				} else if local, ok := localSession(sess); ok {
 					d.clientGone(local, ac, tr, false)
@@ -71,48 +68,40 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			}
 			return
 		}
-		_, token, ok := d.currentConnectionRole(ac, tr)
+		_, token, ok := d.currentAttachmentConnection(ac, tr)
 		if !ok {
 			return
 		}
-		switch token.role {
-		case attachmentActive:
-			if d.handleActiveClientFrame(token, f) {
-				return
-			}
-		case attachmentSnatched:
-			if d.handleSnatchedClientFrame(token, f) {
-				return
-			}
+		if d.handleAttachmentClientFrame(token, f) {
+			return
 		}
 	}
 }
 
-// handleActiveClientFrame owns the ordinary attached-client protocol. Keeping
-// it separate makes the restricted snatched protocol an explicit allow-list.
-func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Frame) bool {
-	if !token.activeEffect() {
+// handleAttachmentClientFrame owns the attached-client protocol.
+func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f ports.Frame) bool {
+	if !token.attachmentEffectCurrent() {
 		return false
 	}
-	if d.afterActiveFrameDispatch != nil {
-		d.afterActiveFrameDispatch(token)
+	if d.afterAttachmentFrameDispatch != nil {
+		d.afterAttachmentFrameDispatch(token)
 	}
-	ticket, admitted := token.ac.beginRoleEffect(token)
+	ticket, admitted := token.ac.beginAttachmentEffect(token)
 	if !admitted {
 		return false
 	}
 	token.effect = ticket
-	defer token.endRoleEffect()
-	if d.afterRoleEffectAdmitted != nil {
-		d.afterRoleEffectAdmitted(token)
+	defer token.endAttachmentEffect()
+	if d.afterAttachmentEffectAdmitted != nil {
+		d.afterAttachmentEffectAdmitted(token)
 	}
 	switch f.Type {
 	case ports.MsgInput:
 		if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
-			d.handleSequencedInputForRole(token, in.InputSeq, in.Data)
+			d.handleSequencedInputForAttachment(token, in.InputSeq, in.Data)
 		}
 	case ports.MsgResize:
-		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.activeEffect() {
+		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.attachmentEffectCurrent() {
 			if sess, ok := localSession(token.sess); ok {
 				d.requestTransactionalResizeForLease(sess, token.ac, token.lease, rz.Size, false)
 			} else if proxy, ok := token.sess.(*proxySession); ok {
@@ -121,30 +110,30 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 		}
 	case ports.MsgTheme:
 		if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
-			d.applyThemeForRole(token, th)
+			d.applyThemeForAttachment(token, th)
 		}
 	case ports.MsgImagePush:
 		if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
-			d.handleSequencedImagePushForRole(token, ip.InputSeq, ip)
+			d.handleSequencedImagePushForAttachment(token, ip.InputSeq, ip)
 		}
 	case ports.MsgClientNotice:
 		if notice, derr := ports.UnmarshalClientNotice(f.Payload); derr == nil {
-			d.handleClientNoticeForRole(token, notice)
+			d.handleClientNoticeForAttachment(token, notice)
 		} else {
 			d.log.Warn("malformed client notice", "err", derr)
 		}
 	case ports.MsgDetach:
-		if token.activeEffect() {
-			d.clientGoneForRole(token, true)
+		if token.attachmentEffectCurrent() {
+			d.clientGoneForAttachment(token, true)
 			return true
 		}
 	case ports.MsgAck:
 		if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
-			d.ackActiveOutput(token, ack.AckedStateNum)
+			d.ackOutput(token, ack.AckedStateNum)
 		}
 	case ports.MsgOutputResetRequest:
 		if _, derr := ports.UnmarshalOutputResetRequest(f.Payload); derr == nil {
-			d.resetActiveOutput(token)
+			d.resetOutput(token)
 		}
 	case ports.MsgCommand:
 		if token.ac.proxied {
@@ -153,16 +142,16 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 				return false
 			}
 			result := d.executeAttachedCommand(token, request)
-			if err := token.sendActiveControl(frameCommandResult(result)); err != nil {
-				token.endRoleEffect()
-				d.detachOnRoleSendError(token, token.transport.transport)
+			if err := token.sendControl(frameCommandResult(result)); err != nil {
+				token.endAttachmentEffect()
+				d.detachOnAttachmentSendError(token, token.transport.transport)
 				return true
 			}
 		}
 	case ports.MsgPing:
-		if err := token.sendActiveControl(framePong()); err != nil {
-			token.endRoleEffect()
-			d.detachOnRoleSendError(token, token.transport.transport)
+		if err := token.sendControl(framePong()); err != nil {
+			token.endAttachmentEffect()
+			d.detachOnAttachmentSendError(token, token.transport.transport)
 			return true
 		}
 	default:
@@ -172,7 +161,7 @@ func (d *Daemon) handleActiveClientFrame(token attachmentRoleToken, f ports.Fram
 	return false
 }
 
-func (d *Daemon) executeAttachedCommand(token attachmentRoleToken, request ports.CommandRequest) ports.CommandResult {
+func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request ports.CommandRequest) ports.CommandResult {
 	result := ports.CommandResult{RequestID: request.RequestID}
 	if request.Version != ports.ProtocolVersion {
 		result.Code = ports.ErrInvalidCommandArgs
@@ -200,7 +189,7 @@ func (d *Daemon) executeAttachedCommand(token attachmentRoleToken, request ports
 		return result
 	}
 	sess, ok := localSession(token.sess)
-	if !ok || !token.activeEffect() {
+	if !ok || !token.attachmentEffectCurrent() {
 		result.Code = ports.ErrNoSuchTarget
 		result.Text = "attached session is no longer active"
 		return result
@@ -227,11 +216,11 @@ func (d *Daemon) executeAttachedCommand(token attachmentRoleToken, request ports
 		return result
 	}
 
-	// The frame's role token is the target capability. No registry/name lookup is
+	// The frame's attachment token is the target capability. No registry/name lookup is
 	// performed, so the command cannot escape to another remote session.
-	sess.dispatchMu.Lock()
-	err := cmd.Run(paletteExec{d: d, sess: sess, ac: token.ac, effect: token.effect}, request.Args)
-	sess.dispatchMu.Unlock()
+	err := sess.runMutation(func() error {
+		return cmd.Run(paletteExec{d: d, sess: sess, ac: token.ac, effect: token.effect}, request.Args)
+	})
 	if err == nil {
 		result.OK = true
 		return result
@@ -252,16 +241,16 @@ func proxyAttachedCommandOwnedRemotely(slug string) bool {
 	return proxyPaletteCommandOwnership(slug) == proxyPaletteRemote
 }
 
-// resetActiveOutput rebases only the exact proxied role and transport admitted
+// resetOutput rebases only the exact proxied attachment and transport admitted
 // by the frame router. sendMu serializes the rebase with every output send;
 // transport revalidation under that lock rejects a link replaced while waiting.
-func (d *Daemon) resetActiveOutput(token attachmentRoleToken) bool {
+func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	ac := token.ac
 	if ac == nil || !ac.proxied || token.effect == nil || token.effect.ended.Load() {
 		return false
 	}
 	ac.sendMu.Lock()
-	if token.effect.ended.Load() || !ac.proxied || !token.activeCurrent() || ac.output == nil {
+	if token.effect.ended.Load() || !ac.proxied || !token.attachmentCurrent() || ac.output == nil {
 		ac.sendMu.Unlock()
 		return false
 	}
@@ -274,7 +263,7 @@ func (d *Daemon) resetActiveOutput(token attachmentRoleToken) bool {
 	})
 }
 
-func (d *Daemon) ackActiveOutput(token attachmentRoleToken, state uint64) bool {
+func (d *Daemon) ackOutput(token attachmentConnectionToken, state uint64) bool {
 	ac := token.ac
 	if token.effect == nil || token.effect.ended.Load() {
 		return false
@@ -286,77 +275,4 @@ func (d *Daemon) ackActiveOutput(token attachmentRoleToken, state uint64) bool {
 		rc.notifyAckForLease(token.lease)
 	}
 	return true
-}
-
-// handleSnatchedClientFrame is intentionally an allow-list. Strict resume and
-// quit actions are introduced separately; until then ordinary input is ignored.
-func (d *Daemon) handleSnatchedClientFrame(token attachmentRoleToken, f ports.Frame) bool {
-	if !token.current() {
-		return false
-	}
-	ticket, admitted := token.ac.beginRoleEffect(token)
-	if !admitted {
-		return false
-	}
-	token.effect = ticket
-	defer token.endRoleEffect()
-	if d.afterRoleEffectAdmitted != nil {
-		d.afterRoleEffectAdmitted(token)
-	}
-	switch f.Type {
-	case ports.MsgInput:
-		if in, err := ports.UnmarshalInput(f.Payload); err == nil && d.handleSnatchedInput(token, in) {
-			return true
-		}
-	case ports.MsgResize:
-		if resize, err := ports.UnmarshalResize(f.Payload); err == nil && resize.Size.Valid() {
-			ac := token.ac
-			ac.sendMu.Lock()
-			if ac.roleGeneration.Load() != token.generation || !ac.transportSnapshotCurrent(token.transport) {
-				ac.sendMu.Unlock()
-				return false
-			}
-			ac.size = resize.Size
-			ac.sendMu.Unlock()
-			if err := d.sendSnatchedPanel(ac, token.transport, token.generation, "", token.effect); err != nil {
-				token.endRoleEffect()
-				d.parkOrDropSnatchedAttachment(token)
-				return true
-			}
-		}
-	case ports.MsgTheme:
-		if theme, err := ports.UnmarshalTheme(f.Payload); err == nil {
-			ac := token.ac
-			ac.sendMu.Lock()
-			if ac.roleGeneration.Load() != token.generation || !ac.transportSnapshotCurrent(token.transport) {
-				ac.sendMu.Unlock()
-				return false
-			}
-			clientTheme := themeFromMessage(theme)
-			ac.setClientTheme(clientTheme)
-			ac.setAppliedTheme(d.resolveAppliedTheme(clientTheme))
-			ac.sendMu.Unlock()
-			if err := d.sendSnatchedPanel(ac, token.transport, token.generation, "", token.effect); err != nil {
-				token.endRoleEffect()
-				d.parkOrDropSnatchedAttachment(token)
-				return true
-			}
-		}
-	case ports.MsgAck:
-		if ack, err := ports.UnmarshalAck(f.Payload); err == nil {
-			token.ac.ackOutputState(ack.AckedStateNum)
-		}
-	case ports.MsgPing:
-		if err := d.sendSnatchedControl(token, framePong()); err != nil {
-			token.endRoleEffect()
-			d.parkOrDropSnatchedAttachment(token)
-			return true
-		}
-	case ports.MsgDetach:
-		_ = d.sendSnatchedControl(token, frameDetached(ports.ReasonDetach))
-		token.endRoleEffect()
-		d.dropSnatchedAttachment(token)
-		return true
-	}
-	return false
 }

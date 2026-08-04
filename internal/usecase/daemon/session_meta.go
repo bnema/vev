@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -11,17 +12,31 @@ var errSessionMetaUnavailable = errors.New("session metadata is unavailable")
 // sessionMetaSnapshot captures the authoritative tab order while session.mu
 // owns every field represented on the wire.
 func (s *session) sessionMetaSnapshot() (ports.SessionMeta, bool) {
+	return s.sessionMetaSnapshotFor(nil)
+}
+
+func (s *session) sessionMetaSnapshotFor(ac *attachedClient) (ports.SessionMeta, bool) {
 	if s == nil {
 		return ports.SessionMeta{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.tabs) == 0 || s.active < 0 || s.active >= len(s.tabs) {
+	if len(s.tabs) == 0 {
 		return ports.SessionMeta{}, false
+	}
+	active := 0
+	if ac != nil {
+		view := ac.viewSnapshot()
+		for i, tb := range s.tabs {
+			if domain.TabStableID(tb.stableID) == view.tabID {
+				active = i
+				break
+			}
+		}
 	}
 	meta := ports.SessionMeta{
 		SessionName: s.name,
-		Active:      uint16(s.active),
+		Active:      uint16(active),
 		Tabs:        make([]ports.SessionTabMeta, len(s.tabs)),
 	}
 	for i, tb := range s.tabs {
@@ -63,11 +78,11 @@ func cloneSessionMeta(meta ports.SessionMeta) ports.SessionMeta {
 // caller holds ac.sendMu, which serializes this snapshot shadow with every
 // output write. The shadow is committed only after the transport accepts the
 // metadata frame.
-func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected transportSnapshot, ticket *roleEffectTicket) error {
+func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected transportSnapshot, ticket *attachmentEffectTicket) error {
 	if ac == nil || sess == nil || !ac.proxied {
 		return nil
 	}
-	meta, ok := sess.sessionMetaSnapshot()
+	meta, ok := sess.sessionMetaSnapshotFor(ac)
 	if !ok {
 		return errSessionMetaUnavailable
 	}
@@ -76,7 +91,7 @@ func (ac *attachedClient) sendSessionMetaIfChanged(sess *session, expected trans
 
 // sendSessionMetaSnapshot sends an already captured metadata snapshot while
 // the caller holds ac.sendMu.
-func (ac *attachedClient) sendSessionMetaSnapshot(meta ports.SessionMeta, expected transportSnapshot, ticket *roleEffectTicket) error {
+func (ac *attachedClient) sendSessionMetaSnapshot(meta ports.SessionMeta, expected transportSnapshot, ticket *attachmentEffectTicket) error {
 	if ac == nil || !ac.proxied {
 		return nil
 	}

@@ -406,8 +406,8 @@ func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
 	sourceClient.initOverlays()
 	destinationClient := &attachedClient{captureFrames: map[*pane]capturedPaneRenderState{floating: {}}}
 	destinationClient.initOverlays()
-	source.client = sourceClient
-	destination.client = destinationClient
+	source.registerAttachment(sourceClient)
+	destination.registerAttachment(destinationClient)
 
 	floating.onExit()
 	d.sessWg.Wait()
@@ -485,7 +485,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		t.Helper()
 		normalPTY, releaseNormal := newBlockingPTY(t)
 		d, sess, ac, sends := newManualSessionWithPTYs(t, normalPTY)
-		tb := sess.activeTab()
+		tb := testAttachmentTab(sess)
 		require.NotNil(t, tb)
 		tb.mu.Lock()
 		normal := tb.focusedPane()
@@ -770,7 +770,7 @@ func TestFloatingAsyncSpawnFailureToastsOnlyForUserOpen(t *testing.T) {
 			tr, _ := newCapturingTransport(t)
 			ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 			ac.initOverlays()
-			sess := &session{sessionCore: sessionCore{id: "floating-spawn", name: "work", client: ac}, tabs: []*tab{tb}, ctx: t.Context()}
+			sess := &session{sessionCore: sessionCore{id: "floating-spawn", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: t.Context()}
 			ac.setSession(sess)
 
 			d.startFloating(sess, tb, tc.userOpen)

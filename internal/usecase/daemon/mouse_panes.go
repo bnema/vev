@@ -10,22 +10,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/mouse"
 )
 
-func focusedPlacementLocked(tb *tab) (layout.Placement, bool) {
-	if tb == nil || tb.tree == nil {
-		return layout.Placement{}, false
-	}
-	placements, ok := solvedPlacementsLocked(tb)
-	if !ok {
-		return layout.Placement{}, false
-	}
-	for _, pl := range placements {
-		if pl.ID == tb.tree.Focus {
-			return pl, true
-		}
-	}
-	return layout.Placement{}, false
-}
-
 func hitTestPlacementLocked(tb *tab, col, row int) (layout.Placement, bool) {
 	if tb == nil || tb.tree == nil || tb.tree.Root == nil || !tb.size.Valid() {
 		return layout.Placement{}, false
