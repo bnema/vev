@@ -401,6 +401,7 @@ func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, regis
 	d := newTestDaemonWithCleanup(t, nil, clock, registerCleanup)
 	tr, sends := newCapturingTransport(t)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac.output.attachment = ac
 	ac.initOverlays()
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	tabs := make([]*tab, 0, len(ptys))
