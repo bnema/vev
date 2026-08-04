@@ -240,24 +240,21 @@ func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession
 // palette interaction has captured recent-session hints. Normal palette state
 // continues to use the canonical, live MRU list.
 func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	var entry attachmentSession
+	var entry *session
 	if cur != nil {
 		entry = cur
 	}
 	return d.barStateForAttachmentPaletteHints(entry, statusFeedback, hints, recent)
 }
 
-// barStateForAttachmentPaletteHints composes daemon-owned chrome for either
-// attachment implementation. Bar scripts remain local-session-only because
+// barStateForAttachmentPaletteHints composes daemon-owned chrome for an
+// attachment. Bar scripts remain local-session-only because
 // their existing execution contract depends on local tabs and PTYs.
-func (d *Daemon) barStateForAttachmentPaletteHints(cur attachmentSession, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
+func (d *Daemon) barStateForAttachmentPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
 	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, recent)
 }
 
-func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur attachmentSession, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	if attachmentSessionCore(cur) == nil {
-		cur = nil
-	}
+func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
 	ranked := rankedRecentForHints(hints, recent)
 	state := barState{statusFeedback: statusFeedback}
 	if d != nil {
@@ -268,14 +265,10 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur attachmentSession, ac 
 		if d != nil {
 			includeTerminalTitle = d.currentTabsConfig().TerminalTitle
 		}
-		if local, ok := localSession(cur); ok {
-			state.status = local.statusSegmentsFor(ac, includeTerminalTitle)
-		} else {
-			state.status = cur.statusSegments(includeTerminalTitle)
-		}
+		state.status = cur.statusSegmentsFor(ac, includeTerminalTitle)
 	}
-	if local, ok := localSession(cur); ok && d != nil {
-		state.topRight, state.bottomRight = d.barScriptSnapshot(local)
+	if cur != nil && d != nil {
+		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)
 	}
 	if ranked != nil {
 		state.rankedRecent = ranked

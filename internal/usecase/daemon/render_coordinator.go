@@ -39,9 +39,6 @@ type renderCoordinator struct {
 	// invalidations retain only their exact target lease here.
 	pendingShared  bool
 	pendingTargets map[*attachedClient]*attachmentLease
-	// ackReadyFor is production's attachment-scoped ACK-window probe. The
-	// legacy options callback remains for coordinator-only tests.
-	ackReadyFor func(*attachedClient) bool
 	// ackBlocked retains the first rejected ACK-capacity probe until the
 	// matching consume or lifecycle closure releases that exact interval.
 	ackBlocked *ackBlockedSpan
@@ -314,6 +311,81 @@ func (c *renderCoordinator) notifyAckForLease(lease *attachmentLease) {
 		blocked.finish(true)
 	}
 	c.fire(gen, false, false)
+}
+
+// retryCapacity restores only the attachment whose wake failed the final
+// capacity check. Readiness is an atomic observation, so paint may discover
+// backpressure after fire has marked the wake delivered. Requeueing the exact
+// wake generation keeps that stale result from clearing shared work and avoids
+// making a healthy peer wait for the blocked attachment.
+func (c *renderCoordinator) retryCapacity(w renderWake, lease *attachmentLease) {
+	if lease == nil || w.generation == 0 {
+		return
+	}
+	var queueStart bool
+	c.mu.Lock()
+	if !c.leaseCurrentLocked(lease, true) || c.pendingGeneration < w.generation {
+		c.mu.Unlock()
+		return
+	}
+	// A newer wake already attempted this lease; its callback owns any
+	// capacity retry. An older callback may still widen a newer targeted wake
+	// to include this lease when that newer wake never reached it.
+	if c.pendingGeneration > w.generation && lease.deliveredGeneration == c.pendingGeneration {
+		c.mu.Unlock()
+		return
+	}
+	if !c.pending {
+		c.pending = true
+		c.pendingReset = w.reset
+		c.pendingUrgent = w.urgent
+		c.pendingShared = false
+		c.pendingTargets = map[*attachedClient]*attachmentLease{lease.attachment: lease}
+		c.coalesced = max(1, w.coalesced)
+		c.deadlineDue = false
+		c.armed = false
+		if c.opts.observer != nil && !c.queueMarked {
+			c.queueMarked = true
+			c.queueCorrelation = ports.NewRuntimeCorrelation()
+			queueStart = true
+		}
+	} else {
+		c.pendingReset = c.pendingReset || w.reset
+		c.pendingUrgent = c.pendingUrgent || w.urgent
+		if !c.pendingShared {
+			if c.pendingTargets == nil {
+				c.pendingTargets = make(map[*attachedClient]*attachmentLease)
+			}
+			c.pendingTargets[lease.attachment] = lease
+		}
+	}
+	if c.delivered != nil {
+		delete(c.delivered, lease.attachment)
+	}
+	if c.ackDeferredFor == nil {
+		c.ackDeferredFor = make(map[*attachedClient]bool)
+	}
+	c.ackDeferredFor[lease.attachment] = true
+	c.ackDeferred = true
+	generation := c.pendingGeneration
+	queueCorrelation := c.queueCorrelation
+	observer := c.opts.observer
+	c.supervisor.startTaskLocked(func() { c.retryPendingGeneration(generation) })
+	c.mu.Unlock()
+	if queueStart && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
+	}
+}
+
+func (c *renderCoordinator) retryPendingGeneration(generation uint64) {
+	c.mu.Lock()
+	if c.torndown || !c.pending || c.pendingGeneration != generation {
+		c.mu.Unlock()
+		return
+	}
+	gen, token := c.normalLane.generation, c.normalLane.token
+	c.mu.Unlock()
+	c.fireWithTimerToken(token, gen, false, false)
 }
 
 // noteSyncBegin records a synchronized-output batch for its stable pane and
@@ -807,7 +879,7 @@ func (c *renderCoordinator) waitForTimerWorkers() { c.supervisor.wait() }
 // invalidateRender is the sole producer fan-in. In tests and transitional
 // headless paths without an attached coordinator it retains the old private
 // compositor; attached sessions always schedule through their coordinator.
-func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
+func (d *Daemon) invalidateRender(entry *session, ac *attachedClient, reset bool, producer string) {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
 		invalidation := renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}
 		if rc.invalidateForAttachment(ac, invalidation) {
@@ -832,7 +904,7 @@ func (d *Daemon) invalidateRender(entry attachmentSession, ac *attachedClient, r
 // invalidateRenderNow publishes through the coordinator but immediately
 // flushes the wake when the client can accept state. Attach uses this path so
 // the required first full frame never depends on a debounce timer.
-func (d *Daemon) invalidateRenderNow(entry attachmentSession, ac *attachedClient, reset bool, producer string) {
+func (d *Daemon) invalidateRenderNow(entry *session, ac *attachedClient, reset bool, producer string) {
 	if rc := attachmentRenderCoordinator(entry); rc != nil {
 		if rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer}) {
 			rc.fireCurrent(false)
@@ -880,8 +952,8 @@ func (c *renderCoordinator) fireWithTimerToken(token *timerToken, gen uint64, wa
 }
 
 func (c *renderCoordinator) attachmentAckReady(ac *attachedClient) bool {
-	if c.ackReadyFor != nil {
-		return c.ackReadyFor(ac)
+	if c.opts.ackReadyFor != nil {
+		return c.opts.ackReadyFor(ac)
 	}
 	if c.opts.ackReady != nil {
 		return c.opts.ackReady()
@@ -1013,7 +1085,11 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 	if len(leases) == 0 && legacyOutput {
 		allDelivered = true
 	}
-	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, attachmentLeases: attachmentLeases, watchdog: watchdog}
+	wakeGeneration := uint64(0)
+	if len(leases) != 0 {
+		wakeGeneration = c.pendingGeneration
+	}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, generation: wakeGeneration, attachmentLeases: attachmentLeases, watchdog: watchdog}
 	if syncLease != nil {
 		if selected, ok := attachmentLeases[syncLease.attachment]; ok && selected == syncLease {
 			w.lease = syncLease
@@ -1043,11 +1119,12 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 	}
 
 	if outputReady {
-		for ac := range attachmentLeases {
+		for ac, lease := range attachmentLeases {
 			if c.delivered == nil {
 				c.delivered = make(map[*attachedClient]uint64)
 			}
 			c.delivered[ac] = c.pendingGeneration
+			lease.deliveredGeneration = c.pendingGeneration
 		}
 	}
 	if len(leases) != 0 {

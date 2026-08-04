@@ -1040,8 +1040,9 @@ func runStdio(ctx context.Context) (retErr error) {
 
 	// sshstdio.Close owns and closes writers that implement io.Closer so a
 	// blocked Send can unwind. Keep process-global stdin/stdout outside that
-	// ownership boundary: input is a non-closing view and output is an owned
-	// pipe drained by a small forwarding goroutine.
+	// ownership boundary: sshstdio recognizes process stdin as a shared
+	// cancellable pump, while output is an owned pipe drained by a forwarding
+	// goroutine.
 	stdin, stdout := os.Stdin, os.Stdout
 	stdoutReader, stdoutWriter := io.Pipe()
 	forwardDone := make(chan struct{})

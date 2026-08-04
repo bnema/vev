@@ -85,7 +85,7 @@ func (d *Daemon) prepareSessionOverflow(current *session, dir layout.Direction, 
 	current.mu.Unlock()
 
 	d.mu.Lock()
-	live := localSessionsSnapshot(d.sessions)
+	live := sessionsSnapshot(d.sessions)
 	d.mu.Unlock()
 
 	snapshots := make([]sessionOverflowSnapshot, 0, len(live))

@@ -51,12 +51,12 @@ func (d *Daemon) togglePickerSort() {
 // enterPicker preserves the existing navigation entry point. Navigation always
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
-func (d *Daemon) enterPicker(sess attachmentSession, ac *attachedClient) {
+func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 	model := d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
 }
 
-func (d *Daemon) publishPicker(sess attachmentSession, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {
+func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {
 	rt := ac.overlays
 	rt.pickerMu.Lock()
 	previous, previousGeneration := rt.pickerPreviewSession, rt.pickerPreviewGeneration
@@ -83,10 +83,13 @@ func (d *Daemon) publishPicker(sess attachmentSession, ac *attachedClient, model
 
 // pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
 // knows nothing about picker intent; picker.New owns all destination policy.
-func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picker.SessionView, picker.SourceFilter) {
+func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.SessionView, picker.SourceFilter) {
 	d.mu.Lock()
-	sessions := make([]attachmentSession, 0, len(d.sessions))
+	sessions := make([]*session, 0, len(d.sessions))
 	for _, entry := range d.sessions {
+		if entry == nil {
+			continue
+		}
 		sessions = append(sessions, entry)
 	}
 	stopped := make([]stoppedSession, 0, len(d.stopped))
@@ -98,14 +101,14 @@ func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picke
 	d.mu.Unlock()
 
 	for _, entry := range sessions {
-		if local, ok := localSession(entry); ok {
-			d.refreshSessionFocusedTitles(local)
+		if entry != nil {
+			d.refreshSessionFocusedTitles(entry)
 		}
 	}
 	opts := viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: d.currentTabsConfig().TerminalTitle}
 
 	type liveSnapshot struct {
-		entry attachmentSession
+		entry *session
 		view  sessionView
 	}
 	// One snapshot per live session: sorting and view building read the same
@@ -116,13 +119,11 @@ func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picke
 	var current picker.SourceFilter
 	for _, entry := range sessions {
 		if entry == cur && ac != nil {
-			if local, ok := localSession(entry); ok {
-				local.repairAttachmentView(ac)
-			}
+			entry.repairAttachmentView(ac)
 		}
 		snap := entry.snapshotView(opts)
 		if entry == cur {
-			if _, ok := localSession(entry); ok && ac != nil {
+			if ac != nil {
 				view := ac.viewSnapshot()
 				if view.tabID != "" {
 					current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: view.tabID}
@@ -197,7 +198,7 @@ func (d *Daemon) pickerViews(cur attachmentSession, ac *attachedClient) ([]picke
 	return views, current
 }
 
-func (d *Daemon) newPickerModel(cur attachmentSession, ac *attachedClient, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
+func (d *Daemon) newPickerModel(cur *session, ac *attachedClient, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
 	views, attachedCurrent := d.pickerViews(cur, ac)
 	if intent == pickerNavigate && current == (picker.SourceFilter{}) {
 		current = attachedCurrent
@@ -346,11 +347,9 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		var err error
 		if len(effects) != 0 && effects[0] != nil {
 			err = d.switchToTargetForAttachment(effects[0].connectionToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
-		} else if local, ok := localSession(sess); ok {
-			d.closePicker(ac)
-			err = d.switchToTarget(local, ac, target)
 		} else {
-			err = errAttachmentTransition
+			d.closePicker(ac)
+			err = d.switchToTarget(sess, ac, target)
 		}
 		if errors.Is(err, errAttachmentTransition) {
 			return
@@ -409,7 +408,7 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if targetSess == ac.currentAttachmentSession() {
 		return
 	}
-	rc := d.attachCoordinator(targetSess, nil, false)
+	rc := d.attachCoordinator(targetSess, nil, nil, false)
 	rc.subscribePreviewFor(ac, generation, func(renderWake) {
 		if pickerPreviewCurrent(ac, targetSess, next, generation) {
 			if owner := ac.currentAttachmentSession(); owner != nil {
@@ -479,9 +478,8 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 	}
 	d.mu.Lock()
 	var clients []*attachedClient
-	for _, entry := range d.sessions {
-		sess, ok := localSession(entry)
-		if !ok {
+	for _, sess := range d.sessions {
+		if sess == nil {
 			continue
 		}
 		sess.mu.Lock()
@@ -556,7 +554,7 @@ func remoteKeysEqual(left, right *domain.RemoteSessionKey) bool {
 	return *left == *right
 }
 
-func (d *Daemon) sessionByID(id domain.SessionID) attachmentSession {
+func (d *Daemon) sessionByID(id domain.SessionID) *session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.sessions[id]
@@ -605,9 +603,9 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnecti
 		return nil
 	}
 	d.mu.Lock()
-	targetSess, ok := localSession(d.sessions[target.Session])
+	targetSess := d.sessions[target.Session]
 	d.mu.Unlock()
-	if !ok {
+	if targetSess == nil {
 		if !token.attachmentCurrent() {
 			return nil
 		}
@@ -667,11 +665,10 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
-	sess, ok := localSession(token.sess)
-	if !ok {
+	if token.sess == nil {
 		return errAttachmentTransition
 	}
-	return d.switchToTargetGuardedForAttachment(sess, token.ac, target, guard, &token, action)
+	return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)
 }
 
 // sendRemoteAttachTargetForAttachment validates the catalog row and hands the
@@ -755,7 +752,7 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 				targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, resolvedTarget, guard, sourceToken, action)
 			}
 		}
-	} else if active, ok := localSession(d.sessions[target.Session]); ok {
+	} else if active := d.sessions[target.Session]; active != nil {
 		targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, target, guard, sourceToken, action)
 	}
 	d.mu.Unlock()
@@ -1031,9 +1028,9 @@ func (d *Daemon) killPickerTargetForAttachment(target picker.Target, token attac
 		return d.killPickerTarget(target)
 	}
 	d.mu.Lock()
-	targetSess, ok := localSession(d.sessions[target.Session])
+	targetSess := d.sessions[target.Session]
 	d.mu.Unlock()
-	if !ok {
+	if targetSess == nil {
 		return nil
 	}
 	return d.killSessionForAttachment(targetSess, ports.ReasonSessionKilled, true, token, "picker-delete")
@@ -1048,9 +1045,9 @@ func (d *Daemon) killPickerTarget(target picker.Target) error {
 		return nil
 	}
 	d.mu.Lock()
-	targetSess, ok := localSession(d.sessions[target.Session])
+	targetSess := d.sessions[target.Session]
 	d.mu.Unlock()
-	if ok {
+	if targetSess != nil {
 		return d.killSession(targetSess, ports.ReasonSessionKilled, true)
 	}
 	return nil

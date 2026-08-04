@@ -2,21 +2,12 @@ package daemon
 
 import "github.com/bnema/vev/internal/ports"
 
-// attachmentSessionCore normalizes nil interfaces and implementations that
-// deliberately expose no attachment core.
-func attachmentSessionCore(entry attachmentSession) *sessionCore {
-	if entry == nil {
-		return nil
-	}
-	return entry.core()
-}
-
 // attachmentConnectionToken is the exact capability for one registered
 // attachment connection incarnation. It is invalid as soon as any of the
 // session, attachment membership, connection generation, transport link, or
 // coordinator lease changes.
 type attachmentConnectionToken struct {
-	sess       attachmentSession
+	sess       *session
 	ac         *attachedClient
 	generation uint64
 	transport  transportSnapshot
@@ -27,7 +18,7 @@ type attachmentConnectionToken struct {
 	rebase bool
 }
 
-func attachmentToken(entry attachmentSession, ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
+func attachmentToken(entry *session, ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
 	if entry == nil || entry.core() == nil || ac == nil || tr == nil {
 		return attachmentConnectionToken{}
 	}
@@ -70,7 +61,7 @@ func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attach
 }
 
 // current validates every immutable identity captured by the token. Membership
-// is the sole authority; there is no owner, replacement, or compatibility distinction.
+// is the sole authority; there is no owner, replacement, or compatibility role.
 func (t attachmentConnectionToken) current() bool {
 	return t.sess != nil && t.ac != nil &&
 		t.ac.connectionGeneration.Load() == t.generation &&
@@ -100,8 +91,8 @@ func (t attachmentConnectionToken) attachmentEffectCurrent() bool {
 	return t.attachmentCurrent()
 }
 
-func beginAttachmentLeaseEffect(sess attachmentSession, ac *attachedClient, lease *attachmentLease) (*attachmentEffectTicket, bool) {
-	if sess == nil || ac == nil || lease == nil || lease.attachment != ac {
+func beginAttachmentLeaseEffect(sess *session, ac *attachedClient, lease *attachmentLease) (*attachmentEffectTicket, bool) {
+	if sess == nil || ac == nil || lease == nil {
 		return nil, false
 	}
 	token := attachmentToken(sess, ac, ac.transport())

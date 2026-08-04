@@ -7,16 +7,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-// attachmentSession is the private attachment-facing session contract. Local
-// process, tab, persistence, and teardown behavior remains on *session.
-type attachmentSession interface {
-	core() *sessionCore
-	snapshotView(viewOptions) sessionView
-	statusSegments(includeTerminalTitle bool) statusSnapshot
-	captureRenderState(*attachedClient, renderCaptureRequest) (*capturedRenderState, bool)
-	validTargetTabLocked(tabIndex int) bool
-}
-
 // sessionCore is the state shared by every attachment-capable session. It is
 // embedded as the first field of session so the existing s.mu selector remains
 // the one lock guarding both attachment membership and local tab state.
@@ -60,19 +50,12 @@ func (s *session) validTargetTabLocked(tabIndex int) bool {
 	return tabIndex < len(s.tabs)
 }
 
-// localSession narrows an attachment entry for operations that own local PTYs,
-// tabs, snapshots, or durable lifecycle state.
-func localSession(entry attachmentSession) (*session, bool) {
-	sess, ok := entry.(*session)
-	return sess, ok && sess != nil
-}
-
-func localSessionsSnapshot(entries map[domain.SessionID]attachmentSession) []*session {
-	locals := make([]*session, 0, len(entries))
-	for _, entry := range entries {
-		if sess, ok := localSession(entry); ok {
-			locals = append(locals, sess)
+func sessionsSnapshot(entries map[domain.SessionID]*session) []*session {
+	sessions := make([]*session, 0, len(entries))
+	for _, sess := range entries {
+		if sess != nil {
+			sessions = append(sessions, sess)
 		}
 	}
-	return locals
+	return sessions
 }

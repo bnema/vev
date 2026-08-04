@@ -186,9 +186,8 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 			return nil, ports.ErrNoSuchTarget, "target tab and pane IDs must be provided together"
 		}
 		var match *session
-		for _, entry := range d.sessions {
-			sess, ok := localSession(entry)
-			if !ok || !sess.containsStableIDs(request.TargetTab, request.TargetPane) {
+		for _, sess := range d.sessions {
+			if sess == nil || !sess.containsStableIDs(request.TargetTab, request.TargetPane) {
 				continue
 			}
 			if match != nil {
@@ -201,7 +200,7 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 		}
 		return nil, ports.ErrNoSuchTarget, "no live session contains the target tab/pane"
 	}
-	locals := localSessionsSnapshot(d.sessions)
+	locals := sessionsSnapshot(d.sessions)
 	if len(locals) == 0 {
 		return nil, ports.ErrNoSuchTarget, "no live sessions"
 	}
@@ -658,7 +657,7 @@ func (e controlExec) ListSessions(asJSON bool) (string, error) {
 		Active    bool   `json:"active"`
 	}
 	e.d.mu.Lock()
-	sessions := localSessionsSnapshot(e.d.sessions)
+	sessions := sessionsSnapshot(e.d.sessions)
 	e.d.mu.Unlock()
 	snaps := make([]sessionView, 0, len(sessions))
 	for _, sess := range sessions {
@@ -695,7 +694,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		return "", command.ErrInvalidArguments
 	}
 	e.d.mu.Lock()
-	sessions := localSessionsSnapshot(e.d.sessions)
+	sessions := sessionsSnapshot(e.d.sessions)
 	e.d.mu.Unlock()
 	rows := make([]ports.RemoteCatalogSession, 0, len(sessions))
 	// Stopped sessions live in d.stopped and are intentionally not in this listing.

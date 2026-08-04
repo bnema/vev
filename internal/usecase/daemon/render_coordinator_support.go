@@ -15,7 +15,7 @@ func (c *renderCoordinator) burstMetricsSnapshot() renderCoordinatorBurstMetrics
 
 // attachmentRenderCoordinator returns the coordinator installed for the exact
 // attachment-session identity.
-func attachmentRenderCoordinator(entry attachmentSession) *renderCoordinator {
+func attachmentRenderCoordinator(entry *session) *renderCoordinator {
 	if entry == nil || entry.core() == nil {
 		return nil
 	}
@@ -24,7 +24,7 @@ func attachmentRenderCoordinator(entry attachmentSession) *renderCoordinator {
 
 // installAttachmentRenderCoordinator publishes rc for the exact
 // attachment-session identity.
-func installAttachmentRenderCoordinator(entry attachmentSession, rc *renderCoordinator) {
+func installAttachmentRenderCoordinator(entry *session, rc *renderCoordinator) {
 	if entry == nil || entry.core() == nil {
 		return
 	}

@@ -71,7 +71,6 @@ func newOutputStateStream(windowSize ...uint8) *outputStateStream {
 		maxOutstanding: uint64(window),
 	}
 	stream.maxOutstandingAtomic.Store(uint64(window))
-	stream.publishOutstanding()
 	return stream
 }
 
@@ -287,8 +286,8 @@ func (s *outputStateStream) rebaseLocked() {
 	s.next = 0
 	s.acked = 0
 	s.generation++
-	s.maxOutstandingAtomic.Store(s.maxOutstanding)
 	s.publishOutstanding()
+	s.maxOutstandingAtomic.Store(s.maxOutstanding)
 	s.renderer.Reset()
 	s.forceSnapshot = true
 	s.initialized = false
@@ -317,7 +316,11 @@ func (s *outputStateStream) atCapacity() bool {
 	if s == nil {
 		return false
 	}
-	return s.outstandingAtomic.Load() >= s.maxOutstandingAtomic.Load()
+	maxOutstanding := s.maxOutstandingAtomic.Load()
+	if maxOutstanding == 0 {
+		maxOutstanding = s.maxOutstanding
+	}
+	return s.outstandingAtomic.Load() >= maxOutstanding
 }
 
 func (s *outputStateStream) outstanding() uint64 {

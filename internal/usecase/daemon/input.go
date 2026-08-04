@@ -383,8 +383,7 @@ type daemonKeyHandler struct {
 func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffectTicket, bool) {
 	if h.connectionToken.ac != nil {
 		if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
-			sess, _ := localSession(h.connectionToken.sess)
-			return sess, effect, false
+			return h.connectionToken.sess, effect, false
 		}
 		effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
 		if h.d.afterDelayedKeyEffectAttempt != nil {
@@ -398,12 +397,11 @@ func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffect
 			token.effect = effect
 			h.d.afterAttachmentEffectAdmitted(token)
 		}
-		sess, ok := localSession(h.connectionToken.sess)
-		if !ok {
+		if h.connectionToken.sess == nil {
 			effect.End()
 			return nil, nil, false
 		}
-		return sess, effect, true
+		return h.connectionToken.sess, effect, true
 	}
 	sess := h.ac.currentSession()
 	if sess == nil {

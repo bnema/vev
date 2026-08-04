@@ -97,7 +97,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			d.sessions[target.id] = target
 			d.mu.Unlock()
 
-			rc := d.attachCoordinator(source, old, true)
+			rc := d.attachCoordinator(source, nil, old, true)
 			token := source.attachmentToken(old, old.transport())
 			token.lease = rc.attachmentLease(old)
 			old.publishAttachmentCapability(token)
@@ -152,7 +152,7 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 7, state: ports.SessionStopped}
 	d.mu.Unlock()
 
-	rc := d.attachCoordinator(source, old, true)
+	rc := d.attachCoordinator(source, nil, old, true)
 	token := source.attachmentToken(old, old.transport())
 	token.lease = rc.attachmentLease(old)
 	old.publishAttachmentCapability(token)

@@ -316,12 +316,9 @@ func (d *Daemon) commitResumeClaim(ac *attachedClient) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	token := ac.resumeClaimToken
-	if token == 0 {
-		return true
-	}
 	parked := d.parked[token]
-	if parked == nil || parked.ac != ac || !parked.claimed {
-		return false
+	if token == 0 || parked == nil || parked.ac != ac || !parked.claimed {
+		return token == 0
 	}
 	delete(d.parked, token)
 	parked.claimed = false
@@ -612,7 +609,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// mandatory first paint cannot be blocked by ACKs that died with the link.
 	ac.rebaseOutput()
 	ac.output.maxOutstanding = uint64(normalizeOutputWindow(h.MaxOutputInFlight))
-	ac.output.syncCapacityLocked()
+	ac.output.maxOutstandingAtomic.Store(ac.output.maxOutstanding)
 	ac.replaceTransport(tr)
 	ac.size = sz
 	ac.resumeToken = d.nextResumeTokenLocked()

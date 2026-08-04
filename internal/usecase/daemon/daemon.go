@@ -70,7 +70,7 @@ var defaultSize = domain.Size{Cols: 80, Rows: 24}
 
 type Daemon struct {
 	mu       sync.Mutex
-	sessions map[domain.SessionID]attachmentSession
+	sessions map[domain.SessionID]*session
 	stopped  map[string]stoppedSession
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
@@ -144,7 +144,7 @@ type Daemon struct {
 	afterResizeCommitSendLocked func()
 	// afterConnectionSessionSnapshot is a deterministic test seam after the
 	// connection loop reads its current session and before it captures that role.
-	afterConnectionSessionSnapshot func(attachmentSession)
+	afterConnectionSessionSnapshot func(*session)
 	// afterAttachmentFrameDispatch is a deterministic test seam after the
 	// connection loop snapshots a token and before a decoded frame takes effect.
 	afterAttachmentFrameDispatch func(attachmentConnectionToken)
@@ -586,7 +586,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:          make(map[domain.SessionID]attachmentSession),
+		sessions:          make(map[domain.SessionID]*session),
 		stopped:           make(map[string]stoppedSession),
 		creating:          make(map[string]struct{}),
 		parked:            make(map[uint64]*parkedAttachment),
@@ -914,7 +914,7 @@ func snapshotStopContext(deadline *snapshotShutdownDeadline) (context.Context, c
 
 // registerSessionLocked publishes an exact attachment-session identity. Caller
 // holds d.mu.
-func (d *Daemon) registerSessionLocked(entry attachmentSession) bool {
+func (d *Daemon) registerSessionLocked(entry *session) bool {
 	if entry == nil {
 		return false
 	}
@@ -928,7 +928,7 @@ func (d *Daemon) registerSessionLocked(entry attachmentSession) bool {
 
 // unregisterSessionLocked removes only the exact registered identity. Caller
 // holds d.mu.
-func (d *Daemon) unregisterSessionLocked(entry attachmentSession) bool {
+func (d *Daemon) unregisterSessionLocked(entry *session) bool {
 	if entry == nil {
 		return false
 	}
@@ -941,7 +941,7 @@ func (d *Daemon) unregisterSessionLocked(entry attachmentSession) bool {
 }
 
 func (d *Daemon) sessionsSnapshotLocked() []*session {
-	return localSessionsSnapshot(d.sessions)
+	return sessionsSnapshot(d.sessions)
 }
 
 // handleConn reads the first frame off a fresh connection and routes it. A
@@ -1001,9 +1001,8 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	d.mu.Lock()
 	infos := make([]ports.SessionInfo, 0, len(d.sessions)+len(d.stopped))
 	liveNames := make(map[string]struct{}, len(d.sessions))
-	for _, entry := range d.sessions {
-		s, ok := localSession(entry)
-		if !ok {
+	for _, s := range d.sessions {
+		if s == nil {
 			continue
 		}
 		s.mu.Lock()

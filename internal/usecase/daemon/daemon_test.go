@@ -297,8 +297,8 @@ func awaitFrame(t *testing.T, ch chan ports.Frame, typ ports.MsgType) ports.Fram
 func firstSession(d *Daemon) *session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, entry := range d.sessions {
-		if s, ok := localSession(entry); ok {
+	for _, s := range d.sessions {
+		if s != nil {
 			return s
 		}
 	}

@@ -47,7 +47,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 			d.sessions[target.id] = target
 			d.mu.Unlock()
 
-			rc := d.attachCoordinator(source, ac, true)
+			rc := d.attachCoordinator(source, nil, ac, true)
 			token := source.attachmentToken(ac, ac.transport())
 			token.lease = rc.attachmentLease(ac)
 			ac.publishAttachmentCapability(token)

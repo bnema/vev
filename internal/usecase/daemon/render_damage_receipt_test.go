@@ -134,7 +134,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			// Prepare failures now schedule recovery through the coordinator;
 			// retain the failed transaction here until this test explicitly retries.
 			d.clock = newNoticeClock()
-			d.attachCoordinator(sess, ac, true)
+			d.attachCoordinator(sess, nil, ac, true)
 			healthy := ac.transport()
 			p := sess.tabs[0].focusedPane()
 
@@ -170,7 +170,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 func TestPrepareFailureNotifiesAndSchedulesRecovery(t *testing.T) {
 	clock := newNoticeClock()
 	d, sess, ac, _ := newNoticeFixture(t, clock)
-	rc := d.attachCoordinator(sess, ac, true)
+	rc := d.attachCoordinator(sess, nil, ac, true)
 	var producers []string
 	rc.opts.onInvalidate = func(inv renderInvalidation) {
 		// Both the notice repaint and the explicit recovery must re-enter only

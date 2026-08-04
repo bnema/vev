@@ -236,9 +236,8 @@ func (d *Daemon) reportError(sess *session, err error) {
 	d.notify(sess, domain.NoticeError, domain.NoticeInternal, "internal error", err)
 }
 
-func (d *Daemon) reportAttachmentError(entry attachmentSession, err error) {
-	local, _ := localSession(entry)
-	d.reportError(local, err)
+func (d *Daemon) reportAttachmentError(entry *session, err error) {
+	d.reportError(entry, err)
 }
 
 // notify records a notice and routes it to whoever can see it. A nil sess means
@@ -300,7 +299,7 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 func (d *Daemon) deliverGlobal(n domain.Notification) {
 	d.mu.Lock()
 	d.notices.routingMu.Lock()
-	sessions := make([]attachmentSession, 0, len(d.sessions))
+	sessions := make([]*session, 0, len(d.sessions))
 	for _, entry := range d.sessions {
 		sessions = append(sessions, entry)
 	}
@@ -311,7 +310,10 @@ func (d *Daemon) deliverGlobal(n domain.Notification) {
 	}
 	targets := make([]*attachedClient, 0, len(sessions))
 	for _, s := range sessions {
-		for _, ac := range snapshotAttachmentSession(s) {
+		if s == nil {
+			continue
+		}
+		for _, ac := range s.snapshotAttachments() {
 			if !d.publishToast(ac, n) {
 				continue
 			}

@@ -219,7 +219,7 @@ func TestRefreshBarScriptsAllSessionsForcesRun(t *testing.T) {
 	d := newBarRefreshTestDaemon(r, 60*time.Second)
 	sess := newBarRefreshTestSession()
 	sess.registerAttachment(&attachedClient{size: domain.Size{Cols: 80, Rows: 24}})
-	d.sessions = map[domain.SessionID]attachmentSession{sess.id: sess}
+	d.sessions = map[domain.SessionID]*session{sess.id: sess}
 
 	// Verifies refreshBarScriptsAllSessions iterates every live session and
 	// dispatches a run for each. This does not exercise force specifically:

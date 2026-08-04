@@ -8,11 +8,17 @@ When the client reports truecolor, new panes get `TERM=xterm-direct` and `COLORT
 
 On each attach, the attaching environment becomes the session's source of truth for future PTY children. vev preserves it except that it replaces `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `VEV`; `SHELL` selects the command used to start each PTY. Already-running processes keep their original environment.
 
-For remote attaches, the remote proxy substitutes the remote host's exported environment, so remote PTYs do not inherit the local client's environment.
+The attaching client's exported environment is sent in the connection handshake and becomes the session's source of truth for future PTY children, including remote attaches. A later attachment updates that shared environment for children created afterward; already-running processes keep their original environment.
 
 ## VT compatibility
 
 vev keeps a server-side VT screen per pane: scroll regions (DECOM), insert mode, cursor and mode-query reports, alternate screen, bracketed paste, mouse tracking, synchronized updates, OSC 9/777 notifications, OSC 52 clipboard, and double-width cells. Resizes repair double-width cells so CJK and emoji halves are never left behind.
+
+## Session content size
+
+The first valid attachment establishes the session's fixed PTY content size. Each
+attachment may have a different outer window and viewport; resizing it changes
+only its attachment-local presentation and does not resize shared PTYs.
 
 ## Recovery
 

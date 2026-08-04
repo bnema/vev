@@ -428,7 +428,7 @@ func commitDamageReceipts(receipts []damageReceipt) {
 
 // emitFrame is the sole side-effecting half of the pipeline. The caller holds
 // sendMu for the complete capture/compose/emit transaction.
-func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
+func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
 	var ownedMarks runtimeMarkBatch
 	var marks *runtimeMarkBatch
 	if len(batches) != 0 {
@@ -480,17 +480,15 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		// Without a coordinator reportError repaints synchronously. Suppress only
 		// that nested notice repaint; leave the guard before returning so a later,
 		// independent failed transaction can still notify the user.
-		if sess, ok := localSession(entry); ok {
-			if sess.renderCoordinator() == nil {
-				if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
-					return true
-				}
-				d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
-				ac.prepareFailureFallback.Store(false)
+		if entry.renderCoordinator() == nil {
+			if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
 				return true
 			}
-			d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
+			d.reportError(entry, domain.UserErr(domain.NoticeInternal, "display update failed", err))
+			ac.prepareFailureFallback.Store(false)
+			return true
 		}
+		d.reportError(entry, domain.UserErr(domain.NoticeInternal, "display update failed", err))
 		// Notices are session-scoped, while the attachment repaint still needs
 		// to redraw its chrome after a failed transaction.
 		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
@@ -563,9 +561,7 @@ func (d *Daemon) emitFrame(entry attachmentSession, ac *attachedClient, state *c
 		// admission first. Detachment freezes the gate and therefore cannot mutate
 		// ownership until any enclosing admitted operation has also ended.
 		if marks.attachmentEffect == nil {
-			if sess, ok := localSession(entry); ok {
-				d.detachOnSendError(sess, ac, sendTr)
-			}
+			d.detachOnSendError(entry, ac, sendTr)
 		} else {
 			// Capture the exact admitted capability, including its coordinator
 			// lease, before End permits a new attachment publication. Reserve

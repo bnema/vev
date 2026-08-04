@@ -344,7 +344,7 @@ func captureLocalRenderState(
 }
 
 // captureRenderState preserves the focused local test seam. Production
-// rendering delegates through attachmentSession.captureRenderState.
+// rendering delegates through *session.captureRenderState.
 func captureRenderState(sess *session, ac *attachedClient, request renderCaptureRequest) (*capturedRenderState, bool) {
 	return captureLocalRenderState(sess, ac, request)
 }

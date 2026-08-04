@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -33,6 +34,18 @@ var (
 
 type closeFunc func() error
 type eofErrFunc func() error
+type operationKind uint8
+
+const (
+	operationSend operationKind = iota
+	operationReceive
+	operationKindCount
+)
+
+type operationWait struct {
+	send    <-chan struct{}
+	receive <-chan struct{}
+}
 
 type Option func(*transport)
 
@@ -57,7 +70,26 @@ func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc
 	if closeFn == nil {
 		closeFn = func() error { return nil }
 	}
-	return &transport{r: r, w: w, close: closeFn, eofErr: eofErr}
+	t := &transport{
+		r:      r,
+		w:      w,
+		close:  closeFn,
+		eofErr: eofErr,
+		done:   make(chan struct{}),
+	}
+	if file, ok := r.(*os.File); ok && file == os.Stdin {
+		t.r = newProcessStdinReader(file, t.done)
+	} else if closer, ok := r.(io.Closer); ok {
+		t.readerCloser = closer
+	} else {
+		t.r = newUnownedReader(r, t.done)
+	}
+	if file, ok := w.(*os.File); !ok || file != os.Stdout {
+		if closer, ok := w.(io.Closer); ok {
+			t.writerCloser = closer
+		}
+	}
+	return t
 }
 
 type transport struct {
@@ -65,16 +97,167 @@ type transport struct {
 	w              io.Writer
 	close          closeFunc
 	eofErr         eofErrFunc
+	readerCloser   io.Closer
+	writerCloser   io.Closer
+	done           chan struct{}
 	observer       ports.SerializedRuntimeObserver
 	operationMu    sync.Mutex
-	operationCount int
+	operationCount [operationKindCount]int
 	closing        bool
-	operationsDone chan struct{}
+	operationsDone [operationKindCount]chan struct{}
 	closeOnce      sync.Once
 	closeErr       error
 
 	mu      sync.Mutex
 	readBuf []byte
+}
+
+type readResult struct {
+	data []byte
+	err  error
+}
+
+// unownedReader is the generic cancellation boundary for readers that cannot
+// be closed by the transport. The worker may remain blocked until the source
+// itself is released; process stdin uses the singleton pump below instead.
+// ponytail: arbitrary io.Reader has no cancellation contract, so one fallback
+// worker may remain until that source returns; add a cancellable reader port if
+// another production unowned source appears.
+type unownedReader struct {
+	r    io.Reader
+	done <-chan struct{}
+}
+
+func newUnownedReader(r io.Reader, done <-chan struct{}) *unownedReader {
+	return &unownedReader{r: r, done: done}
+}
+
+func (r *unownedReader) Read(dst []byte) (int, error) {
+	select {
+	case <-r.done:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	result := make(chan readResult, 1)
+	go func() {
+		buf := make([]byte, len(dst))
+		n, err := r.r.Read(buf)
+		result <- readResult{data: buf[:n], err: err}
+	}()
+	select {
+	case <-r.done:
+		return 0, io.ErrClosedPipe
+	case result := <-result:
+		select {
+		case <-r.done:
+			return 0, io.ErrClosedPipe
+		default:
+		}
+		copy(dst, result.data)
+		return len(result.data), result.err
+	}
+}
+
+type processStdinPump struct {
+	chunks chan readResult
+	mu     sync.Mutex
+	buf    []byte
+	err    error
+}
+
+var processStdinPumps struct {
+	sync.Mutex
+	file *os.File
+	pump *processStdinPump
+}
+
+// processStdinPumpFor keeps one read worker for the process stdin lifetime.
+// Reconnects therefore do not strand one blocked worker per transport.
+func processStdinPumpFor(file *os.File) *processStdinPump {
+	processStdinPumps.Lock()
+	defer processStdinPumps.Unlock()
+	if processStdinPumps.pump != nil && processStdinPumps.file == file {
+		return processStdinPumps.pump
+	}
+	pump := &processStdinPump{chunks: make(chan readResult, 1)}
+	processStdinPumps.file = file
+	processStdinPumps.pump = pump
+	go pump.run(file)
+	return pump
+}
+
+func (p *processStdinPump) run(file *os.File) {
+	for {
+		buf := make([]byte, 32*1024)
+		n, err := file.Read(buf)
+		if n > 0 {
+			p.chunks <- readResult{data: append([]byte(nil), buf[:n]...)}
+		}
+		if err != nil {
+			p.chunks <- readResult{err: err}
+			close(p.chunks)
+			return
+		}
+	}
+}
+
+func (p *processStdinPump) read(done <-chan struct{}, dst []byte) (int, error) {
+	select {
+	case <-done:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	p.mu.Lock()
+	if len(p.buf) != 0 {
+		n := copy(dst, p.buf)
+		p.buf = p.buf[n:]
+		p.mu.Unlock()
+		return n, nil
+	}
+	if p.err != nil {
+		err := p.err
+		p.mu.Unlock()
+		return 0, err
+	}
+	p.mu.Unlock()
+
+	select {
+	case <-done:
+		return 0, io.ErrClosedPipe
+	case result, ok := <-p.chunks:
+		if !ok {
+			return 0, io.EOF
+		}
+		if len(result.data) != 0 {
+			select {
+			case <-done:
+				return 0, io.ErrClosedPipe
+			default:
+			}
+			n := copy(dst, result.data)
+			p.mu.Lock()
+			p.buf = append(p.buf[:0], result.data[n:]...)
+			p.mu.Unlock()
+			return n, nil
+		}
+		p.mu.Lock()
+		p.err = result.err
+		p.mu.Unlock()
+		return 0, result.err
+	}
+}
+
+type processStdinReader struct {
+	pump *processStdinPump
+	done <-chan struct{}
+}
+
+func newProcessStdinReader(file *os.File, done <-chan struct{}) io.Reader {
+	return processStdinReader{pump: processStdinPumpFor(file), done: done}
+}
+
+func (r processStdinReader) Read(dst []byte) (int, error) {
+	return r.pump.read(r.done, dst)
 }
 
 func (t *transport) Send(f ports.Frame) error {
@@ -136,7 +319,11 @@ func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) fu
 	if t.observer == nil {
 		return func(bool) {}
 	}
-	if !t.beginObservedOperation() {
+	kind := operationSend
+	if start == ports.RuntimeAdapterReceiveStart {
+		kind = operationReceive
+	}
+	if !t.beginObservedOperation(kind) {
 		return func(bool) {}
 	}
 	correlation := ports.NewRuntimeCorrelation()
@@ -146,7 +333,7 @@ func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) fu
 		end = ports.RuntimeAdapterReceiveEnd
 	}
 	return func(valid bool) {
-		defer t.finishObservedOperation()
+		defer t.finishObservedOperation(kind)
 		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("sshstdio", correlation, end, bytes, valid))
 	}
 }
@@ -163,20 +350,25 @@ func (t *transport) mapEOFError(err error) error {
 
 func (t *transport) Close() error {
 	t.closeOnce.Do(func() {
-		done := t.beginShutdown()
+		wait := t.beginShutdown()
 		// Close owned streams before waiting for in-flight operations. The
 		// writer is what releases a Send blocked on a child stdin pipe; the
-		// reader releases a Recv blocked in io.ReadFull.
+		// reader releases a Recv blocked in io.ReadFull. Unowned streams cannot
+		// be interrupted safely, so the cancellation boundary releases Recv
+		// without closing the source.
 		var writeErr, readErr error
-		if w, ok := t.w.(io.Closer); ok {
-			writeErr = w.Close()
+		if t.writerCloser != nil {
+			writeErr = t.writerCloser.Close()
 		}
-		if r, ok := t.r.(io.Closer); ok {
-			readErr = r.Close()
+		if t.readerCloser != nil {
+			readErr = t.readerCloser.Close()
 		}
 		closeErr := t.close()
-		if done != nil {
-			<-done
+		if t.writerCloser != nil && wait.send != nil {
+			<-wait.send
+		}
+		if t.readerCloser != nil && wait.receive != nil {
+			<-wait.receive
 		}
 		switch {
 		case closeErr != nil:
@@ -190,36 +382,41 @@ func (t *transport) Close() error {
 	return t.closeErr
 }
 
-func (t *transport) beginObservedOperation() bool {
+func (t *transport) beginObservedOperation(kind operationKind) bool {
 	t.operationMu.Lock()
 	defer t.operationMu.Unlock()
 	if t.closing {
 		return false
 	}
-	if t.operationCount == 0 {
-		t.operationsDone = make(chan struct{})
+	if t.operationCount[kind] == 0 {
+		t.operationsDone[kind] = make(chan struct{})
 	}
-	t.operationCount++
+	t.operationCount[kind]++
 	return true
 }
 
-func (t *transport) finishObservedOperation() {
+func (t *transport) finishObservedOperation(kind operationKind) {
 	t.operationMu.Lock()
 	defer t.operationMu.Unlock()
-	t.operationCount--
-	if t.operationCount == 0 {
-		close(t.operationsDone)
+	t.operationCount[kind]--
+	if t.operationCount[kind] == 0 {
+		close(t.operationsDone[kind])
 	}
 }
 
-func (t *transport) beginShutdown() <-chan struct{} {
+func (t *transport) beginShutdown() operationWait {
 	t.operationMu.Lock()
 	defer t.operationMu.Unlock()
 	t.closing = true
-	if t.operationCount == 0 {
-		return nil
+	close(t.done)
+	var wait operationWait
+	if t.operationCount[operationSend] != 0 {
+		wait.send = t.operationsDone[operationSend]
 	}
-	return t.operationsDone
+	if t.operationCount[operationReceive] != 0 {
+		wait.receive = t.operationsDone[operationReceive]
+	}
+	return wait
 }
 
 type processWaiter struct {
@@ -344,10 +541,11 @@ func DialContextWithRuntimeObserver(ctx context.Context, target, session string,
 	return dialContext(ctx, target, session, logger, opts...)
 }
 
-// DialContext is like Dial, but the context is propagated to ssh startup so a
-// canceled attach attempt interrupts the local ssh process. Callers may pass a
-// logger to record ssh start failures and non-clean exits without logging the
-// generated command line.
+// DialContext is like Dial, but the context gates ssh startup. Once the
+// transport is returned, its Close method owns the subprocess lifetime; the
+// handshake context must not kill an already-established carriage. Callers may
+// pass a logger to record ssh start failures and non-clean exits without logging
+// the generated command line.
 func DialContext(ctx context.Context, target, session string, logger ...*slog.Logger) (ports.Transport, error) {
 	var log *slog.Logger
 	if len(logger) > 0 {
@@ -361,7 +559,12 @@ func dialContext(ctx context.Context, target, session string, log *slog.Logger, 
 		return nil, err
 	}
 	spec := BuildCommand(target, session)
-	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
+	// The caller's context is also the bounded protocol-handshake context and is
+	// canceled after the first committed publication. Binding it to the command
+	// would kill a healthy long-lived carriage at that boundary. Transport.Close
+	// owns cancellation after Start; the preflight check above keeps canceled
+	// attempts from starting a process.
+	cmd := exec.Command(spec.Path, spec.Args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("sshstdio: stdin pipe: %w", err)
@@ -381,6 +584,10 @@ func dialContext(ctx context.Context, target, session string, log *slog.Logger, 
 
 	waiter := newProcessWaiter(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)
 	transport := newTransport(stdout, stdin, waiter.close, waiter.eofErr)
+	if err := ctx.Err(); err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(transport)

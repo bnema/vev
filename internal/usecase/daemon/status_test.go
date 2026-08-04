@@ -22,20 +22,6 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-// --- test doubles -----------------------------------------------------------
-
-type coreNilAttachment struct{}
-
-func (*coreNilAttachment) core() *sessionCore { return nil }
-func (*coreNilAttachment) snapshotView(viewOptions) sessionView {
-	return sessionView{}
-}
-func (*coreNilAttachment) statusSegments(bool) statusSnapshot { return statusSnapshot{} }
-func (*coreNilAttachment) captureRenderState(*attachedClient, renderCaptureRequest) (*capturedRenderState, bool) {
-	return nil, false
-}
-func (*coreNilAttachment) validTargetTabLocked(int) bool { return false }
-
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
@@ -931,18 +917,17 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 }
 
 func TestLockAttachmentSessionsRejectsNilEntriesWithoutPanic(t *testing.T) {
-	var nilEntry attachmentSession
+	var nilEntry *session
 	var typedNil *session
 	valid := &session{sessionCore: sessionCore{id: "valid"}}
 
 	for _, tc := range []struct {
 		name string
-		a    attachmentSession
-		b    attachmentSession
+		a    *session
+		b    *session
 	}{
 		{name: "nil interfaces", a: nilEntry, b: nilEntry},
 		{name: "typed nil", a: typedNil, b: valid},
-		{name: "core nil", a: &coreNilAttachment{}, b: valid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NotPanics(t, func() {

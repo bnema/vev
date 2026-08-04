@@ -64,7 +64,7 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/wire.go`. Connection framing lives in `internal/adapters/ipc/transport.go`.
 
 - IPC frames on a connection are 4-byte big-endian length, 1 type byte, then payload.
-- Client message types currently occupy `1–13` (`MsgOutputResetRequest` is `13`); server types currently occupy `16–23` (`MsgSessionMeta` is `23`). The reserved bands are `1–15` and `16+` respectively.
+- Client message types currently occupy `1–13` (`MsgOutputResetRequest` is `13`); server types occupy `16–23` (`MsgSessionMeta` is `23`) and `25` (`MsgAttachTarget`). Types `14–15` and `24` remain reserved.
 - Version negotiation requires strict equality.
 - `Hello.Version` and `CommandRequest.Version` must stay first so their version peekers work.
 - Bump `ProtocolVersion` for any message layout change.
@@ -74,6 +74,8 @@ Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/
 - Ephemeral numbered sessions survive detach while the daemon retains them, but are not persisted.
 - Named sessions survive headless and persist across daemon restarts.
 - The daemon starts on first use and exits when the last session ends.
-- Local attach sends `Hello`, receives `Welcome`, then pumps `Input`/`Resize` and `Output` frames.
-- Remote attach runs `ssh -- host vev _stdio` and proxies the same protocol over stdio; session selection is carried in `Hello`.
-- Only one client may attach to a session; a new attach replaces the old client.
+- Each connection has a 15-second handshake budget from connect through the initial committed publication.
+- Local and remote attach use the same `Hello`/`Welcome` session protocol, then pump `Input`/`Resize` and `Output` frames over a byte-only Transport.
+- Remote attach opens a direct connection to the selected daemon over UDP by default; `VEV_REMOTE_TRANSPORT=stdio` explicitly selects an SSH-only carriage.
+- A session owns shared PTYs, VT state, tabs, panes, fixed PTY content size, and ordered mutations. Each attachment owns its window/view, copy and overlay state, rendering/output state, and reconnect lifecycle.
+- Command requests have a 10-second result deadline and are tracked per connection.

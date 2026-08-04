@@ -23,13 +23,11 @@ type attachmentView struct {
 	revision   uint64
 }
 
-// viewInvalidation records the order in which attachment views observed one
-// shared session mutation. The order is stable client-ID order, not map
-// iteration or lock-acquisition order, which keeps concurrent attaches
-// deterministic.
-type viewInvalidation struct {
+// attachmentViewSnapshot is the immutable value returned to callers that need
+// to inspect attachment-local state without retaining its mutex.
+type attachmentViewSnapshot struct {
 	attachment *attachedClient
-	revision   uint64
+	view       attachmentView
 }
 
 func (ac *attachedClient) viewSnapshot() attachmentView {
@@ -41,11 +39,7 @@ func (ac *attachedClient) viewSnapshot() attachmentView {
 	return ac.view
 }
 
-func (ac *attachedClient) publishView(view attachmentView) {
-	if ac == nil {
-		return
-	}
-	ac.viewMu.Lock()
+func (ac *attachedClient) publishViewLocked(view attachmentView) {
 	// Rebase while viewMu is held, before the new revision becomes visible.
 	// Output fences take the same lock, so no side effect can pair the new
 	// ViewRevision with the previous output epoch. Test/headless fixtures may
@@ -60,7 +54,28 @@ func (ac *attachedClient) publishView(view attachmentView) {
 		}
 	}
 	ac.view = view
-	ac.viewMu.Unlock()
+}
+
+func (ac *attachedClient) publishView(view attachmentView) {
+	if ac == nil {
+		return
+	}
+	ac.viewMu.Lock()
+	defer ac.viewMu.Unlock()
+	ac.publishViewLocked(view)
+}
+
+func (ac *attachedClient) publishViewIfCurrent(before, view attachmentView) bool {
+	if ac == nil {
+		return false
+	}
+	ac.viewMu.Lock()
+	defer ac.viewMu.Unlock()
+	if ac.view != before {
+		return false
+	}
+	ac.publishViewLocked(view)
+	return true
 }
 
 // registerAttachmentLocked admits ac exactly once. Caller holds s.mu and must
@@ -96,7 +111,7 @@ func (c *sessionCore) registerAttachmentLocked(ac *attachedClient) bool {
 	return true
 }
 
-func registerAttachmentSessionLocked(entry attachmentSession, ac *attachedClient) bool {
+func registerAttachmentSessionLocked(entry *session, ac *attachedClient) bool {
 	if entry == nil || entry.core() == nil {
 		return false
 	}
@@ -138,7 +153,7 @@ func (c *sessionCore) unregisterAttachmentLocked(ac *attachedClient) bool {
 	return true
 }
 
-func unregisterAttachmentSessionLocked(entry attachmentSession, ac *attachedClient) bool {
+func unregisterAttachmentSessionLocked(entry *session, ac *attachedClient) bool {
 	if entry == nil || entry.core() == nil {
 		return false
 	}
@@ -156,26 +171,26 @@ func (s *session) unregisterAttachment(ac *attachedClient) bool {
 	return s.unregisterAttachmentLocked(ac)
 }
 
-// snapshotAttachmentsLocked returns a stable registration-ordered snapshot.
-// Callers hold s.mu; returned attachments may be used after unlocking.
-func (c *sessionCore) snapshotAttachmentsLocked() []*attachedClient {
-	if c == nil || len(c.attachments) == 0 {
+func (s *session) snapshotAttachmentsLocked() []*attachedClient {
+	if s == nil || len(s.attachments) == 0 {
 		return nil
 	}
-	out := make([]*attachedClient, 0, len(c.attachments))
-	for ac := range c.attachments {
+	out := make([]*attachedClient, 0, len(s.attachments))
+	for ac := range s.attachments {
 		out = append(out, ac)
 	}
 	slices.SortStableFunc(out, func(a, b *attachedClient) int {
+		// ClientID is the stable wire identity, so concurrent registration order
+		// cannot affect snapshots or invalidation order.
 		if id := bytes.Compare(a.clientID[:], b.clientID[:]); id != 0 {
 			return id
 		}
-		return cmp.Compare(c.attachmentOrder[a], c.attachmentOrder[b])
+		return cmp.Compare(s.attachmentOrder[a], s.attachmentOrder[b])
 	})
 	return out
 }
 
-func attachmentRegisteredLocked(entry attachmentSession, ac *attachedClient) bool {
+func attachmentRegisteredLocked(entry *session, ac *attachedClient) bool {
 	if entry == nil || ac == nil || entry.core() == nil {
 		return false
 	}
@@ -183,7 +198,7 @@ func attachmentRegisteredLocked(entry attachmentSession, ac *attachedClient) boo
 	return ok
 }
 
-func attachmentRegistered(entry attachmentSession, ac *attachedClient) bool {
+func attachmentRegistered(entry *session, ac *attachedClient) bool {
 	if entry == nil || ac == nil || entry.core() == nil {
 		return false
 	}
@@ -213,16 +228,6 @@ func (s *session) attachmentViewsTabLocked(tb *tab) bool {
 	return false
 }
 
-func snapshotAttachmentSession(entry attachmentSession) []*attachedClient {
-	if entry == nil || entry.core() == nil {
-		return nil
-	}
-	core := entry.core()
-	core.mu.Lock()
-	defer core.mu.Unlock()
-	return core.snapshotAttachmentsLocked()
-}
-
 func (s *session) snapshotAttachments() []*attachedClient {
 	if s == nil {
 		return nil
@@ -230,6 +235,18 @@ func (s *session) snapshotAttachments() []*attachedClient {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshotAttachmentsLocked()
+}
+
+func (s *session) snapshotAttachmentViews() []attachmentViewSnapshot {
+	attachments := s.snapshotAttachments()
+	if len(attachments) == 0 {
+		return nil
+	}
+	views := make([]attachmentViewSnapshot, 0, len(attachments))
+	for _, ac := range attachments {
+		views = append(views, attachmentViewSnapshot{attachment: ac, view: ac.viewSnapshot()})
+	}
+	return views
 }
 
 // repairAttachmentViewLocked validates stable targets and chooses the nearest
@@ -279,10 +296,12 @@ func (s *session) repairAttachmentViewLocked(ac *attachedClient, view attachment
 	} else {
 		view.paneID = ""
 	}
-	if view.windowRows <= 0 {
-		view.windowRows = targetTab.size.Rows
-	}
 	targetTab.mu.Unlock()
+	if view.windowRows <= 0 {
+		targetTab.mu.Lock()
+		view.windowRows = targetTab.size.Rows
+		targetTab.mu.Unlock()
+	}
 	if view.windowTop < 0 {
 		view.windowTop = 0
 	}
@@ -301,19 +320,20 @@ func (s *session) repairAttachmentView(ac *attachedClient) bool {
 	if s == nil || ac == nil {
 		return false
 	}
+	before := ac.viewSnapshot()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.attachments[ac]; !ok {
+		s.mu.Unlock()
 		return false
 	}
-	before := ac.viewSnapshot()
 	after := s.repairAttachmentViewLocked(ac, before)
 	if before.tabID == after.tabID && before.paneID == after.paneID && before.windowTop == after.windowTop && before.windowRows == after.windowRows && before.windowSet == after.windowSet && before.bookmark == after.bookmark && before.liveBottom == after.liveBottom {
+		s.mu.Unlock()
 		return false
 	}
 	after.revision++
-	ac.publishView(after)
-	return true
+	s.mu.Unlock()
+	return ac.publishViewIfCurrent(before, after)
 }
 
 // prepareAttachmentViewsForRemovedTabLocked selects the nearest surviving tab
@@ -347,17 +367,13 @@ func (s *session) prepareAttachmentViewsForRemovedTabLocked(removed *tab, index 
 
 // invalidateViewsLocked orders all per-attachment invalidations behind the
 // shared session mutation. Caller holds s.mu and dispatchMu.
-func (s *session) invalidateViewsLocked() []viewInvalidation {
-	attachments := s.snapshotAttachmentsLocked()
-	invalidations := make([]viewInvalidation, 0, len(attachments))
-	for _, ac := range attachments {
+func (s *session) invalidateViewsLocked() {
+	for _, ac := range s.snapshotAttachmentsLocked() {
 		view := ac.viewSnapshot()
 		repaired := s.repairAttachmentViewLocked(ac, view)
 		repaired.revision++
 		ac.publishView(repaired)
-		invalidations = append(invalidations, viewInvalidation{attachment: ac, revision: repaired.revision})
 	}
-	return invalidations
 }
 
 // runMutation is the one admission boundary for shared session mutations.
@@ -378,23 +394,31 @@ func (s *session) tabForAttachment(ac *attachedClient) *tab {
 	if s == nil || ac == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.attachments[ac]; !ok {
-		return nil
-	}
-	view := ac.viewSnapshot()
-	repaired := s.repairAttachmentViewLocked(ac, view)
-	if repaired.tabID != view.tabID || repaired.paneID != view.paneID || repaired.windowTop != view.windowTop || repaired.windowRows != view.windowRows || repaired.windowSet != view.windowSet || repaired.bookmark != view.bookmark || repaired.liveBottom != view.liveBottom {
-		repaired.revision++
-		ac.publishView(repaired)
-	}
-	for _, tb := range s.tabs {
-		if tb != nil && domain.TabStableID(tb.stableID) == repaired.tabID {
-			return tb
+	for {
+		view := ac.viewSnapshot()
+		s.mu.Lock()
+		if _, ok := s.attachments[ac]; !ok {
+			s.mu.Unlock()
+			return nil
 		}
+		repaired := s.repairAttachmentViewLocked(ac, view)
+		var target *tab
+		for _, tb := range s.tabs {
+			if tb != nil && domain.TabStableID(tb.stableID) == repaired.tabID {
+				target = tb
+				break
+			}
+		}
+		s.mu.Unlock()
+
+		if repaired.tabID != view.tabID || repaired.paneID != view.paneID || repaired.windowTop != view.windowTop || repaired.windowRows != view.windowRows || repaired.windowSet != view.windowSet || repaired.bookmark != view.bookmark || repaired.liveBottom != view.liveBottom {
+			repaired.revision++
+		}
+		if !ac.publishViewIfCurrent(view, repaired) {
+			continue
+		}
+		return target
 	}
-	return nil
 }
 
 // paneForAttachment resolves both stable IDs and repairs a removed pane before
@@ -578,26 +602,24 @@ func (s *session) switchAttachmentRelativeForDispatch(ac *attachedClient, delta 
 
 // repairAttachmentViews repairs all live attachment targets after a shared
 // topology mutation.
-func (s *session) repairAttachmentViews() []viewInvalidation {
+func (s *session) repairAttachmentViews() {
 	if s == nil {
-		return nil
+		return
 	}
-	var invalidations []viewInvalidation
 	_ = s.runMutation(func() error {
 		s.mu.Lock()
-		invalidations = s.invalidateViewsLocked()
+		s.invalidateViewsLocked()
 		s.mu.Unlock()
 		return nil
 	})
-	return invalidations
 }
 
 // repairAttachmentViewsLocked repairs all live attachment targets after a tab
-// or pane mutation. Caller holds dispatchMu and s.mu; it is intended to run at
-// the same mutation linearization point as the shared membership change.
-func (s *session) repairAttachmentViewsLocked() []viewInvalidation {
+// or pane mutation. It is intended to run at the same mutation linearization
+// point as the shared membership change.
+func (s *session) repairAttachmentViewsLocked() {
 	if s == nil {
-		return nil
+		return
 	}
-	return s.invalidateViewsLocked()
+	s.invalidateViewsLocked()
 }

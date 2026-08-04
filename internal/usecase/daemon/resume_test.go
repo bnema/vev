@@ -874,7 +874,7 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 }
 
 // TestMarkParkingInFlightRequiresExactLiveOwnership covers lock-safe rejection
-// when the attachment is no longer the exact active or snatched owner, while
+// when the attachment is no longer the exact registered owner, while
 // still advertising for both live roles.
 func TestStaleClientGoneAfterTransportCheckDoesNotDetachReboundAttachment(t *testing.T) {
 	pty, release := newBlockingPTY(t)

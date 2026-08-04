@@ -152,9 +152,8 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	d.mu.Lock()
 	_, stopped := d.stopped["bravo"]
 	var bravoLive bool
-	for _, entry := range d.sessions {
-		candidate, ok := localSession(entry)
-		if !ok {
+	for _, candidate := range d.sessions {
+		if candidate == nil {
 			continue
 		}
 		candidate.mu.Lock()
@@ -322,9 +321,8 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 	current := ac.currentSession()
 	owners := make([]*session, 0, 1)
 	d.mu.Lock()
-	for _, entry := range d.sessions {
-		candidate, ok := localSession(entry)
-		if !ok {
+	for _, candidate := range d.sessions {
+		if candidate == nil {
 			continue
 		}
 		candidate.mu.Lock()

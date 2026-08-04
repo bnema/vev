@@ -35,7 +35,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	defer releaseDestination()
 
 	d, source, client, _ := newManualSessionWithPTYs(t, movedPTY, remainingPTY)
-	require.NotNil(t, d.attachCoordinator(source, client, true))
+	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
@@ -117,7 +117,7 @@ func TestMovePaneCleanupUsesCommitPointSourceAttachmentToken(t *testing.T) {
 	sourceTab.stableID = "source-tab"
 	remainingTab.stableID = "remaining-tab"
 	moved := sourceTab.focusedPane()
-	require.NotNil(t, d.attachCoordinator(source, displaced, true))
+	require.NotNil(t, d.attachCoordinator(source, nil, displaced, true))
 
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	destinationTab := destination.tabs[0]

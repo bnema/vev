@@ -195,6 +195,7 @@ func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
 	wake := awaitTestValue(t, ch, "coordinator did not publish a wake after fake-clock advancement")
 	wake.attachmentLeases = nil
+	wake.generation = 0
 	return wake
 }
 
@@ -404,12 +405,11 @@ func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
 func TestRenderCoordinatorAckReadinessIsAttachmentScoped(t *testing.T) {
 	slow, healthy := &attachedClient{}, &attachedClient{}
 	var slowReady atomic.Bool
-	slowReady.Store(false)
 	wakes := make(chan renderWake, 2)
 	rc := newRenderCoordinator(renderCoordinatorOptions{
-		wake: func(w renderWake) { wakes <- w },
+		ackReadyFor: func(ac *attachedClient) bool { return ac == healthy || slowReady.Load() },
+		wake:        func(w renderWake) { wakes <- w },
 	})
-	rc.ackReadyFor = func(ac *attachedClient) bool { return ac == healthy || slowReady.Load() }
 	rc.attach(slow)
 	rc.attach(healthy)
 	rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"})
@@ -1403,7 +1403,7 @@ func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T
 }
 
 func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
-	t.Run("detach and park retain a gated headless preview until complete", func(t *testing.T) {
+	t.Run("detach retains a gated headless preview until complete", func(t *testing.T) {
 		for _, transition := range []struct {
 			name string
 			run  func(*renderCoordinator, *attachedClient)

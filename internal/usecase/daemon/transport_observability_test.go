@@ -20,7 +20,7 @@ func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	// One in-flight state makes the second public resize take the ACK-blocked
 	// path. The real coordinator owns both renders and the ACK wake.
 	ac.output = newOutputStateStream(1)
-	rc := d.attachCoordinator(sess, ac, true)
+	rc := d.attachCoordinator(sess, nil, ac, true)
 
 	if !d.resizeForFirstPaint(sess, ac, domain.Size{Cols: 90, Rows: 25}) {
 		t.Fatal("first resize was not accepted")

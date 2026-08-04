@@ -26,6 +26,7 @@ var errShortPayload = errors.New("ports: payload too short")
 var errTrailingBytes = errors.New("ports: unexpected trailing bytes in payload")
 
 var errInvalidBoolean = errors.New("ports: invalid boolean flag")
+var errInvalidEnum = errors.New("ports: invalid enum value")
 
 const (
 	outputHeaderLen       = 5*8 + 2*2 + 1
@@ -170,6 +171,15 @@ func validClientNoticeAction(action uint8) bool {
 	}
 }
 
+func validDetachedReason(reason uint8) bool {
+	switch reason {
+	case ReasonDetach, ReasonSessionKilled, ReasonServerShutdown, ReasonReplaced:
+		return true
+	default:
+		return false
+	}
+}
+
 // Detach asks the daemon to detach the current client without killing the
 // session.
 type Detach struct{}
@@ -214,7 +224,7 @@ type Output struct {
 }
 
 // AttachTarget identifies the endpoint and session selected for a new
-// attachment. It deliberately carries no viewport, resume, or proxy state.
+// attachment. It deliberately carries no viewport, resume, or session state.
 type AttachTarget struct {
 	Endpoint string
 	Session  string
@@ -817,6 +827,9 @@ func UnmarshalTheme(b []byte) (Theme, error) {
 	if err != nil {
 		return Theme{}, err
 	}
+	if flags&^uint8(0x1f) != 0 {
+		return Theme{}, errInvalidEnum
+	}
 	fgR, err := r.getUint8()
 	if err != nil {
 		return Theme{}, err
@@ -994,11 +1007,11 @@ func UnmarshalWelcome(b []byte) (Welcome, error) {
 	if m.SessionName, err = r.getString(); err != nil {
 		return Welcome{}, err
 	}
-	eph, err := r.getUint8()
-	if err != nil {
+	var ephemeral bool
+	if ephemeral, err = r.getBool(); err != nil {
 		return Welcome{}, err
 	}
-	m.Ephemeral = eph != 0
+	m.Ephemeral = ephemeral
 	if m.ResumeToken, err = r.getUint64(); err != nil {
 		return Welcome{}, err
 	}
@@ -1185,6 +1198,9 @@ func UnmarshalDetached(b []byte) (Detached, error) {
 	if err != nil {
 		return Detached{}, err
 	}
+	if !validDetachedReason(reason) {
+		return Detached{}, errInvalidEnum
+	}
 	if err := r.done(); err != nil {
 		return Detached{}, err
 	}
@@ -1312,9 +1328,9 @@ func UnmarshalKill(b []byte) (Kill, error) {
 	if err != nil {
 		return Kill{}, err
 	}
-	var all uint8
+	var all bool
 	if len(r.b) > 0 {
-		all, err = r.getUint8()
+		all, err = r.getBool()
 		if err != nil {
 			return Kill{}, err
 		}
@@ -1322,7 +1338,7 @@ func UnmarshalKill(b []byte) (Kill, error) {
 	if err := r.done(); err != nil {
 		return Kill{}, err
 	}
-	return Kill{Name: name, All: all != 0}, nil
+	return Kill{Name: name, All: all}, nil
 }
 
 // MarshalSessions encodes m into a Sessions message payload: a uint16 count
@@ -1365,19 +1381,19 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 		if s.Name, err = r.getString(); err != nil {
 			return Sessions{}, err
 		}
-		eph, err := r.getUint8()
+		eph, err := r.getBool()
 		if err != nil {
 			return Sessions{}, err
 		}
-		s.Ephemeral = eph != 0
+		s.Ephemeral = eph
 		if s.Tabs, err = r.getUint16(); err != nil {
 			return Sessions{}, err
 		}
-		att, err := r.getUint8()
+		att, err := r.getBool()
 		if err != nil {
 			return Sessions{}, err
 		}
-		s.Attached = att != 0
+		s.Attached = att
 		state, err := r.getUint8()
 		if err != nil {
 			return Sessions{}, err

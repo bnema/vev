@@ -13,7 +13,7 @@ const connectionSnapshotAttempts = 8
 // currentAttachmentConnection retries the lock-free session-to-role snapshot when a
 // handoff lands between those reads. The attachment gate still performs the final
 // mutation admission after this function returns.
-func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (attachmentSession, attachmentConnectionToken, bool) {
+func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (*session, attachmentConnectionToken, bool) {
 	for range connectionSnapshotAttempts {
 		if !ac.currentTransportIs(tr) {
 			break
@@ -54,11 +54,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 				if !ok {
 					return
 				}
-				local, ok := localSession(sess)
-				if !ok {
-					return
-				}
-				d.clientGone(local, ac, tr, false)
+				d.clientGone(sess, ac, tr, false)
 				current := ac.currentAttachmentSession()
 				if current == sess || !ac.currentTransportIs(tr) || current == nil {
 					return
@@ -180,8 +176,8 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 		result.Text = "attached commands cannot override their active session target"
 		return result
 	}
-	sess, ok := localSession(token.sess)
-	if !ok || !token.attachmentEffectCurrent() {
+	sess := token.sess
+	if sess == nil || !token.attachmentEffectCurrent() {
 		result.Code = ports.ErrNoSuchTarget
 		result.Text = "attached session is no longer active"
 		return result
@@ -221,7 +217,7 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 	return result
 }
 
-// resetOutput rebases only the exact proxied attachment and transport admitted
+// resetOutput rebases only the exact attachment and transport admitted
 // by the frame router. sendMu serializes the rebase with every output send;
 // transport revalidation under that lock rejects a link replaced while waiting.
 func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {

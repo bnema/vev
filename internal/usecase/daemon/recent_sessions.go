@@ -17,14 +17,14 @@ type recentSession struct {
 
 // recentSessions returns the current session's capped named-session MRU list.
 // Callers may retain the returned values for the lifetime of an interaction.
-func (d *Daemon) recentSessions(current attachmentSession) []recentSession {
+func (d *Daemon) recentSessions(current *session) []recentSession {
 	if d == nil {
 		return nil
 	}
 	d.mu.Lock()
 	recent := make([]recentSession, 0, len(d.sessions))
 	for _, sess := range d.sessions {
-		if sess == current {
+		if sess == nil || sess == current {
 			continue
 		}
 		snap := sess.snapshotView(viewOptions{})

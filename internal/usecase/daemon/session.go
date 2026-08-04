@@ -155,7 +155,7 @@ type tab struct {
 // what it has actually seen). sendMu serialises the two senders — the render
 // coordinator and the connection handler — so the transport's single-writer
 
-func (d *Daemon) touchMRU(entry attachmentSession) {
+func (d *Daemon) touchMRU(entry *session) {
 	if d == nil || entry == nil || entry.core() == nil {
 		return
 	}
@@ -170,15 +170,11 @@ func (d *Daemon) touchMRU(entry attachmentSession) {
 			break
 		}
 	}
-	sess, ok := localSession(entry)
-	if !ok {
-		return
+	entry.mu.Lock()
+	if !entry.ephemeral {
+		d.markCatalogueDirty(entry.persistRecordLocked(max(d.nowUnixNano(), entry.createdAt, int64(1))).MetadataUpdate())
 	}
-	sess.mu.Lock()
-	if !sess.ephemeral {
-		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
-	}
-	sess.mu.Unlock()
+	entry.mu.Unlock()
 }
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
@@ -474,8 +470,8 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 		expectedTransport: token.transport, sourceToken: &token, action: "create-session",
 		copySourceEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
-			source, ok := localSession(token.sess)
-			if !ok {
+			source := token.sess
+			if source == nil {
 				return nil, errAttachmentTransition
 			}
 			if d.closing {
@@ -500,8 +496,8 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 	}
 
 	d.touchMRU(created)
-	if source, ok := localSession(token.sess); ok {
-		token.ac.recordPreviousSession(source)
+	if token.sess != nil {
+		token.ac.recordPreviousSession(token.sess)
 	}
 	d.log.Info("client attached", "session", created.name, "resume", token.ac.resumeCapable)
 	d.deferAttachmentTransitionCleanups(transition)
@@ -513,7 +509,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	return d.createTabForAttachment(sess, nil, sz)
 }
 
-func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, sz domain.Size) error {
+func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ domain.Size) error {
 	sess.mu.Lock()
 	name := sess.name
 	cwd := sess.cwd
@@ -521,7 +517,7 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, sz do
 	env := copyEnvironment(sess.env)
 	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
-	tbSize := contentSize(sz)
+	tbSize := contentSize(sess.fullViewportSize())
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err
@@ -774,10 +770,7 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken,
 	// own an independent connection lifecycle and detach through the same exact
 	// transport/generation fence.
 	if token.lease == nil {
-		if sess, ok := localSession(token.sess); ok {
-			return d.detachIfCurrentTransport(sess, token.ac, token.transport)
-		}
-		return false
+		return d.detachIfCurrentTransport(token.sess, token.ac, token.transport)
 	}
 	frozen := freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{done: done}, token.ac)
 	defer frozen.unfreeze()
@@ -1152,9 +1145,8 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		if token.sess == nil || token.ac == nil || token.transport.transport == nil {
 			return sessionKillParticipants{}, false
 		}
-		var ok bool
-		snapshot.source, ok = localSession(token.sess)
-		if !ok {
+		snapshot.source = token.sess
+		if snapshot.source == nil {
 			return sessionKillParticipants{}, false
 		}
 		snapshot.sourceToken = &admission.token
@@ -1641,8 +1633,8 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 // d.mu.
 func (d *Daemon) allocEphemeralNameLocked() string {
 	used := make(map[string]struct{}, len(d.sessions)+len(d.stopped))
-	for _, entry := range d.sessions {
-		if s, ok := localSession(entry); ok {
+	for _, s := range d.sessions {
+		if s != nil {
 			used[s.name] = struct{}{}
 		}
 	}
@@ -1658,9 +1650,8 @@ func (d *Daemon) allocEphemeralNameLocked() string {
 }
 
 func (d *Daemon) findByNameLocked(name string) *session {
-	for _, entry := range d.sessions {
-		s, ok := localSession(entry)
-		if ok && s.name == name {
+	for _, s := range d.sessions {
+		if s != nil && s.name == name {
 			return s
 		}
 	}

@@ -410,7 +410,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 	d, sess, ac, _ := newManualSessionWithPTYs(t, first, second)
 	observer := &daemonRuntimeObserver{}
 	d.runtimeObserver = observer
-	rc := d.attachCoordinator(sess, ac, true)
+	rc := d.attachCoordinator(sess, nil, ac, true)
 	lease := rc.attachmentLease(ac)
 	var newer uint64
 	d.beforeSessionResizePublication = func() {
@@ -471,7 +471,7 @@ func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pty := &transactionalResizePTY{}
 			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
-			rc := d.attachCoordinator(sess, ac, true)
+			rc := d.attachCoordinator(sess, nil, ac, true)
 			lease := rc.attachmentLease(ac)
 			epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease)
 			require.NotZero(t, epoch)
@@ -555,7 +555,7 @@ func TestRetryOwnerCannotPublishFloatingGeometryAfterMove(t *testing.T) {
 	tb.mu.Unlock()
 	owner := publishPaneOwner(popup, source, tb, 7)
 
-	rc := d.attachCoordinator(source, ac, true)
+	rc := d.attachCoordinator(source, nil, ac, true)
 	lease := rc.attachmentLease(ac)
 	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 80, Rows: 24}, ac, lease)
 	require.True(t, d.runResizeTransaction(source, ac, lease, epoch))
@@ -780,7 +780,7 @@ func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) 
 	tb.floating = floatingSlot{state: floatingVisible, pane: popup, generation: 7}
 	tb.mu.Unlock()
 
-	rc := d.attachCoordinator(sess, ac, true)
+	rc := d.attachCoordinator(sess, nil, ac, true)
 	lease := rc.attachmentLease(ac)
 	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 80, Rows: 24}, ac, lease)
 	require.NotZero(t, epoch)

@@ -313,7 +313,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, activePTY, inactivePTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(sess, ac, true)
+		rc := d.attachCoordinator(sess, nil, ac, true)
 
 		d.sessWg.Add(1)
 		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
@@ -349,7 +349,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, oldPTY, newPTY, parkedPTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(sess, ac, true)
+		rc := d.attachCoordinator(sess, nil, ac, true)
 
 		d.sessWg.Add(2)
 		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
@@ -385,7 +385,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		d, target, targetClient, _ := newManualSessionWithPTYs(t, pty)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(target, targetClient, true)
+		rc := d.attachCoordinator(target, nil, targetClient, true)
 
 		// A viewer in a different session is previewing the headless target.
 		viewer := &attachedClient{}
@@ -429,7 +429,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		d, target, detached, _ := newManualSessionWithPTYs(t, pty)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(target, detached, true)
+		rc := d.attachCoordinator(target, nil, detached, true)
 
 		secondTransport, secondSends := newCapturingTransport(t)
 		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), size: detached.size}
@@ -470,7 +470,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		d, target, client, _ := newManualSessionWithPTYs(t, pty)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		rc := d.attachCoordinator(target, client, true)
+		rc := d.attachCoordinator(target, nil, client, true)
 		wakes := make(chan renderWake, 1)
 		rc.opts.wake = func(w renderWake) { wakes <- w }
 		target.mu.Lock()

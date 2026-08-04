@@ -196,7 +196,7 @@ func (d *Daemon) refreshBarScriptsAllSessions() {
 func (d *Daemon) sessionsSnapshot() []*session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return localSessionsSnapshot(d.sessions)
+	return sessionsSnapshot(d.sessions)
 }
 
 func (d *Daemon) clearBarScriptsForSession(id domain.SessionID) {
@@ -390,8 +390,7 @@ func (d *Daemon) logBarScriptFailure(sess *session, sessionName, anchor, command
 		return
 	}
 	attrs := []any{"anchor", anchor, "session", sessionName, "command", command, "err", err}
-	var scriptErr *barScriptError
-	if errors.As(err, &scriptErr) {
+	if scriptErr, ok := errors.AsType[*barScriptError](err); ok {
 		attrs = append(attrs, "exit_code", scriptErr.exitCode)
 		if scriptErr.stderr != "" {
 			attrs = append(attrs, "stderr", scriptErr.stderr)

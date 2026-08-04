@@ -180,8 +180,8 @@ func moveSessionForLocatorLocked(d *Daemon, locator moveSessionLocator) *session
 	if d == nil {
 		return nil
 	}
-	sess, ok := localSession(d.sessions[locator.ID])
-	if !ok || sess.incarnation != locator.Incarnation {
+	sess := d.sessions[locator.ID]
+	if sess == nil || sess.incarnation != locator.Incarnation {
 		return nil
 	}
 	return sess
