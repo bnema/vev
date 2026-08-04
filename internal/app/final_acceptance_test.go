@@ -17,48 +17,45 @@ func sendAcceptanceInput(t *testing.T, tr ports.Transport, data string) {
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(data)})}))
 }
 
-func awaitAcceptanceCommand(t *testing.T, p *pump, requestID uint64) ports.CommandResult {
+func awaitAcceptanceFrame(t *testing.T, p *pump, typ ports.MsgType, predicate func(ports.Frame) bool) ports.Frame {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
 		select {
 		case frame, ok := <-p.ch:
-			require.True(t, ok, "connection closed before command result")
-			if frame.Type != ports.MsgCommandResult {
-				continue
-			}
-			result, err := ports.UnmarshalCommandResult(frame.Payload)
-			require.NoError(t, err)
-			if result.RequestID == requestID {
-				return result
+			require.True(t, ok, "connection closed before frame")
+			if frame.Type == typ && predicate(frame) {
+				return frame
 			}
 		case <-deadline.C:
-			t.Fatal("timed out waiting for command result")
+			t.Fatal("timed out waiting for acceptance frame")
 		}
 	}
 }
 
+func awaitAcceptanceCommand(t *testing.T, p *pump, requestID uint64) ports.CommandResult {
+	t.Helper()
+	frame := awaitAcceptanceFrame(t, p, ports.MsgCommandResult, func(frame ports.Frame) bool {
+		result, err := ports.UnmarshalCommandResult(frame.Payload)
+		require.NoError(t, err)
+		return result.RequestID == requestID
+	})
+	result, err := ports.UnmarshalCommandResult(frame.Payload)
+	require.NoError(t, err)
+	return result
+}
+
 func awaitAcceptanceOutput(t *testing.T, p *pump, predicate func(ports.Output) bool) ports.Output {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	for {
-		select {
-		case frame, ok := <-p.ch:
-			require.True(t, ok, "connection closed before output")
-			if frame.Type != ports.MsgOutput {
-				continue
-			}
-			output, err := ports.UnmarshalOutput(frame.Payload)
-			require.NoError(t, err)
-			if predicate(output) {
-				return output
-			}
-		case <-deadline.C:
-			t.Fatal("timed out waiting for output")
-		}
-	}
+	frame := awaitAcceptanceFrame(t, p, ports.MsgOutput, func(frame ports.Frame) bool {
+		output, err := ports.UnmarshalOutput(frame.Payload)
+		require.NoError(t, err)
+		return predicate(output)
+	})
+	output, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	return output
 }
 
 func awaitAcceptanceCommandResult(t *testing.T, tr ports.Transport, p *pump, requestID uint64, slug string) ports.CommandResult {
@@ -89,7 +86,7 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	awaitText(t, firstPump, size, "Commands")
 	sendAcceptanceInput(t, first, "CNT\r")
 	awaitText(t, firstPump, size, " 1 (cat)  2 (cat) ")
-	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
+	assertNoTextAfterInput(t, secondPump, size, " 1 (cat)  2 (cat) ")
 
 	sendAcceptanceInput(t, first, "\x1b ")
 	awaitText(t, firstPump, size, "Commands")
@@ -115,7 +112,9 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 
 	// A resize and an output reset are scoped to one attachment output stream;
 	// the shared tab's PTY/content geometry and the peer stream remain intact.
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 100, Rows: 30}})}))
+	resizePayload, err := ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 100, Rows: 30}})
+	require.NoError(t, err)
+	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgResize, Payload: resizePayload}))
 	resized := awaitAcceptanceOutput(t, firstPump, func(output ports.Output) bool { return output.Size == (domain.Size{Cols: 100, Rows: 30}) })
 	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, resized.Size)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")

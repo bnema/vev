@@ -152,7 +152,7 @@ func TestMoveTabFinalSourceVisibleFloatingRejectsStaleSlotTransitions(t *testing
 			d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
 			moved := source.tabs[0]
 			moved.stableID = "moved-tab"
-			require.NotNil(t, d.attachCoordinator(source, client, true))
+			require.NotNil(t, d.attachCoordinator(source, nil, client, true))
 			destination := addMoveTabTestSession(d, "destination", "destination-tab")
 			floating := newPaneWithStableID("floating", "floating-stable", newQuietPTY(), domain.Size{Cols: 20, Rows: 8})
 			moved.mu.Lock()
@@ -453,7 +453,7 @@ func (r *moveTabPurgeRepository) DeleteIncarnation(_ context.Context, id domain.
 
 func TestMoveTabFinalNamedSourcePurgesAfterDestinationAdmissionAndFailureDoesNotRollback(t *testing.T) {
 	d, source, client, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	require.NotNil(t, d.attachCoordinator(source, client, true))
+	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
 	source.incarnation = domain.IncarnationID{4}
 	moved := source.tabs[0]
 	moved.stableID = "moved-tab"

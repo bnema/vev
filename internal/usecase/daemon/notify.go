@@ -310,6 +310,9 @@ func (d *Daemon) deliverGlobal(n domain.Notification) {
 	}
 	targets := make([]*attachedClient, 0, len(sessions))
 	for _, s := range sessions {
+		if s == nil {
+			continue
+		}
 		for _, ac := range s.snapshotAttachments() {
 			if !d.publishToast(ac, n) {
 				continue

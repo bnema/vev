@@ -77,9 +77,13 @@ func serveAcceptanceRemote(tr ports.Transport, target string, handoff ports.Atta
 		if outputs != nil {
 			outputs <- string(data)
 		}
-		if err := tr.Send(ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{
+		payload, err := ports.MarshalOutput(ports.Output{
 			Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Data: data,
-		})}); err != nil {
+		})
+		if err != nil {
+			return
+		}
+		if err := tr.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
 			return
 		}
 		_ = tr.Send(ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})})
@@ -127,6 +131,7 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 			deps.Remote = true
 			result := client.NewRunner(deps).Run(ctx, request)
 			if request.SessionName == "work" {
+				require.NoError(t, result, "the client handoff completes before the test injects the composition-root handoff")
 				return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "picked.example", Session: "picked", Intent: ports.IntentAttach}}
 			}
 			return result

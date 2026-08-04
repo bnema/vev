@@ -186,15 +186,15 @@ func TestAttachmentRegistryConcurrentRegistrationSnapshotIsStable(t *testing.T) 
 			t.Fatalf("snapshot[%d] id = %d, want %d", i, got[i].clientID[0], want)
 		}
 	}
-	ordered := sess.repairAttachmentViewsLockedForTest()
+	ordered := sess.repairAttachmentViewsForTest()
 	for i, want := range []byte{1, 2, 3} {
 		if ordered[i].clientID[0] != want {
-			t.Fatalf("invalidation[%d] id = %d, want %d", i, ordered[i].clientID[0], want)
+			t.Fatalf("ordered attachment[%d] id = %d, want %d", i, ordered[i].clientID[0], want)
 		}
 	}
 }
 
-func (s *session) repairAttachmentViewsLockedForTest() []*attachedClient {
+func (s *session) repairAttachmentViewsForTest() []*attachedClient {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.repairAttachmentViewsLocked()

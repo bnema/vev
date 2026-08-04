@@ -803,8 +803,8 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
 
-	sess, ok := localSession(token.sess)
-	if !ok {
+	sess := token.sess
+	if sess == nil {
 		return false
 	}
 	rc := sess.renderCoordinator()

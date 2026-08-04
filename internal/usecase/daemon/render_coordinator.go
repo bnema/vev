@@ -370,11 +370,11 @@ func (c *renderCoordinator) retryCapacity(w renderWake, lease *attachmentLease) 
 	generation := c.pendingGeneration
 	queueCorrelation := c.queueCorrelation
 	observer := c.opts.observer
+	c.supervisor.startTaskLocked(func() { c.retryPendingGeneration(generation) })
 	c.mu.Unlock()
 	if queueStart && observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
 	}
-	go c.retryPendingGeneration(generation)
 }
 
 func (c *renderCoordinator) retryPendingGeneration(generation uint64) {
@@ -1095,7 +1095,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 			w.lease = syncLease
 		}
 	}
-	preview, previews := c.takePendingPreviewsLocked()
+	previews := c.takePendingPreviewsLocked()
 	worker := c.detachNormalTimerLocked()
 	c.armed = false
 
@@ -1114,7 +1114,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 		if ackStart != nil {
 			ackStart.publishStart()
 		}
-		c.notifyPreviews(w, preview, previews)
+		c.notifyPreviews(w, previews)
 		return
 	}
 
@@ -1184,7 +1184,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 	if outputReady && wake != nil {
 		wake(w)
 	}
-	c.notifyPreviews(w, preview, previews)
+	c.notifyPreviews(w, previews)
 }
 
 func (c *renderCoordinator) fireValidLocked(token *timerToken, gen uint64, watchdog bool) bool {
@@ -1228,19 +1228,19 @@ func (c *renderCoordinator) syncGateOpenLocked() bool {
 
 // takePendingPreviewsLocked snapshots and consumes picker preview delivery
 // for this target generation. Preview callbacks are never ACK-gated.
-func (c *renderCoordinator) takePendingPreviewsLocked() (func(renderWake), []func(renderWake)) {
+func (c *renderCoordinator) takePendingPreviewsLocked() []func(renderWake) {
 	if !c.pendingPreview {
-		return nil, nil
+		return nil
 	}
 	c.pendingPreview = false
 	previews := make([]func(renderWake), 0, len(c.previewWakes))
 	for _, subscription := range c.previewWakes {
 		previews = append(previews, subscription.fn)
 	}
-	return nil, previews
+	return previews
 }
 
-func (c *renderCoordinator) notifyPreviews(w renderWake, _ func(renderWake), previews []func(renderWake)) {
+func (c *renderCoordinator) notifyPreviews(w renderWake, previews []func(renderWake)) {
 	for _, fn := range previews {
 		fn(w)
 	}

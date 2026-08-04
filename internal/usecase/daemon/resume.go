@@ -252,15 +252,22 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 		oldSame.closeDone()
 	}
 	d.log.Info("client parked for resume", "session", sess.name, "grace", grace)
+	d.watchParkedTimer(token, parked)
+	return true
+}
 
-	go func(token uint64, parked *parkedAttachment) {
+func (d *Daemon) watchParkedTimer(token uint64, parked *parkedAttachment) {
+	if parked == nil || parked.timer == nil {
+		return
+	}
+	timer := parked.timer
+	go func() {
 		select {
 		case <-timer.C():
 			d.expireParked(token, parked)
 		case <-parked.done:
 		}
-	}(token, parked)
-	return true
+	}()
 }
 
 func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
@@ -348,9 +355,25 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 		sess.unregisterAttachmentLocked(ac)
 		sess.mu.Unlock()
 	}
+	// Recreate the parked entry and its watcher instead of restoring a timer
+	// that may already have fired while the claim held the old entry. This also
+	// makes a failed handshake's credential expiry deterministic under fake clocks.
+	if parked.timer != nil {
+		parked.timer.Stop()
+	}
+	parked.closeDone()
+	rearmed := &parkedAttachment{
+		sess:             parked.sess,
+		ac:               ac,
+		pickerGeneration: parked.pickerGeneration,
+		timer:            d.clock.NewTimer(d.resumeParkGrace),
+		done:             make(chan struct{}),
+	}
+	d.parked[token] = rearmed
 	captured := ac.transportSnapshot().transport
 	ac.setSession(nil)
 	d.mu.Unlock()
+	d.watchParkedTimer(token, rearmed)
 	if captured != nil {
 		_ = ac.closeCapturedTransport(ac.revokeTransport(captured))
 	}

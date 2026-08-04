@@ -848,7 +848,7 @@ func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, s
 	if ac == nil {
 		return d.requestTransactionalResizeForLease(sess, nil, nil, size, immediate)
 	}
-	rc := d.attachCoordinator(sess, ac, true)
+	rc := d.attachCoordinator(sess, nil, ac, true)
 	return d.requestTransactionalResizeForLease(sess, ac, rc.attachmentLease(ac), size, immediate)
 }
 

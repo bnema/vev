@@ -87,6 +87,9 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 	d.mu.Lock()
 	sessions := make([]*session, 0, len(d.sessions))
 	for _, entry := range d.sessions {
+		if entry == nil {
+			continue
+		}
 		sessions = append(sessions, entry)
 	}
 	stopped := make([]stoppedSession, 0, len(d.stopped))
@@ -405,7 +408,7 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if targetSess == ac.currentAttachmentSession() {
 		return
 	}
-	rc := d.attachCoordinator(targetSess, nil, false)
+	rc := d.attachCoordinator(targetSess, nil, nil, false)
 	rc.subscribePreviewFor(ac, generation, func(renderWake) {
 		if pickerPreviewCurrent(ac, targetSess, next, generation) {
 			if owner := ac.currentAttachmentSession(); owner != nil {

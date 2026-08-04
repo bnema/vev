@@ -69,7 +69,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 
 func TestSameAttachmentRebindRejectsQueuedWakeAndFansOutFreshGeneration(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
-	rc := d.attachCoordinator(sess, ac, true)
+	rc := d.attachCoordinator(sess, nil, ac, true)
 	oldLease := rc.attachmentLease(ac)
 	require.NotNil(t, oldLease)
 

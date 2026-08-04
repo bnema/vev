@@ -235,10 +235,19 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 			decode: func(b []byte) error { _, err := UnmarshalKill(b); return err },
 		},
 		{
-			name: "sessions booleans",
+			name: "sessions ephemeral boolean",
 			payload: func() []byte {
 				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionRunning}}})
-				b[4], b[7] = 2, 2
+				b[6] = 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalSessions(b); return err },
+		},
+		{
+			name: "sessions attached boolean",
+			payload: func() []byte {
+				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionRunning}}})
+				b[9] = 2
 				return b
 			}(),
 			decode: func(b []byte) error { _, err := UnmarshalSessions(b); return err },

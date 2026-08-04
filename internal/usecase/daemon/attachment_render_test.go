@@ -34,6 +34,7 @@ func (*blockedAttachmentTransport) Close() error               { return nil }
 func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	rc := d.attachCoordinator(sess, nil, ac, true)
+	require.True(t, sess.repairAttachmentView(ac))
 	rc.opts.clock = nil // drive fire explicitly; the interleaving is the test.
 
 	firstObserved := make(chan struct{})
@@ -144,7 +145,8 @@ func TestAttachmentResizeKeepsSessionContentAndPeersFixed(t *testing.T) {
 func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	clock := &signalClock{timers: make(chan *signalTimer, 16)}
+	d := newTestDaemon(t, newFactory(t, pty), clock)
 	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
 	sess, old, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
 	require.NoError(t, err)
@@ -157,7 +159,10 @@ func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	freshLease := rc.attachmentLease(fresh)
 	require.True(t, rc.markAttachmentReady(oldLease))
 	oldTransport.blocked.Store(true)
-	sess.tabs[0].focusedPane().screen.Write([]byte("slow peer"))
+	pane := sess.tabs[0].focusedPane()
+	pane.mu.Lock()
+	pane.screen.Write([]byte("slow peer"))
+	pane.mu.Unlock()
 	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
 	rc.fireCurrent(false)
 	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
@@ -185,7 +190,10 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	require.True(t, rc.markAttachmentReady(rc.attachmentLease(old)))
 
 	oldTransport.blocked.Store(true)
-	sess.tabs[0].focusedPane().screen.Write([]byte("slow peer"))
+	pane := sess.tabs[0].focusedPane()
+	pane.mu.Lock()
+	pane.screen.Write([]byte("slow peer"))
+	pane.mu.Unlock()
 	require.True(t, rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "test"}))
 	fireDone := make(chan struct{})
 	go func() {

@@ -19,7 +19,7 @@ func newMoveGateRaceFixture(t *testing.T) (*Daemon, *session, *tab, *pane, *sess
 	sourceTab := source.tabs[0]
 	sourceTab.stableID = "source-tab"
 	moved := sourceTab.focusedPane()
-	require.NotNil(t, d.attachCoordinator(source, client, true))
+	require.NotNil(t, d.attachCoordinator(source, nil, client, true))
 
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", ephemeral: true}, tabs: []*tab{newTabWithStableID("destination-tab", "destination-pane", destinationPTY, domain.Size{Cols: 80, Rows: 23})}}
 	destinationTab := destination.tabs[0]
@@ -184,7 +184,7 @@ func TestFinalCloseDoesNotDeadlockWithMoveDispatchAdmission(t *testing.T) {
 
 func TestPaletteFinalCloseEndsCurrentEffectBeforeDrainingPeers(t *testing.T) {
 	d, sess, current, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	d.attachCoordinator(sess, current, true)
+	d.attachCoordinator(sess, nil, current, true)
 	otherTransport := &closeTrackingTransport{}
 	other := &attachedClient{tr: otherTransport, output: newOutputStateStream(), size: current.size}
 	other.initOverlays()
@@ -192,7 +192,7 @@ func TestPaletteFinalCloseEndsCurrentEffectBeforeDrainingPeers(t *testing.T) {
 	sess.mu.Lock()
 	require.True(t, sess.registerAttachmentLocked(other))
 	sess.mu.Unlock()
-	d.attachCoordinator(sess, other, true)
+	d.attachCoordinator(sess, nil, other, true)
 
 	currentToken := sess.attachmentToken(current, current.transport())
 	currentEffect, admitted := current.beginAttachmentEffect(currentToken)

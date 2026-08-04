@@ -66,15 +66,24 @@ func (l *timerLane) clearLocked(token *timerToken) bool {
 type timerSupervisor struct{ workers sync.WaitGroup }
 
 func (s *timerSupervisor) startLocked(token *timerToken, timerC <-chan time.Time, fire func()) {
-	s.workers.Add(1)
-	go func() {
-		defer s.workers.Done()
+	s.startTaskLocked(func() {
 		defer close(token.done)
 		select {
 		case <-timerC:
 			fire()
 		case <-token.cancel:
 		}
+	})
+}
+
+// startTaskLocked accounts for coordinator work that is not backed by a timer
+// token. The caller must hold the coordinator lock so terminal teardown cannot
+// begin waiting between registration and launch.
+func (s *timerSupervisor) startTaskLocked(task func()) {
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		task()
 	}()
 }
 

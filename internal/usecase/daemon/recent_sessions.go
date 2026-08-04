@@ -24,7 +24,7 @@ func (d *Daemon) recentSessions(current *session) []recentSession {
 	d.mu.Lock()
 	recent := make([]recentSession, 0, len(d.sessions))
 	for _, sess := range d.sessions {
-		if sess == current {
+		if sess == nil || sess == current {
 			continue
 		}
 		snap := sess.snapshotView(viewOptions{})
