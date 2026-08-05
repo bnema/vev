@@ -1,6 +1,11 @@
 package ports
 
-import "time"
+import (
+	"time"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/pkg/renderer"
+)
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication.
@@ -54,4 +59,41 @@ const (
 type Frame struct {
 	Type    MsgType
 	Payload []byte
+}
+
+// RemotePreviewSchemaVersion is independent from the attachment IPC version.
+const RemotePreviewSchemaVersion uint16 = 1
+
+// RemotePreviewStatus is a closed response taxonomy. Terminal contents are
+// never carried in an error response.
+type RemotePreviewStatus uint8
+
+const (
+	RemotePreviewOK RemotePreviewStatus = iota
+	RemotePreviewUnavailable
+	RemotePreviewNoSuchTarget
+	RemotePreviewStale
+	RemotePreviewMalformed
+	RemotePreviewTooLarge
+)
+
+// RemotePreviewRequest asks the owning daemon for an in-memory live viewport.
+type RemotePreviewRequest struct {
+	Version uint16
+	Target  domain.RemoteSessionTarget
+	Width   uint16
+	Height  uint16
+}
+
+// RemotePreview is a bounded row-major styled-cell viewport. It is a
+// process-memory DTO and is never persisted, logged, or traced.
+type RemotePreview struct {
+	Version     uint16
+	Status      RemotePreviewStatus
+	LifecycleID domain.SessionLifecycleID
+	TabID       domain.TabStableID
+	Revision    uint64
+	Width       uint16
+	Height      uint16
+	Cells       []renderer.Cell
 }

@@ -35,11 +35,12 @@ func TestRemoteRowsWithDuplicateLabelsKeepDistinctRoutingIdentity(t *testing.T) 
 	expected := []struct {
 		name      string
 		session   domain.SessionID
+		endpoint  string
 		lifecycle domain.SessionLifecycleID
 		tabID     domain.TabStableID
 	}{
-		{name: "first", session: firstKey.ID(), lifecycle: firstLifecycle, tabID: "tab-a"},
-		{name: "second", session: secondKey.ID(), lifecycle: secondLifecycle, tabID: "tab-b"},
+		{name: "first", session: firstKey.ID(), endpoint: "arch", lifecycle: firstLifecycle, tabID: "tab-a"},
+		{name: "second", session: secondKey.ID(), endpoint: "mule", lifecycle: secondLifecycle, tabID: "tab-b"},
 	}
 	for i, want := range expected {
 		t.Run(want.name, func(t *testing.T) {
@@ -47,6 +48,7 @@ func TestRemoteRowsWithDuplicateLabelsKeepDistinctRoutingIdentity(t *testing.T) 
 			require.True(t, ok)
 			require.Equal(t, want.session, selected.Session)
 			require.NotNil(t, selected.RemoteTarget)
+			require.Equal(t, want.endpoint, selected.RemoteTarget.Endpoint)
 			require.Equal(t, want.lifecycle, selected.RemoteTarget.LifecycleID)
 			require.Equal(t, want.tabID, selected.RemoteTarget.LiveTabID)
 		})

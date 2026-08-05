@@ -380,6 +380,48 @@ func TestRemotePickerPreviewSelectionChangeFencesOldTarget(t *testing.T) {
 	require.Equal(t, 2, client.Calls())
 }
 
+func TestRemotePickerPreviewErrorCannotPublishAfterSelectionChange(t *testing.T) {
+	d := newTestDaemon(t, nil, immediateRemotePreviewClock{})
+	firstTarget := remotePreviewCacheTarget()
+	secondTarget := firstTarget
+	secondTarget.LifecycleID[0]++
+	secondTarget.LiveTabID = "tab-2"
+	client := &remotePreviewTestClient{
+		err:     errors.New("remote unavailable"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	d.remotePreviewClient = client
+	_, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+	firstKey := domain.RemoteSessionKey{Host: firstTarget.Endpoint, Name: firstTarget.SessionName, LifecycleID: firstTarget.LifecycleID, DisplayOrigin: firstTarget.DisplayOrigin}
+	secondKey := domain.RemoteSessionKey{Host: secondTarget.Endpoint, Name: secondTarget.SessionName, LifecycleID: secondTarget.LifecycleID, DisplayOrigin: secondTarget.DisplayOrigin}
+	model := picker.New([]picker.SessionView{
+		{ID: firstKey.ID(), Name: firstTarget.SessionName, Tabs: []picker.TabEntry{{TabID: firstTarget.LiveTabID, Name: "first"}}, RemoteKey: &firstKey, RemoteTarget: &firstTarget, RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true},
+		{ID: secondKey.ID(), Name: secondTarget.SessionName, Tabs: []picker.TabEntry{{TabID: secondTarget.LiveTabID, Name: "second"}}, RemoteKey: &secondKey, RemoteTarget: &secondTarget, RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true},
+	}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
+	selected, ok := model.Selected()
+	require.True(t, ok)
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = model
+	ac.overlays.pickerIntent = pickerNavigate
+	ac.overlays.pickerPreviewGeneration = 1
+	ac.overlays.pickerMu.Unlock()
+	d.startRemotePickerPreview(ac, selected, 1)
+	<-client.started
+
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.pickerRemotePreview = picker.Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{{Rune: 'k', Style: renderer.DefaultStyle()}}}}
+	model.Down()
+	ac.overlays.pickerMu.Unlock()
+	close(client.release)
+
+	require.Eventually(t, func() bool {
+		ac.overlays.pickerMu.Lock()
+		defer ac.overlays.pickerMu.Unlock()
+		return len(ac.overlays.pickerRemotePreview.Rows) == 1 && ac.overlays.pickerRemotePreview.Rows[0][0].Rune == 'k'
+	}, time.Second, time.Millisecond)
+}
+
 func TestRemotePickerPreviewRefreshesAfterAttachmentResize(t *testing.T) {
 	d := newTestDaemon(t, nil, immediateRemotePreviewClock{})
 	target := remotePreviewCacheTarget()

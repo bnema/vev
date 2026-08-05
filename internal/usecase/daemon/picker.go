@@ -534,12 +534,19 @@ func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Targ
 		preview, err := d.fetchRemotePreview(previewCtx, remoteTarget, width, height)
 		if err != nil {
 			ac.overlays.pickerMu.Lock()
+			matching := false
 			if ac.overlays.pickerPreviewGeneration == generation && ac.overlays.picker != nil {
-				ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, "remote preview unavailable")
+				selected, stillSelected := ac.overlays.picker.Selected()
+				matching = stillSelected && pickerTargetsEqual(selected, target)
+				if matching {
+					ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, "remote preview unavailable")
+				}
 			}
 			ac.overlays.pickerMu.Unlock()
-			if sess := ac.currentAttachmentSession(); sess != nil {
-				d.invalidateRender(sess, ac, false, "remote picker preview")
+			if matching {
+				if sess := ac.currentAttachmentSession(); sess != nil {
+					d.invalidateRender(sess, ac, false, "remote picker preview")
+				}
 			}
 			return
 		}

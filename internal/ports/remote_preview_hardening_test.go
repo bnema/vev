@@ -116,6 +116,24 @@ func TestRemotePreviewCodecRejectsWideCellBoundaryAndInvalidIDs(t *testing.T) {
 	}
 }
 
+func TestRemotePreviewRejectsControlRunes(t *testing.T) {
+	valid := RemotePreview{
+		Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK,
+		LifecycleID: previewTargetForTest().LifecycleID, TabID: "tab-1", Revision: 1, Width: 1, Height: 1,
+		Cells: []renderer.Cell{{Rune: 'x'}},
+	}
+	for _, control := range []rune{'\x01', '\x1b', '\x7f', '\u0085'} {
+		preview := valid
+		preview.Cells = []renderer.Cell{{Rune: control}}
+		if err := ValidateRemotePreview(preview); err != ErrInvalidRemotePreview {
+			t.Fatalf("control rune %U: ValidateRemotePreview() error = %v, want %v", control, err, ErrInvalidRemotePreview)
+		}
+		if MarshalRemotePreview(preview) != nil {
+			t.Fatalf("control rune %U was marshaled", control)
+		}
+	}
+}
+
 func TestRemotePreviewRequestRejectsOversizedNestedRouteData(t *testing.T) {
 	target := previewTargetForTest()
 	target.Endpoint = strings.Repeat("h", math.MaxUint16+1)
