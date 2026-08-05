@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -904,6 +905,22 @@ func TestRunAttachWithDepsRejectsHandoffLoop(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "attach handoff loop")
 	require.Equal(t, 1, calls)
+}
+
+func TestRunAttachWithDepsCapsUniqueHandoffHops(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote(mock.Anything, mock.Anything, ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(maxAttachHandoffHops + 1)
+
+	calls := 0
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
+			calls++
+			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: fmt.Sprintf("remote-%d.example", calls), Session: "work", Intent: ports.IntentAttach}}
+		},
+	})
+	require.ErrorContains(t, err, "exceeded maximum")
+	require.Equal(t, maxAttachHandoffHops+1, calls)
 }
 
 func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {

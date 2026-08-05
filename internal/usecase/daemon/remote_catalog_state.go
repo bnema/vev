@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -15,8 +16,10 @@ const (
 	remoteHostCached remoteHostStatus = iota
 	remoteHostRefreshing
 	remoteHostFresh
+	remoteHostStale
 	remoteHostUnreachable
 	remoteHostVersionMismatch
+	remoteHostMalformed
 )
 
 // remoteCatalogState owns the cache-derived discovery state. Its mutex never
@@ -43,7 +46,12 @@ func newRemoteCatalogState() remoteCatalogState {
 
 func cloneRemoteCatalogEntry(entry ports.RemoteCatalogCacheEntry) ports.RemoteCatalogCacheEntry {
 	sessions := make([]ports.RemoteCatalogSession, len(entry.Sessions))
-	copy(sessions, entry.Sessions)
+	for i, session := range entry.Sessions {
+		sessions[i] = session
+		if tabs := ports.CatalogTabs(session); tabs != nil {
+			sessions[i].Tabs = slices.Clone(tabs)
+		}
+	}
 	return ports.RemoteCatalogCacheEntry{
 		Host:      entry.Host,
 		FetchedAt: entry.FetchedAt,

@@ -39,6 +39,9 @@ type attachedClient struct {
 	overlays             *overlayRuntime
 	overlayOnce          sync.Once
 	clientID             [16]byte
+	// remoteOrigin is attachment-specific presentation metadata supplied by a
+	// validated picker handoff; it never participates in routing.
+	remoteOrigin string
 	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
 	// the linearization gate for every attachment-bound observable operation. A role
 	// transition freezes and drains this gate before changing either generation
@@ -565,6 +568,7 @@ type attachClientOptions struct {
 	clientID          [16]byte
 	resumeCapable     bool
 	maxOutputInFlight uint8
+	remoteOrigin      string
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -610,6 +614,7 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		size:          sz,
 		view:          attachmentView{windowRows: sz.Rows, windowSet: true},
 		clientID:      opts.clientID,
+		remoteOrigin:  opts.remoteOrigin,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
 	}
@@ -874,6 +879,13 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 		ac.pipelineScratch = composeCacheInput{}
 	}
 	ac.sendMu.Unlock()
+
+	if !sameSize && ac.overlays != nil && ac.overlays.pickerActive() {
+		// The picker preview geometry is attachment-local. A resize must
+		// invalidate any in-flight remote request and fetch the selected row
+		// at the new bounded preview dimensions.
+		d.registerPreviewForSelection(ac)
+	}
 
 	sess := token.sess
 	if sess == nil {

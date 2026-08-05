@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -23,6 +24,8 @@ type pickerSortMode uint32
 const (
 	pickerSortRecent pickerSortMode = iota
 	pickerSortGrouped
+
+	remotePickerPreviewDebounce = 80 * time.Millisecond
 )
 
 func pickerTitle(mode pickerSortMode) string {
@@ -61,7 +64,12 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	rt.pickerMu.Lock()
 	previous, previousGeneration := rt.pickerPreviewSession, rt.pickerPreviewGeneration
 	rt.pickerPreviewGeneration++
+	if rt.pickerRemotePreviewCancel != nil {
+		rt.pickerRemotePreviewCancel()
+		rt.pickerRemotePreviewCancel = nil
+	}
 	rt.pickerPreviewSession = nil
+	rt.pickerRemotePreview = picker.Preview{}
 	rt.pickerPreview = nil
 	rt.picker = model
 	rt.pickerGeneration++
@@ -163,7 +171,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 	catalogRows := 0
 	for _, host := range catalog {
 		catalogRows += len(host.entry.Sessions)
-		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch) {
+		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch || host.status == remoteHostMalformed) {
 			catalogRows++
 		}
 	}
@@ -179,7 +187,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 			}
 			views = append(views, remotePickerView(key, session, host.status, host.entry.FetchedAt))
 		}
-		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch) {
+		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch || host.status == remoteHostMalformed) {
 			views = append(views, remotePickerHostView(host.entry.Host, host.status))
 		}
 	}
@@ -214,6 +222,42 @@ func (d *Daemon) newPickerModel(cur *session, ac *attachedClient, intent pickerI
 
 func attentionSuffix(label string) string {
 	return label + " " + string(ui.AttentionGlyph)
+}
+
+func (d *Daemon) notifyRemotePickerUnavailable(sess *session, target picker.Target) {
+	reason := target.UnavailableReason
+	if reason == "" {
+		reason = "identity_changed"
+	}
+	message := "Remote session unavailable"
+	if target.RemoteTarget != nil {
+		message += ": " + target.RemoteTarget.SessionName + "@" + target.RemoteTarget.DisplayOrigin
+	} else if target.RemoteHost != "" {
+		message += ": " + target.RemoteHost
+	}
+	message += " — " + remotePickerReasonText(reason)
+	d.notify(sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)
+}
+
+func remotePickerReasonText(reason string) string {
+	switch reason {
+	case "catalog_stale":
+		return "catalog stale"
+	case "host_unreachable":
+		return "host unreachable"
+	case "version_mismatch":
+		return "version mismatch"
+	case "session_stopped":
+		return "session stopped"
+	case "session_broken":
+		return "session broken"
+	case "refreshing":
+		return "refreshing"
+	case "identity_changed":
+		return "session identity changed"
+	default:
+		return "unavailable"
+	}
 }
 
 func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
@@ -271,13 +315,16 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		}
 	})
 	var target picker.Target
+	var cursor picker.Target
 	var ok bool
+	var cursorOK bool
 	var intent pickerIntent
 	var source moveSourceLocator
 	// prevIdx is the row the victim occupied; -1 means "no post-delete hint".
 	prevIdx := -1
 	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
 		target, ok = rt.picker.Selected()
+		cursor, cursorOK = rt.picker.Cursor()
 		prevIdx = rt.picker.SelectedIndex()
 	}
 	intent, source = rt.pickerIntent, rt.pickerSource
@@ -286,6 +333,11 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	if result.action == 's' {
 		d.togglePickerSort()
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		d.invalidateRender(sess, ac, true, "picker.go")
+		return
+	}
+	if (result.action == '\r' || result.action == '\n') && !ok && cursorOK && (cursor.RemoteTarget != nil || cursor.RemoteHost != "") {
+		d.notifyRemotePickerUnavailable(sess, cursor)
 		d.invalidateRender(sess, ac, true, "picker.go")
 		return
 	}
@@ -379,11 +431,20 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	previous, previousGeneration := ac.overlays.pickerPreviewSession, ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerPreviewGeneration++
 	generation := ac.overlays.pickerPreviewGeneration
+	if ac.overlays.pickerRemotePreviewCancel != nil {
+		ac.overlays.pickerRemotePreviewCancel()
+		ac.overlays.pickerRemotePreviewCancel = nil
+	}
 	ac.overlays.pickerPreviewSession = nil
+	ac.overlays.pickerRemotePreview = picker.Preview{}
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
 	d.teardownPreviewSubscription(ac, previous, previousGeneration)
 	if !ok {
+		return
+	}
+	if target.RemoteTarget != nil {
+		d.startRemotePickerPreview(ac, target, generation)
 		return
 	}
 	targetSess, next := d.previewTarget(target, intent)
@@ -419,6 +480,130 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	// subscribePreviewFor is deliberately outside pickerMu. Revalidate after it
 	// returns and remove only this generation if selection changed meanwhile.
 	d.revalidatePreviewSubscription(ac, rc, targetSess, next, generation)
+}
+
+func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Target, generation uint64) {
+	if d == nil || ac == nil || target.RemoteTarget == nil || (d.remotePreviewClient == nil && !target.RemoteTarget.Stopped) {
+		return
+	}
+	width, height := remotePickerPreviewSize(ac.sizeSnapshot())
+	if width == 0 || height == 0 {
+		return
+	}
+	ctx := d.serveCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	previewCtx, cancel := context.WithCancel(ctx)
+	ac.overlays.pickerMu.Lock()
+	if ac.overlays.picker == nil || ac.overlays.pickerPreviewGeneration != generation {
+		ac.overlays.pickerMu.Unlock()
+		cancel()
+		return
+	}
+	ac.overlays.pickerRemotePreviewCancel = cancel
+	remoteTarget := *target.RemoteTarget
+	message := "loading remote preview…"
+	if remoteTarget.Stopped {
+		message = "stopped session — preview unavailable"
+	}
+	ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, message)
+	if remoteTarget.Stopped {
+		ac.overlays.pickerRemotePreviewCancel = nil
+		ac.overlays.pickerMu.Unlock()
+		cancel()
+		if sess := ac.currentAttachmentSession(); sess != nil {
+			d.invalidateRender(sess, ac, false, "remote picker preview")
+		}
+		return
+	}
+	ac.overlays.pickerMu.Unlock()
+	go func() {
+		defer cancel()
+		previewClock := d.clock
+		if previewClock == nil {
+			previewClock = systemClock{}
+		}
+		debounce := previewClock.NewTimer(remotePickerPreviewDebounce)
+		defer debounce.Stop()
+		select {
+		case <-debounce.C():
+		case <-previewCtx.Done():
+			return
+		}
+		preview, err := d.fetchRemotePreview(previewCtx, remoteTarget, width, height)
+		if err != nil {
+			ac.overlays.pickerMu.Lock()
+			matching := false
+			if ac.overlays.pickerPreviewGeneration == generation && ac.overlays.picker != nil {
+				selected, stillSelected := ac.overlays.picker.Selected()
+				matching = stillSelected && pickerTargetsEqual(selected, target)
+				if matching {
+					ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, "remote preview unavailable")
+				}
+			}
+			ac.overlays.pickerMu.Unlock()
+			if matching {
+				if sess := ac.currentAttachmentSession(); sess != nil {
+					d.invalidateRender(sess, ac, false, "remote picker preview")
+				}
+			}
+			return
+		}
+		if refreshed, refreshErr := d.awaitRemotePreviewRefresh(previewCtx, remoteTarget, width, height); refreshErr == nil {
+			preview = refreshed
+		} else if previewCtx.Err() != nil {
+			return
+		}
+		rows := preview.FrameRows()
+		candidate := picker.Preview{Rows: rows, Width: int(preview.Width), Height: int(preview.Height)}
+		ac.overlays.pickerMu.Lock()
+		if ac.overlays.pickerPreviewGeneration != generation || ac.overlays.picker == nil {
+			ac.overlays.pickerMu.Unlock()
+			return
+		}
+		selected, stillSelected := ac.overlays.picker.Selected()
+		if !stillSelected || !pickerTargetsEqual(selected, target) {
+			ac.overlays.pickerMu.Unlock()
+			return
+		}
+		ac.overlays.pickerRemotePreview = candidate
+		ac.overlays.pickerRemotePreviewCancel = nil
+		ac.overlays.pickerMu.Unlock()
+		if sess := ac.currentAttachmentSession(); sess != nil {
+			d.invalidateRender(sess, ac, false, "remote picker preview")
+		}
+	}()
+}
+
+func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {
+	layout := picker.ChooseLayout(size)
+	width, height := layout.Preview.Width, layout.Preview.Height
+	if width <= 0 || height <= 0 {
+		return 0, 0
+	}
+	return uint16(min(width, ports.RemotePreviewMaxWidth)), uint16(min(height, ports.RemotePreviewMaxHeight))
+}
+
+func staticRemotePickerPreview(width, height uint16, message string) picker.Preview {
+	if width == 0 || height == 0 {
+		return picker.Preview{}
+	}
+	rows := make([][]renderer.Cell, int(height))
+	style := renderer.DefaultStyle()
+	for y := range rows {
+		rows[y] = make([]renderer.Cell, int(width))
+		for x := range rows[y] {
+			rows[y][x] = renderer.Cell{Rune: ' ', Style: style}
+		}
+	}
+	for x, r := range []rune(message) {
+		if x >= int(width) {
+			break
+		}
+		rows[0][x] = renderer.Cell{Rune: r, Style: style}
+	}
+	return picker.Preview{Rows: rows, Width: int(width), Height: int(height)}
 }
 
 func pickerPreviewCurrent(ac *attachedClient, targetSess *session, next *tab, generation uint64) bool {
@@ -463,7 +648,12 @@ func (d *Daemon) clearPreviewGeneration(ac *attachedClient, generation uint64) b
 	}
 	previous := ac.overlays.pickerPreviewSession
 	ac.overlays.pickerPreviewGeneration++
+	if ac.overlays.pickerRemotePreviewCancel != nil {
+		ac.overlays.pickerRemotePreviewCancel()
+		ac.overlays.pickerRemotePreviewCancel = nil
+	}
 	ac.overlays.pickerPreviewSession = nil
+	ac.overlays.pickerRemotePreview = picker.Preview{}
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
 	d.teardownPreviewSubscription(ac, previous, generation)
@@ -537,8 +727,9 @@ func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, g
 
 func pickerTargetsEqual(left, right picker.Target) bool {
 	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name ||
-		left.TabID != right.TabID || left.TabIndex != right.TabIndex || left.Stopped != right.Stopped ||
-		!remoteKeysEqual(left.RemoteKey, right.RemoteKey) {
+		left.RemoteHost != right.RemoteHost || left.TabID != right.TabID || left.TabIndex != right.TabIndex || left.Stopped != right.Stopped ||
+		left.UnavailableReason != right.UnavailableReason || !remoteKeysEqual(left.RemoteKey, right.RemoteKey) ||
+		!remoteTargetsEqual(left.RemoteTarget, right.RemoteTarget) {
 		return false
 	}
 	if left.ExpectedCreatedAt == nil || right.ExpectedCreatedAt == nil {
@@ -548,6 +739,13 @@ func pickerTargetsEqual(left, right picker.Target) bool {
 }
 
 func remoteKeysEqual(left, right *domain.RemoteSessionKey) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func remoteTargetsEqual(left, right *domain.RemoteSessionTarget) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
@@ -660,6 +858,13 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	if token.sess == nil || token.ac == nil || token.effect == nil {
 		return nil
 	}
+	if target.RemoteTarget != nil {
+		var key domain.RemoteSessionKey
+		if target.RemoteKey != nil {
+			key = *target.RemoteKey
+		}
+		return d.sendRemoteAttachTargetForAttachment(token, target, key, guard, action)
+	}
 	if target.RemoteKey != nil {
 		return d.sendRemoteAttachTargetForAttachment(token, target, *target.RemoteKey, guard, action)
 	}
@@ -676,14 +881,35 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 // the target is sent, the local attachment is detached and the client opens a
 // fresh connection to the owning daemon.
 func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, _ string) error {
-	if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" || !d.remotePickerTargetReady(key) {
+	var handoff ports.AttachTarget
+	if target.RemoteTarget != nil {
+		remoteTarget := *target.RemoteTarget
+		if err := remoteTarget.Validate(); err != nil || target.Stopped != remoteTarget.Stopped || !d.remotePickerTargetReadyTarget(remoteTarget) {
+			return errAttachmentTransition
+		}
+		if target.RemoteKey != nil {
+			if target.Session != target.RemoteKey.ID() || target.RemoteKey.Host != remoteTarget.Endpoint || target.RemoteKey.Name != remoteTarget.SessionName || target.RemoteKey.LifecycleID != remoteTarget.LifecycleID {
+				return errAttachmentTransition
+			}
+		}
+		handoff = ports.AttachTarget{
+			Endpoint:          remoteTarget.Endpoint,
+			Session:           remoteTarget.SessionName,
+			Intent:            ports.IntentAttach,
+			RemoteTarget:      &remoteTarget,
+			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}
+	} else {
+		if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" || !d.remotePickerTargetReady(key) {
+			return errAttachmentTransition
+		}
+		handoff = ports.AttachTarget{Endpoint: key.Host, Session: key.Name, Intent: ports.IntentAttach}
+	}
+	payload := ports.MarshalAttachTarget(handoff)
+	if payload == nil {
 		return errAttachmentTransition
 	}
-	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: ports.MarshalAttachTarget(ports.AttachTarget{
-		Endpoint: key.Host,
-		Session:  key.Name,
-		Intent:   ports.IntentAttach,
-	})}); err != nil {
+	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
 		return err
 	}
 	if guard.closePicker {
@@ -707,6 +933,51 @@ func (d *Daemon) remotePickerTargetReady(key domain.RemoteSessionKey) bool {
 			if session.Name == key.Name {
 				return d.remoteCatalog.status[key.Host] != remoteHostVersionMismatch
 			}
+		}
+	}
+	return false
+}
+
+func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget) bool {
+	if d == nil || target.Validate() != nil {
+		return false
+	}
+	d.remoteCatalog.mu.Lock()
+	defer d.remoteCatalog.mu.Unlock()
+	if d.remoteCatalog.status[target.Endpoint] != remoteHostFresh {
+		return false
+	}
+	for _, entry := range d.remoteCatalog.cache {
+		if entry.Host != target.Endpoint {
+			continue
+		}
+		for _, session := range entry.Sessions {
+			if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
+				continue
+			}
+			if target.Stopped != (session.State == "stopped") || session.State == "broken" {
+				return false
+			}
+			tabs := ports.CatalogTabs(session)
+			metadata := make([]domain.TabSelectorTab, 0, len(tabs))
+			for _, tab := range tabs {
+				metadata = append(metadata, domain.TabSelectorTab{ID: domain.TabStableID(tab.ID), Name: tab.Name})
+			}
+			if target.Stopped {
+				_, ok := target.StoppedTab.Resolve(metadata)
+				return ok
+			}
+			found := false
+			for _, tab := range tabs {
+				if tab.ID != string(target.LiveTabID) {
+					continue
+				}
+				if found {
+					return false
+				}
+				found = true
+			}
+			return found
 		}
 	}
 	return false

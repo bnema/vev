@@ -375,6 +375,9 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	preview := snapshotPickerPreview(nil)
 	if local && overlays.previewTab != tb {
 		preview = snapshotPickerPreview(overlays.previewTab)
+		if overlays.previewTab == nil && overlays.remotePreview.Height > 0 {
+			preview = overlays.remotePreview
+		}
 	}
 	if local {
 		d.refreshSessionFocusedTitles(sess)

@@ -483,6 +483,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	releaseConn()
 	closeOnce.Do(func() { close(readDone) })
 	hg.Wait()
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 	d.sessWg.Wait()
 }
 

@@ -3,8 +3,8 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 23 {
-		t.Fatalf("ProtocolVersion = %d, want 23", ProtocolVersion)
+	if ProtocolVersion != 24 {
+		t.Fatalf("ProtocolVersion = %d, want 24", ProtocolVersion)
 	}
 }
 
@@ -32,11 +32,11 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgDetach", MsgDetach}, {"MsgPing", MsgPing}, {"MsgList", MsgList},
 		{"MsgKill", MsgKill}, {"MsgTheme", MsgTheme}, {"MsgAck", MsgAck},
 		{"MsgImagePush", MsgImagePush}, {"MsgClientNotice", MsgClientNotice},
-		{"MsgCommand", MsgCommand}, {"MsgOutputResetRequest", MsgOutputResetRequest},
+		{"MsgCommand", MsgCommand}, {"MsgOutputResetRequest", MsgOutputResetRequest}, {"MsgRemotePreviewRequest", MsgRemotePreviewRequest},
 		{"MsgWelcome", MsgWelcome}, {"MsgError", MsgError}, {"MsgOutput", MsgOutput},
 		{"MsgDetached", MsgDetached}, {"MsgPong", MsgPong}, {"MsgSessions", MsgSessions},
 		{"MsgCommandResult", MsgCommandResult}, {"MsgSessionMeta", MsgSessionMeta},
-		{"MsgAttachTarget", MsgAttachTarget},
+		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

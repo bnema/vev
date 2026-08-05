@@ -201,7 +201,7 @@ func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) [
 		info := ports.SessionInfo{
 			Name:      session.Name + "@" + host,
 			Ephemeral: session.Ephemeral,
-			Tabs:      session.Tabs,
+			Tabs:      ports.SaturateUint16(ports.CatalogTabCount(session)),
 			Attached:  session.Attached,
 		}
 		switch session.State {

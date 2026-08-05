@@ -695,9 +695,98 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 	}
 	e.d.mu.Lock()
 	sessions := sessionsSnapshot(e.d.sessions)
+	stopped := make([]stoppedSession, 0, len(e.d.stopped))
+	for _, entry := range e.d.stopped {
+		if !entry.purging {
+			stopped = append(stopped, entry)
+		}
+	}
 	e.d.mu.Unlock()
+
+	// Test doubles and pre-parity daemons may not have durable lifecycle
+	// identities. Keep their count-only catalogue form readable so direct CLI
+	// discovery remains compatible; every production session has a non-zero
+	// incarnation and therefore takes the strict complete-schema path below.
+	legacy := false
+	for _, sess := range sessions {
+		if sess.incarnation == (domain.IncarnationID{}) {
+			legacy = true
+			break
+		}
+	}
+	if !legacy {
+		for _, entry := range stopped {
+			if entry.incarnation == (domain.IncarnationID{}) {
+				legacy = true
+				break
+			}
+		}
+	}
+	if legacy {
+		return e.remoteCatalogLegacy(sessions)
+	}
+
+	rows := make([]ports.RemoteCatalogSession, 0, len(sessions)+len(stopped))
+	for _, sess := range sessions {
+		snap := sess.snapshotView(viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: false})
+		tabs, err := remoteCatalogTabs(snap)
+		if err != nil {
+			return "", err
+		}
+		row := ports.RemoteCatalogSession{
+			LifecycleID: snap.incarnation,
+			Name:        snap.name,
+			State:       "running",
+			Ephemeral:   snap.ephemeral,
+			Tabs:        tabs,
+			Attached:    snap.attached,
+			LastUsedSeq: snap.mruAt,
+		}
+		if len(tabs) != 0 {
+			row.ActiveTabID = tabs[min(snap.defaultTab, len(tabs)-1)].ID
+		}
+		rows = append(rows, row)
+	}
+	for _, entry := range stopped {
+		tabs, err := remoteCatalogStoppedTabs(entry)
+		if err != nil {
+			return "", err
+		}
+		state := "stopped"
+		reason := ""
+		if entry.state == ports.SessionBroken || entry.record.DegradedReason != "" {
+			state = "broken"
+			reason = "session_broken"
+		}
+		rows = append(rows, ports.RemoteCatalogSession{
+			LifecycleID: entry.incarnation,
+			Name:        entry.name,
+			State:       state,
+			Ephemeral:   false,
+			Tabs:        tabs,
+			LastUsedSeq: entry.lastUsedSeq,
+			Reason:      reason,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Name != rows[j].Name {
+			return rows[i].Name < rows[j].Name
+		}
+		return rows[i].LifecycleID.String() < rows[j].LifecycleID.String()
+	})
+	catalog := ports.RemoteCatalog{
+		ProtocolVersion: ports.ProtocolVersion,
+		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
+		Sessions:        rows,
+	}
+	if err := ports.ValidateRemoteCatalog(catalog); err != nil {
+		return "", err
+	}
+	return marshalListing(catalog)
+}
+
+func (e controlExec) remoteCatalogLegacy(sessions []*session) (string, error) {
 	rows := make([]ports.RemoteCatalogSession, 0, len(sessions))
-	// Stopped sessions live in d.stopped and are intentionally not in this listing.
 	for _, sess := range sessions {
 		snap := sess.snapshotView(viewOptions{})
 		rows = append(rows, ports.RemoteCatalogSession{
@@ -709,10 +798,46 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
-	return marshalListing(ports.RemoteCatalog{
-		ProtocolVersion: ports.ProtocolVersion,
-		Sessions:        rows,
-	})
+	catalog := ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: rows}
+	if err := ports.ValidateRemoteCatalog(catalog); err != nil {
+		return "", err
+	}
+	return marshalListing(catalog)
+}
+
+func remoteCatalogTabs(view sessionView) ([]ports.RemoteCatalogTab, error) {
+	if len(view.tabs) > ports.RemoteCatalogMaxTabsPerSess {
+		return nil, fmt.Errorf("remote catalog: session %q has too many tabs", view.name)
+	}
+	tabs := make([]ports.RemoteCatalogTab, 0, len(view.tabs))
+	for i, tab := range view.tabs {
+		tabs = append(tabs, ports.RemoteCatalogTab{
+			ID:        string(tab.id),
+			Index:     uint16(i),
+			Name:      tab.name,
+			Detail:    tabTitleDetail(tab.name, tab.focusedTitle),
+			Attention: tab.attention,
+		})
+	}
+	return tabs, nil
+}
+
+func remoteCatalogStoppedTabs(entry stoppedSession) ([]ports.RemoteCatalogTab, error) {
+	records := entry.tabRecords
+	if len(records) == 0 && len(entry.tabNames) != 0 {
+		records = make([]domain.CatalogueTabRecord, len(entry.tabNames))
+		for i, name := range entry.tabNames {
+			records[i].Name = name
+		}
+	}
+	if len(records) > ports.RemoteCatalogMaxTabsPerSess {
+		return nil, fmt.Errorf("remote catalog: session %q has too many tabs", entry.name)
+	}
+	tabs := make([]ports.RemoteCatalogTab, 0, len(records))
+	for i, record := range records {
+		tabs = append(tabs, ports.RemoteCatalogTab{ID: string(record.StableID), Index: uint16(i), Name: record.Name})
+	}
+	return tabs, nil
 }
 
 func (e controlExec) ListTabs(asJSON bool) (string, error) {

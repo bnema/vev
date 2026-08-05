@@ -65,6 +65,23 @@ const (
 	IntentResume    uint8 = 3
 )
 
+// EnvironmentPolicy controls which side owns the environment used for future
+// PTY children. Direct CLI attaches keep the historical client-owned policy;
+// picker handoffs use daemon ownership so a local environment cannot leak into
+// a remote daemon.
+type EnvironmentPolicy uint8
+
+const (
+	EnvironmentPolicyClientOwned EnvironmentPolicy = iota
+	EnvironmentPolicyDaemonOwned
+)
+
+func validEnvironmentPolicy(policy EnvironmentPolicy) bool {
+	return policy == EnvironmentPolicyClientOwned || policy == EnvironmentPolicyDaemonOwned
+}
+
+const remoteTargetWireVersion uint8 = 1
+
 // Capability bits advertised in Welcome.
 const (
 	CapabilityResume  uint32 = 1 << 0
@@ -112,6 +129,11 @@ type Hello struct {
 	// Env is the complete exported client environment for future PTY children.
 	// Entries are opaque strings so their ordering and contents are preserved.
 	Env []string
+	// RemoteTarget is present only for a picker-selected remote attach. It is
+	// carried through reconnects and is validated by the owning daemon before
+	// it creates or publishes any session resources.
+	RemoteTarget      *domain.RemoteSessionTarget
+	EnvironmentPolicy EnvironmentPolicy
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -223,12 +245,15 @@ type Output struct {
 	Data         []byte
 }
 
-// AttachTarget identifies the endpoint and session selected for a new
-// attachment. It deliberately carries no viewport, resume, or session state.
+// AttachTarget identifies the endpoint and exact session/tab selected for a
+// new attachment. Endpoint and Session remain the compatibility route fields;
+// RemoteTarget is the authoritative picker identity when non-nil.
 type AttachTarget struct {
-	Endpoint string
-	Session  string
-	Intent   uint8
+	Endpoint          string
+	Session           string
+	Intent            uint8
+	RemoteTarget      *domain.RemoteSessionTarget
+	EnvironmentPolicy EnvironmentPolicy
 }
 
 // Detached tells a client it has been disconnected from its session and why.
@@ -341,6 +366,175 @@ func (w *payloadWriter) putLongString(s string) {
 func (w *payloadWriter) putLongBytes(b []byte) {
 	w.putUint32(uint32(len(b)))
 	w.b = append(w.b, b...)
+}
+
+func marshalRemoteTargetExtension(w *payloadWriter, target *domain.RemoteSessionTarget, policy EnvironmentPolicy) {
+	w.putUint8(remoteTargetWireVersion)
+	if target == nil {
+		w.putBool(false)
+	} else {
+		w.putBool(true)
+		w.putString(target.Endpoint)
+		w.putString(target.DisplayOrigin)
+		w.putBytes(target.LifecycleID[:])
+		w.putString(target.SessionName)
+		w.putBool(target.Stopped)
+		w.putString(string(target.LiveTabID))
+		w.putUint8(uint8(target.StoppedTab.Kind))
+		switch target.StoppedTab.Kind {
+		case domain.TabSelectorByStableID:
+			w.putString(string(target.StoppedTab.StableID))
+		case domain.TabSelectorByOrdinal:
+			w.putUint16(target.StoppedTab.Ordinal)
+			w.putString(target.StoppedTab.RawName)
+			w.putUint16(target.StoppedTab.ExpectedCount)
+		}
+	}
+	w.putUint8(uint8(policy))
+}
+
+func skipRemoteTargetExtension(r *payloadReader) error {
+	version, err := r.getUint8()
+	if err != nil {
+		return err
+	}
+	if version != remoteTargetWireVersion {
+		return errInvalidEnum
+	}
+	present, err := r.getBool()
+	if err != nil {
+		return err
+	}
+	if present {
+		if err := r.skipString(); err != nil {
+			return err
+		}
+		if err := r.skipString(); err != nil {
+			return err
+		}
+		if _, err := r.getBytes(16); err != nil {
+			return err
+		}
+		if err := r.skipString(); err != nil {
+			return err
+		}
+		if _, err := r.getBool(); err != nil {
+			return err
+		}
+		if err := r.skipString(); err != nil {
+			return err
+		}
+		kind, err := r.getUint8()
+		if err != nil {
+			return err
+		}
+		switch domain.TabSelectorKind(kind) {
+		case domain.TabSelectorByStableID:
+			if err := r.skipString(); err != nil {
+				return err
+			}
+		case domain.TabSelectorByOrdinal:
+			if _, err := r.getUint16(); err != nil {
+				return err
+			}
+			if err := r.skipString(); err != nil {
+				return err
+			}
+			if _, err := r.getUint16(); err != nil {
+				return err
+			}
+		case 0:
+		default:
+			return errInvalidEnum
+		}
+	}
+	policy, err := r.getUint8()
+	if err != nil {
+		return err
+	}
+	if !validEnvironmentPolicy(EnvironmentPolicy(policy)) {
+		return errInvalidEnum
+	}
+	return nil
+}
+
+func unmarshalRemoteTarget(r *payloadReader) (*domain.RemoteSessionTarget, error) {
+	present, err := r.getBool()
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return nil, nil
+	}
+	target := &domain.RemoteSessionTarget{}
+	if target.Endpoint, err = r.getString(); err != nil {
+		return nil, err
+	}
+	if target.DisplayOrigin, err = r.getString(); err != nil {
+		return nil, err
+	}
+	id, err := r.getBytes(16)
+	if err != nil {
+		return nil, err
+	}
+	copy(target.LifecycleID[:], id)
+	if target.SessionName, err = r.getString(); err != nil {
+		return nil, err
+	}
+	if target.Stopped, err = r.getBool(); err != nil {
+		return nil, err
+	}
+	liveID, err := r.getString()
+	if err != nil {
+		return nil, err
+	}
+	target.LiveTabID = domain.TabStableID(liveID)
+	kind, err := r.getUint8()
+	if err != nil {
+		return nil, err
+	}
+	target.StoppedTab.Kind = domain.TabSelectorKind(kind)
+	switch target.StoppedTab.Kind {
+	case domain.TabSelectorByStableID:
+		stableID, err := r.getString()
+		if err != nil {
+			return nil, err
+		}
+		target.StoppedTab.StableID = domain.TabStableID(stableID)
+	case domain.TabSelectorByOrdinal:
+		if target.StoppedTab.Ordinal, err = r.getUint16(); err != nil {
+			return nil, err
+		}
+		if target.StoppedTab.RawName, err = r.getString(); err != nil {
+			return nil, err
+		}
+		if target.StoppedTab.ExpectedCount, err = r.getUint16(); err != nil {
+			return nil, err
+		}
+	case 0:
+	default:
+		return nil, errInvalidEnum
+	}
+	return target, nil
+}
+
+func unmarshalRemoteTargetExtension(r *payloadReader) (*domain.RemoteSessionTarget, EnvironmentPolicy, error) {
+	version, err := r.getUint8()
+	if err != nil {
+		return nil, 0, err
+	}
+	if version != remoteTargetWireVersion {
+		return nil, 0, errInvalidEnum
+	}
+	target, err := unmarshalRemoteTarget(r)
+	if err != nil {
+		return nil, 0, err
+	}
+	policy, err := r.getUint8()
+	if err != nil {
+		return nil, 0, err
+	}
+	return target, EnvironmentPolicy(policy), nil
 }
 
 // payloadReader consumes a message payload field by field in wire order,
@@ -501,6 +695,9 @@ func ValidateHello(h Hello) error {
 	if err := ValidateSize(h.Size); err != nil {
 		return fmt.Errorf("%w: size", ErrInvalidHello)
 	}
+	if !validEnvironmentPolicy(h.EnvironmentPolicy) {
+		return ErrInvalidHello
+	}
 	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || len(h.Env) > math.MaxUint32 {
 		return ErrInvalidHello
 	}
@@ -508,6 +705,21 @@ func ValidateHello(h Hello) error {
 		if uint64(len(entry)) > math.MaxUint32 {
 			return ErrInvalidHello
 		}
+	}
+	if h.RemoteTarget == nil {
+		if h.EnvironmentPolicy != EnvironmentPolicyClientOwned {
+			return ErrInvalidHello
+		}
+		return nil
+	}
+	if h.Intent != IntentAttach && h.Intent != IntentResume {
+		return ErrInvalidHello
+	}
+	if err := validateWireRemoteTarget(*h.RemoteTarget); err != nil {
+		return fmt.Errorf("%w: remote target: %v", ErrInvalidHello, err)
+	}
+	if h.Name != h.RemoteTarget.SessionName {
+		return ErrInvalidHello
 	}
 	return nil
 }
@@ -541,8 +753,8 @@ func ValidateAck(m Ack) error {
 	return nil
 }
 
-// ValidateAttachTarget validates only the endpoint, session, and intent
-// fields carried by the server attach-target message.
+// ValidateAttachTarget validates route fields and, when present, the exact
+// picker identity carried by the handoff.
 func ValidateAttachTarget(m AttachTarget) error {
 	if m.Endpoint == "" || m.Session == "" || len(m.Endpoint) > math.MaxUint16 || len(m.Session) > math.MaxUint16 {
 		return ErrInvalidAttachTarget
@@ -550,11 +762,39 @@ func ValidateAttachTarget(m AttachTarget) error {
 	if m.Intent != IntentEphemeral && m.Intent != IntentNew && m.Intent != IntentAttach && m.Intent != IntentResume {
 		return ErrInvalidAttachTarget
 	}
+	if !validEnvironmentPolicy(m.EnvironmentPolicy) {
+		return ErrInvalidAttachTarget
+	}
+	if m.RemoteTarget == nil {
+		if m.EnvironmentPolicy != EnvironmentPolicyClientOwned {
+			return ErrInvalidAttachTarget
+		}
+		return nil
+	}
+	if m.Intent != IntentAttach && m.Intent != IntentResume {
+		return ErrInvalidAttachTarget
+	}
+	if err := validateWireRemoteTarget(*m.RemoteTarget); err != nil {
+		return fmt.Errorf("%w: remote target: %v", ErrInvalidAttachTarget, err)
+	}
+	if m.Endpoint != m.RemoteTarget.Endpoint || m.Session != m.RemoteTarget.SessionName {
+		return ErrInvalidAttachTarget
+	}
 	return nil
+}
+
+func validateWireRemoteTarget(target domain.RemoteSessionTarget) error {
+	if len(target.Endpoint) > math.MaxUint16 || len(target.DisplayOrigin) > math.MaxUint16 || len(target.SessionName) > math.MaxUint16 || len(target.LiveTabID) > math.MaxUint16 || len(target.StoppedTab.RawName) > math.MaxUint16 {
+		return errors.New("remote target string too long")
+	}
+	return target.Validate()
 }
 
 // MarshalHello encodes h into a Hello message payload.
 func MarshalHello(h Hello) []byte {
+	if err := ValidateHello(h); err != nil {
+		return nil
+	}
 	w := payloadWriter{}
 	w.putUint16(h.Version)
 	w.putUint8(h.Intent)
@@ -570,6 +810,9 @@ func MarshalHello(h Hello) []byte {
 	w.putUint32(uint32(len(h.Env)))
 	for _, entry := range h.Env {
 		w.putLongString(entry)
+	}
+	if h.RemoteTarget != nil || h.EnvironmentPolicy != EnvironmentPolicyClientOwned {
+		marshalRemoteTargetExtension(&w, h.RemoteTarget, h.EnvironmentPolicy)
 	}
 	return w.b
 }
@@ -623,6 +866,11 @@ func preflightHello(b []byte) error {
 	}
 	for range int(envCount) {
 		if err := r.skipLongString(); err != nil {
+			return err
+		}
+	}
+	if len(r.b) != 0 {
+		if err := skipRemoteTargetExtension(&r); err != nil {
 			return err
 		}
 	}
@@ -696,6 +944,11 @@ func UnmarshalHello(b []byte) (Hello, error) {
 				return Hello{}, err
 			}
 			h.Env = append(h.Env, entry)
+		}
+	}
+	if len(r.b) != 0 {
+		if h.RemoteTarget, h.EnvironmentPolicy, err = unmarshalRemoteTargetExtension(&r); err != nil {
+			return Hello{}, err
 		}
 	}
 	if err := r.done(); err != nil {
@@ -1141,6 +1394,9 @@ func MarshalAttachTarget(m AttachTarget) []byte {
 	w.putString(m.Endpoint)
 	w.putString(m.Session)
 	w.putUint8(m.Intent)
+	if m.RemoteTarget != nil || m.EnvironmentPolicy != EnvironmentPolicyClientOwned {
+		marshalRemoteTargetExtension(&w, m.RemoteTarget, m.EnvironmentPolicy)
+	}
 	return w.b
 }
 
@@ -1162,6 +1418,11 @@ func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
 	if err != nil || (intent != IntentEphemeral && intent != IntentNew && intent != IntentAttach && intent != IntentResume) {
 		return AttachTarget{}, ErrInvalidAttachTarget
 	}
+	if len(probe.b) != 0 {
+		if err := skipRemoteTargetExtension(&probe); err != nil {
+			return AttachTarget{}, ErrInvalidAttachTarget
+		}
+	}
 	if err := probe.done(); err != nil {
 		return AttachTarget{}, ErrInvalidAttachTarget
 	}
@@ -1176,6 +1437,11 @@ func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
 	}
 	if m.Intent, err = r.getUint8(); err != nil {
 		return AttachTarget{}, err
+	}
+	if len(r.b) != 0 {
+		if m.RemoteTarget, m.EnvironmentPolicy, err = unmarshalRemoteTargetExtension(&r); err != nil {
+			return AttachTarget{}, err
+		}
 	}
 	if err := r.done(); err != nil {
 		return AttachTarget{}, err
@@ -1408,4 +1674,272 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 		return Sessions{}, err
 	}
 	return Sessions{Sessions: sessions}, nil
+}
+
+func putInt16(w *payloadWriter, n int) { w.putUint16(uint16(int16(n))) }
+
+func getInt16(r *payloadReader) (int, error) {
+	n, err := r.getUint16()
+	return int(int16(n)), err
+}
+
+func putRGB(w *payloadWriter, c renderer.RGB) {
+	w.putUint8(c.R)
+	w.putUint8(c.G)
+	w.putUint8(c.B)
+}
+
+func getRGB(r *payloadReader) (renderer.RGB, error) {
+	red, err := r.getUint8()
+	if err != nil {
+		return renderer.RGB{}, err
+	}
+	green, err := r.getUint8()
+	if err != nil {
+		return renderer.RGB{}, err
+	}
+	blue, err := r.getUint8()
+	if err != nil {
+		return renderer.RGB{}, err
+	}
+	return renderer.RGB{R: red, G: green, B: blue}, nil
+}
+
+func putPreviewStyle(w *payloadWriter, s renderer.Style) {
+	var flags uint8
+	if s.Bold {
+		flags |= 1 << 0
+	}
+	if s.Italic {
+		flags |= 1 << 1
+	}
+	if s.Inverse {
+		flags |= 1 << 2
+	}
+	if s.HasForegroundRGB {
+		flags |= 1 << 3
+	}
+	if s.HasBackgroundRGB {
+		flags |= 1 << 4
+	}
+	if s.HasUnderlineColor {
+		flags |= 1 << 5
+	}
+	if s.HasUnderlineColorRGB {
+		flags |= 1 << 6
+	}
+	w.putUint8(flags)
+	w.putUint16(uint16(s.Attrs))
+	putInt16(w, s.Foreground)
+	putInt16(w, s.Background)
+	w.putUint8(uint8(s.UnderlineStyle))
+	putInt16(w, s.UnderlineColor)
+	putRGB(w, s.ForegroundRGB)
+	putRGB(w, s.BackgroundRGB)
+	putRGB(w, s.UnderlineColorRGB)
+}
+
+func getPreviewStyle(r *payloadReader) (renderer.Style, error) {
+	flags, err := r.getUint8()
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	if flags&0x80 != 0 {
+		return renderer.Style{}, ErrRemotePreviewUnsupportedStyle
+	}
+	attrs, err := r.getUint16()
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	fg, err := getInt16(r)
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	bg, err := getInt16(r)
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	ul, err := r.getUint8()
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	ulc, err := getInt16(r)
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	fgrgb, err := getRGB(r)
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	bgrgb, err := getRGB(r)
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	ulrgb, err := getRGB(r)
+	if err != nil {
+		return renderer.Style{}, err
+	}
+	return renderer.Style{Bold: flags&1 != 0, Italic: flags&(1<<1) != 0, Inverse: flags&(1<<2) != 0,
+		HasForegroundRGB: flags&(1<<3) != 0, HasBackgroundRGB: flags&(1<<4) != 0,
+		HasUnderlineColor: flags&(1<<5) != 0, HasUnderlineColorRGB: flags&(1<<6) != 0,
+		Attrs: renderer.StyleAttrs(attrs), Foreground: fg, Background: bg, UnderlineStyle: renderer.UnderlineStyle(ul), UnderlineColor: ulc,
+		ForegroundRGB: fgrgb, BackgroundRGB: bgrgb, UnderlineColorRGB: ulrgb}, nil
+}
+
+func MarshalRemotePreviewRequest(request RemotePreviewRequest) []byte {
+	if ValidateRemotePreviewRequest(request) != nil {
+		return nil
+	}
+	w := payloadWriter{}
+	w.putUint16(request.Version)
+	w.putBytes(request.Target.LifecycleID[:])
+	w.putString(request.Target.Endpoint)
+	w.putString(request.Target.DisplayOrigin)
+	w.putString(request.Target.SessionName)
+	w.putString(string(request.Target.LiveTabID))
+	w.putUint16(request.Width)
+	w.putUint16(request.Height)
+	return w.b
+}
+
+func UnmarshalRemotePreviewRequest(data []byte) (RemotePreviewRequest, error) {
+	if len(data) > RemotePreviewMaxBytes {
+		return RemotePreviewRequest{}, ErrInvalidRemotePreviewRequest
+	}
+	r := payloadReader{b: data}
+	var q RemotePreviewRequest
+	var err error
+	if q.Version, err = r.getUint16(); err != nil {
+		return q, err
+	}
+	id, err := r.getBytes(16)
+	if err != nil {
+		return q, err
+	}
+	copy(q.Target.LifecycleID[:], id)
+	if q.Target.Endpoint, err = r.getString(); err != nil {
+		return q, err
+	}
+	if q.Target.DisplayOrigin, err = r.getString(); err != nil {
+		return q, err
+	}
+	if q.Target.SessionName, err = r.getString(); err != nil {
+		return q, err
+	}
+	tab, err := r.getString()
+	if err != nil {
+		return q, err
+	}
+	q.Target.LiveTabID = domain.TabStableID(tab)
+	if q.Width, err = r.getUint16(); err != nil {
+		return q, err
+	}
+	if q.Height, err = r.getUint16(); err != nil {
+		return q, err
+	}
+	if err := r.done(); err != nil {
+		return q, err
+	}
+	if err := ValidateRemotePreviewRequest(q); err != nil {
+		return q, err
+	}
+	return q, nil
+}
+
+const previewCellWireSize = 4 + 1 + 1 + 2 + 2 + 2 + 1 + 2 + 3 + 3 + 3
+
+func MarshalRemotePreview(preview RemotePreview) []byte {
+	if ValidateRemotePreview(preview) != nil {
+		return nil
+	}
+	w := payloadWriter{}
+	w.putUint16(preview.Version)
+	w.putUint8(uint8(preview.Status))
+	w.putBytes(preview.LifecycleID[:])
+	w.putString(string(preview.TabID))
+	w.putUint64(preview.Revision)
+	w.putUint16(preview.Width)
+	w.putUint16(preview.Height)
+	w.putUint32(uint32(len(preview.Cells)))
+	for _, cell := range preview.Cells {
+		var flags uint8
+		if cell.Continuation {
+			flags = 1
+		}
+		w.putUint32(uint32(cell.Rune))
+		w.putUint8(flags)
+		putPreviewStyle(&w, cell.Style)
+	}
+	return w.b
+}
+
+func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
+	if len(data) > RemotePreviewMaxBytes {
+		return RemotePreview{}, ErrRemotePreviewTooLarge
+	}
+	r := payloadReader{b: data}
+	var p RemotePreview
+	var err error
+	if p.Version, err = r.getUint16(); err != nil {
+		return p, err
+	}
+	status, err := r.getUint8()
+	if err != nil {
+		return p, err
+	}
+	p.Status = RemotePreviewStatus(status)
+	id, err := r.getBytes(16)
+	if err != nil {
+		return p, err
+	}
+	copy(p.LifecycleID[:], id)
+	tab, err := r.getString()
+	if err != nil {
+		return p, err
+	}
+	p.TabID = domain.TabStableID(tab)
+	if p.Revision, err = r.getUint64(); err != nil {
+		return p, err
+	}
+	if p.Width, err = r.getUint16(); err != nil {
+		return p, err
+	}
+	if p.Height, err = r.getUint16(); err != nil {
+		return p, err
+	}
+	count, err := r.getUint32()
+	if err != nil {
+		return p, err
+	}
+	if count > RemotePreviewMaxCells || uint64(count) > uint64(len(r.b)/previewCellWireSize) {
+		return p, ErrRemotePreviewTooLarge
+	}
+	if count != 0 {
+		p.Cells = make([]renderer.Cell, 0, int(count))
+		for range int(count) {
+			runeValue, e := r.getUint32()
+			if e != nil {
+				return p, e
+			}
+			flags, e := r.getUint8()
+			if e != nil {
+				return p, e
+			}
+			if flags&^uint8(1) != 0 {
+				return p, ErrInvalidRemotePreview
+			}
+			style, e := getPreviewStyle(&r)
+			if e != nil {
+				return p, e
+			}
+			p.Cells = append(p.Cells, renderer.Cell{Rune: rune(runeValue), Continuation: flags&1 != 0, Style: style})
+		}
+	}
+	if err := r.done(); err != nil {
+		return p, err
+	}
+	if err := ValidateRemotePreview(p); err != nil {
+		return p, err
+	}
+	return p, nil
 }

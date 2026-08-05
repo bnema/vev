@@ -797,7 +797,7 @@ func TestRemoteCatalogTabCountSaturates(t *testing.T) {
 	var catalog ports.RemoteCatalog
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
 	require.Equal(t, []ports.RemoteCatalogSession{{
-		Name: "work", State: "running", Ephemeral: true, Tabs: ^uint16(0), Attached: false,
+		Name: "work", State: "running", Ephemeral: true, Tabs: int(^uint16(0)), Attached: false,
 	}}, catalog.Sessions)
 }
 

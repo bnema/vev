@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // IncarnationID permanently distinguishes uses of the same session name.
@@ -18,15 +19,26 @@ type CheckpointRef struct {
 	ManifestDigest [32]byte
 }
 
+// CatalogueTabRecord is the durable ordered metadata for one stopped tab.
+// StableID is empty for records migrated from the legacy TabNames-only format.
+type CatalogueTabRecord struct {
+	StableID TabStableID
+	Name     string
+}
+
 // CatalogueRecord is the durable source of truth for one named session.
 type CatalogueRecord struct {
-	Name           string
-	IncarnationID  IncarnationID
-	Cwd            string
-	CreatedAt      int64
-	UpdatedAt      int64
-	LastUsedSeq    uint64
+	Name          string
+	IncarnationID IncarnationID
+	Cwd           string
+	CreatedAt     int64
+	UpdatedAt     int64
+	LastUsedSeq   uint64
+	// TabNames remains the compatibility metadata consumed by older recovery
+	// paths. TabRecords is authoritative when present and retains trailing
+	// unnamed tabs instead of silently trimming them.
 	TabNames       []string
+	TabRecords     []CatalogueTabRecord
 	Committed      *CheckpointRef
 	DegradedReason string
 }
@@ -44,7 +56,7 @@ func (r *CheckpointRef) Equal(other *CheckpointRef) bool {
 func (r CatalogueRecord) Equal(other CatalogueRecord) bool {
 	return r.Name == other.Name && r.IncarnationID == other.IncarnationID && r.Cwd == other.Cwd &&
 		r.CreatedAt == other.CreatedAt && r.UpdatedAt == other.UpdatedAt && r.LastUsedSeq == other.LastUsedSeq &&
-		slices.Equal(r.TabNames, other.TabNames) && r.Committed.Equal(other.Committed) &&
+		slices.Equal(r.TabNames, other.TabNames) && slices.Equal(r.TabRecords, other.TabRecords) && r.Committed.Equal(other.Committed) &&
 		r.DegradedReason == other.DegradedReason
 }
 
@@ -57,6 +69,7 @@ type CatalogueMetadataUpdate struct {
 	UpdatedAt     *int64
 	LastUsedSeq   *uint64
 	TabNames      *[]string
+	TabRecords    *[]CatalogueTabRecord
 }
 
 // MetadataUpdate returns a complete mutable-metadata update for r. Catalogue
@@ -64,9 +77,10 @@ type CatalogueMetadataUpdate struct {
 func (r CatalogueRecord) MetadataUpdate() CatalogueMetadataUpdate {
 	cwd, updatedAt, lastUsedSeq := r.Cwd, r.UpdatedAt, r.LastUsedSeq
 	tabNames := append([]string(nil), r.TabNames...)
+	tabRecords := append([]CatalogueTabRecord(nil), r.TabRecords...)
 	return CatalogueMetadataUpdate{
 		Name: r.Name, IncarnationID: r.IncarnationID,
-		Cwd: &cwd, UpdatedAt: &updatedAt, LastUsedSeq: &lastUsedSeq, TabNames: &tabNames,
+		Cwd: &cwd, UpdatedAt: &updatedAt, LastUsedSeq: &lastUsedSeq, TabNames: &tabNames, TabRecords: &tabRecords,
 	}
 }
 
@@ -119,6 +133,16 @@ func (r CatalogueRecord) Validate() error {
 		return errors.New("zero catalogue incarnation ID")
 	}
 
+	for _, tab := range r.TabRecords {
+		if tab.StableID != "" {
+			if err := ValidateTabStableID(tab.StableID); err != nil {
+				return errors.New("invalid catalogue tab metadata")
+			}
+		}
+		if !utf8.ValidString(tab.Name) {
+			return errors.New("invalid catalogue tab metadata")
+		}
+	}
 	if r.DegradedReason != "" && r.Committed == nil {
 		return errors.New("broken session has no committed checkpoint")
 	}

@@ -114,6 +114,7 @@ func (c *CatalogClient) List(ctx context.Context, target string) (ports.RemoteCa
 
 type catalogEnvelope struct {
 	ProtocolVersion *uint16                       `json:"protocol_version"`
+	SchemaVersion   *uint16                       `json:"schema_version"`
 	Sessions        *[]ports.RemoteCatalogSession `json:"sessions"`
 }
 
@@ -130,10 +131,22 @@ func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
 		return ports.RemoteCatalog{}, err
 	}
 
+	schemaVersion := uint16(0)
+	if envelope.SchemaVersion != nil {
+		schemaVersion = *envelope.SchemaVersion
+	}
 	if *envelope.ProtocolVersion != ports.ProtocolVersion {
 		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
 			Got:  *envelope.ProtocolVersion,
 			Want: ports.ProtocolVersion,
+			Kind: "protocol",
+		}
+	}
+	if schemaVersion != 0 && schemaVersion != ports.RemoteCatalogSchemaVersion {
+		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
+			Got:  schemaVersion,
+			Want: ports.RemoteCatalogSchemaVersion,
+			Kind: "catalog",
 		}
 	}
 
@@ -141,19 +154,21 @@ func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
 	if sessions == nil {
 		sessions = []ports.RemoteCatalogSession{}
 	}
-	for _, session := range sessions {
-		if err := domain.ValidateSessionName(session.Name); err != nil {
+	catalog := ports.RemoteCatalog{
+		ProtocolVersion: *envelope.ProtocolVersion,
+		SchemaVersion:   schemaVersion,
+		Sessions:        sessions,
+	}
+	if err := ports.ValidateRemoteCatalog(catalog); err != nil {
+		if schemaVersion == 0 {
+			// Keep the old adapter error taxonomy for pre-parity peers and
+			// direct CLI compatibility. Current-schema payloads retain the
+			// typed validation error for callers that need to classify it.
 			return ports.RemoteCatalog{}, fmt.Errorf("%w: %w", errCatalogSession, err)
 		}
-		if !validCatalogState(session.State) {
-			return ports.RemoteCatalog{}, fmt.Errorf("%w: invalid state %q", errCatalogSession, session.State)
-		}
+		return ports.RemoteCatalog{}, err
 	}
-
-	return ports.RemoteCatalog{
-		ProtocolVersion: *envelope.ProtocolVersion,
-		Sessions:        sessions,
-	}, nil
+	return catalog, nil
 }
 
 func rejectTrailingJSON(dec *json.Decoder) error {

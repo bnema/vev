@@ -55,6 +55,27 @@ func newRemotePickerDaemon(store ports.RemoteHostStore) *Daemon {
 	return New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(store, nil, nil, nil, ports.RemoteTransportUDP))
 }
 
+func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
+	now := time.Unix(100, 0)
+	clock := &remotePreviewTestClock{now: now}
+	d := newTestDaemon(t, nil, clock)
+	lifecycle := remoteLifecycleForTest()
+	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: now.Add(-remotePickerAttachTTL), Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: lifecycle, Name: "work", State: "running", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+		}},
+	}})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status["arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	entries := d.remotePickerCatalogSnapshot()
+	require.Len(t, entries, 1)
+	require.Equal(t, remoteHostStale, entries[0].status)
+	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
+	require.False(t, d.remotePickerTargetReadyTarget(target), "attachment must reject a catalogue exactly at the TTL boundary")
+}
+
 func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -401,6 +422,28 @@ func TestRemoteRefreshRejectsRemovedHostAndLateGeneration(t *testing.T) {
 	require.NotContains(t, d.remoteCatalog.cache, "arch")
 	require.NotContains(t, d.remoteCatalog.status, "arch")
 	d.remoteCatalog.mu.Unlock()
+}
+
+func TestRemoteRefreshValidationSentinelsRemainMalformed(t *testing.T) {
+	lifecycle := remoteLifecycleForTest()
+	for _, test := range []struct {
+		name    string
+		session ports.RemoteCatalogSession
+	}{
+		{name: "unknown state", session: ports.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: "unknown"}},
+		{name: "invalid reason", session: ports.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: "running", Reason: "bogus"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
+			d, _, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(400, 0))
+			d.remoteCatalog.refresh = 1
+			catalog := ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{test.session}}
+			require.False(t, d.applyRemoteRefreshResult(1, "arch", catalog, nil))
+			d.remoteCatalog.mu.Lock()
+			require.Equal(t, remoteHostMalformed, d.remoteCatalog.status["arch"])
+			d.remoteCatalog.mu.Unlock()
+		})
+	}
 }
 
 func TestRemoteRefreshVersionMismatchPreservesStaleRows(t *testing.T) {

@@ -1,4 +1,4 @@
-.PHONY: install test test-installer lint mocks demo
+.PHONY: install test test-installer lint mocks demo remote-acceptance
 
 install:
 	go install .
@@ -24,6 +24,9 @@ mocks:
 		exit 1; \
 	fi
 	mockery
+
+remote-acceptance:
+	scripts/remote-picker-harness/run.sh
 
 demo:
 	docker build -f scripts/demo/Dockerfile -t vev-demo .
