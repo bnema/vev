@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -30,11 +31,19 @@ type remotePickerInstance struct {
 // remotePickerCatalogSnapshot copies the cache-derived state needed for a
 // picker before any row sorting begins. No remote-state lock survives this
 // snapshot.
+const remotePickerAttachTTL = 30 * time.Second
+
 func (d *Daemon) remotePickerCatalogSnapshot() []remotePickerCatalogEntry {
 	if d == nil {
 		return nil
 	}
+	now := d.clock.Now()
 	d.remoteCatalog.mu.Lock()
+	for host, entry := range d.remoteCatalog.cache {
+		if d.remoteCatalog.status[host] == remoteHostFresh && remoteCatalogExpired(entry.FetchedAt, now) {
+			d.remoteCatalog.status[host] = remoteHostStale
+		}
+	}
 	entries := make([]remotePickerCatalogEntry, 0, len(d.remoteCatalog.cache)+len(d.remoteCatalog.status))
 	seen := make(map[string]struct{}, len(d.remoteCatalog.cache))
 	for host, entry := range d.remoteCatalog.cache {
@@ -45,7 +54,7 @@ func (d *Daemon) remotePickerCatalogSnapshot() []remotePickerCatalogEntry {
 		seen[host] = struct{}{}
 	}
 	for host, status := range d.remoteCatalog.status {
-		if _, exists := seen[host]; exists || (status != remoteHostUnreachable && status != remoteHostVersionMismatch) {
+		if _, exists := seen[host]; exists || (status != remoteHostUnreachable && status != remoteHostVersionMismatch && status != remoteHostMalformed) {
 			continue
 		}
 		entries = append(entries, remotePickerCatalogEntry{
@@ -75,11 +84,15 @@ func (d *Daemon) remotePickerHostRanks() map[string]int {
 	return ranks
 }
 
+func remoteCatalogExpired(fetchedAt, now time.Time) bool {
+	return fetchedAt.IsZero() || (!now.Before(fetchedAt) && now.Sub(fetchedAt) > remotePickerAttachTTL)
+}
+
 func remotePickerAvailability(status remoteHostStatus) picker.RemoteAvailability {
 	switch status {
 	case remoteHostFresh:
 		return picker.RemoteFresh
-	case remoteHostUnreachable:
+	case remoteHostStale, remoteHostUnreachable, remoteHostMalformed:
 		return picker.RemoteStale
 	case remoteHostVersionMismatch:
 		return picker.RemoteVersionMismatch
@@ -88,15 +101,13 @@ func remotePickerAvailability(status remoteHostStatus) picker.RemoteAvailability
 	}
 }
 
-func remotePickerDetail(tabs uint16) string {
-	if tabs == 1 {
-		return "1 tab"
-	}
-	return fmt.Sprintf("%d tabs", tabs)
-}
-
 func remotePickerStatusDetail(status remoteHostStatus, fetchedAt time.Time) string {
 	switch status {
+	case remoteHostStale:
+		if !fetchedAt.IsZero() {
+			return "catalog stale since " + fetchedAt.Format(time.RFC3339)
+		}
+		return "catalog stale"
 	case remoteHostUnreachable:
 		if !fetchedAt.IsZero() {
 			return "stale since " + fetchedAt.Format(time.RFC3339)
@@ -104,26 +115,139 @@ func remotePickerStatusDetail(status remoteHostStatus, fetchedAt time.Time) stri
 		return "unreachable"
 	case remoteHostVersionMismatch:
 		return "version mismatch"
+	case remoteHostMalformed:
+		return "catalog malformed"
 	default:
 		return ""
 	}
 }
 
+func remoteSessionOrigin(host string) string {
+	if i := strings.LastIndexByte(host, '@'); i >= 0 && i+1 < len(host) {
+		return host[i+1:]
+	}
+	return host
+}
+
 func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
+	key.LifecycleID = session.LifecycleID
+	key.DisplayOrigin = remoteSessionOrigin(key.Host)
+	availability := remotePickerAvailability(status)
+	stopped := session.State == "stopped"
+	broken := session.State == "broken"
+	tabs := ports.CatalogTabs(session)
+	viewTabs := make([]picker.TabEntry, 0, len(tabs))
+	for _, tab := range tabs {
+		name := tab.Name
+		if name == "" {
+			name = fmt.Sprintf("%d", int(tab.Index)+1)
+		}
+		viewTabs = append(viewTabs, picker.TabEntry{
+			TabID:     domain.TabStableID(tab.ID),
+			Name:      name,
+			RawName:   tab.Name,
+			Detail:    tab.Detail,
+			Attention: tab.Attention,
+		})
+	}
+	legacy := session.LifecycleID == (domain.SessionLifecycleID{})
+	var remoteTarget *domain.RemoteSessionTarget
+	if !legacy {
+		target := domain.RemoteSessionTarget{
+			Endpoint:      key.Host,
+			DisplayOrigin: key.DisplayOrigin,
+			LifecycleID:   session.LifecycleID,
+			SessionName:   session.Name,
+			Stopped:       stopped,
+		}
+		if len(tabs) != 0 {
+			first := tabs[0]
+			if stopped {
+				if first.ID != "" {
+					target.StoppedTab = domain.NewStableTabSelector(domain.TabStableID(first.ID))
+				} else {
+					target.StoppedTab = domain.NewOrdinalTabSelector(0, first.Name, uint16(len(tabs)))
+				}
+			} else {
+				target.LiveTabID = domain.TabStableID(first.ID)
+			}
+		}
+		// Keep the structured session identity on rows even when one tab ID is
+		// malformed or a broken session cannot be activated. Cursor navigation
+		// must remain possible, while sendRemoteAttachTargetForAttachment will
+		// fail closed on the invalid target.
+		remoteTarget = &target
+	}
+	reason := ""
+	if !legacy && status != remoteHostFresh {
+		reason = remoteReasonForStatus(status)
+	}
+	targetValid := remoteTarget != nil && remoteTarget.Validate() == nil
+	if broken {
+		reason = "session_broken"
+	} else if !legacy && !targetValid {
+		reason = "identity_changed"
+	}
+	ready := status == remoteHostFresh && targetValid && !broken
+	if legacy {
+		// Count-only peers cannot prove lifecycle/tab identity. Preserve the
+		// historical direct-connect row for compatibility, while all current
+		// schema rows remain gated by exact identity and fresh ownership.
+		ready = status != remoteHostVersionMismatch && !broken
+		if status == remoteHostVersionMismatch {
+			reason = remoteReasonForStatus(status)
+		}
+	}
 	detail := remotePickerStatusDetail(status, fetchedAt)
 	if detail == "" {
-		detail = remotePickerDetail(session.Tabs)
+		switch session.State {
+		case "running":
+			detail = "running"
+			if session.Attached {
+				detail += " · attached"
+			}
+		case "stopped":
+			detail = "stopped"
+		case "broken":
+			detail = "broken"
+		}
+	}
+	if broken {
+		detail = "session broken"
 	}
 	return picker.SessionView{
 		ID:                 key.ID(),
 		Name:               key.Display(),
 		RemoteKey:          &key,
+		RemoteTarget:       remoteTarget,
 		RemoteHost:         key.Host,
-		RemoteAvailability: remotePickerAvailability(status),
+		RemoteAvailability: availability,
 		RemoteDetail:       detail,
-		ConnectOnly:        true,
-		RemoteAttachReady:  status != remoteHostVersionMismatch,
+		RemoteReason:       reason,
+		Tabs:               viewTabs,
+		Stopped:            stopped,
+		ConnectOnly:        legacy,
+		RemoteAttachReady:  ready,
 		CannotAcceptMoves:  true,
+	}
+}
+
+func remoteReasonForStatus(status remoteHostStatus) string {
+	switch status {
+	case remoteHostRefreshing:
+		return "refreshing"
+	case remoteHostStale:
+		return "catalog_stale"
+	case remoteHostUnreachable:
+		return "host_unreachable"
+	case remoteHostVersionMismatch:
+		return "version_mismatch"
+	case remoteHostMalformed:
+		return "malformed"
+	case remoteHostCached:
+		return "refreshing"
+	default:
+		return ""
 	}
 }
 
@@ -132,6 +256,7 @@ func remotePickerHostView(host string, status remoteHostStatus) picker.SessionVi
 		ID:                 domain.SessionID("remote-host:" + base64.RawURLEncoding.EncodeToString([]byte(host))),
 		Name:               host,
 		RemoteHost:         host,
+		RemoteReason:       remoteReasonForStatus(status),
 		RemoteAvailability: remotePickerAvailability(status),
 		RemoteDetail:       remotePickerStatusDetail(status, time.Time{}),
 		ConnectOnly:        true,
@@ -142,7 +267,11 @@ func remotePickerHostView(host string, status remoteHostStatus) picker.SessionVi
 func sortRemotePickerCatalog(entries []remotePickerCatalogEntry, ranks map[string]int) {
 	for i := range entries {
 		sort.Slice(entries[i].entry.Sessions, func(left, right int) bool {
-			return entries[i].entry.Sessions[left].Name < entries[i].entry.Sessions[right].Name
+			l, r := entries[i].entry.Sessions[left], entries[i].entry.Sessions[right]
+			if l.LastUsedSeq != r.LastUsedSeq {
+				return l.LastUsedSeq > r.LastUsedSeq
+			}
+			return l.Name < r.Name
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -365,8 +494,10 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 	}
 	stillKnown := containsRemotePickerHost(hosts, host)
 	now := d.clock.Now()
-	if listErr == nil && catalog.ProtocolVersion != ports.ProtocolVersion {
-		listErr = &ports.RemoteCatalogVersionMismatchError{Got: catalog.ProtocolVersion, Want: ports.ProtocolVersion}
+	if listErr == nil {
+		if err := ports.ValidateRemoteCatalog(catalog); err != nil {
+			listErr = err
+		}
 	}
 
 	d.remoteCatalog.mu.Lock()
@@ -387,10 +518,12 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 		return cacheChanged
 	}
 	if listErr != nil {
-		status := remoteHostUnreachable
+		status := remoteHostMalformed
 		var mismatch *ports.RemoteCatalogVersionMismatchError
 		if errors.As(listErr, &mismatch) {
 			status = remoteHostVersionMismatch
+		} else if !errors.Is(listErr, ports.ErrInvalidRemoteCatalog) && !errors.Is(listErr, ports.ErrRemoteCatalogTooLarge) {
+			status = remoteHostUnreachable
 		}
 		d.remoteCatalog.status[host] = status
 		d.remoteCatalog.failure[host] = now
@@ -398,11 +531,11 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 		d.refreshRemoteOpenPickers()
 		return false
 	}
-	d.remoteCatalog.cache[host] = ports.RemoteCatalogCacheEntry{
+	d.remoteCatalog.cache[host] = cloneRemoteCatalogEntry(ports.RemoteCatalogCacheEntry{
 		Host:      host,
 		FetchedAt: now,
-		Sessions:  append([]ports.RemoteCatalogSession{}, catalog.Sessions...),
-	}
+		Sessions:  catalog.Sessions,
+	})
 	d.remoteCatalog.status[host] = remoteHostFresh
 	delete(d.remoteCatalog.failure, host)
 	d.remoteCatalog.mu.Unlock()

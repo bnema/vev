@@ -35,10 +35,14 @@ type SessionView struct {
 	Stopped           bool
 	ExpectedCreatedAt *int64
 	RemoteKey         *domain.RemoteSessionKey
+	// RemoteTarget is the structured route/lifecycle identity for picker rows.
+	// It is never reconstructed from Name or a rendered label.
+	RemoteTarget *domain.RemoteSessionTarget
 	// RemoteHost marks remote host status rows that have no session key.
 	RemoteHost         string
 	RemoteAvailability RemoteAvailability
 	RemoteDetail       string
+	RemoteReason       string
 	ConnectOnly        bool
 	RemoteAttachReady  bool
 	// CannotAcceptMoves reports whether this session cannot receive a moved tab
@@ -51,6 +55,7 @@ type SessionView struct {
 type TabEntry struct {
 	TabID     domain.TabStableID // stable tab identity; independent of its current index
 	Name      string             // tab display name
+	RawName   string             // unformatted name used by exact remote selectors
 	Detail    string             // " (paneTitle)" or "", drawn muted
 	Attention bool               // draw the attention marker right after Name, before Detail
 }
@@ -110,13 +115,16 @@ func defaultRenderStyles() RenderStyles {
 }
 
 type Target struct {
-	Session     domain.SessionID
-	Incarnation domain.IncarnationID
-	Name        string
-	RemoteKey   *domain.RemoteSessionKey
-	TabID       domain.TabStableID
-	TabIndex    int
-	Stopped     bool
+	Session           domain.SessionID
+	Incarnation       domain.IncarnationID
+	Name              string
+	RemoteKey         *domain.RemoteSessionKey
+	RemoteTarget      *domain.RemoteSessionTarget
+	RemoteHost        string
+	UnavailableReason string
+	TabID             domain.TabStableID
+	TabIndex          int
+	Stopped           bool
 	// ExpectedCreatedAt optionally pins this target to a particular named
 	// session lifecycle. Callers that obtain a snapshot outside the daemon use
 	// it to reject a same-name replacement at commit time.
@@ -187,7 +195,12 @@ type row struct {
 	remoteKey            domain.RemoteSessionKey
 	hasRemoteKey         bool
 	remote               bool
+	remoteTarget         domain.RemoteSessionTarget
+	hasRemoteTarget      bool
+	remoteHost           string
+	unavailableReason    string
 	selectable           bool
+	focusable            bool
 	dim                  bool
 }
 
@@ -202,7 +215,7 @@ func New(sessions []SessionView, config SelectionConfig) *Model {
 			if selectionMatches(pickerRow, config.Current, config.Mode) {
 				m.selected = idx
 			}
-			if config.Mode == SelectNavigationTab && activeSelection < 0 && pickerRow.selectable && pickerRow.kind == rowTab && pickerRow.tabIndex == normalizedActive(session) {
+			if config.Mode == SelectNavigationTab && activeSelection < 0 && pickerRow.focusable && pickerRow.kind == rowTab && pickerRow.tabIndex == normalizedActive(session) {
 				activeSelection = idx
 			}
 		}
@@ -211,7 +224,7 @@ func New(sessions []SessionView, config SelectionConfig) *Model {
 		m.selected = activeSelection
 	}
 	if m.selected < 0 {
-		m.selected = m.firstSelectable()
+		m.selected = m.firstFocusable()
 	}
 	if m.selected < 0 && len(m.rows) > 0 {
 		m.selected = 0
@@ -247,20 +260,38 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	if session.RemoteKey != nil {
 		common.remoteKey, common.hasRemoteKey = *session.RemoteKey, true
 	}
-	common.remote = common.hasRemoteKey || session.RemoteHost != ""
+	if session.RemoteTarget != nil {
+		common.remoteTarget, common.hasRemoteTarget = *session.RemoteTarget, true
+	}
+	common.remoteHost = session.RemoteHost
+	common.remote = common.hasRemoteKey || common.hasRemoteTarget || session.RemoteHost != ""
 	header := common
 	header.kind, header.dispName, header.tabIndex = rowSession, session.Name, -1
 	header.selectable = header.kind.selectable(config.Mode)
+	header.focusable = header.selectable
 	if common.remote {
 		header.detail = remoteRowDetail(session)
-		header.selectable = common.hasRemoteKey && config.Mode == SelectNavigationTab && session.ConnectOnly && remoteSelectable(session)
+		// Rich catalog rows use tab targets. Legacy count-only/connect-only
+		// callers retain their header target until all peers carry the richer
+		// identity contract.
+		if common.hasRemoteTarget {
+			header.selectable = false
+			header.focusable = config.Mode == SelectNavigationTab && len(session.Tabs) == 0
+		} else {
+			header.selectable = common.hasRemoteKey && config.Mode == SelectNavigationTab && session.ConnectOnly && remoteSelectable(session)
+			header.focusable = header.selectable
+			if !common.hasRemoteKey && !common.hasRemoteTarget {
+				header.focusable = config.Mode == SelectNavigationTab
+			}
+		}
+		header.unavailableReason = session.RemoteReason
 		header.dim = remoteDim(session)
 	}
 	if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
-		header.selectable, header.dim = false, true
+		header.selectable, header.focusable, header.dim = false, false, true
 	}
 	rows := []row{header}
-	if !session.ConnectOnly {
+	if !session.ConnectOnly || common.hasRemoteTarget {
 		for i, tab := range session.Tabs {
 			if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
 				continue
@@ -269,12 +300,39 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 			tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
 			tabRow.tabID, tabRow.tabIndex = tab.TabID, i
 			tabRow.selectable = tabRow.kind.selectable(config.Mode)
+			tabRow.focusable = tabRow.selectable
 			if common.remote {
-				tabRow.selectable = false
+				tabRow.unavailableReason = session.RemoteReason
+				if common.hasRemoteTarget {
+					remoteTarget := common.remoteTarget
+					if session.Stopped {
+						remoteTarget.LiveTabID = ""
+						if tab.TabID != "" {
+							remoteTarget.StoppedTab = domain.NewStableTabSelector(tab.TabID)
+						} else {
+							remoteTarget.StoppedTab = domain.NewOrdinalTabSelector(uint16(i), tab.RawName, uint16(len(session.Tabs)))
+						}
+					} else {
+						remoteTarget.StoppedTab = domain.TabSelector{}
+						remoteTarget.LiveTabID = tab.TabID
+					}
+					// Keep the selected tab's structured identity even when it is
+					// invalid. Focus remains possible for diagnostics, while both
+					// the readiness gate and daemon wire validation reject it.
+					tabRow.remoteTarget = remoteTarget
+					tabRow.hasRemoteTarget = true
+				}
+				if !tabRow.hasRemoteTarget {
+					tabRow.focusable = false
+					tabRow.selectable = false
+				} else {
+					tabRow.focusable = true
+					tabRow.selectable = tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteSelectable(session)
+				}
 				tabRow.dim = remoteDim(session)
 			}
 			if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
-				tabRow.selectable, tabRow.dim = false, true
+				tabRow.selectable, tabRow.focusable, tabRow.dim = false, false, true
 			}
 			rows = append(rows, tabRow)
 		}
@@ -286,7 +344,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 }
 
 func remoteSelectable(session SessionView) bool {
-	return session.RemoteAttachReady && session.RemoteAvailability != RemoteVersionMismatch
+	return session.RemoteAttachReady && session.RemoteAvailability != RemoteVersionMismatch && session.RemoteReason == ""
 }
 
 func remoteDim(session SessionView) bool {
@@ -429,13 +487,13 @@ func (m *Model) SelectNearestRow(idx int) {
 	}
 	idx = clamp(idx, 0, len(m.rows)-1)
 	for i := idx; i < len(m.rows); i++ {
-		if m.rows[i].selectable {
+		if m.rows[i].focusable {
 			m.selected = i
 			return
 		}
 	}
 	for i := idx - 1; i >= 0; i-- {
-		if m.rows[i].selectable {
+		if m.rows[i].focusable {
 			m.selected = i
 			return
 		}
@@ -474,21 +532,21 @@ func (m *Model) move(delta int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
-	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].selectable {
-		m.selected = m.firstSelectable()
+	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].focusable {
+		m.selected = m.firstFocusable()
 		return
 	}
 	for i := m.selected + delta; i >= 0 && i < len(m.rows); i += delta {
-		if m.rows[i].selectable {
+		if m.rows[i].focusable {
 			m.selected = i
 			return
 		}
 	}
 }
 
-func (m *Model) firstSelectable() int {
+func (m *Model) firstFocusable() int {
 	for i, r := range m.rows {
-		if r.selectable {
+		if r.focusable {
 			return i
 		}
 	}
@@ -496,9 +554,14 @@ func (m *Model) firstSelectable() int {
 }
 
 func (r row) target() Target {
+	var remoteTarget *domain.RemoteSessionTarget
+	if r.hasRemoteTarget {
+		copyTarget := r.remoteTarget
+		remoteTarget = &copyTarget
+	}
 	return Target{
-		Session: r.session, Incarnation: r.incarnation, Name: r.targetName, RemoteKey: r.remoteKeyPointer(), TabID: r.tabID,
-		TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAtPointer(),
+		Session: r.session, Incarnation: r.incarnation, Name: r.targetName, RemoteKey: r.remoteKeyPointer(), RemoteTarget: remoteTarget,
+		RemoteHost: r.remoteHost, UnavailableReason: r.unavailableReason, TabID: r.tabID, TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAtPointer(),
 	}
 }
 

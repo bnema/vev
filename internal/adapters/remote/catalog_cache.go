@@ -35,11 +35,15 @@ type catalogCacheHost struct {
 }
 
 type catalogCacheSession struct {
-	Name      *string `json:"name"`
-	State     *string `json:"state"`
-	Ephemeral *bool   `json:"ephemeral"`
-	Tabs      *uint16 `json:"tabs"`
-	Attached  *bool   `json:"attached"`
+	LifecycleID *domain.SessionLifecycleID `json:"lifecycle_id,omitempty"`
+	Name        *string                    `json:"name"`
+	State       *string                    `json:"state"`
+	Ephemeral   *bool                      `json:"ephemeral"`
+	LastUsedSeq *uint64                    `json:"last_used_seq,omitempty"`
+	Tabs        *uint16                    `json:"tabs,omitempty"`
+	TabList     *[]ports.RemoteCatalogTab  `json:"tab_list,omitempty"`
+	ActiveTabID *string                    `json:"active_tab_id,omitempty"`
+	Attached    *bool                      `json:"attached"`
 }
 
 type fileCatalogCache struct {
@@ -103,19 +107,33 @@ func (c *fileCatalogCache) Load() ([]ports.RemoteCatalogCacheEntry, error) {
 			Sessions:  make([]ports.RemoteCatalogSession, 0, len(*host.Sessions)),
 		}
 		for _, session := range *host.Sessions {
-			if session.Name == nil || session.State == nil || session.Ephemeral == nil || session.Tabs == nil || session.Attached == nil {
+			if session.Name == nil || session.State == nil || session.Ephemeral == nil || session.Attached == nil || session.Tabs == nil && session.TabList == nil {
 				return nil, fmt.Errorf("remote catalog cache: malformed cache file: missing session fields")
 			}
 			if !utf8.ValidString(*session.Name) || !utf8.ValidString(*session.State) {
 				return nil, fmt.Errorf("remote catalog cache: malformed cache file: invalid UTF-8")
 			}
-			entry.Sessions = append(entry.Sessions, ports.RemoteCatalogSession{
+			decoded := ports.RemoteCatalogSession{
 				Name:      *session.Name,
 				State:     *session.State,
 				Ephemeral: *session.Ephemeral,
-				Tabs:      *session.Tabs,
 				Attached:  *session.Attached,
-			})
+			}
+			if session.LastUsedSeq != nil {
+				decoded.LastUsedSeq = *session.LastUsedSeq
+			}
+			if session.LifecycleID != nil {
+				decoded.LifecycleID = *session.LifecycleID
+			}
+			if session.ActiveTabID != nil {
+				decoded.ActiveTabID = *session.ActiveTabID
+			}
+			if session.TabList != nil {
+				decoded.Tabs = append([]ports.RemoteCatalogTab(nil), (*session.TabList)...)
+			} else {
+				decoded.Tabs = int(*session.Tabs)
+			}
+			entry.Sessions = append(entry.Sessions, decoded)
 		}
 		entries = append(entries, entry)
 	}
@@ -141,15 +159,28 @@ func (c *fileCatalogCache) Store(entries []ports.RemoteCatalogCacheEntry) error 
 			name := session.Name
 			state := session.State
 			ephemeral := session.Ephemeral
-			tabs := session.Tabs
 			attached := session.Attached
-			sessions = append(sessions, catalogCacheSession{
-				Name:      &name,
-				State:     &state,
-				Ephemeral: &ephemeral,
-				Tabs:      &tabs,
-				Attached:  &attached,
-			})
+			row := catalogCacheSession{Name: &name, State: &state, Ephemeral: &ephemeral, Attached: &attached}
+			if session.LastUsedSeq != 0 {
+				lastUsed := session.LastUsedSeq
+				row.LastUsedSeq = &lastUsed
+			}
+			if session.LifecycleID != (domain.SessionLifecycleID{}) {
+				id := session.LifecycleID
+				row.LifecycleID = &id
+			}
+			if session.ActiveTabID != "" {
+				active := session.ActiveTabID
+				row.ActiveTabID = &active
+			}
+			if tabs := ports.CatalogTabs(session); tabs != nil {
+				copyTabs := append([]ports.RemoteCatalogTab(nil), tabs...)
+				row.TabList = &copyTabs
+			} else {
+				count := uint16(ports.CatalogTabCount(session))
+				row.Tabs = &count
+			}
+			sessions = append(sessions, row)
 		}
 		hosts = append(hosts, catalogCacheHost{
 			Target:            &target,
@@ -166,6 +197,9 @@ func (c *fileCatalogCache) Store(entries []ports.RemoteCatalogCacheEntry) error 
 }
 
 func normalizeCatalogCacheEntries(entries []ports.RemoteCatalogCacheEntry) ([]ports.RemoteCatalogCacheEntry, error) {
+	if err := ports.ValidateRemoteCatalogCacheEntries(entries); err != nil {
+		return nil, err
+	}
 	normalized := make([]ports.RemoteCatalogCacheEntry, 0, len(entries))
 	hosts := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
@@ -200,7 +234,15 @@ func normalizeCatalogCacheEntries(entries []ports.RemoteCatalogCacheEntry) ([]po
 				return nil, fmt.Errorf("remote catalog cache: duplicate session %q for host %q", session.Name, entry.Host)
 			}
 			sessions[session.Name] = struct{}{}
-			copyEntry.Sessions = append(copyEntry.Sessions, session)
+			copySession := session
+			if tabs := ports.CatalogTabs(session); tabs != nil {
+				copyTabs := make([]ports.RemoteCatalogTab, len(tabs))
+				for i, tab := range tabs {
+					copyTabs[i] = ports.RemoteCatalogTab{ID: tab.ID, Index: tab.Index, Name: tab.Name}
+				}
+				copySession.Tabs = copyTabs
+			}
+			copyEntry.Sessions = append(copyEntry.Sessions, copySession)
 		}
 		sort.Slice(copyEntry.Sessions, func(i, j int) bool {
 			return copyEntry.Sessions[i].Name < copyEntry.Sessions[j].Name

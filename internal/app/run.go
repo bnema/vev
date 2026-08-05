@@ -67,6 +67,7 @@ const (
 	kindStdio
 	kindUDPBootstrap
 	kindUDPProxy
+	kindRemotePreview
 	kindHelp
 	kindVersion
 )
@@ -74,17 +75,18 @@ const (
 // command is the parsed CLI invocation: what to do, plus the attach intent
 // and session name where relevant.
 type command struct {
-	kind         cmdKind
-	intent       uint8
-	name         string
-	remoteTarget string
-	listHost     string
-	listAll      bool
-	hostAction   string
-	hostTarget   string
-	killAll      bool
-	killDaemon   bool
-	cmd          cmdInvocation
+	kind                 cmdKind
+	intent               uint8
+	name                 string
+	remoteTarget         string
+	listHost             string
+	listAll              bool
+	hostAction           string
+	hostTarget           string
+	killAll              bool
+	killDaemon           bool
+	cmd                  cmdInvocation
+	remotePreviewPayload string
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -175,6 +177,11 @@ func parseArgs(args []string) (command, error) {
 			return command{}, usagef("`_udp-proxy` does not accept a session name")
 		}
 		return command{kind: kindUDPProxy}, nil
+	case "_remote-preview":
+		if len(args) != 2 || args[1] == "" {
+			return command{}, usagef("`_remote-preview` requires one encoded request")
+		}
+		return command{kind: kindRemotePreview, remotePreviewPayload: args[1]}, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -269,6 +276,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runUDPBootstrap(ctx)
 	case kindUDPProxy:
 		return runUDPProxy(ctx, os.Stdout)
+	case kindRemotePreview:
+		return runRemotePreview(ctx, cmd.remotePreviewPayload)
 	case kindList:
 		return runList(ctx, cmd)
 	case kindHost:
@@ -341,6 +350,7 @@ var (
 	newRemoteHostStore                        = remoteadapter.NewFileHostStore
 	newRemoteCatalogCache                     = remoteadapter.NewFileCatalogCache
 	newRemoteCatalogClient                    = remoteadapter.NewCatalogClient
+	newRemotePreviewClient                    = remoteadapter.NewPreviewClient
 	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
 		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer)
 	}
@@ -790,7 +800,18 @@ func validateRemoteAttachHandoff(target ports.AttachTarget) error {
 	if err := domain.ValidateRemoteHostTarget(target.Endpoint); err != nil {
 		return err
 	}
-	return domain.ValidateSessionName(target.Session)
+	if err := domain.ValidateSessionName(target.Session); err != nil {
+		return err
+	}
+	if target.RemoteTarget != nil {
+		if target.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+			return errors.New("remote picker handoff must use daemon-owned environment")
+		}
+		if target.RemoteTarget.Endpoint != target.Endpoint || target.RemoteTarget.SessionName != target.Session {
+			return errors.New("remote picker handoff identity does not match route")
+		}
+	}
+	return nil
 }
 
 // remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
@@ -800,19 +821,27 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 	if err != nil {
 		return nil, err
 	}
-	return daemon.WithRemoteDiscovery(
+	discovery := daemon.WithRemoteDiscovery(
 		newRemoteHostStore(remoteadapter.HostStorePath(stateDir)),
 		newRemoteCatalogClient(),
 		newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)),
 		newRemoteDialerFactoryWithRuntimeObserver(observer),
 		mode,
-	), nil
+	)
+	preview := daemon.WithRemotePreview(newRemotePreviewClient())
+	return func(d *daemon.Daemon) {
+		discovery(d)
+		preview(d)
+	}, nil
 }
 
 type attachHandoffKey struct {
-	endpoint string
-	session  string
-	intent   uint8
+	endpoint  string
+	session   string
+	intent    uint8
+	lifecycle domain.SessionLifecycleID
+	liveTab   domain.TabStableID
+	stopped   domain.TabSelector
 }
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
@@ -833,6 +862,8 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	}
 	mode, modeErr := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
 	factory := deps.remoteDialerFactory
+	var remoteSelection *domain.RemoteSessionTarget
+	var remoteEnvironmentPolicy ports.EnvironmentPolicy
 	seenHandoffs := make(map[attachHandoffKey]struct{})
 	if remoteTarget != "" {
 		if modeErr != nil {
@@ -842,6 +873,36 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			factory = defaultRemoteDialerFactory()
 		}
 		seenHandoffs[attachHandoffKey{endpoint: remoteTarget, session: name, intent: intent}] = struct{}{}
+	}
+	var handoff client.AttachHandoffFunc
+	handoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+		if err := validateRemoteAttachHandoff(target); err != nil {
+			return nil, client.AttachRequest{}, fmt.Errorf("vev: invalid remote attach handoff: %w", err)
+		}
+		if modeErr != nil {
+			return nil, client.AttachRequest{}, modeErr
+		}
+		if factory == nil {
+			factory = defaultRemoteDialerFactory()
+		}
+		next := attachHandoffKey{endpoint: target.Endpoint, session: target.Session, intent: target.Intent}
+		var selection *domain.RemoteSessionTarget
+		if target.RemoteTarget != nil {
+			copyTarget := *target.RemoteTarget
+			selection = &copyTarget
+			next.lifecycle = copyTarget.LifecycleID
+			next.liveTab = copyTarget.LiveTabID
+			next.stopped = copyTarget.StoppedTab
+		}
+		if _, seen := seenHandoffs[next]; seen {
+			return nil, client.AttachRequest{}, fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
+		}
+		seenHandoffs[next] = struct{}{}
+		dialer, err := factory.DialerForRemote(target.Endpoint, target.Session, mode, log)
+		if err != nil {
+			return nil, client.AttachRequest{}, err
+		}
+		return dialer, client.AttachRequest{Intent: target.Intent, SessionName: target.Session, Remote: true, RemoteTarget: selection, EnvironmentPolicy: target.EnvironmentPolicy}, nil
 	}
 
 	for {
@@ -862,8 +923,14 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Logger:            log,
 				RuntimeObserver:   deps.runtimeObserver,
 				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
+				AttachHandoff:     handoff,
 				Remote:            true,
-			}, client.AttachRequest{Intent: intent, SessionName: name})
+			}, client.AttachRequest{
+				Intent:            intent,
+				SessionName:       name,
+				RemoteTarget:      remoteSelection,
+				EnvironmentPolicy: remoteEnvironmentPolicy,
+			})
 		} else {
 			if log != nil {
 				log.Info("attaching to local session", "intent", intent, "name", name)
@@ -874,6 +941,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Clock:           clock.New(),
 				Logger:          log,
 				RuntimeObserver: deps.runtimeObserver,
+				AttachHandoff:   handoff,
 				Remote:          false,
 			}, client.AttachRequest{Intent: intent, SessionName: name})
 		}
@@ -889,6 +957,11 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
 		next := attachHandoffKey{endpoint: handoff.Target.Endpoint, session: handoff.Target.Session, intent: handoff.Target.Intent}
+		if handoff.Target.RemoteTarget != nil {
+			next.lifecycle = handoff.Target.RemoteTarget.LifecycleID
+			next.liveTab = handoff.Target.RemoteTarget.LiveTabID
+			next.stopped = handoff.Target.RemoteTarget.StoppedTab
+		}
 		if _, seen := seenHandoffs[next]; seen {
 			return fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
 		}
@@ -896,6 +969,12 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		remoteTarget = handoff.Target.Endpoint
 		name = handoff.Target.Session
 		intent = handoff.Target.Intent
+		remoteSelection = nil
+		remoteEnvironmentPolicy = handoff.Target.EnvironmentPolicy
+		if handoff.Target.RemoteTarget != nil {
+			copyTarget := *handoff.Target.RemoteTarget
+			remoteSelection = &copyTarget
+		}
 		if modeErr != nil {
 			return modeErr
 		}

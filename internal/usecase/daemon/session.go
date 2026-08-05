@@ -226,12 +226,12 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 			}
 		}
-		if incarnation == (domain.IncarnationID{}) {
-			var err error
-			incarnation, err = domain.NewIncarnationID(rand.Reader)
-			if err != nil {
-				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", fmt.Errorf("generate durable identity: %w", err))
-			}
+	}
+	if incarnation == (domain.IncarnationID{}) {
+		var err error
+		incarnation, err = domain.NewSessionLifecycleID(rand.Reader)
+		if err != nil {
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", fmt.Errorf("generate lifecycle identity: %w", err))
 		}
 	}
 
@@ -240,12 +240,22 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 	}
 	tbSize := contentSize(sz)
 	var names []string
-	if len(restoredTabNames) > 0 {
+	var tabRecords []domain.CatalogueTabRecord
+	if resuming && len(stopped.tabRecords) != 0 {
+		tabRecords = append([]domain.CatalogueTabRecord(nil), stopped.tabRecords...)
+		names = make([]string, len(tabRecords))
+		for i, record := range tabRecords {
+			names[i] = record.Name
+		}
+	} else if len(restoredTabNames) > 0 {
 		names = append([]string(nil), restoredTabNames[0]...)
 	}
 	tabs := make([]*tab, 0, max(1, len(names)))
 	for i := range max(1, len(names)) {
 		tabStableID, paneStableID, err := d.newTabPaneStableIDs()
+		if i < len(tabRecords) && tabRecords[i].StableID != "" {
+			tabStableID = string(tabRecords[i].StableID)
+		}
 		if err != nil {
 			closeTabs(tabs)
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
@@ -317,7 +327,7 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 	}
 	var rollbackDurable func() error
 	if !ephemeral && d.persistEnabled {
-		record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}
+		record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names, TabRecords: tabRecordsFromTabs(tabs)}
 		if d.recovery == nil {
 			closeTabs(tabs)
 			cancel()
@@ -844,11 +854,13 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 			d.mu.Unlock()
 			return err
 		}
-		sess.incarnation, err = domain.NewIncarnationID(rand.Reader)
-		if err != nil {
-			sess.mu.Unlock()
-			d.mu.Unlock()
-			return fmt.Errorf("generate durable identity: %w", err)
+		if sess.incarnation == (domain.IncarnationID{}) {
+			sess.incarnation, err = domain.NewSessionLifecycleID(rand.Reader)
+			if err != nil {
+				sess.mu.Unlock()
+				d.mu.Unlock()
+				return fmt.Errorf("generate durable identity: %w", err)
+			}
 		}
 	}
 	lastUsedSeq := sess.mruAt.Load()
@@ -925,6 +937,20 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 	return nil
 }
 
+func tabRecordsFromTabs(tabs []*tab) []domain.CatalogueTabRecord {
+	if len(tabs) == 0 {
+		return nil
+	}
+	records := make([]domain.CatalogueTabRecord, len(tabs))
+	for i, tb := range tabs {
+		if tb == nil {
+			continue
+		}
+		records[i] = domain.CatalogueTabRecord{StableID: domain.TabStableID(tb.stableID), Name: tb.name}
+	}
+	return records
+}
+
 func (s *session) persistRecordLocked(updatedAt int64) domain.CatalogueRecord {
 	createdAt := s.createdAt
 	tabNames := make([]string, len(s.tabs))
@@ -940,7 +966,7 @@ func (s *session) persistRecordLocked(updatedAt int64) domain.CatalogueRecord {
 	} else {
 		tabNames = tabNames[:lastCustom+1]
 	}
-	return domain.CatalogueRecord{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
+	return domain.CatalogueRecord{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames, TabRecords: tabRecordsFromTabs(s.tabs)}
 }
 
 // closeTab is the public close boundary for callers that are not already
@@ -1545,13 +1571,15 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	stoppedName := sess.name
 	stoppedCwd := sess.cwd
 	createdAt := sess.createdAt
-	tabNames := sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).TabNames
+	stoppedRecord := sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
+	tabNames := stoppedRecord.TabNames
+	tabRecords := stoppedRecord.TabRecords
 	ephemeral := sess.ephemeral
 	unlockCoordinators()
 	unlockSessions()
 	d.notices.routingMu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, incarnation: incarnation, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, incarnation: incarnation, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, tabRecords: tabRecords, record: stoppedRecord, state: ports.SessionStopped, purging: purge}
 		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0

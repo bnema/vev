@@ -9,7 +9,10 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-const catalogueRecordVersion uint16 = 3
+const (
+	catalogueRecordVersion       uint16 = 4
+	legacyCatalogueRecordVersion uint16 = 3
+)
 
 var errMalformedRecord = errors.New("persist: malformed catalogue record")
 
@@ -44,6 +47,20 @@ func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if uint64(len(record.TabRecords)) > math.MaxUint32 {
+		return nil, errors.New("persist: too many tab records")
+	}
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(record.TabRecords)))
+	for _, tab := range record.TabRecords {
+		buf, err = appendCheckedString(buf, string(tab.StableID))
+		if err != nil {
+			return nil, err
+		}
+		buf, err = appendCheckedString(buf, tab.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
 	buf = appendRef(buf, record.Committed)
 	buf, err = appendCheckedString(buf, record.DegradedReason)
 	return buf, err
@@ -59,7 +76,7 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 		return domain.CatalogueRecord{}, errMalformedRecord
 	}
 	version, ok := reader.u16()
-	if !ok || version != catalogueRecordVersion {
+	if !ok || (version != catalogueRecordVersion && version != legacyCatalogueRecordVersion) {
 		return domain.CatalogueRecord{}, errMalformedRecord
 	}
 	id, ok := reader.take(16)
@@ -98,6 +115,30 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 			return domain.CatalogueRecord{}, errMalformedRecord
 		}
 		record.TabNames = append(record.TabNames, tab)
+	}
+	if version == legacyCatalogueRecordVersion {
+		if len(record.TabNames) != 0 {
+			record.TabRecords = make([]domain.CatalogueTabRecord, len(record.TabNames))
+			for i, name := range record.TabNames {
+				record.TabRecords[i] = domain.CatalogueTabRecord{Name: name}
+			}
+		}
+	} else {
+		tabRecordCount, ok := reader.u32()
+		if !ok || uint64(tabRecordCount) > uint64(reader.remaining())/8 {
+			return domain.CatalogueRecord{}, errMalformedRecord
+		}
+		if tabRecordCount > 0 {
+			record.TabRecords = make([]domain.CatalogueTabRecord, 0, int(tabRecordCount))
+		}
+		for range tabRecordCount {
+			stableID, stableOK := reader.str()
+			name, nameOK := reader.str()
+			if !stableOK || !nameOK {
+				return domain.CatalogueRecord{}, errMalformedRecord
+			}
+			record.TabRecords = append(record.TabRecords, domain.CatalogueTabRecord{StableID: domain.TabStableID(stableID), Name: name})
+		}
 	}
 	if record.Committed, ok = reader.ref(); !ok {
 		return domain.CatalogueRecord{}, errMalformedRecord

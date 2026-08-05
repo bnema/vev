@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -21,15 +22,17 @@ type overlayRuntime struct {
 	// pickerGeneration identifies one open lifecycle. It advances only when a
 	// picker is published, so delayed close and registration work can prove it
 	// still owns the exact lifecycle it captured.
-	pickerGeneration        uint64
-	pickerTitle             string
-	pickerIntent            pickerIntent
-	pickerSource            moveSourceLocator
-	pickerPreview           *tab
-	pickerPreviewSession    *session
-	pickerPreviewGeneration uint64
-	pickerPending           []byte
-	pickerESC               pendingByteTimer
+	pickerGeneration          uint64
+	pickerTitle               string
+	pickerIntent              pickerIntent
+	pickerSource              moveSourceLocator
+	pickerPreview             *tab
+	pickerPreviewSession      *session
+	pickerRemotePreview       picker.Preview
+	pickerRemotePreviewCancel context.CancelFunc
+	pickerPreviewGeneration   uint64
+	pickerPending             []byte
+	pickerESC                 pendingByteTimer
 
 	// Test-only, unsynchronized lifecycle seams. Assign them before picker
 	// publication or goroutine startup. Hooks run without pickerMu or
@@ -288,10 +291,11 @@ type overlayRenderSnapshot struct {
 	statusFeedback  string
 	resizeActive    bool
 
-	pickerActive bool
-	pickerModel  *picker.Model
-	pickerTitle  string
-	previewTab   *tab
+	pickerActive  bool
+	pickerModel   *picker.Model
+	pickerTitle   string
+	previewTab    *tab
+	remotePreview picker.Preview
 
 	noticesOverlayActive bool
 	noticesOverlayModel  *notices.Model
@@ -363,6 +367,7 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	snap.pickerModel = rt.picker.Clone()
 	snap.pickerTitle = rt.pickerTitle
 	snap.previewTab = rt.pickerPreview
+	snap.remotePreview = clonePickerPreview(rt.pickerRemotePreview)
 	rt.pickerMu.Unlock()
 
 	rt.paletteMu.Lock()

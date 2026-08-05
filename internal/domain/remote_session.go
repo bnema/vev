@@ -8,8 +8,13 @@ import (
 // RemoteSessionKey identifies a discovered remote session independently from
 // its display label.
 type RemoteSessionKey struct {
-	Host string
-	Name string
+	Host        string
+	Name        string
+	LifecycleID SessionLifecycleID
+	// DisplayOrigin is presentation-only. When empty, Display derives a
+	// conservative origin from Host for legacy callers; picker targets should
+	// populate it explicitly and never parse Display back into routing data.
+	DisplayOrigin string
 }
 
 // Validate reports whether the host target and session name are both valid.
@@ -25,14 +30,21 @@ func (k RemoteSessionKey) Validate() error {
 func (k RemoteSessionKey) ID() SessionID {
 	host := base64.RawURLEncoding.EncodeToString([]byte(k.Host))
 	name := base64.RawURLEncoding.EncodeToString([]byte(k.Name))
+	if k.LifecycleID != (SessionLifecycleID{}) {
+		lifecycle := base64.RawURLEncoding.EncodeToString(k.LifecycleID[:])
+		return SessionID("remote:" + host + "." + name + "." + lifecycle)
+	}
 	return SessionID("remote:" + host + "." + name)
 }
 
 // Display returns the presentation label for this remote session.
 func (k RemoteSessionKey) Display() string {
-	host := k.Host
-	if i := strings.LastIndexByte(host, '@'); i > 0 && i < len(host)-1 {
-		host = host[i+1:]
+	origin := k.DisplayOrigin
+	if origin == "" {
+		origin = k.Host
+		if i := strings.LastIndexByte(origin, '@'); i > 0 && i < len(origin)-1 {
+			origin = origin[i+1:]
+		}
 	}
-	return k.Name + "@" + host
+	return k.Name + "@" + origin
 }

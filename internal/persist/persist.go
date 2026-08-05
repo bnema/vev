@@ -402,6 +402,9 @@ func (p *Persister) UpdateMetadata(update domain.CatalogueMetadataUpdate) error 
 	if update.TabNames != nil {
 		current.TabNames = append([]string(nil), (*update.TabNames)...)
 	}
+	if update.TabRecords != nil {
+		current.TabRecords = append([]domain.CatalogueTabRecord(nil), (*update.TabRecords)...)
+	}
 	return p.applyLocked(map[string]*domain.CatalogueRecord{current.Name: &current}, false)
 }
 

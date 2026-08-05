@@ -69,13 +69,30 @@ func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.Catalogu
 }
 
 func stoppedSessionFromRecord(record domain.CatalogueRecord, state ports.SessionState, done chan struct{}) stoppedSession {
+	tabRecords := append([]domain.CatalogueTabRecord(nil), record.TabRecords...)
+	tabNames := append([]string(nil), record.TabNames...)
+	if len(tabRecords) != 0 {
+		tabNames = make([]string, len(tabRecords))
+		for i, tab := range tabRecords {
+			tabNames[i] = tab.Name
+		}
+	} else if len(tabNames) != 0 {
+		// Legacy catalogue records had no stable IDs. Preserve every encoded
+		// ordinal, including unnamed entries, and resolve them by exact name
+		// and expected count during stopped restoration.
+		tabRecords = make([]domain.CatalogueTabRecord, len(tabNames))
+		for i, name := range tabNames {
+			tabRecords[i] = domain.CatalogueTabRecord{Name: name}
+		}
+	}
 	return stoppedSession{
 		name:        record.Name,
 		cwd:         record.Cwd,
 		createdAt:   record.CreatedAt,
 		incarnation: record.IncarnationID,
 		lastUsedSeq: record.LastUsedSeq,
-		tabNames:    append([]string(nil), record.TabNames...),
+		tabNames:    tabNames,
+		tabRecords:  tabRecords,
 		record:      record,
 		state:       state,
 		restoreDone: done,

@@ -288,9 +288,11 @@ type Daemon struct {
 	// remoteCatalog owns cache-derived discovery state independently of the
 	// live attachment registry. Its cache reads and writes never hold d.mu.
 	remoteCatalog       remoteCatalogState
+	remotePreview       remotePreviewState
 	remoteHostStore     ports.RemoteHostStore
 	remoteCatalogClient ports.RemoteCatalogClient
 	remoteCatalogCache  ports.RemoteCatalogCache
+	remotePreviewClient ports.RemotePreviewClient
 	remoteDialerFactory ports.RemoteDialerFactory
 	remoteTransportMode ports.RemoteTransportMode
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
@@ -355,6 +357,7 @@ type stoppedSession struct {
 	incarnation domain.IncarnationID
 	lastUsedSeq uint64
 	tabNames    []string
+	tabRecords  []domain.CatalogueTabRecord
 	purging     bool
 	record      domain.CatalogueRecord
 	state       ports.SessionState
@@ -380,6 +383,11 @@ func WithRemoteDiscovery(store ports.RemoteHostStore, catalog ports.RemoteCatalo
 		d.remoteDialerFactory = dialer
 		d.remoteTransportMode = mode
 	}
+}
+
+// WithRemotePreview installs the optional non-attaching remote viewport client.
+func WithRemotePreview(client ports.RemotePreviewClient) Option {
+	return func(d *Daemon) { d.remotePreviewClient = client }
 }
 
 // WithShell overrides the command (and its args) each session spawns. The
@@ -650,7 +658,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			state, done := initialSessionState(r)
 			d.stopped[r.Name] = stoppedSessionFromRecord(r, state, done)
 		} else {
-			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: append([]string(nil), r.TabNames...)}
+			d.stopped[r.Name] = stoppedSessionFromRecord(r, ports.SessionStopped, nil)
 		}
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 			maxCreatedAt = r.CreatedAt
@@ -976,6 +984,12 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 		if err := d.handleCommand(tr, first); err != nil {
 			d.log.Warn("command handler failed", "err", err)
 		}
+	case ports.MsgRemotePreviewRequest:
+		stopTransport()
+		finishHandshake()
+		if err := d.handleRemotePreview(tr, first); err != nil {
+			d.log.Warn("remote preview handler failed", "err", err)
+		}
 	case ports.MsgKill:
 		stopTransport()
 		finishHandshake()
@@ -1229,10 +1243,26 @@ func (e *protoErr) Error() string { return e.text }
 // terminal and role state before releasing d.mu, then defers coordinator
 // cleanup so obsolete workers never delay the new handshake.
 func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) (*attachedClient, error) {
+	initialTabIndex := -1
+	if h.RemoteTarget != nil {
+		var ok bool
+		initialTabIndex, ok = remoteTargetTabIndexLocked(sess, *h.RemoteTarget)
+		if !ok {
+			if tr != nil {
+				_ = tr.Close()
+			}
+			d.mu.Unlock()
+			return nil, &protoErr{ports.ErrNoSuchTarget, "remote tab no longer exists"}
+		}
+	}
 	// Session state is the sole source for future PTY children. Update it before
 	// publishing the attachment; existing PTYs keep their original environment.
+	// A picker handoff deliberately leaves the daemon-owned environment and CWD
+	// untouched, even though Hello retains those fields for direct CLI clients.
 	sess.mu.Lock()
-	sess.env = copyEnvironment(h.Env)
+	if h.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+		sess.env = copyEnvironment(h.Env)
+	}
 	sess.terminal = term
 	sess.mu.Unlock()
 	opts := attachClientOptions{
@@ -1240,13 +1270,17 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		resumeCapable:     true,
 		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
 	}
+	if h.RemoteTarget != nil {
+		opts.remoteOrigin = h.RemoteTarget.DisplayOrigin
+	}
 	ac := d.prepareAttachedClientLocked(tr, sz, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
-		target: sess,
-		next:   ac,
-
+		target:            sess,
+		next:              ac,
 		expectedTransport: ac.transportSnapshot(),
+		activateTargetTab: initialTabIndex >= 0,
+		targetTabIndex:    initialTabIndex,
 		ready:             false,
 	})
 	if err != nil {
@@ -1330,6 +1364,9 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 		return nil, nil, &protoErr{ports.ErrInternal, "invalid terminal size"}
 	}
 	term := terminalEnv{TrueColor: h.TrueColor}
+	if h.RemoteTarget != nil && h.ResumeToken == 0 {
+		return d.routeRemoteTargetWithContext(ctx, h, tr)
+	}
 
 	// A non-zero token is an authoritative resume credential. If it is unknown,
 	// expired, or raced with lifecycle teardown, fail closed instead of routing
@@ -1350,12 +1387,20 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 				}
 				return nil, nil, err
 			} else if ok {
+				if h.RemoteTarget != nil && !d.remoteTargetMatchesSession(sess, *h.RemoteTarget) {
+					d.clientGone(sess, ac, tr, false)
+					return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
+				}
 				return sess, ac, nil
 			}
 			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 		}
 		if sess, ac, ok, err := d.resumeParked(h, tr, sz); err == nil {
 			if ok {
+				if h.RemoteTarget != nil && !d.remoteTargetMatchesSession(sess, *h.RemoteTarget) {
+					d.clientGone(sess, ac, tr, false)
+					return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
+				}
 				return sess, ac, nil
 			}
 			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}

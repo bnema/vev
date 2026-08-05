@@ -13,6 +13,31 @@ acknowledgements, and reconnect state. Reconnecting one attachment resumes that
 attachment without replacing its peers or changing their attachment-local
 windows/views; its latest claim may still update shared PTY geometry.
 
+## Remote picker identity
+
+The session picker shows remote live, stopped, broken, stale, and unavailable
+rows using the same expandable session/tab shape as local rows. A row carries a
+lifecycle ID and stable tab selector separately from its display origin; labels
+are never parsed back into routes. Cached and stale rows remain navigable, but
+activation is gated until the host catalog and the exact lifecycle/tab identity
+are current. A successful picker handoff sends the structured target to the
+owning daemon without creating a local shadow session. Picker-selected remote
+attachments use the daemon's environment and persisted session working
+directory; direct CLI remote attaches retain their client-request semantics.
+
+Remote catalogues are bounded and versioned. Complete catalogues contain ordered
+tab IDs, names, state, active tab, attachment state, and MRU sequence. Stopped
+tab metadata is retained across daemon restart; legacy count-only catalogues are
+read-only compatibility rows and cannot provide exact tab identity.
+
+Remote picker previews are bounded styled-cell snapshots fetched without
+attachment or PTY mutation. They are held in a short-lived in-memory cache only;
+viewport contents are not persisted or written to diagnostics. Live preview
+requests use debounce, same-key single-flight, bounded concurrency, TTL
+stale-while-revalidate, and failure cooldowns. Stopped sessions show a static
+placeholder, and late or canceled preview responses are discarded when the
+picker selection changes.
+
 ## Connection limits
 
 - A connection handshake has one 15-second deadline from connection start

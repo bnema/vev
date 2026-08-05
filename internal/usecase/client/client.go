@@ -147,6 +147,8 @@ const (
 )
 
 // Dependencies supplies the collaborators required by a Runner.
+type AttachHandoffFunc func(ports.AttachTarget) (ports.Dialer, AttachRequest, error)
+
 type Dependencies struct {
 	Dialer            ports.Dialer
 	Terminal          ports.Terminal
@@ -155,17 +157,23 @@ type Dependencies struct {
 	Logger            *slog.Logger
 	RuntimeObserver   ports.SerializedRuntimeObserver
 	RemoteHostLearner ports.RemoteHostLearner
+	// AttachHandoff keeps one Runner and one terminal/input ownership across a
+	// local daemon's structured remote handoff. It is nil for direct CLI attach.
+	AttachHandoff AttachHandoffFunc
 	// Remote selects client-side carriage presentation only; it never enters
 	// the daemon-facing session request.
 	Remote bool
 }
 
 // AttachRequest identifies the session for one client run. Remote is
-// client-only presentation metadata; it is never serialized into Hello.
+// client-only presentation metadata. RemoteTarget is an optional exact picker
+// handoff and is serialized into Hello only when present.
 type AttachRequest struct {
-	Intent      uint8
-	SessionName string
-	Remote      bool
+	Intent            uint8
+	SessionName       string
+	Remote            bool
+	RemoteTarget      *domain.RemoteSessionTarget
+	EnvironmentPolicy ports.EnvironmentPolicy
 }
 
 // Runner owns the client lifecycle across one or more attachment attempts.
@@ -177,6 +185,7 @@ type Runner struct {
 	logger            *slog.Logger
 	runtimeObserver   ports.SerializedRuntimeObserver
 	remoteHostLearner ports.RemoteHostLearner
+	attachHandoff     AttachHandoffFunc
 	remote            bool
 
 	inputMu sync.Mutex
@@ -197,6 +206,7 @@ func NewRunner(deps Dependencies) *Runner {
 		logger:            log,
 		runtimeObserver:   deps.RuntimeObserver,
 		remoteHostLearner: deps.RemoteHostLearner,
+		attachHandoff:     deps.AttachHandoff,
 		remote:            deps.Remote,
 	}
 }
@@ -220,6 +230,17 @@ func (r *Runner) terminalInput() *terminalInputPump {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
+	if request.RemoteTarget != nil {
+		if err := request.RemoteTarget.Validate(); err != nil {
+			return fmt.Errorf("vev: invalid remote attach target: %w", err)
+		}
+		if request.SessionName != request.RemoteTarget.SessionName {
+			return errors.New("vev: remote attach target session mismatch")
+		}
+		if request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned && request.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+			return errors.New("vev: invalid remote environment policy")
+		}
+	}
 	ms := milestones{}
 
 	defer func() {
@@ -393,7 +414,22 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			_ = connection.Close()
 		}
 		if result.target != nil {
-			return &AttachTargetError{Target: *result.target}
+			if r.attachHandoff == nil {
+				return &AttachTargetError{Target: *result.target}
+			}
+			nextDialer, nextRequest, handoffErr := r.attachHandoff(*result.target)
+			if handoffErr != nil {
+				return handoffErr
+			}
+			if nextDialer == nil {
+				return errors.New("vev: remote attach handoff returned nil dialer")
+			}
+			r.dialer = nextDialer
+			attemptRequest = nextRequest
+			remote = attemptRequest.Remote || r.remote
+			resumeToken = 0
+			backoff = defaultReconnectBackoff.initial
+			continue
 		}
 		if result.resumeToken != 0 {
 			resumeToken = result.resumeToken
@@ -695,6 +731,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		TrueColor:         trueColor,
 		MaxOutputInFlight: requestedOutputWindow(transport),
 		Env:               os.Environ(),
+		RemoteTarget:      request.RemoteTarget,
+		EnvironmentPolicy: request.EnvironmentPolicy,
 	}
 	if err := sendHandshake(func() error {
 		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
