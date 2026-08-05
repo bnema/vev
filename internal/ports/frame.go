@@ -16,9 +16,9 @@ const MaxFrameLen = 16 << 20
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8
 
-// Frame message types. Client-originated messages are numbered from 1
-// through 15, server-originated messages from 16, with reserved values kept
-// for future extensions.
+// Frame message types. Client-originated messages occupy 1–13 and 15;
+// server-originated messages occupy 16–23 and 25–26. Values 14 and 24 remain
+// reserved for future extensions.
 const (
 	MsgHello                MsgType = 1
 	MsgInput                MsgType = 2
@@ -33,7 +33,7 @@ const (
 	MsgClientNotice         MsgType = 11
 	MsgCommand              MsgType = 12
 	MsgOutputResetRequest   MsgType = 13
-	MsgRemotePreviewRequest MsgType = 14
+	MsgRemotePreviewRequest MsgType = 15
 
 	MsgWelcome               MsgType = 16
 	MsgError                 MsgType = 17
@@ -43,8 +43,8 @@ const (
 	MsgSessions              MsgType = 21
 	MsgCommandResult         MsgType = 22
 	MsgSessionMeta           MsgType = 23
-	MsgRemotePreviewResponse MsgType = 24
 	MsgAttachTarget          MsgType = 25
+	MsgRemotePreviewResponse MsgType = 26
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

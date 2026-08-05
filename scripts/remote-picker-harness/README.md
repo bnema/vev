@@ -12,6 +12,13 @@ all resources when it exits. Docker uses the normal CLI configuration, so
 `DOCKER_HOST` or the active context selects a rootless daemon; the harness does
 not assume a socket pathname.
 
+Environment overrides:
+
+- `VEV_HARNESS_BASE_IMAGE` selects the Docker base image used for both
+  containers (default: `ubuntu:24.04`).
+- `VEV_HARNESS_TARGET` selects the SSH target passed to the harness binary
+  (default: `test@remote`).
+
 The run exercises real SSH-stdio and UDP attachment, typed live catalog and
 preview requests, tab creation/removal fencing, exact lifecycle fencing after
 replacement, daemon restart resume, slow-preview cancellation, version

@@ -64,7 +64,7 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/wire.go`. Connection framing lives in `internal/adapters/ipc/transport.go`.
 
 - IPC frames on a connection are 4-byte big-endian length, 1 type byte, then payload.
-- Client message types currently occupy `1–13` (`MsgOutputResetRequest` is `13`); server types occupy `16–23` (`MsgSessionMeta` is `23`) and `25` (`MsgAttachTarget`). Types `14–15` and `24` remain reserved.
+- Client message types occupy `1–13` (`MsgOutputResetRequest` is `13`) and `15` (`MsgRemotePreviewRequest`); server types occupy `16–23` (`MsgSessionMeta` is `23`) and `25–26` (`MsgAttachTarget` and `MsgRemotePreviewResponse`). Types `14` and `24` remain reserved.
 - Version negotiation requires strict equality.
 - `Hello.Version` and `CommandRequest.Version` must stay first so their version peekers work.
 - Bump `ProtocolVersion` for any message layout change.

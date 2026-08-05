@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,175 +45,172 @@ func run() error {
 
 	catalog := remoteadapter.NewCatalogClient()
 	preview := remoteadapter.NewPreviewClient()
+	if err := runLiveStdioPhase(ctx, target, catalog, preview); err != nil {
+		return err
+	}
+	resumedTarget, err := runRestartResumePhase(ctx, target, catalog, preview)
+	if err != nil {
+		return err
+	}
+	if err := runUDPPhase(ctx, target); err != nil {
+		return err
+	}
+	if err := runCatalogFailurePhase(ctx, target, catalog); err != nil {
+		return err
+	}
+	if _, err := catalog.List(ctx, "test@unreachable.invalid"); err == nil {
+		return errors.New("unreachable catalog unexpectedly succeeded")
+	}
+	return runStaleTargetPhase(ctx, target, catalog, resumedTarget)
+}
 
+func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, preview ports.RemotePreviewClient) error {
 	stdio, err := openTransport(ctx, ports.RemoteTransportStdio, target)
 	if err != nil {
 		return fmt.Errorf("open stdio transport: %w", err)
 	}
+	defer func() { _ = stdio.Close() }()
 	if err := attachAndCheck(ctx, stdio, ports.Hello{
-		Intent:    ports.IntentNew,
-		Name:      sessionName,
-		Env:       localEnvironment(),
-		Cwd:       "/tmp/local-cwd",
-		TermEnv:   "xterm-256color",
-		TrueColor: true,
+		Intent: ports.IntentNew, Name: sessionName, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+		TermEnv: "xterm-256color", TrueColor: true,
 	}); err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("stdio live attach: %w", err)
 	}
 	if err := sendInputAndAwait(ctx, stdio, "printf 'VEV_REMOTE_HARNESS_ENV=%s:%s:%s:%s\\n' \"$VEV_TEST_ENV\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$VEV\"", "local:/run/local:wayland-local:"); err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("direct client environment: %w", err)
 	}
-
 	live, err := waitForSession(ctx, catalog, target, sessionName, "running")
 	if err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("live catalog: %w", err)
 	}
 	liveTarget, err := targetForSession(target, live, false)
 	if err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("live target: %w", err)
 	}
 	if _, err := preview.Preview(ctx, liveTarget, 40, 8); err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("live preview: %w", err)
 	}
-
 	if err := sendCommand(ctx, stdio, "new-tab"); err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("create second tab: %w", err)
 	}
 	liveWithTabs, err := waitForSessionWithTabCount(ctx, catalog, target, sessionName, "running", 2)
 	if err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("multi-tab catalog: %w", err)
 	}
-	removedTargets := make([]domain.RemoteSessionTarget, 0, len(ports.CatalogTabs(liveWithTabs)))
-	for _, tab := range ports.CatalogTabs(liveWithTabs) {
-		candidate := liveWithTabs
-		candidate.ActiveTabID = tab.ID
-		removed, targetErr := targetForSession(target, candidate, false)
-		if targetErr != nil {
-			_ = stdio.Close()
-			return fmt.Errorf("removed-tab target: %w", targetErr)
-		}
-		removedTargets = append(removedTargets, removed)
-	}
+	beforeTabs := ports.CatalogTabs(liveWithTabs)
 	if err := sendCommand(ctx, stdio, "close-tab"); err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("remove tab: %w", err)
 	}
-	if _, err := waitForSessionWithTabCount(ctx, catalog, target, sessionName, "running", 1); err != nil {
-		_ = stdio.Close()
+	after, err := waitForSessionWithTabCount(ctx, catalog, target, sessionName, "running", 1)
+	if err != nil {
 		return fmt.Errorf("removed-tab catalog: %w", err)
 	}
-	removed := false
-	for _, removedTarget := range removedTargets {
-		if _, previewErr := preview.Preview(ctx, removedTarget, 40, 8); previewErr != nil {
-			removed = true
-			break
-		}
+	removedID, ok := removedCatalogTabID(beforeTabs, ports.CatalogTabs(after))
+	if !ok {
+		return errors.New("removed-tab catalog did not identify exactly one removed tab")
 	}
-	if !removed {
-		_ = stdio.Close()
+	removedSession := liveWithTabs
+	removedSession.ActiveTabID = removedID
+	removedTarget, err := targetForSession(target, removedSession, false)
+	if err != nil {
+		return fmt.Errorf("removed-tab target: %w", err)
+	}
+	if _, err := preview.Preview(ctx, removedTarget, 40, 8); err == nil {
 		return errors.New("removed tab unexpectedly produced a preview")
 	}
-
+	survivingTarget, err := targetForSession(target, after, false)
+	if err != nil {
+		return fmt.Errorf("surviving-tab target: %w", err)
+	}
+	if _, err := preview.Preview(ctx, survivingTarget, 40, 8); err != nil {
+		return fmt.Errorf("surviving tab preview: %w", err)
+	}
 	if err := detach(ctx, stdio); err != nil {
-		_ = stdio.Close()
 		return fmt.Errorf("stop session: %w", err)
 	}
-	_ = stdio.Close()
+	return nil
+}
+
+func runRestartResumePhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, preview ports.RemotePreviewClient) (domain.RemoteSessionTarget, error) {
 	if err := runRemoteCommand(ctx, target, "vev", "kill", "--daemon"); err != nil {
-		return fmt.Errorf("stop remote daemon: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("stop remote daemon: %w", err)
 	}
 	if err := runRemoteCommand(ctx, target, "vev", "--daemon-launcher"); err != nil {
-		return fmt.Errorf("restart remote daemon: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("restart remote daemon: %w", err)
 	}
-
 	resumedCatalog, err := waitForSession(ctx, catalog, target, sessionName, "running")
 	if err != nil {
-		return fmt.Errorf("resumed catalog: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("resumed catalog: %w", err)
 	}
 	resumedTarget, err := targetForSession(target, resumedCatalog, false)
 	if err != nil {
-		return fmt.Errorf("resumed target: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("resumed target: %w", err)
 	}
 	resumed, err := openTransport(ctx, ports.RemoteTransportStdio, target)
 	if err != nil {
-		return fmt.Errorf("open restart stdio transport: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("open restart stdio transport: %w", err)
 	}
+	defer func() { _ = resumed.Close() }()
 	if err := attachAndCheck(ctx, resumed, ports.Hello{
-		Intent:            ports.IntentResume,
-		Name:              sessionName,
-		Env:               localEnvironment(),
-		Cwd:               "/tmp/local-cwd",
-		TermEnv:           "xterm-256color",
-		TrueColor:         true,
-		RemoteTarget:      &resumedTarget,
+		Intent: ports.IntentResume, Name: sessionName, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+		TermEnv: "xterm-256color", TrueColor: true, RemoteTarget: &resumedTarget,
 		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}); err != nil {
-		_ = resumed.Close()
-		return fmt.Errorf("exact restart resume: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("exact restart resume: %w", err)
 	}
 	if _, err := preview.Preview(ctx, resumedTarget, 40, 8); err != nil {
-		_ = resumed.Close()
-		return fmt.Errorf("restart preview: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("restart preview: %w", err)
 	}
 	if err := touchRemoteFlag(ctx, target, "/tmp/vev-slow-preview"); err != nil {
-		_ = resumed.Close()
-		return fmt.Errorf("enable slow preview: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("enable slow preview: %w", err)
 	}
 	slowCtx, slowCancel := context.WithTimeout(ctx, 150*time.Millisecond)
 	_, slowErr := preview.Preview(slowCtx, resumedTarget, 40, 8)
 	slowCancel()
+	if err := touchRemoteFlag(ctx, target, "/tmp/vev-slow-preview-off"); err != nil {
+		return domain.RemoteSessionTarget{}, fmt.Errorf("disable slow preview: %w", err)
+	}
 	if slowErr == nil {
-		_ = resumed.Close()
-		return errors.New("slow preview did not honor cancellation")
+		return domain.RemoteSessionTarget{}, errors.New("slow preview did not honor cancellation")
 	}
-	_ = touchRemoteFlag(ctx, target, "/tmp/vev-slow-preview-off")
-
 	if err := detach(ctx, resumed); err != nil {
-		_ = resumed.Close()
-		return fmt.Errorf("stop resumed session: %w", err)
+		return domain.RemoteSessionTarget{}, fmt.Errorf("stop resumed session: %w", err)
 	}
-	_ = resumed.Close()
+	return resumedTarget, nil
+}
 
+func runUDPPhase(ctx context.Context, target string) error {
 	udp, err := openTransport(ctx, ports.RemoteTransportUDP, target)
 	if err != nil {
 		return fmt.Errorf("open UDP transport: %w", err)
 	}
+	defer func() { _ = udp.Close() }()
 	if err := attachAndCheck(ctx, udp, ports.Hello{
-		Intent:    ports.IntentNew,
-		Name:      "udp-harness",
-		Env:       localEnvironment(),
-		Cwd:       "/tmp/local-cwd",
-		TermEnv:   "xterm-256color",
-		TrueColor: true,
+		Intent: ports.IntentNew, Name: "udp-harness", Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+		TermEnv: "xterm-256color", TrueColor: true,
 	}); err != nil {
-		_ = udp.Close()
 		return fmt.Errorf("UDP attach: %w", err)
 	}
 	if err := detach(ctx, udp); err != nil {
-		_ = udp.Close()
 		return fmt.Errorf("UDP detach: %w", err)
 	}
-	_ = udp.Close()
+	return nil
+}
 
+func runCatalogFailurePhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient) error {
 	if err := touchRemoteFlag(ctx, target, "/tmp/vev-bad-catalog"); err != nil {
 		return fmt.Errorf("enable mismatched catalog: %w", err)
 	}
 	if _, err := catalog.List(ctx, target); err == nil {
 		return errors.New("version-mismatched catalog unexpectedly decoded")
 	}
-	_ = touchRemoteFlag(ctx, target, "/tmp/vev-bad-catalog-off")
-
-	if _, err := catalog.List(ctx, "test@unreachable.invalid"); err == nil {
-		return errors.New("unreachable catalog unexpectedly succeeded")
+	if err := touchRemoteFlag(ctx, target, "/tmp/vev-bad-catalog-off"); err != nil {
+		return fmt.Errorf("disable mismatched catalog: %w", err)
 	}
+	return nil
+}
 
+func runStaleTargetPhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, staleTarget domain.RemoteSessionTarget) error {
 	if err := runRemoteCommand(ctx, target, "vev", "kill", sessionName); err != nil {
 		return fmt.Errorf("destroy session for stale-target test: %w", err)
 	}
@@ -223,13 +221,29 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open stale-target transport: %w", err)
 	}
-	if err := expectNoSuchTarget(ctx, stale, resumedTarget); err != nil {
-		_ = stale.Close()
+	defer func() { _ = stale.Close() }()
+	if err := expectNoSuchTarget(ctx, stale, staleTarget); err != nil {
 		return fmt.Errorf("stale target fence: %w", err)
 	}
-	_ = stale.Close()
-
 	return nil
+}
+
+func removedCatalogTabID(before, after []ports.RemoteCatalogTab) (string, bool) {
+	remaining := make(map[string]struct{}, len(after))
+	for _, tab := range after {
+		remaining[tab.ID] = struct{}{}
+	}
+	var removed string
+	for _, tab := range before {
+		if _, exists := remaining[tab.ID]; exists {
+			continue
+		}
+		if removed != "" {
+			return "", false
+		}
+		removed = tab.ID
+	}
+	return removed, removed != ""
 }
 
 func localEnvironment() []string {
@@ -243,21 +257,68 @@ func localEnvironment() []string {
 	}
 }
 
-func openTransport(ctx context.Context, mode ports.RemoteTransportMode, target string) (ports.Transport, error) {
+type harnessFrame struct {
+	frame ports.Frame
+	err   error
+}
+
+type harnessTransport struct {
+	ports.Transport
+	frames    chan harnessFrame
+	stop      chan struct{}
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func newHarnessTransport(transport ports.Transport) *harnessTransport {
+	h := &harnessTransport{Transport: transport, frames: make(chan harnessFrame, 16), stop: make(chan struct{})}
+	go h.receiveLoop()
+	return h
+}
+
+func (h *harnessTransport) receiveLoop() {
+	for {
+		frame, err := h.Transport.Recv()
+		select {
+		case h.frames <- harnessFrame{frame: frame, err: err}:
+		case <-h.stop:
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (h *harnessTransport) Close() error {
+	h.closeOnce.Do(func() {
+		close(h.stop)
+		h.closeErr = h.Transport.Close()
+	})
+	return h.closeErr
+}
+
+func openTransport(ctx context.Context, mode ports.RemoteTransportMode, target string) (*harnessTransport, error) {
+	var transport ports.Transport
+	var err error
 	switch mode {
 	case ports.RemoteTransportStdio:
-		return sshstdio.DialContext(ctx, target, "", slog.New(slog.DiscardHandler))
+		transport, err = sshstdio.DialContext(ctx, target, "", slog.New(slog.DiscardHandler))
 	case ports.RemoteTransportUDP:
 		dialer := dgram.NewRemoteDialerWithLogger(target, "", slog.New(slog.DiscardHandler))
 		dialer.BootstrapTimeout = 8 * time.Second
 		dialer.ProbeTimeout = 3 * time.Second
-		return dialer.Dial(ctx)
+		transport, err = dialer.Dial(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported transport %q", mode)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return newHarnessTransport(transport), nil
 }
 
-func attachAndCheck(ctx context.Context, tr ports.Transport, hello ports.Hello) error {
+func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello) error {
 	hello.Version = ports.ProtocolVersion
 	hello.Size = domain.Size{Cols: 80, Rows: 24}
 	if hello.EnvironmentPolicy == 0 {
@@ -287,7 +348,7 @@ func attachAndCheck(ctx context.Context, tr ports.Transport, hello ports.Hello) 
 	return nil
 }
 
-func sendInputAndAwait(ctx context.Context, tr ports.Transport, command, want string) error {
+func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want string) error {
 	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(command + "\n")})}); err != nil {
 		return err
 	}
@@ -331,7 +392,7 @@ func sendInputAndAwait(ctx context.Context, tr ports.Transport, command, want st
 	}
 }
 
-func sendCommand(ctx context.Context, tr ports.Transport, slug string) error {
+func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 	id := requestID.Add(1)
 	request := ports.CommandRequest{
 		Version:   ports.ProtocolVersion,
@@ -367,7 +428,7 @@ func sendCommand(ctx context.Context, tr ports.Transport, slug string) error {
 	}
 }
 
-func detach(ctx context.Context, tr ports.Transport) error {
+func detach(ctx context.Context, tr *harnessTransport) error {
 	if err := tr.Send(ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}); err != nil {
 		return err
 	}
@@ -384,7 +445,7 @@ func detach(ctx context.Context, tr ports.Transport) error {
 	}
 }
 
-func expectNoSuchTarget(ctx context.Context, tr ports.Transport, target domain.RemoteSessionTarget) error {
+func expectNoSuchTarget(ctx context.Context, tr *harnessTransport, target domain.RemoteSessionTarget) error {
 	target.Endpoint = targetEndpoint(target.Endpoint)
 	target.DisplayOrigin = "remote"
 	target.SessionName = sessionName
@@ -528,22 +589,11 @@ func runRemoteCommand(ctx context.Context, target string, command ...string) err
 	return cmd.Run()
 }
 
-func receiveWithTimeout(ctx context.Context, tr ports.Transport) (ports.Frame, error) {
-	result := make(chan struct {
-		frame ports.Frame
-		err   error
-	}, 1)
-	go func() {
-		frame, err := tr.Recv()
-		result <- struct {
-			frame ports.Frame
-			err   error
-		}{frame: frame, err: err}
-	}()
+func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (ports.Frame, error) {
 	select {
 	case <-ctx.Done():
 		return ports.Frame{}, ctx.Err()
-	case outcome := <-result:
+	case outcome := <-tr.frames:
 		return outcome.frame, outcome.err
 	}
 }

@@ -29,7 +29,11 @@ func testRemoteTarget(stopped bool) *domain.RemoteSessionTarget {
 
 func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 	for _, stopped := range []bool{false, true} {
-		t.Run(map[bool]string{false: "live", true: "stopped"}[stopped], func(t *testing.T) {
+		name := "live"
+		if stopped {
+			name = "stopped"
+		}
+		t.Run(name, func(t *testing.T) {
 			target := testRemoteTarget(stopped)
 			msg := Hello{
 				Version:           ProtocolVersion,
@@ -61,6 +65,9 @@ func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 				RemoteTarget:      target,
 				EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
 			})
+			if attachPayload == nil {
+				t.Fatal("MarshalAttachTarget returned nil")
+			}
 			attach, err := UnmarshalAttachTarget(attachPayload)
 			if err != nil {
 				t.Fatal(err)

@@ -32,18 +32,26 @@ func TestRemoteRowsWithDuplicateLabelsKeepDistinctRoutingIdentity(t *testing.T) 
 		},
 	}, SelectionConfig{Mode: SelectNavigationTab})
 
-	first, ok := model.Selected()
-	require.True(t, ok)
-	require.Equal(t, firstKey.ID(), first.Session)
-	require.NotNil(t, first.RemoteTarget)
-	require.Equal(t, firstLifecycle, first.RemoteTarget.LifecycleID)
-	require.Equal(t, domain.TabStableID("tab-a"), first.RemoteTarget.LiveTabID)
-
-	model.Down()
-	second, ok := model.Selected()
-	require.True(t, ok)
-	require.Equal(t, secondKey.ID(), second.Session)
-	require.NotNil(t, second.RemoteTarget)
-	require.Equal(t, secondLifecycle, second.RemoteTarget.LifecycleID)
-	require.Equal(t, domain.TabStableID("tab-b"), second.RemoteTarget.LiveTabID)
+	expected := []struct {
+		name      string
+		session   domain.SessionID
+		lifecycle domain.SessionLifecycleID
+		tabID     domain.TabStableID
+	}{
+		{name: "first", session: firstKey.ID(), lifecycle: firstLifecycle, tabID: "tab-a"},
+		{name: "second", session: secondKey.ID(), lifecycle: secondLifecycle, tabID: "tab-b"},
+	}
+	for i, want := range expected {
+		t.Run(want.name, func(t *testing.T) {
+			selected, ok := model.Selected()
+			require.True(t, ok)
+			require.Equal(t, want.session, selected.Session)
+			require.NotNil(t, selected.RemoteTarget)
+			require.Equal(t, want.lifecycle, selected.RemoteTarget.LifecycleID)
+			require.Equal(t, want.tabID, selected.RemoteTarget.LiveTabID)
+		})
+		if i+1 < len(expected) {
+			model.Down()
+		}
+	}
 }

@@ -57,6 +57,7 @@ var (
 	ErrInvalidRemotePreviewRequest   = errors.New("ports: invalid remote preview request")
 	ErrInvalidRemotePreview          = errors.New("ports: invalid remote preview")
 	ErrRemotePreviewTooLarge         = errors.New("ports: remote preview exceeds size limit")
+	ErrRemotePreviewTimeout          = errors.New("ports: remote preview command timed out")
 	ErrRemotePreviewUnsupportedStyle = errors.New("ports: remote preview has unsupported style")
 )
 
@@ -98,15 +99,18 @@ func ValidateRemotePreview(preview RemotePreview) error {
 	if want > RemotePreviewMaxCells || len(preview.Cells) != want {
 		return ErrRemotePreviewTooLarge
 	}
+	width := int(preview.Width)
 	for i, cell := range preview.Cells {
 		if !utf8.ValidRune(cell.Rune) || !validRemotePreviewStyle(cell.Style) {
 			return ErrInvalidRemotePreview
 		}
+		rowStart := (i / width) * width
+		rowEnd := rowStart + width
 		if cell.Continuation {
-			if cell.Rune != 0 || i == 0 || preview.Cells[i-1].Continuation || renderer.RuneWidth(preview.Cells[i-1].Rune) != 2 {
+			if cell.Rune != 0 || i == rowStart || preview.Cells[i-1].Continuation || renderer.RuneWidth(preview.Cells[i-1].Rune) != 2 {
 				return ErrInvalidRemotePreview
 			}
-		} else if renderer.RuneWidth(cell.Rune) == 2 && (i+1 >= len(preview.Cells) || !preview.Cells[i+1].Continuation) {
+		} else if renderer.RuneWidth(cell.Rune) == 2 && (i+1 >= rowEnd || !preview.Cells[i+1].Continuation) {
 			return ErrInvalidRemotePreview
 		}
 	}

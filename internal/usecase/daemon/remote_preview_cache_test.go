@@ -112,11 +112,15 @@ func remotePreviewCacheTarget() domain.RemoteSessionTarget {
 }
 
 func remotePreviewCacheResult(target domain.RemoteSessionTarget, revision uint64) ports.RemotePreview {
+	return remotePreviewCacheResultRune(target, revision, 'x')
+}
+
+func remotePreviewCacheResultRune(target domain.RemoteSessionTarget, revision uint64, value rune) ports.RemotePreview {
 	return ports.RemotePreview{
 		Version: ports.RemotePreviewSchemaVersion, Status: ports.RemotePreviewOK,
 		LifecycleID: target.LifecycleID, TabID: target.LiveTabID,
 		Revision: revision, Width: 1, Height: 1,
-		Cells: []renderer.Cell{{Rune: 'x', Style: renderer.DefaultStyle()}},
+		Cells: []renderer.Cell{{Rune: value, Style: renderer.DefaultStyle()}},
 	}
 }
 
@@ -159,6 +163,20 @@ func TestFetchRemotePreviewSingleFlightAndCopiesCache(t *testing.T) {
 	cached, err := d.fetchRemotePreview(context.Background(), target, 1, 1)
 	require.NoError(t, err)
 	require.Equal(t, rune('x'), cached.Cells[0].Rune, "callers must not mutate the memory-only cache")
+	require.Equal(t, 1, client.Calls())
+}
+
+func TestFetchRemotePreviewAdapterTimeoutAppliesCooldown(t *testing.T) {
+	clock := &remotePreviewTestClock{now: time.Unix(250, 0)}
+	target := remotePreviewCacheTarget()
+	client := &remotePreviewTestClient{err: ports.ErrRemotePreviewTimeout}
+	d := newTestDaemon(t, nil, clock)
+	d.remotePreviewClient = client
+
+	_, firstErr := d.fetchRemotePreview(context.Background(), target, 1, 1)
+	require.ErrorIs(t, firstErr, ports.ErrRemotePreviewTimeout)
+	_, secondErr := d.fetchRemotePreview(context.Background(), target, 1, 1)
+	require.ErrorIs(t, secondErr, errRemotePreviewCooldown)
 	require.Equal(t, 1, client.Calls())
 }
 
@@ -205,7 +223,7 @@ func TestFetchRemotePreviewServesStaleWhileRefreshing(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), stale.Revision, "expired content remains available during revalidation")
 	<-client.started
-	key := remotePreviewCacheKey{Endpoint: target.Endpoint, DisplayOrigin: target.DisplayOrigin, LifecycleID: target.LifecycleID, SessionName: target.SessionName, LiveTabID: target.LiveTabID, Width: 1, Height: 1}
+	key := remotePreviewKeyFor(target, 1, 1)
 	d.remotePreview.mu.Lock()
 	flight := d.remotePreview.flights[key]
 	d.remotePreview.mu.Unlock()
@@ -272,7 +290,7 @@ func TestRemotePickerPreviewLateResponseCannotPublishAfterCloseAndReopen(t *test
 	secondTarget.LifecycleID[0]++
 	secondTarget.LiveTabID = "tab-2"
 	client.mu.Lock()
-	client.result = remotePreviewCacheResult(secondTarget, 2)
+	client.result = remotePreviewCacheResultRune(secondTarget, 2, 'y')
 	client.started = make(chan struct{})
 	client.release = make(chan struct{})
 	client.startedSignal = false
@@ -300,9 +318,10 @@ func TestRemotePickerPreviewLateResponseCannotPublishAfterCloseAndReopen(t *test
 	close(firstRelease)
 	close(client.release)
 	width, height := remotePickerPreviewSize(ac.sizeSnapshot())
-	firstKeyForCache := remotePreviewCacheKey{Endpoint: firstTarget.Endpoint, DisplayOrigin: firstTarget.DisplayOrigin, LifecycleID: firstTarget.LifecycleID, SessionName: firstTarget.SessionName, LiveTabID: firstTarget.LiveTabID, Width: width, Height: height}
-	secondKeyForCache := remotePreviewCacheKey{Endpoint: secondTarget.Endpoint, DisplayOrigin: secondTarget.DisplayOrigin, LifecycleID: secondTarget.LifecycleID, SessionName: secondTarget.SessionName, LiveTabID: secondTarget.LiveTabID, Width: width, Height: height}
-	for _, key := range []remotePreviewCacheKey{firstKeyForCache, secondKeyForCache} {
+	for _, key := range []remotePreviewCacheKey{
+		remotePreviewKeyFor(firstTarget, width, height),
+		remotePreviewKeyFor(secondTarget, width, height),
+	} {
 		d.remotePreview.mu.Lock()
 		flight := d.remotePreview.flights[key]
 		d.remotePreview.mu.Unlock()
@@ -316,9 +335,9 @@ func TestRemotePickerPreviewLateResponseCannotPublishAfterCloseAndReopen(t *test
 		preview = ac.overlays.pickerRemotePreview
 		currentGeneration := ac.overlays.pickerPreviewGeneration
 		ac.overlays.pickerMu.Unlock()
-		return currentGeneration == secondGeneration && len(preview.Rows) != 0 && len(preview.Rows[0]) != 0 && preview.Rows[0][0].Rune == 'x'
+		return currentGeneration == secondGeneration && len(preview.Rows) != 0 && len(preview.Rows[0]) != 0 && preview.Rows[0][0].Rune == 'y'
 	}, time.Second, time.Millisecond)
-	require.Equal(t, rune('x'), preview.Rows[0][0].Rune)
+	require.Equal(t, rune('y'), preview.Rows[0][0].Rune)
 	require.Equal(t, 2, client.Calls())
 }
 

@@ -115,7 +115,7 @@ func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 	}{
 		{name: "truncated", raw: []byte(`{"version":1,"hosts":[`)},
 		{name: "trailing JSON", raw: []byte(`{"version":1,"hosts":[]} {}`)},
-		{name: "unknown version", raw: []byte(`{"version":2,"hosts":[]}`)},
+		{name: "unknown version", raw: []byte(`{"version":3,"hosts":[]}`)},
 		{name: "missing hosts", raw: []byte(`{"version":1}`)},
 		{name: "null hosts", raw: []byte(`{"version":1,"hosts":null}`)},
 		{name: "null sessions", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":null}]}`)},

@@ -11,6 +11,30 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
+func TestCaptureRemotePreviewUsesBottomRowsForShorterPreview(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	sess.incarnation = remoteLifecycleForTest()
+	pane := sess.tabs[0].focusedPane()
+	pane.mu.Lock()
+	pane.screen = vt.NewScreen(2, 3)
+	pane.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'a'})
+	pane.screen.Frame.Set(0, 1, renderer.Cell{Rune: 'b'})
+	pane.screen.Frame.Set(0, 2, renderer.Cell{Rune: 'c'})
+	pane.mu.Unlock()
+
+	target := domain.RemoteSessionTarget{
+		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
+		SessionName: "work", LiveTabID: "tab-1",
+	}
+	preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
+		Version: ports.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []rune{'b', 'c'}, []rune{preview.Cells[0].Rune, preview.Cells[1].Rune})
+}
+
 func TestCaptureRemotePreviewDoesNotSplitWideRuneAtCropBoundary(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "tab-1", "pane-1")

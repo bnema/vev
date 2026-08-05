@@ -81,7 +81,7 @@ type TabSelectorTab struct {
 // Resolve returns the selected tab index only when the complete selector still
 // describes the supplied ordered tab metadata.
 func (s TabSelector) Resolve(tabs []TabSelectorTab) (int, bool) {
-	if s.Validate() != nil || len(tabs) != int(s.ExpectedCount) && s.Kind == TabSelectorByOrdinal {
+	if s.Validate() != nil || (len(tabs) != int(s.ExpectedCount) && s.Kind == TabSelectorByOrdinal) {
 		return 0, false
 	}
 	switch s.Kind {

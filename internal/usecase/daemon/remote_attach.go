@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"os"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -70,7 +69,7 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 	// Picker handoffs use the daemon's own environment and persisted CWD. The
 	// client's Env/Cwd fields remain present for wire compatibility but are not
 	// trusted for this branch.
-	env := copyEnvironment(os.Environ())
+	env := copyEnvironment(d.baseEnv)
 	cwd := d.dirOrHome(stopped.cwd)
 	sess, err := d.createSessionLockedWithMode(target.SessionName, false, cwd, h.Size, terminalEnv{TrueColor: h.TrueColor}, env, stopped.tabNames)
 	if err != nil {
@@ -89,12 +88,15 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 }
 
 func (d *Daemon) remoteTargetMatchesSession(sess *session, target domain.RemoteSessionTarget) bool {
-	if sess == nil || sess.incarnation != target.LifecycleID || sess.name != target.SessionName {
+	if sess == nil {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.sessions[sess.id] != sess {
+	sess.mu.Lock()
+	matches := d.sessions[sess.id] == sess && sess.incarnation == target.LifecycleID && sess.name == target.SessionName
+	sess.mu.Unlock()
+	if !matches {
 		return false
 	}
 	_, ok := remoteTargetTabIndexLocked(sess, target)

@@ -40,11 +40,20 @@ remote_container="${network}-remote"
 context_dir="$(mktemp -d "${TMPDIR:-/tmp}/vev-remote-picker-harness.XXXXXX")"
 
 cleanup() {
+  status=$?
+  trap - EXIT INT TERM
   set +e
+  if [ "$status" -ne 0 ]; then
+    printf 'remote picker harness: local container logs:\n' >&2
+    docker logs "$local_container" >&2
+    printf 'remote picker harness: remote container logs:\n' >&2
+    docker logs "$remote_container" >&2
+  fi
   docker rm -f "$local_container" "$remote_container" >/dev/null 2>&1
   docker network rm "$network" >/dev/null 2>&1
   docker image rm "$image" >/dev/null 2>&1
   rm -rf "$context_dir"
+  exit "$status"
 }
 trap cleanup EXIT INT TERM
 
@@ -57,11 +66,14 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 printf 'remote picker harness: building %s\n' "$image"
-go build -o "$context_dir/vev" "$repo_root"
-go build -o "$context_dir/harness" "$repo_root/scripts/remote-picker-harness"
+docker pull "$base_image" >/dev/null
+image_arch="$(docker image inspect "$base_image" --format '{{.Architecture}}')"
+GOOS=linux GOARCH="$image_arch" CGO_ENABLED=0 go build -o "$context_dir/vev" "$repo_root"
+GOOS=linux GOARCH="$image_arch" CGO_ENABLED=0 go build -o "$context_dir/harness" "$repo_root/scripts/remote-picker-harness"
 ssh-keygen -q -t ed25519 -N '' -f "$context_dir/id_ed25519"
 cp "$repo_root/scripts/remote-picker-harness/Dockerfile" "$context_dir/Dockerfile"
 cp "$repo_root/scripts/remote-picker-harness/vev-wrapper" "$context_dir/vev-wrapper"
+printf '%s\n' 'id_ed25519' > "$context_dir/.dockerignore"
 chmod 0600 "$context_dir/id_ed25519"
 
 docker build --build-arg "BASE_IMAGE=$base_image" -t "$image" "$context_dir" >/dev/null

@@ -24,6 +24,8 @@ type pickerSortMode uint32
 const (
 	pickerSortRecent pickerSortMode = iota
 	pickerSortGrouped
+
+	remotePickerPreviewDebounce = 80 * time.Millisecond
 )
 
 func pickerTitle(mode pickerSortMode) string {
@@ -517,11 +519,12 @@ func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Targ
 	}
 	ac.overlays.pickerMu.Unlock()
 	go func() {
+		defer cancel()
 		previewClock := d.clock
 		if previewClock == nil {
 			previewClock = systemClock{}
 		}
-		debounce := previewClock.NewTimer(80 * time.Millisecond)
+		debounce := previewClock.NewTimer(remotePickerPreviewDebounce)
 		defer debounce.Stop()
 		select {
 		case <-debounce.C():

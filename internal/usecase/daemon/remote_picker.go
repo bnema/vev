@@ -85,7 +85,7 @@ func (d *Daemon) remotePickerHostRanks() map[string]int {
 }
 
 func remoteCatalogExpired(fetchedAt, now time.Time) bool {
-	return fetchedAt.IsZero() || (!now.Before(fetchedAt) && now.Sub(fetchedAt) > remotePickerAttachTTL)
+	return fetchedAt.IsZero() || (!now.Before(fetchedAt) && now.Sub(fetchedAt) >= remotePickerAttachTTL)
 }
 
 func remotePickerAvailability(status remoteHostStatus) picker.RemoteAvailability {
@@ -522,7 +522,10 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 		var mismatch *ports.RemoteCatalogVersionMismatchError
 		if errors.As(listErr, &mismatch) {
 			status = remoteHostVersionMismatch
-		} else if !errors.Is(listErr, ports.ErrInvalidRemoteCatalog) && !errors.Is(listErr, ports.ErrRemoteCatalogTooLarge) {
+		} else if !errors.Is(listErr, ports.ErrInvalidRemoteCatalog) &&
+			!errors.Is(listErr, ports.ErrRemoteCatalogTooLarge) &&
+			!errors.Is(listErr, ports.ErrRemoteCatalogUnknownState) &&
+			!errors.Is(listErr, ports.ErrRemoteCatalogInvalidReason) {
 			status = remoteHostUnreachable
 		}
 		d.remoteCatalog.status[host] = status

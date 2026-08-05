@@ -844,6 +844,8 @@ type attachHandoffKey struct {
 	stopped   domain.TabSelector
 }
 
+const maxAttachHandoffHops = 32
+
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == ports.IntentNew {
@@ -865,6 +867,18 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	var remoteSelection *domain.RemoteSessionTarget
 	var remoteEnvironmentPolicy ports.EnvironmentPolicy
 	seenHandoffs := make(map[attachHandoffKey]struct{})
+	handoffHops := 0
+	admitHandoff := func(next attachHandoffKey) error {
+		if _, seen := seenHandoffs[next]; seen {
+			return fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
+		}
+		if handoffHops >= maxAttachHandoffHops {
+			return fmt.Errorf("vev: attach handoff exceeded maximum of %d hops", maxAttachHandoffHops)
+		}
+		handoffHops++
+		seenHandoffs[next] = struct{}{}
+		return nil
+	}
 	if remoteTarget != "" {
 		if modeErr != nil {
 			return modeErr
@@ -894,10 +908,9 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			next.liveTab = copyTarget.LiveTabID
 			next.stopped = copyTarget.StoppedTab
 		}
-		if _, seen := seenHandoffs[next]; seen {
-			return nil, client.AttachRequest{}, fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
+		if err := admitHandoff(next); err != nil {
+			return nil, client.AttachRequest{}, err
 		}
-		seenHandoffs[next] = struct{}{}
 		dialer, err := factory.DialerForRemote(target.Endpoint, target.Session, mode, log)
 		if err != nil {
 			return nil, client.AttachRequest{}, err
@@ -946,33 +959,32 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			}, client.AttachRequest{Intent: intent, SessionName: name})
 		}
 
-		var handoff *client.AttachTargetError
-		if !errors.As(err, &handoff) {
+		var handoffErr *client.AttachTargetError
+		if !errors.As(err, &handoffErr) {
 			return err
 		}
-		if handoff == nil {
+		if handoffErr == nil {
 			return fmt.Errorf("vev: invalid remote attach handoff")
 		}
-		if err := validateRemoteAttachHandoff(handoff.Target); err != nil {
+		if err := validateRemoteAttachHandoff(handoffErr.Target); err != nil {
 			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
-		next := attachHandoffKey{endpoint: handoff.Target.Endpoint, session: handoff.Target.Session, intent: handoff.Target.Intent}
-		if handoff.Target.RemoteTarget != nil {
-			next.lifecycle = handoff.Target.RemoteTarget.LifecycleID
-			next.liveTab = handoff.Target.RemoteTarget.LiveTabID
-			next.stopped = handoff.Target.RemoteTarget.StoppedTab
+		next := attachHandoffKey{endpoint: handoffErr.Target.Endpoint, session: handoffErr.Target.Session, intent: handoffErr.Target.Intent}
+		if handoffErr.Target.RemoteTarget != nil {
+			next.lifecycle = handoffErr.Target.RemoteTarget.LifecycleID
+			next.liveTab = handoffErr.Target.RemoteTarget.LiveTabID
+			next.stopped = handoffErr.Target.RemoteTarget.StoppedTab
 		}
-		if _, seen := seenHandoffs[next]; seen {
-			return fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
+		if err := admitHandoff(next); err != nil {
+			return err
 		}
-		seenHandoffs[next] = struct{}{}
-		remoteTarget = handoff.Target.Endpoint
-		name = handoff.Target.Session
-		intent = handoff.Target.Intent
+		remoteTarget = handoffErr.Target.Endpoint
+		name = handoffErr.Target.Session
+		intent = handoffErr.Target.Intent
 		remoteSelection = nil
-		remoteEnvironmentPolicy = handoff.Target.EnvironmentPolicy
-		if handoff.Target.RemoteTarget != nil {
-			copyTarget := *handoff.Target.RemoteTarget
+		remoteEnvironmentPolicy = handoffErr.Target.EnvironmentPolicy
+		if handoffErr.Target.RemoteTarget != nil {
+			copyTarget := *handoffErr.Target.RemoteTarget
 			remoteSelection = &copyTarget
 		}
 		if modeErr != nil {

@@ -12,7 +12,8 @@ export COLORTERM=truecolor
 case "$*" in
   *remote-catalog*)
     if [ -e /tmp/vev-bad-catalog ]; then
-      printf '%s\n' '{"protocol_version":23,"schema_version":1,"sessions":[]}'
+      # Keep zero invalid so this fixture cannot become a valid protocol version.
+      printf '%s\n' '{"protocol_version":0,"schema_version":1,"sessions":[]}'
       exit 0
     fi
     ;;

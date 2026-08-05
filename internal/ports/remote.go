@@ -85,25 +85,6 @@ type RemoteCatalogCacheEntry struct {
 	Sessions  []RemoteCatalogSession
 }
 
-// RemoteCatalogCacheTab is the durable subset of a tab catalogue entry.
-type RemoteCatalogCacheTab struct {
-	ID    string `json:"id,omitempty"`
-	Index uint16 `json:"index"`
-	Name  string `json:"name"`
-}
-
-// RemoteCatalogCacheSession is the durable subset of a remote session entry.
-type RemoteCatalogCacheSession struct {
-	LifecycleID domain.SessionLifecycleID `json:"lifecycle_id,omitempty"`
-	Name        string                    `json:"name"`
-	State       string                    `json:"state"`
-	Ephemeral   bool                      `json:"ephemeral"`
-	Attached    bool                      `json:"attached"`
-	LastUsedSeq uint64                    `json:"last_used_seq,omitempty"`
-	ActiveTabID string                    `json:"active_tab_id,omitempty"`
-	Tabs        []RemoteCatalogCacheTab   `json:"tabs"`
-}
-
 // RemoteCatalogCache persists complete remote discovery snapshots independently
 // from the remote host registry.
 type RemoteCatalogCache interface {
@@ -194,11 +175,7 @@ func (s *RemoteCatalogSession) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(raw.Tabs, &count); err != nil {
 		return err
 	}
-	if count == math.MaxUint16 {
-		s.Tabs = count
-	} else {
-		s.Tabs = int(count)
-	}
+	s.Tabs = int(count)
 	return nil
 }
 

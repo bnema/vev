@@ -10,6 +10,16 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+const (
+	remotePreviewGoldenStatusOffset         = 2
+	remotePreviewGoldenCellsOffset          = 2 + 1 + 16 + 2 + len("tab-1") + 8 + 2 + 2 + 4
+	remotePreviewGoldenCellFlagsOffset      = remotePreviewGoldenCellsOffset + 4
+	remotePreviewGoldenStyleFlagsOffset     = remotePreviewGoldenCellsOffset + 5
+	remotePreviewGoldenStyleAttrsOffset     = remotePreviewGoldenCellsOffset + 6
+	remotePreviewGoldenSecondCellOffset     = remotePreviewGoldenCellsOffset + previewCellWireSize
+	remotePreviewGoldenUnderlineStyleOffset = remotePreviewGoldenSecondCellOffset + 12
+)
+
 func remotePreviewGoldenPayload() []byte {
 	return []byte{
 		0x00, 0x01, 0x00,
@@ -56,11 +66,11 @@ func TestRemotePreviewCodecRejectsInvalidStatusFlagsAndRanges(t *testing.T) {
 		name   string
 		mutate func([]byte)
 	}{
-		{name: "status", mutate: func(b []byte) { b[2] = 0xff }},
-		{name: "cell flags", mutate: func(b []byte) { b[46] = 0x02 }},
-		{name: "style flags", mutate: func(b []byte) { b[47] = 0x80 }},
-		{name: "style attrs", mutate: func(b []byte) { b[48] = 0x80 }},
-		{name: "underline range", mutate: func(b []byte) { b[54] = byte(renderer.UnderlineDashed + 1) }},
+		{name: "status", mutate: func(b []byte) { b[remotePreviewGoldenStatusOffset] = 0xff }},
+		{name: "cell flags", mutate: func(b []byte) { b[remotePreviewGoldenCellFlagsOffset] = 0x02 }},
+		{name: "style flags", mutate: func(b []byte) { b[remotePreviewGoldenStyleFlagsOffset] = 0x80 }},
+		{name: "style attrs", mutate: func(b []byte) { b[remotePreviewGoldenStyleAttrsOffset] = 0x80 }},
+		{name: "underline range", mutate: func(b []byte) { b[remotePreviewGoldenUnderlineStyleOffset] = byte(renderer.UnderlineDashed + 1) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -88,6 +98,7 @@ func TestRemotePreviewCodecRejectsWideCellBoundaryAndInvalidIDs(t *testing.T) {
 		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 1, Height: 1, Cells: []renderer.Cell{{Rune: '界'}}},
 		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 1, Cells: []renderer.Cell{{Continuation: true}, {Rune: 'x'}}},
 		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 1, Cells: []renderer.Cell{{Rune: '界'}, {Continuation: true, Rune: 'x'}}},
+		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 2, Cells: []renderer.Cell{{Rune: 'x'}, {Rune: '界'}, {Continuation: true}, {Rune: 'y'}}},
 	} {
 		if MarshalRemotePreview(malformed) != nil {
 			t.Fatalf("malformed wide-cell preview marshaled: %#v", malformed.Cells)

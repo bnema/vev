@@ -134,7 +134,12 @@ func (r CatalogueRecord) Validate() error {
 	}
 
 	for _, tab := range r.TabRecords {
-		if !utf8.ValidString(string(tab.StableID)) || !utf8.ValidString(tab.Name) {
+		if tab.StableID != "" {
+			if err := ValidateTabStableID(tab.StableID); err != nil {
+				return errors.New("invalid catalogue tab metadata")
+			}
+		}
+		if !utf8.ValidString(tab.Name) {
 			return errors.New("invalid catalogue tab metadata")
 		}
 	}

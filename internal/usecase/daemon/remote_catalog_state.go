@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -48,7 +49,7 @@ func cloneRemoteCatalogEntry(entry ports.RemoteCatalogCacheEntry) ports.RemoteCa
 	for i, session := range entry.Sessions {
 		sessions[i] = session
 		if tabs := ports.CatalogTabs(session); tabs != nil {
-			sessions[i].Tabs = append([]ports.RemoteCatalogTab(nil), tabs...)
+			sessions[i].Tabs = slices.Clone(tabs)
 		}
 	}
 	return ports.RemoteCatalogCacheEntry{

@@ -323,8 +323,9 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 					tabRow.hasRemoteTarget = true
 				}
 				if !tabRow.hasRemoteTarget {
-					tabRow.focusable = false
-					tabRow.selectable = false
+					legacyRemote := common.hasRemoteKey && config.Mode == SelectNavigationTab && remoteSelectable(session)
+					tabRow.focusable = legacyRemote
+					tabRow.selectable = legacyRemote
 				} else {
 					tabRow.focusable = true
 					tabRow.selectable = tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteSelectable(session)

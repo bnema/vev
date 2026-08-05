@@ -3,9 +3,12 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -14,6 +17,12 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/renderer"
 )
+
+func previewClientTargetForTest() domain.RemoteSessionTarget {
+	var lifecycle domain.SessionLifecycleID
+	lifecycle[0] = 1
+	return domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
+}
 
 func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T) {
 	var lifecycle domain.SessionLifecycleID
@@ -75,4 +84,55 @@ func TestRemotePreviewClientRejectsMalformedResponse(t *testing.T) {
 	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	_, err := client.Preview(context.Background(), target, 1, 1)
 	require.Error(t, err)
+}
+
+func TestRemotePreviewClientRejectsOversizedOutput(t *testing.T) {
+	client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero", ports.RemotePreviewMaxBytes+1))
+	}}
+	target := previewClientTargetForTest()
+	_, err := client.Preview(context.Background(), target, 1, 1)
+	require.ErrorIs(t, err, errRemotePreviewTooLarge)
+}
+
+func TestRemotePreviewClientReturnsStderrDiagnostic(t *testing.T) {
+	client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "printf 'connection refused' >&2; exit 1")
+	}}
+	target := previewClientTargetForTest()
+	_, err := client.Preview(context.Background(), target, 1, 1)
+	require.ErrorIs(t, err, errRemotePreviewSSH)
+	require.Contains(t, err.Error(), "connection refused")
+}
+
+func TestRemotePreviewClientReturnsInternalTimeoutSentinel(t *testing.T) {
+	client := &PreviewClient{
+		timeout: 20 * time.Millisecond,
+		command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sleep", "10")
+		},
+	}
+	_, err := client.Preview(context.Background(), previewClientTargetForTest(), 1, 1)
+	require.ErrorIs(t, err, ports.ErrRemotePreviewTimeout)
+}
+
+func TestRemotePreviewClientReturnsCallerCancellation(t *testing.T) {
+	started := make(chan struct{})
+	client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		close(started)
+		return exec.CommandContext(ctx, "sleep", "10")
+	}}
+	target := previewClientTargetForTest()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.Preview(ctx, target, 1, 1)
+		errCh <- err
+	}()
+	<-started
+	cancel()
+	err := <-errCh
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, errors.Is(err, errRemotePreviewSSH))
 }

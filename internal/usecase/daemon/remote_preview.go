@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -54,6 +55,10 @@ func (d *Daemon) captureRemotePreview(request ports.RemotePreviewRequest) (ports
 		return ports.RemotePreview{}, errRemotePreviewNoSuchTarget
 	}
 	tab := sess.tabs[index]
+	if tab == nil || domain.TabStableID(tab.stableID) != target.LiveTabID {
+		sess.mu.Unlock()
+		return ports.RemotePreview{}, errRemotePreviewNoSuchTarget
+	}
 	sess.mu.Unlock()
 	tab.mu.Lock()
 	pane := tab.focusedPane()

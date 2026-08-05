@@ -60,10 +60,16 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 	cmd.WaitDelay = remotePreviewWaitDelay
 	if err := cmd.Run(); err != nil {
 		if ctxErr := runCtx.Err(); ctxErr != nil {
-			return ports.RemotePreview{}, ctxErr
+			if parentErr := ctx.Err(); parentErr != nil {
+				return ports.RemotePreview{}, parentErr
+			}
+			return ports.RemotePreview{}, ports.ErrRemotePreviewTimeout
 		}
 		if stdout.overflow || stderr.overflow {
 			return ports.RemotePreview{}, errRemotePreviewTooLarge
+		}
+		if diagnostic := sanitizeCatalogDiagnostic(string(stderr.Bytes())); diagnostic != "" {
+			return ports.RemotePreview{}, fmt.Errorf("%w: %v: %s", errRemotePreviewSSH, err, diagnostic)
 		}
 		return ports.RemotePreview{}, fmt.Errorf("%w: %v", errRemotePreviewSSH, err)
 	}

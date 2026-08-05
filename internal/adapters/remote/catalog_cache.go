@@ -17,7 +17,7 @@ import (
 
 const (
 	catalogCacheFileName    = "remote-catalog-cache.json"
-	catalogCacheFileVersion = 1
+	catalogCacheFileVersion = 2
 )
 
 // CatalogCachePath returns the canonical location of the remote catalog cache in stateDir.
@@ -177,7 +177,7 @@ func (c *fileCatalogCache) Store(entries []ports.RemoteCatalogCacheEntry) error 
 				copyTabs := append([]ports.RemoteCatalogTab(nil), tabs...)
 				row.TabList = &copyTabs
 			} else {
-				count := uint16(ports.CatalogTabCount(session))
+				count := ports.SaturateUint16(ports.CatalogTabCount(session))
 				row.Tabs = &count
 			}
 			sessions = append(sessions, row)

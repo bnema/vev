@@ -49,9 +49,11 @@ func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
 func TestRemotePickerRichHandoffRejectsReplacedLifecycle(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	lifecycle := remoteLifecycleForTest()
+	cachedLifecycle := lifecycle
+	cachedLifecycle[0]++
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
 		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: lifecycle, Name: "work", State: "running", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+			LifecycleID: cachedLifecycle, Name: "work", State: "running", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 		}},
 	}})
 	d.remoteCatalog.mu.Lock()
@@ -64,7 +66,7 @@ func TestRemotePickerRichHandoffRejectsReplacedLifecycle(t *testing.T) {
 	token.effect = effect
 	defer effect.End()
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
-	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "replaced"}
-	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "replaced"}
+	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
+	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
 	require.ErrorIs(t, d.sendRemoteAttachTargetForAttachment(token, target, key, sessionHandoffGuard{}, "picker-select"), errAttachmentTransition)
 }

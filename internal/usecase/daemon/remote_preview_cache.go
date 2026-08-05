@@ -191,8 +191,23 @@ func (d *Daemon) runRemotePreviewFlight(ctx context.Context, key remotePreviewCa
 		d.finishRemotePreviewFlight(key, flight, ports.RemotePreview{}, ctx.Err())
 		return
 	}
-	preview, err := d.remotePreviewClient.Preview(ctx, target, width, height)
-	<-d.remotePreview.slots
+	var preview ports.RemotePreview
+	var err error
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("remote preview flight panicked: %v", recovered)
+			preview = ports.RemotePreview{}
+			d.finishRemotePreviewFlight(key, flight, preview, err)
+			panic(recovered)
+		}
+		if err != nil {
+			preview = ports.RemotePreview{}
+		}
+		d.finishRemotePreviewFlight(key, flight, preview, err)
+	}()
+	defer func() { <-d.remotePreview.slots }()
+
+	preview, err = d.remotePreviewClient.Preview(ctx, target, width, height)
 	if err == nil {
 		if validationErr := ports.ValidateRemotePreview(preview); validationErr != nil {
 			err = validationErr
@@ -202,15 +217,16 @@ func (d *Daemon) runRemotePreviewFlight(ctx context.Context, key remotePreviewCa
 			err = errors.New("remote preview identity changed")
 		}
 	}
-	if err != nil {
-		preview = ports.RemotePreview{}
-	}
-	d.finishRemotePreviewFlight(key, flight, preview, err)
 }
 
 func (d *Daemon) finishRemotePreviewFlight(key remotePreviewCacheKey, flight *remotePreviewFlight, preview ports.RemotePreview, err error) {
 	now := d.clock.Now()
 	d.remotePreview.mu.Lock()
+	for cooldownKey, until := range d.remotePreview.cooldowns {
+		if !now.Before(until) {
+			delete(d.remotePreview.cooldowns, cooldownKey)
+		}
+	}
 	flight.preview = cloneRemotePreview(preview)
 	flight.err = err
 	delete(d.remotePreview.flights, key)
@@ -233,7 +249,7 @@ func (d *Daemon) finishRemotePreviewFlight(key remotePreviewCacheKey, flight *re
 			}
 			delete(d.remotePreview.cache, oldestKey)
 		}
-	} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	} else if !errors.Is(err, context.Canceled) {
 		d.remotePreview.cooldowns[key] = now.Add(remotePreviewCooldown)
 	}
 	close(flight.done)

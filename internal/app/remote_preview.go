@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 
@@ -21,9 +22,12 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 	if _, err := ports.UnmarshalRemotePreviewRequest(request); err != nil {
 		return fmt.Errorf("vev: invalid remote preview request: %w", err)
 	}
-	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	transport, err := ipc.DialContext(ctx, ipc.SocketDir())
 	if err != nil {
-		return err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return writeRemotePreviewStatus(ports.RemotePreviewUnavailable)
 	}
 	defer func() { _ = transport.Close() }()
 	if err := transport.Send(ports.Frame{Type: ports.MsgRemotePreviewRequest, Payload: request}); err != nil {
@@ -57,4 +61,15 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 		_, err := os.Stdout.Write(result.frame.Payload)
 		return err
 	}
+}
+
+func writeRemotePreviewStatus(status ports.RemotePreviewStatus) error {
+	payload := ports.MarshalRemotePreview(ports.RemotePreview{Version: ports.RemotePreviewSchemaVersion, Status: status})
+	if payload == nil {
+		return errors.New("vev: failed to encode remote preview status")
+	}
+	if _, err := os.Stdout.Write(payload); err != nil {
+		return fmt.Errorf("vev: writing remote preview status: %w", err)
+	}
+	return nil
 }

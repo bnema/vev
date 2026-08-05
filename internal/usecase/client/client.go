@@ -226,20 +226,28 @@ func (r *Runner) terminalInput() *terminalInputPump {
 	return r.input
 }
 
+func validateAttachRequest(request AttachRequest) error {
+	if request.RemoteTarget == nil {
+		return nil
+	}
+	if err := request.RemoteTarget.Validate(); err != nil {
+		return fmt.Errorf("vev: invalid remote attach target: %w", err)
+	}
+	if request.SessionName != request.RemoteTarget.SessionName {
+		return errors.New("vev: remote attach target session mismatch")
+	}
+	if request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned && request.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+		return errors.New("vev: invalid remote environment policy")
+	}
+	return nil
+}
+
 // Run connects and runs the attach client. It owns the terminal lifecycle
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
-	if request.RemoteTarget != nil {
-		if err := request.RemoteTarget.Validate(); err != nil {
-			return fmt.Errorf("vev: invalid remote attach target: %w", err)
-		}
-		if request.SessionName != request.RemoteTarget.SessionName {
-			return errors.New("vev: remote attach target session mismatch")
-		}
-		if request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned && request.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
-			return errors.New("vev: invalid remote environment policy")
-		}
+	if err := validateAttachRequest(request); err != nil {
+		return err
 	}
 	ms := milestones{}
 
@@ -267,6 +275,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 
 	resumeToken := uint64(0)
 	attemptRequest := request
+	dialer := r.dialer
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
 	var rememberOnce sync.Once
@@ -335,7 +344,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 
 	for {
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
-		transport, err := boundedDial(handshakeCtx, r.dialer)
+		transport, err := boundedDial(handshakeCtx, dialer)
 		if err != nil {
 			err = handshakeContextError(ctx, timedOut, err)
 			finishHandshake()
@@ -421,10 +430,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if handoffErr != nil {
 				return handoffErr
 			}
+			if err := validateAttachRequest(nextRequest); err != nil {
+				return fmt.Errorf("vev: invalid remote attach handoff request: %w", err)
+			}
 			if nextDialer == nil {
 				return errors.New("vev: remote attach handoff returned nil dialer")
 			}
-			r.dialer = nextDialer
+			dialer = nextDialer
 			attemptRequest = nextRequest
 			remote = attemptRequest.Remote || r.remote
 			resumeToken = 0

@@ -25,6 +25,14 @@ owning daemon without creating a local shadow session. Picker-selected remote
 attachments use the daemon's environment and persisted session working
 directory; direct CLI remote attaches retain their client-request semantics.
 
+## Durable record compatibility
+
+The catalogue record format is currently version 4 because records now retain
+stable tab identity metadata. Readers accept version 3 for one-way upgrades, but
+older binaries reject records written at version 4. Back up the vev state
+before a rollback; downgrading after an upgrade can leave newer catalogue
+records unreadable and may require recreating those sessions.
+
 Remote catalogues are bounded and versioned. Complete catalogues contain ordered
 tab IDs, names, state, active tab, attachment state, and MRU sequence. Stopped
 tab metadata is retained across daemon restart; legacy count-only catalogues are
