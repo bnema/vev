@@ -813,10 +813,13 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
-	// A remote view is not a daemon-liveness root. Retire its membership after
-	// releasing d.mu so a token cannot remain valid once shutdown begins.
+	// A remote view is not a daemon-liveness root. Retire each exact local
+	// attachment after releasing d.mu so a token cannot remain valid and a
+	// blocked local-client Recv/Send cannot outlive daemon shutdown.
 	for _, view := range remoteViews {
-		view.close()
+		for _, ac := range view.close() {
+			d.retireShutdownRemoteAttachment(view, ac, reason)
+		}
 	}
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
@@ -1154,8 +1157,24 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 
-	sess, ac, rerr := d.routeWithContext(handshakeCtx, h, tr)
+	view, ac, remoteResume, rerr := d.resumeParkedRemoteView(h, tr)
+	if !remoteResume {
+		view, ac, remoteResume, rerr = d.resumeLiveRemoteView(h, tr)
+	}
+	var owner attachmentOwner = view
+	if remoteResume && rerr == nil && h.RemoteTarget != nil && !remoteViewMatchesTarget(view, *h.RemoteTarget) {
+		d.abortResumeClaim(ac)
+		rerr = &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
+	}
+	if !remoteResume {
+		var sess *session
+		sess, ac, rerr = d.routeWithContext(handshakeCtx, h, tr)
+		owner = sess
+	}
 	if rerr != nil {
+		if errors.Is(rerr, errResumeTokenLifecycleRace) {
+			rerr = &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		}
 		d.log.Warn("hello rejected", "err", rerr, "intent", h.Intent, "session", h.Name)
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
 			_ = sendHandshake(frameError(pe.code, pe.text))
@@ -1165,105 +1184,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		_ = tr.Close()
 		return
 	}
-
-	failAttachment := func() {
-		d.failHandshakeAttachment(sess, ac, tr)
-	}
-	if err := handshakeCtx.Err(); err != nil {
-		failAttachment()
-		return
-	}
-	rc := sess.renderCoordinator()
-	lease := (*attachmentLease)(nil)
-	if rc != nil {
-		lease = rc.attachmentLease(ac)
-	}
-	expected := ac.transportSnapshot()
-	welcomeToken := sess.attachmentToken(ac, tr)
-	welcomeToken.lease = lease
-	welcomeTicket, admitted := ac.beginAttachmentEffect(welcomeToken)
-	if expected.transport != tr || !admitted || welcomeToken.ac == nil {
-		if admitted {
-			welcomeTicket.End()
-		}
-		if !d.abortResumeClaim(ac) {
-			d.clientGone(sess, ac, tr, false)
-		}
-		return
-	}
-	if err := handshakeCtx.Err(); err != nil {
-		welcomeTicket.End()
-		failAttachment()
-		return
-	}
-	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
-		return ac.sendExpectedTransportForAttachment(expected, frameWelcome(sess, ac), welcomeTicket)
-	}); err != nil {
-		welcomeTicket.End()
-		failAttachment()
-		return
-	}
-	// Release Welcome's effect before discovering post-handshake authority so a
-	// replacement blocked behind the send can publish its generation and lease.
-	welcomeTicket.End()
-	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentAttachmentEffect(sess, tr)
-	if !admitted {
-		failAttachment()
-		return
-	}
-	postWelcomeLease := postWelcomeToken.lease
-	if postWelcomeToken.ac == nil {
-		postWelcomeTicket.End()
-		failAttachment()
-		return
-	}
-	if postWelcomeToken.ac.renderMode == ports.RenderModeProxiedContent {
-		meta, metaErr := frameSessionMeta(sess, postWelcomeToken.ac, 1)
-		if metaErr != nil {
-			postWelcomeTicket.End()
-			failAttachment()
-			return
-		}
-		if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
-			return postWelcomeToken.ac.sendExpectedTransportForAttachment(expected, meta, postWelcomeTicket)
-		}); err != nil {
-			postWelcomeTicket.End()
-			failAttachment()
-			return
-		}
-		postWelcomeToken.ac.sendMu.Lock()
-		postWelcomeToken.ac.proxiedMetaRevision = 1
-		postWelcomeToken.ac.sendMu.Unlock()
-	}
-	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
-		postWelcomeTicket.End()
-		// The attachment was detached while Welcome was in flight; never let
-		// this stale handshake emit an Output frame.
-		failAttachment()
-		return
-	}
-	postWelcomeTicket.End()
-	paintToken := sess.attachmentToken(ac, tr)
-	painted := make(chan bool, 1)
-	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
-		painted <- d.firstPaintForTransition(paintToken)
-		return nil
-	}); err != nil {
-		failAttachment()
-		return
-	}
-	if !<-painted || handshakeCtx.Err() != nil {
-		failAttachment()
-		return
-	}
-	if !d.commitResumeClaim(ac) {
-		failAttachment()
-		return
-	}
-	stopHandshakeTransport()
-	finishHandshake()
-	d.runConnLoop(ac)
-	_ = tr.Close()
+	d.completeAttachmentHandshake(handshakeCtx, timedOut, stopHandshakeTransport, finishHandshake, tr, owner, ac)
 }
 
 // protoErr is a session-level rejection carrying a wire ErrorMsg code.

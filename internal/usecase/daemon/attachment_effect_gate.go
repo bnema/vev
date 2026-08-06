@@ -219,11 +219,19 @@ func (ac *attachedClient) beginAttachmentEffect(token attachmentConnectionToken)
 // after Welcome has completed so a replacement blocked behind that send can
 // publish before readiness or first paint.
 func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
-	if ac == nil || sess == nil || tr == nil {
+	return ac.beginCurrentAttachmentOwnerEffect(sess, tr)
+}
+
+// beginCurrentAttachmentOwnerEffect waits out a transition that already froze
+// ac, then admits the capability derived from one exact attachment owner.
+// Handshakes use it after Welcome so a resumed remote view follows the same
+// generation-fenced client lifecycle as a local session.
+func (ac *attachedClient) beginCurrentAttachmentOwnerEffect(owner attachmentOwner, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
+	if ac == nil || normalizeAttachmentOwner(owner) == nil || tr == nil {
 		return attachmentConnectionToken{}, nil, false
 	}
 	for {
-		token := sess.attachmentToken(ac, tr)
+		token := attachmentOwnerToken(owner, ac, tr)
 		if token.ac == nil {
 			return token, nil, false
 		}

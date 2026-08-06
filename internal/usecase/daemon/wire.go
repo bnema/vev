@@ -2,20 +2,46 @@
 package daemon
 
 import (
+	"strconv"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
 func frameWelcome(s *session, ac *attachedClient) ports.Frame {
-	s.mu.Lock()
-	w := ports.Welcome{
-		SessionID:    string(s.id),
-		SessionName:  s.name,
-		Ephemeral:    s.ephemeral,
-		RenderMode:   ac.renderMode,
-		Capabilities: ports.CapabilityResume,
+	return frameWelcomeForAttachment(s, ac)
+}
+
+// frameWelcomeForAttachment emits the local-client handshake identity for one
+// attachment owner. A remote view is a local daemon object rather than a
+// synthetic session, so its opaque local view ID is used only for this wire
+// identity while its remote session name remains presentation data.
+func frameWelcomeForAttachment(owner attachmentOwner, ac *attachedClient) ports.Frame {
+	if ac == nil {
+		return ports.Frame{}
 	}
-	s.mu.Unlock()
+	var w ports.Welcome
+	switch owner := normalizeAttachmentOwner(owner).(type) {
+	case *session:
+		owner.mu.Lock()
+		w = ports.Welcome{
+			SessionID:    string(owner.id),
+			SessionName:  owner.name,
+			Ephemeral:    owner.ephemeral,
+			RenderMode:   ac.renderMode,
+			Capabilities: ports.CapabilityResume,
+		}
+		owner.mu.Unlock()
+	case *remoteView:
+		w = ports.Welcome{
+			SessionID:    "remote-view-" + strconv.FormatUint(uint64(owner.id), 10),
+			SessionName:  owner.key.sessionName,
+			RenderMode:   ac.renderMode,
+			Capabilities: ports.CapabilityResume,
+		}
+	default:
+		return ports.Frame{}
+	}
 	w.ResumeToken = ac.resumeToken
 	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}
 }

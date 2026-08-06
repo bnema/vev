@@ -357,6 +357,10 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 		sess.mu.Lock()
 		sess.unregisterAttachmentLocked(ac)
 		sess.mu.Unlock()
+	} else if view, remote := normalizeAttachmentOwner(parked.owner).(*remoteView); remote {
+		view.mu.Lock()
+		view.unregisterAttachmentLocked(ac)
+		view.mu.Unlock()
 	}
 	// Recreate the parked entry and its watcher instead of restoring a timer
 	// that may already have fired while the claim held the old entry. This also

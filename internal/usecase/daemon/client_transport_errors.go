@@ -68,13 +68,26 @@ func (d *Daemon) clientGoneRemote(view *remoteView, token attachmentConnectionTo
 	if !explicit {
 		parkingToken = d.markParkingInFlightOwner(view, ac)
 	}
+	if d.beforeClientGoneDetach != nil {
+		d.beforeClientGoneDetach()
+	}
 	if !d.detachRemoteAttachmentCurrent(view, token) {
 		d.clearParkingInFlightIfAbandonedOwner(view, ac, parkingToken)
 		return false
 	}
+	return d.finishRemoteClientGone(view, ac, token.transport.transport, explicit)
+}
+
+// finishRemoteClientGone completes remote local-client teardown only after the
+// exact owner binding has been unpublished. It intentionally leaves remote-link
+// lifecycle ownership to Phase 4.
+func (d *Daemon) finishRemoteClientGone(view *remoteView, ac *attachedClient, transport ports.Transport, explicit bool) bool {
+	if d == nil || view == nil || ac == nil {
+		return false
+	}
 	d.unregisterPreview(ac)
 	if !explicit && d.parkAttachmentOwner(view, ac) {
-		_ = ac.closeCapturedTransport(token.transport.transport)
+		_ = ac.closeCapturedTransport(transport)
 		return true
 	}
 	d.clearParkingInFlight(ac.resumeToken, ac)
@@ -83,17 +96,24 @@ func (d *Daemon) clientGoneRemote(view *remoteView, token attachmentConnectionTo
 	if explicit {
 		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
-	_ = ac.closeCapturedTransport(token.transport.transport)
+	_ = ac.closeCapturedTransport(transport)
 	return true
 }
 
 // detachRemoteAttachmentCurrent invalidates exactly the frozen remote-view
 // membership. It performs no transport I/O while architecture locks are held.
 func (d *Daemon) detachRemoteAttachmentCurrent(view *remoteView, token attachmentConnectionToken) bool {
+	return d.detachRemoteAttachmentCurrentUntil(view, token, nil)
+}
+
+// detachRemoteAttachmentCurrentUntil is the deadline-bounded counterpart used
+// by asynchronous failed-send cleanup. A timed-out cleanup leaves ownership
+// intact for a later terminal sweep rather than violating effect-gate ordering.
+func (d *Daemon) detachRemoteAttachmentCurrentUntil(view *remoteView, token attachmentConnectionToken, done func() <-chan struct{}) bool {
 	if d == nil || view == nil || token.ac == nil || token.transport.transport == nil {
 		return false
 	}
-	frozen := freezeAttachmentEffectGates(token.ac)
+	frozen := freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{done: done}, token.ac)
 	defer frozen.unfreeze()
 	if !frozen.acquired || !frozen.drained {
 		return false
@@ -194,6 +214,15 @@ func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToke
 	// A delayed sender may report after the client has rebound. Only the exact
 	// transport captured by this attachment is allowed to detach either lifecycle.
 	if failed == nil || failed != token.transport.transport {
+		return
+	}
+	if view, remote := token.owner.(*remoteView); remote {
+		parkingToken := d.markParkingInFlightOwner(view, token.ac)
+		if d.detachRemoteAttachmentCurrentUntil(view, token, done) {
+			d.finishRemoteClientGone(view, token.ac, failed, false)
+			return
+		}
+		d.clearParkingInFlightIfAbandonedOwner(view, token.ac, parkingToken)
 		return
 	}
 	sess := token.localSession()

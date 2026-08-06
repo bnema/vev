@@ -103,17 +103,40 @@ func (v *remoteView) attachmentRegistered(ac *attachedClient) bool {
 	return registered
 }
 
-// close retires attachment membership without transport I/O. The daemon first
-// marks shutdown under its registry lock, then calls this after releasing it;
-// exact token validation observes the cleared membership immediately.
-func (v *remoteView) close() {
+// close retires attachment membership without transport I/O and returns the
+// exact active attachments for retirement after the caller releases view.mu.
+// The daemon first marks shutdown under its registry lock, then uses that
+// snapshot to interrupt each blocked local-client transport.
+func (v *remoteView) close() []*attachedClient {
 	if v == nil {
-		return
+		return nil
 	}
 	v.mu.Lock()
+	attachments := make([]*attachedClient, 0, len(v.attachments))
+	for ac := range v.attachments {
+		attachments = append(attachments, ac)
+	}
 	v.closed = true
 	clear(v.attachments)
 	v.mu.Unlock()
+	return attachments
+}
+
+// retireShutdownRemoteAttachment closes one exact local-client transport after
+// a remote view is unpublished. It never performs I/O while holding daemon or
+// remote-view locks; a future remote link is separately retired in Phase 4.
+func (d *Daemon) retireShutdownRemoteAttachment(view *remoteView, ac *attachedClient, reason uint8) {
+	if d == nil || view == nil || ac == nil {
+		return
+	}
+	if sameAttachmentOwner(ac.currentAttachmentOwner(), view) {
+		ac.connectionGeneration.Add(1)
+		ac.setAttachmentOwner(nil)
+	}
+	ac.clearPreviousSession()
+	transport := ac.transport()
+	d.boundedSend(ac, frameDetached(reason))
+	_ = ac.closeCapturedTransport(ac.revokeTransport(transport))
 }
 
 func attachmentOwnerRegistered(owner attachmentOwner, ac *attachedClient) bool {
