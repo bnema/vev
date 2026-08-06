@@ -491,6 +491,18 @@ func (d *Daemon) retainToastTimerLocked(ac *attachedClient, t *noticeToast) {
 // repaintForNotice asks for an urgent redraw. It must be called with noticeMu
 // released: invalidateRender can paint inline, which takes sendMu.
 func (d *Daemon) repaintForNotice(ac *attachedClient) {
+	if ac == nil {
+		return
+	}
+	if view, remote := ac.currentAttachmentOwner().(*remoteView); remote {
+		tr := ac.transport()
+		token := attachmentOwnerToken(view, ac, tr)
+		if token.ac == nil {
+			return
+		}
+		d.paintRemoteView(view, ac, false, token)
+		return
+	}
 	sess := ac.currentSession()
 	if sess == nil {
 		// Mid-handoff or torn down: whoever attaches next repaints anyway, and

@@ -27,14 +27,14 @@ var (
 )
 
 func (d *Daemon) handleSequencedImagePushForAttachment(token attachmentConnectionToken, _ uint64, ip ports.ImagePush) {
-	if !token.attachmentEffectCurrent() || token.ac.renderMode == ports.RenderModeProxiedContent {
+	if token.localSession() == nil || !token.attachmentEffectCurrent() || token.ac.renderMode == ports.RenderModeProxiedContent {
 		return
 	}
 	d.handleImagePushForAttachment(token, ip)
 }
 
 func (d *Daemon) handleImagePushForAttachment(token attachmentConnectionToken, ip ports.ImagePush) {
-	if len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !token.attachmentEffectCurrent() {
+	if token.localSession() == nil || len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !token.attachmentEffectCurrent() {
 		return
 	}
 	path, err := d.writeClipboardImageForAttachment(token, ip)
@@ -85,6 +85,9 @@ func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string,
 }
 
 func (d *Daemon) writeClipboardImageForAttachment(token attachmentConnectionToken, ip ports.ImagePush) (string, error) {
+	if token.localSession() == nil || !token.attachmentEffectCurrent() {
+		return "", errAttachmentTransition
+	}
 	path, err := d.createClipboardImage(ip)
 	if err != nil {
 		return "", err

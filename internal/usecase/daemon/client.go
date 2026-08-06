@@ -875,6 +875,14 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 		return false
 	}
 	clientTheme := themeFromMessage(msg)
+	if view, remote := token.owner.(*remoteView); remote {
+		token.ac.setClientTheme(clientTheme)
+		token.ac.setAppliedTheme(d.resolveAppliedTheme(clientTheme))
+		if !token.attachmentEffectCurrent() {
+			return false
+		}
+		return d.paintRemoteView(view, token.ac, true, token) == paintEmitted
+	}
 	token.ac.setClientTheme(clientTheme)
 	sess := token.localSession()
 	if sess == nil || !token.attachmentEffectCurrent() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
@@ -921,6 +929,13 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 		ac.pipelineScratch = composeCacheInput{}
 	}
 	ac.sendMu.Unlock()
+
+	if view, remote := token.owner.(*remoteView); remote {
+		if sameSize || !token.attachmentEffectCurrent() || !view.resizeScreen(ac.sizeSnapshot()) {
+			return false
+		}
+		return d.paintRemoteView(view, ac, true, token) == paintEmitted
+	}
 
 	if !sameSize && ac.overlays != nil && ac.overlays.pickerActive() {
 		// The picker preview geometry is attachment-local. A resize must
@@ -989,7 +1004,16 @@ func (d *Daemon) handleClientNoticeForAttachment(token attachmentConnectionToken
 	}
 	sess := token.localSession()
 	if sess == nil {
+		view, remote := token.owner.(*remoteView)
+		if !remote {
+			d.notices.routingMu.Unlock()
+			return
+		}
+		repaint := d.mutateRemoteClientNotice(token.ac, notice)
 		d.notices.routingMu.Unlock()
+		if repaint && token.attachmentEffectCurrent() {
+			d.paintRemoteView(view, token.ac, false, token)
+		}
 		return
 	}
 	repaint := d.mutateClientNotice(sess, token.ac, notice)
@@ -1031,6 +1055,30 @@ func (d *Daemon) mutateClientNotice(sess *session, ac *attachedClient, notice po
 	default:
 		return false
 	}
+}
+
+// mutateRemoteClientNotice keeps client-originated feedback local to the
+// attachment. A remoteView has no local session scope or notice history to
+// mutate; only its visible toast stack is part of the local composition.
+func (d *Daemon) mutateRemoteClientNotice(ac *attachedClient, notice ports.ClientNotice) bool {
+	if ac == nil {
+		return false
+	}
+	var n domain.Notification
+	switch notice.Action {
+	case ports.ClientNoticeClipboardFallback:
+		n = domain.Notification{Code: domain.NoticeClipboard, Severity: domain.NoticeError, Message: "image paste failed; sent Ctrl+V", Time: d.clock.Now()}
+	case ports.ClientNoticeClipboardTooLarge:
+		n = domain.Notification{Code: domain.NoticeClipboardTooLarge, Severity: domain.NoticeWarn, Message: "image too large to paste", Time: d.clock.Now()}
+	case ports.ClientNoticeLinkDegraded:
+		n = domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "connection degraded", Time: d.clock.Now()}
+	case ports.ClientNoticeLinkConnected:
+		return d.dismissToastWithoutRepaint(ac, domain.NoticeConnection, "")
+	default:
+		return false
+	}
+	n.Count = 1
+	return d.publishToast(ac, n)
 }
 
 // recordClientNotice mutates notice history and the selected attachment while

@@ -175,6 +175,11 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 		result.Text = "attached commands cannot target themselves"
 		return result
 	}
+	if _, remote := token.owner.(*remoteView); remote {
+		result.Code = ports.ErrNoSuchTarget
+		result.Text = "attached session is no longer active"
+		return result
+	}
 	if request.TargetSession != "" || request.TargetTab != "" || request.TargetPane != "" {
 		result.Code = ports.ErrInvalidCommandArgs
 		result.Text = "attached commands cannot override their active session target"
@@ -238,7 +243,9 @@ func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	ac.pipelineCache = composeCacheInput{}
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
-	if sess := token.localSession(); sess != nil {
+	if view, remote := token.owner.(*remoteView); remote {
+		go d.paintRemoteView(view, ac, true, token)
+	} else if sess := token.localSession(); sess != nil {
 		go d.paint(sess, ac, true, token.lease)
 	}
 	return true
@@ -250,12 +257,25 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 		return false
 	}
 	ac.sendMu.Lock()
-	ac.output.ack(epoch, state)
+	if ac.output == nil {
+		ac.sendMu.Unlock()
+		return false
+	}
+	advanced := ac.output.ack(epoch, state)
 	ac.sendMu.Unlock()
+	if !advanced {
+		return true
+	}
 	if sess := token.localSession(); sess != nil {
 		if rc := sess.core().coordinator.Load(); rc != nil {
 			rc.notifyAckForLease(token.lease)
 		}
+	} else if view, remote := token.owner.(*remoteView); remote {
+		// Remote views do not have a session render coordinator to consume the
+		// newly available output-window capacity. Recompose from the retained
+		// private VT so an update previously blocked by the local client window
+		// is not stranded until another remote frame arrives.
+		go d.paintRemoteView(view, ac, false, token)
 	}
 	return true
 }

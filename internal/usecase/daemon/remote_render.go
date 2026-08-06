@@ -19,6 +19,27 @@ type remoteViewRenderSnapshot struct {
 	origin   string
 }
 
+// resizeScreen updates only the private remote VT surface. The attachment
+// owns the outer window and callers must not route this through local session
+// geometry or PTY resize machinery.
+func (v *remoteView) resizeScreen(size domain.Size) bool {
+	if v == nil || !size.Valid() {
+		return false
+	}
+	content := contentSize(size)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return false
+	}
+	if v.screen == nil {
+		v.screen = vt.NewScreen(content.Cols, content.Rows)
+	} else if v.screen.Frame.Width != content.Cols || v.screen.Frame.Height != content.Rows {
+		v.screen.Resize(content.Cols, content.Rows)
+	}
+	return true
+}
+
 // renderSnapshot is the remote-content ownership boundary. It copies every
 // mutable VT and metadata value while view.mu is held, then releases that lock
 // before any attachment, overlay, renderer, or transport work begins.
