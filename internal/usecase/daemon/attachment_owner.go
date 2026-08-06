@@ -61,6 +61,13 @@ type remoteView struct {
 	screen        *vt.Screen
 	metadata      ports.SessionMeta
 	displayOrigin string
+	// link and linkGeneration fence every remote transport callback. They are
+	// owned by the view rather than the local-session registry, and neither
+	// is ever used while view.mu is held for transport I/O.
+	link           *remoteLink
+	linkGeneration uint64
+	output         remoteOutputState
+	resetRequested bool
 }
 
 func (*remoteView) attachmentOwner() {}

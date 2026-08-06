@@ -77,7 +77,11 @@ type Daemon struct {
 	// sessions beyond concrete local *session values. Both are guarded by mu.
 	remoteViews      map[remoteViewID]*remoteView
 	remoteViewsByKey map[remoteViewKey]remoteViewID
-	nextRemoteViewID remoteViewID
+	// remoteViewConstructions reserves a remote key while its dial and
+	// handshake run outside d.mu. A waiter never dials and can cancel without
+	// disturbing the elected constructor.
+	remoteViewConstructions map[remoteViewKey]*remoteViewConstruction
+	nextRemoteViewID        remoteViewID
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
 	nextID   uint64
@@ -600,30 +604,31 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:          make(map[domain.SessionID]*session),
-		stopped:           make(map[string]stoppedSession),
-		remoteViews:       make(map[remoteViewID]*remoteView),
-		remoteViewsByKey:  make(map[remoteViewKey]remoteViewID),
-		creating:          make(map[string]struct{}),
-		parked:            make(map[uint64]*parkedAttachment),
-		parking:           make(map[uint64]*parkingAttachment),
-		paneProcessCtx:    paneProcessCtx,
-		paneProcessCancel: paneProcessCancel,
-		ptys:              ptys,
-		clock:             clock,
-		log:               log,
-		baseEnv:           os.Environ(),
-		shell:             shell,
-		dirOrHome:         dirOrHome,
-		done:              make(chan struct{}),
-		restoreDone:       make(chan struct{}),
-		animWake:          make(chan struct{}, 1),
-		snapshotJobs:      make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted:  make(map[*snapshotCapture]struct{}),
-		snapshotWake:      make(chan struct{}, 1),
-		notices:           newNoticeCenter(),
-		remoteCatalog:     newRemoteCatalogState(),
-		resumeParkGrace:   defaultResumeParkGrace,
+		sessions:                make(map[domain.SessionID]*session),
+		stopped:                 make(map[string]stoppedSession),
+		remoteViews:             make(map[remoteViewID]*remoteView),
+		remoteViewsByKey:        make(map[remoteViewKey]remoteViewID),
+		remoteViewConstructions: make(map[remoteViewKey]*remoteViewConstruction),
+		creating:                make(map[string]struct{}),
+		parked:                  make(map[uint64]*parkedAttachment),
+		parking:                 make(map[uint64]*parkingAttachment),
+		paneProcessCtx:          paneProcessCtx,
+		paneProcessCancel:       paneProcessCancel,
+		ptys:                    ptys,
+		clock:                   clock,
+		log:                     log,
+		baseEnv:                 os.Environ(),
+		shell:                   shell,
+		dirOrHome:               dirOrHome,
+		done:                    make(chan struct{}),
+		restoreDone:             make(chan struct{}),
+		animWake:                make(chan struct{}, 1),
+		snapshotJobs:            make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted:        make(map[*snapshotCapture]struct{}),
+		snapshotWake:            make(chan struct{}, 1),
+		notices:                 newNoticeCenter(),
+		remoteCatalog:           newRemoteCatalogState(),
+		resumeParkGrace:         defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -808,18 +813,36 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	for _, view := range d.remoteViews {
 		remoteViews = append(remoteViews, view)
 	}
+	constructions := make([]context.CancelFunc, 0, len(d.remoteViewConstructions))
+	for _, construction := range d.remoteViewConstructions {
+		if construction.cancel != nil {
+			constructions = append(constructions, construction.cancel)
+		}
+	}
 	clear(d.remoteViews)
 	clear(d.remoteViewsByKey)
+	clear(d.remoteViewConstructions)
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
 	// A remote view is not a daemon-liveness root. Retire each exact local
 	// attachment after releasing d.mu so a token cannot remain valid and a
-	// blocked local-client Recv/Send cannot outlive daemon shutdown.
+	// blocked local-client Recv/Send cannot outlive daemon shutdown. Candidate
+	// construction uses the same exact-close rule, even before publication.
+	for _, cancel := range constructions {
+		cancel()
+	}
+	remoteLinks := make([]*remoteLink, 0, len(remoteViews))
 	for _, view := range remoteViews {
 		for _, ac := range view.close() {
 			d.retireShutdownRemoteAttachment(view, ac, reason)
 		}
+		if link := d.stopRemoteViewLink(view); link != nil {
+			remoteLinks = append(remoteLinks, link)
+		}
+	}
+	for _, link := range remoteLinks {
+		<-link.done
 	}
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))

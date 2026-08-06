@@ -21,8 +21,12 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 	d.handleInput(sess, ac, data)
 }
 
-func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionToken, _ uint64, data []byte) {
+func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionToken, inputSeq uint64, data []byte) {
 	if !token.attachmentEffectCurrent() {
+		return
+	}
+	if view, remote := token.owner.(*remoteView); remote {
+		d.handleRemoteViewInput(view, token, inputSeq, data)
 		return
 	}
 	if token.ac.renderMode == ports.RenderModeProxiedContent {

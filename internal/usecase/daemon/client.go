@@ -934,6 +934,16 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 		if sameSize || !token.attachmentEffectCurrent() || !view.resizeScreen(ac.sizeSnapshot()) {
 			return false
 		}
+		resizePayload, err := ports.MarshalResize(ports.Resize{Size: contentSize(ac.sizeSnapshot())})
+		if err != nil {
+			return false
+		}
+		if err := d.sendRemoteViewFrame(view, ports.Frame{Type: ports.MsgResize, Payload: resizePayload}); err != nil {
+			// A disconnected remote link must not suppress the attachment-local
+			// rebase: retained content remains locally renderable while Phase 4
+			// reconnect policy restores the remote transport.
+			d.log.Warn("forwarding remote view resize failed", "endpoint", view.key.endpoint, "session", view.key.sessionName, "err", err)
+		}
 		return d.paintRemoteView(view, ac, true, token) == paintEmitted
 	}
 
