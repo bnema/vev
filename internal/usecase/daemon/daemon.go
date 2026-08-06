@@ -849,7 +849,7 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 		warm.stop()
 	}
 	for _, link := range remoteLinks {
-		<-link.done
+		joinRemoteLink(link)
 	}
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))

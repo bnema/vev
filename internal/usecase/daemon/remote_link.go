@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -37,10 +38,11 @@ type remoteLink struct {
 	transport  ports.Transport
 	cancel     context.CancelFunc
 
-	sendMu    sync.Mutex
-	startOnce sync.Once
-	done      chan struct{}
-	active    bool // guarded by view.mu
+	sendMu        sync.Mutex
+	startOnce     sync.Once
+	workerStarted atomic.Bool
+	done          chan struct{}
+	active        bool // guarded by view.mu
 }
 
 // remoteOutputState is the remote-link equivalent of the thin client's
@@ -458,8 +460,18 @@ func (d *Daemon) startRemoteLink(link *remoteLink) {
 		return
 	}
 	link.startOnce.Do(func() {
+		link.workerStarted.Store(true)
 		go d.runRemoteLink(link)
 	})
+}
+
+// joinRemoteLink waits only for a receiver that was actually started. Candidate
+// and test-only links may have no transport worker; treating their open done
+// channel as joinable would deadlock terminal cleanup.
+func joinRemoteLink(link *remoteLink) {
+	if link != nil && link.workerStarted.Load() {
+		<-link.done
+	}
 }
 
 func (d *Daemon) runRemoteLink(link *remoteLink) {

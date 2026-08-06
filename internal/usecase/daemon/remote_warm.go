@@ -145,7 +145,7 @@ func (d *Daemon) expireRemoteViewWarm(view *remoteView, warm *remoteViewWarm) {
 	if link.transport != nil {
 		_ = link.transport.Close()
 	}
-	<-link.done
+	joinRemoteLink(link)
 }
 
 // stopRemoteViewWarm clears and returns only the current timer. Its caller is

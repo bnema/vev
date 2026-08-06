@@ -13,6 +13,9 @@ func TestRemoteViewWarmExpiryRemovesOnlyDetachedExactView(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, nil, clock)
 	view := registerRemoteWarmTestView(t, d)
+	view.mu.Lock()
+	view.link = &remoteLink{view: view, generation: view.linkGeneration, cancel: func() {}, done: make(chan struct{}), active: true}
+	view.mu.Unlock()
 
 	d.parkRemoteViewWarm(view)
 	warm, timer := remoteWarmTimer(t, clock, view)
