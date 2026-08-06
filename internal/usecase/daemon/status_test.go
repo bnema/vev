@@ -110,15 +110,28 @@ func TestStatusCompositionGolden(t *testing.T) {
 }
 
 func TestStatusSegmentsIncludesAttachmentRemoteOrigin(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	_, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
+	tests := []struct {
+		name              string
+		remoteOrigin      string
+		wantAttachmentBar string
+	}{
+		{name: "remote origin", remoteOrigin: "arch", wantAttachmentBar: "vive at arch"},
+		{name: "local attachment", wantAttachmentBar: "vive"},
+	}
 
-	sess.name = "vive"
-	ac.remoteOrigin = "arch"
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p, releasePTY := newBlockingPTY(t)
+			_, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			defer releasePTY()
 
-	require.Equal(t, "vive at arch", sess.statusSegmentsFor(ac, true).session)
-	require.Equal(t, "vive", sess.statusSegments(true).session, "remote provenance belongs only to the selected attachment")
+			sess.name = "vive"
+			ac.remoteOrigin = test.remoteOrigin
+
+			require.Equal(t, test.wantAttachmentBar, sess.statusSegmentsFor(ac, true).session)
+			require.Equal(t, "vive", sess.statusSegments(true).session, "remote provenance belongs only to the selected attachment")
+		})
+	}
 }
 
 func TestStatusSegmentsIncludesFocusedPaneTitle(t *testing.T) {

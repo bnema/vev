@@ -77,35 +77,74 @@ func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
 }
 
 func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
-	d := newRemotePickerDaemon(nil)
-	lifecycle := remoteLifecycleForTest()
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: lifecycle,
-			Name:        "vive",
-			State:       "running",
-			Tabs: []ports.RemoteCatalogTab{
+	tests := []struct {
+		name        string
+		tabs        []ports.RemoteCatalogTab
+		activeTabID string
+		wantActive  int
+		wantTabID   domain.TabStableID
+	}{
+		{
+			name: "active first",
+			tabs: []ports.RemoteCatalogTab{
+				{ID: "tab-active", Index: 0, Name: "active"},
+				{ID: "tab-last", Index: 1, Name: "last"},
+			},
+			activeTabID: "tab-active",
+			wantActive:  0,
+			wantTabID:   "tab-active",
+		},
+		{
+			name: "active last",
+			tabs: []ports.RemoteCatalogTab{
 				{ID: "tab-first", Index: 0, Name: "first"},
 				{ID: "tab-active", Index: 1, Name: "active"},
 			},
-			ActiveTabID: "tab-active",
-		}},
-	}})
-	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.status["arch"] = remoteHostFresh
-	d.remoteCatalog.mu.Unlock()
+			activeTabID: "tab-active",
+			wantActive:  1,
+			wantTabID:   "tab-active",
+		},
+		{
+			name: "empty active tab ID falls back to first stable tab",
+			tabs: []ports.RemoteCatalogTab{
+				{ID: "tab-first", Index: 0, Name: "first"},
+				{ID: "", Index: 1, Name: "malformed"},
+			},
+			wantActive: 0,
+			wantTabID:  "tab-first",
+		},
+	}
 
-	views, _ := d.pickerViews(nil, nil)
-	require.Len(t, views, 1)
-	require.Equal(t, 1, views[0].Active)
-	require.NotNil(t, views[0].RemoteTarget)
-	require.Equal(t, domain.TabStableID("tab-active"), views[0].RemoteTarget.LiveTabID)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d := newRemotePickerDaemon(nil)
+			lifecycle := remoteLifecycleForTest()
+			d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
+					LifecycleID: lifecycle,
+					Name:        "vive",
+					State:       "running",
+					Tabs:        test.tabs,
+					ActiveTabID: test.activeTabID,
+				}},
+			}})
+			d.remoteCatalog.mu.Lock()
+			d.remoteCatalog.status["arch"] = remoteHostFresh
+			d.remoteCatalog.mu.Unlock()
 
-	model := d.newPickerModel(nil, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-	target, ok := model.Selected()
-	require.True(t, ok)
-	require.NotNil(t, target.RemoteTarget)
-	require.Equal(t, domain.TabStableID("tab-active"), target.RemoteTarget.LiveTabID)
+			views, _ := d.pickerViews(nil, nil)
+			require.Len(t, views, 1)
+			require.Equal(t, test.wantActive, views[0].Active)
+			require.NotNil(t, views[0].RemoteTarget)
+			require.Equal(t, test.wantTabID, views[0].RemoteTarget.LiveTabID)
+
+			model := d.newPickerModel(nil, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+			target, ok := model.Selected()
+			require.True(t, ok)
+			require.NotNil(t, target.RemoteTarget)
+			require.Equal(t, test.wantTabID, target.RemoteTarget.LiveTabID)
+		})
+	}
 }
 
 func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {

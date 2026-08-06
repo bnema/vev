@@ -35,80 +35,96 @@ func TestCaptureRemotePreviewUsesBottomRowsForShorterPreview(t *testing.T) {
 	require.Equal(t, []rune{'b', 'c'}, []rune{preview.Cells[0].Rune, preview.Cells[1].Rune})
 }
 
-func TestCaptureRemotePreviewCompactsBlankTailToKeepShortScreenContentVisible(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
-	sess.ephemeral = false
-	sess.incarnation = remoteLifecycleForTest()
-	pane := sess.tabs[0].focusedPane()
-	pane.mu.Lock()
-	pane.screen = vt.NewScreen(2, 4)
-	pane.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'v'})
-	pane.mu.Unlock()
-
-	target := domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
-		SessionName: "work", LiveTabID: "tab-1",
+func TestCaptureRemotePreviewCompactsBlankTail(t *testing.T) {
+	type screenCell struct {
+		x, y int
+		cell renderer.Cell
 	}
-	preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
-		Version: ports.RemotePreviewSchemaVersion, Target: target, Width: 2, Height: 2,
-	})
-	require.NoError(t, err)
-	require.Equal(t, uint16(1), preview.Height)
-	require.Equal(t, []rune{'v', ' '}, []rune{preview.Cells[0].Rune, preview.Cells[1].Rune})
-}
-
-func TestCaptureRemotePreviewIgnoresBoundarySplitWideRuneWhenCompacting(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
-	sess.ephemeral = false
-	sess.incarnation = remoteLifecycleForTest()
-	pane := sess.tabs[0].focusedPane()
-	pane.mu.Lock()
-	pane.screen = vt.NewScreen(3, 3)
-	pane.screen.Frame.Set(0, 1, renderer.Cell{Rune: 'a'})
-	pane.screen.Frame.Set(1, 2, renderer.Cell{Rune: '界'})
-	pane.screen.Frame.Set(2, 2, renderer.Cell{Continuation: true})
-	pane.mu.Unlock()
-
-	target := domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
-		SessionName: "work", LiveTabID: "tab-1",
+	type previewCell struct {
+		index int
+		rune  rune
+		style *renderer.Style
 	}
-	preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
-		Version: ports.RemotePreviewSchemaVersion, Target: target, Width: 2, Height: 2,
-	})
-	require.NoError(t, err)
-	require.Equal(t, uint16(1), preview.Height)
-	require.Equal(t, []rune{'a', ' '}, []rune{preview.Cells[0].Rune, preview.Cells[1].Rune})
-}
-
-func TestCaptureRemotePreviewPreservesStyledBlankTail(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
-	sess.ephemeral = false
-	sess.incarnation = remoteLifecycleForTest()
-	pane := sess.tabs[0].focusedPane()
-	style := renderer.DefaultStyle()
-	style.Background = 4
-	pane.mu.Lock()
-	pane.screen = vt.NewScreen(2, 4)
-	pane.screen.Frame.Set(0, 2, renderer.Cell{Rune: 'a'})
-	pane.screen.Frame.Set(0, 3, renderer.Cell{Rune: ' ', Style: style})
-	pane.mu.Unlock()
-
-	target := domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
-		SessionName: "work", LiveTabID: "tab-1",
+	styledBlank := renderer.DefaultStyle()
+	styledBlank.Background = 4
+	tests := []struct {
+		name                      string
+		screenWidth, screenHeight int
+		cells                     []screenCell
+		width, height             uint16
+		wantHeight                uint16
+		wantCells                 []previewCell
+	}{
+		{
+			name:         "keeps short screen content visible",
+			screenWidth:  2,
+			screenHeight: 4,
+			cells:        []screenCell{{x: 0, y: 0, cell: renderer.Cell{Rune: 'v'}}},
+			width:        2,
+			height:       2,
+			wantHeight:   1,
+			wantCells:    []previewCell{{index: 0, rune: 'v'}, {index: 1, rune: ' '}},
+		},
+		{
+			name:         "ignores boundary split wide rune",
+			screenWidth:  3,
+			screenHeight: 3,
+			cells: []screenCell{
+				{x: 0, y: 1, cell: renderer.Cell{Rune: 'a'}},
+				{x: 1, y: 2, cell: renderer.Cell{Rune: '界'}},
+				{x: 2, y: 2, cell: renderer.Cell{Continuation: true}},
+			},
+			width:      2,
+			height:     2,
+			wantHeight: 1,
+			wantCells:  []previewCell{{index: 0, rune: 'a'}, {index: 1, rune: ' '}},
+		},
+		{
+			name:         "preserves styled blank tail",
+			screenWidth:  2,
+			screenHeight: 4,
+			cells: []screenCell{
+				{x: 0, y: 2, cell: renderer.Cell{Rune: 'a'}},
+				{x: 0, y: 3, cell: renderer.Cell{Rune: ' ', Style: styledBlank}},
+			},
+			width:      2,
+			height:     2,
+			wantHeight: 2,
+			wantCells:  []previewCell{{index: 0, rune: 'a'}, {index: 2, rune: ' ', style: &styledBlank}},
+		},
 	}
-	preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
-		Version: ports.RemotePreviewSchemaVersion, Target: target, Width: 2, Height: 2,
-	})
-	require.NoError(t, err)
-	require.Equal(t, uint16(2), preview.Height)
-	require.Equal(t, rune('a'), preview.Cells[0].Rune)
-	require.Equal(t, rune(' '), preview.Cells[2].Rune)
-	require.True(t, preview.Cells[2].Style.Equal(style))
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "tab-1", "pane-1")
+			sess.ephemeral = false
+			sess.incarnation = remoteLifecycleForTest()
+			pane := sess.tabs[0].focusedPane()
+			pane.mu.Lock()
+			pane.screen = vt.NewScreen(test.screenWidth, test.screenHeight)
+			for _, cell := range test.cells {
+				pane.screen.Frame.Set(cell.x, cell.y, cell.cell)
+			}
+			pane.mu.Unlock()
+
+			target := domain.RemoteSessionTarget{
+				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
+				SessionName: "work", LiveTabID: "tab-1",
+			}
+			preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
+				Version: ports.RemotePreviewSchemaVersion, Target: target, Width: test.width, Height: test.height,
+			})
+			require.NoError(t, err)
+			require.Equal(t, test.wantHeight, preview.Height)
+			for _, want := range test.wantCells {
+				require.Equal(t, want.rune, preview.Cells[want.index].Rune)
+				if want.style != nil {
+					require.True(t, preview.Cells[want.index].Style.Equal(*want.style))
+				}
+			}
+		})
+	}
 }
 
 func TestStaticRemotePickerPreviewUsesOnlyItsTextRow(t *testing.T) {

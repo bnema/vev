@@ -139,7 +139,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	viewTabs := make([]picker.TabEntry, 0, len(tabs))
 	active := 0
 	for i, tab := range tabs {
-		if tab.ID == session.ActiveTabID {
+		if session.ActiveTabID != "" && tab.ID == session.ActiveTabID {
 			active = i
 		}
 		name := tab.Name

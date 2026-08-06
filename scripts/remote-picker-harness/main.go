@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -140,7 +141,7 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 // daemon container. It validates the seam that individual catalog, preview,
 // and attach tests cannot: catalog active-tab selection, live remote preview,
 // emitted rich handoff, and the remote attachment's visible provenance.
-func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, preview ports.RemotePreviewClient) error {
+func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, preview ports.RemotePreviewClient) (err error) {
 	const (
 		localSession  = "local-picker"
 		remoteSession = "picker"
@@ -151,13 +152,25 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err != nil {
 		return fmt.Errorf("open remote picker source: %w", err)
 	}
-	defer func() { _ = remote.Close() }()
+	ownsRemoteSession := false
+	defer func() {
+		_ = remote.Close()
+		if !ownsRemoteSession {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if cleanupErr := runRemoteCommand(cleanup, target, "vev", "kill", remoteSession); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("destroy remote picker session: %w", cleanupErr))
+		}
+	}()
 	if err := attachAndCheck(ctx, remote, ports.Hello{
 		Intent: ports.IntentNew, Name: remoteSession, Env: localEnvironment(), Cwd: "/tmp/remote-cwd",
 		TermEnv: "xterm-256color", TrueColor: true,
 	}); err != nil {
 		return fmt.Errorf("attach remote picker source: %w", err)
 	}
+	ownsRemoteSession = true
 	if err := sendCommand(ctx, remote, "new-tab"); err != nil {
 		return fmt.Errorf("create remote picker tab: %w", err)
 	}
@@ -474,10 +487,48 @@ func openTransport(ctx context.Context, mode ports.RemoteTransportMode, target s
 	return newHarnessTransport(transport), nil
 }
 
+const commandStderrLimit = 4 << 10
+
+type boundedStderr struct {
+	bytes.Buffer
+	truncated bool
+}
+
+func (b *boundedStderr) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := commandStderrLimit - b.Len()
+	if remaining <= 0 {
+		b.truncated = b.truncated || written != 0
+		return written, nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		b.truncated = true
+	}
+	_, _ = b.Buffer.Write(p)
+	return written, nil
+}
+
+func (b *boundedStderr) String() string {
+	stderr := b.Buffer.String()
+	if b.truncated {
+		stderr += "\n[stderr truncated]"
+	}
+	return stderr
+}
+
+func commandErrorWithStderr(err error, stderr string) error {
+	if stderr = strings.TrimSpace(stderr); stderr == "" {
+		return err
+	}
+	return fmt.Errorf("%w: stderr: %s", err, stderr)
+}
+
 func startLocalDaemon(ctx context.Context) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, "vev", "--daemon")
+	stderr := &boundedStderr{}
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -493,7 +544,7 @@ func startLocalDaemon(ctx context.Context) (*exec.Cmd, error) {
 		select {
 		case <-deadline.Done():
 			stopLocalProcess(cmd)
-			return nil, deadline.Err()
+			return nil, commandErrorWithStderr(deadline.Err(), stderr.String())
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
@@ -515,10 +566,18 @@ func stopLocalProcess(cmd *exec.Cmd) {
 }
 
 func runLocalCommand(ctx context.Context, name string, args ...string) error {
+	return runCapturedCommand(ctx, name, args...)
+}
+
+func runCapturedCommand(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	stderr := &boundedStderr{}
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return commandErrorWithStderr(err, stderr.String())
+	}
+	return nil
 }
 
 func openLocalTransport(ctx context.Context) (*harnessTransport, error) {
@@ -928,10 +987,7 @@ func touchRemoteFlag(ctx context.Context, target, path string) error {
 
 func runRemoteCommand(ctx context.Context, target string, command ...string) error {
 	spec := sshstdio.BuildCommandForRemoteCommand(target, command...)
-	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+	return runCapturedCommand(ctx, spec.Path, spec.Args...)
 }
 
 func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (ports.Frame, error) {
