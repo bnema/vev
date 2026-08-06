@@ -76,6 +76,38 @@ func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
 	require.False(t, d.remotePickerTargetReadyTarget(target), "attachment must reject a catalogue exactly at the TTL boundary")
 }
 
+func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	lifecycle := remoteLifecycleForTest()
+	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: lifecycle,
+			Name:        "vive",
+			State:       "running",
+			Tabs: []ports.RemoteCatalogTab{
+				{ID: "tab-first", Index: 0, Name: "first"},
+				{ID: "tab-active", Index: 1, Name: "active"},
+			},
+			ActiveTabID: "tab-active",
+		}},
+	}})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status["arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	views, _ := d.pickerViews(nil, nil)
+	require.Len(t, views, 1)
+	require.Equal(t, 1, views[0].Active)
+	require.NotNil(t, views[0].RemoteTarget)
+	require.Equal(t, domain.TabStableID("tab-active"), views[0].RemoteTarget.LiveTabID)
+
+	model := d.newPickerModel(nil, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	target, ok := model.Selected()
+	require.True(t, ok)
+	require.NotNil(t, target.RemoteTarget)
+	require.Equal(t, domain.TabStableID("tab-active"), target.RemoteTarget.LiveTabID)
+}
+
 func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 	tests := []struct {
 		name   string

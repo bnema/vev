@@ -589,13 +589,10 @@ func staticRemotePickerPreview(width, height uint16, message string) picker.Prev
 	if width == 0 || height == 0 {
 		return picker.Preview{}
 	}
-	rows := make([][]renderer.Cell, int(height))
+	rows := [][]renderer.Cell{make([]renderer.Cell, int(width))}
 	style := renderer.DefaultStyle()
-	for y := range rows {
-		rows[y] = make([]renderer.Cell, int(width))
-		for x := range rows[y] {
-			rows[y][x] = renderer.Cell{Rune: ' ', Style: style}
-		}
+	for x := range rows[0] {
+		rows[0][x] = renderer.Cell{Rune: ' ', Style: style}
 	}
 	for x, r := range []rune(message) {
 		if x >= int(width) {
@@ -603,7 +600,7 @@ func staticRemotePickerPreview(width, height uint16, message string) picker.Prev
 		}
 		rows[0][x] = renderer.Cell{Rune: r, Style: style}
 	}
-	return picker.Preview{Rows: rows, Width: int(width), Height: int(height)}
+	return picker.Preview{Rows: rows, Width: int(width), Height: len(rows)}
 }
 
 func pickerPreviewCurrent(ac *attachedClient, targetSess *session, next *tab, generation uint64) bool {

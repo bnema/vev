@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/dgram"
+	"github.com/bnema/vev/internal/adapters/ipc"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 const (
@@ -45,6 +47,9 @@ func run() error {
 
 	catalog := remoteadapter.NewCatalogClient()
 	preview := remoteadapter.NewPreviewClient()
+	if err := runLocalPickerUnitedPhase(ctx, target, catalog, preview); err != nil {
+		return err
+	}
 	if err := runLiveStdioPhase(ctx, target, catalog, preview); err != nil {
 		return err
 	}
@@ -127,6 +132,157 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 	}
 	if err := detach(ctx, stdio); err != nil {
 		return fmt.Errorf("stop session: %w", err)
+	}
+	return nil
+}
+
+// runLocalPickerUnitedPhase drives the actual local picker against the SSH
+// daemon container. It validates the seam that individual catalog, preview,
+// and attach tests cannot: catalog active-tab selection, live remote preview,
+// emitted rich handoff, and the remote attachment's visible provenance.
+func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, preview ports.RemotePreviewClient) error {
+	const (
+		localSession  = "local-picker"
+		remoteSession = "picker"
+		previewMarker = "VEV_REMOTE_PICKER_ACTIVE"
+	)
+
+	remote, err := openTransport(ctx, ports.RemoteTransportStdio, target)
+	if err != nil {
+		return fmt.Errorf("open remote picker source: %w", err)
+	}
+	defer func() { _ = remote.Close() }()
+	if err := attachAndCheck(ctx, remote, ports.Hello{
+		Intent: ports.IntentNew, Name: remoteSession, Env: localEnvironment(), Cwd: "/tmp/remote-cwd",
+		TermEnv: "xterm-256color", TrueColor: true,
+	}); err != nil {
+		return fmt.Errorf("attach remote picker source: %w", err)
+	}
+	if err := sendCommand(ctx, remote, "new-tab"); err != nil {
+		return fmt.Errorf("create remote picker tab: %w", err)
+	}
+	if err := sendCommand(ctx, remote, "next-tab"); err != nil {
+		return fmt.Errorf("focus remote picker tab: %w", err)
+	}
+	if err := sendInputAndAwait(ctx, remote, "printf '"+previewMarker+"\\n'", previewMarker); err != nil {
+		return fmt.Errorf("seed remote picker preview: %w", err)
+	}
+	remoteCatalog, err := waitForSessionWithTabCount(ctx, catalog, target, remoteSession, "running", 2)
+	if err != nil {
+		return fmt.Errorf("remote picker catalog: %w", err)
+	}
+	if remoteCatalog.ActiveTabID == "" {
+		return errors.New("remote picker catalog omitted active tab")
+	}
+	tabs := ports.CatalogTabs(remoteCatalog)
+	if len(tabs) != 2 {
+		return errors.New("remote picker catalog did not retain both tabs")
+	}
+	selectedTarget, err := targetForSession(target, remoteCatalog, false)
+	if err != nil {
+		return fmt.Errorf("active remote picker target: %w", err)
+	}
+	if selectedTarget.LiveTabID != domain.TabStableID(remoteCatalog.ActiveTabID) {
+		return errors.New("remote picker catalog active tab did not resolve to the selected target")
+	}
+	activeTabIndex := -1
+	for i, tab := range tabs {
+		if domain.TabStableID(tab.ID) == selectedTarget.LiveTabID {
+			activeTabIndex = i
+			break
+		}
+	}
+	if activeTabIndex < 0 {
+		return errors.New("remote picker catalog active tab was absent from tab list")
+	}
+	selectedPreview, err := preview.Preview(ctx, selectedTarget, 55, 22)
+	if err != nil {
+		return fmt.Errorf("explicit remote tab preview: %w", err)
+	}
+	if !remotePreviewContains(selectedPreview, previewMarker) {
+		return errors.New("explicit remote tab preview omitted marker")
+	}
+
+	if err := runLocalCommand(ctx, "vev", "host", "add", target); err != nil {
+		return fmt.Errorf("register remote picker host: %w", err)
+	}
+	localDaemon, err := startLocalDaemon(ctx)
+	if err != nil {
+		return fmt.Errorf("start local picker daemon: %w", err)
+	}
+	defer stopLocalDaemon(localDaemon)
+
+	local, err := openLocalTransport(ctx)
+	if err != nil {
+		return fmt.Errorf("open local picker transport: %w", err)
+	}
+	defer func() { _ = local.Close() }()
+	if err := attachAndCheck(ctx, local, ports.Hello{
+		Intent: ports.IntentNew, Name: localSession, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+		TermEnv: "xterm-256color", TrueColor: true,
+	}); err != nil {
+		return fmt.Errorf("attach local picker session: %w", err)
+	}
+	if err := sendRawInput(local, "\x1b "); err != nil {
+		return fmt.Errorf("open command palette: %w", err)
+	}
+	if err := awaitOutputContains(ctx, local, "Commands"); err != nil {
+		return fmt.Errorf("await command palette: %w", err)
+	}
+	if err := sendRawInput(local, "SSP\r"); err != nil {
+		return fmt.Errorf("open session picker: %w", err)
+	}
+	if err := awaitOutputContains(ctx, local, remoteSession+"@remote"); err != nil {
+		return fmt.Errorf("await remote picker catalog row: %w", err)
+	}
+	// The local selected tab is first and the remote session header is not
+	// selectable, so one down reaches the first remote tab. Derive the rest
+	// from the catalog's stable active tab identity instead of assuming an
+	// ordinal target.
+	if err := sendRawInput(local, strings.Repeat("j", activeTabIndex+1)); err != nil {
+		return fmt.Errorf("select catalog active remote tab: %w", err)
+	}
+	if err := awaitRemotePickerPreview(ctx, local, previewMarker); err != nil {
+		return fmt.Errorf("remote picker preview: %w", err)
+	}
+	if err := sendRawInput(local, "\r"); err != nil {
+		return fmt.Errorf("commit remote picker target: %w", err)
+	}
+	handoffFrame, err := receiveFrame(ctx, local, ports.MsgAttachTarget)
+	if err != nil {
+		return fmt.Errorf("await remote picker handoff: %w", err)
+	}
+	handoff, err := ports.UnmarshalAttachTarget(handoffFrame.Payload)
+	if err != nil {
+		return fmt.Errorf("decode remote picker handoff: %w", err)
+	}
+	if handoff.RemoteTarget == nil {
+		return errors.New("remote picker handoff omitted the remote target")
+	}
+	if handoff.RemoteTarget.LiveTabID != selectedTarget.LiveTabID {
+		return fmt.Errorf("remote picker handoff tab = %q, want %q", handoff.RemoteTarget.LiveTabID, selectedTarget.LiveTabID)
+	}
+	if handoff.RemoteTarget.DisplayOrigin != "remote" {
+		return fmt.Errorf("remote picker handoff origin = %q, want remote", handoff.RemoteTarget.DisplayOrigin)
+	}
+	if handoff.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+		return fmt.Errorf("remote picker handoff policy = %d, want daemon-owned", handoff.EnvironmentPolicy)
+	}
+
+	selected, err := openTransport(ctx, ports.RemoteTransportStdio, target)
+	if err != nil {
+		return fmt.Errorf("open selected remote transport: %w", err)
+	}
+	defer func() { _ = selected.Close() }()
+	if err := attachAndCheck(ctx, selected, ports.Hello{
+		Intent: ports.IntentAttach, Name: handoff.Session, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+		TermEnv: "xterm-256color", TrueColor: true,
+		RemoteTarget: handoff.RemoteTarget, EnvironmentPolicy: handoff.EnvironmentPolicy,
+	}); err != nil {
+		return fmt.Errorf("attach selected remote target: %w", err)
+	}
+	if err := awaitOutputContains(ctx, selected, remoteSession+" at remote"); err != nil {
+		return fmt.Errorf("remote provenance status bar: %w", err)
 	}
 	return nil
 }
@@ -318,6 +474,61 @@ func openTransport(ctx context.Context, mode ports.RemoteTransportMode, target s
 	return newHarnessTransport(transport), nil
 }
 
+func startLocalDaemon(ctx context.Context) (*exec.Cmd, error) {
+	cmd := exec.CommandContext(ctx, "vev", "--daemon")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for {
+		transport, err := ipc.DialContext(deadline, ipc.SocketDir())
+		if err == nil {
+			_ = transport.Close()
+			return cmd, nil
+		}
+		select {
+		case <-deadline.Done():
+			stopLocalProcess(cmd)
+			return nil, deadline.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func stopLocalDaemon(cmd *exec.Cmd) {
+	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = runLocalCommand(cleanup, "vev", "kill", "--daemon")
+	stopLocalProcess(cmd)
+}
+
+func stopLocalProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+func runLocalCommand(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
+}
+
+func openLocalTransport(ctx context.Context) (*harnessTransport, error) {
+	transport, err := ipc.DialContext(ctx, ipc.SocketDir())
+	if err != nil {
+		return nil, err
+	}
+	return newHarnessTransport(transport), nil
+}
+
 func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello) error {
 	hello.Version = ports.ProtocolVersion
 	hello.Size = domain.Size{Cols: 80, Rows: 24}
@@ -348,6 +559,136 @@ func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello
 	return nil
 }
 
+func sendRawInput(tr *harnessTransport, data string) error {
+	return tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(data)})})
+}
+
+func acknowledgeOutput(tr *harnessTransport, output ports.Output) error {
+	if output.Epoch == 0 || output.New == 0 {
+		return nil
+	}
+	payload, err := ports.MarshalAck(ports.Ack{Epoch: output.Epoch, State: output.New})
+	if err != nil {
+		return err
+	}
+	return tr.Send(ports.Frame{Type: ports.MsgAck, Payload: payload})
+}
+
+func awaitOutputContains(ctx context.Context, tr *harnessTransport, want string) error {
+	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var received strings.Builder
+	screen := vt.NewScreen(80, 24)
+	for {
+		frame, err := receiveWithTimeout(deadline, tr)
+		if err != nil {
+			return err
+		}
+		if frame.Type != ports.MsgOutput {
+			continue
+		}
+		output, err := ports.UnmarshalOutput(frame.Payload)
+		if err != nil {
+			return err
+		}
+		if err := acknowledgeOutput(tr, output); err != nil {
+			return err
+		}
+		received.Write(output.Data)
+		screen.Write(output.Data)
+		if strings.Contains(received.String(), want) || strings.Contains(harnessScreenText(screen), want) {
+			return nil
+		}
+		if received.Len() > 64<<10 {
+			text := received.String()
+			received.Reset()
+			received.WriteString(text[len(text)-16<<10:])
+		}
+	}
+}
+
+func awaitRemotePickerPreview(ctx context.Context, tr *harnessTransport, marker string) error {
+	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	screen := vt.NewScreen(80, 24)
+	outputFrames := 0
+	sawLoading := false
+	for {
+		frame, err := receiveWithTimeout(deadline, tr)
+		if err != nil {
+			return fmt.Errorf("no rendered remote preview after %d output frames (loading=%t): %w", outputFrames, sawLoading, err)
+		}
+		if frame.Type != ports.MsgOutput {
+			continue
+		}
+		output, err := ports.UnmarshalOutput(frame.Payload)
+		if err != nil {
+			return err
+		}
+		if err := acknowledgeOutput(tr, output); err != nil {
+			return err
+		}
+		outputFrames++
+		screen.Write(output.Data)
+		text := harnessScreenText(screen)
+		sawLoading = sawLoading || strings.Contains(text, "loading remote preview") || strings.Contains(string(output.Data), "loading remote preview")
+		if strings.Contains(text, marker) || strings.Contains(string(output.Data), marker) {
+			return nil
+		}
+		if strings.Contains(text, "remote preview unavailable") {
+			return errors.New("remote preview unavailable")
+		}
+	}
+}
+
+func harnessScreenText(screen *vt.Screen) string {
+	var text strings.Builder
+	for y := range screen.Frame.Height {
+		for x := range screen.Frame.Width {
+			r := screen.Frame.At(x, y).Rune
+			if r == 0 {
+				r = ' '
+			}
+			text.WriteRune(r)
+		}
+		text.WriteByte('\n')
+	}
+	return text.String()
+}
+
+func remotePreviewContains(preview ports.RemotePreview, want string) bool {
+	var text strings.Builder
+	for _, cell := range preview.Cells {
+		if !cell.Continuation {
+			text.WriteRune(cell.Rune)
+		}
+	}
+	return strings.Contains(text.String(), want)
+}
+
+func receiveFrame(ctx context.Context, tr *harnessTransport, typ ports.MsgType) (ports.Frame, error) {
+	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for {
+		frame, err := receiveWithTimeout(deadline, tr)
+		if err != nil {
+			return ports.Frame{}, err
+		}
+		if frame.Type == typ {
+			return frame, nil
+		}
+		if frame.Type == ports.MsgOutput {
+			output, decodeErr := ports.UnmarshalOutput(frame.Payload)
+			if decodeErr != nil {
+				return ports.Frame{}, decodeErr
+			}
+			if ackErr := acknowledgeOutput(tr, output); ackErr != nil {
+				return ports.Frame{}, ackErr
+			}
+		}
+	}
+}
+
 func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want string) error {
 	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(command + "\n")})}); err != nil {
 		return err
@@ -371,14 +712,8 @@ func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want 
 		}
 		outputFrames++
 		outputBytes += len(output.Data)
-		if output.Epoch != 0 && output.New != 0 {
-			ackPayload, err := ports.MarshalAck(ports.Ack{Epoch: output.Epoch, State: output.New})
-			if err != nil {
-				return fmt.Errorf("encode output ack: %w", err)
-			}
-			if err := tr.Send(ports.Frame{Type: ports.MsgAck, Payload: ackPayload}); err != nil {
-				return fmt.Errorf("ack output: %w", err)
-			}
+		if err := acknowledgeOutput(tr, output); err != nil {
+			return fmt.Errorf("ack output: %w", err)
 		}
 		received.Write(output.Data)
 		if strings.Contains(received.String(), want) {
@@ -413,6 +748,16 @@ func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 		frame, err := receiveWithTimeout(deadline, tr)
 		if err != nil {
 			return err
+		}
+		if frame.Type == ports.MsgOutput {
+			output, decodeErr := ports.UnmarshalOutput(frame.Payload)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			if ackErr := acknowledgeOutput(tr, output); ackErr != nil {
+				return ackErr
+			}
+			continue
 		}
 		if frame.Type != ports.MsgCommandResult {
 			continue
