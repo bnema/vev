@@ -88,6 +88,22 @@ func (f *remoteLinkTestFactory) DialerForRemote(_ string, _ string, _ ports.Remo
 	return f.dialer, nil
 }
 
+type remoteLinkSequenceFactory struct {
+	mu      sync.Mutex
+	dialers []ports.Dialer
+	calls   atomic.Int32
+}
+
+func (f *remoteLinkSequenceFactory) DialerForRemote(_ string, _ string, _ ports.RemoteTransportMode, _ *slog.Logger) (ports.Dialer, error) {
+	call := int(f.calls.Add(1)) - 1
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if call < 0 || call >= len(f.dialers) {
+		return nil, io.EOF
+	}
+	return f.dialers[call], nil
+}
+
 func remoteLinkTestTarget() domain.RemoteSessionTarget {
 	return domain.RemoteSessionTarget{
 		Endpoint:      "remote.example",
@@ -100,6 +116,11 @@ func remoteLinkTestTarget() domain.RemoteSessionTarget {
 
 func enqueueRemoteLinkHandshake(t *testing.T, transport *remoteLinkTestTransport, target domain.RemoteSessionTarget, size domain.Size) {
 	t.Helper()
+	enqueueRemoteLinkHandshakeWithContent(t, transport, target, size, "remote marker")
+}
+
+func enqueueRemoteLinkHandshakeWithContent(t *testing.T, transport *remoteLinkTestTransport, target domain.RemoteSessionTarget, size domain.Size, contentMarker string) {
+	t.Helper()
 	content := contentSize(size)
 	metaPayload, err := ports.MarshalSessionMeta(ports.SessionMeta{
 		LifecycleID: target.LifecycleID,
@@ -110,7 +131,7 @@ func enqueueRemoteLinkHandshake(t *testing.T, transport *remoteLinkTestTransport
 	})
 	require.NoError(t, err)
 	outputPayload, err := ports.MarshalOutput(ports.Output{
-		Epoch: 1, New: 1, Size: content, Full: true, Data: []byte("remote marker"),
+		Epoch: 1, New: 1, Size: content, Full: true, Data: []byte(contentMarker),
 	})
 	require.NoError(t, err)
 	transport.recv <- remoteLinkTestReceive{frame: ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{
@@ -336,6 +357,201 @@ func TestOpenRemoteViewPublishesHandshakeReadyCandidate(t *testing.T) {
 	view.mu.Unlock()
 
 	require.NoError(t, transport.Close())
+}
+
+func TestOpenRemoteViewReconnectsInactiveExactView(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	target := remoteLinkTestTarget()
+	size := domain.Size{Cols: 80, Rows: 24}
+	firstTransport := newRemoteLinkTestTransport()
+	secondTransport := newRemoteLinkTestTransport()
+	enqueueRemoteLinkHandshakeWithContent(t, firstTransport, target, size, "first generation")
+	enqueueRemoteLinkHandshakeWithContent(t, secondTransport, target, size, "second generation")
+	factory := &remoteLinkSequenceFactory{dialers: []ports.Dialer{
+		&remoteLinkTestDialer{transport: firstTransport},
+		&remoteLinkTestDialer{transport: secondTransport},
+	}}
+	d.remoteDialerFactory = factory
+
+	view, err := d.openRemoteView(context.Background(), target, size)
+	require.NoError(t, err)
+	awaitFrame(t, firstTransport.sent, ports.MsgHello)
+	awaitFrame(t, firstTransport.sent, ports.MsgAck)
+
+	localTransport := &closeTrackingTransport{}
+	attachment := &attachedClient{tr: localTransport}
+	attachment.setAttachmentOwner(view)
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(attachment))
+	oldLink := view.link
+	oldGeneration := view.linkGeneration
+	oldLink.active = false
+	require.Contains(t, screenLineText(view.screen, 0), "first generation")
+	view.mu.Unlock()
+
+	reconnected, err := d.openRemoteView(context.Background(), target, size)
+	require.NoError(t, err)
+	require.Same(t, view, reconnected)
+	require.Equal(t, int32(2), factory.calls.Load(), "an inactive registry link must be re-established")
+	awaitFrame(t, secondTransport.sent, ports.MsgHello)
+	awaitFrame(t, secondTransport.sent, ports.MsgAck)
+
+	view.mu.Lock()
+	require.NotSame(t, oldLink, view.link)
+	require.Equal(t, oldGeneration+1, view.linkGeneration)
+	require.Same(t, view, view.link.view)
+	require.Equal(t, view.linkGeneration, view.link.generation)
+	require.True(t, view.link.active)
+	require.Contains(t, screenLineText(view.screen, 0), "second generation")
+	require.Contains(t, view.attachments, attachment, "reconnect must preserve local attachment membership")
+	view.mu.Unlock()
+	require.Same(t, view, attachment.currentAttachmentOwner())
+	select {
+	case <-firstTransport.closed:
+	default:
+		t.Fatal("reconnect did not close the replaced exact transport")
+	}
+	awaitTestCompletion(t, oldLink.done, "reconnect did not join the replaced exact transport")
+
+	d.shutdownAll(ports.ReasonServerShutdown)
+}
+
+func TestOpenRemoteViewFailedReconnectPreservesViewUntilValidatedPublication(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	target := remoteLinkTestTarget()
+	size := domain.Size{Cols: 80, Rows: 24}
+	firstTransport := newRemoteLinkTestTransport()
+	failedTransport := newRemoteLinkTestTransport()
+	enqueueRemoteLinkHandshakeWithContent(t, firstTransport, target, size, "retained generation")
+	failedTransport.recv <- remoteLinkTestReceive{frame: ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{
+		SessionID: "remote-id", SessionName: target.SessionName, RenderMode: ports.RenderModeProxiedContent,
+	})}}
+	invalidMetadata, err := ports.MarshalSessionMeta(ports.SessionMeta{
+		LifecycleID: domain.SessionLifecycleID{9}, Revision: 1, SessionName: target.SessionName, ActiveTabID: target.LiveTabID,
+		Tabs: []ports.SessionTabMeta{{ID: target.LiveTabID, Name: "main"}},
+	})
+	require.NoError(t, err)
+	failedTransport.recv <- remoteLinkTestReceive{frame: ports.Frame{Type: ports.MsgSessionMeta, Payload: invalidMetadata}}
+	factory := &remoteLinkSequenceFactory{dialers: []ports.Dialer{
+		&remoteLinkTestDialer{transport: firstTransport},
+		&remoteLinkTestDialer{transport: failedTransport},
+	}}
+	d.remoteDialerFactory = factory
+
+	view, err := d.openRemoteView(context.Background(), target, size)
+	require.NoError(t, err)
+	awaitFrame(t, firstTransport.sent, ports.MsgHello)
+	awaitFrame(t, firstTransport.sent, ports.MsgAck)
+	attachment := &attachedClient{tr: &closeTrackingTransport{}}
+	attachment.setAttachmentOwner(view)
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(attachment))
+	oldLink := view.link
+	oldGeneration := view.linkGeneration
+	oldScreen := view.screen
+	oldLink.active = false
+	view.mu.Unlock()
+
+	reconnected, err := d.openRemoteView(context.Background(), target, size)
+	require.Nil(t, reconnected)
+	require.ErrorContains(t, err, "metadata identity mismatch")
+	require.Equal(t, int32(2), factory.calls.Load(), "the inactive registry hit must not be returned")
+	select {
+	case <-failedTransport.closed:
+	default:
+		t.Fatal("failed reconnect candidate transport was not closed")
+	}
+
+	d.mu.Lock()
+	require.Same(t, view, d.remoteViewByKeyLocked(view.key))
+	d.mu.Unlock()
+	view.mu.Lock()
+	require.Same(t, oldLink, view.link)
+	require.Equal(t, oldGeneration, view.linkGeneration)
+	require.Same(t, oldScreen, view.screen)
+	require.Contains(t, screenLineText(view.screen, 0), "retained generation")
+	require.Contains(t, view.attachments, attachment)
+	view.mu.Unlock()
+	require.Same(t, view, attachment.currentAttachmentOwner())
+
+	d.shutdownAll(ports.ReasonServerShutdown)
+}
+
+func TestOpenRemoteViewReconnectPublicationRejectsStaleLinkGeneration(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	target := remoteLinkTestTarget()
+	size := domain.Size{Cols: 80, Rows: 24}
+	oldTransport := newRemoteLinkTestTransport()
+	candidateTransport := newRemoteLinkTestTransport()
+	enqueueRemoteLinkHandshake(t, oldTransport, target, size)
+	enqueueRemoteLinkHandshakeWithContent(t, candidateTransport, target, size, "stale candidate")
+	reconnectStarted := make(chan struct{})
+	releaseReconnect := make(chan struct{})
+	factory := &remoteLinkSequenceFactory{dialers: []ports.Dialer{
+		&remoteLinkTestDialer{transport: oldTransport},
+		&remoteLinkTestDialer{transport: candidateTransport, started: reconnectStarted, release: releaseReconnect},
+	}}
+	d.remoteDialerFactory = factory
+
+	view, err := d.openRemoteView(context.Background(), target, size)
+	require.NoError(t, err)
+	awaitFrame(t, oldTransport.sent, ports.MsgHello)
+	awaitFrame(t, oldTransport.sent, ports.MsgAck)
+	view.mu.Lock()
+	observedLink := view.link
+	observedLink.active = false
+	view.mu.Unlock()
+
+	type result struct {
+		view *remoteView
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		reconnected, reconnectErr := d.openRemoteView(context.Background(), target, size)
+		resultCh <- result{view: reconnected, err: reconnectErr}
+	}()
+	awaitTestCompletion(t, reconnectStarted, "reconnect dial did not start")
+
+	newerTransport := newRemoteLinkTestTransport()
+	_, cancelNewer := context.WithCancel(context.Background())
+	view.mu.Lock()
+	view.linkGeneration++
+	newerLink := &remoteLink{
+		view: view, generation: view.linkGeneration, target: target, transport: newerTransport,
+		cancel: cancelNewer, done: make(chan struct{}), active: true,
+	}
+	view.link = newerLink
+	view.mu.Unlock()
+	d.startRemoteLink(newerLink)
+	close(releaseReconnect)
+
+	got := awaitTestValue(t, resultCh, "reconnect did not finish")
+	require.NoError(t, got.err)
+	require.Same(t, view, got.view)
+	view.mu.Lock()
+	require.Same(t, newerLink, view.link, "stale reconnect publication replaced a newer generation")
+	view.mu.Unlock()
+	select {
+	case <-candidateTransport.closed:
+	default:
+		t.Fatal("stale reconnect candidate transport was not closed")
+	}
+	select {
+	case <-newerTransport.closed:
+		t.Fatal("stale reconnect closed the newer exact transport")
+	default:
+	}
+	select {
+	case <-oldTransport.closed:
+		t.Fatal("rejected reconnect closed a transport it did not replace")
+	default:
+	}
+
+	observedLink.cancel()
+	require.NoError(t, oldTransport.Close())
+	awaitTestCompletion(t, observedLink.done, "superseded test link did not stop")
+	d.shutdownAll(ports.ReasonServerShutdown)
 }
 
 func TestOpenRemoteViewCancellationClosesUnpublishedTransport(t *testing.T) {

@@ -27,6 +27,12 @@ type remoteViewConstruction struct {
 	err    error
 }
 
+type remoteViewLinkSnapshot struct {
+	view       *remoteView
+	link       *remoteLink
+	generation uint64
+}
+
 // remoteLink is one exact transport generation for a remote view. sendMu
 // orders every outbound remote frame; view.mu guards whether this exact link
 // remains current. Neither lock is held while transport I/O runs.
@@ -92,9 +98,10 @@ func (s remoteOutputState) next(output ports.Output) (remoteOutputState, bool) {
 	return remoteOutputState{epoch: output.Epoch, state: output.New, viewRevision: output.ViewRevision, initialized: true}, true
 }
 
-// openRemoteView returns the exact warm view for target or elects one
-// constructor. The reservation is protected only by Daemon.mu; the dial and
-// all handshake I/O happen after every architecture lock is released.
+// openRemoteView returns the exact healthy warm view for target or elects one
+// constructor. An unhealthy registry hit is a reconnect candidate, never a
+// reusable result. The reservation is protected only by Daemon.mu; the dial
+// and all handshake I/O happen after every architecture lock is released.
 func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSessionTarget, size domain.Size) (*remoteView, error) {
 	if d == nil {
 		return nil, errors.New("remote view: nil daemon")
@@ -121,7 +128,8 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 			return nil, err
 		}
 		d.mu.Lock()
-		if existing := d.remoteViewByKeyLocked(key); existing != nil {
+		existing, observed, reusable := d.remoteViewLinkByKeyLocked(key)
+		if reusable {
 			d.mu.Unlock()
 			return existing, nil
 		}
@@ -141,17 +149,17 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 				return nil, err
 			}
 			d.mu.Lock()
-			winner := d.remoteViewByKeyLocked(key)
+			winner, _, healthy := d.remoteViewLinkByKeyLocked(key)
 			constructionErr := construction.err
 			d.mu.Unlock()
-			if winner != nil {
+			if healthy {
 				return winner, nil
 			}
 			if constructionErr != nil && !errors.Is(constructionErr, context.Canceled) && !errors.Is(constructionErr, context.DeadlineExceeded) {
 				return nil, constructionErr
 			}
-			// A canceled candidate never poisons an independent waiter. Re-elect
-			// if the caller still wants this exact remote view.
+			// A canceled candidate never poisons an independent waiter. A link
+			// that failed immediately after publication is likewise not reusable.
 			continue
 		}
 
@@ -170,21 +178,55 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 		cancel()
 
 		var winner *remoteView
+		var replaced *remoteLink
+		var repaint []*attachedClient
 		publishErr := constructionErr
 		d.mu.Lock()
 		if publishErr == nil {
-			if d.closing {
+			switch current := d.remoteViewByKeyLocked(key); {
+			case d.closing:
 				publishErr = errors.New("remote view: daemon is shutting down")
-			} else if existing := d.remoteViewByKeyLocked(key); existing != nil {
-				winner = existing
-			} else if err := d.registerRemoteViewLocked(candidate); err != nil {
-				publishErr = fmt.Errorf("remote view: publish candidate: %w", err)
-			} else {
-				winner = candidate
-				// Starting the receiver while d.mu still protects publication keeps
-				// shutdown from observing a registry-visible link with no worker
-				// to join.
-				d.startRemoteLink(candidate.link)
+			case current == nil && observed.view != nil:
+				publishErr = errRemoteViewStale
+			case current == nil:
+				if err := d.registerRemoteViewLocked(candidate); err != nil {
+					publishErr = fmt.Errorf("remote view: publish candidate: %w", err)
+				} else {
+					winner = candidate
+					// Starting the receiver while d.mu still protects publication
+					// keeps shutdown from observing a registry-visible link with no
+					// worker to join.
+					d.startRemoteLink(candidate.link)
+				}
+			case current != observed.view:
+				current.mu.Lock()
+				if remoteViewLinkReusableLocked(current) {
+					winner = current
+				} else {
+					publishErr = errRemoteViewStale
+				}
+				current.mu.Unlock()
+			default:
+				current.mu.Lock()
+				if remoteViewLinkReusableLocked(current) {
+					winner = current
+				} else if current.closed || current.link != observed.link || current.linkGeneration != observed.generation {
+					publishErr = errRemoteViewStale
+				} else {
+					var installed bool
+					replaced, installed = installRemoteViewCandidateLocked(current, candidate)
+					if !installed {
+						publishErr = errors.New("remote view: candidate link is unavailable")
+					} else {
+						winner = current
+						repaint = make([]*attachedClient, 0, len(current.attachments))
+						for attachment := range current.attachments {
+							repaint = append(repaint, attachment)
+						}
+						d.startRemoteLink(current.link)
+					}
+				}
+				current.mu.Unlock()
 			}
 		}
 		construction.err = publishErr
@@ -197,10 +239,89 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 		if candidate != nil && candidate != winner {
 			d.stopUnpublishedRemoteView(candidate)
 		}
+		if replaced != nil {
+			stopAndJoinRemoteLink(replaced)
+		}
+		for _, attachment := range repaint {
+			token := attachmentOwnerToken(winner, attachment, attachment.transport())
+			if token.ac != nil {
+				go d.paintRemoteView(winner, attachment, false, token)
+			}
+		}
 		if winner != nil {
-			return winner, nil
+			d.mu.Lock()
+			current, _, healthy := d.remoteViewLinkByKeyLocked(key)
+			d.mu.Unlock()
+			if healthy && current == winner {
+				return winner, nil
+			}
+			continue
 		}
 		return nil, publishErr
+	}
+}
+
+// remoteViewLinkByKeyLocked snapshots health and replacement authority under
+// the registry-to-view lock order. Caller holds d.mu.
+func (d *Daemon) remoteViewLinkByKeyLocked(key remoteViewKey) (*remoteView, remoteViewLinkSnapshot, bool) {
+	view := d.remoteViewByKeyLocked(key)
+	if view == nil {
+		return nil, remoteViewLinkSnapshot{}, false
+	}
+	view.mu.Lock()
+	snapshot := remoteViewLinkSnapshot{view: view, link: view.link, generation: view.linkGeneration}
+	reusable := remoteViewLinkReusableLocked(view)
+	view.mu.Unlock()
+	return view, snapshot, reusable
+}
+
+func remoteViewLinkReusableLocked(view *remoteView) bool {
+	if view == nil || view.closed || view.link == nil {
+		return false
+	}
+	link := view.link
+	return link.view == view && link.generation == view.linkGeneration && link.transport != nil && link.active
+}
+
+// installRemoteViewCandidateLocked transfers one fully handshaken candidate
+// into the exact observed view generation. Attachment membership and warm
+// retention stay on the stable view; content becomes visible only with the new
+// validated link publication. Caller holds the existing view's mutex.
+func installRemoteViewCandidateLocked(view, candidate *remoteView) (*remoteLink, bool) {
+	if view == nil || candidate == nil || candidate.link == nil || candidate.screen == nil {
+		return nil, false
+	}
+	link := candidate.link
+	replaced := view.link
+	view.linkGeneration++
+	link.view = view
+	link.generation = view.linkGeneration
+	link.active = true
+	view.link = link
+	view.screen = candidate.screen
+	view.metadata = cloneRemoteSessionMeta(candidate.metadata)
+	view.displayOrigin = candidate.displayOrigin
+	view.output = candidate.output
+	view.resetRequested = candidate.resetRequested
+	if replaced != nil {
+		replaced.active = false
+	}
+	candidate.link = nil
+	return replaced, true
+}
+
+func stopAndJoinRemoteLink(link *remoteLink) {
+	if link == nil {
+		return
+	}
+	if link.cancel != nil {
+		link.cancel()
+	}
+	if link.transport != nil {
+		_ = link.transport.Close()
+	}
+	if link.done != nil {
+		<-link.done
 	}
 }
 
@@ -618,6 +739,11 @@ func (link *remoteLink) send(frame ports.Frame) error {
 	err := transport.Send(frame)
 	link.sendMu.Unlock()
 	if err != nil {
+		view.mu.Lock()
+		if view.link == link && view.linkGeneration == link.generation {
+			link.active = false
+		}
+		view.mu.Unlock()
 		link.cancel()
 		_ = transport.Close()
 	}
