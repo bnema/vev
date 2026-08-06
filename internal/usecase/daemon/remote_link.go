@@ -397,27 +397,54 @@ func cloneRemoteSessionMeta(metadata ports.SessionMeta) ports.SessionMeta {
 	return metadata
 }
 
-// applyRemoteMetadata commits one validated update only for the exact current
-// link. The view lock protects content state only; no renderer or callback runs
-// before it is released.
+type remoteMetadataResult uint8
+
+const (
+	remoteMetadataInvalid remoteMetadataResult = iota
+	remoteMetadataStale
+	remoteMetadataAccepted
+)
+
+// applyRemoteMetadata retains the boolean helper used by initial handshake
+// callers. The detailed result is used by the live-link frame handler so a
+// valid stale revision can be ignored without stopping the link.
 func (v *remoteView) applyRemoteMetadata(link *remoteLink, metadata ports.SessionMeta, initial bool) bool {
-	if v == nil || link == nil {
-		return false
+	result, _ := v.applyRemoteMetadataWithAttachments(link, metadata, initial)
+	return result == remoteMetadataAccepted
+}
+
+// applyRemoteMetadataWithAttachments commits one validated update only for the
+// exact current link. The view lock protects content state only; no renderer or
+// callback runs before it is released. Accepted updates return an attachment
+// snapshot for repainting after the lock is released.
+func (v *remoteView) applyRemoteMetadataWithAttachments(link *remoteLink, metadata ports.SessionMeta, initial bool) (remoteMetadataResult, []*attachedClient) {
+	if v == nil || link == nil || ports.ValidateSessionMeta(metadata) != nil {
+		return remoteMetadataInvalid, nil
+	}
+	if metadata.LifecycleID != link.target.LifecycleID || metadata.SessionName != link.target.SessionName {
+		return remoteMetadataInvalid, nil
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed || v.link != link || v.linkGeneration != link.generation {
-		return false
+		return remoteMetadataInvalid, nil
 	}
 	if initial {
-		if v.metadata.Revision != 0 {
-			return false
+		if v.metadata.Revision != 0 || metadata.Revision != 1 {
+			return remoteMetadataInvalid, nil
 		}
 	} else if metadata.Revision <= v.metadata.Revision {
-		return false
+		return remoteMetadataStale, nil
 	}
 	v.metadata = cloneRemoteSessionMeta(metadata)
-	return true
+	if initial {
+		return remoteMetadataAccepted, nil
+	}
+	attachments := make([]*attachedClient, 0, len(v.attachments))
+	for attachment := range v.attachments {
+		attachments = append(attachments, attachment)
+	}
+	return remoteMetadataAccepted, attachments
 }
 
 // applyRemoteOutput validates and applies state-bearing ANSI to the persistent
@@ -516,22 +543,23 @@ func (d *Daemon) handleRemoteLinkFrame(link *remoteLink, frame ports.Frame) erro
 				return fmt.Errorf("remote view: acknowledge output: %w", err)
 			}
 		}
-		for _, attachment := range attachments {
-			token := attachmentOwnerToken(link.view, attachment, attachment.transport())
-			if token.ac != nil {
-				go d.paintRemoteView(link.view, attachment, false, token)
-			}
-		}
+		d.repaintRemoteViewAttachments(link.view, attachments)
 		return nil
 	case ports.MsgSessionMeta:
 		metadata, err := ports.UnmarshalSessionMeta(frame.Payload)
 		if err != nil {
 			return fmt.Errorf("remote view: decode metadata: %w", err)
 		}
-		if metadata.LifecycleID != link.target.LifecycleID || metadata.SessionName != link.target.SessionName || !link.view.applyRemoteMetadata(link, metadata, false) {
+		result, attachments := link.view.applyRemoteMetadataWithAttachments(link, metadata, false)
+		switch result {
+		case remoteMetadataAccepted:
+			d.repaintRemoteViewAttachments(link.view, attachments)
+			return nil
+		case remoteMetadataStale:
+			return nil
+		default:
 			return errors.New("remote view: invalid metadata update")
 		}
-		return nil
 	case ports.MsgPing:
 		if _, err := ports.UnmarshalPing(frame.Payload); err != nil {
 			return fmt.Errorf("remote view: decode ping: %w", err)
@@ -554,6 +582,19 @@ func (d *Daemon) handleRemoteLinkFrame(link *remoteLink, frame ports.Frame) erro
 		return fmt.Errorf("remote view: remote error (%d): %s", remoteErr.Code, remoteErr.Text)
 	default:
 		return fmt.Errorf("remote view: unexpected server frame type %d", frame.Type)
+	}
+}
+
+// repaintRemoteViewAttachments starts one local-chrome repaint for every
+// attachment captured by an accepted remote update. The snapshot is taken
+// under view.mu, but all token validation, rendering callbacks, and transport
+// I/O happen after that lock has been released.
+func (d *Daemon) repaintRemoteViewAttachments(view *remoteView, attachments []*attachedClient) {
+	for _, attachment := range attachments {
+		token := attachmentOwnerToken(view, attachment, attachment.transport())
+		if token.ac != nil {
+			go d.paintRemoteView(view, attachment, false, token)
+		}
 	}
 }
 

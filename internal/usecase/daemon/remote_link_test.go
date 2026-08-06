@@ -10,6 +10,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,6 +119,182 @@ func enqueueRemoteLinkHandshake(t *testing.T, transport *remoteLinkTestTransport
 	})}}
 	transport.recv <- remoteLinkTestReceive{frame: ports.Frame{Type: ports.MsgSessionMeta, Payload: metaPayload}}
 	transport.recv <- remoteLinkTestReceive{frame: ports.Frame{Type: ports.MsgOutput, Payload: outputPayload}}
+}
+
+func newRemoteMetadataLinkFixture(t *testing.T) (*Daemon, *remoteView, *remoteLink, *remoteLinkTestTransport) {
+	t.Helper()
+	d := newTestDaemon(t, nil, stubClock{})
+	transport := newRemoteLinkTestTransport()
+	target := remoteLinkTestTarget()
+	view := &remoteView{
+		key: remoteViewKey{
+			endpoint:    target.Endpoint,
+			lifecycleID: target.LifecycleID,
+			sessionName: target.SessionName,
+		},
+		screen:         vt.NewScreen(80, 22),
+		linkGeneration: 1,
+		metadata: ports.SessionMeta{
+			LifecycleID: target.LifecycleID,
+			Revision:    1,
+			SessionName: target.SessionName,
+			ActiveTabID: target.LiveTabID,
+			Tabs:        []ports.SessionTabMeta{{ID: target.LiveTabID, Name: "main"}},
+		},
+	}
+	link := &remoteLink{
+		view:       view,
+		generation: 1,
+		target:     target,
+		transport:  transport,
+		cancel:     func() {},
+		active:     true,
+	}
+	view.link = link
+	d.mu.Lock()
+	require.NoError(t, d.registerRemoteViewLocked(view))
+	d.mu.Unlock()
+	return d, view, link, transport
+}
+
+func attachRemoteMetadataClient(t *testing.T, view *remoteView) (*attachedClient, chan ports.Frame) {
+	t.Helper()
+	transport, sends := newCapturingTransport(t)
+	ac := &attachedClient{tr: transport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac.initOverlays()
+	ac.setAttachmentOwner(view)
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(ac))
+	view.mu.Unlock()
+	return ac, sends
+}
+
+func remoteMetadataFrame(t *testing.T, metadata ports.SessionMeta) ports.Frame {
+	t.Helper()
+	payload, err := ports.MarshalSessionMeta(metadata)
+	require.NoError(t, err)
+	return ports.Frame{Type: ports.MsgSessionMeta, Payload: payload}
+}
+
+func TestRemoteLinkAcceptedMetadataRepaintsEveryAttachedClientUnderLocalChrome(t *testing.T) {
+	d, view, link, _ := newRemoteMetadataLinkFixture(t)
+	first, firstSends := attachRemoteMetadataClient(t, view)
+	second, secondSends := attachRemoteMetadataClient(t, view)
+	callbacks := make(chan struct{}, 2)
+	for _, ac := range []*attachedClient{first, second} {
+		ac.beforeAttachmentTokenValidation = func() {
+			view.mu.Lock()
+			view.mu.Unlock()
+			callbacks <- struct{}{}
+		}
+	}
+
+	metadata := ports.SessionMeta{
+		LifecycleID: view.key.lifecycleID,
+		Revision:    2,
+		SessionName: view.key.sessionName,
+		ActiveTabID: "tab-1",
+		Tabs:        []ports.SessionTabMeta{{ID: "tab-1", Name: "renamed"}},
+	}
+	require.NoError(t, d.handleRemoteLinkFrame(link, remoteMetadataFrame(t, metadata)))
+	for range 2 {
+		awaitTestValue(t, callbacks, "metadata repaint callback did not run outside remoteView.mu")
+	}
+
+	for _, sends := range []chan ports.Frame{firstSends, secondSends} {
+		frame := awaitFrame(t, sends, ports.MsgOutput)
+		output, err := ports.UnmarshalOutput(frame.Payload)
+		require.NoError(t, err)
+		require.Contains(t, string(output.Data), "renamed", "accepted metadata must repaint local chrome")
+	}
+	view.mu.Lock()
+	require.Equal(t, uint64(2), view.metadata.Revision)
+	require.Equal(t, "renamed", view.metadata.Tabs[0].Name)
+	view.mu.Unlock()
+}
+
+func TestRemoteLinkIgnoresDuplicateAndOlderMetadataWithoutStopping(t *testing.T) {
+	d, view, link, transport := newRemoteMetadataLinkFixture(t)
+	metadata := ports.SessionMeta{
+		LifecycleID: view.key.lifecycleID,
+		Revision:    2,
+		SessionName: view.key.sessionName,
+		ActiveTabID: "tab-1",
+		Tabs:        []ports.SessionTabMeta{{ID: "tab-1", Name: "new"}},
+	}
+	frame := remoteMetadataFrame(t, metadata)
+	require.NoError(t, d.handleRemoteLinkFrame(link, frame))
+	require.NoError(t, d.handleRemoteLinkFrame(link, frame), "duplicate metadata must be ignored")
+	require.NoError(t, d.handleRemoteLinkFrame(link, remoteMetadataFrame(t, ports.SessionMeta{
+		LifecycleID: view.key.lifecycleID,
+		Revision:    1,
+		SessionName: view.key.sessionName,
+		ActiveTabID: "tab-1",
+		Tabs:        []ports.SessionTabMeta{{ID: "tab-1", Name: "old"}},
+	})), "older metadata must be ignored")
+
+	view.mu.Lock()
+	require.Same(t, link, view.link)
+	require.True(t, link.active)
+	require.Equal(t, uint64(2), view.metadata.Revision)
+	require.Equal(t, "new", view.metadata.Tabs[0].Name)
+	view.mu.Unlock()
+
+	require.NoError(t, d.handleRemoteLinkFrame(link, ports.Frame{Type: ports.MsgPing, Payload: ports.MarshalPing(ports.Ping{})}))
+	awaitFrame(t, transport.sent, ports.MsgPong)
+}
+
+func TestRemoteLinkRejectsInvalidMetadataIdentityAndOrdering(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, []byte)
+	}{
+		{
+			name: "lifecycle identity",
+			mutate: func(_ *testing.T, payload []byte) {
+				payload[0] = 2
+			},
+		},
+		{
+			name: "session identity",
+			mutate: func(t *testing.T, payload []byte) {
+				metadata := ports.SessionMeta{
+					LifecycleID: domain.SessionLifecycleID{1}, Revision: 2, SessionName: "remote!", ActiveTabID: "tab-1",
+					Tabs: []ports.SessionTabMeta{{ID: "tab-1", Name: "new"}},
+				}
+				encoded, err := ports.MarshalSessionMeta(metadata)
+				require.NoError(t, err)
+				copy(payload, encoded)
+			},
+		},
+		{
+			name: "zero revision",
+			mutate: func(_ *testing.T, payload []byte) {
+				clear(payload[16:24])
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d, view, link, _ := newRemoteMetadataLinkFixture(t)
+			metadata := ports.SessionMeta{
+				LifecycleID: view.key.lifecycleID,
+				Revision:    2,
+				SessionName: view.key.sessionName,
+				ActiveTabID: "tab-1",
+				Tabs:        []ports.SessionTabMeta{{ID: "tab-1", Name: "new"}},
+			}
+			payload, err := ports.MarshalSessionMeta(metadata)
+			require.NoError(t, err)
+			test.mutate(t, payload)
+			err = d.handleRemoteLinkFrame(link, ports.Frame{Type: ports.MsgSessionMeta, Payload: payload})
+			require.Error(t, err)
+			view.mu.Lock()
+			require.Same(t, link, view.link)
+			require.Equal(t, uint64(1), view.metadata.Revision)
+			view.mu.Unlock()
+		})
+	}
 }
 
 func TestOpenRemoteViewPublishesHandshakeReadyCandidate(t *testing.T) {
