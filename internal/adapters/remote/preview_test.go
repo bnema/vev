@@ -75,6 +75,38 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 	require.Contains(t, gotArgs[2], "'_remote-preview'")
 }
 
+func TestRemotePreviewClientRejectsMismatchedResponseIdentity(t *testing.T) {
+	target := previewClientTargetForTest()
+	var otherLifecycle domain.SessionLifecycleID
+	otherLifecycle[0] = 2
+	valid := ports.RemotePreview{
+		Version: ports.RemotePreviewSchemaVersion, Status: ports.RemotePreviewOK,
+		LifecycleID: target.LifecycleID, TabID: target.LiveTabID, Revision: 1, Width: 1, Height: 1,
+		Cells: []renderer.Cell{{Rune: 'x', Style: renderer.DefaultStyle()}},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*ports.RemotePreview)
+	}{
+		{name: "lifecycle ID", mutate: func(preview *ports.RemotePreview) { preview.LifecycleID = otherLifecycle }},
+		{name: "tab ID", mutate: func(preview *ports.RemotePreview) { preview.TabID = "tab-2" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preview := valid
+			tt.mutate(&preview)
+			payload := ports.MarshalRemotePreview(preview)
+			require.NotNil(t, payload)
+
+			client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+				return stdoutCmd(ctx, string(payload))
+			}}
+			_, err := client.Preview(context.Background(), target, 1, 1)
+			require.ErrorIs(t, err, errRemotePreviewIdentity)
+		})
+	}
+}
+
 func TestRemotePreviewClientRejectsMalformedResponse(t *testing.T) {
 	client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return stdoutCmd(ctx, "not-a-preview")

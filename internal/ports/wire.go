@@ -712,6 +712,9 @@ func ValidateHello(h Hello) error {
 		}
 		return nil
 	}
+	if h.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
+		return ErrInvalidHello
+	}
 	if h.Intent != IntentAttach && h.Intent != IntentResume {
 		return ErrInvalidHello
 	}
@@ -770,6 +773,9 @@ func ValidateAttachTarget(m AttachTarget) error {
 			return ErrInvalidAttachTarget
 		}
 		return nil
+	}
+	if m.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
+		return ErrInvalidAttachTarget
 	}
 	if m.Intent != IntentAttach && m.Intent != IntentResume {
 		return ErrInvalidAttachTarget

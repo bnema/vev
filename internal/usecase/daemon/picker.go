@@ -941,6 +941,12 @@ func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget
 	}
 	d.remoteCatalog.mu.Lock()
 	defer d.remoteCatalog.mu.Unlock()
+	now := d.clock.Now()
+	if d.remoteCatalog.status[target.Endpoint] == remoteHostFresh {
+		if entry, ok := d.remoteCatalog.cache[target.Endpoint]; ok && remoteCatalogExpired(entry.FetchedAt, now) {
+			d.remoteCatalog.status[target.Endpoint] = remoteHostStale
+		}
+	}
 	if d.remoteCatalog.status[target.Endpoint] != remoteHostFresh {
 		return false
 	}
