@@ -68,6 +68,26 @@ func TestRemoteAttachmentTokenUsesExactRemoteOwnerMembership(t *testing.T) {
 	require.False(t, token.current(), "remote membership is part of exact token identity")
 }
 
+func TestTransitionToRemoteViewPublishesOneAuthoritativeOwner(t *testing.T) {
+	d, source, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	view := &remoteView{key: remoteViewKey{endpoint: "host", lifecycleID: domain.SessionLifecycleID{1}, sessionName: "remote"}}
+	d.mu.Lock()
+	require.NoError(t, d.registerRemoteViewLocked(view))
+	d.mu.Unlock()
+
+	before := source.attachmentToken(ac, ac.transport())
+	require.True(t, before.current())
+	published, err := d.transitionToRemoteView(before, view)
+	require.NoError(t, err)
+
+	require.False(t, before.current())
+	require.True(t, published.current())
+	require.Same(t, view, ac.currentAttachmentOwner())
+	require.Empty(t, source.snapshotAttachments())
+	require.True(t, view.attachmentRegistered(ac))
+	require.Same(t, source, ac.previousOwner.Get())
+}
+
 func TestShutdownRetiresRemoteViewsWithoutLocalSession(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	view := &remoteView{key: remoteViewKey{endpoint: "host", lifecycleID: domain.SessionLifecycleID{1}, sessionName: "remote"}}
@@ -91,6 +111,31 @@ func TestShutdownRetiresRemoteViewsWithoutLocalSession(t *testing.T) {
 	require.Empty(t, d.remoteViewsByKey)
 	d.mu.Unlock()
 	require.False(t, token.current())
+}
+
+func TestRemoteClientGoneParksExactOwnerBinding(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	view := &remoteView{key: remoteViewKey{endpoint: "host", lifecycleID: domain.SessionLifecycleID{1}, sessionName: "remote"}}
+	d.mu.Lock()
+	require.NoError(t, d.registerRemoteViewLocked(view))
+	d.mu.Unlock()
+
+	transport := &closeTrackingTransport{}
+	ac := &attachedClient{tr: transport, resumeCapable: true}
+	ac.setAttachmentOwner(view)
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(ac))
+	view.mu.Unlock()
+	token := attachmentOwnerToken(view, ac, transport)
+
+	require.True(t, d.clientGoneRemote(view, token, false))
+	require.Nil(t, ac.currentAttachmentOwner())
+	require.False(t, view.attachmentRegistered(ac))
+	d.mu.Lock()
+	parked := d.parked[ac.resumeToken]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+	require.Same(t, view, parked.owner)
 }
 
 func TestRemoteParkingRetainsStableOwnerBinding(t *testing.T) {

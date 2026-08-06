@@ -37,6 +37,9 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
+	if view, remote := token.owner.(*remoteView); remote {
+		return d.clientGoneRemote(view, token, explicit)
+	}
 	sess := token.localSession()
 	if sess == nil {
 		return false
@@ -51,6 +54,72 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 	}
 	d.finishClientGone(sess, token.ac, token.transport.transport, explicit)
 	return true
+}
+
+// clientGoneRemote retires only the current local-client binding to a remote
+// view. The remote link itself remains a Phase 4 lifecycle concern; a failed
+// local transport parks the stable view owner without inventing a local PTY.
+func (d *Daemon) clientGoneRemote(view *remoteView, token attachmentConnectionToken, explicit bool) bool {
+	if d == nil || view == nil || token.ac == nil || !sameAttachmentOwner(token.owner, view) {
+		return false
+	}
+	ac := token.ac
+	var parkingToken uint64
+	if !explicit {
+		parkingToken = d.markParkingInFlightOwner(view, ac)
+	}
+	if !d.detachRemoteAttachmentCurrent(view, token) {
+		d.clearParkingInFlightIfAbandonedOwner(view, ac, parkingToken)
+		return false
+	}
+	d.unregisterPreview(ac)
+	if !explicit && d.parkAttachmentOwner(view, ac) {
+		_ = ac.closeCapturedTransport(token.transport.transport)
+		return true
+	}
+	d.clearParkingInFlight(ac.resumeToken, ac)
+	d.closePicker(ac)
+	ac.clearPreviousSession()
+	if explicit {
+		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
+	}
+	_ = ac.closeCapturedTransport(token.transport.transport)
+	return true
+}
+
+// detachRemoteAttachmentCurrent invalidates exactly the frozen remote-view
+// membership. It performs no transport I/O while architecture locks are held.
+func (d *Daemon) detachRemoteAttachmentCurrent(view *remoteView, token attachmentConnectionToken) bool {
+	if d == nil || view == nil || token.ac == nil || token.transport.transport == nil {
+		return false
+	}
+	frozen := freezeAttachmentEffectGates(token.ac)
+	defer frozen.unfreeze()
+	if !frozen.acquired || !frozen.drained {
+		return false
+	}
+	d.mu.Lock()
+	if d.closing || !d.attachmentOwnerRegisteredByDaemonLocked(view) {
+		d.mu.Unlock()
+		return false
+	}
+	view.mu.Lock()
+	current := sameAttachmentOwner(token.owner, view) &&
+		token.generation == token.ac.connectionGeneration.Load() &&
+		sameAttachmentOwner(token.ac.currentAttachmentOwner(), view) &&
+		token.ac.transportSnapshotCurrent(token.transport)
+	if _, registered := view.attachments[token.ac]; !registered {
+		current = false
+	}
+	if current {
+		view.unregisterAttachmentLocked(token.ac)
+		token.ac.connectionGeneration.Add(1)
+		token.ac.setAttachmentOwner(nil)
+		token.ac.invalidateFrozenAttachmentCapability()
+	}
+	view.mu.Unlock()
+	d.mu.Unlock()
+	return current
 }
 
 func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {

@@ -13,24 +13,24 @@ const connectionSnapshotAttempts = 8
 // currentAttachmentConnection retries the lock-free session-to-role snapshot when a
 // handoff lands between those reads. The attachment gate still performs the final
 // mutation admission after this function returns.
-func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (*session, attachmentConnectionToken, bool) {
+func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (attachmentOwner, attachmentConnectionToken, bool) {
 	for range connectionSnapshotAttempts {
 		if !ac.currentTransportIs(tr) {
 			break
 		}
-		sess := ac.currentAttachmentSession()
-		if sess == nil {
+		owner := ac.currentAttachmentOwner()
+		if owner == nil {
 			return nil, attachmentConnectionToken{}, false
 		}
-		if d.afterConnectionSessionSnapshot != nil {
+		if sess := localSession(owner); sess != nil && d.afterConnectionSessionSnapshot != nil {
 			d.afterConnectionSessionSnapshot(sess)
 		}
-		token := attachmentToken(sess, ac, tr)
-		if token.ac == nil || ac.currentAttachmentSession() != sess {
+		token := attachmentOwnerToken(owner, ac, tr)
+		if token.ac == nil || !sameAttachmentOwner(ac.currentAttachmentOwner(), owner) {
 			runtime.Gosched()
 			continue
 		}
-		return sess, token, true
+		return owner, token, true
 	}
 	return nil, attachmentConnectionToken{}, false
 }
@@ -44,19 +44,23 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		return
 	}
 	for {
-		if !ac.currentTransportIs(tr) || ac.currentAttachmentSession() == nil {
+		if !ac.currentTransportIs(tr) || ac.currentAttachmentOwner() == nil {
 			return
 		}
 		f, err := tr.Recv()
 		if err != nil {
 			for range connectionSnapshotAttempts {
-				sess, _, ok := d.currentAttachmentConnection(ac, tr)
+				owner, token, ok := d.currentAttachmentConnection(ac, tr)
 				if !ok {
 					return
 				}
-				d.clientGone(sess, ac, tr, false)
-				current := ac.currentAttachmentSession()
-				if current == sess || !ac.currentTransportIs(tr) || current == nil {
+				if sess := localSession(owner); sess != nil {
+					d.clientGone(sess, ac, tr, false)
+				} else if view, remote := owner.(*remoteView); remote {
+					d.clientGoneRemote(view, token, false)
+				}
+				current := ac.currentAttachmentOwner()
+				if sameAttachmentOwner(current, owner) || !ac.currentTransportIs(tr) || current == nil {
 					return
 				}
 			}
