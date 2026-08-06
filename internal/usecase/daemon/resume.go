@@ -146,6 +146,20 @@ func (d *Daemon) purgeParkingForSessionLocked(sess *session) {
 	}
 }
 
+// purgeParkingForRemoteViewLocked invalidates in-flight resume publication for
+// one terminal remote view. At this point the view has no attachment members,
+// so clearing the credential cannot race a live owner.
+func (d *Daemon) purgeParkingForRemoteViewLocked(view *remoteView) {
+	for token, pending := range d.parking {
+		if owner, remote := normalizeAttachmentOwner(pending.owner).(*remoteView); remote && owner == view {
+			delete(d.parking, token)
+			pending.ac.resumeToken = 0
+			pending.ac.parked = false
+			pending.closeDone()
+		}
+	}
+}
+
 // waitParkingInFlight waits for an identified same-client parking publication
 // to finish. Returns true when a matching in-flight entry was observed.
 // Unknown and mismatched credentials return false without waiting.
@@ -353,11 +367,12 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	ac.parked = true
 	ac.connectionGeneration.Add(1)
 	sess := localSession(parked.owner)
+	view, remote := normalizeAttachmentOwner(parked.owner).(*remoteView)
 	if sess != nil {
 		sess.mu.Lock()
 		sess.unregisterAttachmentLocked(ac)
 		sess.mu.Unlock()
-	} else if view, remote := normalizeAttachmentOwner(parked.owner).(*remoteView); remote {
+	} else if remote {
 		view.mu.Lock()
 		view.unregisterAttachmentLocked(ac)
 		view.mu.Unlock()
@@ -382,6 +397,9 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	d.mu.Unlock()
 	if sess != nil {
 		d.recalculateSessionGeometryAndInvalidate(sess, nil, "resume.go")
+	}
+	if remote {
+		d.parkRemoteViewWarm(view)
 	}
 	d.watchParkedTimer(token, rearmed)
 	if captured != nil {
@@ -417,6 +435,19 @@ func (d *Daemon) purgeParkedForSessionLocked(sess *session) []parkedAttachmentRe
 	var retirements []parkedAttachmentRetirement
 	for token, parked := range d.parked {
 		if localSession(parked.owner) == sess {
+			retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
+		}
+	}
+	return retirements
+}
+
+// purgeParkedForRemoteViewLocked retires every resume credential owned by the
+// exact remote view. The caller completes the returned external cleanup after
+// releasing d.mu.
+func (d *Daemon) purgeParkedForRemoteViewLocked(view *remoteView) []parkedAttachmentRetirement {
+	var retirements []parkedAttachmentRetirement
+	for token, parked := range d.parked {
+		if owner, remote := normalizeAttachmentOwner(parked.owner).(*remoteView); remote && owner == view {
 			retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
 		}
 	}

@@ -124,6 +124,8 @@ func (d *Daemon) expireRemoteViewWarm(view *remoteView, warm *remoteViewWarm) {
 	view.warm = nil
 	view.warmGeneration++
 	view.closed = true
+	retirements := d.purgeParkedForRemoteViewLocked(view)
+	d.purgeParkingForRemoteViewLocked(view)
 	link := view.link
 	view.link = nil
 	view.linkGeneration++
@@ -135,6 +137,7 @@ func (d *Daemon) expireRemoteViewWarm(view *remoteView, warm *remoteViewWarm) {
 	d.mu.Unlock()
 
 	warm.stop()
+	d.finishParkedAttachmentRetirements(retirements)
 	if link == nil {
 		return
 	}

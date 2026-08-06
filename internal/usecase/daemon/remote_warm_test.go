@@ -29,6 +29,31 @@ func TestRemoteViewWarmExpiryRemovesOnlyDetachedExactView(t *testing.T) {
 	view.mu.Unlock()
 }
 
+func TestRemoteViewWarmExpiryPurgesRemoteResumeCredentials(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	view := registerRemoteWarmTestView(t, d)
+	parked := &attachedClient{resumeToken: 41, parked: true}
+	parking := &attachedClient{resumeToken: 42}
+	d.mu.Lock()
+	d.parked[parked.resumeToken] = &parkedAttachment{owner: view, ac: parked, timer: stubTimer{}, done: make(chan struct{})}
+	d.parking[parking.resumeToken] = &parkingAttachment{owner: view, ac: parking, done: make(chan struct{})}
+	d.mu.Unlock()
+
+	d.parkRemoteViewWarm(view)
+	warm, timer := remoteWarmTimer(t, clock, view)
+	timer.ch <- time.Now()
+	awaitTestCompletion(t, warm.done, "remote warm expiry did not complete")
+
+	d.mu.Lock()
+	require.Empty(t, d.parked)
+	require.Empty(t, d.parking)
+	d.mu.Unlock()
+	require.Zero(t, parked.resumeToken)
+	require.False(t, parked.parked)
+	require.Zero(t, parking.resumeToken)
+}
+
 func TestRemoteViewWarmActivationFencesStaleExpiry(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, nil, clock)
