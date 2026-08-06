@@ -76,6 +76,33 @@ func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
 	require.False(t, d.remotePickerTargetReadyTarget(target), "attachment must reject a catalogue exactly at the TTL boundary")
 }
 
+func TestRemotePickerTargetReadyExpiresAfterPickerBuildWithoutSnapshot(t *testing.T) {
+	now := time.Unix(100, 0)
+	clock := &remotePreviewTestClock{now: now}
+	d := newTestDaemon(t, nil, clock)
+	lifecycle := remoteLifecycleForTest()
+	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: lifecycle, Name: "work", State: "running", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+		}},
+	}})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status["arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	model := d.newPickerModel(nil, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	target, ok := model.Selected()
+	require.True(t, ok)
+	require.NotNil(t, target.RemoteTarget)
+	require.True(t, d.remotePickerTargetReadyTarget(*target.RemoteTarget), "fresh picker target must be ready before the attach TTL")
+
+	clock.Advance(remotePickerAttachTTL)
+	require.False(t, d.remotePickerTargetReadyTarget(*target.RemoteTarget), "handoff must reject a picker target whose catalog reached the attach TTL")
+	d.remoteCatalog.mu.Lock()
+	require.Equal(t, remoteHostStale, d.remoteCatalog.status["arch"])
+	d.remoteCatalog.mu.Unlock()
+}
+
 func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
 	tests := []struct {
 		name        string

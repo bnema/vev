@@ -236,8 +236,8 @@ func validateAttachRequest(request AttachRequest) error {
 	if request.SessionName != request.RemoteTarget.SessionName {
 		return errors.New("vev: remote attach target session mismatch")
 	}
-	if request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned && request.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
-		return errors.New("vev: invalid remote environment policy")
+	if request.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+		return errors.New("vev: remote attach target requires daemon-owned environment")
 	}
 	return nil
 }

@@ -22,6 +22,7 @@ const (
 var (
 	errRemotePreviewSSH      = errors.New("remote preview: ssh command failed")
 	errRemotePreviewTooLarge = errors.New("remote preview: output exceeds size limit")
+	errRemotePreviewIdentity = errors.New("remote preview: response identity mismatch")
 )
 
 // PreviewClient invokes the hidden remote preview command over SSH. The
@@ -82,6 +83,9 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 	}
 	if preview.Status != ports.RemotePreviewOK {
 		return ports.RemotePreview{}, fmt.Errorf("remote preview unavailable: status %d", preview.Status)
+	}
+	if preview.LifecycleID != target.LifecycleID || preview.TabID != target.LiveTabID {
+		return ports.RemotePreview{}, errRemotePreviewIdentity
 	}
 	return preview, nil
 }

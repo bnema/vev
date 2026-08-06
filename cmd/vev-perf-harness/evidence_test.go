@@ -364,7 +364,7 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 	}
 }
 
-func TestHarnessObserverGapSuppressesOnlyDiscardedSpanKeys(t *testing.T) {
+func TestHarnessObserverGapSuppressesPotentiallyDroppedSpanEnds(t *testing.T) {
 	base := func(kind string, sequence, requestID, epoch uint64, tick int64) traceRecord {
 		return traceRecord{ProcessID: "one", Component: "ipc", Scenario: "s", Run: 1, Sequence: sequence, RequestID: requestID, Epoch: epoch, Kind: kind, Tick: tick, Valid: true}
 	}
@@ -372,10 +372,9 @@ func TestHarnessObserverGapSuppressesOnlyDiscardedSpanKeys(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		records []traceRecord
-		wantErr bool
 	}{
 		{
-			name: "discarded span end is suppressed",
+			name: "span began before observed gap",
 			records: []traceRecord{
 				base("adapter_receive_start", 2, 2, 2, 10),
 				gap,
@@ -383,14 +382,11 @@ func TestHarnessObserverGapSuppressesOnlyDiscardedSpanKeys(t *testing.T) {
 			},
 		},
 		{
-			name: "unrelated unmatched end remains an error",
+			name: "span start was dropped before observed gap",
 			records: []traceRecord{
-				base("adapter_receive_start", 2, 2, 2, 10),
 				gap,
-				base("adapter_receive_end", 2, 2, 2, 20),
 				base("adapter_receive_end", 3, 3, 3, 30),
 			},
-			wantErr: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -403,14 +399,8 @@ func TestHarnessObserverGapSuppressesOnlyDiscardedSpanKeys(t *testing.T) {
 				t.Fatal(err)
 			}
 			spans, err := mergeProcessTraces([]processMapping{{ProcessID: "one", ClockDomain: "one", TracePath: path, Scenario: "s", Run: 1}})
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("unrelated unmatched end accepted: spans=%+v", spans)
-				}
-				return
-			}
 			if err != nil {
-				t.Fatalf("discarded span end was rejected: %v", err)
+				t.Fatalf("potentially dropped span end was rejected: %v", err)
 			}
 			if len(spans) != 0 {
 				t.Fatalf("spans=%+v, want no sample after observer gap", spans)

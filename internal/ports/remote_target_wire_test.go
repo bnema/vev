@@ -79,29 +79,111 @@ func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 	}
 }
 
-func TestRemoteTargetWireRejectsTruncationAndTrailingData(t *testing.T) {
-	target := testRemoteTarget(true)
-	payload := MarshalAttachTarget(AttachTarget{
-		Endpoint:          target.Endpoint,
-		Session:           target.SessionName,
-		Intent:            IntentAttach,
-		RemoteTarget:      target,
-		EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
-	})
-	legacyLen := len(MarshalAttachTarget(AttachTarget{Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach}))
-	for i := 0; i < len(payload); i++ {
-		if i == legacyLen {
-			// The extension is optional for old peers; the complete legacy
-			// prefix is therefore a valid count-only target by design.
-			continue
-		}
-		if _, err := UnmarshalAttachTarget(payload[:i]); err == nil {
-			t.Fatalf("prefix %d unexpectedly decoded", i)
-		}
+func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
+	target := testRemoteTarget(false)
+	tests := []struct {
+		name          string
+		validate      func() error
+		marshalBad    func() []byte
+		marshalGood   func() []byte
+		marshalLegacy func() []byte
+		unmarshal     func([]byte) error
+	}{
+		{
+			name: "hello",
+			validate: func() error {
+				return ValidateHello(Hello{
+					Version: ProtocolVersion, Intent: IntentAttach,
+					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
+					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+				})
+			},
+			marshalBad: func() []byte {
+				return MarshalHello(Hello{
+					Version: ProtocolVersion, Intent: IntentAttach,
+					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
+					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+				})
+			},
+			marshalGood: func() []byte {
+				return MarshalHello(Hello{
+					Version: ProtocolVersion, Intent: IntentAttach,
+					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
+					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+				})
+			},
+			marshalLegacy: func() []byte {
+				return MarshalHello(Hello{
+					Version: ProtocolVersion, Intent: IntentAttach,
+					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
+				})
+			},
+			unmarshal: func(payload []byte) error { _, err := UnmarshalHello(payload); return err },
+		},
+		{
+			name: "attach target",
+			validate: func() error {
+				return ValidateAttachTarget(AttachTarget{
+					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
+					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+				})
+			},
+			marshalBad: func() []byte {
+				return MarshalAttachTarget(AttachTarget{
+					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
+					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+				})
+			},
+			marshalGood: func() []byte {
+				return MarshalAttachTarget(AttachTarget{
+					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
+					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+				})
+			},
+			marshalLegacy: func() []byte {
+				return MarshalAttachTarget(AttachTarget{
+					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
+				})
+			},
+			unmarshal: func(payload []byte) error { _, err := UnmarshalAttachTarget(payload); return err },
+		},
 	}
-	trailing := append(append([]byte(nil), payload...), 0xff)
-	if _, err := UnmarshalAttachTarget(trailing); err == nil {
-		t.Fatal("trailing garbage unexpectedly decoded")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.validate(); err == nil {
+				t.Fatal("direct validation accepted client-owned policy for remote target")
+			}
+			if payload := tt.marshalBad(); payload != nil {
+				t.Fatalf("marshal accepted client-owned policy: %x", payload)
+			}
+			payload := tt.marshalGood()
+			if payload == nil {
+				t.Fatal("failed to marshal daemon-owned control payload")
+			}
+			legacyLen := len(tt.marshalLegacy())
+			if err := tt.unmarshal(payload[:legacyLen]); err != nil {
+				t.Fatalf("complete legacy prefix failed to decode: %v", err)
+			}
+			for i := 0; i < len(payload); i++ {
+				if i == legacyLen {
+					// The complete legacy prefix is a valid count-only payload by
+					// design; every other rich-target prefix is malformed.
+					continue
+				}
+				if err := tt.unmarshal(payload[:i]); err == nil {
+					t.Fatalf("prefix %d unexpectedly decoded", i)
+				}
+			}
+			trailing := append(append([]byte(nil), payload...), 0xff)
+			if err := tt.unmarshal(trailing); err == nil {
+				t.Fatal("trailing garbage unexpectedly decoded")
+			}
+			payload[len(payload)-1] = byte(EnvironmentPolicyClientOwned)
+			if err := tt.unmarshal(payload); err == nil {
+				t.Fatal("unmarshal accepted client-owned policy for remote target")
+			}
+		})
 	}
 }
 

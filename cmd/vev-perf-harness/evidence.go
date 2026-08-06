@@ -200,23 +200,22 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 		// and exact correlation domain may pair, and each pair's ticks must retain
 		// its own start-before-end ordering.
 		starts := map[string]traceRecord{}
-		discarded := map[string]struct{}{}
+		traceIncomplete := false
 		for _, r := range records {
 			if r.Component == "observer" && r.Kind == "transport_diagnostic" && !r.Valid {
-				// A bounded producer queue reports dropped marks explicitly. Any
-				// in-flight span may have lost either endpoint, so discard those
-				// partial samples; only their exact keys may be missing an end.
-				for key := range starts {
-					discarded[key] = struct{}{}
-				}
+				// A bounded producer queue reports that one or more marks were lost,
+				// but not their correlation keys. A later unmatched end can therefore
+				// be the end of a span whose start was dropped. Treat all subsequent
+				// unpaired ends as incomplete evidence rather than rejecting the run.
+				// Starts already observed before the gap are likewise incomplete.
 				starts = map[string]traceRecord{}
+				traceIncomplete = true
 				continue
 			}
 			for _, pair := range spanPairs {
 				key := fmt.Sprintf("%s/%s/%s/%d/%d/%d/%d", r.ProcessID, r.Component, m.Scenario, m.Run, r.Sequence, r.RequestID, r.Epoch)
 				if r.Kind == pair.start {
 					k := pair.name + "/" + key
-					delete(discarded, k)
 					if _, exists := starts[k]; exists {
 						return nil, errors.New("duplicate process-local span start")
 					}
@@ -226,8 +225,7 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 					k := pair.name + "/" + key
 					start, ok := starts[k]
 					if !ok {
-						if _, ok := discarded[k]; ok {
-							delete(discarded, k)
+						if traceIncomplete {
 							continue
 						}
 						return nil, errors.New("span end without same-process start")
