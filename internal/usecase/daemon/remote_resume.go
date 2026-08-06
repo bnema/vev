@@ -150,6 +150,7 @@ func (d *Daemon) resumeRemoteAttachment(view *remoteView, ac *attachedClient, tr
 	ac.publishFrozenAttachmentCapability(published)
 	view.mu.Unlock()
 	d.mu.Unlock()
+	d.activateRemoteView(view)
 	return published, nil
 }
 

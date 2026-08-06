@@ -61,6 +61,7 @@ func (d *Daemon) transitionToRemoteView(token attachmentConnectionToken, target 
 	source.mu.Unlock()
 	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
+	d.activateRemoteView(target)
 
 	// The old coordinator is no longer a lease owner for this attachment. Its
 	// cleanup runs after publication and outside architecture locks.
@@ -162,5 +163,6 @@ func (d *Daemon) transitionFromRemoteView(token attachmentConnectionToken, sourc
 	// Record the reverse toggle while the attachment gate is still frozen, so a
 	// concurrent handoff cannot observe the new local owner without its history.
 	token.ac.recordPreviousOwner(source)
+	d.parkRemoteViewWarm(source)
 	return published, nil
 }

@@ -88,6 +88,7 @@ func (d *Daemon) finishRemoteClientGone(view *remoteView, ac *attachedClient, tr
 	d.unregisterPreview(ac)
 	if !explicit && d.parkAttachmentOwner(view, ac) {
 		_ = ac.closeCapturedTransport(transport)
+		d.parkRemoteViewWarm(view)
 		return true
 	}
 	d.clearParkingInFlight(ac.resumeToken, ac)
@@ -97,6 +98,7 @@ func (d *Daemon) finishRemoteClientGone(view *remoteView, ac *attachedClient, tr
 		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
 	_ = ac.closeCapturedTransport(transport)
+	d.parkRemoteViewWarm(view)
 	return true
 }
 

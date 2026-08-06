@@ -68,6 +68,10 @@ type remoteView struct {
 	linkGeneration uint64
 	output         remoteOutputState
 	resetRequested bool
+	// warm and warmGeneration fence the five-minute retention timer for an
+	// unattached view. The timer is always stopped after view.mu is released.
+	warm           *remoteViewWarm
+	warmGeneration uint64
 }
 
 func (*remoteView) attachmentOwner() {}

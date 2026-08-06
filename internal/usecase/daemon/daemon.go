@@ -832,14 +832,21 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	for _, cancel := range constructions {
 		cancel()
 	}
+	remoteWarms := make([]*remoteViewWarm, 0, len(remoteViews))
 	remoteLinks := make([]*remoteLink, 0, len(remoteViews))
 	for _, view := range remoteViews {
 		for _, ac := range view.close() {
 			d.retireShutdownRemoteAttachment(view, ac, reason)
 		}
+		if warm := d.stopRemoteViewWarm(view); warm != nil {
+			remoteWarms = append(remoteWarms, warm)
+		}
 		if link := d.stopRemoteViewLink(view); link != nil {
 			remoteLinks = append(remoteLinks, link)
 		}
+	}
+	for _, warm := range remoteWarms {
+		warm.stop()
 	}
 	for _, link := range remoteLinks {
 		<-link.done
