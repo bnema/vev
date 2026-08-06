@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // attachmentOwner is the sole mutable owner binding for an attached client.
@@ -44,16 +46,21 @@ func remoteViewKeyForTarget(target domain.RemoteSessionTarget) (remoteViewKey, e
 	}, nil
 }
 
-// remoteView is intentionally attachment-facing only. Link state, remote VT
-// content, metadata, and warm lifecycle are added in Phase 4; keeping this
-// type free of local session state prevents accidental PTY/persistence reuse.
+// remoteView is intentionally attachment-facing only. Its private VT and
+// presentation metadata are the remote content boundary: neither carries a
+// local PTY, persistence, tab tree, or render coordinator. The remote-link
+// lifecycle owns writes to them in Phase 4; local composition only snapshots
+// them while holding this mutex.
 type remoteView struct {
 	id  remoteViewID
 	key remoteViewKey
 
-	mu          sync.Mutex
-	closed      bool
-	attachments map[*attachedClient]struct{}
+	mu            sync.Mutex
+	closed        bool
+	attachments   map[*attachedClient]struct{}
+	screen        *vt.Screen
+	metadata      ports.SessionMeta
+	displayOrigin string
 }
 
 func (*remoteView) attachmentOwner() {}

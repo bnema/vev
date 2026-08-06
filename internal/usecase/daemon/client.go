@@ -788,6 +788,9 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
 	}
+	if view, remote := token.owner.(*remoteView); remote {
+		return d.paintRemoteView(view, token.ac, true, token) == paintEmitted
+	}
 	sess := token.localSession()
 	if sess == nil {
 		return false

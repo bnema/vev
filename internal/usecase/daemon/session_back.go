@@ -10,8 +10,35 @@ import (
 // owner is retained in the owner history but is not interpreted as a local
 // session; remote back navigation is published with remote transitions.
 func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error {
+	if d == nil || token.ac == nil {
+		return nil
+	}
+	if view, remote := token.owner.(*remoteView); remote {
+		previous := token.ac.previousOwner.Get()
+		target := localSession(previous)
+		if target == nil {
+			// A non-local predecessor is not a valid reverse target. Keep it as
+			// stable history for the owner-specific transition that can interpret it.
+			return nil
+		}
+		if target.core() == nil || d.sessionByID(target.core().id) != target {
+			token.ac.clearPreviousOwnerIf(previous)
+			return nil
+		}
+		published, err := d.transitionFromRemoteView(token, view, target)
+		if err != nil {
+			if !token.current() {
+				return nil
+			}
+			return err
+		}
+		d.touchMRU(target)
+		d.firstPaintForTransition(published)
+		return nil
+	}
+
 	current := token.localSession()
-	if d == nil || current == nil || token.ac == nil {
+	if current == nil {
 		return nil
 	}
 	previous := token.ac.previousOwner.Get()

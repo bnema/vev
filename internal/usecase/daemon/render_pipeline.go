@@ -426,9 +426,19 @@ func commitDamageReceipts(receipts []damageReceipt) {
 	}
 }
 
-// emitFrame is the sole side-effecting half of the pipeline. The caller holds
-// sendMu for the complete capture/compose/emit transaction.
+// emitFrame is the local-session compatibility entry point for the sole
+// side-effecting half of the pipeline. The caller holds sendMu for the
+// complete capture/compose/emit transaction.
 func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
+	return d.emitAttachmentFrame(entry, ac, state, composed, batches...)
+}
+
+// emitAttachmentFrame commits a composed attachment frame only while its
+// exact owner binding remains current. It deliberately knows nothing about
+// session panes or remote VT state; those belong to capture. A coordinator
+// lease remains a local-session capability and is therefore rejected for
+// remote owners.
+func (d *Daemon) emitAttachmentFrame(owner attachmentOwner, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
 	var ownedMarks runtimeMarkBatch
 	var marks *runtimeMarkBatch
 	if len(batches) != 0 {
@@ -440,22 +450,20 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		// follows emitFrame's release of attachment ownership.
 		defer marks.flush()
 	}
-	if entry == nil || entry.core() == nil || ac == nil || state == nil {
+	if normalizeAttachmentOwner(owner) == nil || ac == nil || state == nil {
 		if ac != nil {
 			ac.sendMu.Unlock()
 		}
 		return false
 	}
-	entry.core().mu.Lock()
-	_, owned := entry.core().attachments[ac]
-	entry.core().mu.Unlock()
-	if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
+	if !attachmentOwnerRegistered(owner, ac) || state.attachment != ac || !sameAttachmentOwner(ac.currentAttachmentOwner(), owner) {
 		ac.sendMu.Unlock()
 		return false
 	}
 	if state.lease != nil {
+		entry := localSession(owner)
 		rc := attachmentRenderCoordinator(entry)
-		if rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
+		if entry == nil || rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
 			ac.sendMu.Unlock()
 			return false
 		}
@@ -476,7 +484,13 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	endDiff(0, err == nil)
 	if err != nil {
 		ac.sendMu.Unlock()
-		d.log.Error("render draw failed", "err", err, "session", entry.core().name)
+		d.log.Error("render draw failed", "err", err, "session", attachmentOwnerName(owner))
+		entry := localSession(owner)
+		if entry == nil {
+			// A remote view has no session-scoped notice history or coordinator.
+			// Its next remote publication will retry from the retained private VT.
+			return true
+		}
 		// Without a coordinator reportError repaints synchronously. Suppress only
 		// that nested notice repaint; leave the guard before returning so a later,
 		// independent failed transaction can still notify the user.
@@ -561,7 +575,11 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		// admission first. Detachment freezes the gate and therefore cannot mutate
 		// ownership until any enclosing admitted operation has also ended.
 		if marks.attachmentEffect == nil {
-			d.detachOnSendError(entry, ac, sendTr)
+			if entry := localSession(owner); entry != nil {
+				d.detachOnSendError(entry, ac, sendTr)
+			} else if view, remote := owner.(*remoteView); remote {
+				d.clientGoneRemote(view, attachmentOwnerToken(view, ac, sendTr), false)
+			}
 		} else {
 			// Capture the exact admitted capability, including its coordinator
 			// lease, before End permits a new attachment publication. Reserve

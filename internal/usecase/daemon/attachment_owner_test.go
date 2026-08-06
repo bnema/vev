@@ -5,6 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,6 +87,29 @@ func TestTransitionToRemoteViewPublishesOneAuthoritativeOwner(t *testing.T) {
 	require.Empty(t, source.snapshotAttachments())
 	require.True(t, view.attachmentRegistered(ac))
 	require.Same(t, source, ac.previousOwner.Get())
+}
+
+func TestRemoteViewFirstPaintComposesPrivateContentUnderLocalChrome(t *testing.T) {
+	d, source, ac, sends := newManualSessionWithPTYs(t, newQuietPTY())
+	view := &remoteView{
+		key:    remoteViewKey{endpoint: "host", lifecycleID: domain.SessionLifecycleID{1}, sessionName: "remote"},
+		screen: vt.NewScreen(80, 22),
+	}
+	view.screen.Write([]byte("remote content"))
+	d.mu.Lock()
+	require.NoError(t, d.registerRemoteViewLocked(view))
+	d.mu.Unlock()
+
+	token, err := d.transitionToRemoteView(source.attachmentToken(ac, ac.transport()), view)
+	require.NoError(t, err)
+	require.True(t, d.firstPaintForTransition(token))
+
+	output := mustApplyOutput(t, vt.NewScreen(80, 24), awaitOutputFrameWithoutSleep(t, sends))
+	require.True(t, output.Full)
+	terminal := vt.NewScreen(80, 24)
+	terminal.Write(output.Data)
+	require.Contains(t, rowText(terminal.Snapshot().Row(0)), "remote")
+	require.Contains(t, rowText(terminal.Snapshot().Row(1)), "remote content")
 }
 
 func TestShutdownRetiresRemoteViewsWithoutLocalSession(t *testing.T) {
