@@ -109,6 +109,31 @@ func TestStatusCompositionGolden(t *testing.T) {
 	}
 }
 
+func TestStatusSegmentsIncludesAttachmentRemoteOrigin(t *testing.T) {
+	tests := []struct {
+		name              string
+		remoteOrigin      string
+		wantAttachmentBar string
+	}{
+		{name: "remote origin", remoteOrigin: "arch", wantAttachmentBar: "vive at arch"},
+		{name: "local attachment", wantAttachmentBar: "vive"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p, releasePTY := newBlockingPTY(t)
+			_, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			defer releasePTY()
+
+			sess.name = "vive"
+			ac.remoteOrigin = test.remoteOrigin
+
+			require.Equal(t, test.wantAttachmentBar, sess.statusSegmentsFor(ac, true).session)
+			require.Equal(t, "vive", sess.statusSegments(true).session, "remote provenance belongs only to the selected attachment")
+		})
+	}
+}
+
 func TestStatusSegmentsIncludesFocusedPaneTitle(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)

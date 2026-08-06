@@ -192,6 +192,9 @@ func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle boo
 	if s.ephemeral {
 		name += "*"
 	}
+	if ac != nil && ac.remoteOrigin != "" {
+		name += " at " + ac.remoteOrigin
+	}
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	activeIndex := 0
 	if ac != nil {

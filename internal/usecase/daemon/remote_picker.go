@@ -137,7 +137,11 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	broken := session.State == "broken"
 	tabs := ports.CatalogTabs(session)
 	viewTabs := make([]picker.TabEntry, 0, len(tabs))
-	for _, tab := range tabs {
+	active := 0
+	for i, tab := range tabs {
+		if session.ActiveTabID != "" && tab.ID == session.ActiveTabID {
+			active = i
+		}
 		name := tab.Name
 		if name == "" {
 			name = fmt.Sprintf("%d", int(tab.Index)+1)
@@ -169,7 +173,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 					target.StoppedTab = domain.NewOrdinalTabSelector(0, first.Name, uint16(len(tabs)))
 				}
 			} else {
-				target.LiveTabID = domain.TabStableID(first.ID)
+				target.LiveTabID = domain.TabStableID(tabs[active].ID)
 			}
 		}
 		// Keep the structured session identity on rows even when one tab ID is
@@ -225,6 +229,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 		RemoteDetail:       detail,
 		RemoteReason:       reason,
 		Tabs:               viewTabs,
+		Active:             active,
 		Stopped:            stopped,
 		ConnectOnly:        legacy,
 		RemoteAttachReady:  ready,
