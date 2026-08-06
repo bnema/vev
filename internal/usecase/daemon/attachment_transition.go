@@ -45,7 +45,7 @@ type attachmentTransitionRequest struct {
 }
 
 func transitionSourceTokenMatchesRequest(token attachmentConnectionToken, source *session, req attachmentTransitionRequest) bool {
-	return token.sess == source && token.ac == req.next &&
+	return sameAttachmentOwner(token.owner, source) && token.ac == req.next &&
 		token.generation == req.next.connectionGeneration.Load() &&
 		token.transport.transport == req.expectedTransport.transport &&
 		token.transport.incarnation == req.expectedTransport.incarnation
@@ -55,9 +55,9 @@ func transitionSourceTokenMatchesRequest(token attachmentConnectionToken, source
 // lease exists, sourceCoordinator.mu. It is the canonical exact-connection
 // handoff check for client-originated navigation and lifecycle mutations.
 func transitionSourceTokenCurrentLocked(token attachmentConnectionToken, source *session, sourceCoordinator *renderCoordinator, req attachmentTransitionRequest) bool {
-	if token.sess != source || token.ac != req.next ||
+	if !sameAttachmentOwner(token.owner, source) || token.ac != req.next ||
 		token.generation != req.next.connectionGeneration.Load() ||
-		token.sess == nil || token.ac.currentAttachmentSession() != source ||
+		token.localSession() == nil || !sameAttachmentOwner(token.ac.currentAttachmentOwner(), source) ||
 		!attachmentRegisteredLocked(source, req.next) ||
 		!req.next.transportSnapshotCurrent(token.transport) {
 		return false

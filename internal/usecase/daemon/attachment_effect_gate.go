@@ -18,7 +18,7 @@ const (
 // effect admission. It deliberately contains no independently mutable state:
 // a ticket is admitted only when every field matches the frame's token.
 type attachmentCapability struct {
-	sess       *session
+	owner      attachmentOwner
 	generation uint64
 	transport  transportSnapshot
 	lease      *attachmentLease
@@ -26,7 +26,7 @@ type attachmentCapability struct {
 
 func capabilityFromToken(token attachmentConnectionToken) attachmentCapability {
 	return attachmentCapability{
-		sess:       token.sess,
+		owner:      token.owner,
 		generation: token.generation,
 		transport:  token.transport,
 		lease:      token.lease,
@@ -34,7 +34,7 @@ func capabilityFromToken(token attachmentConnectionToken) attachmentCapability {
 }
 
 func (c attachmentCapability) matches(token attachmentConnectionToken) bool {
-	return token.ac != nil && c.sess == token.sess &&
+	return token.ac != nil && sameAttachmentOwner(c.owner, token.owner) &&
 		c.generation == token.generation && c.transport.transport == token.transport.transport &&
 		c.transport.incarnation == token.transport.incarnation && c.lease == token.lease
 }
@@ -271,13 +271,13 @@ func (ac *attachedClient) publishAttachmentCapability(token attachmentConnection
 // bootstrapAttachmentCapability supports direct/headless session construction. It
 // never changes an existing or frozen production publication.
 func (ac *attachedClient) bootstrapAttachmentCapability(token attachmentConnectionToken) {
-	if ac == nil || token.sess == nil || token.ac != ac {
+	if ac == nil || token.owner == nil || token.ac != ac {
 		return
 	}
 	g := &ac.attachmentEffects
 	g.mu.Lock()
 	g.initLocked()
-	if g.phase == attachmentEffectsStable && g.capability.sess == nil {
+	if g.phase == attachmentEffectsStable && g.capability.owner == nil {
 		g.capability = capabilityFromToken(token)
 		g.failedTransport = transportSnapshot{}
 	}

@@ -467,7 +467,8 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
-	if token.sess == nil || token.ac == nil || token.effect == nil {
+	source := token.localSession()
+	if source == nil || token.ac == nil || token.effect == nil {
 		return errAttachmentTransition
 	}
 	token.effect.bindActionEnd(d, "create-session")
@@ -475,12 +476,11 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 
 	var created *session
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source: token.sess, next: token.ac,
+		source: source, next: token.ac,
 
 		expectedTransport: token.transport, sourceToken: &token, action: "create-session",
 		copySourceEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
-			source := token.sess
 			if source == nil {
 				return nil, errAttachmentTransition
 			}
@@ -506,8 +506,8 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 	}
 
 	d.touchMRU(created)
-	if token.sess != nil {
-		token.ac.recordPreviousSession(token.sess)
+	if source != nil {
+		token.ac.recordPreviousSession(source)
 	}
 	d.log.Info("client attached", "session", created.name, "resume", token.ac.resumeCapable)
 	d.deferAttachmentTransitionCleanups(transition)
@@ -773,14 +773,15 @@ func (d *Daemon) detachIfAttachmentCurrent(token attachmentConnectionToken) bool
 }
 
 func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken, done func() <-chan struct{}) bool {
-	if token.sess == nil || token.ac == nil || token.transport.transport == nil {
+	sess := token.localSession()
+	if sess == nil || token.ac == nil || token.transport.transport == nil {
 		return false
 	}
 	// Attachments without the session's optional primary render lease still
 	// own an independent connection lifecycle and detach through the same exact
 	// transport/generation fence.
 	if token.lease == nil {
-		return d.detachIfCurrentTransport(token.sess, token.ac, token.transport)
+		return d.detachIfCurrentTransport(sess, token.ac, token.transport)
 	}
 	frozen := freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{done: done}, token.ac)
 	defer frozen.unfreeze()
@@ -791,8 +792,8 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken,
 		d.afterDetachAttachmentEffectsFrozen()
 	}
 	d.mu.Lock()
-	core := token.sess.core()
-	if core == nil || d.sessions[core.id] != token.sess {
+	core := sess.core()
+	if core == nil || d.sessions[core.id] != sess {
 		d.mu.Unlock()
 		return false
 	}
@@ -803,11 +804,11 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken,
 		coordinator.mu.Lock()
 	}
 	req := attachmentTransitionRequest{
-		source: token.sess, next: token.ac, expectedTransport: token.transport,
+		source: sess, next: token.ac, expectedTransport: token.transport,
 	}
-	current := coordinator != nil && transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
+	current := coordinator != nil && transitionSourceTokenCurrentLocked(token, sess, coordinator, req)
 	if current {
-		unregisterAttachmentSessionLocked(token.sess, token.ac)
+		unregisterAttachmentSessionLocked(sess, token.ac)
 		token.ac.connectionGeneration.Add(1)
 		token.ac.setSession(nil)
 		token.ac.invalidateFrozenAttachmentCapability()
@@ -1168,10 +1169,10 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 	snapshot := sessionKillParticipants{target: target}
 	if admission != nil {
 		token := admission.token
-		if token.sess == nil || token.ac == nil || token.transport.transport == nil {
+		if token.localSession() == nil || token.ac == nil || token.transport.transport == nil {
 			return sessionKillParticipants{}, false
 		}
-		snapshot.source = token.sess
+		snapshot.source = token.localSession()
 		if snapshot.source == nil {
 			return sessionKillParticipants{}, false
 		}
@@ -1271,10 +1272,11 @@ func sessionKillParticipantsCurrentLocked(snapshot sessionKillParticipants, sour
 		return true
 	}
 	token := *snapshot.sourceToken
+	source := token.localSession()
 	req := attachmentTransitionRequest{
-		source: token.sess, next: token.ac, expectedTransport: token.transport,
+		source: source, next: token.ac, expectedTransport: token.transport,
 	}
-	return transitionSourceTokenCurrentLocked(token, token.sess, sourceCoordinator, req)
+	return transitionSourceTokenCurrentLocked(token, source, sourceCoordinator, req)
 }
 
 // stopInMemoryLifecycle cancels every session producer and closes every PTY

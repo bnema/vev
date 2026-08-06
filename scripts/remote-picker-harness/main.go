@@ -20,7 +20,6 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 const (
@@ -38,13 +37,23 @@ func main() {
 	fmt.Println("remote picker harness: PASS")
 }
 
-func run() error {
+func run() (runErr error) {
 	target := os.Getenv("VEV_HARNESS_TARGET")
 	if target == "" {
 		target = defaultTarget
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+
+	artifact := newHarnessArtifact(os.Getenv("VEV_HARNESS_ARTIFACT_DIR"))
+	if artifact != nil {
+		ctx = withHarnessArtifact(ctx, artifact)
+		defer func() {
+			if err := artifact.write(runErr == nil); err != nil {
+				runErr = errors.Join(runErr, err)
+			}
+		}()
+	}
 
 	catalog := remoteadapter.NewCatalogClient()
 	preview := remoteadapter.NewPreviewClient()
@@ -148,10 +157,15 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 		previewMarker = "VEV_REMOTE_PICKER_ACTIVE"
 	)
 
+	trace := &probeTrace{}
+	if artifact := harnessArtifactFromContext(ctx); artifact != nil {
+		artifact.registerTrace(trace)
+	}
 	remote, err := openTransport(ctx, ports.RemoteTransportStdio, target)
 	if err != nil {
 		return fmt.Errorf("open remote picker source: %w", err)
 	}
+	remote.probe.configure("remote-picker-source", nil)
 	ownsRemoteSession := false
 	defer func() {
 		_ = remote.Close()
@@ -229,6 +243,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err != nil {
 		return fmt.Errorf("open local picker transport: %w", err)
 	}
+	local.probe.configure("local-picker", trace)
 	defer func() { _ = local.Close() }()
 	if err := attachAndCheck(ctx, local, ports.Hello{
 		Intent: ports.IntentNew, Name: localSession, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
@@ -286,6 +301,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err != nil {
 		return fmt.Errorf("open selected remote transport: %w", err)
 	}
+	selected.probe.configure("selected-remote", trace)
 	defer func() { _ = selected.Close() }()
 	if err := attachAndCheck(ctx, selected, ports.Hello{
 		Intent: ports.IntentAttach, Name: handoff.Session, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
@@ -296,6 +312,9 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	}
 	if err := awaitOutputContains(ctx, selected, remoteSession+" at remote"); err != nil {
 		return fmt.Errorf("remote provenance status bar: %w", err)
+	}
+	if err := validateHandoffEventOrdering(trace.events); err != nil {
+		return fmt.Errorf("characterize remote picker handoff: %w", err)
 	}
 	return nil
 }
@@ -433,6 +452,7 @@ type harnessFrame struct {
 
 type harnessTransport struct {
 	ports.Transport
+	probe     *visualProbe
 	frames    chan harnessFrame
 	stop      chan struct{}
 	closeOnce sync.Once
@@ -440,7 +460,12 @@ type harnessTransport struct {
 }
 
 func newHarnessTransport(transport ports.Transport) *harnessTransport {
-	h := &harnessTransport{Transport: transport, frames: make(chan harnessFrame, 16), stop: make(chan struct{})}
+	h := &harnessTransport{
+		Transport: transport,
+		probe:     newVisualProbe(domain.Size{Cols: defaultProbeCols, Rows: defaultProbeRows}),
+		frames:    make(chan harnessFrame, 16),
+		stop:      make(chan struct{}),
+	}
 	go h.receiveLoop()
 	return h
 }
@@ -484,7 +509,12 @@ func openTransport(ctx context.Context, mode ports.RemoteTransportMode, target s
 	if err != nil {
 		return nil, err
 	}
-	return newHarnessTransport(transport), nil
+	h := newHarnessTransport(transport)
+	h.probe.configure(string(mode), nil)
+	if artifact := harnessArtifactFromContext(ctx); artifact != nil {
+		artifact.registerProbe(h.probe)
+	}
+	return h, nil
 }
 
 const commandStderrLimit = 4 << 10
@@ -585,7 +615,12 @@ func openLocalTransport(ctx context.Context) (*harnessTransport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newHarnessTransport(transport), nil
+	h := newHarnessTransport(transport)
+	h.probe.configure("local", nil)
+	if artifact := harnessArtifactFromContext(ctx); artifact != nil {
+		artifact.registerProbe(h.probe)
+	}
+	return h, nil
 }
 
 func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello) error {
@@ -612,6 +647,7 @@ func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello
 	if frame.Type != ports.MsgWelcome {
 		return fmt.Errorf("welcome frame type %d", frame.Type)
 	}
+	tr.probe.recordControl(probeEventWelcome)
 	if err := tr.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(ports.Theme{TrueColor: hello.TrueColor, SchemeKnown: true})}); err != nil {
 		return fmt.Errorf("send initial theme: %w", err)
 	}
@@ -622,22 +658,41 @@ func sendRawInput(tr *harnessTransport, data string) error {
 	return tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(data)})})
 }
 
-func acknowledgeOutput(tr *harnessTransport, output ports.Output) error {
-	if output.Epoch == 0 || output.New == 0 {
-		return nil
-	}
-	payload, err := ports.MarshalAck(ports.Ack{Epoch: output.Epoch, State: output.New})
+func processOutputFrame(tr *harnessTransport, frame ports.Frame) error {
+	output, err := ports.UnmarshalOutput(frame.Payload)
 	if err != nil {
 		return err
 	}
-	return tr.Send(ports.Frame{Type: ports.MsgAck, Payload: payload})
+	result := tr.probe.apply(output)
+	if !result.Accepted {
+		if !tr.probe.resetPending {
+			if err := tr.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}); err != nil {
+				return err
+			}
+			tr.probe.resetPending = true
+			tr.probe.recordControl(probeEventOutputReset)
+		}
+		return nil
+	}
+	if !result.StateBearing {
+		return nil
+	}
+	payload, err := ports.MarshalAck(result.Ack)
+	if err != nil {
+		return err
+	}
+	if err := tr.Send(ports.Frame{Type: ports.MsgAck, Payload: payload}); err != nil {
+		return err
+	}
+	tr.probe.resetPending = false
+	tr.probe.markAcked(result)
+	return nil
 }
 
 func awaitOutputContains(ctx context.Context, tr *harnessTransport, want string) error {
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	var received strings.Builder
-	screen := vt.NewScreen(80, 24)
+	visible := tr.probe.contains(want)
 	for {
 		frame, err := receiveWithTimeout(deadline, tr)
 		if err != nil {
@@ -646,73 +701,44 @@ func awaitOutputContains(ctx context.Context, tr *harnessTransport, want string)
 		if frame.Type != ports.MsgOutput {
 			continue
 		}
-		output, err := ports.UnmarshalOutput(frame.Payload)
-		if err != nil {
+		if err := processOutputFrame(tr, frame); err != nil {
 			return err
 		}
-		if err := acknowledgeOutput(tr, output); err != nil {
-			return err
-		}
-		received.Write(output.Data)
-		screen.Write(output.Data)
-		if strings.Contains(received.String(), want) || strings.Contains(harnessScreenText(screen), want) {
+		nowVisible := tr.probe.contains(want)
+		if !visible && nowVisible {
 			return nil
 		}
-		if received.Len() > 64<<10 {
-			text := received.String()
-			received.Reset()
-			received.WriteString(text[len(text)-16<<10:])
-		}
+		visible = nowVisible
 	}
 }
 
 func awaitRemotePickerPreview(ctx context.Context, tr *harnessTransport, marker string) error {
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	screen := vt.NewScreen(80, 24)
-	outputFrames := 0
 	sawLoading := false
+	markerVisible := tr.probe.contains(marker)
 	for {
 		frame, err := receiveWithTimeout(deadline, tr)
 		if err != nil {
-			return fmt.Errorf("no rendered remote preview after %d output frames (loading=%t): %w", outputFrames, sawLoading, err)
+			return fmt.Errorf("no rendered remote preview after %d output frames (loading=%t): %w", tr.probe.outputFrames, sawLoading, err)
 		}
 		if frame.Type != ports.MsgOutput {
 			continue
 		}
-		output, err := ports.UnmarshalOutput(frame.Payload)
-		if err != nil {
+		if err := processOutputFrame(tr, frame); err != nil {
 			return err
 		}
-		if err := acknowledgeOutput(tr, output); err != nil {
-			return err
-		}
-		outputFrames++
-		screen.Write(output.Data)
-		text := harnessScreenText(screen)
-		sawLoading = sawLoading || strings.Contains(text, "loading remote preview") || strings.Contains(string(output.Data), "loading remote preview")
-		if strings.Contains(text, marker) || strings.Contains(string(output.Data), marker) {
+		text := tr.probe.text()
+		sawLoading = sawLoading || strings.Contains(text, "loading remote preview")
+		nowMarkerVisible := strings.Contains(text, marker)
+		if !markerVisible && nowMarkerVisible {
 			return nil
 		}
+		markerVisible = nowMarkerVisible
 		if strings.Contains(text, "remote preview unavailable") {
 			return errors.New("remote preview unavailable")
 		}
 	}
-}
-
-func harnessScreenText(screen *vt.Screen) string {
-	var text strings.Builder
-	for y := range screen.Frame.Height {
-		for x := range screen.Frame.Width {
-			r := screen.Frame.At(x, y).Rune
-			if r == 0 {
-				r = ' '
-			}
-			text.WriteRune(r)
-		}
-		text.WriteByte('\n')
-	}
-	return text.String()
 }
 
 func remotePreviewContains(preview ports.RemotePreview, want string) bool {
@@ -734,15 +760,14 @@ func receiveFrame(ctx context.Context, tr *harnessTransport, typ ports.MsgType) 
 			return ports.Frame{}, err
 		}
 		if frame.Type == typ {
+			if typ == ports.MsgAttachTarget {
+				tr.probe.recordControl(probeEventAttachTarget)
+			}
 			return frame, nil
 		}
 		if frame.Type == ports.MsgOutput {
-			output, decodeErr := ports.UnmarshalOutput(frame.Payload)
-			if decodeErr != nil {
-				return ports.Frame{}, decodeErr
-			}
-			if ackErr := acknowledgeOutput(tr, output); ackErr != nil {
-				return ports.Frame{}, ackErr
+			if err := processOutputFrame(tr, frame); err != nil {
+				return ports.Frame{}, err
 			}
 		}
 	}
@@ -752,37 +777,25 @@ func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want 
 	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(command + "\n")})}); err != nil {
 		return err
 	}
-	var received strings.Builder
-	var outputFrames int
-	var outputBytes int
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	visible := tr.probe.contains(want)
 	for {
 		frame, err := receiveWithTimeout(deadline, tr)
 		if err != nil {
-			return fmt.Errorf("waiting for marker after %d output frames/%d bytes: %w", outputFrames, outputBytes, err)
+			return fmt.Errorf("waiting for marker after %d output frames/%d bytes: %w", tr.probe.outputFrames, tr.probe.outputBytes, err)
 		}
 		if frame.Type != ports.MsgOutput {
 			continue
 		}
-		output, err := ports.UnmarshalOutput(frame.Payload)
-		if err != nil {
-			return err
+		if err := processOutputFrame(tr, frame); err != nil {
+			return fmt.Errorf("process output: %w", err)
 		}
-		outputFrames++
-		outputBytes += len(output.Data)
-		if err := acknowledgeOutput(tr, output); err != nil {
-			return fmt.Errorf("ack output: %w", err)
-		}
-		received.Write(output.Data)
-		if strings.Contains(received.String(), want) {
+		nowVisible := tr.probe.contains(want)
+		if !visible && nowVisible {
 			return nil
 		}
-		if received.Len() > 64<<10 {
-			text := received.String()
-			received.Reset()
-			received.WriteString(text[len(text)-16<<10:])
-		}
+		visible = nowVisible
 	}
 }
 
@@ -809,12 +822,8 @@ func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 			return err
 		}
 		if frame.Type == ports.MsgOutput {
-			output, decodeErr := ports.UnmarshalOutput(frame.Payload)
-			if decodeErr != nil {
-				return decodeErr
-			}
-			if ackErr := acknowledgeOutput(tr, output); ackErr != nil {
-				return ackErr
+			if err := processOutputFrame(tr, frame); err != nil {
+				return err
 			}
 			continue
 		}

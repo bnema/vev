@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
@@ -24,7 +25,37 @@ func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionTok
 	if !token.attachmentEffectCurrent() {
 		return
 	}
+	if token.ac.renderMode == ports.RenderModeProxiedContent {
+		d.handleProxiedInputForAttachment(token, data)
+		return
+	}
 	d.handleInputForAttachment(token, data)
+}
+
+// handleProxiedInputForAttachment preserves remote terminal bytes exactly.
+// Local key routing, overlays, mouse interpretation, and copy-mode state are
+// deliberately unavailable on the remote daemon's content-only surface.
+func (d *Daemon) handleProxiedInputForAttachment(token attachmentConnectionToken, data []byte) {
+	sess := token.localSession()
+	if len(data) == 0 || !token.attachmentEffectCurrent() || sess == nil {
+		return
+	}
+	_ = sess.runMutation(func() error {
+		if !token.attachmentEffectCurrent() {
+			return nil
+		}
+		tab := sess.tabForAttachment(token.ac)
+		if tab == nil {
+			return nil
+		}
+		tab.mu.Lock()
+		pane := tab.terminalTargetLocked()
+		tab.mu.Unlock()
+		if pane != nil {
+			d.writeToPane(sess, pane, data)
+		}
+		return nil
+	})
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
@@ -383,7 +414,7 @@ type daemonKeyHandler struct {
 func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffectTicket, bool) {
 	if h.connectionToken.ac != nil {
 		if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
-			return h.connectionToken.sess, effect, false
+			return h.connectionToken.localSession(), effect, false
 		}
 		effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
 		if h.d.afterDelayedKeyEffectAttempt != nil {
@@ -397,11 +428,12 @@ func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffect
 			token.effect = effect
 			h.d.afterAttachmentEffectAdmitted(token)
 		}
-		if h.connectionToken.sess == nil {
+		sess := h.connectionToken.localSession()
+		if sess == nil {
 			effect.End()
 			return nil, nil, false
 		}
-		return h.connectionToken.sess, effect, true
+		return sess, effect, true
 	}
 	sess := h.ac.currentSession()
 	if sess == nil {

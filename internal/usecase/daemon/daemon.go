@@ -72,6 +72,12 @@ type Daemon struct {
 	mu       sync.Mutex
 	sessions map[domain.SessionID]*session
 	stopped  map[string]stoppedSession
+	// remoteViews holds non-persistent, daemon-local attachment owners. The
+	// companion key index provides warm-link reuse without ever widening
+	// sessions beyond concrete local *session values. Both are guarded by mu.
+	remoteViews      map[remoteViewID]*remoteView
+	remoteViewsByKey map[remoteViewKey]remoteViewID
+	nextRemoteViewID remoteViewID
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
 	nextID   uint64
@@ -322,7 +328,7 @@ type Daemon struct {
 }
 
 type parkedAttachment struct {
-	sess             *session
+	owner            attachmentOwner
 	ac               *attachedClient
 	pickerGeneration uint64
 	timer            ports.Timer
@@ -335,7 +341,7 @@ type parkedAttachment struct {
 // credential. done closes when the token is published into parked or parking
 // is abandoned.
 type parkingAttachment struct {
-	sess     *session
+	owner    attachmentOwner
 	ac       *attachedClient
 	done     chan struct{}
 	doneOnce sync.Once
@@ -596,6 +602,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	d := &Daemon{
 		sessions:          make(map[domain.SessionID]*session),
 		stopped:           make(map[string]stoppedSession),
+		remoteViews:       make(map[remoteViewID]*remoteView),
+		remoteViewsByKey:  make(map[remoteViewKey]remoteViewID),
 		creating:          make(map[string]struct{}),
 		parked:            make(map[uint64]*parkedAttachment),
 		parking:           make(map[uint64]*parkingAttachment),
@@ -796,9 +804,20 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	d.closing = true
 	d.purgeAllParkingLocked()
 	parkedRetirements := d.purgeAllParkedLocked()
+	remoteViews := make([]*remoteView, 0, len(d.remoteViews))
+	for _, view := range d.remoteViews {
+		remoteViews = append(remoteViews, view)
+	}
+	clear(d.remoteViews)
+	clear(d.remoteViewsByKey)
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
+	// A remote view is not a daemon-liveness root. Retire its membership after
+	// releasing d.mu so a token cannot remain valid once shutdown begins.
+	for _, view := range remoteViews {
+		view.close()
+	}
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
@@ -1198,6 +1217,24 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
+	if postWelcomeToken.ac.renderMode == ports.RenderModeProxiedContent {
+		meta, metaErr := frameSessionMeta(sess, postWelcomeToken.ac, 1)
+		if metaErr != nil {
+			postWelcomeTicket.End()
+			failAttachment()
+			return
+		}
+		if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
+			return postWelcomeToken.ac.sendExpectedTransportForAttachment(expected, meta, postWelcomeTicket)
+		}); err != nil {
+			postWelcomeTicket.End()
+			failAttachment()
+			return
+		}
+		postWelcomeToken.ac.sendMu.Lock()
+		postWelcomeToken.ac.proxiedMetaRevision = 1
+		postWelcomeToken.ac.sendMu.Unlock()
+	}
 	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
 		postWelcomeTicket.End()
 		// The attachment was detached while Welcome was in flight; never let
@@ -1269,6 +1306,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		clientID:          h.ClientID,
 		resumeCapable:     true,
 		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
+		renderMode:        h.RenderMode,
 	}
 	if h.RemoteTarget != nil {
 		opts.remoteOrigin = h.RemoteTarget.DisplayOrigin

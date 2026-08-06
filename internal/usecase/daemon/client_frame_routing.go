@@ -176,7 +176,7 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 		result.Text = "attached commands cannot override their active session target"
 		return result
 	}
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil || !token.attachmentEffectCurrent() {
 		result.Code = ports.ErrNoSuchTarget
 		result.Text = "attached session is no longer active"
@@ -234,7 +234,9 @@ func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	ac.pipelineCache = composeCacheInput{}
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
-	go d.paint(token.sess, ac, true, token.lease)
+	if sess := token.localSession(); sess != nil {
+		go d.paint(sess, ac, true, token.lease)
+	}
 	return true
 }
 
@@ -246,8 +248,10 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 	ac.sendMu.Lock()
 	ac.output.ack(epoch, state)
 	ac.sendMu.Unlock()
-	if rc := token.sess.core().coordinator.Load(); rc != nil {
-		rc.notifyAckForLease(token.lease)
+	if sess := token.localSession(); sess != nil {
+		if rc := sess.core().coordinator.Load(); rc != nil {
+			rc.notifyAckForLease(token.lease)
+		}
 	}
 	return true
 }

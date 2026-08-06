@@ -460,7 +460,7 @@ func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
 	// Establish a valid back-session target, then remove that target immediately
 	// after the command releases its role admission.
 	target := d.sessions[domain.SessionID("recent")]
-	ac.previousSession.Set(target)
+	ac.previousOwner.Set(target)
 	invalidations := installPaletteInvalidationObserver(current)
 	d.enterPalette(current, ac)
 	d.handlePaletteInput(ac, []byte("BSK"))

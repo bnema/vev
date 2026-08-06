@@ -920,7 +920,7 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	targetPane.screen.Write([]byte("TARGET"))
 	targetPane.screen.ClearDamage() // TARGET is already rendered and has no pending VT damage.
 	require.Empty(t, targetPane.screen.Damage(), "target deliberately has no pending VT damage")
-	ac.previousSession.Set(target)
+	ac.previousOwner.Set(target)
 
 	// Exercise the user-facing previous-session route, which delegates to the
 	// real switchToTarget hand-off and immediately emits its required reset.

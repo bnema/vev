@@ -27,7 +27,7 @@ var (
 )
 
 func (d *Daemon) handleSequencedImagePushForAttachment(token attachmentConnectionToken, _ uint64, ip ports.ImagePush) {
-	if !token.attachmentEffectCurrent() {
+	if !token.attachmentEffectCurrent() || token.ac.renderMode == ports.RenderModeProxiedContent {
 		return
 	}
 	d.handleImagePushForAttachment(token, ip)
@@ -89,7 +89,7 @@ func (d *Daemon) writeClipboardImageForAttachment(token attachmentConnectionToke
 	if err != nil {
 		return "", err
 	}
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil {
 		_ = os.Remove(path)
 		return "", errAttachmentTransition
@@ -135,7 +135,7 @@ func (d *Daemon) injectClipboardPath(sess *session, path string) {
 }
 
 func (d *Daemon) injectClipboardPathForAttachment(token attachmentConnectionToken, path string) {
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil || !token.attachmentEffectCurrent() {
 		return
 	}
@@ -236,6 +236,11 @@ func (d *Daemon) forwardClipboardAsync(owner paneEffectLease, b64 string) {
 
 	items := make([]clipboardForward, 0, len(attachments))
 	for _, ac := range attachments {
+		// A remote daemon's proxied content stream must never carry OSC52 or
+		// another host-facing side effect to the local link.
+		if ac.renderMode == ports.RenderModeProxiedContent {
+			continue
+		}
 		transport := ac.transport()
 		token := sess.attachmentToken(ac, transport)
 		if token.attachmentCurrent() {

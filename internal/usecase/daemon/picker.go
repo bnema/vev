@@ -794,7 +794,8 @@ func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence 
 }
 
 func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.sess == nil || token.ac == nil {
+	source := token.localSession()
+	if source == nil || token.ac == nil {
 		return nil
 	}
 	d.mu.Lock()
@@ -804,15 +805,15 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnecti
 		if !token.attachmentCurrent() {
 			return nil
 		}
-		d.invalidateRender(token.sess, token.ac, true, "picker.go")
+		d.invalidateRender(source, token.ac, true, "picker.go")
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", nil)
 	}
-	if targetSess == token.sess {
+	if targetSess == source {
 		return nil
 	}
 
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source: token.sess, target: targetSess, next: token.ac,
+		source: source, target: targetSess, next: token.ac,
 
 		expectedTransport: token.transport, sourceToken: &token, action: action,
 		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
@@ -834,7 +835,7 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnecti
 		}
 	}
 	d.touchMRU(targetSess)
-	token.ac.recordPreviousSession(token.sess)
+	token.ac.recordPreviousSession(source)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
 	return nil
@@ -852,7 +853,7 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 // every active, stopped, and same-session target then uses transitionAttachment
 // for frozen, atomic source-token preflight.
 func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.sess == nil || token.ac == nil || token.effect == nil {
+	if token.localSession() == nil || token.ac == nil || token.effect == nil {
 		return nil
 	}
 	if target.RemoteTarget != nil {
@@ -867,10 +868,11 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
-	if token.sess == nil {
+	source := token.localSession()
+	if source == nil {
 		return errAttachmentTransition
 	}
-	return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)
+	return d.switchToTargetGuardedForAttachment(source, token.ac, target, guard, &token, action)
 }
 
 // sendRemoteAttachTargetForAttachment validates the catalog row and hands the

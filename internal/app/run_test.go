@@ -575,7 +575,7 @@ func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd, err := parseArgs([]string{"attach", tt.arg})
 			require.NoError(t, err)
-			connection, err := client.NewSessionConnection(portsmocks.NewMockTransport(t), client.SessionTarget{
+			connection, err := client.NewSessionConnection(portsmocks.NewMockTransport(t), client.AttachRequest{
 				Intent:      cmd.intent,
 				SessionName: cmd.name,
 			})

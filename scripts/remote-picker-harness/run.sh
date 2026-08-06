@@ -16,6 +16,9 @@ Environment:
                           already select the rootless daemon.
   VEV_HARNESS_BASE_IMAGE  Base image for the disposable containers
                           (default: ubuntu:24.04).
+  VEV_HARNESS_ARTIFACT_DIR Host directory for the bounded probe artifact.
+                          The JSON report is copied there before container
+                          cleanup; no report is written when unset.
 USAGE
 }
 
@@ -33,6 +36,11 @@ esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 base_image="${VEV_HARNESS_BASE_IMAGE:-ubuntu:24.04}"
+artifact_dir="${VEV_HARNESS_ARTIFACT_DIR:-}"
+if [ -n "$artifact_dir" ]; then
+  umask 077
+  mkdir -p "$artifact_dir"
+fi
 run_id="$(date +%s)-$$"
 image="vev-remote-picker-harness:${run_id}"
 network="vev-remote-picker-harness-${run_id}"
@@ -106,4 +114,15 @@ if ! docker exec --user test -e HOME=/home/test "$local_container" ssh -o BatchM
 fi
 
 printf 'remote picker harness: running acceptance checks\n'
-docker exec --user test -e HOME=/home/test "$local_container" /usr/local/bin/remote-picker-harness
+harness_status=0
+if [ -n "$artifact_dir" ]; then
+  docker exec --user test -e HOME=/home/test -e VEV_HARNESS_ARTIFACT_DIR=/tmp/vev-harness-artifact "$local_container" /usr/local/bin/remote-picker-harness || harness_status=$?
+  if ! docker cp "$local_container:/tmp/vev-harness-artifact/remote-picker-harness.json" "$artifact_dir/remote-picker-harness.json"; then
+    echo 'remote picker harness: failed to collect probe artifact' >&2
+    exit 1
+  fi
+  chmod 0600 "$artifact_dir/remote-picker-harness.json"
+else
+  docker exec --user test -e HOME=/home/test "$local_container" /usr/local/bin/remote-picker-harness || harness_status=$?
+fi
+exit "$harness_status"

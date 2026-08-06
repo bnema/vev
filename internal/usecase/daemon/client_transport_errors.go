@@ -37,7 +37,7 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil {
 		return false
 	}
@@ -127,7 +127,7 @@ func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToke
 	if failed == nil || failed != token.transport.transport {
 		return
 	}
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil {
 		return
 	}

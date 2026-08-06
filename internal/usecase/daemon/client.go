@@ -42,6 +42,14 @@ type attachedClient struct {
 	// remoteOrigin is attachment-specific presentation metadata supplied by a
 	// validated picker handoff; it never participates in routing.
 	remoteOrigin string
+	// renderMode is fixed by the accepted Hello and controls the remote daemon's
+	// publication contract for this transport. It is immutable for one
+	// attachment lifetime and is not local session ownership state.
+	renderMode ports.RenderMode
+	// proxiedMetaRevision and proxiedOutputStarted are serialized by sendMu.
+	// They order metadata snapshots ahead of every post-handshake content output.
+	proxiedMetaRevision  uint64
+	proxiedOutputStarted bool
 	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
 	// the linearization gate for every attachment-bound observable operation. A role
 	// transition freezes and drains this gate before changing either generation
@@ -85,18 +93,18 @@ type attachedClient struct {
 	// tabs and panes without changing shared session ownership.
 	viewMu       sync.Mutex
 	view         attachmentView
-	sess         Guarded[*session]
+	owner        Guarded[attachmentOwner]
 	mouseScan    mouse.Scanner
 	themeMu      sync.Mutex
 	clientTheme  themeui.Theme
 	appliedTheme appliedTheme
 	lastCursor   cursorOut
 	renderStages renderStageHooks // optional render and handoff observability hooks
-	// previousSession is guarded independently. It is retained through temporary
-	// setSession(nil) hand-offs and cleared only on terminal teardown.
-	previousSession Guarded[*session]
-	linkMu          sync.Mutex
-	sendMu          sync.Mutex
+	// previousOwner is guarded independently. It retains navigation history
+	// through temporary owner hand-offs and is cleared only on terminal teardown.
+	previousOwner Guarded[attachmentOwner]
+	linkMu        sync.Mutex
+	sendMu        sync.Mutex
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -209,18 +217,37 @@ func (ac *attachedClient) clearGeometryClaim() {
 	ac.sizeMu.Unlock()
 }
 
-func (ac *attachedClient) currentAttachmentSession() *session { return ac.sess.Get() }
+// currentAttachmentOwner returns the one authoritative binding for this
+// attachment. Callers that need local-only behavior must narrow it with
+// localSession rather than retaining a second session owner.
+func (ac *attachedClient) currentAttachmentOwner() attachmentOwner {
+	if ac == nil {
+		return nil
+	}
+	return ac.owner.Get()
+}
 
-// currentSession narrows the attachment to its owning local session.
+func (ac *attachedClient) currentAttachmentSession() *session {
+	return localSession(ac.currentAttachmentOwner())
+}
+
+// currentSession is retained for local-session call sites. It deliberately
+// returns nil for a remote view so local PTY/persistence paths fail closed.
 func (ac *attachedClient) currentSession() *session {
 	return ac.currentAttachmentSession()
 }
 
-func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
+func (ac *attachedClient) setAttachmentOwner(owner attachmentOwner) {
+	if ac != nil {
+		ac.owner.Set(normalizeAttachmentOwner(owner))
+	}
+}
+
+func (ac *attachedClient) setSession(sess *session) { ac.setAttachmentOwner(sess) }
 
 func (ac *attachedClient) clearPreviousSession() {
 	if ac != nil {
-		ac.previousSession.Set(nil)
+		ac.previousOwner.Set(nil)
 	}
 }
 
@@ -569,6 +596,7 @@ type attachClientOptions struct {
 	resumeCapable     bool
 	maxOutputInFlight uint8
 	remoteOrigin      string
+	renderMode        ports.RenderMode
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -615,6 +643,7 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		view:          attachmentView{windowRows: sz.Rows, windowSet: true},
 		clientID:      opts.clientID,
 		remoteOrigin:  opts.remoteOrigin,
+		renderMode:    opts.renderMode,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
 	}
@@ -759,10 +788,20 @@ func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
 		token.ac.captureFrames = nil
 		token.ac.sendMu.Unlock()
 	}
-	if token.sess == nil {
+	sess := token.localSession()
+	if sess == nil {
 		return false
 	}
-	d.firstPaintWithLease(token.sess, token.ac, token.lease, true)
+	if token.ac.renderMode == ports.RenderModeProxiedContent {
+		// The proxied Hello size is already content geometry. Reconcile the shared
+		// PTY/layout claim before the first authoritative content reset and wake
+		// every existing attachment if that claim changed their geometry. Welcome
+		// and the first SessionMeta were committed before this post-transition
+		// path, so the proxied attachment cannot receive content ahead of metadata.
+		d.recalculateSessionGeometryAndInvalidate(sess, nil, "client.go")
+		return d.paintProxiedContent(sess, token.ac, true, token.lease) == paintEmitted
+	}
+	d.firstPaintWithLease(sess, token.ac, token.lease, true)
 	return true
 }
 
@@ -834,14 +873,14 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 	}
 	clientTheme := themeFromMessage(msg)
 	token.ac.setClientTheme(clientTheme)
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil || !token.attachmentEffectCurrent() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
 		return false
 	}
 	if !token.attachmentEffectCurrent() {
 		return false
 	}
-	if rc := token.sess.core().coordinator.Load(); rc != nil {
+	if rc := sess.core().coordinator.Load(); rc != nil {
 		return rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
 	}
 	return false
@@ -887,7 +926,7 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 		d.registerPreviewForSelection(ac)
 	}
 
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil {
 		return false
 	}
@@ -945,11 +984,12 @@ func (d *Daemon) handleClientNoticeForAttachment(token attachmentConnectionToken
 		d.notices.routingMu.Unlock()
 		return
 	}
-	if token.sess == nil {
+	sess := token.localSession()
+	if sess == nil {
 		d.notices.routingMu.Unlock()
 		return
 	}
-	repaint := d.mutateClientNotice(token.sess, token.ac, notice)
+	repaint := d.mutateClientNotice(sess, token.ac, notice)
 	d.notices.routingMu.Unlock()
 	if repaint && token.attachmentEffectCurrent() {
 		d.repaintForNotice(token.ac)
