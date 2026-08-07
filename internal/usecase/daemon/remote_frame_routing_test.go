@@ -114,6 +114,22 @@ func TestRemoteFrameRoutingForwardsOrdinaryTerminalInput(t *testing.T) {
 	require.Equal(t, []byte("x"), input.Data)
 }
 
+func TestRemoteFrameRoutingForwardsNonPaletteActions(t *testing.T) {
+	d, _, _, view, token := remoteBackFixture(t)
+	remoteTransport := newRemoteLinkTestTransport()
+	view.mu.Lock()
+	view.linkGeneration = 1
+	view.link = &remoteLink{view: view, generation: 1, transport: remoteTransport, active: true}
+	view.mu.Unlock()
+
+	d.handleAttachmentClientFrame(token, frameInput([]byte{keys.ESC, '1'}))
+
+	frame := awaitFrame(t, remoteTransport.sent, ports.MsgInput)
+	input, err := ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []byte{keys.ESC, '1'}, input.Data)
+}
+
 func TestRemoteFrameRoutingOpensPaletteLocally(t *testing.T) {
 	d, _, ac, view, token := remoteBackFixture(t)
 	remoteTransport := newRemoteLinkTestTransport()

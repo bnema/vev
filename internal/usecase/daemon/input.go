@@ -66,8 +66,12 @@ func (h remoteViewKeyHandler) Forward(data []byte) {
 	h.d.handleRemoteViewInput(h.view, h.token, h.inputSeq, data)
 }
 
-func (h remoteViewKeyHandler) Action(action keys.Action, _ []byte) {
-	if action != keys.ActionOpenPalette || !h.token.attachmentEffectCurrent() {
+func (h remoteViewKeyHandler) Action(action keys.Action, raw []byte) {
+	if !h.token.attachmentEffectCurrent() {
+		return
+	}
+	if action != keys.ActionOpenPalette {
+		h.Forward(raw)
 		return
 	}
 	if source := h.ac.navigationSession(); source != nil {

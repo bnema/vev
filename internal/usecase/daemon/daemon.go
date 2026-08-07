@@ -45,6 +45,10 @@ const (
 // the in-flight send. Teardown is never gated on a client draining its socket.
 const detachNotifyTimeout = time.Second
 
+// remoteConstructionShutdownGrace bounds a non-cooperative remote dialer when
+// durable snapshots have not installed a shared shutdown deadline.
+const remoteConstructionShutdownGrace = ports.HandshakeTimeout
+
 // maxUnackedOutputStates caps how many output states may be in flight (sent but
 // not yet acked by the client) before paint defers rather than composing
 // another diff. It bounds the daemon's paint rate to the client's ack rate, so
@@ -835,12 +839,30 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	// Candidate construction owns dial and handshake I/O outside daemon locks.
 	// A shutdown deadline bounds a non-cooperative dialer; a late constructor
 	// observes d.closing and retires its unpublished candidate independently.
+	var constructionTimer ports.Timer
+	var constructionTimeout <-chan time.Time
+	if deadline == nil && len(constructions) != 0 {
+		clock := d.clock
+		if clock == nil {
+			clock = systemClock{}
+		}
+		constructionTimer = clock.NewTimer(remoteConstructionShutdownGrace)
+		if constructionTimer == nil || constructionTimer.C() == nil {
+			constructionTimer = systemClock{}.NewTimer(remoteConstructionShutdownGrace)
+		}
+		constructionTimeout = constructionTimer.C()
+		defer constructionTimer.Stop()
+	}
 	for _, construction := range constructions {
 		if construction == nil || construction.done == nil {
 			continue
 		}
 		if deadline == nil {
-			<-construction.done
+			select {
+			case <-construction.done:
+			case <-constructionTimeout:
+				checkpointIncomplete = true
+			}
 			continue
 		}
 		select {

@@ -506,6 +506,17 @@ func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 	require.Contains(t, label.String(), "(down)")
 }
 
+func TestStoppedSessionReservesDownSuffix(t *testing.T) {
+	m := New([]SessionView{{ID: "stopped:long", Name: "long-session", Tabs: []TabEntry{{}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
+
+	frame := m.Render(domain.Size{Cols: 8, Rows: 2}, Preview{})
+	var label strings.Builder
+	for _, cell := range frame.Row(0) {
+		label.WriteRune(cell.Rune)
+	}
+	require.Contains(t, label.String(), "(down)")
+}
+
 func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
 	live := SessionView{ID: "live", Name: "work", Tabs: []TabEntry{{TabID: "t1", Name: "tab"}}}
 	halted := SessionView{ID: "stopped:old", Name: "old", TargetName: "old", Stopped: true, Tabs: []TabEntry{{}}}

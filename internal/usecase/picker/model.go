@@ -629,7 +629,11 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if !r.kind.rendersAsHeader() {
 			name = "  " + name
 		}
-		name = ui.TruncateText(name, rect.Width)
+		suffix := ""
+		if r.kind.rendersAsHeader() && r.stopped {
+			suffix = "(down)"
+		}
+		name = ui.TruncateText(name, max(rect.Width-len(suffix), 0))
 		x := ui.DrawText(frame, rect.X, rect.Y+y, clipX, name, nameStyle)
 
 		if r.kind.rendersAsHeader() {
@@ -640,7 +644,9 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 				} else {
 					detail += " "
 				}
-				ui.DrawText(frame, x, rect.Y+y, clipX, detail+"(down)", base)
+				detail = ui.TruncateText(detail, max(clipX-x-len(suffix), 0))
+				x = ui.DrawText(frame, x, rect.Y+y, clipX, detail, base)
+				ui.DrawText(frame, x, rect.Y+y, clipX, suffix, base)
 			} else {
 				ui.DrawText(frame, x, rect.Y+y, clipX, ui.TruncateText(r.detail, clipX-x), detailStyle)
 			}

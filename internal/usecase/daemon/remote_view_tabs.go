@@ -59,6 +59,9 @@ func (d *Daemon) activateRemoteViewTab(ctx context.Context, view *remoteView, ta
 		if err != nil {
 			return err
 		}
+		if slug == "" {
+			return nil
+		}
 		if err := d.sendRemoteViewCommand(ctx, link, generation, slug); err != nil {
 			return err
 		}
@@ -127,7 +130,7 @@ func remoteViewRelativeTabCommand(view *remoteView, link *remoteLink, generation
 	forward := (selectedIndex - activeIndex + len(view.metadata.Tabs)) % len(view.metadata.Tabs)
 	backward := (activeIndex - selectedIndex + len(view.metadata.Tabs)) % len(view.metadata.Tabs)
 	if forward == 0 || backward == 0 {
-		return "", errRemoteViewTabUnavailable
+		return "", nil
 	}
 	if forward <= backward {
 		return "next-tab", nil

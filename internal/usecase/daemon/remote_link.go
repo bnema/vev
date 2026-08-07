@@ -862,7 +862,7 @@ func (link *remoteLink) send(frame ports.Frame) error {
 	case <-timer.C():
 		// Transport.Close is required to interrupt Send. The sending goroutine
 		// owns sendMu and releases it once the adapter observes that close.
-		_ = transport.Close()
+		link.failSend(view, transport, errSendTimedOut)
 		return errSendTimedOut
 	}
 }
@@ -936,8 +936,12 @@ func (d *Daemon) markRemoteLinkUnavailable(link *remoteLink) {
 	if !current {
 		return
 	}
-	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-	link.cancel()
+	if link.commands != nil {
+		link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
+	}
+	if link.cancel != nil {
+		link.cancel()
+	}
 	if link.transport != nil {
 		_ = link.transport.Close()
 	}
@@ -962,8 +966,12 @@ func (d *Daemon) stopUnpublishedRemoteView(view *remoteView) {
 	signalRemoteViewMetadataChangedLocked(view)
 	view.mu.Unlock()
 	if link != nil {
-		link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-		link.cancel()
+		if link.commands != nil {
+			link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
+		}
+		if link.cancel != nil {
+			link.cancel()
+		}
 		if link.transport != nil {
 			_ = link.transport.Close()
 		}
@@ -988,8 +996,12 @@ func (d *Daemon) stopRemoteViewLink(view *remoteView) *remoteLink {
 	}
 	view.mu.Unlock()
 	if link != nil {
-		link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-		link.cancel()
+		if link.commands != nil {
+			link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
+		}
+		if link.cancel != nil {
+			link.cancel()
+		}
 		if link.transport != nil {
 			_ = link.transport.Close()
 		}

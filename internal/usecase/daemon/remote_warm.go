@@ -36,10 +36,15 @@ func (d *Daemon) parkRemoteViewWarm(view *remoteView) {
 	if d == nil || view == nil {
 		return
 	}
-	warm := &remoteViewWarm{
-		timer: d.clock.NewTimer(remoteViewWarmTTL),
-		done:  make(chan struct{}),
+	clock := d.clock
+	if clock == nil {
+		clock = systemClock{}
 	}
+	timer := clock.NewTimer(remoteViewWarmTTL)
+	if timer == nil {
+		return
+	}
+	warm := &remoteViewWarm{timer: timer, done: make(chan struct{})}
 
 	d.mu.Lock()
 	if d.closing || !d.attachmentOwnerRegisteredByDaemonLocked(view) {

@@ -9,6 +9,29 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
+func TestPickerTransitionReusesCurrentRemoteView(t *testing.T) {
+	d, view, _, remoteTransport := newRemoteMetadataLinkFixture(t)
+	t.Cleanup(func() { require.NoError(t, remoteTransport.Close()) })
+	ac, _ := attachRemoteMetadataClient(t, view)
+	model := picker.New(nil, picker.SelectionConfig{})
+	token := attachmentOwnerToken(view, ac, ac.transport())
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = model
+	ac.overlays.pickerGeneration++
+	selection := &remotePickerSelection{model: model, generation: ac.overlays.pickerGeneration, token: token}
+	ac.overlays.pickerRemoteSelection = selection
+	ac.overlays.pickerMu.Unlock()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := d.transitionRemoteViewToRemoteViewForPicker(token, view, selection)
+		result <- err
+	}()
+	require.NoError(t, awaitTestValue(t, result, "reselecting the current remote view deadlocked"))
+	require.Same(t, view, ac.currentAttachmentOwner())
+	require.True(t, view.attachmentRegistered(ac))
+}
+
 func TestPickerTransitionRejectsInactiveRemoteLink(t *testing.T) {
 	d, source, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	view := &remoteView{key: remoteViewKey{

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -255,6 +256,22 @@ func TestShutdownDeadlineDoesNotWaitForUncooperativeRemoteConstruction(t *testin
 	result := make(chan bool, 1)
 	go func() { result <- d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, deadline) }()
 	require.True(t, awaitTestValue(t, result, "shutdown blocked on canceled remote construction"))
+}
+
+func TestShutdownWithoutDeadlineBoundsUncooperativeRemoteConstruction(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	construction := &remoteViewConstruction{done: make(chan struct{})}
+	d.mu.Lock()
+	d.remoteViewConstructions[remoteViewKey{}] = construction
+	d.mu.Unlock()
+
+	result := make(chan bool, 1)
+	go func() { result <- d.shutdownAll(ports.ReasonServerShutdown) }()
+	timer := awaitTestValue(t, clock.timers, "remote construction shutdown timer")
+	require.Equal(t, remoteConstructionShutdownGrace, timer.duration)
+	timer.ch <- time.Now()
+	require.True(t, awaitTestValue(t, result, "shutdown blocked on uncooperative remote construction"))
 }
 
 func TestSnapshotStopContextCancelIsIdempotent(t *testing.T) {

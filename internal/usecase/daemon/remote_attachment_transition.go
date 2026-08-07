@@ -137,11 +137,12 @@ func (d *Daemon) transitionRemoteViewToRemoteViewGuarded(token attachmentConnect
 
 	if source == target {
 		source.mu.Lock()
+		_, attached := source.attachments[token.ac]
 		current := sameAttachmentOwner(token.owner, source) &&
 			token.generation == token.ac.connectionGeneration.Load() &&
 			sameAttachmentOwner(token.ac.currentAttachmentOwner(), source) &&
 			token.ac.transportSnapshotCurrent(token.transport) &&
-			attachmentOwnerRegistered(source, token.ac) && !source.closed &&
+			attached && !source.closed &&
 			expectedLink != nil && source.link == expectedLink &&
 			source.linkGeneration == expectedLinkGeneration && remoteViewLinkReusableLocked(source)
 		source.mu.Unlock()
