@@ -270,7 +270,9 @@ func TestRemoteLinkAcceptedMetadataRepaintsEveryAttachedClientUnderLocalChrome(t
 func TestRemoteLinkAppliesSideEffectOutputWithoutAdvancingStateOrAcking(t *testing.T) {
 	_, view, link, _ := newRemoteMetadataLinkFixture(t)
 	attachment, _ := attachRemoteMetadataClient(t, view)
+	view.mu.Lock()
 	before := view.output
+	view.mu.Unlock()
 	ack, reset, attachments, accepted := view.applyRemoteOutput(link, ports.Output{
 		Epoch: 1, Size: domain.Size{Cols: 80, Rows: 22}, Data: []byte("side effect"),
 	})
@@ -282,6 +284,21 @@ func TestRemoteLinkAppliesSideEffectOutputWithoutAdvancingStateOrAcking(t *testi
 	require.Equal(t, before, view.output)
 	require.Contains(t, screenLineText(view.screen, 0), "side effect")
 	view.mu.Unlock()
+}
+
+func TestRemoteLinkSendRejectsInactiveLinkBeforeTransportUse(t *testing.T) {
+	_, view, link, transport := newRemoteMetadataLinkFixture(t)
+	view.mu.Lock()
+	link.active = false
+	view.mu.Unlock()
+
+	err := link.send(ports.Frame{Type: ports.MsgPing})
+	require.ErrorIs(t, err, errRemoteViewStale)
+	select {
+	case <-transport.sent:
+		t.Fatal("stale remote link sent a frame")
+	default:
+	}
 }
 
 func TestRemoteLinkIgnoresDuplicateAndOlderMetadataWithoutStopping(t *testing.T) {

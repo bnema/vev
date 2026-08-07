@@ -70,7 +70,6 @@ func (d *Daemon) paintProxiedContent(entry *session, ac *attachedClient, reset b
 		return paintRejected
 	}
 	composed := composeProxiedContent(*state)
-	ac.proxiedOutputStarted = true
 	if !d.emitFrame(entry, ac, state, composed, &marks) {
 		return paintRejected
 	}

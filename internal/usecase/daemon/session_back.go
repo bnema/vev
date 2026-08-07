@@ -51,6 +51,7 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken, after
 			if !token.current() {
 				return nil
 			}
+			token.ac.clearPreviousOwnerIf(previous)
 			return err
 		}
 		d.firstPaintForTransition(published)

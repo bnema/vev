@@ -108,6 +108,24 @@ func TestProxiedPaintFlushesRuntimeMarks(t *testing.T) {
 	require.NotEmpty(t, observer.marks, "proxied rendering must flush observer marks after releasing sendMu")
 }
 
+func TestProxiedOutputStartCommitsOnlyAfterAcceptedFrame(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	ac.renderMode = ports.RenderModeProxiedContent
+	state, ok := captureLocalRenderState(sess, ac, renderCaptureRequest{reset: true})
+	require.True(t, ok)
+	composed := composeProxiedContent(*state)
+
+	state.attachment = &attachedClient{}
+	ac.sendMu.Lock()
+	require.False(t, d.emitFrame(sess, ac, state, composed))
+	require.False(t, ac.proxiedOutputStarted, "rejected proxied output must remain retryable")
+
+	state.attachment = ac
+	ac.sendMu.Lock()
+	require.True(t, d.emitFrame(sess, ac, state, composed))
+	require.True(t, ac.proxiedOutputStarted, "accepted proxied output starts the output boundary")
+}
+
 func TestProxiedMetadataFallsBackFromStaleAttachmentTab(t *testing.T) {
 	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	sess.mu.Lock()

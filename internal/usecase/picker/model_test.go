@@ -491,30 +491,30 @@ func TestSelectedIndexReportsRawSelectedRow(t *testing.T) {
 	require.Equal(t, 1, m.SelectedIndex())
 }
 
-func TestStoppedSessionSelectableAndRendered(t *testing.T) {
-	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
-	got, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "stopped:work", Name: "work", TabIndex: 0, Stopped: true}, got)
-	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, Preview{})
-	require.Equal(t, 'w', frame.At(0, 0).Rune)
-	require.Equal(t, '(', frame.At(5, 0).Rune)
-	var label strings.Builder
-	for _, cell := range frame.Row(0) {
-		label.WriteRune(cell.Rune)
-	}
-	require.Contains(t, label.String(), "(down)")
-}
+func TestStoppedSessionRendersDownSuffix(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		sessionID   domain.SessionID
+		sessionName string
+		size        domain.Size
+	}{
+		{name: "normal", sessionID: "stopped:work", sessionName: "work", size: domain.Size{Cols: 24, Rows: 4}},
+		{name: "constrained", sessionID: "stopped:long", sessionName: "long-session", size: domain.Size{Cols: 8, Rows: 2}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New([]SessionView{{ID: tt.sessionID, Name: tt.sessionName, Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
+			got, ok := m.Selected()
+			require.True(t, ok)
+			require.Equal(t, Target{Session: tt.sessionID, Name: tt.sessionName, TabIndex: 0, Stopped: true}, got)
 
-func TestStoppedSessionReservesDownSuffix(t *testing.T) {
-	m := New([]SessionView{{ID: "stopped:long", Name: "long-session", Tabs: []TabEntry{{}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	frame := m.Render(domain.Size{Cols: 8, Rows: 2}, Preview{})
-	var label strings.Builder
-	for _, cell := range frame.Row(0) {
-		label.WriteRune(cell.Rune)
+			frame := m.Render(tt.size, Preview{})
+			var label strings.Builder
+			for _, cell := range frame.Row(0) {
+				label.WriteRune(cell.Rune)
+			}
+			require.Contains(t, label.String(), "(down)")
+		})
 	}
-	require.Contains(t, label.String(), "(down)")
 }
 
 func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {

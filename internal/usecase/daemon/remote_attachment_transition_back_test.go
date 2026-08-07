@@ -117,3 +117,33 @@ func TestBackSessionForAttachmentRejectsReboundRemoteToken(t *testing.T) {
 	require.True(t, view.attachmentRegistered(ac))
 	require.Same(t, local, ac.previousOwner.Get(), "a stale token must not consume valid history")
 }
+
+func TestBackSessionForAttachmentClearsRemoteHistoryAfterCurrentTransitionFailure(t *testing.T) {
+	d, local, ac, view, token := remoteBackFixture(t)
+	require.NoError(t, d.backSessionForAttachment(token))
+	localToken := local.attachmentToken(ac, ac.transport())
+
+	view.mu.Lock()
+	view.closed = true
+	view.mu.Unlock()
+	err := d.backSessionForAttachment(localToken)
+
+	require.Error(t, err)
+	require.Same(t, local, ac.currentAttachmentOwner())
+	require.Nil(t, ac.previousOwner.Get(), "current transition failure clears consumed remote history")
+}
+
+func TestBackSessionForAttachmentKeepsRemoteHistoryAfterStaleTransitionCancellation(t *testing.T) {
+	d, local, ac, view, token := remoteBackFixture(t)
+	require.NoError(t, d.backSessionForAttachment(token))
+	localToken := local.attachmentToken(ac, ac.transport())
+	ac.connectionGeneration.Add(1)
+
+	view.mu.Lock()
+	view.closed = true
+	view.mu.Unlock()
+	require.NoError(t, d.backSessionForAttachment(localToken))
+
+	require.Same(t, local, ac.currentAttachmentOwner())
+	require.Same(t, view, ac.previousOwner.Get(), "stale transition cancellation preserves remote history")
+}

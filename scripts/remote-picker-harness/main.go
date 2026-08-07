@@ -996,23 +996,21 @@ func assertNoDirectHandoff(tr *harnessTransport) error {
 	if tr == nil || tr.probe == nil {
 		return errors.New("local picker transport has no visual probe")
 	}
-	// Inspect frames already queued by the receiver, retaining non-handoff
-	// frames for the next receiveWithTimeout call.
-	for {
-		select {
-		case outcome := <-tr.frames:
-			if outcome.frame.Type == ports.MsgAttachTarget {
-				tr.probe.recordIncoming(outcome.frame)
-			} else {
-				tr.queued = append(tr.queued, outcome)
-			}
-		default:
-			if tr.probe.unexpectedHandoffs != 0 {
-				return fmt.Errorf("picker emitted %d direct MsgAttachTarget handoff frame(s)", tr.probe.unexpectedHandoffs)
-			}
-			return nil
+	// Inspect only the frames already queued at assertion start, retaining
+	// non-handoff frames for the next receiveWithTimeout call.
+	queued := len(tr.frames)
+	for range queued {
+		outcome := <-tr.frames
+		if outcome.frame.Type == ports.MsgAttachTarget {
+			tr.probe.recordIncoming(outcome.frame)
+		} else {
+			tr.queued = append(tr.queued, outcome)
 		}
 	}
+	if tr.probe.unexpectedHandoffs != 0 {
+		return fmt.Errorf("picker emitted %d direct MsgAttachTarget handoff frame(s)", tr.probe.unexpectedHandoffs)
+	}
+	return nil
 }
 
 func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (ports.Frame, error) {

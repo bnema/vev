@@ -826,10 +826,17 @@ func (link *remoteLink) send(frame ports.Frame) error {
 	if link == nil || link.view == nil {
 		return errRemoteViewUnavailable
 	}
-	link.sendMu.Lock()
 	view := link.view
 	view.mu.Lock()
 	current := !view.closed && view.link == link && view.linkGeneration == link.generation && link.active
+	view.mu.Unlock()
+	if !current {
+		return errRemoteViewStale
+	}
+
+	link.sendMu.Lock()
+	view.mu.Lock()
+	current = !view.closed && view.link == link && view.linkGeneration == link.generation && link.active
 	transport := link.transport
 	view.mu.Unlock()
 	if !current || transport == nil {
@@ -936,15 +943,7 @@ func (d *Daemon) markRemoteLinkUnavailable(link *remoteLink) {
 	if !current {
 		return
 	}
-	if link.commands != nil {
-		link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-	}
-	if link.cancel != nil {
-		link.cancel()
-	}
-	if link.transport != nil {
-		_ = link.transport.Close()
-	}
+	interruptRemoteLink(link)
 	d.repaintRemoteViewAttachments(view, attachments)
 	if startReconnect {
 		go d.reconnectRemoteView(view, link, reconnectGeneration, reconnectTarget, reconnectSize)
@@ -966,15 +965,7 @@ func (d *Daemon) stopUnpublishedRemoteView(view *remoteView) {
 	signalRemoteViewMetadataChangedLocked(view)
 	view.mu.Unlock()
 	if link != nil {
-		if link.commands != nil {
-			link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-		}
-		if link.cancel != nil {
-			link.cancel()
-		}
-		if link.transport != nil {
-			_ = link.transport.Close()
-		}
+		interruptRemoteLink(link)
 	}
 }
 
@@ -996,15 +987,7 @@ func (d *Daemon) stopRemoteViewLink(view *remoteView) *remoteLink {
 	}
 	view.mu.Unlock()
 	if link != nil {
-		if link.commands != nil {
-			link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-		}
-		if link.cancel != nil {
-			link.cancel()
-		}
-		if link.transport != nil {
-			_ = link.transport.Close()
-		}
+		interruptRemoteLink(link)
 	}
 	return link
 }

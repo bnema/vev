@@ -566,6 +566,11 @@ func (d *Daemon) emitAttachmentFrame(owner attachmentOwner, ac *attachedClient, 
 		// represents the captured frame. Lock panes only under sendMu and with no
 		// session guard held.
 		commitDamageReceipts(state.receipts)
+		if ac.renderMode == ports.RenderModeProxiedContent {
+			// A proxied output boundary is established only after preparation and
+			// transport emission succeed, while sendMu still serializes the transition.
+			ac.proxiedOutputStarted = true
+		}
 		if ac.renderStages.emit != nil {
 			ac.renderStages.emit()
 		}
