@@ -841,6 +841,7 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	// observes d.closing and retires its unpublished candidate independently.
 	var constructionTimer ports.Timer
 	var constructionTimeout <-chan time.Time
+	graceExpired := false
 	if deadline == nil && len(constructions) != 0 {
 		clock := d.clock
 		if clock == nil {
@@ -858,10 +859,14 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 			continue
 		}
 		if deadline == nil {
+			if graceExpired {
+				continue
+			}
 			select {
 			case <-construction.done:
 			case <-constructionTimeout:
 				checkpointIncomplete = true
+				graceExpired = true
 			}
 			continue
 		}

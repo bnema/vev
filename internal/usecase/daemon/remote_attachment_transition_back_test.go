@@ -39,6 +39,19 @@ func TestBackSessionForAttachmentReturnsFromRemoteViewToPreviousLocal(t *testing
 	require.NotNil(t, current.lease, "returning to a local owner restores its coordinator lease")
 }
 
+func TestBackSessionForAttachmentReturnsToPreviousRemoteView(t *testing.T) {
+	d, local, ac, view, remoteToken := remoteBackFixture(t)
+
+	require.NoError(t, d.backSessionForAttachment(remoteToken))
+	localToken := local.attachmentToken(ac, ac.transport())
+	require.NoError(t, d.backSessionForAttachment(localToken))
+
+	require.Same(t, view, ac.currentAttachmentOwner())
+	require.True(t, view.attachmentRegistered(ac))
+	require.False(t, local.attachmentRegistered(ac))
+	require.Same(t, local, ac.previousOwner.Get())
+}
+
 func TestRemoteRecentAppearsInLocalStatusMRUAfterReturn(t *testing.T) {
 	d, local, ac, _, token := remoteBackFixture(t)
 

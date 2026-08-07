@@ -79,7 +79,7 @@ func (d *Daemon) startRemotePickerSelection(token attachmentConnectionToken, tar
 		token.effect.bindActionEnd(d, action)
 	}
 	d.invalidateAttachedOwner(token.ac, true, "remote_picker_selection.go")
-	go d.completeRemotePickerSelection(selection)
+	d.sessWg.Go(func() { d.completeRemotePickerSelection(selection) })
 	return nil
 }
 

@@ -270,7 +270,7 @@ func TestShutdownWithoutDeadlineBoundsUncooperativeRemoteConstruction(t *testing
 	go func() { result <- d.shutdownAll(ports.ReasonServerShutdown) }()
 	timer := awaitTestValue(t, clock.timers, "remote construction shutdown timer")
 	require.Equal(t, remoteConstructionShutdownGrace, timer.duration)
-	timer.ch <- time.Now()
+	timer.ch <- time.Time{}
 	require.True(t, awaitTestValue(t, result, "shutdown blocked on uncooperative remote construction"))
 }
 

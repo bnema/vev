@@ -45,10 +45,19 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken, after
 		return nil
 	}
 	previous := token.ac.previousOwner.Get()
+	if view, remote := normalizeAttachmentOwner(previous).(*remoteView); remote {
+		published, err := d.transitionToRemoteView(token, view)
+		if err != nil {
+			if !token.current() {
+				return nil
+			}
+			return err
+		}
+		d.firstPaintForTransition(published)
+		return nil
+	}
 	target := localSession(previous)
 	if target == nil {
-		// A remote predecessor remains stable history for the remote transition
-		// path; the local-only back path must not discard it.
 		return nil
 	}
 	if target == current || target.core() == nil || d.sessionByID(target.core().id) != target {

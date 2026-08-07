@@ -423,7 +423,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			if len(effects) != 0 && effects[0] != nil {
 				effect = effects[0]
 			} else {
-				token := sess.attachmentToken(ac, ac.transport())
+				token := attachmentOwnerToken(ac.currentAttachmentOwner(), ac, ac.transport())
 				var admitted bool
 				effect, admitted = ac.beginAttachmentEffect(token)
 				if !admitted {
@@ -946,8 +946,11 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 		}
 		return nil
 	}
-	if token.localSession() == nil || token.effect == nil {
+	if token.localSession() == nil {
 		return nil
+	}
+	if token.effect == nil {
+		return errAttachmentTransition
 	}
 	if target.RemoteTarget != nil {
 		return d.startRemotePickerSelection(token, target, guard, action)
