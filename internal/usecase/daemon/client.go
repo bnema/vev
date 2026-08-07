@@ -237,6 +237,16 @@ func (ac *attachedClient) currentSession() *session {
 	return ac.currentAttachmentSession()
 }
 
+// navigationSession returns the local session that owns local navigation UI.
+// A remote view has no local tabs or PTYs, but the attachment retains its
+// immediate local predecessor so picker and palette shell state stay local.
+func (ac *attachedClient) navigationSession() *session {
+	if current := ac.currentAttachmentSession(); current != nil {
+		return current
+	}
+	return localSession(ac.previousOwner.Get())
+}
+
 func (ac *attachedClient) setAttachmentOwner(owner attachmentOwner) {
 	if ac != nil {
 		ac.owner.Set(normalizeAttachmentOwner(owner))

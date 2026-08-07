@@ -167,7 +167,7 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 	}
 	rt := ac.overlays
 	rt.pickerMu.Lock()
-	if rt.picker == nil {
+	if rt.picker == nil || rt.pickerRemoteSelection != nil {
 		rt.pickerMu.Unlock()
 		return
 	}

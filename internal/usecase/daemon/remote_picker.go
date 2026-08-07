@@ -178,8 +178,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 		}
 		// Keep the structured session identity on rows even when one tab ID is
 		// malformed or a broken session cannot be activated. Cursor navigation
-		// must remain possible, while sendRemoteAttachTargetForAttachment will
-		// fail closed on the invalid target.
+		// remains possible for diagnostics, but activation fails closed.
 		remoteTarget = &target
 	}
 	reason := ""
@@ -194,13 +193,10 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	}
 	ready := status == remoteHostFresh && targetValid && !broken
 	if legacy {
-		// Count-only peers cannot prove lifecycle/tab identity. Preserve the
-		// historical direct-connect row for compatibility, while all current
-		// schema rows remain gated by exact identity and fresh ownership.
-		ready = status != remoteHostVersionMismatch && !broken
-		if status == remoteHostVersionMismatch {
-			reason = remoteReasonForStatus(status)
-		}
+		// Proxied picker activation requires exact lifecycle and stable-tab
+		// identity. A count-only cached row cannot fall back to client-owned
+		// direct attachment under the v25 protocol contract.
+		reason = "identity_changed"
 	}
 	detail := remotePickerStatusDetail(status, fetchedAt)
 	if detail == "" {

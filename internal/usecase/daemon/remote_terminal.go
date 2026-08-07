@@ -34,6 +34,7 @@ func (d *Daemon) retireTerminalRemoteView(link *remoteLink, reason uint8) {
 	view.link = nil
 	view.linkGeneration++
 	link.active = false
+	signalRemoteViewMetadataChangedLocked(view)
 	_ = d.unregisterRemoteViewLocked(view)
 	view.mu.Unlock()
 	d.mu.Unlock()
@@ -43,6 +44,7 @@ func (d *Daemon) retireTerminalRemoteView(link *remoteLink, reason uint8) {
 	for _, attachment := range attachments {
 		d.retireShutdownRemoteAttachment(view, attachment, reason)
 	}
+	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
 	link.cancel()
 	if link.transport != nil {
 		_ = link.transport.Close()

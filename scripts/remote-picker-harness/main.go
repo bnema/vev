@@ -148,19 +148,17 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 
 // runLocalPickerUnitedPhase drives the actual local picker against the SSH
 // daemon container. It validates the seam that individual catalog, preview,
-// and attach tests cannot: catalog active-tab selection, live remote preview,
-// emitted rich handoff, and the remote attachment's visible provenance.
+// and attach tests cannot: unified rows before and after selection, remote
+// content publication on the same local client transport, local chrome
+// composition, and continued input forwarding.
 func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, preview ports.RemotePreviewClient) (err error) {
 	const (
 		localSession  = "local-picker"
 		remoteSession = "picker"
 		previewMarker = "VEV_REMOTE_PICKER_ACTIVE"
+		inputMarker   = "VEV_REMOTE_PICKER_INPUT_OK"
 	)
 
-	trace := &probeTrace{}
-	if artifact := harnessArtifactFromContext(ctx); artifact != nil {
-		artifact.registerTrace(trace)
-	}
 	remote, err := openTransport(ctx, ports.RemoteTransportStdio, target)
 	if err != nil {
 		return fmt.Errorf("open remote picker source: %w", err)
@@ -243,7 +241,10 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err != nil {
 		return fmt.Errorf("open local picker transport: %w", err)
 	}
-	local.probe.configure("local-picker", trace)
+	// This is the one client-equivalent connection for the proof. Remote
+	// selection must replace its daemon-side owner without sending an endpoint
+	// or MsgAttachTarget to this transport.
+	local.probe.configure("local-picker", nil)
 	defer func() { _ = local.Close() }()
 	if err := attachAndCheck(ctx, local, ports.Hello{
 		Intent: ports.IntentNew, Name: localSession, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
@@ -263,6 +264,10 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err := awaitOutputContains(ctx, local, remoteSession+"@remote"); err != nil {
 		return fmt.Errorf("await remote picker catalog row: %w", err)
 	}
+	beforeRows := capturePickerRows(local.probe)
+	if err := assertUnifiedPickerRows(beforeRows, localSession, remoteSession); err != nil {
+		return fmt.Errorf("capture unified picker rows before remote selection: %w", err)
+	}
 	// The local selected tab is first and the remote session header is not
 	// selectable, so one down reaches the first remote tab. Derive the rest
 	// from the catalog's stable active tab identity instead of assuming an
@@ -276,45 +281,49 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err := sendRawInput(local, "\r"); err != nil {
 		return fmt.Errorf("commit remote picker target: %w", err)
 	}
-	handoffFrame, err := receiveFrame(ctx, local, ports.MsgAttachTarget)
-	if err != nil {
-		return fmt.Errorf("await remote picker handoff: %w", err)
+	if err := awaitOutputContains(ctx, local, remoteSession+" at remote"); err != nil {
+		return fmt.Errorf("publish remote content on local transport: %w", err)
 	}
-	handoff, err := ports.UnmarshalAttachTarget(handoffFrame.Payload)
-	if err != nil {
-		return fmt.Errorf("decode remote picker handoff: %w", err)
+	if !local.probe.contains(previewMarker) {
+		return errors.New("published remote content omitted preview marker")
 	}
-	if handoff.RemoteTarget == nil {
-		return errors.New("remote picker handoff omitted the remote target")
+	if err := assertNoDirectHandoff(local); err != nil {
+		return err
 	}
-	if handoff.RemoteTarget.LiveTabID != selectedTarget.LiveTabID {
-		return fmt.Errorf("remote picker handoff tab = %q, want %q", handoff.RemoteTarget.LiveTabID, selectedTarget.LiveTabID)
+	if err := assertNoRemoteChrome(local.probe, remoteSession); err != nil {
+		return fmt.Errorf("remote content chrome: %w", err)
 	}
-	if handoff.RemoteTarget.DisplayOrigin != "remote" {
-		return fmt.Errorf("remote picker handoff origin = %q, want remote", handoff.RemoteTarget.DisplayOrigin)
+	if err := sendInputAndAwait(ctx, local, "printf '"+inputMarker+"'", inputMarker); err != nil {
+		return fmt.Errorf("continued input on local transport: %w", err)
 	}
-	if handoff.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
-		return fmt.Errorf("remote picker handoff policy = %d, want daemon-owned", handoff.EnvironmentPolicy)
+	if err := assertNoDirectHandoff(local); err != nil {
+		return err
 	}
 
-	selected, err := openTransport(ctx, ports.RemoteTransportStdio, target)
-	if err != nil {
-		return fmt.Errorf("open selected remote transport: %w", err)
+	// Reopen the picker through the same local connection while its owner is a
+	// remote view. The navigation shell must remain local and retain both sides
+	// of the unified session list.
+	if err := sendRawInput(local, "\x1b "); err != nil {
+		return fmt.Errorf("reopen command palette from remote content: %w", err)
 	}
-	selected.probe.configure("selected-remote", trace)
-	defer func() { _ = selected.Close() }()
-	if err := attachAndCheck(ctx, selected, ports.Hello{
-		Intent: ports.IntentAttach, Name: handoff.Session, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
-		TermEnv: "xterm-256color", TrueColor: true,
-		RemoteTarget: handoff.RemoteTarget, EnvironmentPolicy: handoff.EnvironmentPolicy,
-	}); err != nil {
-		return fmt.Errorf("attach selected remote target: %w", err)
+	if err := awaitOutputContains(ctx, local, "Commands"); err != nil {
+		return fmt.Errorf("await reopened command palette: %w", err)
 	}
-	if err := awaitOutputContains(ctx, selected, remoteSession+" at remote"); err != nil {
-		return fmt.Errorf("remote provenance status bar: %w", err)
+	if err := sendRawInput(local, "SSP\r"); err != nil {
+		return fmt.Errorf("reopen session picker from remote content: %w", err)
 	}
-	if err := validateHandoffEventOrdering(trace.events); err != nil {
-		return fmt.Errorf("characterize remote picker handoff: %w", err)
+	if err := awaitOutputContains(ctx, local, remoteSession+"@remote"); err != nil {
+		return fmt.Errorf("await reopened remote picker row: %w", err)
+	}
+	afterRows := capturePickerRows(local.probe)
+	if err := assertUnifiedPickerRows(afterRows, localSession, remoteSession); err != nil {
+		return fmt.Errorf("capture unified picker rows after remote selection: %w", err)
+	}
+	if err := assertNoDirectHandoff(local); err != nil {
+		return err
+	}
+	if err := sendRawInput(local, "\x1b"); err != nil {
+		return fmt.Errorf("close reopened session picker: %w", err)
 	}
 	return nil
 }
@@ -751,28 +760,6 @@ func remotePreviewContains(preview ports.RemotePreview, want string) bool {
 	return strings.Contains(text.String(), want)
 }
 
-func receiveFrame(ctx context.Context, tr *harnessTransport, typ ports.MsgType) (ports.Frame, error) {
-	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	for {
-		frame, err := receiveWithTimeout(deadline, tr)
-		if err != nil {
-			return ports.Frame{}, err
-		}
-		if frame.Type == typ {
-			if typ == ports.MsgAttachTarget {
-				tr.probe.recordControl(probeEventAttachTarget)
-			}
-			return frame, nil
-		}
-		if frame.Type == ports.MsgOutput {
-			if err := processOutputFrame(tr, frame); err != nil {
-				return ports.Frame{}, err
-			}
-		}
-	}
-}
-
 func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want string) error {
 	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(command + "\n")})}); err != nil {
 		return err
@@ -999,11 +986,24 @@ func runRemoteCommand(ctx context.Context, target string, command ...string) err
 	return runCapturedCommand(ctx, spec.Path, spec.Args...)
 }
 
+func assertNoDirectHandoff(tr *harnessTransport) error {
+	if tr == nil || tr.probe == nil {
+		return errors.New("local picker transport has no visual probe")
+	}
+	if tr.probe.unexpectedHandoffs != 0 {
+		return fmt.Errorf("picker emitted %d direct MsgAttachTarget handoff frame(s)", tr.probe.unexpectedHandoffs)
+	}
+	return nil
+}
+
 func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (ports.Frame, error) {
 	select {
 	case <-ctx.Done():
 		return ports.Frame{}, ctx.Err()
 	case outcome := <-tr.frames:
+		if outcome.err == nil {
+			tr.probe.recordIncoming(outcome.frame)
+		}
 		return outcome.frame, outcome.err
 	}
 }

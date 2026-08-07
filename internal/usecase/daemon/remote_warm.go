@@ -129,6 +129,7 @@ func (d *Daemon) expireRemoteViewWarm(view *remoteView, warm *remoteViewWarm) {
 	link := view.link
 	view.link = nil
 	view.linkGeneration++
+	signalRemoteViewMetadataChangedLocked(view)
 	if link != nil {
 		link.active = false
 	}
@@ -141,6 +142,7 @@ func (d *Daemon) expireRemoteViewWarm(view *remoteView, warm *remoteViewWarm) {
 	if link == nil {
 		return
 	}
+	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
 	link.cancel()
 	if link.transport != nil {
 		_ = link.transport.Close()

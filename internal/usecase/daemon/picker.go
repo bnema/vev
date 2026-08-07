@@ -63,6 +63,8 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	rt := ac.overlays
 	rt.pickerMu.Lock()
 	previous, previousGeneration := rt.pickerPreviewSession, rt.pickerPreviewGeneration
+	previousSelection := rt.pickerRemoteSelection
+	rt.pickerRemoteSelection = nil
 	rt.pickerPreviewGeneration++
 	if rt.pickerRemotePreviewCancel != nil {
 		rt.pickerRemotePreviewCancel()
@@ -80,9 +82,12 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	rt.pickerPending = nil
 	rt.pickerESC.stop()
 	rt.pickerMu.Unlock()
+	if previousSelection != nil {
+		previousSelection.cancel()
+	}
 	d.teardownPreviewSubscription(ac, previous, previousGeneration)
 	d.registerPreviewForSelection(ac)
-	d.invalidateRender(sess, ac, true, "picker.go")
+	d.invalidateAttachedOwner(ac, true, "picker.go")
 	if rt.beforeRemotePickerRegistration != nil {
 		rt.beforeRemotePickerRegistration()
 	}
@@ -264,6 +269,7 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 	rt := ac.overlays
 	var previewGeneration uint64
 	var instance remotePickerInstance
+	var closed bool
 	return listInputState{
 		pending:  &rt.pickerPending,
 		esc:      &rt.pickerESC,
@@ -273,6 +279,13 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		unlock:   rt.pickerMu.Unlock,
 		active:   func() bool { return rt.picker != nil },
 		closeLocked: func() {
+			if selection := rt.pickerRemoteSelection; selection != nil {
+				rt.pickerRemoteSelection = nil
+				rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
+				selection.cancel()
+				return
+			}
+			closed = true
 			instance = remotePickerInstance{ac: ac, generation: rt.pickerGeneration, model: rt.picker}
 			rt.picker = nil
 			rt.pickerIntent = pickerNavigate
@@ -280,17 +293,17 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 			previewGeneration = rt.pickerPreviewGeneration
 		},
 		afterClose: func() {
-			d.clearPreviewGeneration(ac, previewGeneration)
-			d.remotePickerClosed(instance)
-			if sess := ac.currentAttachmentSession(); sess != nil {
-				d.invalidateRender(sess, ac, true, "picker.go")
+			if closed {
+				d.clearPreviewGeneration(ac, previewGeneration)
+				d.remotePickerClosed(instance)
 			}
+			d.invalidateAttachedOwner(ac, true, "picker.go")
 		},
 	}
 }
 
 func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
-	sess := ac.currentAttachmentSession()
+	sess := ac.navigationSession()
 	if sess == nil {
 		return
 	}
@@ -397,7 +410,29 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			return
 		}
 		var err error
-		if len(effects) != 0 && effects[0] != nil {
+		if target.RemoteTarget != nil {
+			// Remote picker activation is always an attachment-owned async
+			// transition. Unit/headless callers may omit the frame effect, so
+			// admit a short-lived local effect here rather than closing the
+			// picker and falling through to the client handoff path.
+			var effect *attachmentEffectTicket
+			ownedEffect := false
+			if len(effects) != 0 && effects[0] != nil {
+				effect = effects[0]
+			} else {
+				token := sess.attachmentToken(ac, ac.transport())
+				var admitted bool
+				effect, admitted = ac.beginAttachmentEffect(token)
+				if !admitted {
+					return
+				}
+				ownedEffect = true
+			}
+			err = d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
+			if ownedEffect {
+				effect.End()
+			}
+		} else if len(effects) != 0 && effects[0] != nil {
 			err = d.switchToTargetForAttachment(effects[0].connectionToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
 		} else {
 			d.closePicker(ac)
@@ -413,7 +448,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		return
 	}
 	if result.exit || result.changed {
-		d.invalidateRender(sess, ac, true, "picker.go")
+		d.invalidateAttachedOwner(ac, true, "picker.go")
 	}
 }
 
@@ -707,6 +742,8 @@ func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, g
 		return false
 	}
 	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: ac.overlays.picker}
+	selection := ac.overlays.pickerRemoteSelection
+	ac.overlays.pickerRemoteSelection = nil
 	ac.overlays.picker = nil
 	ac.overlays.pickerTitle = ""
 	ac.overlays.pickerIntent = pickerNavigate
@@ -715,6 +752,9 @@ func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, g
 	ac.overlays.pickerESC.stop()
 	previewGeneration := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
+	if selection != nil {
+		selection.cancel()
+	}
 	d.clearPreviewGeneration(ac, previewGeneration)
 	if instance.model != nil {
 		d.remotePickerClosed(instance)
@@ -857,14 +897,13 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 		return nil
 	}
 	if target.RemoteTarget != nil {
-		var key domain.RemoteSessionKey
-		if target.RemoteKey != nil {
-			key = *target.RemoteKey
-		}
-		return d.sendRemoteAttachTargetForAttachment(token, target, key, guard, action)
+		return d.startRemotePickerSelection(token, target, guard, action)
 	}
 	if target.RemoteKey != nil {
-		return d.sendRemoteAttachTargetForAttachment(token, target, *target.RemoteKey, guard, action)
+		// Picker-originated remote activation requires the complete validated
+		// lifecycle/tab target. Legacy display keys must never fall back to a
+		// client-owned attach handoff.
+		return errAttachmentTransition
 	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
@@ -873,68 +912,6 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 		return errAttachmentTransition
 	}
 	return d.switchToTargetGuardedForAttachment(source, token.ac, target, guard, &token, action)
-}
-
-// sendRemoteAttachTargetForAttachment validates the catalog row and hands the
-// endpoint to the thin client. The daemon owns no remote session shadow: after
-// the target is sent, the local attachment is detached and the client opens a
-// fresh connection to the owning daemon.
-func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, _ string) error {
-	var handoff ports.AttachTarget
-	if target.RemoteTarget != nil {
-		remoteTarget := *target.RemoteTarget
-		if err := remoteTarget.Validate(); err != nil || target.Stopped != remoteTarget.Stopped || !d.remotePickerTargetReadyTarget(remoteTarget) {
-			return errAttachmentTransition
-		}
-		if target.RemoteKey != nil {
-			if target.Session != target.RemoteKey.ID() || target.RemoteKey.Host != remoteTarget.Endpoint || target.RemoteKey.Name != remoteTarget.SessionName || target.RemoteKey.LifecycleID != remoteTarget.LifecycleID {
-				return errAttachmentTransition
-			}
-		}
-		handoff = ports.AttachTarget{
-			Endpoint:          remoteTarget.Endpoint,
-			Session:           remoteTarget.SessionName,
-			Intent:            ports.IntentAttach,
-			RemoteTarget:      &remoteTarget,
-			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-		}
-	} else {
-		if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" || !d.remotePickerTargetReady(key) {
-			return errAttachmentTransition
-		}
-		handoff = ports.AttachTarget{Endpoint: key.Host, Session: key.Name, Intent: ports.IntentAttach}
-	}
-	payload := ports.MarshalAttachTarget(handoff)
-	if payload == nil {
-		return errAttachmentTransition
-	}
-	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
-		return err
-	}
-	if guard.closePicker {
-		d.closePicker(token.ac)
-	}
-	d.clientGoneForAttachment(token, false)
-	return nil
-}
-
-func (d *Daemon) remotePickerTargetReady(key domain.RemoteSessionKey) bool {
-	if d == nil {
-		return false
-	}
-	d.remoteCatalog.mu.Lock()
-	defer d.remoteCatalog.mu.Unlock()
-	for _, entry := range d.remoteCatalog.cache {
-		if entry.Host != key.Host {
-			continue
-		}
-		for _, session := range entry.Sessions {
-			if session.Name == key.Name {
-				return d.remoteCatalog.status[key.Host] != remoteHostVersionMismatch
-			}
-		}
-	}
-	return false
 }
 
 func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget) bool {

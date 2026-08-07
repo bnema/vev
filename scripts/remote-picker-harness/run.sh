@@ -6,8 +6,9 @@ usage() {
 Usage: scripts/remote-picker-harness/run.sh
 
 Builds the current vev binary into a disposable two-container environment and
-runs local-picker rich-handoff plus SSH-stdio, UDP, catalog, preview,
-lifecycle-fence, and environment acceptance checks. Docker is invoked normally,
+runs the unified same-connection local-picker proof plus SSH-stdio, UDP,
+catalog, preview, lifecycle-fence, and environment acceptance checks. Docker is
+invoked normally,
 so DOCKER_HOST and the active
 Docker context select the daemon; no socket path is assumed.
 

@@ -45,6 +45,7 @@ type remoteLink struct {
 	cancel     context.CancelFunc
 
 	sendMu        sync.Mutex
+	commands      *CommandRequestTracker
 	startOnce     sync.Once
 	workerStarted atomic.Bool
 	done          chan struct{}
@@ -301,8 +302,12 @@ func installRemoteViewCandidateLocked(view, candidate *remoteView) (*remoteLink,
 	view.screen = candidate.screen
 	view.metadata = cloneRemoteSessionMeta(candidate.metadata)
 	view.displayOrigin = candidate.displayOrigin
+	view.reconnectTarget = candidate.reconnectTarget
 	view.output = candidate.output
 	view.resetRequested = candidate.resetRequested
+	view.linkState = remoteViewLinkHealthy
+	view.reconnectGeneration++
+	signalRemoteViewMetadataChangedLocked(view)
 	if replaced != nil {
 		replaced.active = false
 	}
@@ -314,6 +319,7 @@ func stopAndJoinRemoteLink(link *remoteLink) {
 	if link == nil {
 		return
 	}
+	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
 	if link.cancel != nil {
 		link.cancel()
 	}
@@ -359,6 +365,7 @@ func (d *Daemon) constructRemoteView(ctx context.Context, target domain.RemoteSe
 		target:     target,
 		clientID:   clientID,
 		cancel:     cancelLink,
+		commands:   NewCommandRequestTracker(),
 		done:       make(chan struct{}),
 		active:     true,
 	}
@@ -507,15 +514,54 @@ func validateInitialRemoteLinkMetadata(frame ports.Frame, target domain.RemoteSe
 	if metadata.LifecycleID != target.LifecycleID || metadata.SessionName != target.SessionName || metadata.Revision != 1 {
 		return ports.SessionMeta{}, errors.New("remote view: metadata identity mismatch")
 	}
-	if !target.Stopped && metadata.ActiveTabID != target.LiveTabID {
-		return ports.SessionMeta{}, errors.New("remote view: metadata active tab mismatch")
+	if err := validateInitialRemoteLinkTarget(metadata, target); err != nil {
+		return ports.SessionMeta{}, err
 	}
 	return metadata, nil
+}
+
+func validateInitialRemoteLinkTarget(metadata ports.SessionMeta, target domain.RemoteSessionTarget) error {
+	if err := ports.ValidateSessionMeta(metadata); err != nil {
+		return fmt.Errorf("remote view: invalid initial metadata: %w", err)
+	}
+	if !target.Stopped {
+		if metadata.ActiveTabID != target.LiveTabID {
+			return errors.New("remote view: metadata active tab mismatch")
+		}
+		return nil
+	}
+
+	tabs := make([]domain.TabSelectorTab, len(metadata.Tabs))
+	for i, tab := range metadata.Tabs {
+		tabs[i] = domain.TabSelectorTab{ID: tab.ID, Name: tab.Name}
+	}
+	selected, ok := target.StoppedTab.Resolve(tabs)
+	if !ok {
+		return errors.New("remote view: stopped tab selector mismatch")
+	}
+	if metadata.ActiveTabID != tabs[selected].ID {
+		return errors.New("remote view: metadata active tab mismatch")
+	}
+	return nil
 }
 
 func cloneRemoteSessionMeta(metadata ports.SessionMeta) ports.SessionMeta {
 	metadata.Tabs = append([]ports.SessionTabMeta(nil), metadata.Tabs...)
 	return metadata
+}
+
+// signalRemoteViewMetadataChangedLocked wakes waiters after an exact remote
+// metadata or link-generation change. The caller holds view.mu and must not
+// perform rendering or transport work before releasing it.
+func signalRemoteViewMetadataChangedLocked(view *remoteView) {
+	if view == nil {
+		return
+	}
+	previous := view.metadataChanged
+	view.metadataChanged = make(chan struct{})
+	if previous != nil {
+		close(previous)
+	}
 }
 
 type remoteMetadataResult uint8
@@ -558,6 +604,12 @@ func (v *remoteView) applyRemoteMetadataWithAttachments(link *remoteLink, metada
 		return remoteMetadataStale, nil
 	}
 	v.metadata = cloneRemoteSessionMeta(metadata)
+	reconnectTarget := v.reconnectTarget
+	if reconnectTarget.Validate() != nil {
+		reconnectTarget = link.target
+	}
+	v.reconnectTarget = runningRemoteTarget(reconnectTarget, metadata.ActiveTabID)
+	signalRemoteViewMetadataChangedLocked(v)
 	if initial {
 		return remoteMetadataAccepted, nil
 	}
@@ -681,6 +733,15 @@ func (d *Daemon) handleRemoteLinkFrame(link *remoteLink, frame ports.Frame) erro
 		default:
 			return errors.New("remote view: invalid metadata update")
 		}
+	case ports.MsgCommandResult:
+		result, err := ports.UnmarshalCommandResult(frame.Payload)
+		if err != nil {
+			return fmt.Errorf("remote view: decode command result: %w", err)
+		}
+		if link.commands != nil {
+			link.commands.Complete(link.generation, result)
+		}
+		return nil
 	case ports.MsgPing:
 		if _, err := ports.UnmarshalPing(frame.Payload); err != nil {
 			return fmt.Errorf("remote view: decode ping: %w", err)
@@ -690,11 +751,11 @@ func (d *Daemon) handleRemoteLinkFrame(link *remoteLink, frame ports.Frame) erro
 		_, err := ports.UnmarshalPong(frame.Payload)
 		return err
 	case ports.MsgDetached:
-		_, err := ports.UnmarshalDetached(frame.Payload)
+		detached, err := ports.UnmarshalDetached(frame.Payload)
 		if err != nil {
 			return fmt.Errorf("remote view: decode detached: %w", err)
 		}
-		d.retireTerminalRemoteView(link, ports.ReasonSessionKilled)
+		d.retireTerminalRemoteView(link, detached.Reason)
 		return nil
 	case ports.MsgError:
 		remoteErr, err := ports.UnmarshalErrorMsg(frame.Payload)
@@ -743,8 +804,10 @@ func (link *remoteLink) send(frame ports.Frame) error {
 		view.mu.Lock()
 		if view.link == link && view.linkGeneration == link.generation {
 			link.active = false
+			signalRemoteViewMetadataChangedLocked(view)
 		}
 		view.mu.Unlock()
+		link.commands.FailGeneration(link.generation, err)
 		link.cancel()
 		_ = transport.Close()
 	}
@@ -776,23 +839,58 @@ func (d *Daemon) sendRemoteViewFrame(view *remoteView, frame ports.Frame) error 
 	if link == nil {
 		return errRemoteViewUnavailable
 	}
-	return link.send(frame)
+	err := link.send(frame)
+	if err != nil {
+		d.markRemoteLinkUnavailable(link)
+	}
+	return err
 }
 
 func (d *Daemon) markRemoteLinkUnavailable(link *remoteLink) {
-	if link == nil || link.view == nil {
+	if d == nil || link == nil || link.view == nil {
 		return
 	}
 	view := link.view
 	view.mu.Lock()
 	current := !view.closed && view.link == link && view.linkGeneration == link.generation
+	var (
+		attachments         []*attachedClient
+		startReconnect      bool
+		reconnectGeneration uint64
+		reconnectSize       domain.Size
+		reconnectTarget     domain.RemoteSessionTarget
+	)
 	if current {
 		link.active = false
+		signalRemoteViewMetadataChangedLocked(view)
+		attachments = make([]*attachedClient, 0, len(view.attachments))
+		for attachment := range view.attachments {
+			attachments = append(attachments, attachment)
+		}
+		if view.linkState == remoteViewLinkHealthy {
+			view.linkState = remoteViewLinkReconnecting
+			view.reconnectGeneration++
+			reconnectGeneration = view.reconnectGeneration
+			startReconnect = len(attachments) != 0
+			reconnectSize = reconnectSizeLocked(view)
+			reconnectTarget = view.reconnectTarget
+			if reconnectTarget.Validate() != nil {
+				reconnectTarget = link.target
+			}
+		}
 	}
 	view.mu.Unlock()
-	if current {
-		link.cancel()
+	if !current {
+		return
+	}
+	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
+	link.cancel()
+	if link.transport != nil {
 		_ = link.transport.Close()
+	}
+	d.repaintRemoteViewAttachments(view, attachments)
+	if startReconnect {
+		go d.reconnectRemoteView(view, link, reconnectGeneration, reconnectTarget, reconnectSize)
 	}
 }
 
@@ -808,8 +906,10 @@ func (d *Daemon) stopUnpublishedRemoteView(view *remoteView) {
 	link := view.link
 	view.link = nil
 	view.linkGeneration++
+	signalRemoteViewMetadataChangedLocked(view)
 	view.mu.Unlock()
 	if link != nil {
+		link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
 		link.cancel()
 		if link.transport != nil {
 			_ = link.transport.Close()
@@ -831,9 +931,11 @@ func (d *Daemon) stopRemoteViewLink(view *remoteView) *remoteLink {
 		view.link = nil
 		view.linkGeneration++
 		link.active = false
+		signalRemoteViewMetadataChangedLocked(view)
 	}
 	view.mu.Unlock()
 	if link != nil {
+		link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
 		link.cancel()
 		if link.transport != nil {
 			_ = link.transport.Close()

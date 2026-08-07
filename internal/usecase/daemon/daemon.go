@@ -813,11 +813,9 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	for _, view := range d.remoteViews {
 		remoteViews = append(remoteViews, view)
 	}
-	constructions := make([]context.CancelFunc, 0, len(d.remoteViewConstructions))
+	constructions := make([]*remoteViewConstruction, 0, len(d.remoteViewConstructions))
 	for _, construction := range d.remoteViewConstructions {
-		if construction.cancel != nil {
-			constructions = append(constructions, construction.cancel)
-		}
+		constructions = append(constructions, construction)
 	}
 	clear(d.remoteViews)
 	clear(d.remoteViewsByKey)
@@ -829,8 +827,18 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	// attachment after releasing d.mu so a token cannot remain valid and a
 	// blocked local-client Recv/Send cannot outlive daemon shutdown. Candidate
 	// construction uses the same exact-close rule, even before publication.
-	for _, cancel := range constructions {
-		cancel()
+	for _, construction := range constructions {
+		if construction != nil && construction.cancel != nil {
+			construction.cancel()
+		}
+	}
+	// Candidate construction owns dial and handshake I/O outside daemon locks.
+	// Shutdown waits for each canceled constructor to close its completion gate
+	// so no unpublished transport or callback can outlive daemon teardown.
+	for _, construction := range constructions {
+		if construction != nil && construction.done != nil {
+			<-construction.done
+		}
 	}
 	remoteWarms := make([]*remoteViewWarm, 0, len(remoteViews))
 	remoteLinks := make([]*remoteLink, 0, len(remoteViews))

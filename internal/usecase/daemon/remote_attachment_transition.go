@@ -5,6 +5,28 @@ package daemon
 // I/O deliberately happen before this function; this function only performs
 // the frozen, exact local ownership hand-off.
 func (d *Daemon) transitionToRemoteView(token attachmentConnectionToken, target *remoteView) (attachmentConnectionToken, error) {
+	return d.transitionToRemoteViewGuarded(token, target, nil, nil, 0)
+}
+
+// transitionToRemoteViewForPicker carries the picker lifecycle fence through
+// the attachment freeze boundary. A completed remote handshake is insufficient
+// to move the client if Escape, picker replacement, or source transport loss
+// won while it was in flight.
+func (d *Daemon) transitionToRemoteViewForPicker(token attachmentConnectionToken, target *remoteView, selection *remotePickerSelection) (attachmentConnectionToken, error) {
+	if target == nil {
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	target.mu.Lock()
+	link, generation := target.link, target.linkGeneration
+	healthy := remoteViewLinkReusableLocked(target)
+	target.mu.Unlock()
+	if !healthy {
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	return d.transitionToRemoteViewGuarded(token, target, selection, link, generation)
+}
+
+func (d *Daemon) transitionToRemoteViewGuarded(token attachmentConnectionToken, target *remoteView, selection *remotePickerSelection, expectedLink *remoteLink, expectedLinkGeneration uint64) (attachmentConnectionToken, error) {
 	source := token.localSession()
 	if d == nil || source == nil || token.ac == nil || target == nil {
 		return attachmentConnectionToken{}, errAttachmentTransition
@@ -15,6 +37,9 @@ func (d *Daemon) transitionToRemoteView(token attachmentConnectionToken, target 
 	frozen := freezeAttachmentEffectGates(token.ac)
 	defer frozen.unfreeze()
 	if !frozen.acquired || !frozen.drained {
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	if selection != nil && !selection.current() {
 		return attachmentConnectionToken{}, errAttachmentTransition
 	}
 
@@ -32,6 +57,10 @@ func (d *Daemon) transitionToRemoteView(token attachmentConnectionToken, target 
 		token.ac.transportSnapshotCurrent(token.transport) &&
 		attachmentRegisteredLocked(source, token.ac) &&
 		!target.closed
+	if selection != nil {
+		current = current && expectedLink != nil && target.link == expectedLink &&
+			target.linkGeneration == expectedLinkGeneration && remoteViewLinkReusableLocked(target)
+	}
 	if !current {
 		target.mu.Unlock()
 		source.mu.Unlock()

@@ -26,7 +26,7 @@ func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionTok
 		return
 	}
 	if view, remote := token.owner.(*remoteView); remote {
-		d.handleRemoteViewInput(view, token, inputSeq, data)
+		d.handleRemoteViewInputForAttachment(view, token, inputSeq, data)
 		return
 	}
 	if token.ac.renderMode == ports.RenderModeProxiedContent {
@@ -34,6 +34,45 @@ func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionTok
 		return
 	}
 	d.handleInputForAttachment(token, data)
+}
+
+// handleRemoteViewInputForAttachment keeps picker and palette routing local
+// while forwarding ordinary terminal bytes unchanged to the exact remote link.
+func (d *Daemon) handleRemoteViewInputForAttachment(view *remoteView, token attachmentConnectionToken, inputSeq uint64, data []byte) {
+	if view == nil || token.ac == nil || !token.attachmentEffectCurrent() {
+		return
+	}
+	ac := token.ac
+	ac.initOverlays()
+	if ac.overlays.HandleInput(d, data, token.effect) {
+		return
+	}
+	if ac.keys == nil {
+		d.handleRemoteViewInput(view, token, inputSeq, data)
+		return
+	}
+	ac.keys.RouteWithHandler(data, remoteViewKeyHandler{d: d, ac: ac, view: view, token: token, inputSeq: inputSeq})
+}
+
+type remoteViewKeyHandler struct {
+	d        *Daemon
+	ac       *attachedClient
+	view     *remoteView
+	token    attachmentConnectionToken
+	inputSeq uint64
+}
+
+func (h remoteViewKeyHandler) Forward(data []byte) {
+	h.d.handleRemoteViewInput(h.view, h.token, h.inputSeq, data)
+}
+
+func (h remoteViewKeyHandler) Action(action keys.Action, _ []byte) {
+	if action != keys.ActionOpenPalette || !h.token.attachmentEffectCurrent() {
+		return
+	}
+	if source := h.ac.navigationSession(); source != nil {
+		h.d.enterPalette(source, h.ac)
+	}
 }
 
 // handleProxiedInputForAttachment preserves remote terminal bytes exactly.

@@ -11,12 +11,13 @@ import (
 const remoteContentPaneID = "remote-content"
 
 type remoteViewRenderSnapshot struct {
-	frame    renderer.Frame
-	cursor   vt.CursorSnapshot
-	title    string
-	tabs     []ports.SessionTabMeta
-	activeID domain.TabStableID
-	origin   string
+	frame     renderer.Frame
+	cursor    vt.CursorSnapshot
+	title     string
+	tabs      []ports.SessionTabMeta
+	activeID  domain.TabStableID
+	origin    string
+	linkState remoteViewLinkState
 }
 
 // resizeScreen updates only the private remote VT surface. The attachment
@@ -54,22 +55,46 @@ func (v *remoteView) renderSnapshot(size domain.Size) (remoteViewRenderSnapshot,
 	}
 	if v.screen == nil {
 		v.screen = vt.NewScreen(size.Cols, size.Rows)
-	} else if v.screen.Frame.Width != size.Cols || v.screen.Frame.Height != size.Rows {
-		v.screen.Resize(size.Cols, size.Rows)
 	}
+	// The shared remote screen follows the latest valid content-size claim via
+	// resizeScreen. Rendering another local attachment must only capture it;
+	// resizing here would let a non-authoritative window corrupt the remote
+	// output chain without sending a matching remote resize.
 	screen := v.screen.Snapshot()
 	frame := renderer.NewFrame(screen.Columns(), screen.Rows())
 	for y := range frame.Height {
 		copy(frame.Row(y), screen.BorrowedRow(y))
 	}
 	return remoteViewRenderSnapshot{
-		frame:    frame,
-		cursor:   screen.Cursor(),
-		title:    screen.Title(),
-		tabs:     append([]ports.SessionTabMeta(nil), v.metadata.Tabs...),
-		activeID: v.metadata.ActiveTabID,
-		origin:   v.displayOrigin,
+		frame:     frame,
+		cursor:    screen.Cursor(),
+		title:     screen.Title(),
+		tabs:      append([]ports.SessionTabMeta(nil), v.metadata.Tabs...),
+		activeID:  v.metadata.ActiveTabID,
+		origin:    v.displayOrigin,
+		linkState: v.linkState,
 	}, true
+}
+
+// invalidateAttachedOwner repaints an attachment through its actual owner.
+// Local UI overlays remain attachment-local while remote content is active,
+// so they must never enqueue work on the source session's coordinator after
+// that attachment has moved to a remote view.
+func (d *Daemon) invalidateAttachedOwner(ac *attachedClient, reset bool, producer string) {
+	if d == nil || ac == nil {
+		return
+	}
+	owner := ac.currentAttachmentOwner()
+	if view, remote := owner.(*remoteView); remote {
+		token := attachmentOwnerToken(view, ac, ac.transport())
+		if token.ac != nil {
+			go d.paintRemoteView(view, ac, reset, token)
+		}
+		return
+	}
+	if sess := localSession(owner); sess != nil {
+		d.invalidateRender(sess, ac, reset, producer)
+	}
 }
 
 func remoteStatusSnapshot(view *remoteView, snap remoteViewRenderSnapshot) statusSnapshot {
@@ -82,6 +107,12 @@ func remoteStatusSnapshot(view *remoteView, snap remoteViewRenderSnapshot) statu
 	}
 	if snap.origin != "" {
 		name += " at " + snap.origin
+	}
+	switch snap.linkState {
+	case remoteViewLinkReconnecting:
+		name += " · reconnecting"
+	case remoteViewLinkUnavailable:
+		name += " · unavailable"
 	}
 	status := statusSnapshot{session: name, tabs: make([]statusTab, 0, max(1, len(snap.tabs)))}
 	for _, tab := range snap.tabs {

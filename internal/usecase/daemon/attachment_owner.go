@@ -35,6 +35,14 @@ type remoteViewKey struct {
 	sessionName string
 }
 
+type remoteViewLinkState uint8
+
+const (
+	remoteViewLinkHealthy remoteViewLinkState = iota
+	remoteViewLinkReconnecting
+	remoteViewLinkUnavailable
+)
+
 func remoteViewKeyForTarget(target domain.RemoteSessionTarget) (remoteViewKey, error) {
 	if err := target.Validate(); err != nil {
 		return remoteViewKey{}, err
@@ -55,19 +63,33 @@ type remoteView struct {
 	id  remoteViewID
 	key remoteViewKey
 
-	mu            sync.Mutex
-	closed        bool
-	attachments   map[*attachedClient]struct{}
-	screen        *vt.Screen
-	metadata      ports.SessionMeta
-	displayOrigin string
+	mu sync.Mutex
+	// tabActivationMu serializes command/metadata activation sequences without
+	// retaining mu while waiting for remote transport or metadata frames.
+	tabActivationMu sync.Mutex
+	closed          bool
+	attachments     map[*attachedClient]struct{}
+	screen          *vt.Screen
+	metadata        ports.SessionMeta
+	displayOrigin   string
 	// link and linkGeneration fence every remote transport callback. They are
 	// owned by the view rather than the local-session registry, and neither
 	// is ever used while view.mu is held for transport I/O.
 	link           *remoteLink
 	linkGeneration uint64
-	output         remoteOutputState
-	resetRequested bool
+	// metadataChanged is replaced and the prior channel is closed after every
+	// exact metadata or link-generation change. Waiters use it only after
+	// releasing view.mu, so it never carries mutable metadata itself.
+	metadataChanged chan struct{}
+	linkState       remoteViewLinkState
+	// reconnectTarget is the currently active running tab route used only for
+	// a later link replacement. It is guarded by mu with link state.
+	reconnectTarget domain.RemoteSessionTarget
+	// reconnectGeneration fences a single automatic reconnect attempt against
+	// its failed link generation and any later terminal/replacement lifecycle.
+	reconnectGeneration uint64
+	output              remoteOutputState
+	resetRequested      bool
 	// warm and warmGeneration fence the five-minute retention timer for an
 	// unattached view. The timer is always stopped after view.mu is released.
 	warm           *remoteViewWarm

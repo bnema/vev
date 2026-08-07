@@ -221,65 +221,43 @@ func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 	}
 }
 
-func TestHandoffEventOrdering(t *testing.T) {
-	event := func(transport, kind string, accepted bool) *probeEvent {
-		result := &probeEvent{Transport: transport, Kind: kind, Accepted: accepted}
-		if kind == probeEventOutput && accepted {
-			result.StateBearing = true
-			result.Acked = true
-		}
-		return result
+func TestCaptureUnifiedPickerRowsRequiresLocalAndRemoteEntries(t *testing.T) {
+	probe := newVisualProbe(domain.Size{Cols: 48, Rows: 4})
+	probe.screen.Write([]byte("local-picker\npicker@remote"))
+
+	rows := capturePickerRows(probe)
+	if err := assertUnifiedPickerRows(rows, "local-picker", "picker"); err != nil {
+		t.Fatalf("assert unified picker rows: %v; rows = %#v", err, rows)
 	}
-	for _, tt := range []struct {
+}
+
+func TestVisualProbeRecordsUnexpectedAttachTarget(t *testing.T) {
+	probe := newVisualProbe(domain.Size{Cols: probeTestCols, Rows: probeTestRows})
+	probe.recordIncoming(ports.Frame{Type: ports.MsgAttachTarget})
+
+	if probe.unexpectedHandoffs != 1 {
+		t.Fatalf("unexpected handoffs = %d, want 1", probe.unexpectedHandoffs)
+	}
+	if len(probe.events) != 1 || probe.events[0].Kind != probeEventUnexpectedHandoff {
+		t.Fatalf("events = %#v, want one unexpected handoff event", probe.events)
+	}
+}
+
+func TestAssertNoRemoteChromeIgnoresLocalBarsButRejectsContentLeak(t *testing.T) {
+	for _, test := range []struct {
 		name    string
-		events  []*probeEvent
+		content string
 		wantErr bool
 	}{
-		{
-			name: "direct handoff order",
-			events: []*probeEvent{
-				event("local-picker", probeEventWelcome, true),
-				event("local-picker", probeEventOutput, true),
-				event("local-picker", probeEventAttachTarget, true),
-				event("selected-remote", probeEventWelcome, true),
-				event("selected-remote", probeEventOutput, true),
-			},
-		},
-		{
-			name: "selected output arrived before welcome",
-			events: []*probeEvent{
-				event("local-picker", probeEventOutput, true),
-				event("local-picker", probeEventAttachTarget, true),
-				event("selected-remote", probeEventOutput, true),
-				event("selected-remote", probeEventWelcome, true),
-			},
-			wantErr: true,
-		},
-		{
-			name: "rejected local output does not characterize handoff",
-			events: []*probeEvent{
-				event("local-picker", probeEventOutput, false),
-				event("local-picker", probeEventAttachTarget, true),
-				event("selected-remote", probeEventWelcome, true),
-				event("selected-remote", probeEventOutput, true),
-			},
-			wantErr: true,
-		},
-		{
-			name: "unacknowledged local output does not characterize handoff",
-			events: []*probeEvent{
-				{Transport: "local-picker", Kind: probeEventOutput, Accepted: true},
-				event("local-picker", probeEventAttachTarget, true),
-				event("selected-remote", probeEventWelcome, true),
-				event("selected-remote", probeEventOutput, true),
-			},
-			wantErr: true,
-		},
+		{name: "local bars", content: "picker at remote\nremote content\nlocal bottom", wantErr: false},
+		{name: "remote status in content", content: "local top\npicker at remote\nlocal bottom", wantErr: true},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateHandoffEventOrdering(tt.events)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("error = %v, want error = %t", err, tt.wantErr)
+		t.Run(test.name, func(t *testing.T) {
+			probe := newVisualProbe(domain.Size{Cols: 48, Rows: 3})
+			probe.screen.Write([]byte(test.content))
+			err := assertNoRemoteChrome(probe, "picker")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, want error = %t", err, test.wantErr)
 			}
 		})
 	}

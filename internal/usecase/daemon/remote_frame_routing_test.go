@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
@@ -37,6 +38,91 @@ func newRemoteFrameRoutingFixture(t *testing.T) (*Daemon, *remoteView, *attached
 	token := attachmentOwnerToken(view, ac, tr)
 	require.True(t, token.current())
 	return d, view, ac, token, sends
+}
+
+func TestRemoteViewRenderSnapshotDoesNotResizeSharedScreen(t *testing.T) {
+	view := &remoteView{screen: vt.NewScreen(80, 22)}
+
+	snapshot, ok := view.renderSnapshot(domain.Size{Cols: 100, Rows: 28})
+
+	require.True(t, ok)
+	require.Equal(t, 80, snapshot.frame.Width)
+	require.Equal(t, 22, snapshot.frame.Height)
+	view.mu.Lock()
+	require.Equal(t, 80, view.screen.Frame.Width)
+	require.Equal(t, 22, view.screen.Frame.Height)
+	view.mu.Unlock()
+}
+
+func TestRemoteFrameRoutingKeepsPickerNavigationLocal(t *testing.T) {
+	d, source, ac, view, token := remoteBackFixture(t)
+	remoteTransport := newRemoteLinkTestTransport()
+	view.mu.Lock()
+	view.linkGeneration = 1
+	view.link = &remoteLink{view: view, generation: 1, transport: remoteTransport, active: true}
+	view.mu.Unlock()
+
+	otherTab := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	otherTab.stableID = "other-tab"
+	other := &session{sessionCore: sessionCore{id: "other", name: "other", attachments: make(map[*attachedClient]struct{})}, tabs: []*tab{otherTab}}
+	publishTiledPaneOwners(other, otherTab)
+	d.mu.Lock()
+	d.sessions[other.id] = other
+	d.mu.Unlock()
+
+	d.enterPicker(source, ac)
+	ac.overlays.pickerMu.Lock()
+	before, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	d.handleAttachmentClientFrame(token, frameInput([]byte("j")))
+
+	ac.overlays.pickerMu.Lock()
+	selected, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.NotEqual(t, before.Session, selected.Session, "picker navigation remains local while viewing remote content")
+	select {
+	case frame := <-remoteTransport.sent:
+		t.Fatalf("picker navigation was forwarded to remote link as %v", frame.Type)
+	default:
+	}
+}
+
+func TestRemoteFrameRoutingForwardsOrdinaryTerminalInput(t *testing.T) {
+	d, _, _, view, token := remoteBackFixture(t)
+	remoteTransport := newRemoteLinkTestTransport()
+	view.mu.Lock()
+	view.linkGeneration = 1
+	view.link = &remoteLink{view: view, generation: 1, transport: remoteTransport, active: true}
+	view.mu.Unlock()
+
+	d.handleAttachmentClientFrame(token, frameInput([]byte("x")))
+
+	frame := awaitFrame(t, remoteTransport.sent, ports.MsgInput)
+	input, err := ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []byte("x"), input.Data)
+}
+
+func TestRemoteFrameRoutingOpensPaletteLocally(t *testing.T) {
+	d, _, ac, view, token := remoteBackFixture(t)
+	remoteTransport := newRemoteLinkTestTransport()
+	view.mu.Lock()
+	view.linkGeneration = 1
+	view.link = &remoteLink{view: view, generation: 1, transport: remoteTransport, active: true}
+	view.mu.Unlock()
+
+	d.handleAttachmentClientFrame(token, frameInput([]byte{keys.ESC, ' '}))
+
+	require.True(t, ac.overlays.paletteActive(), "the local palette remains reachable while remote content is active")
+	d.handleAttachmentClientFrame(token, frameInput([]byte("SSP\r")))
+	require.True(t, ac.overlays.pickerActive(), "the local session picker reopens from the remote view")
+	select {
+	case frame := <-remoteTransport.sent:
+		t.Fatalf("palette shortcut was forwarded to remote link as %v", frame.Type)
+	default:
+	}
 }
 
 func TestRemoteFrameRoutingResetRepaintsComposedFrameAndAckAdvancesOutput(t *testing.T) {

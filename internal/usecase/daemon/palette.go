@@ -49,7 +49,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
-	d.invalidateRender(sess, ac, true, "palette.go")
+	d.invalidateAttachedOwner(ac, true, "palette.go")
 }
 
 // paletteResults captures eligible named sessions before paletteMu so the
@@ -146,7 +146,7 @@ func (d *Daemon) recordPaletteUse(code string) {
 }
 
 func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
-	entry := ac.currentAttachmentSession()
+	entry := ac.navigationSession()
 	if entry == nil {
 		return
 	}
@@ -253,12 +253,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
-		d.invalidateRender(entry, ac, true, "palette.go")
+		d.invalidateAttachedOwner(ac, true, "palette.go")
 		return
 	}
 	if !execute {
 		if changed {
-			d.invalidateRender(entry, ac, true, "palette.go")
+			d.invalidateAttachedOwner(ac, true, "palette.go")
 		}
 		return
 	}

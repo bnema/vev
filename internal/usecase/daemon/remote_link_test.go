@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -121,14 +122,19 @@ func enqueueRemoteLinkHandshake(t *testing.T, transport *remoteLinkTestTransport
 
 func enqueueRemoteLinkHandshakeWithContent(t *testing.T, transport *remoteLinkTestTransport, target domain.RemoteSessionTarget, size domain.Size, contentMarker string) {
 	t.Helper()
-	content := contentSize(size)
-	metaPayload, err := ports.MarshalSessionMeta(ports.SessionMeta{
+	enqueueRemoteLinkHandshakeWithMetadata(t, transport, target, size, ports.SessionMeta{
 		LifecycleID: target.LifecycleID,
 		Revision:    1,
 		SessionName: target.SessionName,
 		ActiveTabID: target.LiveTabID,
 		Tabs:        []ports.SessionTabMeta{{ID: target.LiveTabID, Name: "main"}},
-	})
+	}, contentMarker)
+}
+
+func enqueueRemoteLinkHandshakeWithMetadata(t *testing.T, transport *remoteLinkTestTransport, target domain.RemoteSessionTarget, size domain.Size, metadata ports.SessionMeta, contentMarker string) {
+	t.Helper()
+	content := contentSize(size)
+	metaPayload, err := ports.MarshalSessionMeta(metadata)
 	require.NoError(t, err)
 	outputPayload, err := ports.MarshalOutput(ports.Output{
 		Epoch: 1, New: 1, Size: content, Full: true, Data: []byte(contentMarker),
@@ -195,6 +201,21 @@ func remoteMetadataFrame(t *testing.T, metadata ports.SessionMeta) ports.Frame {
 	payload, err := ports.MarshalSessionMeta(metadata)
 	require.NoError(t, err)
 	return ports.Frame{Type: ports.MsgSessionMeta, Payload: payload}
+}
+
+func TestRemoteLinkDetachedPropagatesItsExactReason(t *testing.T) {
+	d, view, link, _ := newRemoteMetadataLinkFixture(t)
+	attachment, sends := attachRemoteMetadataClient(t, view)
+
+	require.NoError(t, d.handleRemoteLinkFrame(link, ports.Frame{
+		Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}),
+	}))
+
+	frame := awaitFrame(t, sends, ports.MsgDetached)
+	detached, err := ports.UnmarshalDetached(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ReasonDetach, detached.Reason)
+	require.Nil(t, attachment.currentAttachmentOwner())
 }
 
 func TestRemoteLinkAcceptedMetadataRepaintsEveryAttachedClientUnderLocalChrome(t *testing.T) {
@@ -318,6 +339,153 @@ func TestRemoteLinkRejectsInvalidMetadataIdentityAndOrdering(t *testing.T) {
 	}
 }
 
+func TestValidateInitialRemoteLinkTargetResolvesStoppedSelectorsStrictly(t *testing.T) {
+	baseTarget := remoteLinkTestTarget()
+	baseTarget.LiveTabID = ""
+	baseTarget.Stopped = true
+	baseMetadata := ports.SessionMeta{
+		LifecycleID: baseTarget.LifecycleID,
+		Revision:    1,
+		SessionName: baseTarget.SessionName,
+		ActiveTabID: "tab-b",
+		Tabs: []ports.SessionTabMeta{
+			{ID: "tab-a", Name: "alpha"},
+			{ID: "tab-b", Name: "beta"},
+		},
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*domain.RemoteSessionTarget, *ports.SessionMeta)
+		wantErr string
+	}{
+		{
+			name: "valid stable selector",
+			mutate: func(target *domain.RemoteSessionTarget, _ *ports.SessionMeta) {
+				target.StoppedTab = domain.NewStableTabSelector("tab-b")
+			},
+		},
+		{
+			name: "valid ordinal selector",
+			mutate: func(target *domain.RemoteSessionTarget, _ *ports.SessionMeta) {
+				target.StoppedTab = domain.NewOrdinalTabSelector(1, "beta", 2)
+			},
+		},
+		{
+			name: "wrong stable ID",
+			mutate: func(target *domain.RemoteSessionTarget, _ *ports.SessionMeta) {
+				target.StoppedTab = domain.NewStableTabSelector("tab-missing")
+			},
+			wantErr: "stopped tab selector mismatch",
+		},
+		{
+			name: "missing stable ID",
+			mutate: func(_ *domain.RemoteSessionTarget, metadata *ports.SessionMeta) {
+				metadata.Tabs[0].ID = ""
+			},
+			wantErr: "invalid initial metadata",
+		},
+		{
+			name: "duplicate stable IDs",
+			mutate: func(_ *domain.RemoteSessionTarget, metadata *ports.SessionMeta) {
+				metadata.Tabs[0].ID = metadata.Tabs[1].ID
+			},
+			wantErr: "invalid initial metadata",
+		},
+		{
+			name: "reordered ordinal selector",
+			mutate: func(target *domain.RemoteSessionTarget, metadata *ports.SessionMeta) {
+				target.StoppedTab = domain.NewOrdinalTabSelector(1, "beta", 2)
+				metadata.Tabs[0], metadata.Tabs[1] = metadata.Tabs[1], metadata.Tabs[0]
+			},
+			wantErr: "stopped tab selector mismatch",
+		},
+		{
+			name: "ordinal name mismatch",
+			mutate: func(target *domain.RemoteSessionTarget, _ *ports.SessionMeta) {
+				target.StoppedTab = domain.NewOrdinalTabSelector(1, "renamed", 2)
+			},
+			wantErr: "stopped tab selector mismatch",
+		},
+		{
+			name: "ordinal count mismatch",
+			mutate: func(target *domain.RemoteSessionTarget, _ *ports.SessionMeta) {
+				target.StoppedTab = domain.NewOrdinalTabSelector(1, "beta", 3)
+			},
+			wantErr: "stopped tab selector mismatch",
+		},
+		{
+			name: "active tab mismatch",
+			mutate: func(target *domain.RemoteSessionTarget, metadata *ports.SessionMeta) {
+				target.StoppedTab = domain.NewStableTabSelector("tab-b")
+				metadata.ActiveTabID = "tab-a"
+			},
+			wantErr: "metadata active tab mismatch",
+		},
+		{
+			name: "running target validation remains strict",
+			mutate: func(target *domain.RemoteSessionTarget, metadata *ports.SessionMeta) {
+				*target = remoteLinkTestTarget()
+				metadata.ActiveTabID = "tab-a"
+				metadata.Tabs[1].ID = target.LiveTabID
+			},
+			wantErr: "metadata active tab mismatch",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := baseTarget
+			metadata := baseMetadata
+			metadata.Tabs = append([]ports.SessionTabMeta(nil), baseMetadata.Tabs...)
+			test.mutate(&target, &metadata)
+
+			err := validateInitialRemoteLinkTarget(metadata, target)
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
+}
+
+func TestOpenRemoteViewRejectsStoppedTargetBeforeCandidatePublication(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	target := remoteLinkTestTarget()
+	target.LiveTabID = ""
+	target.Stopped = true
+	target.StoppedTab = domain.NewStableTabSelector("tab-b")
+	transport := newRemoteLinkTestTransport()
+	transport.recv <- remoteLinkTestReceive{frame: ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{
+		SessionID: "remote-id", SessionName: target.SessionName, RenderMode: ports.RenderModeProxiedContent,
+	})}}
+	metadataPayload, err := ports.MarshalSessionMeta(ports.SessionMeta{
+		LifecycleID: target.LifecycleID,
+		Revision:    1,
+		SessionName: target.SessionName,
+		ActiveTabID: "tab-a",
+		Tabs: []ports.SessionTabMeta{
+			{ID: "tab-a", Name: "alpha"},
+			{ID: "tab-b", Name: "beta"},
+		},
+	})
+	require.NoError(t, err)
+	transport.recv <- remoteLinkTestReceive{frame: ports.Frame{Type: ports.MsgSessionMeta, Payload: metadataPayload}}
+	d.remoteDialerFactory = &remoteLinkTestFactory{dialer: &remoteLinkTestDialer{transport: transport}}
+
+	view, err := d.openRemoteView(context.Background(), target, domain.Size{Cols: 80, Rows: 24})
+	require.Nil(t, view)
+	require.ErrorContains(t, err, "metadata active tab mismatch")
+	select {
+	case <-transport.closed:
+	default:
+		t.Fatal("rejected stopped-target candidate transport was not closed")
+	}
+	d.mu.Lock()
+	require.Empty(t, d.remoteViews)
+	require.Empty(t, d.remoteViewConstructions)
+	d.mu.Unlock()
+}
+
 func TestOpenRemoteViewPublishesHandshakeReadyCandidate(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	target := remoteLinkTestTarget()
@@ -413,6 +581,91 @@ func TestOpenRemoteViewReconnectsInactiveExactView(t *testing.T) {
 	}
 	awaitTestCompletion(t, oldLink.done, "reconnect did not join the replaced exact transport")
 
+	d.shutdownAll(ports.ReasonServerShutdown)
+}
+
+func TestRemoteLinkFailureReconnectsAttachedViewWithoutChangingLocalOwner(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	target := remoteLinkTestTarget()
+	size := domain.Size{Cols: 80, Rows: 24}
+	firstTransport := newRemoteLinkTestTransport()
+	secondTransport := newRemoteLinkTestTransport()
+	enqueueRemoteLinkHandshake(t, firstTransport, target, size)
+	enqueueRemoteLinkHandshake(t, secondTransport, target, size)
+	reconnectStarted := make(chan struct{})
+	releaseReconnect := make(chan struct{})
+	factory := &remoteLinkSequenceFactory{dialers: []ports.Dialer{
+		&remoteLinkTestDialer{transport: firstTransport},
+		&remoteLinkTestDialer{transport: secondTransport, started: reconnectStarted, release: releaseReconnect},
+	}}
+	d.remoteDialerFactory = factory
+
+	view, err := d.openRemoteView(context.Background(), target, size)
+	require.NoError(t, err)
+	awaitFrame(t, firstTransport.sent, ports.MsgHello)
+	awaitFrame(t, firstTransport.sent, ports.MsgAck)
+	attachment := &attachedClient{tr: &closeTrackingTransport{}}
+	attachment.setAttachmentOwner(view)
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(attachment))
+	oldLink := view.link
+	oldScreen := view.screen
+	view.mu.Unlock()
+
+	firstTransport.recv <- remoteLinkTestReceive{err: io.EOF}
+	awaitTestCompletion(t, reconnectStarted, "remote link failure did not begin reconnect")
+	view.mu.Lock()
+	require.Equal(t, remoteViewLinkReconnecting, view.linkState)
+	require.Same(t, oldLink, view.link)
+	require.Same(t, oldScreen, view.screen)
+	view.mu.Unlock()
+	require.Same(t, view, attachment.currentAttachmentOwner())
+
+	close(releaseReconnect)
+	require.Eventually(t, func() bool {
+		view.mu.Lock()
+		defer view.mu.Unlock()
+		return view.link != oldLink && view.linkState == remoteViewLinkHealthy && view.link != nil && view.link.active
+	}, time.Second, 5*time.Millisecond, "validated reconnect should restore the same local remote view")
+	require.Same(t, view, attachment.currentAttachmentOwner())
+	require.Equal(t, int32(2), factory.calls.Load())
+	d.shutdownAll(ports.ReasonServerShutdown)
+}
+
+func TestRemoteLinkFailedAutoReconnectMarksViewUnavailableWithoutDetachingLocalOwner(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	target := remoteLinkTestTarget()
+	size := domain.Size{Cols: 80, Rows: 24}
+	firstTransport := newRemoteLinkTestTransport()
+	enqueueRemoteLinkHandshake(t, firstTransport, target, size)
+	factory := &remoteLinkSequenceFactory{dialers: []ports.Dialer{
+		&remoteLinkTestDialer{transport: firstTransport},
+		&remoteLinkTestDialer{},
+	}}
+	d.remoteDialerFactory = factory
+
+	view, err := d.openRemoteView(context.Background(), target, size)
+	require.NoError(t, err)
+	awaitFrame(t, firstTransport.sent, ports.MsgHello)
+	awaitFrame(t, firstTransport.sent, ports.MsgAck)
+	attachment := &attachedClient{tr: &closeTrackingTransport{}}
+	attachment.setAttachmentOwner(view)
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(attachment))
+	oldLink := view.link
+	view.mu.Unlock()
+
+	firstTransport.recv <- remoteLinkTestReceive{err: io.EOF}
+	require.Eventually(t, func() bool {
+		view.mu.Lock()
+		defer view.mu.Unlock()
+		return view.link == oldLink && view.linkState == remoteViewLinkUnavailable && !oldLink.active
+	}, time.Second, 5*time.Millisecond, "failed automatic reconnect should leave the local view available for navigation")
+	snapshot, ok := view.renderSnapshot(size)
+	require.True(t, ok)
+	require.Contains(t, remoteStatusSnapshot(view, snapshot).session, "unavailable")
+	require.Same(t, view, attachment.currentAttachmentOwner())
+	require.Equal(t, int32(2), factory.calls.Load())
 	d.shutdownAll(ports.ReasonServerShutdown)
 }
 

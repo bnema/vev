@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,10 +23,10 @@ const (
 	maxProbeTraces      = 128
 	maxArtifactBytes    = 64 << 10
 
-	probeEventOutput       = "output"
-	probeEventWelcome      = "welcome"
-	probeEventAttachTarget = "attach_target"
-	probeEventOutputReset  = "output_reset_request"
+	probeEventOutput            = "output"
+	probeEventWelcome           = "welcome"
+	probeEventOutputReset       = "output_reset_request"
+	probeEventUnexpectedHandoff = "unexpected_attach_target"
 )
 
 // visualOutputState mirrors the client's output dependency chain. A probe may
@@ -134,6 +135,8 @@ type visualProbe struct {
 	outputFrames int
 	outputBytes  int
 	resetPending bool
+
+	unexpectedHandoffs int
 }
 
 type harnessArtifactContextKey struct{}
@@ -247,62 +250,95 @@ func (p *visualProbe) contains(want string) bool {
 	return strings.Contains(p.text(), want)
 }
 
+func (p *visualProbe) recordIncoming(frame ports.Frame) {
+	if p == nil || frame.Type != ports.MsgAttachTarget {
+		return
+	}
+	p.unexpectedHandoffs++
+	p.record(probeEvent{Kind: probeEventUnexpectedHandoff})
+}
+
 func (p *visualProbe) markAcked(result visualOutputResult) {
 	if result.event != nil && result.StateBearing && result.Accepted {
 		result.event.Acked = true
 	}
 }
 
-func visualScreenText(screen *vt.Screen) string {
+func visualScreenLines(screen *vt.Screen) []string {
 	if screen == nil {
-		return ""
+		return nil
 	}
-	var text strings.Builder
+	lines := make([]string, screen.Frame.Height)
 	for y := range screen.Frame.Height {
+		var line strings.Builder
 		for x := range screen.Frame.Width {
 			r := screen.Frame.At(x, y).Rune
 			if r == 0 {
 				r = ' '
 			}
-			text.WriteRune(r)
+			line.WriteRune(r)
 		}
-		text.WriteByte('\n')
+		lines[y] = line.String()
 	}
-	return text.String()
+	return lines
 }
 
-func validateHandoffEventOrdering(events []*probeEvent) error {
-	acceptedState := func(event *probeEvent) bool {
-		return event != nil && event.Kind == probeEventOutput && event.Accepted && event.StateBearing && event.Acked
+func visualScreenText(screen *vt.Screen) string {
+	lines := visualScreenLines(screen)
+	if len(lines) == 0 {
+		return ""
 	}
-	localOutput := eventIndex(events, func(event *probeEvent) bool {
-		return event.Transport == "local-picker" && acceptedState(event)
-	})
-	handoff := eventIndex(events, func(event *probeEvent) bool {
-		return event.Transport == "local-picker" && event.Kind == probeEventAttachTarget
-	})
-	selectedWelcome := eventIndex(events, func(event *probeEvent) bool {
-		return event.Transport == "selected-remote" && event.Kind == probeEventWelcome
-	})
-	selectedOutput := eventIndex(events, func(event *probeEvent) bool {
-		return event.Transport == "selected-remote" && acceptedState(event)
-	})
-	if localOutput < 0 || handoff < 0 || selectedWelcome < 0 || selectedOutput < 0 {
-		return fmt.Errorf("handoff trace omitted local output, direct handoff, selected welcome, or selected output")
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func capturePickerRows(probe *visualProbe) []string {
+	if probe == nil {
+		return nil
 	}
-	if !(localOutput < handoff && handoff < selectedWelcome && selectedWelcome < selectedOutput) {
-		return fmt.Errorf("handoff trace order was not local output, direct handoff, selected welcome, selected output")
+	var rows []string
+	for _, line := range visualScreenLines(probe.screen) {
+		if line = strings.TrimSpace(line); line != "" {
+			rows = append(rows, line)
+		}
+	}
+	return rows
+}
+
+func assertUnifiedPickerRows(rows []string, localSession, remoteSession string) error {
+	if len(rows) == 0 {
+		return errors.New("picker screen had no visible rows")
+	}
+	contains := func(want string) bool {
+		for _, row := range rows {
+			if strings.Contains(row, want) {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains(localSession) {
+		return fmt.Errorf("unified picker rows omitted local session %q", localSession)
+	}
+	remoteRow := remoteSession + "@remote"
+	if !contains(remoteRow) {
+		return fmt.Errorf("unified picker rows omitted remote session %q", remoteRow)
 	}
 	return nil
 }
 
-func eventIndex(events []*probeEvent, match func(*probeEvent) bool) int {
-	for i, event := range events {
-		if event != nil && match(event) {
-			return i
+func assertNoRemoteChrome(probe *visualProbe, remoteSession string) error {
+	lines := visualScreenLines(probe.screen)
+	if len(lines) < 3 {
+		return errors.New("remote view did not expose a content region")
+	}
+	// The first and last rows belong to the local attachment's bars. Remote
+	// daemon chrome must not be replayed into the content rows.
+	for _, line := range lines[1 : len(lines)-1] {
+		if strings.Contains(line, remoteSession+" at remote") || strings.Contains(line, " Sessions · ") {
+			return fmt.Errorf("remote chrome leaked into content row %q", strings.TrimSpace(line))
 		}
 	}
-	return -1
+	return nil
 }
 
 type harnessArtifact struct {

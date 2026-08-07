@@ -28,8 +28,10 @@ Each logical transport has one persistent `vt.Screen` and a client-equivalent
 output-state chain. The probe writes accepted full, incremental, and side-effect
 frames to that screen, ACKs only accepted state-bearing frames, and retains a
 bounded set of screen checkpoints plus non-sensitive event metadata. The local
-picker phase uses separate local-picker and selected-remote probes to
-characterize the existing `MsgAttachTarget` direct handoff and its event order.
+picker phase captures unified local/remote rows before selection, keeps the same
+local client transport while the daemon publishes proxied remote content,
+rejects direct `MsgAttachTarget` handoff and remote daemon chrome, verifies
+continued input, and captures the unified rows again from the remote view.
 
 The run exercises real SSH-stdio and UDP attachment, typed live catalog and
 preview requests, tab creation/removal fencing, exact lifecycle fencing after
