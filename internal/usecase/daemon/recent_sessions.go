@@ -66,7 +66,22 @@ func (d *Daemon) recentSessionsForAttachment(current *session, ac *attachedClien
 	if ac == nil {
 		return recent
 	}
-	return trimRecentSessions(append(recent, ac.remoteRecentSessions()...))
+	return trimRecentSessions(append(recent, ac.remoteRecentSessionsExcept(remoteViewKey{})...))
+}
+
+// recentSessionsForRemoteAttachment merges daemon-local entries with this
+// attachment's remote history while omitting the remote view currently rendered
+// in the status bar.
+func (d *Daemon) recentSessionsForRemoteAttachment(current *remoteView, ac *attachedClient) []recentSession {
+	recent := d.recentSessions(nil)
+	if ac == nil {
+		return recent
+	}
+	var excluded remoteViewKey
+	if current != nil {
+		excluded = current.key
+	}
+	return trimRecentSessions(append(recent, ac.remoteRecentSessionsExcept(excluded)...))
 }
 
 func trimRecentSessions(recent []recentSession) []recentSession {
@@ -113,7 +128,7 @@ func (d *Daemon) recordRemoteRecent(ac *attachedClient, view *remoteView) {
 	})
 }
 
-func (ac *attachedClient) remoteRecentSessions() []recentSession {
+func (ac *attachedClient) remoteRecentSessionsExcept(excluded remoteViewKey) []recentSession {
 	if ac == nil {
 		return nil
 	}
@@ -121,6 +136,9 @@ func (ac *attachedClient) remoteRecentSessions() []recentSession {
 	ac.remoteRecent.With(func(entries *[]remoteRecentSession) {
 		recent = make([]recentSession, 0, len(*entries))
 		for _, entry := range *entries {
+			if entry.key == excluded {
+				continue
+			}
 			recent = append(recent, recentSession{name: entry.name(), mruAt: entry.mruAt})
 		}
 	})

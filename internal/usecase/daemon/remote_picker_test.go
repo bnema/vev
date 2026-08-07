@@ -701,6 +701,100 @@ func TestRemotePickerSelectionKeepsLocalConnectionUntilRemoteViewIsReady(t *test
 	d.shutdownAll(ports.ReasonServerShutdown)
 }
 
+func TestRemotePickerSelectionTransitionsBetweenRemoteViewsAndSharesAttachmentMRU(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	first := remoteLinkTestTarget()
+	second := first
+	second.LifecycleID = domain.SessionLifecycleID{2}
+	second.SessionName = "other"
+	second.LiveTabID = "tab-2"
+	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+		Host: first.Endpoint, FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{
+			{LifecycleID: first.LifecycleID, Name: first.SessionName, State: "running", Tabs: []ports.RemoteCatalogTab{{ID: string(first.LiveTabID), Index: 0, Name: "main"}}},
+			{LifecycleID: second.LifecycleID, Name: second.SessionName, State: "running", Tabs: []ports.RemoteCatalogTab{{ID: string(second.LiveTabID), Index: 0, Name: "main"}}},
+		},
+	}})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status[first.Endpoint] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	firstTransport := newRemoteLinkTestTransport()
+	secondTransport := newRemoteLinkTestTransport()
+	d.remoteDialerFactory = &remoteLinkSequenceFactory{dialers: []ports.Dialer{
+		&remoteLinkTestDialer{transport: firstTransport},
+		&remoteLinkTestDialer{transport: secondTransport},
+	}}
+	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+	openPicker := func() {
+		ac.overlays.pickerMu.Lock()
+		ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
+		ac.overlays.pickerGeneration++
+		ac.overlays.pickerMu.Unlock()
+	}
+	selectTarget := func(token attachmentConnectionToken, target domain.RemoteSessionTarget) {
+		effect, admitted := ac.beginAttachmentEffect(token)
+		require.True(t, admitted)
+		token.effect = effect
+		key := domain.RemoteSessionKey{Host: target.Endpoint, Name: target.SessionName, LifecycleID: target.LifecycleID, DisplayOrigin: target.DisplayOrigin}
+		require.NoError(t, d.switchToTargetForAttachment(token, picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &target}, sessionHandoffGuard{closePicker: true}, "picker-select"))
+		effect.End()
+	}
+
+	openPicker()
+	selectTarget(sess.attachmentToken(ac, ac.transport()), first)
+	enqueueRemoteLinkHandshake(t, firstTransport, first, ac.sizeSnapshot())
+	require.Eventually(t, func() bool {
+		_, remote := ac.currentAttachmentOwner().(*remoteView)
+		return remote
+	}, time.Second, 5*time.Millisecond, "the first remote picker selection should publish its view")
+	firstView, ok := ac.currentAttachmentOwner().(*remoteView)
+	require.True(t, ok)
+
+	openPicker()
+	selectTarget(attachmentOwnerToken(firstView, ac, ac.transport()), second)
+	enqueueRemoteLinkHandshake(t, secondTransport, second, ac.sizeSnapshot())
+	require.Eventually(t, func() bool {
+		view, remote := ac.currentAttachmentOwner().(*remoteView)
+		return remote && view != firstView && view.key == remoteViewKey{endpoint: second.Endpoint, lifecycleID: second.LifecycleID, sessionName: second.SessionName}
+	}, time.Second, 5*time.Millisecond, "the selected remote view should replace the current remote owner")
+	secondView, ok := ac.currentAttachmentOwner().(*remoteView)
+	require.True(t, ok)
+	require.False(t, firstView.attachmentRegistered(ac))
+	require.True(t, secondView.attachmentRegistered(ac))
+	require.Same(t, sess, ac.previousOwner.Get(), "remote-to-remote keeps the retained local return owner")
+	firstView.mu.Lock()
+	require.NotNil(t, firstView.warm, "the replaced remote view is retained warm")
+	firstView.mu.Unlock()
+
+	remoteRecent := d.recentSessionsForRemoteAttachment(secondView, ac)
+	remoteNames := make([]string, 0, len(remoteRecent))
+	for _, entry := range remoteRecent {
+		remoteNames = append(remoteNames, entry.name)
+	}
+	require.Contains(t, remoteNames, "remote@remote.example")
+	require.NotContains(t, remoteNames, "other@remote.example", "the remote status bar excludes its current view")
+	select {
+	case frame := <-sends:
+		require.NotEqual(t, ports.MsgAttachTarget, frame.Type)
+	default:
+	}
+
+	backToken := attachmentOwnerToken(secondView, ac, ac.transport())
+	backEffect, admitted := ac.beginAttachmentEffect(backToken)
+	require.True(t, admitted)
+	backToken.effect = backEffect
+	require.NoError(t, d.backSessionForAttachment(backToken))
+	backEffect.End()
+	require.Same(t, sess, ac.currentAttachmentSession())
+	localState := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, nil)
+	localNames := make([]string, 0, len(localState.mru))
+	for _, entry := range localState.mru {
+		localNames = append(localNames, entry.name)
+	}
+	require.Equal(t, []string{"other@remote.example", "remote@remote.example"}, localNames)
+	d.shutdownAll(ports.ReasonServerShutdown)
+}
+
 func TestRemotePickerReselectUsesWarmRemoteViewWithoutSecondDial(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	target := remoteLinkTestTarget()

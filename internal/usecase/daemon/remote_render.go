@@ -188,7 +188,7 @@ func (d *Daemon) captureRemoteViewRenderState(view *remoteView, ac *attachedClie
 	bars.status = remoteStatusSnapshot(view, snapshot)
 	if d != nil {
 		bars.attentionFrame = d.attentionFrame()
-		bars.mru = d.recentSessions(nil)
+		bars.mru = d.recentSessionsForRemoteAttachment(view, ac)
 	}
 	state := &capturedRenderState{
 		attachment:         ac,

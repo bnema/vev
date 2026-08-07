@@ -35,7 +35,7 @@ func (selection *remotePickerSelection) current() bool {
 }
 
 func (d *Daemon) startRemotePickerSelection(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if d == nil || token.ac == nil || token.localSession() == nil || token.ac.overlays == nil || !guard.closePicker || !token.attachmentEffectCurrent() {
+	if d == nil || token.ac == nil || normalizeAttachmentOwner(token.owner) == nil || token.ac.overlays == nil || !guard.closePicker || !token.attachmentEffectCurrent() {
 		return errAttachmentTransition
 	}
 	if target.RemoteTarget == nil {
@@ -78,7 +78,7 @@ func (d *Daemon) startRemotePickerSelection(token attachmentConnectionToken, tar
 	if token.effect != nil {
 		token.effect.bindActionEnd(d, action)
 	}
-	d.invalidateRender(token.localSession(), token.ac, true, "remote_picker_selection.go")
+	d.invalidateAttachedOwner(token.ac, true, "remote_picker_selection.go")
 	go d.completeRemotePickerSelection(selection)
 	return nil
 }
@@ -106,7 +106,12 @@ func (d *Daemon) completeRemotePickerSelection(selection *remotePickerSelection)
 		return
 	}
 
-	published, err := d.transitionToRemoteViewForPicker(selection.token, view, selection)
+	var published attachmentConnectionToken
+	if _, remote := normalizeAttachmentOwner(selection.token.owner).(*remoteView); remote {
+		published, err = d.transitionRemoteViewToRemoteViewForPicker(selection.token, view, selection)
+	} else {
+		published, err = d.transitionToRemoteViewForPicker(selection.token, view, selection)
+	}
 	if err != nil {
 		d.parkRemoteViewWarm(view)
 		d.failRemotePickerSelection(selection, err)
@@ -140,10 +145,10 @@ func (d *Daemon) failRemotePickerSelection(selection *remotePickerSelection, err
 	if !errors.Is(err, context.Canceled) {
 		d.log.Warn("remote picker selection failed", "endpoint", selection.target.Endpoint, "session", selection.target.SessionName, "err", err)
 		if selection.token.current() {
-			d.notify(selection.token.localSession(), domain.NoticeWarn, domain.NoticeSessionUnavailable, "couldn't connect to remote session", nil)
+			d.notifyAttachment(selection.token.ac, domain.NoticeWarn, domain.NoticeSessionUnavailable, "couldn't connect to remote session", nil)
 		}
 	}
-	if source := selection.token.localSession(); source != nil && selection.token.current() {
-		d.invalidateRender(source, selection.token.ac, true, "remote_picker_selection.go")
+	if selection.token.current() {
+		d.invalidateAttachedOwner(selection.token.ac, true, "remote_picker_selection.go")
 	}
 }

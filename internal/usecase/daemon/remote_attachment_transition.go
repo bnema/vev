@@ -103,6 +103,107 @@ func (d *Daemon) transitionToRemoteViewGuarded(token attachmentConnectionToken, 
 	return published, nil
 }
 
+// transitionRemoteViewToRemoteViewForPicker moves an attachment between two
+// daemon-owned remote views after the selected target has completed its
+// proxied handshake. It keeps the original local predecessor intact so local
+// navigation and remote-to-local return remain attachment-owned.
+func (d *Daemon) transitionRemoteViewToRemoteViewForPicker(token attachmentConnectionToken, target *remoteView, selection *remotePickerSelection) (attachmentConnectionToken, error) {
+	source, remote := normalizeAttachmentOwner(token.owner).(*remoteView)
+	if d == nil || !remote || source == nil || target == nil || token.ac == nil || token.transport.transport == nil {
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	target.mu.Lock()
+	link, generation := target.link, target.linkGeneration
+	healthy := remoteViewLinkReusableLocked(target)
+	target.mu.Unlock()
+	if !healthy {
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	return d.transitionRemoteViewToRemoteViewGuarded(token, source, target, selection, link, generation)
+}
+
+func (d *Daemon) transitionRemoteViewToRemoteViewGuarded(token attachmentConnectionToken, source, target *remoteView, selection *remotePickerSelection, expectedLink *remoteLink, expectedLinkGeneration uint64) (attachmentConnectionToken, error) {
+	if d == nil || source == nil || target == nil || token.ac == nil || token.transport.transport == nil {
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	if token.effect != nil {
+		d.endActionAttachmentEffect(token.effect, "remote-view-transition")
+	}
+	frozen := freezeAttachmentEffectGates(token.ac)
+	defer frozen.unfreeze()
+	if !frozen.acquired || !frozen.drained || selection == nil || !selection.current() {
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+
+	if source == target {
+		source.mu.Lock()
+		current := sameAttachmentOwner(token.owner, source) &&
+			token.generation == token.ac.connectionGeneration.Load() &&
+			sameAttachmentOwner(token.ac.currentAttachmentOwner(), source) &&
+			token.ac.transportSnapshotCurrent(token.transport) &&
+			attachmentOwnerRegistered(source, token.ac) && !source.closed &&
+			expectedLink != nil && source.link == expectedLink &&
+			source.linkGeneration == expectedLinkGeneration && remoteViewLinkReusableLocked(source)
+		source.mu.Unlock()
+		if !current {
+			return attachmentConnectionToken{}, errAttachmentTransition
+		}
+		d.recordRemoteRecent(token.ac, target)
+		return token, nil
+	}
+
+	d.mu.Lock()
+	if d.closing || !d.attachmentOwnerRegisteredByDaemonLocked(source) || !d.attachmentOwnerRegisteredByDaemonLocked(target) {
+		d.mu.Unlock()
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	d.notices.routingMu.Lock()
+	// Remote owners are leaf locks. A total ID order prevents ABBA deadlock
+	// when separate attachments concurrently move between the same two views.
+	first, second := source, target
+	if second.id < first.id {
+		first, second = second, first
+	}
+	first.mu.Lock()
+	second.mu.Lock()
+	unlock := func() {
+		second.mu.Unlock()
+		first.mu.Unlock()
+		d.notices.routingMu.Unlock()
+		d.mu.Unlock()
+	}
+	_, sourceAttached := source.attachments[token.ac]
+	_, targetAttached := target.attachments[token.ac]
+	current := sameAttachmentOwner(token.owner, source) &&
+		token.generation == token.ac.connectionGeneration.Load() &&
+		sameAttachmentOwner(token.ac.currentAttachmentOwner(), source) &&
+		token.ac.transportSnapshotCurrent(token.transport) &&
+		sourceAttached && !source.closed && !target.closed && !targetAttached &&
+		expectedLink != nil && target.link == expectedLink &&
+		target.linkGeneration == expectedLinkGeneration && remoteViewLinkReusableLocked(target)
+	if !current || !target.registerAttachmentLocked(token.ac) {
+		unlock()
+		return attachmentConnectionToken{}, errAttachmentTransition
+	}
+	source.unregisterAttachmentLocked(token.ac)
+	generation := token.ac.connectionGeneration.Add(1)
+	token.ac.setAttachmentOwner(target)
+	published := attachmentConnectionToken{
+		owner:      target,
+		ac:         token.ac,
+		generation: generation,
+		transport:  token.transport,
+		rebase:     true,
+	}
+	token.ac.publishFrozenAttachmentCapability(published)
+	unlock()
+
+	d.activateRemoteView(target)
+	d.parkRemoteViewWarm(source)
+	d.recordRemoteRecent(token.ac, target)
+	return published, nil
+}
+
 // transitionFromRemoteView moves an attachment from one exact daemon-owned
 // remote view back to its previous local session. The remote view has no
 // coordinator lease, so only the target session coordinator is attached during
