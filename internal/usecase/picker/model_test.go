@@ -748,9 +748,9 @@ func TestRemoteRowsCarryStructuredIdentityAndRemainNonSelectable(t *testing.T) {
 		require.True(t, pickerRow.hasRemoteKey)
 		require.False(t, pickerRow.selectable, "remote state %d must remain gated in phase 5", availability[i])
 		require.True(t, pickerRow.dim, "remote state %d is visibly unavailable", availability[i])
-		wantDetail := "proxy activation pending"
+		wantDetail := "@mule (proxy activation pending)"
 		if availability[i] == RemoteStale || availability[i] == RemoteVersionMismatch {
-			wantDetail = "remote state detail"
+			wantDetail = "@mule (remote state detail)"
 		}
 		require.Equal(t, wantDetail, pickerRow.detail)
 	}

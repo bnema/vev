@@ -6,12 +6,35 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 func remoteParityLifecycle(seed byte) domain.SessionLifecycleID {
 	var id domain.SessionLifecycleID
 	id[0] = seed
 	return id
+}
+
+func TestRemoteSessionHeaderIncludesOrigin(t *testing.T) {
+	lifecycle := remoteParityLifecycle(1)
+	key := domain.RemoteSessionKey{Host: "vev@arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
+	target := domain.RemoteSessionTarget{Endpoint: key.Host, DisplayOrigin: key.DisplayOrigin, LifecycleID: lifecycle, SessionName: key.Name, LiveTabID: "tab-1"}
+	model := New([]SessionView{{
+		ID: key.ID(), Name: key.Name, Tabs: []TabEntry{{TabID: "tab-1", Name: "main"}},
+		RemoteKey: &key, RemoteTarget: &target, RemoteAvailability: RemoteFresh, RemoteAttachReady: true,
+	}}, SelectionConfig{Mode: SelectNavigationTab})
+
+	require.Equal(t, "work", model.rows[0].dispName)
+	require.Equal(t, "@arch", model.rows[0].detail)
+	frame := model.Render(domain.Size{Cols: 32, Rows: 4}, Preview{}, RenderStyles{
+		Name: renderer.Style{Bold: true}, Detail: renderer.Style{Attrs: renderer.AttrDim},
+	})
+	require.Equal(t, '@', frame.At(4, 0).Rune)
+	require.True(t, frame.At(4, 0).Style.Equal(renderer.Style{Attrs: renderer.AttrDim}))
+	selected, ok := model.Selected()
+	require.True(t, ok)
+	require.Equal(t, key.ID(), selected.Session)
+	require.Equal(t, &target, selected.RemoteTarget)
 }
 
 func TestRemoteRowsWithDuplicateLabelsKeepDistinctRoutingIdentity(t *testing.T) {

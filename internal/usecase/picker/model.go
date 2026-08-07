@@ -267,10 +267,21 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	common.remote = common.hasRemoteKey || common.hasRemoteTarget || session.RemoteHost != ""
 	header := common
 	header.kind, header.dispName, header.tabIndex = rowSession, session.Name, -1
+	if common.hasRemoteKey {
+		header.dispName = common.remoteKey.Name
+		display := common.remoteKey.Display()
+		header.detail = display[len(common.remoteKey.Name):]
+	}
 	header.selectable = header.kind.selectable(config.Mode)
 	header.focusable = header.selectable
 	if common.remote {
-		header.detail = remoteRowDetail(session)
+		if remoteDetail := remoteRowDetail(session); remoteDetail != "" {
+			if header.detail != "" {
+				header.detail += " (" + remoteDetail + ")"
+			} else {
+				header.detail = remoteDetail
+			}
+		}
 		// Rich catalog rows use tab targets. Legacy count-only/connect-only
 		// callers retain their header target until all peers carry the richer
 		// identity contract.
@@ -623,7 +634,13 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 
 		if r.kind.rendersAsHeader() {
 			if r.stopped {
-				ui.DrawText(frame, x, rect.Y+y, clipX, " (stopped)", base)
+				detail := r.detail
+				if detail == "" {
+					detail = " "
+				} else {
+					detail += " "
+				}
+				ui.DrawText(frame, x, rect.Y+y, clipX, detail+"(stopped)", base)
 			} else {
 				ui.DrawText(frame, x, rect.Y+y, clipX, ui.TruncateText(r.detail, clipX-x), detailStyle)
 			}
