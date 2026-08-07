@@ -106,7 +106,7 @@ func remoteStatusSnapshot(view *remoteView, snap remoteViewRenderSnapshot) statu
 		}
 	}
 	if snap.origin != "" {
-		name += " at " + snap.origin
+		name += "@" + snap.origin
 	}
 	switch snap.linkState {
 	case remoteViewLinkReconnecting:

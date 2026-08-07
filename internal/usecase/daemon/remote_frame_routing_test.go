@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
@@ -52,6 +53,14 @@ func TestRemoteViewRenderSnapshotDoesNotResizeSharedScreen(t *testing.T) {
 	require.Equal(t, 80, view.screen.Frame.Width)
 	require.Equal(t, 22, view.screen.Frame.Height)
 	view.mu.Unlock()
+}
+
+func TestRemoteStatusSnapshotUsesSessionHostSyntax(t *testing.T) {
+	view := &remoteView{key: remoteViewKey{endpoint: "remote", sessionName: "test1"}}
+
+	status := remoteStatusSnapshot(view, remoteViewRenderSnapshot{origin: "remote"})
+
+	require.Equal(t, "test1@remote", status.session)
 }
 
 func TestRemoteFrameRoutingKeepsPickerNavigationLocal(t *testing.T) {
@@ -123,6 +132,59 @@ func TestRemoteFrameRoutingOpensPaletteLocally(t *testing.T) {
 		t.Fatalf("palette shortcut was forwarded to remote link as %v", frame.Type)
 	default:
 	}
+}
+
+func TestRemoteFrameRoutingReturnsToRetainedLocalSession(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*Daemon, *attachedClient, attachmentConnectionToken)
+	}{
+		{
+			name: "palette session result",
+			run: func(d *Daemon, _ *attachedClient, token attachmentConnectionToken) {
+				d.handleAttachmentClientFrame(token, frameInput([]byte{keys.ESC, ' '}))
+				d.handleAttachmentClientFrame(token, frameInput([]byte("work\r")))
+			},
+		},
+		{
+			name: "jump recent session",
+			run: func(d *Daemon, _ *attachedClient, token attachmentConnectionToken) {
+				d.handleAttachmentClientFrame(token, frameInput([]byte{keys.ESC, ' '}))
+				d.handleAttachmentClientFrame(token, frameInput([]byte("JRS 1\r")))
+			},
+		},
+		{
+			name: "session picker",
+			run: func(d *Daemon, ac *attachedClient, token attachmentConnectionToken) {
+				d.handleAttachmentClientFrame(token, frameInput([]byte{keys.ESC, ' '}))
+				d.handleAttachmentClientFrame(token, frameInput([]byte("SSP\r")))
+				require.True(t, ac.overlays.pickerActive())
+				d.handleAttachmentClientFrame(token, frameInput([]byte("\r")))
+				require.False(t, ac.overlays.pickerActive(), "the picker closes before the remote-to-local handoff")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d, source, ac, view, token := remoteBackFixture(t)
+
+			test.run(d, ac, token)
+
+			require.True(t, ac.currentAttachmentSession() == source)
+			require.True(t, source.attachmentRegistered(ac))
+			require.False(t, view.attachmentRegistered(ac))
+			require.True(t, ac.previousOwner.Get() == view)
+		})
+	}
+}
+
+func TestRemoteFrameRoutingRejectsUnidentifiedLocalTarget(t *testing.T) {
+	d, source, ac, view, token := remoteBackFixture(t)
+
+	err := d.switchToTargetForAttachment(token, picker.Target{}, sessionHandoffGuard{}, "picker-select")
+
+	require.ErrorIs(t, err, errAttachmentTransition)
+	require.Same(t, view, ac.currentAttachmentOwner())
+	require.Same(t, source, ac.previousOwner.Get())
 }
 
 func TestRemoteFrameRoutingResetRepaintsComposedFrameAndAckAdvancesOutput(t *testing.T) {

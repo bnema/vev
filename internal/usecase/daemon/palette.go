@@ -37,10 +37,16 @@ func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	// Capture daemon/session state before taking paletteMu: lock ordering forbids
-	// holding an overlay lock while inspecting live sessions.
-	recent := d.recentSessions(sess)
+	// holding an overlay lock while inspecting live sessions. A remote view is
+	// not a local session, so its retained local source must remain offered as a
+	// palette result and JRS candidate.
+	current := sess
+	if _, remote := normalizeAttachmentOwner(ac.currentAttachmentOwner()).(*remoteView); remote {
+		current = nil
+	}
+	recent := d.recentSessions(current)
 	commands := d.paletteCommands()
-	results := d.paletteResults(sess, commands)
+	results := d.paletteResults(current, commands)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = palette.New(results)

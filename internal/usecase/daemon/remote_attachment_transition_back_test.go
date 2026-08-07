@@ -39,6 +39,16 @@ func TestBackSessionForAttachmentReturnsFromRemoteViewToPreviousLocal(t *testing
 	require.NotNil(t, current.lease, "returning to a local owner restores its coordinator lease")
 }
 
+func TestRemoteRecentAppearsInLocalStatusMRUAfterReturn(t *testing.T) {
+	d, local, ac, _, token := remoteBackFixture(t)
+
+	require.NoError(t, d.backSessionForAttachment(token))
+
+	state := d.barStateForAttachmentPaletteHintsFor(local, ac, "", nil, nil)
+	require.Equal(t, []recentSession{{name: "remote@host", mruAt: 1}}, state.mru)
+	require.Empty(t, d.recentSessions(local), "remote recency stays out of global navigation MRU")
+}
+
 func TestBackSessionForAttachmentFailsClosedForStaleOrNonLocalPredecessor(t *testing.T) {
 	tests := []struct {
 		name  string

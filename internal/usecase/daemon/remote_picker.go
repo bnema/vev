@@ -453,6 +453,11 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 	d.remoteCatalog.mu.Unlock()
 	if cacheChanged {
 		d.persistRemoteCatalogCache()
+	}
+	// A picker model may have been built from a fresh cached entry just before
+	// this refresh marked its host pending. Rebuild it before the catalog I/O so
+	// Enter cannot commit that stale selectable target during the refresh window.
+	if cacheChanged || len(hosts) != 0 {
 		d.refreshRemoteOpenPickers()
 	}
 

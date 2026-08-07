@@ -99,6 +99,7 @@ func (d *Daemon) transitionToRemoteViewGuarded(token attachmentConnectionToken, 
 	}
 	d.recalculateSessionGeometryAndInvalidateAsync(source, "remote_attachment_transition.go")
 	token.ac.recordPreviousOwner(source)
+	d.recordRemoteRecent(token.ac, target)
 	return published, nil
 }
 

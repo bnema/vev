@@ -431,6 +431,55 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	d.remoteCatalog.mu.Unlock()
 }
 
+func TestRemotePickerRefreshDisablesCachedTargetUntilCatalogCompletes(t *testing.T) {
+	now := time.Unix(120, 0)
+	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
+	d, catalog, cache := newRemoteRefreshDaemon(t, hosts, now)
+	lifecycle := remoteLifecycleForTest()
+	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+		Host:      "arch",
+		FetchedAt: now,
+		Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: lifecycle,
+			Name:        "work",
+			State:       "running",
+			Tabs:        []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+		}},
+	}})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status["arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "local")
+	model := d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	model.Down()
+	_, selectable := model.Selected()
+	require.True(t, selectable, "the cached remote tab starts selectable before refresh begins")
+
+	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
+	request := receiveRemotePicker(t, catalog.requests, "catalog request")
+
+	ac.overlays.pickerMu.Lock()
+	updated := ac.overlays.picker.Clone()
+	ac.overlays.pickerMu.Unlock()
+	cursor, cursorOK := updated.Cursor()
+	_, selectable = updated.Selected()
+	require.True(t, cursorOK)
+	require.NotNil(t, cursor.RemoteTarget)
+	require.Equal(t, "refreshing", cursor.UnavailableReason)
+	require.False(t, selectable, "a refresh-in-flight picker must not retain the old selectable target")
+
+	request.result <- remoteRefreshResult{catalog: ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{{
+		LifecycleID: lifecycle,
+		Name:        "work",
+		State:       "running",
+		Tabs:        []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	}}}}
+	receiveRemotePicker(t, cache.stores, "remote cache store")
+	requireNoRemoteLockViolations(t, catalog, cache)
+	d.shutdownAll(ports.ReasonServerShutdown)
+}
+
 func TestRemoteRefreshLockProbesSerialized(t *testing.T) {
 	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
 	d, catalog, cache := newRemoteRefreshDaemon(t, hosts, time.Unix(125, 0))

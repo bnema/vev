@@ -888,12 +888,52 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 	return d.switchToTargetGuarded(from, ac, target, sessionHandoffGuard{})
 }
 
+// retainedLocalTargetMatches reports whether target is the local session held
+// as a remote attachment's exact return owner. It compares structured session
+// and lifecycle identity; a remote attachment must never infer a return route
+// from a rendered label.
+func retainedLocalTargetMatches(target picker.Target, owner attachmentOwner) bool {
+	if target.Session == "" && target.Incarnation == (domain.IncarnationID{}) && target.ExpectedCreatedAt == nil {
+		return false
+	}
+	retained := localSession(owner)
+	if retained == nil {
+		return false
+	}
+	snapshot := retained.snapshotView(viewOptions{})
+	if target.Session != "" && target.Session != snapshot.id {
+		return false
+	}
+	if target.Incarnation != (domain.IncarnationID{}) && target.Incarnation != snapshot.incarnation {
+		return false
+	}
+	return targetMatchesLifecycle(target, snapshot.name, snapshot.createdAt)
+}
+
 // switchToTargetForAttachment is the sole client-originated navigation entry. The
 // intent captures the exact initiating capability before admission is released;
 // every active, stopped, and same-session target then uses transitionAttachment
 // for frozen, atomic source-token preflight.
 func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.localSession() == nil || token.ac == nil || token.effect == nil {
+	if token.ac == nil {
+		return nil
+	}
+	if _, remote := normalizeAttachmentOwner(token.owner).(*remoteView); remote {
+		if target.RemoteTarget != nil {
+			return d.startRemotePickerSelection(token, target, guard, action)
+		}
+		if target.RemoteKey != nil {
+			return errAttachmentTransition
+		}
+		if !retainedLocalTargetMatches(target, token.ac.previousOwner.Get()) {
+			return errAttachmentTransition
+		}
+		if guard.closePicker {
+			d.closePicker(token.ac)
+		}
+		return d.backSessionForAttachment(token)
+	}
+	if token.localSession() == nil || token.effect == nil {
 		return nil
 	}
 	if target.RemoteTarget != nil {

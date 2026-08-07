@@ -103,8 +103,12 @@ type attachedClient struct {
 	// previousOwner is guarded independently. It retains navigation history
 	// through temporary owner hand-offs and is cleared only on terminal teardown.
 	previousOwner Guarded[attachmentOwner]
-	linkMu        sync.Mutex
-	sendMu        sync.Mutex
+	// remoteRecent is attachment-local, display-only MRU state. Remote views do
+	// not enter the local session registry, so these entries must not be usable
+	// by navigation, palette, or persistence paths.
+	remoteRecent Guarded[[]remoteRecentSession]
+	linkMu       sync.Mutex
+	sendMu       sync.Mutex
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
