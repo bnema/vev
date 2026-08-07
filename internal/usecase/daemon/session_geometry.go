@@ -1,6 +1,9 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import (
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+)
 
 // sessionGeometrySource identifies the attachment whose latest attach,
 // resume, or resize claim controls shared PTY/layout geometry. claim is zero
@@ -62,6 +65,11 @@ func sessionGeometryViewport(sess *session) (domain.Size, sessionGeometrySource,
 		return domain.Size{}, sessionGeometrySource{}, false
 	}
 	content := contentSize(source.size)
+	if source.attachment.renderMode == ports.RenderModeProxiedContent {
+		// A proxied Hello already carries content geometry; do not subtract the
+		// remote daemon's local chrome rows from it.
+		content = source.size
+	}
 	return domain.Size{Cols: content.Cols, Rows: content.Rows + tabChromeRows}, source, true
 }
 

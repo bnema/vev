@@ -11,8 +11,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 24 {
-		t.Fatalf("ProtocolVersion = %d, want 24", ProtocolVersion)
+	if ProtocolVersion != 25 {
+		t.Fatalf("ProtocolVersion = %d, want 25", ProtocolVersion)
 	}
 	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -26,8 +26,8 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 24, 2}, make([]byte, 16+8)...)
-	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	want := append([]byte{0, 25, 2, 0}, make([]byte, 16+8)...)
+	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Hello bytes = %x, want %x", got, want)
@@ -178,7 +178,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	msg := AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach}
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2}
+	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0}
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AttachTarget bytes = %x, want %x", got, want)
@@ -197,7 +197,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 }
 
 func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
-	meta, err := MarshalSessionMeta(SessionMeta{Tabs: []SessionTabMeta{{Name: "tab"}}})
+	meta, err := MarshalSessionMeta(SessionMeta{LifecycleID: domain.SessionLifecycleID{1}, Revision: 1, SessionName: "work", ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: "tab"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 			name: "hello boolean",
 			payload: func() []byte {
 				b := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
-				b[len(b)-6] = 2
+				b[len(b)-8] = 2
 				return b
 			}(),
 			decode: func(b []byte) error { _, err := UnmarshalHello(b); return err },
@@ -237,7 +237,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "sessions ephemeral boolean",
 			payload: func() []byte {
-				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionRunning}}})
+				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionUp}}})
 				b[6] = 2
 				return b
 			}(),
@@ -246,7 +246,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "sessions attached boolean",
 			payload: func() []byte {
-				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionRunning}}})
+				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionUp}}})
 				b[9] = 2
 				return b
 			}(),

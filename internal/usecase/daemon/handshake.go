@@ -115,7 +115,13 @@ func handshakeContextError(parent context.Context, timedOut <-chan struct{}, fal
 // by route. A fresh route-owned session is purged only after its attachment is
 // removed; existing sessions and their unrelated attachments are preserved.
 func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.Transport) {
-	if sess == nil || ac == nil {
+	d.failHandshakeAttachmentOwner(sess, ac, tr)
+}
+
+// failHandshakeAttachmentOwner synchronously retires an admitted local-client
+// handshake without assuming that its attachment owner owns a local session.
+func (d *Daemon) failHandshakeAttachmentOwner(owner attachmentOwner, ac *attachedClient, tr ports.Transport) {
+	if normalizeAttachmentOwner(owner) == nil || ac == nil {
 		if tr != nil {
 			_ = tr.Close()
 		}
@@ -130,11 +136,15 @@ func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr p
 		}
 		return
 	}
-	d.clientGone(sess, ac, tr, true)
+	if view, remote := owner.(*remoteView); remote {
+		d.clientGoneRemote(view, attachmentOwnerToken(view, ac, tr), true)
+	} else if sess := localSession(owner); sess != nil {
+		d.clientGone(sess, ac, tr, true)
+	}
 	if tr != nil {
 		_ = tr.Close()
 	}
-	if ac.routeCreatedSession {
+	if sess := localSession(owner); sess != nil && ac.routeCreatedSession {
 		sess.mu.Lock()
 		empty := len(sess.attachments) == 0
 		sess.mu.Unlock()

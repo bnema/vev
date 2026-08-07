@@ -533,7 +533,7 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 	d.mu.Unlock()
 	require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach publication")
 	require.Same(t, ac, parkingInGap.ac)
-	require.Same(t, sess, parkingInGap.sess)
+	require.Same(t, sess, localSession(parkingInGap.owner))
 	require.False(t, parkedInGap, "fixture: park must not have published yet")
 
 	_, _, err = d.route(helloResumeCapable(ports.IntentResume, "work", 0xdecafbad), &closeTrackingTransport{})
@@ -1268,7 +1268,7 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := &session{sessionCore: sessionCore{id: "previous"}}
-	ac.previousSession.Set(previous)
+	ac.previousOwner.Set(previous)
 	d.clientGone(sess, ac, ac.transport(), false)
 
 	token := ac.resumeToken
@@ -1276,14 +1276,14 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	parked := d.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parked)
-	require.Same(t, previous, ac.previousSession.Get(), "a live parked attachment keeps its toggle")
+	require.Same(t, previous, ac.previousOwner.Get(), "a live parked attachment keeps its toggle")
 
 	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), tr2)
 	require.NoError(t, err)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
-	require.Same(t, previous, resumedAC.previousSession.Get(), "resume keeps the live attachment toggle")
+	require.Same(t, previous, resumedAC.previousOwner.Get(), "resume keeps the live attachment toggle")
 }
 
 func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
@@ -1301,7 +1301,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 		{
 			name: "session purge",
 			discard: func(d *Daemon, _ uint64, parked *parkedAttachment) []parkedAttachmentRetirement {
-				return d.purgeParkedForSessionLocked(parked.sess)
+				return d.purgeParkedForSessionLocked(localSession(parked.owner))
 			},
 		},
 	} {
@@ -1313,7 +1313,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 			require.NoError(t, err)
 
-			ac.previousSession.Set(&session{sessionCore: sessionCore{id: "previous"}})
+			ac.previousOwner.Set(&session{sessionCore: sessionCore{id: "previous"}})
 			d.clientGone(sess, ac, ac.transport(), false)
 
 			d.mu.Lock()
@@ -1323,7 +1323,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			d.mu.Unlock()
 			d.finishParkedAttachmentRetirements(retirements)
 
-			require.Nil(t, ac.previousSession.Get())
+			require.Nil(t, ac.previousOwner.Get())
 		})
 	}
 }

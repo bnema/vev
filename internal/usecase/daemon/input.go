@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
@@ -20,11 +21,88 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 	d.handleInput(sess, ac, data)
 }
 
-func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionToken, _ uint64, data []byte) {
+func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionToken, inputSeq uint64, data []byte) {
 	if !token.attachmentEffectCurrent() {
 		return
 	}
+	if view, remote := token.owner.(*remoteView); remote {
+		d.handleRemoteViewInputForAttachment(view, token, inputSeq, data)
+		return
+	}
+	if token.ac.renderMode == ports.RenderModeProxiedContent {
+		d.handleProxiedInputForAttachment(token, data)
+		return
+	}
 	d.handleInputForAttachment(token, data)
+}
+
+// handleRemoteViewInputForAttachment keeps picker and palette routing local
+// while forwarding ordinary terminal bytes unchanged to the exact remote link.
+func (d *Daemon) handleRemoteViewInputForAttachment(view *remoteView, token attachmentConnectionToken, inputSeq uint64, data []byte) {
+	if view == nil || token.ac == nil || !token.attachmentEffectCurrent() {
+		return
+	}
+	ac := token.ac
+	ac.initOverlays()
+	if ac.overlays.HandleInput(d, data, token.effect) {
+		return
+	}
+	if ac.keys == nil {
+		d.handleRemoteViewInput(view, token, inputSeq, data)
+		return
+	}
+	ac.keys.RouteWithHandler(data, remoteViewKeyHandler{d: d, ac: ac, view: view, token: token, inputSeq: inputSeq})
+}
+
+type remoteViewKeyHandler struct {
+	d        *Daemon
+	ac       *attachedClient
+	view     *remoteView
+	token    attachmentConnectionToken
+	inputSeq uint64
+}
+
+func (h remoteViewKeyHandler) Forward(data []byte) {
+	h.d.handleRemoteViewInput(h.view, h.token, h.inputSeq, data)
+}
+
+func (h remoteViewKeyHandler) Action(action keys.Action, raw []byte) {
+	if !h.token.attachmentEffectCurrent() {
+		return
+	}
+	if action != keys.ActionOpenPalette {
+		h.Forward(raw)
+		return
+	}
+	if source := h.ac.navigationSession(); source != nil {
+		h.d.enterPalette(source, h.ac)
+	}
+}
+
+// handleProxiedInputForAttachment preserves remote terminal bytes exactly.
+// Local key routing, overlays, mouse interpretation, and copy-mode state are
+// deliberately unavailable on the remote daemon's content-only surface.
+func (d *Daemon) handleProxiedInputForAttachment(token attachmentConnectionToken, data []byte) {
+	sess := token.localSession()
+	if len(data) == 0 || !token.attachmentEffectCurrent() || sess == nil {
+		return
+	}
+	_ = sess.runMutation(func() error {
+		if !token.attachmentEffectCurrent() {
+			return nil
+		}
+		tab := sess.tabForAttachment(token.ac)
+		if tab == nil {
+			return nil
+		}
+		tab.mu.Lock()
+		pane := tab.terminalTargetLocked()
+		tab.mu.Unlock()
+		if pane != nil {
+			d.writeToPane(sess, pane, data)
+		}
+		return nil
+	})
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
@@ -383,7 +461,7 @@ type daemonKeyHandler struct {
 func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffectTicket, bool) {
 	if h.connectionToken.ac != nil {
 		if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
-			return h.connectionToken.sess, effect, false
+			return h.connectionToken.localSession(), effect, false
 		}
 		effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
 		if h.d.afterDelayedKeyEffectAttempt != nil {
@@ -397,11 +475,12 @@ func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffect
 			token.effect = effect
 			h.d.afterAttachmentEffectAdmitted(token)
 		}
-		if h.connectionToken.sess == nil {
+		sess := h.connectionToken.localSession()
+		if sess == nil {
 			effect.End()
 			return nil, nil, false
 		}
-		return h.connectionToken.sess, effect, true
+		return sess, effect, true
 	}
 	sess := h.ac.currentSession()
 	if sess == nil {

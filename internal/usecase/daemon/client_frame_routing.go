@@ -13,24 +13,24 @@ const connectionSnapshotAttempts = 8
 // currentAttachmentConnection retries the lock-free session-to-role snapshot when a
 // handoff lands between those reads. The attachment gate still performs the final
 // mutation admission after this function returns.
-func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (*session, attachmentConnectionToken, bool) {
+func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (attachmentOwner, attachmentConnectionToken, bool) {
 	for range connectionSnapshotAttempts {
 		if !ac.currentTransportIs(tr) {
 			break
 		}
-		sess := ac.currentAttachmentSession()
-		if sess == nil {
+		owner := ac.currentAttachmentOwner()
+		if owner == nil {
 			return nil, attachmentConnectionToken{}, false
 		}
-		if d.afterConnectionSessionSnapshot != nil {
+		if sess := localSession(owner); sess != nil && d.afterConnectionSessionSnapshot != nil {
 			d.afterConnectionSessionSnapshot(sess)
 		}
-		token := attachmentToken(sess, ac, tr)
-		if token.ac == nil || ac.currentAttachmentSession() != sess {
+		token := attachmentOwnerToken(owner, ac, tr)
+		if token.ac == nil || !sameAttachmentOwner(ac.currentAttachmentOwner(), owner) {
 			runtime.Gosched()
 			continue
 		}
-		return sess, token, true
+		return owner, token, true
 	}
 	return nil, attachmentConnectionToken{}, false
 }
@@ -44,19 +44,23 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		return
 	}
 	for {
-		if !ac.currentTransportIs(tr) || ac.currentAttachmentSession() == nil {
+		if !ac.currentTransportIs(tr) || ac.currentAttachmentOwner() == nil {
 			return
 		}
 		f, err := tr.Recv()
 		if err != nil {
 			for range connectionSnapshotAttempts {
-				sess, _, ok := d.currentAttachmentConnection(ac, tr)
+				owner, token, ok := d.currentAttachmentConnection(ac, tr)
 				if !ok {
 					return
 				}
-				d.clientGone(sess, ac, tr, false)
-				current := ac.currentAttachmentSession()
-				if current == sess || !ac.currentTransportIs(tr) || current == nil {
+				if sess := localSession(owner); sess != nil {
+					d.clientGone(sess, ac, tr, false)
+				} else if view, remote := owner.(*remoteView); remote {
+					d.clientGoneRemote(view, token, false)
+				}
+				current := ac.currentAttachmentOwner()
+				if sameAttachmentOwner(current, owner) || !ac.currentTransportIs(tr) || current == nil {
 					return
 				}
 			}
@@ -171,12 +175,17 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 		result.Text = "attached commands cannot target themselves"
 		return result
 	}
+	if _, remote := token.owner.(*remoteView); remote {
+		result.Code = ports.ErrNoSuchTarget
+		result.Text = "attached session is no longer active"
+		return result
+	}
 	if request.TargetSession != "" || request.TargetTab != "" || request.TargetPane != "" {
 		result.Code = ports.ErrInvalidCommandArgs
 		result.Text = "attached commands cannot override their active session target"
 		return result
 	}
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil || !token.attachmentEffectCurrent() {
 		result.Code = ports.ErrNoSuchTarget
 		result.Text = "attached session is no longer active"
@@ -234,7 +243,11 @@ func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	ac.pipelineCache = composeCacheInput{}
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
-	go d.paint(token.sess, ac, true, token.lease)
+	if view, remote := token.owner.(*remoteView); remote {
+		d.scheduleRemoteViewPaint(view, ac, true)
+	} else if sess := token.localSession(); sess != nil {
+		go d.paint(sess, ac, true, token.lease)
+	}
 	return true
 }
 
@@ -244,10 +257,25 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 		return false
 	}
 	ac.sendMu.Lock()
-	ac.output.ack(epoch, state)
+	if ac.output == nil {
+		ac.sendMu.Unlock()
+		return false
+	}
+	advanced := ac.output.ack(epoch, state)
 	ac.sendMu.Unlock()
-	if rc := token.sess.core().coordinator.Load(); rc != nil {
-		rc.notifyAckForLease(token.lease)
+	if !advanced {
+		return true
+	}
+	if sess := token.localSession(); sess != nil {
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.notifyAckForLease(token.lease)
+		}
+	} else if view, remote := token.owner.(*remoteView); remote {
+		// Remote views do not have a session render coordinator to consume the
+		// newly available output-window capacity. Recompose from the retained
+		// private VT so an update previously blocked by the local client window
+		// is not stranded until another remote frame arrives.
+		d.scheduleRemoteViewPaint(view, ac, false)
 	}
 	return true
 }

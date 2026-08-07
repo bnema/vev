@@ -45,6 +45,10 @@ const (
 // the in-flight send. Teardown is never gated on a client draining its socket.
 const detachNotifyTimeout = time.Second
 
+// remoteConstructionShutdownGrace bounds a non-cooperative remote dialer when
+// durable snapshots have not installed a shared shutdown deadline.
+const remoteConstructionShutdownGrace = ports.HandshakeTimeout
+
 // maxUnackedOutputStates caps how many output states may be in flight (sent but
 // not yet acked by the client) before paint defers rather than composing
 // another diff. It bounds the daemon's paint rate to the client's ack rate, so
@@ -72,6 +76,16 @@ type Daemon struct {
 	mu       sync.Mutex
 	sessions map[domain.SessionID]*session
 	stopped  map[string]stoppedSession
+	// remoteViews holds non-persistent, daemon-local attachment owners. The
+	// companion key index provides warm-link reuse without ever widening
+	// sessions beyond concrete local *session values. Both are guarded by mu.
+	remoteViews      map[remoteViewID]*remoteView
+	remoteViewsByKey map[remoteViewKey]remoteViewID
+	// remoteViewConstructions reserves a remote key while its dial and
+	// handshake run outside d.mu. A waiter never dials and can cancel without
+	// disturbing the elected constructor.
+	remoteViewConstructions map[remoteViewKey]*remoteViewConstruction
+	nextRemoteViewID        remoteViewID
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
 	nextID   uint64
@@ -322,7 +336,7 @@ type Daemon struct {
 }
 
 type parkedAttachment struct {
-	sess             *session
+	owner            attachmentOwner
 	ac               *attachedClient
 	pickerGeneration uint64
 	timer            ports.Timer
@@ -335,7 +349,7 @@ type parkedAttachment struct {
 // credential. done closes when the token is published into parked or parking
 // is abandoned.
 type parkingAttachment struct {
-	sess     *session
+	owner    attachmentOwner
 	ac       *attachedClient
 	done     chan struct{}
 	doneOnce sync.Once
@@ -594,28 +608,31 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:          make(map[domain.SessionID]*session),
-		stopped:           make(map[string]stoppedSession),
-		creating:          make(map[string]struct{}),
-		parked:            make(map[uint64]*parkedAttachment),
-		parking:           make(map[uint64]*parkingAttachment),
-		paneProcessCtx:    paneProcessCtx,
-		paneProcessCancel: paneProcessCancel,
-		ptys:              ptys,
-		clock:             clock,
-		log:               log,
-		baseEnv:           os.Environ(),
-		shell:             shell,
-		dirOrHome:         dirOrHome,
-		done:              make(chan struct{}),
-		restoreDone:       make(chan struct{}),
-		animWake:          make(chan struct{}, 1),
-		snapshotJobs:      make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted:  make(map[*snapshotCapture]struct{}),
-		snapshotWake:      make(chan struct{}, 1),
-		notices:           newNoticeCenter(),
-		remoteCatalog:     newRemoteCatalogState(),
-		resumeParkGrace:   defaultResumeParkGrace,
+		sessions:                make(map[domain.SessionID]*session),
+		stopped:                 make(map[string]stoppedSession),
+		remoteViews:             make(map[remoteViewID]*remoteView),
+		remoteViewsByKey:        make(map[remoteViewKey]remoteViewID),
+		remoteViewConstructions: make(map[remoteViewKey]*remoteViewConstruction),
+		creating:                make(map[string]struct{}),
+		parked:                  make(map[uint64]*parkedAttachment),
+		parking:                 make(map[uint64]*parkingAttachment),
+		paneProcessCtx:          paneProcessCtx,
+		paneProcessCancel:       paneProcessCancel,
+		ptys:                    ptys,
+		clock:                   clock,
+		log:                     log,
+		baseEnv:                 os.Environ(),
+		shell:                   shell,
+		dirOrHome:               dirOrHome,
+		done:                    make(chan struct{}),
+		restoreDone:             make(chan struct{}),
+		animWake:                make(chan struct{}, 1),
+		snapshotJobs:            make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted:        make(map[*snapshotCapture]struct{}),
+		snapshotWake:            make(chan struct{}, 1),
+		notices:                 newNoticeCenter(),
+		remoteCatalog:           newRemoteCatalogState(),
+		resumeParkGrace:         defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -658,7 +675,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			state, done := initialSessionState(r)
 			d.stopped[r.Name] = stoppedSessionFromRecord(r, state, done)
 		} else {
-			d.stopped[r.Name] = stoppedSessionFromRecord(r, ports.SessionStopped, nil)
+			d.stopped[r.Name] = stoppedSessionFromRecord(r, ports.SessionDown, nil)
 		}
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 			maxCreatedAt = r.CreatedAt
@@ -796,14 +813,93 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	d.closing = true
 	d.purgeAllParkingLocked()
 	parkedRetirements := d.purgeAllParkedLocked()
+	remoteViews := make([]*remoteView, 0, len(d.remoteViews))
+	for _, view := range d.remoteViews {
+		remoteViews = append(remoteViews, view)
+	}
+	constructions := make([]*remoteViewConstruction, 0, len(d.remoteViewConstructions))
+	for _, construction := range d.remoteViewConstructions {
+		constructions = append(constructions, construction)
+	}
+	clear(d.remoteViews)
+	clear(d.remoteViewsByKey)
+	clear(d.remoteViewConstructions)
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
+	// A remote view is not a daemon-liveness root. Retire each exact local
+	// attachment after releasing d.mu so a token cannot remain valid and a
+	// blocked local-client Recv/Send cannot outlive daemon shutdown. Candidate
+	// construction uses the same exact-close rule, even before publication.
+	for _, construction := range constructions {
+		if construction != nil && construction.cancel != nil {
+			construction.cancel()
+		}
+	}
+	// Candidate construction owns dial and handshake I/O outside daemon locks.
+	// A shutdown deadline bounds a non-cooperative dialer; a late constructor
+	// observes d.closing and retires its unpublished candidate independently.
+	var constructionTimer ports.Timer
+	var constructionTimeout <-chan time.Time
+	graceExpired := false
+	if deadline == nil && len(constructions) != 0 {
+		clock := d.clock
+		if clock == nil {
+			clock = systemClock{}
+		}
+		constructionTimer = clock.NewTimer(remoteConstructionShutdownGrace)
+		if constructionTimer == nil || constructionTimer.C() == nil {
+			constructionTimer = systemClock{}.NewTimer(remoteConstructionShutdownGrace)
+		}
+		constructionTimeout = constructionTimer.C()
+		defer constructionTimer.Stop()
+	}
+	for _, construction := range constructions {
+		if construction == nil || construction.done == nil {
+			continue
+		}
+		if deadline == nil {
+			if graceExpired {
+				continue
+			}
+			select {
+			case <-construction.done:
+			case <-constructionTimeout:
+				checkpointIncomplete = true
+				graceExpired = true
+			}
+			continue
+		}
+		select {
+		case <-construction.done:
+		case <-deadline.Done():
+			checkpointIncomplete = true
+		}
+	}
+	remoteWarms := make([]*remoteViewWarm, 0, len(remoteViews))
+	remoteLinks := make([]*remoteLink, 0, len(remoteViews))
+	for _, view := range remoteViews {
+		for _, ac := range view.close() {
+			d.retireShutdownRemoteAttachment(view, ac, reason)
+		}
+		if warm := d.stopRemoteViewWarm(view); warm != nil {
+			remoteWarms = append(remoteWarms, warm)
+		}
+		if link := d.stopRemoteViewLink(view); link != nil {
+			remoteLinks = append(remoteLinks, link)
+		}
+	}
+	for _, warm := range remoteWarms {
+		warm.stop()
+	}
+	for _, link := range remoteLinks {
+		joinRemoteLink(link)
+	}
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
-		return false
+		return checkpointIncomplete
 	}
 	for _, s := range snapshot {
 		// Cancellation and PTY closure must not wait behind a teardown owner that
@@ -1023,7 +1119,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		info := ports.SessionInfo{
 			SessionID: string(s.id),
 			Name:      s.name,
-			State:     ports.SessionRunning,
+			State:     ports.SessionUp,
 			Ephemeral: s.ephemeral,
 			Tabs:      uint16(len(s.tabs)),
 			Attached:  len(s.attachments) != 0,
@@ -1036,7 +1132,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		if _, live := liveNames[name]; live {
 			continue
 		}
-		state := ports.SessionStopped
+		state := ports.SessionDown
 		if stopped.purging || stopped.state == ports.SessionBroken {
 			// Purge is the dominant externally visible state: restoration must
 			// never make a deletion-reserved record appear attachable.
@@ -1135,8 +1231,24 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 
-	sess, ac, rerr := d.routeWithContext(handshakeCtx, h, tr)
+	view, ac, remoteResume, rerr := d.resumeParkedRemoteView(h, tr)
+	if !remoteResume {
+		view, ac, remoteResume, rerr = d.resumeLiveRemoteView(h, tr)
+	}
+	var owner attachmentOwner = view
+	if remoteResume && rerr == nil && h.RemoteTarget != nil && !remoteViewMatchesTarget(view, *h.RemoteTarget) {
+		d.abortResumeClaim(ac)
+		rerr = &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
+	}
+	if !remoteResume {
+		var sess *session
+		sess, ac, rerr = d.routeWithContext(handshakeCtx, h, tr)
+		owner = sess
+	}
 	if rerr != nil {
+		if errors.Is(rerr, errResumeTokenLifecycleRace) {
+			rerr = &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		}
 		d.log.Warn("hello rejected", "err", rerr, "intent", h.Intent, "session", h.Name)
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
 			_ = sendHandshake(frameError(pe.code, pe.text))
@@ -1146,87 +1258,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		_ = tr.Close()
 		return
 	}
-
-	failAttachment := func() {
-		d.failHandshakeAttachment(sess, ac, tr)
-	}
-	if err := handshakeCtx.Err(); err != nil {
-		failAttachment()
-		return
-	}
-	rc := sess.renderCoordinator()
-	lease := (*attachmentLease)(nil)
-	if rc != nil {
-		lease = rc.attachmentLease(ac)
-	}
-	expected := ac.transportSnapshot()
-	welcomeToken := sess.attachmentToken(ac, tr)
-	welcomeToken.lease = lease
-	welcomeTicket, admitted := ac.beginAttachmentEffect(welcomeToken)
-	if expected.transport != tr || !admitted || welcomeToken.ac == nil {
-		if admitted {
-			welcomeTicket.End()
-		}
-		if !d.abortResumeClaim(ac) {
-			d.clientGone(sess, ac, tr, false)
-		}
-		return
-	}
-	if err := handshakeCtx.Err(); err != nil {
-		welcomeTicket.End()
-		failAttachment()
-		return
-	}
-	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
-		return ac.sendExpectedTransportForAttachment(expected, frameWelcome(sess, ac), welcomeTicket)
-	}); err != nil {
-		welcomeTicket.End()
-		failAttachment()
-		return
-	}
-	// Release Welcome's effect before discovering post-handshake authority so a
-	// replacement blocked behind the send can publish its generation and lease.
-	welcomeTicket.End()
-	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentAttachmentEffect(sess, tr)
-	if !admitted {
-		failAttachment()
-		return
-	}
-	postWelcomeLease := postWelcomeToken.lease
-	if postWelcomeToken.ac == nil {
-		postWelcomeTicket.End()
-		failAttachment()
-		return
-	}
-	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
-		postWelcomeTicket.End()
-		// The attachment was detached while Welcome was in flight; never let
-		// this stale handshake emit an Output frame.
-		failAttachment()
-		return
-	}
-	postWelcomeTicket.End()
-	paintToken := sess.attachmentToken(ac, tr)
-	painted := make(chan bool, 1)
-	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
-		painted <- d.firstPaintForTransition(paintToken)
-		return nil
-	}); err != nil {
-		failAttachment()
-		return
-	}
-	if !<-painted || handshakeCtx.Err() != nil {
-		failAttachment()
-		return
-	}
-	if !d.commitResumeClaim(ac) {
-		failAttachment()
-		return
-	}
-	stopHandshakeTransport()
-	finishHandshake()
-	d.runConnLoop(ac)
-	_ = tr.Close()
+	d.completeAttachmentHandshake(handshakeCtx, stopHandshakeTransport, finishHandshake, tr, owner, ac)
 }
 
 // protoErr is a session-level rejection carrying a wire ErrorMsg code.
@@ -1269,6 +1301,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		clientID:          h.ClientID,
 		resumeCapable:     true,
 		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
+		renderMode:        h.RenderMode,
 	}
 	if h.RemoteTarget != nil {
 		opts.remoteOrigin = h.RemoteTarget.DisplayOrigin

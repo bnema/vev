@@ -27,14 +27,14 @@ var (
 )
 
 func (d *Daemon) handleSequencedImagePushForAttachment(token attachmentConnectionToken, _ uint64, ip ports.ImagePush) {
-	if !token.attachmentEffectCurrent() {
+	if token.localSession() == nil || !token.attachmentEffectCurrent() || token.ac.renderMode == ports.RenderModeProxiedContent {
 		return
 	}
 	d.handleImagePushForAttachment(token, ip)
 }
 
 func (d *Daemon) handleImagePushForAttachment(token attachmentConnectionToken, ip ports.ImagePush) {
-	if len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !token.attachmentEffectCurrent() {
+	if token.localSession() == nil || len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !token.attachmentEffectCurrent() {
 		return
 	}
 	path, err := d.writeClipboardImageForAttachment(token, ip)
@@ -85,11 +85,14 @@ func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string,
 }
 
 func (d *Daemon) writeClipboardImageForAttachment(token attachmentConnectionToken, ip ports.ImagePush) (string, error) {
+	if token.localSession() == nil || !token.attachmentEffectCurrent() {
+		return "", errAttachmentTransition
+	}
 	path, err := d.createClipboardImage(ip)
 	if err != nil {
 		return "", err
 	}
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil {
 		_ = os.Remove(path)
 		return "", errAttachmentTransition
@@ -135,7 +138,7 @@ func (d *Daemon) injectClipboardPath(sess *session, path string) {
 }
 
 func (d *Daemon) injectClipboardPathForAttachment(token attachmentConnectionToken, path string) {
-	sess := token.sess
+	sess := token.localSession()
 	if sess == nil || !token.attachmentEffectCurrent() {
 		return
 	}
@@ -236,6 +239,11 @@ func (d *Daemon) forwardClipboardAsync(owner paneEffectLease, b64 string) {
 
 	items := make([]clipboardForward, 0, len(attachments))
 	for _, ac := range attachments {
+		// A remote daemon's proxied content stream must never carry OSC52 or
+		// another host-facing side effect to the local link.
+		if ac.renderMode == ports.RenderModeProxiedContent {
+			continue
+		}
 		transport := ac.transport()
 		token := sess.attachmentToken(ac, transport)
 		if token.attachmentCurrent() {

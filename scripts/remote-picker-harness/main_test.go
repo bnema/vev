@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/bnema/vev/internal/ports"
 )
 
 func TestBoundedStderrRetainsAtMostDiagnosticLimit(t *testing.T) {
@@ -40,5 +42,24 @@ func TestRunCapturedCommandIncludesStderr(t *testing.T) {
 	err := runCapturedCommand(t.Context(), "sh", "-c", "printf 'command diagnostics\\n' >&2; exit 1")
 	if err == nil || !strings.Contains(err.Error(), "stderr: command diagnostics") {
 		t.Fatalf("command error = %v", err)
+	}
+}
+
+func TestAssertNoDirectHandoffProcessesInitialFramesAndRetainsOutput(t *testing.T) {
+	tr := &harnessTransport{
+		probe:  &visualProbe{},
+		frames: make(chan harnessFrame, 2),
+	}
+	tr.frames <- harnessFrame{frame: ports.Frame{Type: ports.MsgOutput}}
+	tr.frames <- harnessFrame{frame: ports.Frame{Type: ports.MsgAttachTarget}}
+
+	if err := assertNoDirectHandoff(tr); err == nil {
+		t.Fatal("direct handoff was not rejected")
+	}
+	if len(tr.queued) != 1 || tr.queued[0].frame.Type != ports.MsgOutput {
+		t.Fatalf("queued frames = %#v, want one retained output", tr.queued)
+	}
+	if tr.probe.unexpectedHandoffs != 1 {
+		t.Fatalf("unexpected handoffs = %d, want 1", tr.probe.unexpectedHandoffs)
 	}
 }

@@ -64,7 +64,7 @@ type RemotePreviewClient interface {
 const (
 	// RemoteCatalogSchemaVersion is independent from the IPC protocol. A
 	// catalogue can be rejected without changing the attachment wire layout.
-	RemoteCatalogSchemaVersion uint16 = 1
+	RemoteCatalogSchemaVersion uint16 = 2
 
 	RemoteCatalogMaxHosts        = 64
 	RemoteCatalogMaxSessions     = 256
@@ -103,7 +103,7 @@ type RemoteCatalogTab struct {
 }
 
 // RemoteCatalogSession is one session in the remote discovery catalog. State
-// is an explicit string contract (running|stopped|broken), not SessionState.
+// is an explicit string contract (up|down|broken), not SessionState.
 //
 // Tabs is interface-typed only to keep old v0.x callers that supplied a count
 // source-compatible while the versioned schema carries []RemoteCatalogTab.
@@ -301,7 +301,7 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 				if session.ActiveTabID != "" {
 					return fmt.Errorf("%w: active tab is absent", ErrInvalidRemoteCatalog)
 				}
-				if session.State == "running" && session.Tabs == nil {
+				if session.State == "up" && session.Tabs == nil {
 					return fmt.Errorf("%w: missing tab list", ErrInvalidRemoteCatalog)
 				}
 			}
@@ -320,8 +320,8 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 				if tab.Index != uint16(i) {
 					return fmt.Errorf("%w: tab indexes are not ordered", ErrInvalidRemoteCatalog)
 				}
-				if session.State == "running" && tab.ID == "" {
-					return fmt.Errorf("%w: running tab has zero ID", ErrInvalidRemoteCatalog)
+				if session.State == "up" && tab.ID == "" {
+					return fmt.Errorf("%w: up tab has zero ID", ErrInvalidRemoteCatalog)
 				}
 				if tab.ID != "" {
 					if err := domain.ValidateTabStableID(domain.TabStableID(tab.ID)); err != nil {
@@ -335,8 +335,8 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 				bytes += len(tab.ID) + len(tab.Name) + len(tab.Detail)
 			}
 			if session.ActiveTabID != "" {
-				if session.State != "running" {
-					return fmt.Errorf("%w: stopped or broken session has an active tab", ErrInvalidRemoteCatalog)
+				if session.State != "up" {
+					return fmt.Errorf("%w: down or broken session has an active tab", ErrInvalidRemoteCatalog)
 				}
 				if _, ok := tabIDs[session.ActiveTabID]; !ok {
 					return fmt.Errorf("%w: active tab is absent", ErrInvalidRemoteCatalog)
@@ -404,7 +404,7 @@ func validRemoteCatalogText(value string) bool {
 
 func validRemoteCatalogState(state string) bool {
 	switch state {
-	case "running", "stopped", "broken":
+	case "up", "down", "broken":
 		return true
 	default:
 		return false
@@ -413,7 +413,7 @@ func validRemoteCatalogState(state string) bool {
 
 func validRemoteCatalogReason(reason string) bool {
 	switch reason {
-	case "", "refreshing", "catalog_stale", "host_unreachable", "version_mismatch", "session_stopped", "session_broken", "identity_changed", "not_found", "timeout", "malformed":
+	case "", "refreshing", "catalog_stale", "host_unreachable", "version_mismatch", "session_down", "session_broken", "identity_changed", "not_found", "timeout", "malformed":
 		return true
 	default:
 		return false

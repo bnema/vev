@@ -2,6 +2,7 @@ package picker
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -490,14 +491,30 @@ func TestSelectedIndexReportsRawSelectedRow(t *testing.T) {
 	require.Equal(t, 1, m.SelectedIndex())
 }
 
-func TestStoppedSessionSelectableAndRendered(t *testing.T) {
-	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
-	got, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "stopped:work", Name: "work", TabIndex: 0, Stopped: true}, got)
-	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, Preview{})
-	require.Equal(t, 'w', frame.At(0, 0).Rune)
-	require.Equal(t, '(', frame.At(5, 0).Rune)
+func TestStoppedSessionRendersDownSuffix(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		sessionID   domain.SessionID
+		sessionName string
+		size        domain.Size
+	}{
+		{name: "normal", sessionID: "stopped:work", sessionName: "work", size: domain.Size{Cols: 24, Rows: 4}},
+		{name: "constrained", sessionID: "stopped:long", sessionName: "long-session", size: domain.Size{Cols: 8, Rows: 2}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New([]SessionView{{ID: tt.sessionID, Name: tt.sessionName, Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
+			got, ok := m.Selected()
+			require.True(t, ok)
+			require.Equal(t, Target{Session: tt.sessionID, Name: tt.sessionName, TabIndex: 0, Stopped: true}, got)
+
+			frame := m.Render(tt.size, Preview{})
+			var label strings.Builder
+			for _, cell := range frame.Row(0) {
+				label.WriteRune(cell.Rune)
+			}
+			require.Contains(t, label.String(), "(down)")
+		})
+	}
 }
 
 func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
@@ -510,7 +527,7 @@ func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
 	require.Equal(t, stoppedStyle, styles.Stopped)
 
 	frame := m.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
-	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old (stopped)" header, 3 its tab row.
+	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old (down)" header, 3 its tab row.
 	require.Equal(t, stoppedStyle, frame.Row(2)[0].Style, "stopped header must be dim italic")
 	require.Equal(t, stoppedStyle, frame.Row(3)[0].Style, "stopped tab row must be dim italic")
 	require.NotEqual(t, stoppedStyle, frame.Row(0)[0].Style, "live header keeps base style")
@@ -587,7 +604,7 @@ func TestRenderListDrawsNameAndDetailSegmentsWithDistinctStyles(t *testing.T) {
 	}
 
 	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
-		{Name: "alpha", Detail: " (running)"},
+		{Name: "alpha", Detail: " (up)"},
 		{Name: "beta", Detail: " (idle)", Attention: true},
 	}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
 
@@ -748,9 +765,9 @@ func TestRemoteRowsCarryStructuredIdentityAndRemainNonSelectable(t *testing.T) {
 		require.True(t, pickerRow.hasRemoteKey)
 		require.False(t, pickerRow.selectable, "remote state %d must remain gated in phase 5", availability[i])
 		require.True(t, pickerRow.dim, "remote state %d is visibly unavailable", availability[i])
-		wantDetail := "proxy activation pending"
+		wantDetail := "@mule (proxy activation pending)"
 		if availability[i] == RemoteStale || availability[i] == RemoteVersionMismatch {
-			wantDetail = "remote state detail"
+			wantDetail = "@mule (remote state detail)"
 		}
 		require.Equal(t, wantDetail, pickerRow.detail)
 	}

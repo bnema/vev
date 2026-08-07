@@ -299,6 +299,9 @@ const (
 )
 
 func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *attachmentLease) paintResult {
+	if ac != nil && ac.renderMode == ports.RenderModeProxiedContent {
+		return d.paintProxiedContent(entry, ac, reset, lease)
+	}
 	// Session-owned PTY preparation remains local; attachment rendering is
 	// captured through session.captureRenderState.
 	sess := entry
@@ -424,7 +427,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		resizeActive: overlays.resizeActive, statusFeedback: statusFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
-	state, ok := entry.captureRenderState(ac, renderCaptureRequest{
+	captureRequest := renderCaptureRequest{
 		bars:            bars,
 		overlays:        capturedOverlays,
 		preview:         preview,
@@ -433,7 +436,8 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		styleGeneration: applied.Generation,
 		reset:           reset,
 		lease:           lease,
-	})
+	}
+	state, ok := entry.captureRenderState(ac, captureRequest)
 	endCapture(0, ok)
 	if !ok {
 		ac.sendMu.Unlock()

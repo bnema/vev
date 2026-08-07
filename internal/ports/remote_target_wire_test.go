@@ -2,6 +2,7 @@ package ports
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -79,15 +80,54 @@ func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 	}
 }
 
+func TestProxiedHelloGoldenAndStrict(t *testing.T) {
+	target := testRemoteTarget(false)
+	msg := Hello{
+		Version: ProtocolVersion, Intent: IntentAttach, RenderMode: RenderModeProxiedContent,
+		ClientID: [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, ResumeToken: 0x0102030405060708,
+		Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 2,
+		RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+	}
+	want := []byte{
+		0, 25, IntentAttach, byte(RenderModeProxiedContent),
+		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+		1, 2, 3, 4, 5, 6, 7, 8,
+		0, 4, 'w', 'o', 'r', 'k', 0, 80, 0, 24, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0,
+		1,
+		0, 15, 'b', 'u', 'i', 'l', 'd', '@', 'm', 'u', 'l', 'e', ':', '2', '2', '2', '2',
+		0, 9, 'm', 'u', 'l', 'e', ':', '2', '2', '2', '2',
+		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+		0, 4, 'w', 'o', 'r', 'k', 0, 0, 5, 't', 'a', 'b', '-', '3', 0, byte(EnvironmentPolicyDaemonOwned),
+	}
+	payload := MarshalHello(msg)
+	if !bytes.Equal(payload, want) {
+		t.Fatalf("proxied Hello bytes = %x, want %x", payload, want)
+	}
+	decoded, err := UnmarshalHello(payload)
+	if err != nil || !reflect.DeepEqual(decoded, msg) || decoded.RemoteTarget == msg.RemoteTarget {
+		t.Fatalf("proxied Hello = %#v, error %v", decoded, err)
+	}
+	assertAllPrefixesFail(t, payload, UnmarshalHello)
+	assertTrailingGarbageFails(t, payload, UnmarshalHello)
+
+	if MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, RenderMode: RenderModeProxiedContent, Size: domain.Size{Cols: 80, Rows: 24}}) != nil {
+		t.Fatal("proxied Hello without exact target marshaled")
+	}
+	malformed := append([]byte(nil), payload...)
+	malformed[3] = 2
+	if _, err := UnmarshalHello(malformed); err == nil {
+		t.Fatal("unknown render mode decoded")
+	}
+}
+
 func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 	target := testRemoteTarget(false)
 	tests := []struct {
-		name          string
-		validate      func() error
-		marshalBad    func() []byte
-		marshalGood   func() []byte
-		marshalLegacy func() []byte
-		unmarshal     func([]byte) error
+		name        string
+		validate    func() error
+		marshalBad  func() []byte
+		marshalGood func() []byte
+		unmarshal   func([]byte) error
 	}{
 		{
 			name: "hello",
@@ -112,12 +152,6 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
 				})
 			},
-			marshalLegacy: func() []byte {
-				return MarshalHello(Hello{
-					Version: ProtocolVersion, Intent: IntentAttach,
-					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
-				})
-			},
 			unmarshal: func(payload []byte) error { _, err := UnmarshalHello(payload); return err },
 		},
 		{
@@ -140,11 +174,6 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
 				})
 			},
-			marshalLegacy: func() []byte {
-				return MarshalAttachTarget(AttachTarget{
-					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
-				})
-			},
 			unmarshal: func(payload []byte) error { _, err := UnmarshalAttachTarget(payload); return err },
 		},
 	}
@@ -161,16 +190,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 			if payload == nil {
 				t.Fatal("failed to marshal daemon-owned control payload")
 			}
-			legacyLen := len(tt.marshalLegacy())
-			if err := tt.unmarshal(payload[:legacyLen]); err != nil {
-				t.Fatalf("complete legacy prefix failed to decode: %v", err)
-			}
-			for i := 0; i < len(payload); i++ {
-				if i == legacyLen {
-					// The complete legacy prefix is a valid count-only payload by
-					// design; every other rich-target prefix is malformed.
-					continue
-				}
+			for i := range len(payload) {
 				if err := tt.unmarshal(payload[:i]); err == nil {
 					t.Fatalf("prefix %d unexpectedly decoded", i)
 				}
@@ -187,10 +207,10 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 	}
 }
 
-func TestLegacyTargetWireBytesRemainUnchanged(t *testing.T) {
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', IntentAttach}
+func TestTargetWireIncludesRequiredV25Section(t *testing.T) {
+	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0}
 	got := MarshalAttachTarget(AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach})
 	if !bytes.Equal(got, want) {
-		t.Fatalf("legacy target bytes = %x, want %x", got, want)
+		t.Fatalf("target bytes = %x, want %x", got, want)
 	}
 }

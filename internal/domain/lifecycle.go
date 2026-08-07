@@ -138,15 +138,15 @@ func (t RemoteSessionTarget) Validate() error {
 	}
 	if t.Stopped {
 		if t.LiveTabID != "" || t.StoppedTab.Validate() != nil {
-			return errors.New("stopped remote target requires an ordinal or stable tab selector")
+			return errors.New("down remote target requires an ordinal or stable tab selector")
 		}
 		return nil
 	}
 	if err := ValidateTabStableID(t.LiveTabID); err != nil {
-		return errors.New("running remote target requires a stable tab ID")
+		return errors.New("up remote target requires a stable tab ID")
 	}
 	if t.StoppedTab != (TabSelector{}) {
-		return errors.New("running remote target cannot carry a stopped selector")
+		return errors.New("up remote target cannot carry a down selector")
 	}
 	return nil
 }

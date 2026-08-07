@@ -1,0 +1,63 @@
+package daemon
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/picker"
+)
+
+func TestPickerTransitionReusesCurrentRemoteView(t *testing.T) {
+	d, view, _, remoteTransport := newRemoteMetadataLinkFixture(t)
+	t.Cleanup(func() { require.NoError(t, remoteTransport.Close()) })
+	ac, _ := attachRemoteMetadataClient(t, view)
+	model := picker.New(nil, picker.SelectionConfig{})
+	token := attachmentOwnerToken(view, ac, ac.transport())
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = model
+	ac.overlays.pickerGeneration++
+	selection := &remotePickerSelection{model: model, generation: ac.overlays.pickerGeneration, token: token}
+	ac.overlays.pickerRemoteSelection = selection
+	ac.overlays.pickerMu.Unlock()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := d.transitionRemoteViewToRemoteViewForPicker(token, view, selection)
+		result <- err
+	}()
+	require.NoError(t, awaitTestValue(t, result, "reselecting the current remote view deadlocked"))
+	require.Same(t, view, ac.currentAttachmentOwner())
+	require.True(t, view.attachmentRegistered(ac))
+}
+
+func TestPickerTransitionRejectsInactiveRemoteLink(t *testing.T) {
+	d, source, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	view := &remoteView{key: remoteViewKey{
+		endpoint: "remote.example", lifecycleID: domain.SessionLifecycleID{1}, sessionName: "remote",
+	}}
+	link := &remoteLink{view: view, generation: 1, transport: newRemoteLinkTestTransport()}
+	view.mu.Lock()
+	view.link, view.linkGeneration = link, 1
+	require.False(t, remoteViewLinkReusableLocked(view), "the fixture must start with an unusable link")
+	view.mu.Unlock()
+	d.mu.Lock()
+	require.NoError(t, d.registerRemoteViewLocked(view))
+	d.mu.Unlock()
+
+	model := picker.New(nil, picker.SelectionConfig{})
+	token := source.attachmentToken(ac, ac.transport())
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = model
+	ac.overlays.pickerGeneration++
+	selection := &remotePickerSelection{model: model, generation: ac.overlays.pickerGeneration, token: token}
+	ac.overlays.pickerRemoteSelection = selection
+	ac.overlays.pickerMu.Unlock()
+
+	_, err := d.transitionToRemoteViewForPicker(selection.token, view, selection)
+	require.ErrorIs(t, err, errAttachmentTransition)
+	require.Same(t, source, ac.currentAttachmentSession())
+	require.True(t, source.attachmentRegistered(ac))
+	require.False(t, view.attachmentRegistered(ac))
+}

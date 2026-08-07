@@ -40,6 +40,10 @@ func (e *ProtocolError) Error() string {
 	return fmt.Sprintf("vev: %s", e.Text)
 }
 
+// errRenderModeMismatch is a permanent attach failure: retrying the same
+// request cannot make a daemon accept a different render contract.
+var errRenderModeMismatch = errors.New("vev: daemon accepted render mode")
+
 // DetachedError reports that the daemon detached this client for a reason
 // other than an ordinary user-initiated detach.
 type DetachedError struct {
@@ -171,6 +175,7 @@ type Dependencies struct {
 type AttachRequest struct {
 	Intent            uint8
 	SessionName       string
+	RenderMode        ports.RenderMode
 	Remote            bool
 	RemoteTarget      *domain.RemoteSessionTarget
 	EnvironmentPolicy ports.EnvironmentPolicy
@@ -227,7 +232,32 @@ func (r *Runner) terminalInput() *terminalInputPump {
 }
 
 func validateAttachRequest(request AttachRequest) error {
+	switch request.RenderMode {
+	case ports.RenderModeFullTerminal, ports.RenderModeProxiedContent:
+	default:
+		return fmt.Errorf("vev: invalid render mode %d", request.RenderMode)
+	}
+	switch request.Intent {
+	case ports.IntentEphemeral:
+	case ports.IntentNew, ports.IntentAttach, ports.IntentResume:
+		if request.SessionName == "" {
+			return domain.ErrInvalidSessionName
+		}
+	default:
+		return fmt.Errorf("vev: invalid session intent %d", request.Intent)
+	}
+	if request.SessionName != "" {
+		if err := domain.ValidateSessionName(request.SessionName); err != nil {
+			return err
+		}
+	}
 	if request.RemoteTarget == nil {
+		if request.RenderMode == ports.RenderModeProxiedContent {
+			return errors.New("vev: proxied attach request requires remote target")
+		}
+		if request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned {
+			return errors.New("vev: attach request without remote target requires client-owned environment")
+		}
 		return nil
 	}
 	if err := request.RemoteTarget.Validate(); err != nil {
@@ -239,6 +269,9 @@ func validateAttachRequest(request AttachRequest) error {
 	if request.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
 		return errors.New("vev: remote attach target requires daemon-owned environment")
 	}
+	if request.Intent != ports.IntentAttach && request.Intent != ports.IntentResume {
+		return errors.New("vev: remote attach target requires attach or resume intent")
+	}
 	return nil
 }
 
@@ -246,6 +279,7 @@ func validateAttachRequest(request AttachRequest) error {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
+	request = cloneAttachRequest(request)
 	if err := validateAttachRequest(request); err != nil {
 		return err
 	}
@@ -378,10 +412,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return errors.New("vev: dialer returned nil transport")
 		}
 		stopHandshakeTransport := watchHandshakeTransport(handshakeCtx, transport)
-		connection, err := NewSessionConnection(transport, SessionTarget{
-			Intent:      attemptRequest.Intent,
-			SessionName: attemptRequest.SessionName,
-		})
+		connection, err := NewSessionConnection(transport, attemptRequest)
 		if err != nil {
 			stopHandshakeTransport()
 			finishHandshake()
@@ -430,6 +461,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if handoffErr != nil {
 				return handoffErr
 			}
+			nextRequest = cloneAttachRequest(nextRequest)
 			if err := validateAttachRequest(nextRequest); err != nil {
 				return fmt.Errorf("vev: invalid remote attach handoff request: %w", err)
 			}
@@ -439,6 +471,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			dialer = nextDialer
 			attemptRequest = nextRequest
 			remote = attemptRequest.Remote || r.remote
+			reconnect.remote = remote
 			resumeToken = 0
 			backoff = defaultReconnectBackoff.initial
 			continue
@@ -679,7 +712,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	enterRaw := a.enterRaw
 	reconnect := a.reconnect
 	linkEvents := a.linkEvents
-	remote := a.remote || a.request.Remote
+	remote := a.remote || request.Remote
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -737,6 +770,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		ClientID:          clientID,
 		ResumeToken:       resumeToken,
 		Name:              name,
+		RenderMode:        request.RenderMode,
 		Size:              size,
 		TermEnv:           termEnv,
 		Cwd:               cwd,
@@ -770,6 +804,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		welcome, derr := ports.UnmarshalWelcome(reply.Payload)
 		if derr != nil {
 			return result(false, fmt.Errorf("vev: decoding welcome: %w", derr))
+		}
+		if welcome.RenderMode != request.RenderMode {
+			return result(false, fmt.Errorf("%w %d, want %d", errRenderModeMismatch, welcome.RenderMode, request.RenderMode))
 		}
 		resumeToken = welcome.ResumeToken
 		name = welcome.SessionName

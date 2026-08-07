@@ -21,7 +21,7 @@ var errRetryableRestoreLoad = errors.New("snapshot: retryable checkpoint load")
 
 func initialSessionState(record domain.CatalogueRecord) (ports.SessionState, chan struct{}) {
 	done := make(chan struct{})
-	state := ports.SessionStopped
+	state := ports.SessionDown
 	if record.DegradedReason != "" {
 		state = ports.SessionBroken
 		close(done)
@@ -179,7 +179,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		return nil
 	}
 	if record.Committed == nil {
-		d.setStoppedRecovery(record, ports.SessionStopped)
+		d.setStoppedRecovery(record, ports.SessionDown)
 		d.logSessionRestoreComplete(record, 0, false)
 		return nil
 	}
@@ -231,7 +231,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {
 		return err
 	}
-	d.setStoppedRecovery(record, ports.SessionStopped)
+	d.setStoppedRecovery(record, ports.SessionDown)
 	d.logSessionRestoreComplete(record, selected.Generation, false)
 	return nil
 }
@@ -252,7 +252,7 @@ func (d *Daemon) resetIncompatibleCheckpoint(ctx context.Context, record domain.
 
 	d.mu.Lock()
 	if entry, ok := d.stopped[record.Name]; ok {
-		d.stopped[record.Name] = stoppedSessionFromRecord(fresh, ports.SessionStopped, entry.restoreDone)
+		d.stopped[record.Name] = stoppedSessionFromRecord(fresh, ports.SessionDown, entry.restoreDone)
 	}
 	d.mu.Unlock()
 

@@ -30,8 +30,8 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 			Host:      "zebra",
 			FetchedAt: fetchedAt,
 			Sessions: []ports.RemoteCatalogSession{
-				{Name: "work", State: "running", Tabs: 2},
-				{Name: "alpha", State: "stopped", Ephemeral: true, Tabs: 1, Attached: true},
+				{Name: "work", State: "up", Tabs: 2},
+				{Name: "alpha", State: "down", Ephemeral: true, Tabs: 1, Attached: true},
 			},
 		},
 		{
@@ -72,8 +72,8 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 			Host:      "zebra",
 			FetchedAt: fetchedAt,
 			Sessions: []ports.RemoteCatalogSession{
-				{Name: "alpha", State: "stopped", Ephemeral: true, Tabs: 1, Attached: true},
-				{Name: "work", State: "running", Tabs: 2},
+				{Name: "alpha", State: "down", Ephemeral: true, Tabs: 1, Attached: true},
+				{Name: "work", State: "up", Tabs: 2},
 			},
 		},
 	}
@@ -122,7 +122,7 @@ func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 		{name: "zero fetched at", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":0,"sessions":[]}]}`)},
 		{name: "negative fetched at", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":-1,"sessions":[]}]}`)},
 		{name: "duplicate hosts", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[]},{"target":"arch","fetched_at_unix_nano":2,"sessions":[]}]}`)},
-		{name: "duplicate sessions", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"name":"work","state":"running","ephemeral":false,"tabs":1,"attached":false},{"name":"work","state":"running","ephemeral":false,"tabs":1,"attached":false}]}]}`)},
+		{name: "duplicate sessions", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"name":"work","state":"up","ephemeral":false,"tabs":1,"attached":false},{"name":"work","state":"up","ephemeral":false,"tabs":1,"attached":false}]}]}`)},
 		{name: "invalid utf8", raw: []byte("{\"version\":1,\"hosts\":[{\"target\":\"\xff\",\"fetched_at_unix_nano\":1,\"sessions\":[]}]}")},
 	}
 	for _, tc := range cases {

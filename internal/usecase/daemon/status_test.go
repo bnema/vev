@@ -115,7 +115,7 @@ func TestStatusSegmentsIncludesAttachmentRemoteOrigin(t *testing.T) {
 		remoteOrigin      string
 		wantAttachmentBar string
 	}{
-		{name: "remote origin", remoteOrigin: "arch", wantAttachmentBar: "vive at arch"},
+		{name: "remote origin", remoteOrigin: "arch", wantAttachmentBar: "vive@arch"},
 		{name: "local attachment", wantAttachmentBar: "vive"},
 	}
 
@@ -1549,4 +1549,5 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	releasePTY2()
 	hg.Wait()
 	d.sessWg.Wait()
+	d.waitNotifies()
 }

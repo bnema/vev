@@ -8,6 +8,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -120,7 +121,7 @@ func TestRestoreFailureCannotOverwriteDiscardReplacement(t *testing.T) {
 	entry := d.stopped[record.Name]
 	d.mu.Unlock()
 	require.Equal(t, persisted, entry.record)
-	require.Equal(t, ports.SessionStopped, entry.state)
+	require.Equal(t, ports.SessionDown, entry.state)
 }
 
 func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
@@ -138,7 +139,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				record.Committed = &ref
 				return record
 			},
-			state: ports.SessionStopped,
+			state: ports.SessionDown,
 		},
 		{
 			name: "newer incarnation",
@@ -146,7 +147,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				record.IncarnationID = domain.IncarnationID{9}
 				return record
 			},
-			state: ports.SessionStopped,
+			state: ports.SessionDown,
 		},
 		{
 			name: "degraded authority",
@@ -223,7 +224,7 @@ func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.catalogue = catalogue
 	d.persistEnabled = true
-	d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionStopped, make(chan struct{}))
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionDown, make(chan struct{}))
 
 	result := make(chan error, 1)
 	go func() {
@@ -241,6 +242,36 @@ func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	require.Empty(t, d.sessions)
+}
+
+func TestShutdownDeadlineDoesNotWaitForUncooperativeRemoteConstruction(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	construction := &remoteViewConstruction{done: make(chan struct{})}
+	d.mu.Lock()
+	d.remoteViewConstructions[remoteViewKey{}] = construction
+	d.mu.Unlock()
+	deadline := &snapshotShutdownDeadline{done: make(chan struct{})}
+	close(deadline.done)
+
+	result := make(chan bool, 1)
+	go func() { result <- d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, deadline) }()
+	require.True(t, awaitTestValue(t, result, "shutdown blocked on canceled remote construction"))
+}
+
+func TestShutdownWithoutDeadlineBoundsUncooperativeRemoteConstruction(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	construction := &remoteViewConstruction{done: make(chan struct{})}
+	d.mu.Lock()
+	d.remoteViewConstructions[remoteViewKey{}] = construction
+	d.mu.Unlock()
+
+	result := make(chan bool, 1)
+	go func() { result <- d.shutdownAll(ports.ReasonServerShutdown) }()
+	timer := awaitTestValue(t, clock.timers, "remote construction shutdown timer")
+	require.Equal(t, remoteConstructionShutdownGrace, timer.duration)
+	timer.ch <- time.Time{}
+	require.True(t, awaitTestValue(t, result, "shutdown blocked on uncooperative remote construction"))
 }
 
 func TestSnapshotStopContextCancelIsIdempotent(t *testing.T) {

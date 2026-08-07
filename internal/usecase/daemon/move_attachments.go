@@ -1,8 +1,8 @@
 package daemon
 
 func moveAttachmentTokenCurrentLocked(token attachmentConnectionToken, sess *session) bool {
-	return token.sess == sess && token.ac != nil && token.generation == token.ac.connectionGeneration.Load() &&
-		token.ac.currentAttachmentSession() == sess && token.ac.transportSnapshotCurrent(token.transport) &&
+	return sameAttachmentOwner(token.owner, sess) && token.ac != nil && token.generation == token.ac.connectionGeneration.Load() &&
+		sameAttachmentOwner(token.ac.currentAttachmentOwner(), sess) && token.ac.transportSnapshotCurrent(token.transport) &&
 		attachmentRegisteredLocked(sess, token.ac)
 }
 

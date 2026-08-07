@@ -29,25 +29,26 @@ func (d *Daemon) transitionSourcePreflightLocked(req attachmentTransitionRequest
 }
 
 func (d *Daemon) sourceAttachmentTokenCurrentFrozen(token attachmentConnectionToken) bool {
-	if token.sess == nil || token.ac == nil {
+	sess := token.localSession()
+	if sess == nil || token.ac == nil {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.closing || token.sess.core() == nil || d.sessions[token.sess.core().id] != token.sess {
+	if d.closing || sess.core() == nil || d.sessions[sess.core().id] != sess {
 		return false
 	}
 	d.notices.routingMu.Lock()
 	defer d.notices.routingMu.Unlock()
-	token.sess.core().mu.Lock()
-	defer token.sess.core().mu.Unlock()
-	coordinator := token.sess.core().coordinator.Load()
+	sess.core().mu.Lock()
+	defer sess.core().mu.Unlock()
+	coordinator := sess.core().coordinator.Load()
 	if coordinator != nil {
 		coordinator.mu.Lock()
 		defer coordinator.mu.Unlock()
 	}
-	req := attachmentTransitionRequest{source: token.sess, next: token.ac, expectedTransport: token.transport}
-	return transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
+	req := attachmentTransitionRequest{source: sess, next: token.ac, expectedTransport: token.transport}
+	return transitionSourceTokenCurrentLocked(token, sess, coordinator, req)
 }
 
 func transitionSourceTabCurrentLocked(source *session, expected *tab) bool {
@@ -215,7 +216,7 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 		}
 	}
 	result.published = attachmentConnectionToken{
-		sess: req.target, ac: req.next,
+		owner: req.target, ac: req.next,
 		generation: publication.nextGeneration,
 		transport:  req.expectedTransport, lease: lease,
 		rebase: publication.source != req.target,

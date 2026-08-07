@@ -83,7 +83,7 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 	valid := ports.RemoteCatalog{
 		ProtocolVersion: ports.ProtocolVersion,
 		Sessions: []ports.RemoteCatalogSession{
-			{Name: "work", State: "running", Ephemeral: false, Tabs: 2, Attached: true},
+			{Name: "work", State: "up", Ephemeral: false, Tabs: 2, Attached: true},
 		},
 	}
 	validJSON := mustCatalogJSON(t, valid)
@@ -148,7 +148,7 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 		},
 		{
 			name:    "invalid session name",
-			stdout:  mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "bad name", State: "running"}}}),
+			stdout:  mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "bad name", State: "up"}}}),
 			wantErr: errCatalogSession,
 		},
 		{

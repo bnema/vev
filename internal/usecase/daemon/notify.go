@@ -370,6 +370,29 @@ func (d *Daemon) NotifyGlobal(sev domain.NoticeSeverity, code domain.NoticeCode,
 	d.notify(nil, sev, code, msg, cause)
 }
 
+// notifyAttachment publishes a notice to one exact attachment. Remote views do
+// not belong to the local-session attachment registry, so a remote selection
+// failure must not fall back to daemon-global delivery.
+func (d *Daemon) notifyAttachment(ac *attachedClient, sev domain.NoticeSeverity, code domain.NoticeCode, msg string, cause error) {
+	if d == nil || ac == nil {
+		return
+	}
+	n := d.notices.record(domain.Notification{
+		Code:     code,
+		Severity: sev,
+		Message:  msg,
+		Details:  noticeDetails(cause),
+		Time:     d.clock.Now(),
+	})
+	d.log.Log(d.serveCtx, slogLevelFor(sev), "attachment notice", "code", code.String(), "severity", sev, "msg", msg, "err", cause)
+	d.notices.routingMu.Lock()
+	published := d.publishToast(ac, n)
+	d.notices.routingMu.Unlock()
+	if published {
+		d.repaintForNotice(ac)
+	}
+}
+
 // publishToast durably mutates one client's toast state without repainting.
 // Routing paths call it while routingMu excludes detach, then release routingMu
 // before rendering so a render failure can safely route another notice.
@@ -491,6 +514,13 @@ func (d *Daemon) retainToastTimerLocked(ac *attachedClient, t *noticeToast) {
 // repaintForNotice asks for an urgent redraw. It must be called with noticeMu
 // released: invalidateRender can paint inline, which takes sendMu.
 func (d *Daemon) repaintForNotice(ac *attachedClient) {
+	if ac == nil {
+		return
+	}
+	if _, remote := normalizeAttachmentOwner(ac.currentAttachmentOwner()).(*remoteView); remote {
+		d.invalidateAttachedOwner(ac, false, "notify.go")
+		return
+	}
 	sess := ac.currentSession()
 	if sess == nil {
 		// Mid-handoff or torn down: whoever attaches next repaints anyway, and

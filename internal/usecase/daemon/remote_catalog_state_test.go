@@ -42,9 +42,9 @@ func TestRemoteCatalogCacheStartup(t *testing.T) {
 		{
 			name: "loads cached entries",
 			load: func() ([]ports.RemoteCatalogCacheEntry, error) {
-				return []ports.RemoteCatalogCacheEntry{{Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "running"}}}}, nil
+				return []ports.RemoteCatalogCacheEntry{{Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}}}}, nil
 			},
-			wantCache:  map[string]ports.RemoteCatalogCacheEntry{"arch": {Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "running"}}}},
+			wantCache:  map[string]ports.RemoteCatalogCacheEntry{"arch": {Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}}}},
 			wantStatus: map[string]remoteHostStatus{"arch": remoteHostCached},
 		},
 		{
@@ -101,14 +101,14 @@ func TestRemoteCatalogCacheStoreSerializesLockFreeIO(t *testing.T) {
 	}}
 	d = New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(nil, nil, cache, nil, ports.RemoteTransportUDP))
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 1), Sessions: []ports.RemoteCatalogSession{{Name: "one", State: "running"}}}
+	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 1), Sessions: []ports.RemoteCatalogSession{{Name: "one", State: "up"}}}
 	d.remoteCatalog.mu.Unlock()
 
 	done := make(chan struct{}, 2)
 	go func() { d.persistRemoteCatalogCache(); done <- struct{}{} }()
 	<-entered
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 2), Sessions: []ports.RemoteCatalogSession{{Name: "two", State: "running"}}}
+	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 2), Sessions: []ports.RemoteCatalogSession{{Name: "two", State: "up"}}}
 	d.remoteCatalog.mu.Unlock()
 	go func() { d.persistRemoteCatalogCache(); done <- struct{}{} }()
 
