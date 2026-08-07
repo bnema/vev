@@ -669,6 +669,62 @@ func TestRemoteLinkFailedAutoReconnectMarksViewUnavailableWithoutDetachingLocalO
 	d.shutdownAll(ports.ReasonServerShutdown)
 }
 
+func TestStaleFailedReconnectCannotDegradeReplacementGeneration(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	target := remoteLinkTestTarget()
+	size := domain.Size{Cols: 80, Rows: 24}
+	firstTransport := newRemoteLinkTestTransport()
+	candidateTransport := newRemoteLinkTestTransport()
+	enqueueRemoteLinkHandshake(t, firstTransport, target, size)
+	factory := &remoteLinkSequenceFactory{dialers: []ports.Dialer{
+		&remoteLinkTestDialer{transport: firstTransport},
+		&remoteLinkTestDialer{transport: candidateTransport},
+	}}
+	d.remoteDialerFactory = factory
+
+	view, err := d.openRemoteView(context.Background(), target, size)
+	require.NoError(t, err)
+	awaitFrame(t, firstTransport.sent, ports.MsgHello)
+	awaitFrame(t, firstTransport.sent, ports.MsgAck)
+	attachment := &attachedClient{tr: &closeTrackingTransport{}}
+	attachment.setAttachmentOwner(view)
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(attachment))
+	oldLink := view.link
+	view.mu.Unlock()
+
+	firstTransport.recv <- remoteLinkTestReceive{err: io.EOF}
+	awaitFrame(t, candidateTransport.sent, ports.MsgHello)
+
+	// A newer publication wins while the single automatic attempt is still
+	// waiting for its candidate handshake. Its later failure must not turn the
+	// replacement view unavailable or start a second retry.
+	replacementTransport := newRemoteLinkTestTransport()
+	view.mu.Lock()
+	view.linkGeneration++
+	replacement := &remoteLink{
+		view: view, generation: view.linkGeneration, target: target, transport: replacementTransport,
+		cancel: func() {}, done: make(chan struct{}), active: true,
+	}
+	view.link = replacement
+	view.linkState = remoteViewLinkHealthy
+	view.reconnectGeneration++
+	view.mu.Unlock()
+	candidateTransport.recv <- remoteLinkTestReceive{err: io.EOF}
+	awaitTestCompletion(t, candidateTransport.closed, "stale reconnect candidate was not closed")
+
+	view.mu.Lock()
+	require.Same(t, replacement, view.link)
+	require.Equal(t, remoteViewLinkHealthy, view.linkState)
+	view.mu.Unlock()
+	require.Same(t, view, attachment.currentAttachmentOwner())
+	require.Equal(t, int32(2), factory.calls.Load(), "a stale failed reconnect must not start another retry")
+
+	d.markRemoteLinkUnavailable(oldLink)
+	require.Equal(t, int32(2), factory.calls.Load(), "a retired link cannot start another retry")
+	d.shutdownAll(ports.ReasonServerShutdown)
+}
+
 func TestOpenRemoteViewFailedReconnectPreservesViewUntilValidatedPublication(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	target := remoteLinkTestTarget()

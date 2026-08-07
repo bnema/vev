@@ -135,6 +135,9 @@ func remoteViewRelativeTabCommand(view *remoteView, link *remoteLink, generation
 	return "previous-tab", nil
 }
 
+// sendRemoteViewCommand is intentionally narrower than the remote daemon's
+// attached-command executor. It is not palette forwarding: stable remote
+// metadata only supports the two no-argument relative tab operations.
 func (d *Daemon) sendRemoteViewCommand(ctx context.Context, link *remoteLink, generation uint64, slug string) error {
 	if d == nil || link == nil || link.commands == nil {
 		return errRemoteViewUnavailable
