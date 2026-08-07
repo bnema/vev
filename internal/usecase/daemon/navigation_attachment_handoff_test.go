@@ -56,7 +56,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffectTicket) error {
 				d.mu.Lock()
 				delete(d.sessions, target.id)
-				d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 9, state: ports.SessionStopped}
+				d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 9, state: ports.SessionDown}
 				d.mu.Unlock()
 				expectedCreatedAt := int64(9)
 				return d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "stopped-session")
@@ -149,7 +149,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.T) {
 	d, source, old, _ := newManualSessionWithPTYs(t, nil)
 	d.mu.Lock()
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 7, state: ports.SessionStopped}
+	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 7, state: ports.SessionDown}
 	d.mu.Unlock()
 
 	rc := d.attachCoordinator(source, nil, old, true)

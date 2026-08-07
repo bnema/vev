@@ -671,7 +671,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			state, done := initialSessionState(r)
 			d.stopped[r.Name] = stoppedSessionFromRecord(r, state, done)
 		} else {
-			d.stopped[r.Name] = stoppedSessionFromRecord(r, ports.SessionStopped, nil)
+			d.stopped[r.Name] = stoppedSessionFromRecord(r, ports.SessionDown, nil)
 		}
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 			maxCreatedAt = r.CreatedAt
@@ -1083,7 +1083,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		info := ports.SessionInfo{
 			SessionID: string(s.id),
 			Name:      s.name,
-			State:     ports.SessionRunning,
+			State:     ports.SessionUp,
 			Ephemeral: s.ephemeral,
 			Tabs:      uint16(len(s.tabs)),
 			Attached:  len(s.attachments) != 0,
@@ -1096,7 +1096,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		if _, live := liveNames[name]; live {
 			continue
 		}
-		state := ports.SessionStopped
+		state := ports.SessionDown
 		if stopped.purging || stopped.state == ports.SessionBroken {
 			// Purge is the dominant externally visible state: restoration must
 			// never make a deletion-reserved record appear attachable.

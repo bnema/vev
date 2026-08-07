@@ -252,8 +252,8 @@ func remotePickerReasonText(reason string) string {
 		return "host unreachable"
 	case "version_mismatch":
 		return "version mismatch"
-	case "session_stopped":
-		return "session stopped"
+	case "session_down":
+		return "session down"
 	case "session_broken":
 		return "session broken"
 	case "refreshing":
@@ -543,7 +543,7 @@ func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Targ
 	remoteTarget := *target.RemoteTarget
 	message := "loading remote preview…"
 	if remoteTarget.Stopped {
-		message = "stopped session — preview unavailable"
+		message = "down session — preview unavailable"
 	}
 	ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, message)
 	if remoteTarget.Stopped {
@@ -980,7 +980,7 @@ func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget
 			if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
 				continue
 			}
-			if target.Stopped != (session.State == "stopped") || session.State == "broken" {
+			if target.Stopped != (session.State == "down") || session.State == "broken" {
 				return false
 			}
 			tabs := ports.CatalogTabs(session)

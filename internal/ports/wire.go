@@ -288,8 +288,8 @@ type Kill struct {
 type SessionState uint8
 
 const (
-	SessionRunning SessionState = iota
-	SessionStopped
+	SessionUp SessionState = iota
+	SessionDown
 	SessionBroken
 )
 

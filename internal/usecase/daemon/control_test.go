@@ -735,7 +735,7 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	build.mruAt.Store(1)
 
 	d.mu.Lock()
-	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp/old", createdAt: 1, state: ports.SessionStopped}
+	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp/old", createdAt: 1, state: ports.SessionDown}
 	d.mu.Unlock()
 
 	listBefore := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
@@ -765,12 +765,12 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	require.True(t, hasProtocol && hasSessions)
 
 	require.Equal(t, []ports.RemoteCatalogSession{
-		{Name: "build", State: "running", Ephemeral: true, Tabs: 1, Attached: false},
-		{Name: "work", State: "running", Ephemeral: false, Tabs: 2, Attached: true},
+		{Name: "build", State: "up", Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", State: "up", Ephemeral: false, Tabs: 2, Attached: true},
 	}, catalog.Sessions)
 
 	for _, session := range catalog.Sessions {
-		require.Equal(t, "running", session.State)
+		require.Equal(t, "up", session.State)
 		require.NotEqual(t, "old", session.Name)
 	}
 
@@ -797,7 +797,7 @@ func TestRemoteCatalogTabCountSaturates(t *testing.T) {
 	var catalog ports.RemoteCatalog
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
 	require.Equal(t, []ports.RemoteCatalogSession{{
-		Name: "work", State: "running", Ephemeral: true, Tabs: int(^uint16(0)), Attached: false,
+		Name: "work", State: "up", Ephemeral: true, Tabs: int(^uint16(0)), Attached: false,
 	}}, catalog.Sessions)
 }
 

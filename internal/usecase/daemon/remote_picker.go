@@ -133,7 +133,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	key.LifecycleID = session.LifecycleID
 	key.DisplayOrigin = remoteSessionOrigin(key.Host)
 	availability := remotePickerAvailability(status)
-	stopped := session.State == "stopped"
+	stopped := session.State == "down"
 	broken := session.State == "broken"
 	tabs := ports.CatalogTabs(session)
 	viewTabs := make([]picker.TabEntry, 0, len(tabs))
@@ -201,13 +201,13 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	detail := remotePickerStatusDetail(status, fetchedAt)
 	if detail == "" {
 		switch session.State {
-		case "running":
-			detail = "running"
+		case "up":
+			detail = "up"
 			if session.Attached {
 				detail += " · attached"
 			}
-		case "stopped":
-			detail = "stopped"
+		case "down":
+			detail = "down"
 		case "broken":
 			detail = "broken"
 		}

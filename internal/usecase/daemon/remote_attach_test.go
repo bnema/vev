@@ -31,7 +31,7 @@ func TestRemotePickerSelectionRejectsReplacedLifecycle(t *testing.T) {
 				cachedLifecycle[0]++
 				d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
 					Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
-						LifecycleID: cachedLifecycle, Name: "work", State: "running", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+						LifecycleID: cachedLifecycle, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 					}},
 				}})
 				d.remoteCatalog.mu.Lock()

@@ -776,8 +776,8 @@ func TestSessionInfoRecoveryState(t *testing.T) {
 		state SessionState
 		want  []byte
 	}{
-		{name: "running", state: SessionRunning, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-		{name: "stopped", state: SessionStopped, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
+		{name: "up", state: SessionUp, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{name: "down", state: SessionDown, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
 		{name: "broken", state: SessionBroken, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
 	}
 	for _, tt := range tests {
@@ -813,8 +813,8 @@ func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 		{
 			name: "two",
 			msg: Sessions{Sessions: []SessionInfo{
-				{SessionID: "0", Name: "0", State: SessionRunning, Ephemeral: true, Tabs: 1, Attached: false},
-				{SessionID: "work", Name: "proj", State: SessionStopped, Ephemeral: false, Tabs: 5, Attached: true},
+				{SessionID: "0", Name: "0", State: SessionUp, Ephemeral: true, Tabs: 1, Attached: false},
+				{SessionID: "work", Name: "proj", State: SessionDown, Ephemeral: false, Tabs: 5, Attached: true},
 			}},
 			want: []byte{
 				0x00, 0x02,

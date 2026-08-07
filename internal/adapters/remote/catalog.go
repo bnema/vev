@@ -185,7 +185,7 @@ func rejectTrailingJSON(dec *json.Decoder) error {
 
 func validCatalogState(state string) bool {
 	switch state {
-	case "running", "stopped", "broken":
+	case "up", "down", "broken":
 		return true
 	default:
 		return false

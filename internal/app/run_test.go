@@ -588,26 +588,26 @@ func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
 func TestListShowsBroken(t *testing.T) {
 	var out bytes.Buffer
 	printSessions(&out, []ports.SessionInfo{
-		{Name: "fresh", State: ports.SessionStopped},
-		{Name: "loading", State: ports.SessionStopped},
+		{Name: "fresh", State: ports.SessionDown},
+		{Name: "loading", State: ports.SessionDown},
 		{Name: "broken", State: ports.SessionBroken},
 	})
 	require.Contains(t, out.String(), "fresh")
-	require.Contains(t, out.String(), "stopped")
+	require.Contains(t, out.String(), "down")
 	require.Contains(t, out.String(), "loading")
 	require.Contains(t, out.String(), "broken")
 	require.NotContains(t, out.String(), "restoring")
 	require.NotContains(t, out.String(), "degraded")
 }
 
-func TestPrintSessionsShowsStoppedState(t *testing.T) {
+func TestPrintSessionsShowsDownState(t *testing.T) {
 	var out bytes.Buffer
 	printSessions(&out, []ports.SessionInfo{
-		{Name: "main", State: ports.SessionRunning, Tabs: 2, Attached: true},
-		{Name: "old", State: ports.SessionStopped},
+		{Name: "main", State: ports.SessionUp, Tabs: 2, Attached: true},
+		{Name: "old", State: ports.SessionDown},
 	})
 	got := out.String()
-	for _, want := range []string{"NAME", "STATE", "main", "running", "2", "yes", "old", "stopped", "-"} {
+	for _, want := range []string{"NAME", "STATE", "main", "up", "2", "yes", "old", "down", "-"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("printSessions output %q missing %q", got, want)
 		}
@@ -617,12 +617,12 @@ func TestPrintSessionsShowsStoppedState(t *testing.T) {
 func TestPrintSessionsMarksEphemeral(t *testing.T) {
 	var buf bytes.Buffer
 	printSessions(&buf, []ports.SessionInfo{
-		{Name: "0", State: ports.SessionRunning, Ephemeral: true, Tabs: 1, Attached: false},
-		{Name: "work", State: ports.SessionRunning, Tabs: 2, Attached: true},
-		{Name: "old", State: ports.SessionStopped},
+		{Name: "0", State: ports.SessionUp, Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", State: ports.SessionUp, Tabs: 2, Attached: true},
+		{Name: "old", State: ports.SessionDown},
 	})
 	out := buf.String()
-	for _, want := range []string{"0", "temporary", "work", "running", "old", "stopped"} {
+	for _, want := range []string{"0", "temporary", "work", "up", "old", "down"} {
 		require.Contains(t, out, want)
 	}
 }
@@ -634,7 +634,7 @@ func newTestPersister(t *testing.T, stateDir string) *persist.Persister {
 	return persist.New(store)
 }
 
-func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
+func TestRunListReadsDownSessionsWithoutDaemon(t *testing.T) {
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
@@ -653,7 +653,7 @@ func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 			t.Fatalf("runList error = %v", err)
 		}
 	})
-	for _, want := range []string{"stored", "stopped", "-"} {
+	for _, want := range []string{"stored", "down", "-"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("runList output %q missing %q", got, want)
 		}

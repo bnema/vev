@@ -171,7 +171,7 @@ func TestRemoteHostListingUsesUnifiedStore(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
 	store.EXPECT().Hosts().Return([]string{"arch"}, []string{"beta"}, nil).Once()
 	catalog := portsmocks.NewMockRemoteCatalogClient(t)
-	catalog.EXPECT().List(mock.Anything, "arch").Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "build", State: "running"}}}, nil).Once()
+	catalog.EXPECT().List(mock.Anything, "arch").Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "build", State: "up"}}}, nil).Once()
 	var out bytes.Buffer
 	err := runRemoteList(context.Background(), command{listHost: "arch"}, remoteHostDeps{
 		store:   store,
@@ -194,7 +194,7 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				var out bytes.Buffer
 				err := listAllSessions(context.Background(), remoteHostDeps{
 					localList: func(context.Context) ([]ports.SessionInfo, error) {
-						return []ports.SessionInfo{{Name: "local", State: ports.SessionRunning}}, localErr
+						return []ports.SessionInfo{{Name: "local", State: ports.SessionUp}}, localErr
 					},
 					stdout: &out,
 				}, nil)
@@ -210,13 +210,13 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				catalog := portsmocks.NewMockRemoteCatalogClient(t)
 				catalog.EXPECT().List(mock.Anything, "arch").RunAndReturn(func(context.Context, string) (ports.RemoteCatalog, error) {
 					cancel()
-					return ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "dev", State: "running"}}}, nil
+					return ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "dev", State: "up"}}}, nil
 				}).Once()
 				var out bytes.Buffer
 				err := listAllSessions(ctx, remoteHostDeps{
 					catalog: catalog,
 					localList: func(context.Context) ([]ports.SessionInfo, error) {
-						return []ports.SessionInfo{{Name: "local", State: ports.SessionRunning}}, nil
+						return []ports.SessionInfo{{Name: "local", State: ports.SessionUp}}, nil
 					},
 					stdout: &out,
 				}, []domain.RemoteHost{{Target: "arch"}, {Target: "mule"}})
@@ -233,15 +233,15 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				var calls []string
 				catalog.EXPECT().List(mock.Anything, "arch").Run(func(_ context.Context, target string) {
 					calls = append(calls, target)
-				}).Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "dev", State: "running"}}}, nil).Once()
+				}).Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "dev", State: "up"}}}, nil).Once()
 				catalog.EXPECT().List(mock.Anything, "mule").Run(func(_ context.Context, target string) {
 					calls = append(calls, target)
-				}).Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "ops", State: "running"}}}, nil).Once()
+				}).Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "ops", State: "up"}}}, nil).Once()
 				var out bytes.Buffer
 				err := listAllSessions(context.Background(), remoteHostDeps{
 					catalog: catalog,
 					localList: func(context.Context) ([]ports.SessionInfo, error) {
-						return []ports.SessionInfo{{Name: "local", State: ports.SessionRunning}}, nil
+						return []ports.SessionInfo{{Name: "local", State: ports.SessionUp}}, nil
 					},
 					stdout: &out,
 				}, []domain.RemoteHost{{Target: "arch"}, {Target: "mule"}})
@@ -265,8 +265,8 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 		wantState ports.SessionState
 		wantTabs  uint16
 	}{
-		{name: "running", session: ports.RemoteCatalogSession{Name: "dev", State: "running", Tabs: 2}, wantState: ports.SessionRunning, wantTabs: 2},
-		{name: "stopped", session: ports.RemoteCatalogSession{Name: "dev", State: "stopped", Tabs: 2}, wantState: ports.SessionStopped, wantTabs: 2},
+		{name: "up", session: ports.RemoteCatalogSession{Name: "dev", State: "up", Tabs: 2}, wantState: ports.SessionUp, wantTabs: 2},
+		{name: "down", session: ports.RemoteCatalogSession{Name: "dev", State: "down", Tabs: 2}, wantState: ports.SessionDown, wantTabs: 2},
 		{name: "broken", session: ports.RemoteCatalogSession{Name: "dev", State: "broken", Tabs: 2}, wantState: ports.SessionBroken, wantTabs: 2},
 		{name: "unknown fails closed", session: ports.RemoteCatalogSession{Name: "dev", State: "unknown", Tabs: 2}, wantState: ports.SessionBroken, wantTabs: 2},
 	}

@@ -120,7 +120,7 @@ func TestRestoreFailureCannotOverwriteDiscardReplacement(t *testing.T) {
 	entry := d.stopped[record.Name]
 	d.mu.Unlock()
 	require.Equal(t, persisted, entry.record)
-	require.Equal(t, ports.SessionStopped, entry.state)
+	require.Equal(t, ports.SessionDown, entry.state)
 }
 
 func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
@@ -138,7 +138,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				record.Committed = &ref
 				return record
 			},
-			state: ports.SessionStopped,
+			state: ports.SessionDown,
 		},
 		{
 			name: "newer incarnation",
@@ -146,7 +146,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				record.IncarnationID = domain.IncarnationID{9}
 				return record
 			},
-			state: ports.SessionStopped,
+			state: ports.SessionDown,
 		},
 		{
 			name: "degraded authority",
@@ -223,7 +223,7 @@ func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.catalogue = catalogue
 	d.persistEnabled = true
-	d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionStopped, make(chan struct{}))
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionDown, make(chan struct{}))
 
 	result := make(chan error, 1)
 	go func() {

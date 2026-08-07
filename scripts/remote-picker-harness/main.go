@@ -94,7 +94,7 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 	if err := sendInputAndAwait(ctx, stdio, "printf 'VEV_REMOTE_HARNESS_ENV=%s:%s:%s:%s\\n' \"$VEV_TEST_ENV\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$VEV\"", "local:/run/local:wayland-local:"); err != nil {
 		return fmt.Errorf("direct client environment: %w", err)
 	}
-	live, err := waitForSession(ctx, catalog, target, sessionName, "running")
+	live, err := waitForSession(ctx, catalog, target, sessionName, "up")
 	if err != nil {
 		return fmt.Errorf("live catalog: %w", err)
 	}
@@ -108,7 +108,7 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 	if err := sendCommand(ctx, stdio, "new-tab"); err != nil {
 		return fmt.Errorf("create second tab: %w", err)
 	}
-	liveWithTabs, err := waitForSessionWithTabCount(ctx, catalog, target, sessionName, "running", 2)
+	liveWithTabs, err := waitForSessionWithTabCount(ctx, catalog, target, sessionName, "up", 2)
 	if err != nil {
 		return fmt.Errorf("multi-tab catalog: %w", err)
 	}
@@ -116,7 +116,7 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 	if err := sendCommand(ctx, stdio, "close-tab"); err != nil {
 		return fmt.Errorf("remove tab: %w", err)
 	}
-	after, err := waitForSessionWithTabCount(ctx, catalog, target, sessionName, "running", 1)
+	after, err := waitForSessionWithTabCount(ctx, catalog, target, sessionName, "up", 1)
 	if err != nil {
 		return fmt.Errorf("removed-tab catalog: %w", err)
 	}
@@ -192,7 +192,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err := sendInputAndAwait(ctx, remote, "printf '"+previewMarker+"\\n'", previewMarker); err != nil {
 		return fmt.Errorf("seed remote picker preview: %w", err)
 	}
-	remoteCatalog, err := waitForSessionWithTabCount(ctx, catalog, target, remoteSession, "running", 2)
+	remoteCatalog, err := waitForSessionWithTabCount(ctx, catalog, target, remoteSession, "up", 2)
 	if err != nil {
 		return fmt.Errorf("remote picker catalog: %w", err)
 	}
@@ -335,7 +335,7 @@ func runRestartResumePhase(ctx context.Context, target string, catalog ports.Rem
 	if err := runRemoteCommand(ctx, target, "vev", "--daemon-launcher"); err != nil {
 		return domain.RemoteSessionTarget{}, fmt.Errorf("restart remote daemon: %w", err)
 	}
-	resumedCatalog, err := waitForSession(ctx, catalog, target, sessionName, "running")
+	resumedCatalog, err := waitForSession(ctx, catalog, target, sessionName, "up")
 	if err != nil {
 		return domain.RemoteSessionTarget{}, fmt.Errorf("resumed catalog: %w", err)
 	}

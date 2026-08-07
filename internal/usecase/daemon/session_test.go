@@ -779,7 +779,7 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	require.Equal(t, int64(7), stopped.createdAt)
 	require.Equal(t, incarnation, stopped.incarnation)
 	require.Equal(t, uint64(9), stopped.lastUsedSeq)
-	require.Equal(t, ports.SessionStopped, stopped.state)
+	require.Equal(t, ports.SessionDown, stopped.state)
 	require.NotNil(t, stopped.restoreDone)
 	require.Equal(t, uint64(9), d.mruSeq.Load())
 }
@@ -1718,7 +1718,7 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 
 	alpha := d.stopped["alpha"]
 	require.Equal(t, records[0], alpha.record)
-	require.Equal(t, ports.SessionStopped, alpha.state)
+	require.Equal(t, ports.SessionDown, alpha.state)
 	require.NotNil(t, alpha.restoreDone)
 	select {
 	case <-alpha.restoreDone:

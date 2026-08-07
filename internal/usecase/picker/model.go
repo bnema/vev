@@ -596,8 +596,8 @@ func (r row) remoteKeyPointer() *domain.RemoteSessionKey {
 // renderList draws each visible row as up to three segments: a name segment
 // (bold when styles came from a truecolor theme), a base-styled attention
 // marker right after the name, and a muted detail segment (tab rows only) —
-// or a base-styled "(stopped)" suffix for stopped session headers. A tight
-// width ellipsizes the detail segment before eating into the name.
+// or a base-styled "(down)" suffix for down session headers. A tight width
+// ellipsizes the detail segment before eating into the name.
 func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles RenderStyles) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
@@ -640,7 +640,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 				} else {
 					detail += " "
 				}
-				ui.DrawText(frame, x, rect.Y+y, clipX, detail+"(stopped)", base)
+				ui.DrawText(frame, x, rect.Y+y, clipX, detail+"(down)", base)
 			} else {
 				ui.DrawText(frame, x, rect.Y+y, clipX, ui.TruncateText(r.detail, clipX-x), detailStyle)
 			}

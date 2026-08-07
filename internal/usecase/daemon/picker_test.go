@@ -741,7 +741,7 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 		runtimeState ports.SessionState
 	}{
 		{name: "broken", broken: true, runtimeState: ports.SessionBroken},
-		{name: "healthy without restored runtime", runtimeState: ports.SessionStopped},
+		{name: "healthy without restored runtime", runtimeState: ports.SessionDown},
 	}
 
 	for _, tt := range tests {
@@ -800,7 +800,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	defer release3()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactorySeq(t, p2, p3)
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: ports.SessionStopped}
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: ports.SessionDown}
 
 	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
 	awaitFrame(t, sends, ports.MsgOutput)

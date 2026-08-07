@@ -1434,7 +1434,7 @@ func listLocalSessions(ctx context.Context) (_ []ports.SessionInfo, retErr error
 		}
 		infos := make([]ports.SessionInfo, 0, len(records))
 		for _, r := range records {
-			state := ports.SessionStopped
+			state := ports.SessionDown
 			if r.DegradedReason != "" {
 				state = ports.SessionBroken
 			}
@@ -1481,12 +1481,12 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "NAME\tSTATE\tTABS\tATTACHED")
 	for _, s := range sessions {
-		state := "running"
+		state := "up"
 		tabs := fmt.Sprintf("%d", s.Tabs)
 		attached := "no"
 		switch s.State {
-		case ports.SessionStopped:
-			state = "stopped"
+		case ports.SessionDown:
+			state = "down"
 			tabs = "-"
 		case ports.SessionBroken:
 			state = "broken"

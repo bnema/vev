@@ -205,10 +205,10 @@ func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) [
 			Attached:  session.Attached,
 		}
 		switch session.State {
-		case "running":
-			info.State = ports.SessionRunning
-		case "stopped":
-			info.State = ports.SessionStopped
+		case "up":
+			info.State = ports.SessionUp
+		case "down":
+			info.State = ports.SessionDown
 		case "broken":
 			info.State = ports.SessionBroken
 		default:

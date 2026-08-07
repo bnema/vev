@@ -2,6 +2,7 @@ package picker
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -498,6 +499,11 @@ func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, Preview{})
 	require.Equal(t, 'w', frame.At(0, 0).Rune)
 	require.Equal(t, '(', frame.At(5, 0).Rune)
+	var label strings.Builder
+	for _, cell := range frame.Row(0) {
+		label.WriteRune(cell.Rune)
+	}
+	require.Contains(t, label.String(), "(down)")
 }
 
 func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
@@ -510,7 +516,7 @@ func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
 	require.Equal(t, stoppedStyle, styles.Stopped)
 
 	frame := m.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
-	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old (stopped)" header, 3 its tab row.
+	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old (down)" header, 3 its tab row.
 	require.Equal(t, stoppedStyle, frame.Row(2)[0].Style, "stopped header must be dim italic")
 	require.Equal(t, stoppedStyle, frame.Row(3)[0].Style, "stopped tab row must be dim italic")
 	require.NotEqual(t, stoppedStyle, frame.Row(0)[0].Style, "live header keeps base style")
@@ -587,7 +593,7 @@ func TestRenderListDrawsNameAndDetailSegmentsWithDistinctStyles(t *testing.T) {
 	}
 
 	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
-		{Name: "alpha", Detail: " (running)"},
+		{Name: "alpha", Detail: " (up)"},
 		{Name: "beta", Detail: " (idle)", Attention: true},
 	}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
 

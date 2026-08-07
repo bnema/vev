@@ -643,7 +643,7 @@ func (e controlExec) SessionRecovery(action string) (string, error) {
 		return "", err
 	}
 	if ok {
-		e.d.setStoppedRecovery(record, ports.SessionStopped)
+		e.d.setStoppedRecovery(record, ports.SessionDown)
 	}
 	return "", nil
 }
@@ -736,7 +736,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		row := ports.RemoteCatalogSession{
 			LifecycleID: snap.incarnation,
 			Name:        snap.name,
-			State:       "running",
+			State:       "up",
 			Ephemeral:   snap.ephemeral,
 			Tabs:        tabs,
 			Attached:    snap.attached,
@@ -752,7 +752,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		state := "stopped"
+		state := "down"
 		reason := ""
 		if entry.state == ports.SessionBroken || entry.record.DegradedReason != "" {
 			state = "broken"
@@ -791,7 +791,7 @@ func (e controlExec) remoteCatalogLegacy(sessions []*session) (string, error) {
 		snap := sess.snapshotView(viewOptions{})
 		rows = append(rows, ports.RemoteCatalogSession{
 			Name:      snap.name,
-			State:     "running",
+			State:     "up",
 			Ephemeral: snap.ephemeral,
 			Tabs:      ports.SaturateUint16(snap.tabCount),
 			Attached:  snap.attached,

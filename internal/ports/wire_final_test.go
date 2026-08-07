@@ -237,7 +237,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "sessions ephemeral boolean",
 			payload: func() []byte {
-				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionRunning}}})
+				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionUp}}})
 				b[6] = 2
 				return b
 			}(),
@@ -246,7 +246,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "sessions attached boolean",
 			payload: func() []byte {
-				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionRunning}}})
+				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionUp}}})
 				b[9] = 2
 				return b
 			}(),
