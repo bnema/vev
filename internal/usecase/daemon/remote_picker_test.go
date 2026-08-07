@@ -635,6 +635,54 @@ func TestRemoteRefreshVersionMismatchPreservesStaleRows(t *testing.T) {
 	d.remoteCatalog.mu.Unlock()
 }
 
+func TestRemoteCatalogRefreshUpdatesRemoteOwnerPicker(t *testing.T) {
+	d, view, _, remoteTransport := newRemoteMetadataLinkFixture(t)
+	t.Cleanup(func() { require.NoError(t, remoteTransport.Close()) })
+	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+
+	source.mu.Lock()
+	require.True(t, source.unregisterAttachmentLocked(ac))
+	source.mu.Unlock()
+	view.mu.Lock()
+	require.True(t, view.registerAttachmentLocked(ac))
+	view.mu.Unlock()
+	ac.setAttachmentOwner(view)
+	ac.recordPreviousOwner(source)
+
+	setCatalog := func(name string) {
+		d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+			Host: view.key.endpoint, FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
+				LifecycleID: view.key.lifecycleID, Name: name, State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+			}},
+		}})
+		d.remoteCatalog.mu.Lock()
+		d.remoteCatalog.status[view.key.endpoint] = remoteHostFresh
+		d.remoteCatalog.mu.Unlock()
+	}
+	setCatalog("cached")
+
+	d.enterPicker(source, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	setCatalog("updated")
+	d.refreshRemoteOpenPickers()
+
+	ac.overlays.pickerMu.Lock()
+	model := ac.overlays.picker.Clone()
+	ac.overlays.pickerMu.Unlock()
+	frame := model.Render(domain.Size{Cols: 80, Rows: 20}, picker.Preview{})
+	var text strings.Builder
+	for y := range frame.Height {
+		text.WriteString(rowText(frame.Row(y)))
+	}
+	require.Contains(t, text.String(), "updated", "remote-owner picker must use refreshed catalog rows")
+
+	output := awaitFrame(t, sends, ports.MsgOutput)
+	decoded, err := ports.UnmarshalOutput(output.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(decoded.Data), "updated", "remote-owner picker must repaint after refresh")
+}
+
 func TestRemotePickerSelectionKeepsLocalConnectionUntilRemoteViewIsReady(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	target := remoteLinkTestTarget()

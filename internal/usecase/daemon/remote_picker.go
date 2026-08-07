@@ -570,8 +570,8 @@ func (d *Daemon) refreshRemoteOpenPickers() {
 			continue
 		}
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-		if entry := ac.currentAttachmentSession(); entry != nil {
-			d.invalidateRender(entry, ac, true, "remote_picker.go")
-		}
+		// The picker is attachment-local: catalog changes repaint the actual
+		// owner, which can be either the retained local session or a remote view.
+		d.invalidateAttachedOwner(ac, true, "remote_picker.go")
 	}
 }
