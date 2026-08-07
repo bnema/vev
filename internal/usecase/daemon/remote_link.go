@@ -694,7 +694,8 @@ func (d *Daemon) handleRemoteLinkFrame(link *remoteLink, frame ports.Frame) erro
 		if err != nil {
 			return fmt.Errorf("remote view: decode detached: %w", err)
 		}
-		return errors.New("remote view: remote session detached")
+		d.retireTerminalRemoteView(link, ports.ReasonSessionKilled)
+		return nil
 	case ports.MsgError:
 		remoteErr, err := ports.UnmarshalErrorMsg(frame.Payload)
 		if err != nil {
