@@ -84,6 +84,21 @@ func TestVisualProbePersistsFullAndIncrementalOutput(t *testing.T) {
 	}
 }
 
+func TestVisualProbeResizesToAcceptedOutput(t *testing.T) {
+	probe := newVisualProbe(domain.Size{Cols: probeTestCols, Rows: probeTestRows})
+	outputSize := domain.Size{Cols: 48, Rows: 3}
+	result := probe.apply(ports.Output{
+		Epoch: 1, New: 1, Full: true, ViewRevision: 1, Size: outputSize, Data: []byte("resized"),
+	})
+
+	require.True(t, result.Accepted)
+	require.Equal(t, outputSize.Cols, probe.screen.Frame.Width)
+	require.Equal(t, outputSize.Rows, probe.screen.Frame.Height)
+	require.Len(t, probe.checkpoints, 1)
+	require.Equal(t, outputSize.Cols, probe.checkpoints[0].snapshot.Columns())
+	require.Equal(t, outputSize.Rows, probe.checkpoints[0].snapshot.Rows())
+}
+
 func TestVisualProbeRejectsOutputWithoutMutationOrAck(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
 	for _, tt := range []struct {
@@ -269,8 +284,8 @@ func TestAssertNoRemoteChromeIgnoresLocalBarsButRejectsContentLeak(t *testing.T)
 		content string
 		wantErr bool
 	}{
-		{name: "local bars", content: "picker at remote\nremote content\nlocal bottom", wantErr: false},
-		{name: "remote status in content", content: "local top\npicker at remote\nlocal bottom", wantErr: true},
+		{name: "local bars", content: "picker@remote\r\nremote content\r\nlocal bottom", wantErr: false},
+		{name: "remote status in content", content: "local top\r\npicker@remote\r\nlocal bottom", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			probe := newVisualProbe(domain.Size{Cols: 48, Rows: 3})

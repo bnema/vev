@@ -9,7 +9,7 @@ import (
 // the immediately preceding successfully activated local session. A remote
 // owner is retained in the owner history but is not interpreted as a local
 // session; remote back navigation is published with remote transitions.
-func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error {
+func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken, afterRemoteTransition ...func()) error {
 	if d == nil || token.ac == nil {
 		return nil
 	}
@@ -31,6 +31,9 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error
 				return nil
 			}
 			return err
+		}
+		if len(afterRemoteTransition) != 0 && afterRemoteTransition[0] != nil {
+			afterRemoteTransition[0]()
 		}
 		d.touchMRU(target)
 		d.firstPaintForTransition(published)

@@ -243,6 +243,20 @@ func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
 	require.Empty(t, d.sessions)
 }
 
+func TestShutdownDeadlineDoesNotWaitForUncooperativeRemoteConstruction(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	construction := &remoteViewConstruction{done: make(chan struct{})}
+	d.mu.Lock()
+	d.remoteViewConstructions[remoteViewKey{}] = construction
+	d.mu.Unlock()
+	deadline := &snapshotShutdownDeadline{done: make(chan struct{})}
+	close(deadline.done)
+
+	result := make(chan bool, 1)
+	go func() { result <- d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, deadline) }()
+	require.True(t, awaitTestValue(t, result, "shutdown blocked on canceled remote construction"))
+}
+
 func TestSnapshotStopContextCancelIsIdempotent(t *testing.T) {
 	deadline := &snapshotShutdownDeadline{done: make(chan struct{})}
 	_, cancel := snapshotStopContext(deadline)

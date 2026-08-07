@@ -15,7 +15,7 @@ func sleepRemoteViewRetry(ctx context.Context, clock ports.Clock) bool {
 		ctx = context.Background()
 	}
 	if clock == nil {
-		return true
+		clock = systemClock{}
 	}
 	timer := clock.NewTimer(remoteViewRetryDelay)
 	defer timer.Stop()

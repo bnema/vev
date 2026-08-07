@@ -471,6 +471,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			dialer = nextDialer
 			attemptRequest = nextRequest
 			remote = attemptRequest.Remote || r.remote
+			reconnect.remote = remote
 			resumeToken = 0
 			backoff = defaultReconnectBackoff.initial
 			continue

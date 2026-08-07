@@ -119,7 +119,10 @@ harness_status=0
 if [ -n "$artifact_dir" ]; then
   docker exec --user test -e HOME=/home/test -e VEV_HARNESS_ARTIFACT_DIR=/tmp/vev-harness-artifact "$local_container" /usr/local/bin/remote-picker-harness || harness_status=$?
   if ! docker cp "$local_container:/tmp/vev-harness-artifact/remote-picker-harness.json" "$artifact_dir/remote-picker-harness.json"; then
-    echo 'remote picker harness: failed to collect probe artifact' >&2
+    echo "remote picker harness: failed to collect probe artifact (acceptance status $harness_status)" >&2
+    if [ "$harness_status" -ne 0 ]; then
+      exit "$harness_status"
+    fi
     exit 1
   fi
   chmod 0600 "$artifact_dir/remote-picker-harness.json"

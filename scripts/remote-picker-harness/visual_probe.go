@@ -208,6 +208,9 @@ func (p *visualProbe) apply(output ports.Output) visualOutputResult {
 
 	// The client writes side effects as well as state-bearing frames, but only
 	// state-bearing frames advance the dependency chain and receive an ACK.
+	if p.screen.Frame.Width != output.Size.Cols || p.screen.Frame.Height != output.Size.Rows {
+		p.screen.Resize(output.Size.Cols, output.Size.Rows)
+	}
 	p.screen.Write(output.Data)
 	p.state = next
 	checkpoint := visualCheckpoint{event: event, state: p.state, snapshot: p.screen.Snapshot()}
@@ -320,7 +323,7 @@ func assertNoRemoteChrome(probe *visualProbe, remoteSession string) error {
 	// The first and last rows belong to the local attachment's bars. Remote
 	// daemon chrome must not be replayed into the content rows.
 	for _, line := range lines[1 : len(lines)-1] {
-		if strings.Contains(line, remoteSession+" at remote") || strings.Contains(line, " Sessions · ") {
+		if strings.Contains(line, remoteSession+"@remote") || strings.Contains(line, " Sessions · ") {
 			return fmt.Errorf("remote chrome leaked into content row %q", strings.TrimSpace(line))
 		}
 	}

@@ -833,11 +833,20 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 		}
 	}
 	// Candidate construction owns dial and handshake I/O outside daemon locks.
-	// Shutdown waits for each canceled constructor to close its completion gate
-	// so no unpublished transport or callback can outlive daemon teardown.
+	// A shutdown deadline bounds a non-cooperative dialer; a late constructor
+	// observes d.closing and retires its unpublished candidate independently.
 	for _, construction := range constructions {
-		if construction != nil && construction.done != nil {
+		if construction == nil || construction.done == nil {
+			continue
+		}
+		if deadline == nil {
 			<-construction.done
+			continue
+		}
+		select {
+		case <-construction.done:
+		case <-deadline.Done():
+			checkpointIncomplete = true
 		}
 	}
 	remoteWarms := make([]*remoteViewWarm, 0, len(remoteViews))
@@ -863,7 +872,7 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
-		return false
+		return checkpointIncomplete
 	}
 	for _, s := range snapshot {
 		// Cancellation and PTY closure must not wait behind a teardown owner that

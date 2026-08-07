@@ -18,6 +18,8 @@ var (
 	errRemoteViewStale       = errors.New("remote view: link is stale")
 )
 
+const maxRemoteViewOpenAttempts = 3
+
 // remoteViewConstruction reserves one remote-view key while its candidate
 // dials and handshakes. It is guarded by Daemon.mu. cancel is invoked only
 // after the daemon lock is released, because it may interrupt adapter I/O.
@@ -125,7 +127,7 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 		return nil, fmt.Errorf("remote view: key: %w", err)
 	}
 
-	for {
+	for attempts := 0; ; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -257,6 +259,10 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 			// A winner can be invalidated by its receiver immediately after
 			// publication. Do not spin constructors in a tight loop while the
 			// remote endpoint is unavailable.
+			attempts++
+			if attempts >= maxRemoteViewOpenAttempts {
+				return nil, errRemoteViewUnavailable
+			}
 			if !sleepRemoteViewRetry(ctx, d.clock) {
 				return nil, ctx.Err()
 			}
@@ -796,6 +802,23 @@ func (d *Daemon) repaintRemoteViewAttachments(view *remoteView, attachments []*a
 	}
 }
 
+// failSend invalidates the exact link after an outbound transport failure.
+func (link *remoteLink) failSend(view *remoteView, transport ports.Transport, err error) {
+	view.mu.Lock()
+	if view.link == link && view.linkGeneration == link.generation {
+		link.active = false
+		signalRemoteViewMetadataChangedLocked(view)
+	}
+	view.mu.Unlock()
+	if link.commands != nil {
+		link.commands.FailGeneration(link.generation, err)
+	}
+	if link.cancel != nil {
+		link.cancel()
+	}
+	_ = transport.Close()
+}
+
 // send serializes the complete outbound remote stream. It captures the exact
 // current transport under view.mu, releases every architecture lock, then lets
 // Close interrupt a blocked Send concurrently.
@@ -817,19 +840,7 @@ func (link *remoteLink) send(frame ports.Frame) error {
 		err := transport.Send(frame)
 		link.sendMu.Unlock()
 		if err != nil {
-			view.mu.Lock()
-			if view.link == link && view.linkGeneration == link.generation {
-				link.active = false
-				signalRemoteViewMetadataChangedLocked(view)
-			}
-			view.mu.Unlock()
-			if link.commands != nil {
-				link.commands.FailGeneration(link.generation, err)
-			}
-			if link.cancel != nil {
-				link.cancel()
-			}
-			_ = transport.Close()
+			link.failSend(view, transport, err)
 		}
 		return err
 	}
@@ -845,19 +856,7 @@ func (link *remoteLink) send(frame ports.Frame) error {
 	case err := <-result:
 		timer.Stop()
 		if err != nil {
-			view.mu.Lock()
-			if view.link == link && view.linkGeneration == link.generation {
-				link.active = false
-				signalRemoteViewMetadataChangedLocked(view)
-			}
-			view.mu.Unlock()
-			if link.commands != nil {
-				link.commands.FailGeneration(link.generation, err)
-			}
-			if link.cancel != nil {
-				link.cancel()
-			}
-			_ = transport.Close()
+			link.failSend(view, transport, err)
 		}
 		return err
 	case <-timer.C():

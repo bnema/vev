@@ -349,12 +349,12 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	if result.action == 's' {
 		d.togglePickerSort()
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-		d.invalidateRender(sess, ac, true, "picker.go")
+		d.invalidateAttachedOwner(ac, true, "picker.go")
 		return
 	}
 	if (result.action == '\r' || result.action == '\n') && !ok && cursorOK && (cursor.RemoteTarget != nil || cursor.RemoteHost != "") {
 		d.notifyRemotePickerUnavailable(sess, cursor)
-		d.invalidateRender(sess, ac, true, "picker.go")
+		d.invalidateAttachedOwner(ac, true, "picker.go")
 		return
 	}
 	if result.action == 'x' {
@@ -382,7 +382,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			defer fresh.End()
 		}
 		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: prevIdx})
-		d.invalidateRender(sess, ac, true, "picker.go")
+		d.invalidateAttachedOwner(ac, true, "picker.go")
 		return
 	}
 	if result.changed {
@@ -396,7 +396,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		if intent == pickerMovePane || intent == pickerMoveTab {
 			if err := d.movePickerSourceError(source); err != nil {
 				d.reportAttachmentError(sess, err)
-				d.invalidateRender(sess, ac, true, "picker.go")
+				d.invalidateAttachedOwner(ac, true, "picker.go")
 				return
 			}
 			if len(effects) != 0 && effects[0] != nil {
@@ -406,10 +406,10 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			err := d.commitMovePickerSelection(intent, source, target)
 			if err != nil {
 				d.reportAttachmentError(sess, movePickerUserError(err))
-				d.invalidateRender(sess, ac, true, "picker.go")
+				d.invalidateAttachedOwner(ac, true, "picker.go")
 				return
 			}
-			d.invalidateRender(sess, ac, true, "picker.go")
+			d.invalidateAttachedOwner(ac, true, "picker.go")
 			return
 		}
 		var err error
@@ -928,13 +928,23 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 		if target.RemoteKey != nil {
 			return errAttachmentTransition
 		}
-		if !retainedLocalTargetMatches(target, token.ac.previousOwner.Get()) {
+		previous := token.ac.previousOwner.Get()
+		if !retainedLocalTargetMatches(target, previous) {
 			return errAttachmentTransition
 		}
-		if guard.closePicker {
-			d.closePicker(token.ac)
+		transitioned := false
+		if err := d.backSessionForAttachment(token, func() {
+			transitioned = true
+			if guard.closePicker {
+				d.closePicker(token.ac)
+			}
+		}); err != nil {
+			return err
 		}
-		return d.backSessionForAttachment(token)
+		if !transitioned {
+			return errAttachmentTransition
+		}
+		return nil
 	}
 	if token.localSession() == nil || token.effect == nil {
 		return nil

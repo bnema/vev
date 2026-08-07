@@ -293,7 +293,9 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err := assertNoRemoteChrome(local.probe, remoteSession); err != nil {
 		return fmt.Errorf("remote content chrome: %w", err)
 	}
-	if err := sendInputAndAwait(ctx, local, "printf '"+inputMarker+"'", inputMarker); err != nil {
+	// Split the marker so the terminal's echoed command line cannot satisfy the
+	// awaited-output assertion before the shell executes it.
+	if err := sendInputAndAwait(ctx, local, "printf '%s%s' 'VEV_REMOTE_PICKER' '_INPUT_OK'", inputMarker); err != nil {
 		return fmt.Errorf("continued input on local transport: %w", err)
 	}
 	if err := assertNoDirectHandoff(local); err != nil {
