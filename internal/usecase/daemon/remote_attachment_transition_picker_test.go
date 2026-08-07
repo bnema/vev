@@ -16,6 +16,9 @@ func TestPickerTransitionRejectsInactiveRemoteLink(t *testing.T) {
 	}}
 	link := &remoteLink{view: view, generation: 1, transport: newRemoteLinkTestTransport()}
 	view.link, view.linkGeneration = link, 1
+	view.mu.Lock()
+	require.False(t, remoteViewLinkReusableLocked(view), "the fixture must start with an unusable link")
+	view.mu.Unlock()
 	d.mu.Lock()
 	require.NoError(t, d.registerRemoteViewLocked(view))
 	d.mu.Unlock()

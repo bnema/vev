@@ -494,13 +494,8 @@ func (d *Daemon) repaintForNotice(ac *attachedClient) {
 	if ac == nil {
 		return
 	}
-	if view, remote := ac.currentAttachmentOwner().(*remoteView); remote {
-		tr := ac.transport()
-		token := attachmentOwnerToken(view, ac, tr)
-		if token.ac == nil {
-			return
-		}
-		d.paintRemoteView(view, ac, false, token)
+	if _, remote := normalizeAttachmentOwner(ac.currentAttachmentOwner()).(*remoteView); remote {
+		d.invalidateAttachedOwner(ac, false, "notify.go")
 		return
 	}
 	sess := ac.currentSession()

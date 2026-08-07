@@ -83,6 +83,7 @@ func (d *Daemon) completeRemotePickerSelection(selection *remotePickerSelection)
 	if selection == nil || selection.token.ac == nil {
 		return
 	}
+	defer selection.cancel()
 	view, err := d.openRemoteView(selection.ctx, selection.target, selection.token.ac.sizeSnapshot())
 	if err != nil {
 		d.failRemotePickerSelection(selection, err)

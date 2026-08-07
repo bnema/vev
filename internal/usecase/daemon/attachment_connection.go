@@ -26,6 +26,7 @@ func attachmentToken(entry *session, ac *attachedClient, tr ports.Transport) att
 }
 
 func attachmentOwnerToken(owner attachmentOwner, ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
+	owner = normalizeAttachmentOwner(owner)
 	if owner == nil || ac == nil || tr == nil {
 		return attachmentConnectionToken{}
 	}

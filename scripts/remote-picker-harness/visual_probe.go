@@ -20,7 +20,6 @@ const (
 
 	maxProbeEvents      = 128
 	maxProbeCheckpoints = 16
-	maxProbeTraces      = 128
 	maxArtifactBytes    = 64 << 10
 
 	probeEventOutput            = "output"
@@ -45,6 +44,9 @@ func (s visualOutputState) next(output ports.Output) (visualOutputState, bool) {
 	}
 	if !s.initialized {
 		if output.New == 0 {
+			if output.Base != 0 || output.Full {
+				return visualOutputState{}, false
+			}
 			return s, true
 		}
 		if output.Base != 0 || !output.Full {
@@ -91,20 +93,6 @@ type probeEvent struct {
 	DataBytes    int
 }
 
-type probeTrace struct {
-	events []*probeEvent
-}
-
-func (t *probeTrace) record(event *probeEvent) {
-	if t == nil || event == nil {
-		return
-	}
-	if len(t.events) == maxProbeTraces {
-		t.events = t.events[1:]
-	}
-	t.events = append(t.events, event)
-}
-
 type visualCheckpoint struct {
 	event    *probeEvent
 	state    visualOutputState
@@ -129,7 +117,6 @@ type visualProbe struct {
 
 	events      []*probeEvent
 	checkpoints []visualCheckpoint
-	trace       *probeTrace
 	nextEvent   uint64
 
 	outputFrames int
@@ -164,12 +151,11 @@ func newVisualProbe(size domain.Size) *visualProbe {
 	return &visualProbe{screen: vt.NewScreen(width, height)}
 }
 
-func (p *visualProbe) configure(label string, trace *probeTrace) {
+func (p *visualProbe) configure(label string) {
 	if p == nil {
 		return
 	}
 	p.label = label
-	p.trace = trace
 }
 
 func (p *visualProbe) record(event probeEvent) *probeEvent {
@@ -184,9 +170,6 @@ func (p *visualProbe) record(event probeEvent) *probeEvent {
 		p.events = p.events[1:]
 	}
 	p.events = append(p.events, owned)
-	if p.trace != nil {
-		p.trace.record(owned)
-	}
 	return owned
 }
 
@@ -327,6 +310,9 @@ func assertUnifiedPickerRows(rows []string, localSession, remoteSession string) 
 }
 
 func assertNoRemoteChrome(probe *visualProbe, remoteSession string) error {
+	if probe == nil {
+		return errors.New("remote view probe was not created")
+	}
 	lines := visualScreenLines(probe.screen)
 	if len(lines) < 3 {
 		return errors.New("remote view did not expose a content region")
@@ -344,7 +330,6 @@ func assertNoRemoteChrome(probe *visualProbe, remoteSession string) error {
 type harnessArtifact struct {
 	dir    string
 	probes []*visualProbe
-	traces []*probeTrace
 }
 
 func newHarnessArtifact(dir string) *harnessArtifact {
@@ -359,13 +344,6 @@ func (a *harnessArtifact) registerProbe(probe *visualProbe) {
 		return
 	}
 	a.probes = append(a.probes, probe)
-}
-
-func (a *harnessArtifact) registerTrace(trace *probeTrace) {
-	if a == nil || trace == nil {
-		return
-	}
-	a.traces = append(a.traces, trace)
 }
 
 type artifactEvent struct {
@@ -404,10 +382,9 @@ type artifactProbe struct {
 }
 
 type artifactDocument struct {
-	Version int               `json:"version"`
-	Passed  bool              `json:"passed"`
-	Probes  []artifactProbe   `json:"probes"`
-	Traces  [][]artifactEvent `json:"traces,omitempty"`
+	Version int             `json:"version"`
+	Passed  bool            `json:"passed"`
+	Probes  []artifactProbe `json:"probes"`
 }
 
 func (a *harnessArtifact) document(passed bool) artifactDocument {
@@ -442,18 +419,6 @@ func (a *harnessArtifact) document(passed bool) artifactDocument {
 			})
 		}
 		document.Probes = append(document.Probes, item)
-	}
-	for _, trace := range a.traces {
-		if trace == nil {
-			continue
-		}
-		var events []artifactEvent
-		for _, event := range trace.events {
-			if event != nil {
-				events = append(events, artifactEventFrom(event))
-			}
-		}
-		document.Traces = append(document.Traces, events)
 	}
 	return document
 }
@@ -494,7 +459,7 @@ func (a *harnessArtifact) write(passed bool) error {
 		return fmt.Errorf("create harness artifact: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("protect harness artifact: %w", err)

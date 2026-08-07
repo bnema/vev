@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -126,6 +127,23 @@ func TestVisualProbeRejectsOutputWithoutMutationOrAck(t *testing.T) {
 	}
 }
 
+func TestVisualProbeRejectsInvalidUninitializedSideEffects(t *testing.T) {
+	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
+	for _, output := range []ports.Output{
+		{Epoch: 1, Base: 1, Size: size, Data: []byte("invalid base")},
+		{Epoch: 1, Full: true, Size: size, Data: []byte("invalid full")},
+	} {
+		probe := newVisualProbe(size)
+		result := probe.apply(output)
+		if result.Accepted || result.StateBearing || result.Ack != (ports.Ack{}) {
+			t.Fatalf("result = %+v, want rejected uninitialized side effect", result)
+		}
+		require.Len(t, probe.events, 1)
+		require.False(t, probe.events[0].Accepted)
+		require.Empty(t, probe.checkpoints)
+	}
+}
+
 func TestVisualProbeSideEffectsApplyWithoutAck(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
 	for _, tt := range []struct {
@@ -169,24 +187,24 @@ func TestVisualProbeSideEffectsApplyWithoutAck(t *testing.T) {
 func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
 	for _, tt := range []struct {
-		name      string
-		output    ports.Output
-		wantAck   bool
-		wantReset bool
+		name       string
+		output     ports.Output
+		wantACKs   int
+		wantResets int
 	}{
 		{
-			name:    "accepted full",
-			output:  ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("full")},
-			wantAck: true,
+			name:     "accepted full",
+			output:   ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("full")},
+			wantACKs: 1,
 		},
 		{
 			name:   "accepted side effect",
 			output: ports.Output{Epoch: 1, Size: size, Data: []byte("side effect")},
 		},
 		{
-			name:      "rejected state",
-			output:    ports.Output{Epoch: 1, New: 3, Full: true, ViewRevision: 4, Size: size, Data: []byte("gap")},
-			wantReset: true,
+			name:       "rejected state",
+			output:     ports.Output{Epoch: 1, New: 3, Full: true, ViewRevision: 4, Size: size, Data: []byte("gap")},
+			wantResets: 1,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -211,11 +229,11 @@ func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 					resetCount++
 				}
 			}
-			if (ackCount > 0) != tt.wantAck {
-				t.Fatalf("ACK count = %d, want ACK = %t", ackCount, tt.wantAck)
+			if ackCount != tt.wantACKs {
+				t.Fatalf("ACK count = %d, want %d", ackCount, tt.wantACKs)
 			}
-			if (resetCount > 0) != tt.wantReset {
-				t.Fatalf("reset count = %d, want reset = %t", resetCount, tt.wantReset)
+			if resetCount != tt.wantResets {
+				t.Fatalf("reset count = %d, want %d", resetCount, tt.wantResets)
 			}
 		})
 	}
@@ -244,6 +262,7 @@ func TestVisualProbeRecordsUnexpectedAttachTarget(t *testing.T) {
 }
 
 func TestAssertNoRemoteChromeIgnoresLocalBarsButRejectsContentLeak(t *testing.T) {
+	require.Error(t, assertNoRemoteChrome(nil, "picker"))
 	for _, test := range []struct {
 		name    string
 		content string
@@ -266,12 +285,19 @@ func TestAssertNoRemoteChromeIgnoresLocalBarsButRejectsContentLeak(t *testing.T)
 func TestHarnessArtifactIsBoundedAndContainsOnlyMetadata(t *testing.T) {
 	dir := t.TempDir()
 	artifact := newHarnessArtifact(dir)
-	probe := newVisualProbe(domain.Size{Cols: probeTestCols, Rows: probeTestRows})
-	probe.configure("local-picker", nil)
+	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
+	probe := newVisualProbe(size)
+	probe.configure("local-picker")
 	artifact.registerProbe(probe)
 	secret := "not-for-artifact"
-	if result := probe.apply(ports.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: probeTestCols, Rows: probeTestRows}, Data: []byte(secret)}); !result.Accepted {
-		t.Fatal("probe output was rejected")
+	for state := uint64(1); state <= maxProbeEvents+1; state++ {
+		output := ports.Output{Epoch: 1, Base: state - 1, New: state, Size: size, Data: []byte(secret)}
+		if state == 1 {
+			output.Full = true
+		}
+		if result := probe.apply(output); !result.Accepted {
+			t.Fatalf("probe output %d was rejected", state)
+		}
 	}
 	if err := artifact.write(true); err != nil {
 		t.Fatal(err)
@@ -291,7 +317,13 @@ func TestHarnessArtifactIsBoundedAndContainsOnlyMetadata(t *testing.T) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatalf("artifact JSON: %v", err)
 	}
-	if !document.Passed || len(document.Probes) != 1 || len(document.Probes[0].Checkpoints) != 1 {
-		t.Fatalf("artifact document = %+v, want one passed probe checkpoint", document)
+	if !document.Passed || len(document.Probes) != 1 {
+		t.Fatalf("artifact document = %+v, want one passed probe", document)
+	}
+	if len(document.Probes[0].Events) != maxProbeEvents {
+		t.Fatalf("artifact events = %d, want %d", len(document.Probes[0].Events), maxProbeEvents)
+	}
+	if len(document.Probes[0].Checkpoints) != maxProbeCheckpoints {
+		t.Fatalf("artifact checkpoints = %d, want %d", len(document.Probes[0].Checkpoints), maxProbeCheckpoints)
 	}
 }

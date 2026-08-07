@@ -950,6 +950,26 @@ func TestRunSendsRequestedProxiedRenderMode(t *testing.T) {
 	require.Equal(t, ports.RenderModeProxiedContent, helloFromSend(t, tr).RenderMode)
 }
 
+func TestRunRejectsMismatchedProxiedWelcomeBeforeEnteringRawMode(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{1}
+	target := domain.RemoteSessionTarget{
+		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
+		SessionName: "main", LiveTabID: "tab-live",
+	}
+	term := newRunTerminal()
+	defer term.in.unblock()
+	tr := &recordingTransport{recvs: []recvItem{{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+		SessionID: "s1", SessionName: "main", RenderMode: ports.RenderModeFullTerminal,
+	}))}}}
+
+	err := runTestClient(context.Background(), testDependencies(&sequenceDialer{trs: []ports.Transport{tr}}, term, realClock{}, nil, nil), client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "main", RenderMode: ports.RenderModeProxiedContent,
+		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	})
+	require.ErrorContains(t, err, "daemon accepted render mode")
+	require.Zero(t, term.rawCount.Load())
+}
+
 func TestRunnerRejectsInvalidAttachRequestBeforeHello(t *testing.T) {
 	lifecycle := domain.SessionLifecycleID{}
 	lifecycle[0] = 1

@@ -13,7 +13,7 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error
 	if d == nil || token.ac == nil {
 		return nil
 	}
-	if view, remote := token.owner.(*remoteView); remote {
+	if view, remote := normalizeAttachmentOwner(token.owner).(*remoteView); remote {
 		previous := token.ac.previousOwner.Get()
 		target := localSession(previous)
 		if target == nil {
@@ -103,6 +103,7 @@ func (ac *attachedClient) clearPreviousOwnerIf(target attachmentOwner) {
 // committed. Keeping this after the commit makes failed/displaced switches
 // leave the toggle pair intact.
 func (ac *attachedClient) recordPreviousOwner(origin attachmentOwner) {
+	origin = normalizeAttachmentOwner(origin)
 	if ac != nil && origin != nil {
 		ac.previousOwner.Set(origin)
 	}

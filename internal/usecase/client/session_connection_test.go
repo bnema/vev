@@ -48,6 +48,11 @@ func TestSessionConnectionOwnsCompleteAttachRequestForLocalAndRemoteTransports(t
 }
 
 func TestSessionConnectionAttachRequestValidation(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{1}
+	remoteTarget := &domain.RemoteSessionTarget{
+		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
+		SessionName: "work", LiveTabID: "tab-1",
+	}
 	tests := []struct {
 		name    string
 		request client.AttachRequest
@@ -62,6 +67,8 @@ func TestSessionConnectionAttachRequestValidation(t *testing.T) {
 		{name: "unknown intent", request: client.AttachRequest{Intent: 99, SessionName: "work"}, wantErr: true},
 		{name: "invalid render mode", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", RenderMode: ports.RenderMode(99)}, wantErr: true},
 		{name: "proxied without remote target", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", RenderMode: ports.RenderModeProxiedContent}, wantErr: true},
+		{name: "remote target with new intent", request: client.AttachRequest{Intent: ports.IntentNew, SessionName: "work", RemoteTarget: remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, wantErr: true},
+		{name: "daemon-owned without remote target", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

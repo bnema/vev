@@ -163,7 +163,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err != nil {
 		return fmt.Errorf("open remote picker source: %w", err)
 	}
-	remote.probe.configure("remote-picker-source", nil)
+	remote.probe.configure("remote-picker-source")
 	ownsRemoteSession := false
 	defer func() {
 		_ = remote.Close()
@@ -244,7 +244,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	// This is the one client-equivalent connection for the proof. Remote
 	// selection must replace its daemon-side owner without sending an endpoint
 	// or MsgAttachTarget to this transport.
-	local.probe.configure("local-picker", nil)
+	local.probe.configure("local-picker")
 	defer func() { _ = local.Close() }()
 	if err := attachAndCheck(ctx, local, ports.Hello{
 		Intent: ports.IntentNew, Name: localSession, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
@@ -519,7 +519,7 @@ func openTransport(ctx context.Context, mode ports.RemoteTransportMode, target s
 		return nil, err
 	}
 	h := newHarnessTransport(transport)
-	h.probe.configure(string(mode), nil)
+	h.probe.configure(string(mode))
 	if artifact := harnessArtifactFromContext(ctx); artifact != nil {
 		artifact.registerProbe(h.probe)
 	}
@@ -625,7 +625,7 @@ func openLocalTransport(ctx context.Context) (*harnessTransport, error) {
 		return nil, err
 	}
 	h := newHarnessTransport(transport)
-	h.probe.configure("local", nil)
+	h.probe.configure("local")
 	if artifact := harnessArtifactFromContext(ctx); artifact != nil {
 		artifact.registerProbe(h.probe)
 	}

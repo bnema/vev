@@ -14,6 +14,7 @@ func (d *Daemon) paintProxiedContent(entry *session, ac *attachedClient, reset b
 		return paintRejected
 	}
 	marks := d.newRuntimeMarkBatch()
+	defer marks.flush()
 	if lease != nil {
 		token := attachmentToken(entry, ac, ac.transport())
 		token.lease = lease

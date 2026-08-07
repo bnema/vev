@@ -203,6 +203,22 @@ func remoteMetadataFrame(t *testing.T, metadata ports.SessionMeta) ports.Frame {
 	return ports.Frame{Type: ports.MsgSessionMeta, Payload: payload}
 }
 
+func TestStopAndJoinRemoteLinkDoesNotWaitForUnstartedWorker(t *testing.T) {
+	transport := newRemoteLinkTestTransport()
+	link := &remoteLink{generation: 1, transport: transport, done: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		stopAndJoinRemoteLink(link)
+		close(done)
+	}()
+	awaitTestCompletion(t, done, "stopping an unstarted remote link blocked")
+	select {
+	case <-transport.closed:
+	default:
+		t.Fatal("stopping an unstarted remote link did not close its transport")
+	}
+}
+
 func TestRemoteLinkDetachedPropagatesItsExactReason(t *testing.T) {
 	d, view, link, _ := newRemoteMetadataLinkFixture(t)
 	attachment, sends := attachRemoteMetadataClient(t, view)

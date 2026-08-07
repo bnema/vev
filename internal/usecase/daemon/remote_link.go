@@ -326,9 +326,7 @@ func stopAndJoinRemoteLink(link *remoteLink) {
 	if link.transport != nil {
 		_ = link.transport.Close()
 	}
-	if link.done != nil {
-		<-link.done
-	}
+	joinRemoteLink(link)
 }
 
 // constructRemoteView builds an unexposed candidate. Its caller owns a

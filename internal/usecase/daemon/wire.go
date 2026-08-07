@@ -71,7 +71,9 @@ func frameSessionMeta(s *session, ac *attachedClient, revision uint64) (ports.Fr
 		meta.Tabs = append(meta.Tabs, ports.SessionTabMeta{ID: id, Name: tabDisplayName(tab, i), Attention: tab.attention})
 		activePresent = activePresent || active == id
 	}
-	if !activePresent && len(meta.Tabs) != 0 {
+	if len(meta.Tabs) == 0 {
+		active = ""
+	} else if !activePresent {
 		active = meta.Tabs[0].ID
 	}
 	meta.ActiveTabID = active

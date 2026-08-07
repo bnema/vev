@@ -98,6 +98,16 @@ func TestProxiedCompositionUsesAttachmentContentWindowAndFloatingSurface(t *test
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, composed.damage)
 }
 
+func TestProxiedPaintFlushesRuntimeMarks(t *testing.T) {
+	observer := &daemonRuntimeObserver{}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d.runtimeObserver = observer
+	ac.renderMode = ports.RenderModeProxiedContent
+
+	require.Equal(t, paintEmitted, d.paintProxiedContent(sess, ac, true, nil))
+	require.NotEmpty(t, observer.marks, "proxied rendering must flush observer marks after releasing sendMu")
+}
+
 func TestProxiedMetadataFallsBackFromStaleAttachmentTab(t *testing.T) {
 	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	sess.mu.Lock()

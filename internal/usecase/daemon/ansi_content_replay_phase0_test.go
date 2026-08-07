@@ -261,6 +261,8 @@ func TestPhase0PrivateReplaySuppressesHostSideEffects(t *testing.T) {
 	data = append(data, "\x1b[5n\x1b[c\x1b[6n\x1b]10;?\x07"...)
 	data = append(data, "\x1b]9;remote notification\x07"...)
 	data = append(data, "\x1b]777;notify;title;body\x07"...)
+	data = append(data, "\x1b]0;remote-title\x07"...)
+	data = append(data, "\x1b]2;remote-title-2\x1b\\"...)
 	data = append(data, "\x1b]9;4;2;0\x07\x1b]9;4;0\x07\a"...)
 	data = append(data, "\x1bP1;2|dcs-payload\x1b\\"...)
 	data = append(data, "\x1b_Ga=T,f=100;image-payload\x1b\\"...)
@@ -277,7 +279,9 @@ func TestPhase0PrivateReplaySuppressesHostSideEffects(t *testing.T) {
 	requirePhase0ComposedContent(t, composition, expected)
 	require.Equal(t, 0, capture.cursor.Row)
 	require.Equal(t, 4, capture.cursor.Col)
-	require.Empty(t, screen.TerminalTitle())
+	// The private remote VT retains its title as terminal state, but the
+	// composed local output below contains no title-setting control sequence.
+	require.Equal(t, "remote-title-2", screen.TerminalTitle())
 
 	// A control sequence is consumed before composition and cannot appear in
 	// the locally rendered result.

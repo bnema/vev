@@ -1276,7 +1276,9 @@ func TestRemoteRowsRequireFreshRichIdentityForPickerActivation(t *testing.T) {
 		{status: remoteHostCached},
 		{status: remoteHostRefreshing},
 		{status: remoteHostFresh, want: true},
+		{status: remoteHostStale},
 		{status: remoteHostUnreachable},
+		{status: remoteHostMalformed},
 		{status: remoteHostVersionMismatch},
 	} {
 		view := remotePickerView(key, session, test.status, time.Unix(1, 0))

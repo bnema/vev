@@ -266,7 +266,7 @@ func validateAttachRequest(request AttachRequest) error {
 		return errors.New("vev: remote attach target requires daemon-owned environment")
 	}
 	if request.Intent != ports.IntentAttach && request.Intent != ports.IntentResume {
-		return fmt.Errorf("vev: remote attach target requires attach or resume intent")
+		return errors.New("vev: remote attach target requires attach or resume intent")
 	}
 	return nil
 }

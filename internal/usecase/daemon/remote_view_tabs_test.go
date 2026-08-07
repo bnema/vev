@@ -40,6 +40,38 @@ func TestSendRemoteViewCommandAllowsOnlyRelativeTabCommands(t *testing.T) {
 	}
 }
 
+func TestSendRemoteViewCommandReportsRemoteFailureAndCancellation(t *testing.T) {
+	t.Run("remote failure", func(t *testing.T) {
+		d, _, link, transport := newRemoteMetadataLinkFixture(t)
+		link.commands = NewCommandRequestTracker()
+		done := make(chan error, 1)
+		go func() {
+			done <- d.sendRemoteViewCommand(context.Background(), link, link.generation, "next-tab")
+		}()
+		frame := awaitFrame(t, transport.sent, ports.MsgCommand)
+		request, err := ports.UnmarshalCommandRequest(frame.Payload)
+		require.NoError(t, err)
+		resultPayload := ports.MarshalCommandResult(ports.CommandResult{RequestID: request.RequestID, Code: 12, Text: "rejected"})
+		require.NoError(t, d.handleRemoteLinkFrame(link, ports.Frame{Type: ports.MsgCommandResult, Payload: resultPayload}))
+		require.ErrorContains(t, awaitTestValue(t, done, "failed remote tab command did not complete"), "command \"next-tab\" failed (12): rejected")
+		require.Zero(t, link.commands.PendingCount())
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		d, _, link, transport := newRemoteMetadataLinkFixture(t)
+		link.commands = NewCommandRequestTracker()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- d.sendRemoteViewCommand(ctx, link, link.generation, "previous-tab")
+		}()
+		awaitFrame(t, transport.sent, ports.MsgCommand)
+		cancel()
+		require.ErrorIs(t, awaitTestValue(t, done, "canceled remote tab command did not complete"), context.Canceled)
+		require.Zero(t, link.commands.PendingCount())
+	})
+}
+
 func TestSendRemoteViewCommandRejectsOperationsOutsideRelativeTabAllowlist(t *testing.T) {
 	for _, slug := range []string{
 		"new-session",
