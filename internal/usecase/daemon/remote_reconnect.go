@@ -2,9 +2,30 @@ package daemon
 
 import (
 	"context"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 )
+
+const remoteViewRetryDelay = 100 * time.Millisecond
+
+func sleepRemoteViewRetry(ctx context.Context, clock ports.Clock) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if clock == nil {
+		return true
+	}
+	timer := clock.NewTimer(remoteViewRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C():
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
 
 // reconnectRemoteView preserves the registered view and its local attachments
 // while openRemoteView verifies a replacement link. It changes presentation

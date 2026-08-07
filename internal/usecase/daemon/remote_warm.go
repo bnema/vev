@@ -142,11 +142,7 @@ func (d *Daemon) expireRemoteViewWarm(view *remoteView, warm *remoteViewWarm) {
 	if link == nil {
 		return
 	}
-	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-	link.cancel()
-	if link.transport != nil {
-		_ = link.transport.Close()
-	}
+	interruptRemoteLink(link)
 	joinRemoteLink(link)
 }
 

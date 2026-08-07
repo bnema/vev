@@ -244,7 +244,7 @@ func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
 	if view, remote := token.owner.(*remoteView); remote {
-		go d.paintRemoteView(view, ac, true, token)
+		d.scheduleRemoteViewPaint(view, ac, true)
 	} else if sess := token.localSession(); sess != nil {
 		go d.paint(sess, ac, true, token.lease)
 	}
@@ -267,7 +267,7 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 		return true
 	}
 	if sess := token.localSession(); sess != nil {
-		if rc := sess.core().coordinator.Load(); rc != nil {
+		if rc := sess.renderCoordinator(); rc != nil {
 			rc.notifyAckForLease(token.lease)
 		}
 	} else if view, remote := token.owner.(*remoteView); remote {
@@ -275,7 +275,7 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 		// newly available output-window capacity. Recompose from the retained
 		// private VT so an update previously blocked by the local client window
 		// is not stranded until another remote frame arrives.
-		go d.paintRemoteView(view, ac, false, token)
+		d.scheduleRemoteViewPaint(view, ac, false)
 	}
 	return true
 }

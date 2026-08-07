@@ -24,7 +24,7 @@ func attachRemoteGeometryClient(t *testing.T, view *remoteView, size domain.Size
 func resizeRemoteGeometryAttachment(t *testing.T, d *Daemon, view *remoteView, ac *attachedClient, size domain.Size, remoteSends chan ports.Frame) domain.Size {
 	t.Helper()
 	token := attachmentOwnerToken(view, ac, ac.transport())
-	require.True(t, token.current())
+	require.True(t, token.attachmentCurrent())
 	require.True(t, d.resizeAttachmentForLease(token, size))
 
 	frame := awaitFrame(t, remoteSends, ports.MsgResize)

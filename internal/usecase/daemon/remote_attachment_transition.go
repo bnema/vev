@@ -28,7 +28,7 @@ func (d *Daemon) transitionToRemoteViewForPicker(token attachmentConnectionToken
 
 func (d *Daemon) transitionToRemoteViewGuarded(token attachmentConnectionToken, target *remoteView, selection *remotePickerSelection, expectedLink *remoteLink, expectedLinkGeneration uint64) (attachmentConnectionToken, error) {
 	source := token.localSession()
-	if d == nil || source == nil || token.ac == nil || target == nil {
+	if d == nil || source == nil || token.ac == nil || target == nil || token.transport.transport == nil {
 		return attachmentConnectionToken{}, errAttachmentTransition
 	}
 	if token.effect != nil {
@@ -86,6 +86,7 @@ func (d *Daemon) transitionToRemoteViewGuarded(token attachmentConnectionToken, 
 		rebase:     true,
 	}
 	token.ac.publishFrozenAttachmentCapability(published)
+	token.ac.recordPreviousOwner(source)
 	target.mu.Unlock()
 	source.mu.Unlock()
 	d.notices.routingMu.Unlock()
@@ -98,7 +99,6 @@ func (d *Daemon) transitionToRemoteViewGuarded(token attachmentConnectionToken, 
 		coordinator.noteDetach(token.ac)
 	}
 	d.recalculateSessionGeometryAndInvalidateAsync(source, "remote_attachment_transition.go")
-	token.ac.recordPreviousOwner(source)
 	d.recordRemoteRecent(token.ac, target)
 	return published, nil
 }

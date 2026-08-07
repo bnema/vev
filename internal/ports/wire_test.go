@@ -452,6 +452,13 @@ func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 	assertTrailingGarbageFails(t, full, UnmarshalWelcome)
 }
 
+func TestMarshalWelcomeRejectsInvalidRenderMode(t *testing.T) {
+	got := MarshalWelcome(Welcome{SessionID: "sess-1", RenderMode: RenderMode(99)})
+	if got != nil {
+		t.Fatalf("MarshalWelcome() = %#v, want nil for invalid render mode", got)
+	}
+}
+
 func TestCommandErrorCodes(t *testing.T) {
 	require.Equal(t, uint16(6), ErrUnknownCommand)
 	require.Equal(t, uint16(7), ErrNotScriptable)

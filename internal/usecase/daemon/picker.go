@@ -269,6 +269,7 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 	rt := ac.overlays
 	var previewGeneration uint64
 	var instance remotePickerInstance
+	var selection *remotePickerSelection
 	var closed bool
 	return listInputState{
 		pending:  &rt.pickerPending,
@@ -279,10 +280,9 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		unlock:   rt.pickerMu.Unlock,
 		active:   func() bool { return rt.picker != nil },
 		closeLocked: func() {
-			if selection := rt.pickerRemoteSelection; selection != nil {
+			if selection = rt.pickerRemoteSelection; selection != nil {
 				rt.pickerRemoteSelection = nil
 				rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
-				selection.cancel()
 				return
 			}
 			closed = true
@@ -293,6 +293,9 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 			previewGeneration = rt.pickerPreviewGeneration
 		},
 		afterClose: func() {
+			if selection != nil {
+				selection.cancel()
+			}
 			if closed {
 				d.clearPreviewGeneration(ac, previewGeneration)
 				d.remotePickerClosed(instance)

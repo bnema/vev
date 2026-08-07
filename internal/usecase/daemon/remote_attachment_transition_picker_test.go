@@ -15,8 +15,8 @@ func TestPickerTransitionRejectsInactiveRemoteLink(t *testing.T) {
 		endpoint: "remote.example", lifecycleID: domain.SessionLifecycleID{1}, sessionName: "remote",
 	}}
 	link := &remoteLink{view: view, generation: 1, transport: newRemoteLinkTestTransport()}
-	view.link, view.linkGeneration = link, 1
 	view.mu.Lock()
+	view.link, view.linkGeneration = link, 1
 	require.False(t, remoteViewLinkReusableLocked(view), "the fixture must start with an unusable link")
 	view.mu.Unlock()
 	d.mu.Lock()
@@ -24,10 +24,11 @@ func TestPickerTransitionRejectsInactiveRemoteLink(t *testing.T) {
 	d.mu.Unlock()
 
 	model := picker.New(nil, picker.SelectionConfig{})
+	token := source.attachmentToken(ac, ac.transport())
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = model
 	ac.overlays.pickerGeneration++
-	selection := &remotePickerSelection{model: model, generation: ac.overlays.pickerGeneration, token: source.attachmentToken(ac, ac.transport())}
+	selection := &remotePickerSelection{model: model, generation: ac.overlays.pickerGeneration, token: token}
 	ac.overlays.pickerRemoteSelection = selection
 	ac.overlays.pickerMu.Unlock()
 

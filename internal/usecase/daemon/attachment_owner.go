@@ -162,10 +162,11 @@ func (d *Daemon) retireShutdownRemoteAttachment(view *remoteView, ac *attachedCl
 	if d == nil || view == nil || ac == nil {
 		return
 	}
-	if sameAttachmentOwner(ac.currentAttachmentOwner(), view) {
-		ac.connectionGeneration.Add(1)
-		ac.setAttachmentOwner(nil)
+	if !sameAttachmentOwner(ac.currentAttachmentOwner(), view) {
+		return
 	}
+	ac.connectionGeneration.Add(1)
+	ac.setAttachmentOwner(nil)
 	ac.clearPreviousSession()
 	transport := ac.transport()
 	d.boundedSend(ac, frameDetached(reason))

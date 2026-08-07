@@ -186,14 +186,7 @@ func newRemoteMetadataLinkFixture(t *testing.T) (*Daemon, *remoteView, *remoteLi
 
 func attachRemoteMetadataClient(t *testing.T, view *remoteView) (*attachedClient, chan ports.Frame) {
 	t.Helper()
-	transport, sends := newCapturingTransport(t)
-	ac := &attachedClient{tr: transport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac.initOverlays()
-	ac.setAttachmentOwner(view)
-	view.mu.Lock()
-	require.True(t, view.registerAttachmentLocked(ac))
-	view.mu.Unlock()
-	return ac, sends
+	return attachRemoteGeometryClient(t, view, domain.Size{Cols: 80, Rows: 24})
 }
 
 func remoteMetadataFrame(t *testing.T, metadata ports.SessionMeta) ports.Frame {
@@ -241,7 +234,10 @@ func TestRemoteLinkAcceptedMetadataRepaintsEveryAttachedClientUnderLocalChrome(t
 	callbacks := make(chan struct{}, 2)
 	for _, ac := range []*attachedClient{first, second} {
 		ac.beforeAttachmentTokenValidation = func() {
+			// This intentionally empty critical section is a callback-outside-lock
+			// probe: the callback must be able to acquire view.mu.
 			view.mu.Lock()
+			//lint:ignore SA2001 the empty section is the lock-ordering probe
 			view.mu.Unlock()
 			callbacks <- struct{}{}
 		}
@@ -268,6 +264,23 @@ func TestRemoteLinkAcceptedMetadataRepaintsEveryAttachedClientUnderLocalChrome(t
 	view.mu.Lock()
 	require.Equal(t, uint64(2), view.metadata.Revision)
 	require.Equal(t, "renamed", view.metadata.Tabs[0].Name)
+	view.mu.Unlock()
+}
+
+func TestRemoteLinkAppliesSideEffectOutputWithoutAdvancingStateOrAcking(t *testing.T) {
+	_, view, link, _ := newRemoteMetadataLinkFixture(t)
+	attachment, _ := attachRemoteMetadataClient(t, view)
+	before := view.output
+	ack, reset, attachments, accepted := view.applyRemoteOutput(link, ports.Output{
+		Epoch: 1, Size: domain.Size{Cols: 80, Rows: 22}, Data: []byte("side effect"),
+	})
+	require.True(t, accepted)
+	require.Zero(t, ack)
+	require.False(t, reset)
+	require.Equal(t, []*attachedClient{attachment}, attachments)
+	view.mu.Lock()
+	require.Equal(t, before, view.output)
+	require.Contains(t, screenLineText(view.screen, 0), "side effect")
 	view.mu.Unlock()
 }
 
@@ -899,7 +912,7 @@ func TestOpenRemoteViewCancellationClosesUnpublishedTransport(t *testing.T) {
 	awaitFrame(t, transport.sent, ports.MsgHello)
 	cancel()
 
-	got := <-resultCh
+	got := awaitTestValue(t, resultCh, "canceled remote view construction did not finish")
 	require.Nil(t, got.view)
 	require.ErrorIs(t, got.err, context.Canceled)
 	select {
@@ -1077,7 +1090,7 @@ func TestOpenRemoteViewElectsOneConstructorAndCanceledWaiterDoesNotPoisonWinner(
 		view, err := d.openRemoteView(context.Background(), target, size)
 		ownerResult <- result{view: view, err: err}
 	}()
-	<-started
+	awaitTestCompletion(t, started, "remote view constructor did not start")
 
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
 	cancelWaiter()
@@ -1087,7 +1100,7 @@ func TestOpenRemoteViewElectsOneConstructorAndCanceledWaiterDoesNotPoisonWinner(
 	require.Equal(t, int32(1), factory.calls.Load())
 
 	close(release)
-	owner := <-ownerResult
+	owner := awaitTestValue(t, ownerResult, "remote view constructor result did not arrive")
 	require.NoError(t, owner.err)
 	require.NotNil(t, owner.view)
 	require.Equal(t, int32(1), factory.calls.Load())

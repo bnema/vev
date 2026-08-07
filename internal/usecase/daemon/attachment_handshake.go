@@ -10,7 +10,7 @@ import (
 // owner is deliberately generic so a resumed remote view receives the same
 // local-client Welcome/output lifecycle without being manufactured as a local
 // session.
-func (d *Daemon) completeAttachmentHandshake(handshakeCtx context.Context, timedOut <-chan struct{}, stopHandshakeTransport, finishHandshake func(), tr ports.Transport, owner attachmentOwner, ac *attachedClient) {
+func (d *Daemon) completeAttachmentHandshake(handshakeCtx context.Context, stopHandshakeTransport, finishHandshake func(), tr ports.Transport, owner attachmentOwner, ac *attachedClient) {
 	failAttachment := func() {
 		d.failHandshakeAttachmentOwner(owner, ac, tr)
 	}

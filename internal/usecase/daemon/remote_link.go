@@ -42,6 +42,7 @@ type remoteLink struct {
 	target     domain.RemoteSessionTarget
 	clientID   [16]byte
 	transport  ports.Transport
+	clock      ports.Clock
 	cancel     context.CancelFunc
 
 	sendMu        sync.Mutex
@@ -244,10 +245,7 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 			stopAndJoinRemoteLink(replaced)
 		}
 		for _, attachment := range repaint {
-			token := attachmentOwnerToken(winner, attachment, attachment.transport())
-			if token.ac != nil {
-				go d.paintRemoteView(winner, attachment, false, token)
-			}
+			d.scheduleRemoteViewPaint(winner, attachment, false)
 		}
 		if winner != nil {
 			d.mu.Lock()
@@ -255,6 +253,12 @@ func (d *Daemon) openRemoteView(ctx context.Context, target domain.RemoteSession
 			d.mu.Unlock()
 			if healthy && current == winner {
 				return winner, nil
+			}
+			// A winner can be invalidated by its receiver immediately after
+			// publication. Do not spin constructors in a tight loop while the
+			// remote endpoint is unavailable.
+			if !sleepRemoteViewRetry(ctx, d.clock) {
+				return nil, ctx.Err()
 			}
 			continue
 		}
@@ -315,17 +319,25 @@ func installRemoteViewCandidateLocked(view, candidate *remoteView) (*remoteLink,
 	return replaced, true
 }
 
-func stopAndJoinRemoteLink(link *remoteLink) {
+// interruptRemoteLink invalidates an exact link without waiting for its
+// receiver. Callers may join afterward, but a receiver must never join itself.
+func interruptRemoteLink(link *remoteLink) {
 	if link == nil {
 		return
 	}
-	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
+	if link.commands != nil {
+		link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
+	}
 	if link.cancel != nil {
 		link.cancel()
 	}
 	if link.transport != nil {
 		_ = link.transport.Close()
 	}
+}
+
+func stopAndJoinRemoteLink(link *remoteLink) {
+	interruptRemoteLink(link)
 	joinRemoteLink(link)
 }
 
@@ -362,6 +374,7 @@ func (d *Daemon) constructRemoteView(ctx context.Context, target domain.RemoteSe
 		generation: view.linkGeneration,
 		target:     target,
 		clientID:   clientID,
+		clock:      d.clock,
 		cancel:     cancelLink,
 		commands:   NewCommandRequestTracker(),
 		done:       make(chan struct{}),
@@ -639,7 +652,14 @@ func (v *remoteView) applyRemoteOutput(link *remoteLink, output ports.Output) (a
 		return 0, true, nil, false
 	}
 	if output.New == 0 {
-		return 0, false, nil, true
+		if len(output.Data) != 0 && v.screen != nil {
+			v.screen.Write(output.Data)
+		}
+		attachments = make([]*attachedClient, 0, len(v.attachments))
+		for attachment := range v.attachments {
+			attachments = append(attachments, attachment)
+		}
+		return 0, false, attachments, true
 	}
 	v.output = next
 	v.resetRequested = false
@@ -772,10 +792,7 @@ func (d *Daemon) handleRemoteLinkFrame(link *remoteLink, frame ports.Frame) erro
 // I/O happen after that lock has been released.
 func (d *Daemon) repaintRemoteViewAttachments(view *remoteView, attachments []*attachedClient) {
 	for _, attachment := range attachments {
-		token := attachmentOwnerToken(view, attachment, attachment.transport())
-		if token.ac != nil {
-			go d.paintRemoteView(view, attachment, false, token)
-		}
+		d.scheduleRemoteViewPaint(view, attachment, false)
 	}
 }
 
@@ -796,20 +813,59 @@ func (link *remoteLink) send(frame ports.Frame) error {
 		link.sendMu.Unlock()
 		return errRemoteViewStale
 	}
-	err := transport.Send(frame)
-	link.sendMu.Unlock()
-	if err != nil {
-		view.mu.Lock()
-		if view.link == link && view.linkGeneration == link.generation {
-			link.active = false
-			signalRemoteViewMetadataChangedLocked(view)
+	if link.clock == nil {
+		err := transport.Send(frame)
+		link.sendMu.Unlock()
+		if err != nil {
+			view.mu.Lock()
+			if view.link == link && view.linkGeneration == link.generation {
+				link.active = false
+				signalRemoteViewMetadataChangedLocked(view)
+			}
+			view.mu.Unlock()
+			if link.commands != nil {
+				link.commands.FailGeneration(link.generation, err)
+			}
+			if link.cancel != nil {
+				link.cancel()
+			}
+			_ = transport.Close()
 		}
-		view.mu.Unlock()
-		link.commands.FailGeneration(link.generation, err)
-		link.cancel()
-		_ = transport.Close()
+		return err
 	}
-	return err
+
+	result := make(chan error, 1)
+	go func() {
+		err := transport.Send(frame)
+		link.sendMu.Unlock()
+		result <- err
+	}()
+	timer := link.clock.NewTimer(detachNotifyTimeout)
+	select {
+	case err := <-result:
+		timer.Stop()
+		if err != nil {
+			view.mu.Lock()
+			if view.link == link && view.linkGeneration == link.generation {
+				link.active = false
+				signalRemoteViewMetadataChangedLocked(view)
+			}
+			view.mu.Unlock()
+			if link.commands != nil {
+				link.commands.FailGeneration(link.generation, err)
+			}
+			if link.cancel != nil {
+				link.cancel()
+			}
+			_ = transport.Close()
+		}
+		return err
+	case <-timer.C():
+		// Transport.Close is required to interrupt Send. The sending goroutine
+		// owns sendMu and releases it once the adapter observes that close.
+		_ = transport.Close()
+		return errSendTimedOut
+	}
 }
 
 // handleRemoteViewInput forwards the raw local-terminal bytes and their

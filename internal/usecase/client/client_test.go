@@ -41,6 +41,44 @@ func (r *realTimer) C() <-chan time.Time        { return r.t.C }
 func (r *realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
 func (r *realTimer) Stop() bool                 { return r.t.Stop() }
 
+const runnerInitialBackoff = 100 * time.Millisecond
+
+type runnerTestClock struct {
+	handshake chan *runnerTestTimer
+	palette   chan *runnerTestTimer
+	reconnect chan *runnerTestTimer
+}
+
+type runnerTestTimer struct {
+	ch       chan time.Time
+	duration time.Duration
+}
+
+func newRunnerTestClock() *runnerTestClock {
+	return &runnerTestClock{
+		handshake: make(chan *runnerTestTimer, 4),
+		palette:   make(chan *runnerTestTimer, 8),
+		reconnect: make(chan *runnerTestTimer, 16),
+	}
+}
+
+func (*runnerTestClock) Now() time.Time { return time.Time{} }
+func (c *runnerTestClock) NewTimer(duration time.Duration) ports.Timer {
+	timer := &runnerTestTimer{ch: make(chan time.Time, 1), duration: duration}
+	if duration == ports.HandshakeTimeout {
+		c.handshake <- timer
+	} else if duration == 200*time.Millisecond {
+		c.palette <- timer
+	} else {
+		c.reconnect <- timer
+	}
+	return timer
+}
+func (t *runnerTestTimer) C() <-chan time.Time    { return t.ch }
+func (*runnerTestTimer) Reset(time.Duration) bool { return false }
+func (*runnerTestTimer) Stop() bool               { return true }
+func (t *runnerTestTimer) fire()                  { t.ch <- time.Time{} }
+
 // recvItem is one scripted Recv result.
 type recvItem struct {
 	f   ports.Frame
@@ -901,8 +939,24 @@ func TestRunReconnectsPreservesRichRemoteTarget(t *testing.T) {
 				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 			}
 
-			err := runTestClient(context.Background(), testDependencies(d, term, realClock{}, nil, nil), request)
-			require.NoError(t, err)
+			clock := newRunnerTestClock()
+			done := make(chan error, 1)
+			go func() {
+				done <- runTestClient(context.Background(), testDependencies(d, term, clock, nil, nil), request)
+			}()
+			handshakeTimer := <-clock.handshake
+			require.Equal(t, testPreWelcomeTimeout, handshakeTimer.duration)
+			firstReconnect := <-clock.reconnect
+			require.Equal(t, runnerInitialBackoff, firstReconnect.duration)
+			firstReconnect.fire()
+			handshakeTimer = <-clock.handshake
+			require.Equal(t, testPreWelcomeTimeout, handshakeTimer.duration)
+			secondReconnect := <-clock.reconnect
+			require.Equal(t, runnerInitialBackoff, secondReconnect.duration)
+			secondReconnect.fire()
+			handshakeTimer = <-clock.handshake
+			require.Equal(t, testPreWelcomeTimeout, handshakeTimer.duration)
+			require.NoError(t, <-done)
 			require.Equal(t, int32(3), d.calls.Load())
 			require.Equal(t, int32(1), term.rawCount.Load())
 			require.Equal(t, int32(1), term.restoreCount.Load())
@@ -982,6 +1036,16 @@ func TestRunnerRejectsInvalidAttachRequestBeforeHello(t *testing.T) {
 		request client.AttachRequest
 		wantErr string
 	}{
+		{
+			name:    "invalid render mode",
+			request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "main", RenderMode: ports.RenderMode(99)},
+			wantErr: "vev: invalid render mode",
+		},
+		{
+			name:    "invalid session intent",
+			request: client.AttachRequest{Intent: 99, SessionName: "main"},
+			wantErr: "vev: invalid session intent",
+		},
 		{
 			name: "missing daemon-owned policy",
 			request: client.AttachRequest{

@@ -1222,7 +1222,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		_ = tr.Close()
 		return
 	}
-	d.completeAttachmentHandshake(handshakeCtx, timedOut, stopHandshakeTransport, finishHandshake, tr, owner, ac)
+	d.completeAttachmentHandshake(handshakeCtx, stopHandshakeTransport, finishHandshake, tr, owner, ac)
 }
 
 // protoErr is a session-level rejection carrying a wire ErrorMsg code.

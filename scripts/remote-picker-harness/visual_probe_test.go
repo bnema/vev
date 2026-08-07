@@ -188,6 +188,7 @@ func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
 	for _, tt := range []struct {
 		name       string
+		seed       *ports.Output
 		output     ports.Output
 		wantACKs   int
 		wantResets int
@@ -203,6 +204,7 @@ func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 		},
 		{
 			name:       "rejected state",
+			seed:       &ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("seed")},
 			output:     ports.Output{Epoch: 1, New: 3, Full: true, ViewRevision: 4, Size: size, Data: []byte("gap")},
 			wantResets: 1,
 		},
@@ -210,9 +212,8 @@ func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := &probeTestTransport{}
 			tr := &harnessTransport{Transport: transport, probe: newVisualProbe(size)}
-			if tt.name == "rejected state" {
-				seed := probeTestOutput(t, ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("seed")})
-				if err := processOutputFrame(tr, seed); err != nil {
+			if tt.seed != nil {
+				if err := processOutputFrame(tr, probeTestOutput(t, *tt.seed)); err != nil {
 					t.Fatal(err)
 				}
 				transport.sent = nil

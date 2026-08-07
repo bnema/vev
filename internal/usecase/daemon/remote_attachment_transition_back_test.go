@@ -50,6 +50,7 @@ func TestRemoteRecentAppearsInLocalStatusMRUAfterReturn(t *testing.T) {
 }
 
 func TestBackSessionForAttachmentFailsClosedForStaleOrNonLocalPredecessor(t *testing.T) {
+	sentinel := &remoteView{id: 99}
 	tests := []struct {
 		name  string
 		prep  func(*Daemon, *session, *attachedClient, *remoteView)
@@ -72,13 +73,13 @@ func TestBackSessionForAttachmentFailsClosedForStaleOrNonLocalPredecessor(t *tes
 		{
 			name: "non-local predecessor",
 			prep: func(_ *Daemon, _ *session, ac *attachedClient, _ *remoteView) {
-				ac.previousOwner.Set(&remoteView{id: 99})
+				ac.previousOwner.Set(sentinel)
 			},
 			check: func(t *testing.T, _ *session, ac *attachedClient, view *remoteView) {
 				other := ac.previousOwner.Get()
 				require.Same(t, view, ac.currentAttachmentOwner())
 				require.True(t, view.attachmentRegistered(ac))
-				require.IsType(t, &remoteView{}, other)
+				require.Same(t, sentinel, other)
 			},
 		},
 	}

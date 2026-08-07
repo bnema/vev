@@ -40,6 +40,10 @@ func (e *ProtocolError) Error() string {
 	return fmt.Sprintf("vev: %s", e.Text)
 }
 
+// errRenderModeMismatch is a permanent attach failure: retrying the same
+// request cannot make a daemon accept a different render contract.
+var errRenderModeMismatch = errors.New("vev: daemon accepted render mode")
+
 // DetachedError reports that the daemon detached this client for a reason
 // other than an ordinary user-initiated detach.
 type DetachedError struct {
@@ -231,7 +235,7 @@ func validateAttachRequest(request AttachRequest) error {
 	switch request.RenderMode {
 	case ports.RenderModeFullTerminal, ports.RenderModeProxiedContent:
 	default:
-		return fmt.Errorf("invalid render mode %d", request.RenderMode)
+		return fmt.Errorf("vev: invalid render mode %d", request.RenderMode)
 	}
 	switch request.Intent {
 	case ports.IntentEphemeral:
@@ -240,7 +244,7 @@ func validateAttachRequest(request AttachRequest) error {
 			return domain.ErrInvalidSessionName
 		}
 	default:
-		return fmt.Errorf("invalid session intent %d", request.Intent)
+		return fmt.Errorf("vev: invalid session intent %d", request.Intent)
 	}
 	if request.SessionName != "" {
 		if err := domain.ValidateSessionName(request.SessionName); err != nil {
@@ -801,7 +805,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return result(false, fmt.Errorf("vev: decoding welcome: %w", derr))
 		}
 		if welcome.RenderMode != request.RenderMode {
-			return result(false, fmt.Errorf("vev: daemon accepted render mode %d, want %d", welcome.RenderMode, request.RenderMode))
+			return result(false, fmt.Errorf("%w %d, want %d", errRenderModeMismatch, welcome.RenderMode, request.RenderMode))
 		}
 		resumeToken = welcome.ResumeToken
 		name = welcome.SessionName

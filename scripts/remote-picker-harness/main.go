@@ -463,6 +463,7 @@ type harnessTransport struct {
 	ports.Transport
 	probe     *visualProbe
 	frames    chan harnessFrame
+	queued    []harnessFrame
 	stop      chan struct{}
 	closeOnce sync.Once
 	closeErr  error
@@ -702,6 +703,9 @@ func awaitOutputContains(ctx context.Context, tr *harnessTransport, want string)
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	visible := tr.probe.contains(want)
+	if visible {
+		return nil
+	}
 	for {
 		frame, err := receiveWithTimeout(deadline, tr)
 		if err != nil {
@@ -739,14 +743,14 @@ func awaitRemotePickerPreview(ctx context.Context, tr *harnessTransport, marker 
 		}
 		text := tr.probe.text()
 		sawLoading = sawLoading || strings.Contains(text, "loading remote preview")
+		if strings.Contains(text, "remote preview unavailable") {
+			return errors.New("remote preview unavailable")
+		}
 		nowMarkerVisible := strings.Contains(text, marker)
 		if !markerVisible && nowMarkerVisible {
 			return nil
 		}
 		markerVisible = nowMarkerVisible
-		if strings.Contains(text, "remote preview unavailable") {
-			return errors.New("remote preview unavailable")
-		}
 	}
 }
 
@@ -990,13 +994,34 @@ func assertNoDirectHandoff(tr *harnessTransport) error {
 	if tr == nil || tr.probe == nil {
 		return errors.New("local picker transport has no visual probe")
 	}
-	if tr.probe.unexpectedHandoffs != 0 {
-		return fmt.Errorf("picker emitted %d direct MsgAttachTarget handoff frame(s)", tr.probe.unexpectedHandoffs)
+	// Inspect frames already queued by the receiver, retaining non-handoff
+	// frames for the next receiveWithTimeout call.
+	for {
+		select {
+		case outcome := <-tr.frames:
+			if outcome.frame.Type == ports.MsgAttachTarget {
+				tr.probe.recordIncoming(outcome.frame)
+			} else {
+				tr.queued = append(tr.queued, outcome)
+			}
+		default:
+			if tr.probe.unexpectedHandoffs != 0 {
+				return fmt.Errorf("picker emitted %d direct MsgAttachTarget handoff frame(s)", tr.probe.unexpectedHandoffs)
+			}
+			return nil
+		}
 	}
-	return nil
 }
 
 func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (ports.Frame, error) {
+	if len(tr.queued) != 0 {
+		outcome := tr.queued[0]
+		tr.queued = tr.queued[1:]
+		if outcome.err == nil {
+			tr.probe.recordIncoming(outcome.frame)
+		}
+		return outcome.frame, outcome.err
+	}
 	select {
 	case <-ctx.Done():
 		return ports.Frame{}, ctx.Err()

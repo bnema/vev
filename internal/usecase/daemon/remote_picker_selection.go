@@ -49,7 +49,11 @@ func (d *Daemon) startRemotePickerSelection(token attachmentConnectionToken, tar
 		return errAttachmentTransition
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	root := d.serveCtx
+	if root == nil {
+		root = context.Background()
+	}
+	ctx, cancel := context.WithCancel(root)
 	selection := &remotePickerSelection{
 		token:  token,
 		target: remoteTarget,
@@ -80,10 +84,13 @@ func (d *Daemon) startRemotePickerSelection(token attachmentConnectionToken, tar
 }
 
 func (d *Daemon) completeRemotePickerSelection(selection *remotePickerSelection) {
-	if selection == nil || selection.token.ac == nil {
+	if selection == nil {
 		return
 	}
 	defer selection.cancel()
+	if selection.token.ac == nil {
+		return
+	}
 	view, err := d.openRemoteView(selection.ctx, selection.target, selection.token.ac.sizeSnapshot())
 	if err != nil {
 		d.failRemotePickerSelection(selection, err)

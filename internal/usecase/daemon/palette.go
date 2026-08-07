@@ -290,11 +290,11 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "requested session is unavailable")
-			d.invalidateRender(entry, ac, true, "palette.go")
+			d.invalidateAttachedOwner(ac, true, "palette.go")
 			return
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
-			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
+			d.invalidateAttachedOwner(ac, true, "palette.go")
 		}
 		return
 	}
@@ -303,7 +303,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		rank, err := command.ParsePositiveDecimal(args)
 		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "rank must be one positive decimal")
-			d.invalidateRender(entry, ac, true, "palette.go")
+			d.invalidateAttachedOwner(ac, true, "palette.go")
 			return
 		}
 		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, recent: recent, effect: effect}
@@ -312,12 +312,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 				return
 			}
 			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
-			d.invalidateRender(entry, ac, true, "palette.go")
+			d.invalidateAttachedOwner(ac, true, "palette.go")
 			return
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
-			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
+			d.invalidateAttachedOwner(ac, true, "palette.go")
 		}
 		return
 	}
@@ -333,7 +333,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			currentToken := current.attachmentToken(ac, ac.transport())
 			fresh, admitted := ac.beginAttachmentEffect(currentToken)
 			if ac.closeExecutedPalette(generation, rawQuery) {
-				d.invalidateRender(current, ac, true, "palette.go")
+				d.invalidateAttachedOwner(ac, true, "palette.go")
 			}
 			if admitted {
 				fresh.End()

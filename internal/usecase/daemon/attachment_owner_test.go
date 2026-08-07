@@ -306,11 +306,8 @@ func TestRemoteClientResumeWaitsForInFlightRemoteParking(t *testing.T) {
 	view.mu.Lock()
 	require.True(t, view.registerAttachmentLocked(ac))
 	view.mu.Unlock()
-	resumeToken := ac.resumeToken
-	if resumeToken == 0 {
-		resumeToken = d.markParkingInFlightOwner(view, ac)
-		d.clearParkingInFlight(resumeToken, ac)
-	}
+	resumeToken := d.markParkingInFlightOwner(view, ac)
+	d.clearParkingInFlight(resumeToken, ac)
 
 	detachStarted := make(chan struct{})
 	releaseDetach := make(chan struct{})

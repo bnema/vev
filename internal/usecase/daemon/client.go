@@ -109,6 +109,13 @@ type attachedClient struct {
 	remoteRecent Guarded[[]remoteRecentSession]
 	linkMu       sync.Mutex
 	sendMu       sync.Mutex
+	// remotePaintMu coalesces asynchronous remote-view repaints to one worker
+	// per attachment. The worker always consumes the latest reset request.
+	remotePaintMu      sync.Mutex
+	remotePaintView    *remoteView
+	remotePaintPending bool
+	remotePaintRunning bool
+	remotePaintReset   bool
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -245,6 +252,9 @@ func (ac *attachedClient) currentSession() *session {
 // A remote view has no local tabs or PTYs, but the attachment retains its
 // immediate local predecessor so picker and palette shell state stay local.
 func (ac *attachedClient) navigationSession() *session {
+	if ac == nil {
+		return nil
+	}
 	if current := ac.currentAttachmentSession(); current != nil {
 		return current
 	}
@@ -905,7 +915,7 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 	if !token.attachmentEffectCurrent() {
 		return false
 	}
-	if rc := sess.core().coordinator.Load(); rc != nil {
+	if rc := sess.renderCoordinator(); rc != nil {
 		return rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
 	}
 	return false
@@ -1036,7 +1046,7 @@ func (d *Daemon) handleClientNoticeForAttachment(token attachmentConnectionToken
 		repaint := d.mutateRemoteClientNotice(token.ac, notice)
 		d.notices.routingMu.Unlock()
 		if repaint && token.attachmentEffectCurrent() {
-			d.paintRemoteView(view, token.ac, false, token)
+			d.scheduleRemoteViewPaint(view, token.ac, false)
 		}
 		return
 	}
@@ -1067,18 +1077,15 @@ func (d *Daemon) handleClientNoticeDirect(sess *session, ac *attachedClient, not
 }
 
 func (d *Daemon) mutateClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) bool {
-	switch notice.Action {
-	case ports.ClientNoticeClipboardFallback:
-		return d.recordClientNotice(sess, ac, domain.NoticeError, domain.NoticeClipboard, "image paste failed; sent Ctrl+V")
-	case ports.ClientNoticeClipboardTooLarge:
-		return d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeClipboardTooLarge, "image too large to paste")
-	case ports.ClientNoticeLinkDegraded:
-		return d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeConnection, "connection degraded")
-	case ports.ClientNoticeLinkConnected:
+	if notice.Action == ports.ClientNoticeLinkConnected {
 		return d.dismissToastWithoutRepaint(ac, domain.NoticeConnection, sess.id)
-	default:
+	}
+	n, ok := d.clientNoticeNotification(notice)
+	if !ok {
 		return false
 	}
+	n.SessionID = sess.id
+	return d.publishToast(ac, d.notices.record(n))
 }
 
 // mutateRemoteClientNotice keeps client-originated feedback local to the
@@ -1088,35 +1095,32 @@ func (d *Daemon) mutateRemoteClientNotice(ac *attachedClient, notice ports.Clien
 	if ac == nil {
 		return false
 	}
-	var n domain.Notification
-	switch notice.Action {
-	case ports.ClientNoticeClipboardFallback:
-		n = domain.Notification{Code: domain.NoticeClipboard, Severity: domain.NoticeError, Message: "image paste failed; sent Ctrl+V", Time: d.clock.Now()}
-	case ports.ClientNoticeClipboardTooLarge:
-		n = domain.Notification{Code: domain.NoticeClipboardTooLarge, Severity: domain.NoticeWarn, Message: "image too large to paste", Time: d.clock.Now()}
-	case ports.ClientNoticeLinkDegraded:
-		n = domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "connection degraded", Time: d.clock.Now()}
-	case ports.ClientNoticeLinkConnected:
+	if notice.Action == ports.ClientNoticeLinkConnected {
 		return d.dismissToastWithoutRepaint(ac, domain.NoticeConnection, "")
-	default:
+	}
+	n, ok := d.clientNoticeNotification(notice)
+	if !ok {
 		return false
 	}
 	n.Count = 1
 	return d.publishToast(ac, n)
 }
 
-// recordClientNotice mutates notice history and the selected attachment while
-// routingMu keeps another connection from changing that selection. Rendering is left
-// to the caller after it releases routingMu.
-func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domain.NoticeSeverity, code domain.NoticeCode, message string) bool {
-	n := d.notices.record(domain.Notification{
-		Code:      code,
-		Severity:  sev,
-		Message:   message,
-		Time:      d.clock.Now(),
-		SessionID: sess.id,
-	})
-	return d.publishToast(ac, n)
+// clientNoticeNotification maps the closed client notice vocabulary to daemon
+// notification values. Caller-specific session scope and LinkConnected handling
+// remain at the two mutation sites; rendering is left to the caller after it
+// releases routingMu.
+func (d *Daemon) clientNoticeNotification(notice ports.ClientNotice) (domain.Notification, bool) {
+	switch notice.Action {
+	case ports.ClientNoticeClipboardFallback:
+		return domain.Notification{Code: domain.NoticeClipboard, Severity: domain.NoticeError, Message: "image paste failed; sent Ctrl+V", Time: d.clock.Now()}, true
+	case ports.ClientNoticeClipboardTooLarge:
+		return domain.Notification{Code: domain.NoticeClipboardTooLarge, Severity: domain.NoticeWarn, Message: "image too large to paste", Time: d.clock.Now()}, true
+	case ports.ClientNoticeLinkDegraded:
+		return domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "connection degraded", Time: d.clock.Now()}, true
+	default:
+		return domain.Notification{}, false
+	}
 }
 
 // resizeForFirstPaint retains attach's synchronous geometry guarantee. The

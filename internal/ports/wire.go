@@ -1258,6 +1258,9 @@ func UnmarshalAck(b []byte) (Ack, error) {
 
 // MarshalWelcome encodes m into a Welcome message payload.
 func MarshalWelcome(m Welcome) []byte {
+	if !validRenderMode(m.RenderMode) {
+		return nil
+	}
 	w := payloadWriter{}
 	w.putString(m.SessionID)
 	w.putString(m.SessionName)

@@ -3,7 +3,9 @@ package daemon
 // retireTerminalRemoteView invalidates one exact remote-link generation after
 // the remote daemon reports that its session detached. It removes the local
 // view before interrupting transports, so stale receive callbacks, warm timers,
-// and resume credentials cannot resurrect it.
+// and resume credentials cannot resurrect it. This is called synchronously
+// only from MsgDetached in runRemoteLink; it must not join link here because
+// joining the current receiver would deadlock.
 func (d *Daemon) retireTerminalRemoteView(link *remoteLink, reason uint8) {
 	if d == nil || link == nil || link.view == nil {
 		return
@@ -44,9 +46,5 @@ func (d *Daemon) retireTerminalRemoteView(link *remoteLink, reason uint8) {
 	for _, attachment := range attachments {
 		d.retireShutdownRemoteAttachment(view, attachment, reason)
 	}
-	link.commands.FailGeneration(link.generation, errRemoteViewUnavailable)
-	link.cancel()
-	if link.transport != nil {
-		_ = link.transport.Close()
-	}
+	interruptRemoteLink(link)
 }

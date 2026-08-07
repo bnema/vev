@@ -76,6 +76,46 @@ func (v *remoteView) renderSnapshot(size domain.Size) (remoteViewRenderSnapshot,
 	}, true
 }
 
+// scheduleRemoteViewPaint coalesces asynchronous remote-view invalidations. A
+// single worker per attachment preserves sendMu serialization without allowing
+// ACK, metadata, and overlay callbacks to accumulate blocked goroutines.
+func (d *Daemon) scheduleRemoteViewPaint(view *remoteView, ac *attachedClient, reset bool) {
+	if d == nil || view == nil || ac == nil {
+		return
+	}
+	ac.remotePaintMu.Lock()
+	ac.remotePaintView = view
+	ac.remotePaintPending = true
+	ac.remotePaintReset = ac.remotePaintReset || reset
+	start := !ac.remotePaintRunning
+	if start {
+		ac.remotePaintRunning = true
+	}
+	ac.remotePaintMu.Unlock()
+	if !start {
+		return
+	}
+	go func() {
+		for {
+			ac.remotePaintMu.Lock()
+			if !ac.remotePaintPending {
+				ac.remotePaintRunning = false
+				ac.remotePaintMu.Unlock()
+				return
+			}
+			view := ac.remotePaintView
+			reset := ac.remotePaintReset
+			ac.remotePaintPending = false
+			ac.remotePaintReset = false
+			ac.remotePaintMu.Unlock()
+			token := attachmentOwnerToken(view, ac, ac.transport())
+			if token.ac != nil {
+				d.paintRemoteView(view, ac, reset, token)
+			}
+		}
+	}()
+}
+
 // invalidateAttachedOwner repaints an attachment through its actual owner.
 // Local UI overlays remain attachment-local while remote content is active,
 // so they must never enqueue work on the source session's coordinator after
@@ -86,10 +126,7 @@ func (d *Daemon) invalidateAttachedOwner(ac *attachedClient, reset bool, produce
 	}
 	owner := ac.currentAttachmentOwner()
 	if view, remote := owner.(*remoteView); remote {
-		token := attachmentOwnerToken(view, ac, ac.transport())
-		if token.ac != nil {
-			go d.paintRemoteView(view, ac, reset, token)
-		}
+		d.scheduleRemoteViewPaint(view, ac, reset)
 		return
 	}
 	if sess := localSession(owner); sess != nil {

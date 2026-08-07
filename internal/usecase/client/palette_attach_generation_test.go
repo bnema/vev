@@ -35,7 +35,7 @@ type attachPaletteTimer struct {
 func newAttachPaletteClock() *attachPaletteClock {
 	return &attachPaletteClock{
 		timers:          make(chan *attachPaletteTimer, 16),
-		handshakeTimers: make(chan *attachPaletteTimer, 1),
+		handshakeTimers: make(chan *attachPaletteTimer, 4),
 	}
 }
 

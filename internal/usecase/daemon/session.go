@@ -481,9 +481,6 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 		expectedTransport: token.transport, sourceToken: &token, action: "create-session",
 		copySourceEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
-			if source == nil {
-				return nil, errAttachmentTransition
-			}
 			if d.closing {
 				return nil, errors.New("daemon is shutting down")
 			}
@@ -1169,13 +1166,11 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 	snapshot := sessionKillParticipants{target: target}
 	if admission != nil {
 		token := admission.token
-		if token.localSession() == nil || token.ac == nil || token.transport.transport == nil {
+		source := token.localSession()
+		if source == nil || token.ac == nil || token.transport.transport == nil {
 			return sessionKillParticipants{}, false
 		}
-		snapshot.source = token.localSession()
-		if snapshot.source == nil {
-			return sessionKillParticipants{}, false
-		}
+		snapshot.source = source
 		snapshot.sourceToken = &admission.token
 	}
 

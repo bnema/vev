@@ -439,6 +439,9 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 // lease remains a local-session capability and is therefore rejected for
 // remote owners.
 func (d *Daemon) emitAttachmentFrame(owner attachmentOwner, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
+	owner = normalizeAttachmentOwner(owner)
+	entry := localSession(owner)
+	view, remote := owner.(*remoteView)
 	var ownedMarks runtimeMarkBatch
 	var marks *runtimeMarkBatch
 	if len(batches) != 0 {
@@ -450,7 +453,7 @@ func (d *Daemon) emitAttachmentFrame(owner attachmentOwner, ac *attachedClient, 
 		// follows emitFrame's release of attachment ownership.
 		defer marks.flush()
 	}
-	if normalizeAttachmentOwner(owner) == nil || ac == nil || state == nil {
+	if owner == nil || ac == nil || state == nil {
 		if ac != nil {
 			ac.sendMu.Unlock()
 		}
@@ -461,7 +464,6 @@ func (d *Daemon) emitAttachmentFrame(owner attachmentOwner, ac *attachedClient, 
 		return false
 	}
 	if state.lease != nil {
-		entry := localSession(owner)
 		rc := attachmentRenderCoordinator(entry)
 		if entry == nil || rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
 			ac.sendMu.Unlock()
@@ -485,7 +487,6 @@ func (d *Daemon) emitAttachmentFrame(owner attachmentOwner, ac *attachedClient, 
 	if err != nil {
 		ac.sendMu.Unlock()
 		d.log.Error("render draw failed", "err", err, "session", attachmentOwnerName(owner))
-		entry := localSession(owner)
 		if entry == nil {
 			// A remote view has no session-scoped notice history or coordinator.
 			// Its next remote publication will retry from the retained private VT.
@@ -575,9 +576,9 @@ func (d *Daemon) emitAttachmentFrame(owner attachmentOwner, ac *attachedClient, 
 		// admission first. Detachment freezes the gate and therefore cannot mutate
 		// ownership until any enclosing admitted operation has also ended.
 		if marks.attachmentEffect == nil {
-			if entry := localSession(owner); entry != nil {
+			if entry != nil {
 				d.detachOnSendError(entry, ac, sendTr)
-			} else if view, remote := owner.(*remoteView); remote {
+			} else if remote {
 				d.clientGoneRemote(view, attachmentOwnerToken(view, ac, sendTr), false)
 			}
 		} else {
