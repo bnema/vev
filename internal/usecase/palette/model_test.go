@@ -465,11 +465,11 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 	m := New(results)
 	results[1] = NewActiveSessionResult("changed", created, "changed-id")
 
-	for _, r := range "work" {
+	for _, r := range "switch" {
 		m.Insert(r)
 	}
 	matches := m.Matches()
-	require.Len(t, matches, 2)
+	require.Len(t, matches, 1)
 	require.Equal(t, ResultKindActiveSession, matches[0].Result.Kind())
 	matches[0].Result = NewCommandResult(cmd("BAD", "", ""))
 	require.Equal(t, ResultKindActiveSession, m.Matches()[0].Result.Kind())
@@ -481,7 +481,7 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 	require.True(t, active)
 	require.Equal(t, domain.SessionID("work-id"), id)
 	require.False(t, m.CompleteSelected(), "sessions never participate in tab completion")
-	require.Equal(t, "work", m.Query())
+	require.Equal(t, "switch", m.Query())
 	_, argument := m.ArgumentCommand()
 	require.False(t, argument)
 

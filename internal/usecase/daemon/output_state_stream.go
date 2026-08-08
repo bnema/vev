@@ -250,18 +250,17 @@ func (s *outputStateStream) sideEffectLocked(data []byte, echoAck uint64) (ports
 	return marshalOutputState(data, epoch, 0, 0, echoAck, viewRevision, size, false)
 }
 
-func (s *outputStateStream) ack(epoch, state uint64) bool {
+func (s *outputStateStream) ack(epoch, state uint64) {
 	if s == nil {
-		return false
+		return
 	}
 	s.lockView()
 	defer s.unlockView()
 	if epoch != s.currentEpochLocked() || state > s.next || state <= s.acked {
-		return false
+		return
 	}
 	s.acked = state
 	s.publishOutstanding()
-	return true
 }
 
 func (s *outputStateStream) rebase() {

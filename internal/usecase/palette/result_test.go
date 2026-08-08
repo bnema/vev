@@ -30,7 +30,7 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, created, createdAt)
 	require.Equal(t, "Switch to session work", active.DisplayText())
-	require.Equal(t, "work", active.SearchText())
+	require.Equal(t, "Switch to session work", active.SearchText())
 	id, ok := active.SessionID()
 	require.True(t, ok)
 	require.Equal(t, domain.SessionID("session-work"), id)
@@ -43,6 +43,31 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, created, createdAt)
 	require.Equal(t, "Resume session archive", stopped.DisplayText())
+	require.Equal(t, "Resume session archive", stopped.SearchText())
 	_, ok = stopped.SessionID()
 	require.False(t, ok)
+}
+
+func TestSessionResultsSearchDisplayedActionText(t *testing.T) {
+	created := time.Date(2026, time.March, 1, 2, 3, 4, 0, time.UTC)
+	tests := []struct {
+		name      string
+		result    Result
+		query     string
+		positions []int
+	}{
+		{name: "active prefix", result: NewActiveSessionResult("work", created, "work-id"), query: "switch", positions: []int{0, 1, 2, 3, 4, 5}},
+		{name: "active name", result: NewActiveSessionResult("work", created, "work-id"), query: "work", positions: []int{1, 8, 20, 21}},
+		{name: "stopped prefix", result: NewStoppedSessionResult("archive", created), query: "resume", positions: []int{0, 1, 2, 3, 4, 5}},
+		{name: "stopped name", result: NewStoppedSessionResult("archive", created), query: "archive", positions: []int{15, 16, 17, 18, 19, 20, 21}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches := Fuzzy([]Result{tt.result}, tt.query)
+			require.Len(t, matches, 1)
+			require.Equal(t, tt.result.DisplayText(), tt.result.SearchText())
+			require.Equal(t, tt.positions, matches[0].Positions)
+		})
+	}
 }

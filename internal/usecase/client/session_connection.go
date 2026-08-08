@@ -4,38 +4,52 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
 var errNilSessionTransport = errors.New("client: nil session transport")
 
-func cloneAttachRequest(request AttachRequest) AttachRequest {
-	if request.RemoteTarget != nil {
-		target := *request.RemoteTarget
-		request.RemoteTarget = &target
-	}
-	return request
+// SessionTarget is the validated daemon-facing session selection. Endpoint
+// details are resolved before a transport is opened and never enter this type.
+type SessionTarget struct {
+	Intent      uint8
+	SessionName string
 }
 
-// SessionConnection owns one already-open transport and the complete
-// validated daemon-facing attach request. Local sockets and remote carriages
-// use this same owner.
+func (t SessionTarget) validate() error {
+	switch t.Intent {
+	case ports.IntentEphemeral:
+		if t.SessionName == "" {
+			return nil
+		}
+	case ports.IntentNew, ports.IntentAttach, ports.IntentResume:
+		if t.SessionName == "" {
+			return domain.ErrInvalidSessionName
+		}
+	default:
+		return fmt.Errorf("invalid session intent %d", t.Intent)
+	}
+	return domain.ValidateSessionName(t.SessionName)
+}
+
+// SessionConnection owns one already-open transport and its daemon-facing
+// session target. Local sockets and remote carriages use this same owner.
 type SessionConnection struct {
 	transport ports.Transport
-	request   AttachRequest
+	target    SessionTarget
 }
 
 // NewSessionConnection creates a connection for an already-selected transport.
-// Request validation happens before the connection is used for a Hello.
-func NewSessionConnection(transport ports.Transport, request AttachRequest) (*SessionConnection, error) {
+// Target validation happens before the connection is used for a Hello.
+func NewSessionConnection(transport ports.Transport, target SessionTarget) (*SessionConnection, error) {
 	if transport == nil {
 		return nil, errNilSessionTransport
 	}
-	request = cloneAttachRequest(request)
-	if err := validateAttachRequest(request); err != nil {
-		return nil, fmt.Errorf("invalid attach request: %w", err)
+	if err := target.validate(); err != nil {
+		return nil, fmt.Errorf("invalid session target: %w", err)
 	}
-	return &SessionConnection{transport: transport, request: request}, nil
+	return &SessionConnection{transport: transport, target: target}, nil
 }
 
 // Transport returns the owned carriage for this connection.
@@ -46,12 +60,23 @@ func (c *SessionConnection) Transport() ports.Transport {
 	return c.transport
 }
 
-// AttachRequest returns the complete request retained for this connection.
+// AttachRequest returns the common request shape used after transport
+// selection. It contains no remote/proxy semantic.
 func (c *SessionConnection) AttachRequest() AttachRequest {
 	if c == nil {
 		return AttachRequest{}
 	}
-	return cloneAttachRequest(c.request)
+	return AttachRequest{Intent: c.target.Intent, SessionName: c.target.SessionName}
+}
+
+// cloneAttachRequest keeps the immutable request independent from transport
+// ownership while protecting the exact remote target from caller mutation.
+func cloneAttachRequest(request AttachRequest) AttachRequest {
+	if request.RemoteTarget != nil {
+		target := *request.RemoteTarget
+		request.RemoteTarget = &target
+	}
+	return request
 }
 
 // Close releases the owned transport.

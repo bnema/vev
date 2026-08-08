@@ -28,11 +28,11 @@ func (p resizeCommitPublication) current() bool {
 	if p.connection.effect == nil {
 		return false
 	}
-	if p.connection.effect.ended.Load() || !sameAttachmentOwner(p.connection.owner, p.session) ||
+	if p.connection.effect.ended.Load() || p.connection.sess != p.session ||
 		p.connection.ac != p.attachment || p.connection.lease != p.lease ||
 		p.connection.generation != p.attachment.connectionGeneration.Load() ||
 		!p.attachment.transportSnapshotCurrent(p.connection.transport) ||
-		!sameAttachmentOwner(p.attachment.currentAttachmentOwner(), p.session) || p.coordinator == nil {
+		p.attachment.currentSession() != p.session || p.coordinator == nil {
 		return false
 	}
 	registered := attachmentRegistered(p.session, p.attachment)

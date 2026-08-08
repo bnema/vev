@@ -73,7 +73,7 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 				TrueColor:         true,
 				MaxOutputInFlight: 8,
 			},
-			want: []byte{0x00, 0x01, 0x01, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x02, 0x77, 0x30, 0x00, 0x50, 0x00, 0x18, 0x00, 0x0e, 0x78, 0x74, 0x65, 0x72, 0x6d, 0x2d, 0x32, 0x35, 0x36, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x0c, 0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x01, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x02, 0x77, 0x30, 0x00, 0x50, 0x00, 0x18, 0x00, 0x0e, 0x78, 0x74, 0x65, 0x72, 0x6d, 0x2d, 0x32, 0x35, 0x36, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x0c, 0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 		{
 			name: "empty strings",
@@ -86,14 +86,15 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 				Cwd:       "",
 				TrueColor: false,
 			},
-			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			want := append(append([]byte(nil), tt.want...), 0, 0)
 			got := MarshalHello(tt.msg)
-			if !bytes.Equal(got, tt.want) {
+			if !bytes.Equal(got, want) {
 				t.Fatalf("MarshalHello() = %#v, want %#v", got, tt.want)
 			}
 			back, err := UnmarshalHello(got)
@@ -124,7 +125,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 		}
 		got := MarshalHello(msg)
 		want := []byte{
-			0x00, 0x19, 0x00, 0x00, // version, intent, render mode
+			0x00, 0x1a, 0x00, // version, intent, first client ID byte
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -138,6 +139,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			0x00, 0x00, 0x00, 0x06, 'X', 'Y', '=', '1', '2', '3',
 			0x00, 0x00, // no remote target, client-owned environment
 		}
+		want = append(want, 0, 0)
 		require.Equal(t, want, got)
 		decoded, err := UnmarshalHello(want)
 		require.NoError(t, err)
@@ -342,7 +344,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(25), ProtocolVersion)
+	require.Equal(t, uint16(26), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -422,12 +424,12 @@ func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 		{
 			name: "ephemeral",
 			msg:  Welcome{SessionID: "sess-1", SessionName: "main", Ephemeral: true, ResumeToken: 0x0102030405060708, Capabilities: CapabilityResume | CapabilityPredict},
-			want: []byte{0x00, 0x06, 0x73, 0x65, 0x73, 0x73, 0x2d, 0x31, 0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x05},
+			want: []byte{0x00, 0x06, 0x73, 0x65, 0x73, 0x73, 0x2d, 0x31, 0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x05},
 		},
 		{
 			name: "non-ephemeral empty name",
 			msg:  Welcome{SessionID: "abc", SessionName: "", Ephemeral: false},
-			want: []byte{0x00, 0x03, 0x61, 0x62, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x03, 0x61, 0x62, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 	}
 
@@ -452,13 +454,6 @@ func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 	assertTrailingGarbageFails(t, full, UnmarshalWelcome)
 }
 
-func TestMarshalWelcomeRejectsInvalidRenderMode(t *testing.T) {
-	got := MarshalWelcome(Welcome{SessionID: "sess-1", RenderMode: RenderMode(99)})
-	if got != nil {
-		t.Fatalf("MarshalWelcome() = %#v, want nil for invalid render mode", got)
-	}
-}
-
 func TestCommandErrorCodes(t *testing.T) {
 	require.Equal(t, uint16(6), ErrUnknownCommand)
 	require.Equal(t, uint16(7), ErrNotScriptable)
@@ -477,7 +472,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "minimal",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
 			want: []byte{
-				0x00, 0x19,
+				0x00, 0x1a,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x00, // self
@@ -500,7 +495,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 				JSON:          true,
 			},
 			want: []byte{
-				0x00, 0x19,
+				0x00, 0x1a,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x01, // self
@@ -898,9 +893,10 @@ func TestHelloOutputWindowByteExactValues(t *testing.T) {
 		t.Run(fmt.Sprintf("window_%d", window), func(t *testing.T) {
 			hello := Hello{Version: 14, Size: domain.Size{Cols: 1, Rows: 1}, MaxOutputInFlight: window}
 			// The empty Hello has a fixed 1x1 size before the negotiated output window.
-			want := append(make([]byte, 39), window, 0, 0, 0, 0, 0, 0)
+			want := append(make([]byte, 38), window, 0, 0, 0, 0, 0, 0)
+			want = append(want, 0, 0)
 			want[1] = 14
-			want[31], want[33] = 1, 1
+			want[30], want[32] = 1, 1
 			got := MarshalHello(hello)
 			requireBytesEqual(t, want, got)
 			back, err := UnmarshalHello(got)
@@ -928,7 +924,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "attached",
 			msg:  CommandRequest{Version: ProtocolVersion, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
 			want: []byte{
-				0x00, 0x19, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
+				0x00, 0x1a, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, '-', '-', 'v', 'e', 'r', 't', 'i', 'c', 'a', 'l',
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -938,7 +934,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "control",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "ls"},
 			want: []byte{
-				0x00, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x02, 'l', 's', 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			},
@@ -994,101 +990,4 @@ func TestOutputResetRequestStrict(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutputResetRequest{}, back)
 	assertTrailingGarbageFails(t, got, UnmarshalOutputResetRequest)
-}
-
-func TestSessionMetaGoldenAndStrict(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-	tests := []struct {
-		name string
-		msg  SessionMeta
-		want []byte
-	}{
-		{
-			name: "one unicode tab",
-			msg:  SessionMeta{LifecycleID: lifecycle, Revision: 2, SessionName: "démo", ActiveTabID: "tab-é", Tabs: []SessionTabMeta{{ID: "tab-é", Name: "é", Attention: true}}},
-			want: []byte{
-				1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-				0, 0, 0, 0, 0, 0, 0, 2,
-				0, 5, 'd', 0xc3, 0xa9, 'm', 'o',
-				0, 6, 't', 'a', 'b', '-', 0xc3, 0xa9,
-				0, 1,
-				0, 6, 't', 'a', 'b', '-', 0xc3, 0xa9,
-				0, 2, 0xc3, 0xa9, 1,
-			},
-		},
-		{
-			name: "multiple tabs",
-			msg:  SessionMeta{LifecycleID: lifecycle, Revision: 7, SessionName: "work", ActiveTabID: "tab-build", Tabs: []SessionTabMeta{{ID: "tab-shell", Name: "shell"}, {ID: "tab-build", Name: "build", Attention: true}}},
-			want: []byte{
-				1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-				0, 0, 0, 0, 0, 0, 0, 7,
-				0, 4, 'w', 'o', 'r', 'k',
-				0, 9, 't', 'a', 'b', '-', 'b', 'u', 'i', 'l', 'd',
-				0, 2,
-				0, 9, 't', 'a', 'b', '-', 's', 'h', 'e', 'l', 'l', 0, 5, 's', 'h', 'e', 'l', 'l', 0,
-				0, 9, 't', 'a', 'b', '-', 'b', 'u', 'i', 'l', 'd', 0, 5, 'b', 'u', 'i', 'l', 'd', 1,
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := MarshalSessionMeta(tt.msg)
-			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
-			back, err := UnmarshalSessionMeta(got)
-			require.NoError(t, err)
-			require.Equal(t, tt.msg, back)
-			assertAllPrefixesFail(t, got, UnmarshalSessionMeta)
-			assertTrailingGarbageFails(t, got, UnmarshalSessionMeta)
-		})
-	}
-
-	maxString := string(bytes.Repeat([]byte{'x'}, math.MaxUint16))
-	payload, err := MarshalSessionMeta(SessionMeta{LifecycleID: lifecycle, Revision: 1, SessionName: maxString, ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: maxString}}})
-	require.NoError(t, err)
-	back, err := UnmarshalSessionMeta(payload)
-	require.NoError(t, err)
-	require.Equal(t, maxString, back.SessionName)
-	require.Equal(t, maxString, back.Tabs[0].Name)
-
-	validMeta := func() SessionMeta {
-		return SessionMeta{LifecycleID: lifecycle, Revision: 1, SessionName: "work", ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: "one"}}}
-	}
-	invalid := []SessionMeta{
-		{},
-		{LifecycleID: lifecycle, Revision: 1, SessionName: "work", Tabs: []SessionTabMeta{{ID: "tab", Name: "one"}}},
-		{LifecycleID: lifecycle, SessionName: "work", ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: "one"}}},
-		{LifecycleID: lifecycle, Revision: 1, SessionName: "work", ActiveTabID: "missing", Tabs: []SessionTabMeta{{ID: "tab", Name: "one"}}},
-		{LifecycleID: lifecycle, Revision: 1, SessionName: "work", ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: "one"}, {ID: "tab", Name: "two"}}},
-		{LifecycleID: lifecycle, Revision: 1, SessionName: "work", ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: string(bytes.Repeat([]byte{'x'}, math.MaxUint16+1))}}},
-		{LifecycleID: lifecycle, Revision: 1, SessionName: string(bytes.Repeat([]byte{'x'}, math.MaxUint16+1)), ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: "one"}}},
-	}
-	for _, msg := range invalid {
-		_, err := MarshalSessionMeta(msg)
-		require.Error(t, err)
-	}
-
-	valid, err := MarshalSessionMeta(validMeta())
-	require.NoError(t, err)
-	for _, tt := range []struct {
-		name      string
-		mutate    func([]byte)
-		wantError error
-	}{
-		{name: "zero lifecycle", mutate: func(b []byte) { clear(b[:16]) }, wantError: ErrInvalidSessionMeta},
-		{name: "zero revision", mutate: func(b []byte) { clear(b[16:24]) }, wantError: ErrInvalidSessionMeta},
-		{name: "invalid active stable ID", mutate: func(b []byte) { b[32] = ' ' }, wantError: ErrInvalidSessionMeta},
-		{name: "attention flag malformed", mutate: func(b []byte) { b[len(b)-1] = 2 }},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			malformed := append([]byte(nil), valid...)
-			tt.mutate(malformed)
-			_, err := UnmarshalSessionMeta(malformed)
-			if tt.wantError != nil {
-				require.ErrorIs(t, err, tt.wantError)
-				return
-			}
-			require.Error(t, err)
-		})
-	}
 }

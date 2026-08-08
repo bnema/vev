@@ -575,7 +575,7 @@ func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd, err := parseArgs([]string{"attach", tt.arg})
 			require.NoError(t, err)
-			connection, err := client.NewSessionConnection(portsmocks.NewMockTransport(t), client.AttachRequest{
+			connection, err := client.NewSessionConnection(portsmocks.NewMockTransport(t), client.SessionTarget{
 				Intent:      cmd.intent,
 				SessionName: cmd.name,
 			})
@@ -845,8 +845,8 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 					}
 					gotDialer = nd.name
 					gotRemote = deps.Remote
-					if request.Remote {
-						t.Fatal("remote carriage metadata must not be in the attach request")
+					if !request.Remote || request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned {
+						t.Fatal("direct CLI remote attach must preserve client-owned environment policy")
 					}
 					gotClipboard = deps.Clipboard
 					if request.Intent != ports.IntentAttach || request.SessionName != "work" {
@@ -871,6 +871,29 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 	}
 }
 
+func TestRunAttachWithDepsDirectLegacyCallbackPreservesClientOwnership(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
+	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			require.True(t, request.Remote)
+			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
+			nextDialer, nextRequest, err := deps.AttachHandoff(ports.AttachTarget{
+				Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach,
+				EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, nextDialer)
+			require.Equal(t, ports.EnvironmentPolicyClientOwned, nextRequest.EnvironmentPolicy)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+}
+
 func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.T) {
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
@@ -878,9 +901,11 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 	var calls int
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
-		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
+		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			calls++
 			require.NotNil(t, deps.Dialer)
+			require.True(t, request.Remote)
+			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy, "direct CLI remote ownership must survive a handoff")
 			if calls == 1 {
 				return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
 			}
@@ -934,7 +959,7 @@ func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T)
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			if deps.Remote {
 				remoteCalls++
-				require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "picked"}, request)
+				require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "picked", Remote: true, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, request)
 				return nil
 			}
 			localCalls++
@@ -954,6 +979,18 @@ func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
 	}{
 		{name: "invalid host", target: ports.AttachTarget{Endpoint: "remote host", Session: "work", Intent: ports.IntentAttach}},
 		{name: "invalid session", target: ports.AttachTarget{Endpoint: "remote.example", Session: "bad name", Intent: ports.IntentAttach}},
+		{name: "tokenless resume", target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentResume}},
+		{
+			name: "tokenless resume with remote target",
+			target: ports.AttachTarget{
+				Endpoint: "remote.example", Session: "work", Intent: ports.IntentResume,
+				RemoteTarget: &domain.RemoteSessionTarget{
+					Endpoint: "remote.example", DisplayOrigin: "remote.example",
+					LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work", LiveTabID: "tab-1",
+				},
+				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

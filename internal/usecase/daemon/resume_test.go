@@ -97,6 +97,73 @@ func helloResumeCapable(intent uint8, name string, token uint64) ports.Hello {
 	}
 }
 
+func TestTokenlessResumeIsRejectedBeforeNameRouting(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	tr, _ := newCapturingTransport(t)
+	_, _, err := d.route(helloResumeCapable(ports.IntentResume, "work", 0), tr)
+	var protocol *protoErr
+	require.ErrorAs(t, err, &protocol)
+	require.Equal(t, ports.ErrNoSuchSession, protocol.code)
+	require.Empty(t, d.sessions)
+}
+
+func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	require.NoError(t, err)
+	token := ac.resumeToken
+
+	target := domain.RemoteSessionTarget{
+		LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
+	}
+	resume := helloResumeCapable(ports.IntentResume, "work", token)
+	resume.RemoteTarget = &target
+	resume.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	_, _, err = d.route(resume, &closeTrackingTransport{})
+	var protocol *protoErr
+	require.ErrorAs(t, err, &protocol)
+	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	require.Same(t, oldTransport, ac.transport())
+	d.mu.Lock()
+	_, parked := d.parked[token]
+	d.mu.Unlock()
+	require.False(t, parked, "mismatched target must not park the live attachment")
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
+}
+
+func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+
+	target := domain.RemoteSessionTarget{
+		LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
+	}
+	resume := helloResumeCapable(ports.IntentResume, "work", token)
+	resume.RemoteTarget = &target
+	resume.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	_, _, err = d.route(resume, &closeTrackingTransport{})
+	var protocol *protoErr
+	require.ErrorAs(t, err, &protocol)
+	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	d.mu.Lock()
+	parked := d.parked[token]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+	require.False(t, parked.claimed, "mismatched target must not claim the parked attachment")
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
+}
+
 func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 8)}
 	pty, release := newBlockingPTY(t)
@@ -533,7 +600,7 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 	d.mu.Unlock()
 	require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach publication")
 	require.Same(t, ac, parkingInGap.ac)
-	require.Same(t, sess, localSession(parkingInGap.owner))
+	require.Same(t, sess, parkingInGap.sess)
 	require.False(t, parkedInGap, "fixture: park must not have published yet")
 
 	_, _, err = d.route(helloResumeCapable(ports.IntentResume, "work", 0xdecafbad), &closeTrackingTransport{})
@@ -1268,7 +1335,7 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := &session{sessionCore: sessionCore{id: "previous"}}
-	ac.previousOwner.Set(previous)
+	ac.previousSession.Set(previous)
 	d.clientGone(sess, ac, ac.transport(), false)
 
 	token := ac.resumeToken
@@ -1276,14 +1343,14 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	parked := d.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parked)
-	require.Same(t, previous, ac.previousOwner.Get(), "a live parked attachment keeps its toggle")
+	require.Same(t, previous, ac.previousSession.Get(), "a live parked attachment keeps its toggle")
 
 	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), tr2)
 	require.NoError(t, err)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
-	require.Same(t, previous, resumedAC.previousOwner.Get(), "resume keeps the live attachment toggle")
+	require.Same(t, previous, resumedAC.previousSession.Get(), "resume keeps the live attachment toggle")
 }
 
 func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
@@ -1301,7 +1368,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 		{
 			name: "session purge",
 			discard: func(d *Daemon, _ uint64, parked *parkedAttachment) []parkedAttachmentRetirement {
-				return d.purgeParkedForSessionLocked(localSession(parked.owner))
+				return d.purgeParkedForSessionLocked(parked.sess)
 			},
 		},
 	} {
@@ -1313,7 +1380,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 			require.NoError(t, err)
 
-			ac.previousOwner.Set(&session{sessionCore: sessionCore{id: "previous"}})
+			ac.previousSession.Set(&session{sessionCore: sessionCore{id: "previous"}})
 			d.clientGone(sess, ac, ac.transport(), false)
 
 			d.mu.Lock()
@@ -1323,7 +1390,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			d.mu.Unlock()
 			d.finishParkedAttachmentRetirements(retirements)
 
-			require.Nil(t, ac.previousOwner.Get())
+			require.Nil(t, ac.previousSession.Get())
 		})
 	}
 }
@@ -1546,6 +1613,34 @@ func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
 	sess.mu.Unlock()
 	require.Equal(t, []string{"/bin/sh", "/usr/bin/fish"}, commands)
 	require.Equal(t, []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
+}
+
+func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	d.baseEnv = []string{"DAEMON=owned"}
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	require.NoError(t, err)
+	sess.mu.Lock()
+	sess.env = copyEnvironment(d.baseEnv)
+	sess.mu.Unlock()
+	token := ac.resumeToken
+	require.True(t, sess.detachIfCurrent(ac))
+	require.True(t, d.parkAttachment(sess, ac))
+
+	resume := helloResumeCapable(ports.IntentResume, "work", token)
+	resume.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	resume.Env = []string{"UNTRUSTED=client"}
+	_, _, ok, err := d.resumeParked(resume, &closeTrackingTransport{}, defaultSize)
+	require.NoError(t, err)
+	require.True(t, ok)
+	sess.mu.Lock()
+	require.Equal(t, []string{"DAEMON=owned"}, sess.env)
+	sess.mu.Unlock()
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 }
 
 func TestResumeRenegotiatesOutputWindowOnReusedStream(t *testing.T) {

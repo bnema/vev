@@ -667,6 +667,44 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 	}
 }
 
+func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) {
+	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+		newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+	}}
+	d.mu.Lock()
+	d.sessions[target.id] = target
+	d.mu.Unlock()
+	ac.previousSession.Set(target)
+
+	transport := &closeTrackingTransport{}
+	ac.replaceTransport(transport)
+	rc := d.attachCoordinator(source, nil, ac, true)
+	token := source.attachmentToken(ac, transport)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+	payload, err := ports.MarshalCommandRequest(ports.CommandRequest{
+		Version: ports.ProtocolVersion, RequestID: 1, Slug: "back-session", Attached: true,
+	})
+	require.NoError(t, err)
+
+	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
+	require.Same(t, target, ac.currentAttachmentSession())
+	frames := transport.Sends()
+	require.NotEmpty(t, frames)
+	var result ports.CommandResult
+	for _, frame := range frames {
+		if frame.Type != ports.MsgCommandResult {
+			continue
+		}
+		result, err = ports.UnmarshalCommandResult(frame.Payload)
+		require.NoError(t, err)
+		break
+	}
+	require.True(t, result.OK, result.Text)
+	require.False(t, transport.Closed(), "local navigation must not tear down the transitioned attachment")
+}
+
 func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)

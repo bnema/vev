@@ -68,10 +68,7 @@ func (r Result) sessionDisplayPrefix() string {
 }
 
 func (r Result) SearchText() string {
-	if r.kind == ResultKindCommand {
-		return r.command.Code
-	}
-	return r.session.name
+	return r.DisplayText()
 }
 
 // Command returns the command payload only for command results.

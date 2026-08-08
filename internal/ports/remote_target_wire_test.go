@@ -2,7 +2,6 @@ package ports
 
 import (
 	"bytes"
-	"reflect"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -77,46 +76,6 @@ func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 				t.Fatalf("attach target = %#v, want %#v", attach.RemoteTarget, target)
 			}
 		})
-	}
-}
-
-func TestProxiedHelloGoldenAndStrict(t *testing.T) {
-	target := testRemoteTarget(false)
-	msg := Hello{
-		Version: ProtocolVersion, Intent: IntentAttach, RenderMode: RenderModeProxiedContent,
-		ClientID: [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, ResumeToken: 0x0102030405060708,
-		Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 2,
-		RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
-	}
-	want := []byte{
-		0, 25, IntentAttach, byte(RenderModeProxiedContent),
-		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-		1, 2, 3, 4, 5, 6, 7, 8,
-		0, 4, 'w', 'o', 'r', 'k', 0, 80, 0, 24, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0,
-		1,
-		0, 15, 'b', 'u', 'i', 'l', 'd', '@', 'm', 'u', 'l', 'e', ':', '2', '2', '2', '2',
-		0, 9, 'm', 'u', 'l', 'e', ':', '2', '2', '2', '2',
-		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-		0, 4, 'w', 'o', 'r', 'k', 0, 0, 5, 't', 'a', 'b', '-', '3', 0, byte(EnvironmentPolicyDaemonOwned),
-	}
-	payload := MarshalHello(msg)
-	if !bytes.Equal(payload, want) {
-		t.Fatalf("proxied Hello bytes = %x, want %x", payload, want)
-	}
-	decoded, err := UnmarshalHello(payload)
-	if err != nil || !reflect.DeepEqual(decoded, msg) || decoded.RemoteTarget == msg.RemoteTarget {
-		t.Fatalf("proxied Hello = %#v, error %v", decoded, err)
-	}
-	assertAllPrefixesFail(t, payload, UnmarshalHello)
-	assertTrailingGarbageFails(t, payload, UnmarshalHello)
-
-	if MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, RenderMode: RenderModeProxiedContent, Size: domain.Size{Cols: 80, Rows: 24}}) != nil {
-		t.Fatal("proxied Hello without exact target marshaled")
-	}
-	malformed := append([]byte(nil), payload...)
-	malformed[3] = 2
-	if _, err := UnmarshalHello(malformed); err == nil {
-		t.Fatal("unknown render mode decoded")
 	}
 }
 
@@ -199,7 +158,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 			if err := tt.unmarshal(trailing); err == nil {
 				t.Fatal("trailing garbage unexpectedly decoded")
 			}
-			payload[len(payload)-1] = byte(EnvironmentPolicyClientOwned)
+			payload[len(payload)-3] = byte(EnvironmentPolicyClientOwned)
 			if err := tt.unmarshal(payload); err == nil {
 				t.Fatal("unmarshal accepted client-owned policy for remote target")
 			}
@@ -207,7 +166,28 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 	}
 }
 
-func TestTargetWireIncludesRequiredV25Section(t *testing.T) {
+func TestAttachTargetRejectsTokenlessResume(t *testing.T) {
+	tests := []AttachTarget{
+		{Endpoint: "host", Session: "work", Intent: IntentResume},
+		{
+			Endpoint:          "build@mule:2222",
+			Session:           "work",
+			Intent:            IntentResume,
+			RemoteTarget:      testRemoteTarget(false),
+			EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+		},
+	}
+	for _, target := range tests {
+		if err := ValidateAttachTarget(target); err != ErrInvalidAttachTarget {
+			t.Fatalf("ValidateAttachTarget(%#v) error = %v, want %v", target, err, ErrInvalidAttachTarget)
+		}
+		if got := MarshalAttachTarget(target); got != nil {
+			t.Fatalf("MarshalAttachTarget(%#v) = %x, want nil", target, got)
+		}
+	}
+}
+
+func TestTargetWireIncludesRequiredV26Section(t *testing.T) {
 	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0}
 	got := MarshalAttachTarget(AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach})
 	if !bytes.Equal(got, want) {

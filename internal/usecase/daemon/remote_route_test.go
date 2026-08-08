@@ -26,6 +26,28 @@ func TestRouteRemoteTargetSelectsExactLiveTab(t *testing.T) {
 	d.clientGone(sess, ac, tr, false)
 }
 
+func TestFinishRouteAttachRollsBackCreatedSession(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", defaultSize, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	target := domain.RemoteSessionTarget{LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: "missing-tab"}
+	hello := ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}
+	d.mu.Lock()
+	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, terminalEnv{}, hello, true, true)
+	var protocol *protoErr
+	require.ErrorAs(t, err, &protocol)
+	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	d.mu.Lock()
+	_, retained := d.sessions[sess.id]
+	d.mu.Unlock()
+	require.False(t, retained, "failed route attach must remove its newly created session")
+}
+
 func TestRouteRemoteTargetRejectsSameNameReplacement(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "tab-new", "pane-new")

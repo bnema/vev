@@ -18,7 +18,7 @@ const (
 // effect admission. It deliberately contains no independently mutable state:
 // a ticket is admitted only when every field matches the frame's token.
 type attachmentCapability struct {
-	owner      attachmentOwner
+	sess       *session
 	generation uint64
 	transport  transportSnapshot
 	lease      *attachmentLease
@@ -26,7 +26,7 @@ type attachmentCapability struct {
 
 func capabilityFromToken(token attachmentConnectionToken) attachmentCapability {
 	return attachmentCapability{
-		owner:      token.owner,
+		sess:       token.sess,
 		generation: token.generation,
 		transport:  token.transport,
 		lease:      token.lease,
@@ -34,7 +34,7 @@ func capabilityFromToken(token attachmentConnectionToken) attachmentCapability {
 }
 
 func (c attachmentCapability) matches(token attachmentConnectionToken) bool {
-	return token.ac != nil && sameAttachmentOwner(c.owner, token.owner) &&
+	return token.ac != nil && c.sess == token.sess &&
 		c.generation == token.generation && c.transport.transport == token.transport.transport &&
 		c.transport.incarnation == token.transport.incarnation && c.lease == token.lease
 }
@@ -219,19 +219,11 @@ func (ac *attachedClient) beginAttachmentEffect(token attachmentConnectionToken)
 // after Welcome has completed so a replacement blocked behind that send can
 // publish before readiness or first paint.
 func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
-	return ac.beginCurrentAttachmentOwnerEffect(sess, tr)
-}
-
-// beginCurrentAttachmentOwnerEffect waits out a transition that already froze
-// ac, then admits the capability derived from one exact attachment owner.
-// Handshakes use it after Welcome so a resumed remote view follows the same
-// generation-fenced client lifecycle as a local session.
-func (ac *attachedClient) beginCurrentAttachmentOwnerEffect(owner attachmentOwner, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
-	if ac == nil || normalizeAttachmentOwner(owner) == nil || tr == nil {
+	if ac == nil || sess == nil || tr == nil {
 		return attachmentConnectionToken{}, nil, false
 	}
 	for {
-		token := attachmentOwnerToken(owner, ac, tr)
+		token := sess.attachmentToken(ac, tr)
 		if token.ac == nil {
 			return token, nil, false
 		}
@@ -279,13 +271,13 @@ func (ac *attachedClient) publishAttachmentCapability(token attachmentConnection
 // bootstrapAttachmentCapability supports direct/headless session construction. It
 // never changes an existing or frozen production publication.
 func (ac *attachedClient) bootstrapAttachmentCapability(token attachmentConnectionToken) {
-	if ac == nil || token.owner == nil || token.ac != ac {
+	if ac == nil || token.sess == nil || token.ac != ac {
 		return
 	}
 	g := &ac.attachmentEffects
 	g.mu.Lock()
 	g.initLocked()
-	if g.phase == attachmentEffectsStable && g.capability.owner == nil {
+	if g.phase == attachmentEffectsStable && g.capability.sess == nil {
 		g.capability = capabilityFromToken(token)
 		g.failedTransport = transportSnapshot{}
 	}

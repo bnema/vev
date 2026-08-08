@@ -48,7 +48,7 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote tab no longer exists"}
 		}
-		ac, err := d.finishAttach(live, tr, h.Size, terminalEnv{TrueColor: h.TrueColor}, h)
+		ac, err := d.finishRouteAttach(live, tr, h.Size, terminalEnv{TrueColor: h.TrueColor}, h, false, false)
 		return live, ac, err
 	}
 
@@ -76,25 +76,42 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 		d.mu.Unlock()
 		return nil, nil, err
 	}
-	ac, err := d.finishAttach(sess, tr, h.Size, terminalEnv{TrueColor: h.TrueColor}, h)
-	if err != nil {
-		// The route-created session has no published client if finishAttach
-		// fails. Retire it immediately rather than leaving a shadow live row.
-		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
-		return nil, nil, err
-	}
-	ac.routeCreatedSession = true
-	return sess, ac, nil
+	ac, err := d.finishRouteAttach(sess, tr, h.Size, terminalEnv{TrueColor: h.TrueColor}, h, true, false)
+	return sess, ac, err
 }
 
-func (d *Daemon) remoteTargetMatchesSession(sess *session, target domain.RemoteSessionTarget) bool {
-	if sess == nil {
+func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionToken, action ports.NavigationAction) error {
+	payload := ports.MarshalNavigationAction(action)
+	if payload == nil {
+		return errAttachmentTransition
+	}
+	return token.sendControl(ports.Frame{Type: ports.MsgNavigationAction, Payload: payload})
+}
+
+func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello, routeCreated, purge bool) (*attachedClient, error) {
+	ac, err := d.finishAttach(sess, tr, sz, term, h)
+	if err != nil && routeCreated {
+		if cleanupErr := d.killSession(sess, ports.ReasonSessionKilled, purge); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+		return nil, err
+	}
+	if err == nil && routeCreated && ac != nil {
+		ac.routeCreatedSession = true
+		ac.routeSessionPurge = purge
+	}
+	return ac, err
+}
+
+// remoteTargetMatchesSessionLocked validates the exact lifecycle and tab
+// selector while the daemon registry lock is held. Callers use this before
+// changing resume ownership so a stale target cannot partially claim a session.
+func (d *Daemon) remoteTargetMatchesSessionLocked(sess *session, target domain.RemoteSessionTarget) bool {
+	if sess == nil || d.sessions[sess.id] != sess {
 		return false
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	sess.mu.Lock()
-	matches := d.sessions[sess.id] == sess && sess.incarnation == target.LifecycleID && sess.name == target.SessionName
+	matches := sess.incarnation == target.LifecycleID && sess.name == target.SessionName
 	sess.mu.Unlock()
 	if !matches {
 		return false

@@ -161,16 +161,13 @@ type pickerRefreshOptions struct {
 }
 
 func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions) {
-	// A remote view retains its local navigation predecessor for picker state.
-	// Rebuild against that session so remote catalog completions update the
-	// picker while its attachment remains remotely owned.
-	sess := ac.navigationSession()
+	sess := ac.currentSession()
 	if sess == nil {
 		return
 	}
 	rt := ac.overlays
 	rt.pickerMu.Lock()
-	if rt.picker == nil || rt.pickerRemoteSelection != nil {
+	if rt.picker == nil {
 		rt.pickerMu.Unlock()
 		return
 	}

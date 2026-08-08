@@ -56,9 +56,6 @@ func shouldReconnect(err error) bool {
 	if _, ok := errors.AsType[*ProtocolError](err); ok {
 		return false
 	}
-	if errors.Is(err, errRenderModeMismatch) {
-		return false
-	}
 	_, ok := errors.AsType[*DetachedError](err)
 	return !ok
 }

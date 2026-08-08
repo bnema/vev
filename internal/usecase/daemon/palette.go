@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -37,16 +38,10 @@ func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	// Capture daemon/session state before taking paletteMu: lock ordering forbids
-	// holding an overlay lock while inspecting live sessions. A remote view is
-	// not a local session, so its retained local source must remain offered as a
-	// palette result and JRS candidate.
-	current := sess
-	if _, remote := normalizeAttachmentOwner(ac.currentAttachmentOwner()).(*remoteView); remote {
-		current = nil
-	}
-	recent := d.recentSessions(current)
+	// holding an overlay lock while inspecting live sessions.
+	recent := d.recentSessions(sess)
 	commands := d.paletteCommands()
-	results := d.paletteResults(current, commands)
+	results := d.paletteResults(sess, commands)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = palette.New(results)
@@ -55,7 +50,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
-	d.invalidateAttachedOwner(ac, true, "palette.go")
+	d.invalidateRender(sess, ac, true, "palette.go")
 }
 
 // paletteResults captures eligible named sessions before paletteMu so the
@@ -152,7 +147,7 @@ func (d *Daemon) recordPaletteUse(code string) {
 }
 
 func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
-	entry := ac.navigationSession()
+	entry := ac.currentAttachmentSession()
 	if entry == nil {
 		return
 	}
@@ -259,12 +254,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
-		d.invalidateAttachedOwner(ac, true, "palette.go")
+		d.invalidateRender(entry, ac, true, "palette.go")
 		return
 	}
 	if !execute {
 		if changed {
-			d.invalidateAttachedOwner(ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 		}
 		return
 	}
@@ -290,11 +285,11 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "requested session is unavailable")
-			d.invalidateAttachedOwner(ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
-			d.invalidateAttachedOwner(ac, true, "palette.go")
+			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
 		}
 		return
 	}
@@ -303,7 +298,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		rank, err := command.ParsePositiveDecimal(args)
 		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "rank must be one positive decimal")
-			d.invalidateAttachedOwner(ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
 		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, recent: recent, effect: effect}
@@ -312,12 +307,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 				return
 			}
 			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
-			d.invalidateAttachedOwner(ac, true, "palette.go")
+			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
-			d.invalidateAttachedOwner(ac, true, "palette.go")
+			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
 		}
 		return
 	}
@@ -333,7 +328,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			currentToken := current.attachmentToken(ac, ac.transport())
 			fresh, admitted := ac.beginAttachmentEffect(currentToken)
 			if ac.closeExecutedPalette(generation, rawQuery) {
-				d.invalidateAttachedOwner(ac, true, "palette.go")
+				d.invalidateRender(current, ac, true, "palette.go")
 			}
 			if admitted {
 				fresh.End()
@@ -604,6 +599,9 @@ func (e paletteExec) RenameTab() error {
 }
 
 func (e paletteExec) OpenSessionPicker() error {
+	if e.ac != nil && e.ac.navigationCapabilities&ports.NavigationCapabilityHomePicker != 0 && e.effect != nil {
+		return e.d.sendNavigationActionForAttachment(e.effect.connectionToken(), ports.NavigationOpenHomePicker)
+	}
 	e.d.enterPicker(e.sess, e.ac)
 	return nil
 }

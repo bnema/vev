@@ -12,7 +12,7 @@ import (
 const HandshakeTimeout = 15 * time.Second
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 25
+const ProtocolVersion uint16 = 26
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.
@@ -22,7 +22,7 @@ const MaxFrameLen = 16 << 20
 type MsgType uint8
 
 // Frame message types. Client-originated messages occupy 1–13 and 15;
-// server-originated messages occupy 16–23 and 25–26. Values 14 and 24 remain
+// server-originated messages occupy 16–22 and 25–27. Values 14, 23–24 remain
 // reserved for future extensions.
 const (
 	MsgHello                MsgType = 1
@@ -47,9 +47,9 @@ const (
 	MsgPong                  MsgType = 20
 	MsgSessions              MsgType = 21
 	MsgCommandResult         MsgType = 22
-	MsgSessionMeta           MsgType = 23
 	MsgAttachTarget          MsgType = 25
 	MsgRemotePreviewResponse MsgType = 26
+	MsgNavigationAction      MsgType = 27
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited
@@ -60,6 +60,31 @@ type Frame struct {
 	Type    MsgType
 	Payload []byte
 }
+
+// NavigationCapabilities advertises the bounded client routes available to a
+// directly attached daemon.
+type NavigationCapabilities uint8
+
+const (
+	NavigationCapabilityHomePicker NavigationCapabilities = 1 << iota
+	NavigationCapabilityBack
+)
+
+// StartupOverlay selects the one startup overlay opened by a navigation route.
+type StartupOverlay uint8
+
+const (
+	StartupOverlayNone StartupOverlay = iota
+	StartupOverlaySessionPicker
+)
+
+// NavigationAction is a server request for one bounded client route transition.
+type NavigationAction uint8
+
+const (
+	NavigationOpenHomePicker NavigationAction = 1
+	NavigationBack           NavigationAction = 2
+)
 
 // RemotePreviewSchemaVersion is independent from the attachment IPC version.
 const RemotePreviewSchemaVersion uint16 = 1

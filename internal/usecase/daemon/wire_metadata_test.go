@@ -23,7 +23,7 @@ func TestFrameWelcomeSnapshotsSessionMetadataUnderLock(t *testing.T) {
 	})
 
 	for range 1000 {
-		frame := frameWelcome(sess, ac)
+		frame := frameWelcome(sess, ac.resumeToken)
 		welcome, err := ports.UnmarshalWelcome(frame.Payload)
 		if err != nil {
 			t.Fatalf("UnmarshalWelcome() error = %v", err)

@@ -25,6 +25,15 @@ owning daemon without creating a local shadow session. Picker-selected remote
 attachments use the daemon's environment and persisted session working
 directory; direct CLI remote attaches retain their client-request semantics.
 
+Remote attachments remain direct: the selected remote daemon owns the session,
+PTYs, rendering, input, resize, effects, and teardown. The client does not
+proxy remote content through the local daemon. A picker-selected remote target
+is a temporary direct handoff; the client keeps one input pump and remembers a
+bounded home route. A remote daemon may request the home picker, and cancelling
+that temporary local picker returns to the parked remote route, first attempting
+resume and then falling back to a fresh attach when the resume token is stale.
+These navigation actions and the strict handshake layout use protocol v26.
+
 ## Durable record compatibility
 
 The catalogue record format is currently version 4 because records now retain

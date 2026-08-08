@@ -1,6 +1,8 @@
 package client
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,6 +10,30 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
+
+type validationCountingDialer struct{ calls int }
+
+func (d *validationCountingDialer) Dial(context.Context) (ports.Transport, error) {
+	d.calls++
+	return nil, nil
+}
+
+func TestMalformedAttachRequestsNeverDial(t *testing.T) {
+	tests := []AttachRequest{
+		{Intent: ports.IntentAttach},
+		{Intent: ports.IntentAttach, SessionName: "bad name"},
+		{Intent: ports.IntentAttach, SessionName: "main", EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned},
+		{Intent: ports.IntentEphemeral, NavigationCapabilities: ports.NavigationCapabilityHomePicker},
+	}
+	for i, request := range tests {
+		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
+			dialer := &validationCountingDialer{}
+			err := NewRunner(Dependencies{Dialer: dialer}).Run(context.Background(), request)
+			require.Error(t, err)
+			require.Zero(t, dialer.calls)
+		})
+	}
+}
 
 func TestValidateAttachRequestRequiresDaemonOwnedEnvironmentForRemoteTarget(t *testing.T) {
 	var lifecycle domain.SessionLifecycleID

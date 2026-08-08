@@ -41,44 +41,6 @@ func (r *realTimer) C() <-chan time.Time        { return r.t.C }
 func (r *realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
 func (r *realTimer) Stop() bool                 { return r.t.Stop() }
 
-const runnerInitialBackoff = 100 * time.Millisecond
-
-type runnerTestClock struct {
-	handshake chan *runnerTestTimer
-	palette   chan *runnerTestTimer
-	reconnect chan *runnerTestTimer
-}
-
-type runnerTestTimer struct {
-	ch       chan time.Time
-	duration time.Duration
-}
-
-func newRunnerTestClock() *runnerTestClock {
-	return &runnerTestClock{
-		handshake: make(chan *runnerTestTimer, 4),
-		palette:   make(chan *runnerTestTimer, 8),
-		reconnect: make(chan *runnerTestTimer, 16),
-	}
-}
-
-func (*runnerTestClock) Now() time.Time { return time.Time{} }
-func (c *runnerTestClock) NewTimer(duration time.Duration) ports.Timer {
-	timer := &runnerTestTimer{ch: make(chan time.Time, 1), duration: duration}
-	if duration == ports.HandshakeTimeout {
-		c.handshake <- timer
-	} else if duration == 200*time.Millisecond {
-		c.palette <- timer
-	} else {
-		c.reconnect <- timer
-	}
-	return timer
-}
-func (t *runnerTestTimer) C() <-chan time.Time    { return t.ch }
-func (*runnerTestTimer) Reset(time.Duration) bool { return false }
-func (*runnerTestTimer) Stop() bool               { return true }
-func (t *runnerTestTimer) fire()                  { t.ch <- time.Time{} }
-
 // recvItem is one scripted Recv result.
 type recvItem struct {
 	f   ports.Frame
@@ -382,6 +344,35 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("hello frame was not sent")
 	}
+}
+
+func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	lifecycle := domain.SessionLifecycleID{1, 2, 3}
+	target := &domain.RemoteSessionTarget{
+		Endpoint: "remote.example", DisplayOrigin: "remote.example", LifecycleID: lifecycle,
+		SessionName: "work", LiveTabID: "tab-1",
+	}
+	request := client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "work", Remote: true,
+		RemoteTarget: target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		NavigationCapabilities: ports.NavigationCapabilityHomePicker,
+		StartupOverlay:         ports.StartupOverlayNone,
+	}
+	tr := &recordingTransport{recvs: []recvItem{
+		{f: welcomeFrame(0)},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+
+	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, term, realClock{}), request))
+	hello := helloFromSend(t, tr)
+	require.Equal(t, request.Intent, hello.Intent)
+	require.Equal(t, request.SessionName, hello.Name)
+	require.Equal(t, target, hello.RemoteTarget)
+	require.Equal(t, request.EnvironmentPolicy, hello.EnvironmentPolicy)
+	require.Equal(t, request.NavigationCapabilities, hello.NavigationCapabilities)
+	require.Equal(t, request.StartupOverlay, hello.StartupOverlay)
 }
 
 func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.T) {
@@ -827,15 +818,11 @@ func (d *sequenceDialer) Dial(context.Context) (ports.Transport, error) {
 type recordingTransport struct {
 	recvs  []recvItem
 	sends  []ports.Frame
-	onSend func(ports.Frame)
 	closed atomic.Int32
 }
 
 func (t *recordingTransport) Send(f ports.Frame) error {
 	t.sends = append(t.sends, f)
-	if t.onSend != nil {
-		t.onSend(f)
-	}
 	return nil
 }
 
@@ -888,203 +875,33 @@ func welcomeFrame(token uint64) ports.Frame {
 	return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: "main", ResumeToken: token, Capabilities: ports.CapabilityResume}))
 }
 
-func TestRunReconnectsPreservesRichRemoteTarget(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{}
-	lifecycle[0] = 1
-	otherLifecycle := domain.SessionLifecycleID{}
-	otherLifecycle[0] = 2
-	tests := []struct {
-		name   string
-		target domain.RemoteSessionTarget
-	}{
-		{
-			name: "live tab",
-			target: domain.RemoteSessionTarget{
-				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
-				SessionName: "main", LiveTabID: "tab-live",
-			},
-		},
-		{
-			name: "stopped tab",
-			target: domain.RemoteSessionTarget{
-				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: otherLifecycle,
-				SessionName: "main", Stopped: true,
-				StoppedTab: domain.NewOrdinalTabSelector(1, "shell", 2),
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			term := newRunTerminal()
-			defer term.in.unblock()
-			wantTarget := tt.target
-			tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
-			tr1.onSend = func(frame ports.Frame) {
-				if frame.Type != ports.MsgHello {
-					return
-				}
-				tt.target.Endpoint = "mutated.invalid"
-				tt.target.LifecycleID = domain.SessionLifecycleID{}
-				tt.target.LiveTabID = "mutated-tab"
-			}
-			tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
-			tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
-			d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
-			request := client.AttachRequest{
-				Intent:            ports.IntentAttach,
-				SessionName:       "main",
-				Remote:            true,
-				RemoteTarget:      &tt.target,
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-			}
-
-			clock := newRunnerTestClock()
-			done := make(chan error, 1)
-			go func() {
-				done <- runTestClient(context.Background(), testDependencies(d, term, clock, nil, nil), request)
-			}()
-			handshakeTimer := <-clock.handshake
-			require.Equal(t, testPreWelcomeTimeout, handshakeTimer.duration)
-			firstReconnect := <-clock.reconnect
-			require.Equal(t, runnerInitialBackoff, firstReconnect.duration)
-			firstReconnect.fire()
-			handshakeTimer = <-clock.handshake
-			require.Equal(t, testPreWelcomeTimeout, handshakeTimer.duration)
-			secondReconnect := <-clock.reconnect
-			require.Equal(t, runnerInitialBackoff, secondReconnect.duration)
-			secondReconnect.fire()
-			handshakeTimer = <-clock.handshake
-			require.Equal(t, testPreWelcomeTimeout, handshakeTimer.duration)
-			require.NoError(t, <-done)
-			require.Equal(t, int32(3), d.calls.Load())
-			require.Equal(t, int32(1), term.rawCount.Load())
-			require.Equal(t, int32(1), term.restoreCount.Load())
-
-			h1 := helloFromSend(t, tr1)
-			h2 := helloFromSend(t, tr2)
-			h3 := helloFromSend(t, tr3)
-			require.Equal(t, ports.IntentAttach, h1.Intent)
-			require.Zero(t, h1.ResumeToken)
-			require.Equal(t, ports.IntentResume, h2.Intent)
-			require.Equal(t, uint64(11), h2.ResumeToken)
-			require.Equal(t, ports.IntentResume, h3.Intent)
-			require.Equal(t, uint64(22), h3.ResumeToken)
-			for _, hello := range []ports.Hello{h1, h2, h3} {
-				require.Equal(t, &wantTarget, hello.RemoteTarget)
-				require.Equal(t, ports.EnvironmentPolicyDaemonOwned, hello.EnvironmentPolicy)
-			}
-			require.Equal(t, h1.ClientID, h2.ClientID)
-			require.Equal(t, h1.ClientID, h3.ClientID)
-			require.Contains(t, term.out.String(), "reconnecting through SSH")
-		})
-	}
-}
-
-func TestRunSendsRequestedProxiedRenderMode(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1}
-	target := domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
-		SessionName: "main", LiveTabID: "tab-live",
-	}
+func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
-	tr := &recordingTransport{recvs: []recvItem{
-		{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
-			SessionID: "s1", SessionName: "main", RenderMode: ports.RenderModeProxiedContent,
-		}))},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
-	}}
-	deps := testDependencies(&sequenceDialer{trs: []ports.Transport{tr}}, term, realClock{}, nil, nil)
-	err := runTestClient(context.Background(), deps, client.AttachRequest{
-		Intent: ports.IntentAttach, SessionName: "main", RenderMode: ports.RenderModeProxiedContent,
-		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-	})
+	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
+	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
+	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
+	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
+
+	err := runTestClient(context.Background(), testDependencies(d, term, realClock{}, nil, nil), client.AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: false})
 	require.NoError(t, err)
-	require.Equal(t, ports.RenderModeProxiedContent, helloFromSend(t, tr).RenderMode)
-}
+	require.Equal(t, int32(3), d.calls.Load())
+	require.Equal(t, int32(1), term.rawCount.Load())
+	require.Equal(t, int32(1), term.restoreCount.Load())
 
-func TestRunRejectsMismatchedProxiedWelcomeBeforeEnteringRawMode(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1}
-	target := domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
-		SessionName: "main", LiveTabID: "tab-live",
-	}
-	term := newRunTerminal()
-	defer term.in.unblock()
-	tr := &recordingTransport{recvs: []recvItem{{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
-		SessionID: "s1", SessionName: "main", RenderMode: ports.RenderModeFullTerminal,
-	}))}}}
-
-	err := runTestClient(context.Background(), testDependencies(&sequenceDialer{trs: []ports.Transport{tr}}, term, realClock{}, nil, nil), client.AttachRequest{
-		Intent: ports.IntentAttach, SessionName: "main", RenderMode: ports.RenderModeProxiedContent,
-		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-	})
-	require.ErrorContains(t, err, "daemon accepted render mode")
-	require.Zero(t, term.rawCount.Load())
-}
-
-func TestRunnerRejectsInvalidAttachRequestBeforeHello(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{}
-	lifecycle[0] = 1
-	validTarget := domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
-		SessionName: "main", LiveTabID: "tab-live",
-	}
-	tests := []struct {
-		name    string
-		request client.AttachRequest
-		wantErr string
-	}{
-		{
-			name:    "invalid render mode",
-			request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "main", RenderMode: ports.RenderMode(99)},
-			wantErr: "vev: invalid render mode",
-		},
-		{
-			name:    "invalid session intent",
-			request: client.AttachRequest{Intent: 99, SessionName: "main"},
-			wantErr: "vev: invalid session intent",
-		},
-		{
-			name: "missing daemon-owned policy",
-			request: client.AttachRequest{
-				Intent:       ports.IntentAttach,
-				SessionName:  "main",
-				RemoteTarget: &validTarget,
-			},
-			wantErr: "remote attach target requires daemon-owned environment",
-		},
-		{
-			name: "target session mismatch",
-			request: client.AttachRequest{
-				Intent:            ports.IntentAttach,
-				SessionName:       "other",
-				RemoteTarget:      &validTarget,
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-			},
-			wantErr: "remote attach target session mismatch",
-		},
-		{
-			name: "malformed target",
-			request: client.AttachRequest{
-				Intent:            ports.IntentAttach,
-				SessionName:       "main",
-				RemoteTarget:      &domain.RemoteSessionTarget{SessionName: "main", LiveTabID: "tab-live"},
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-			},
-			wantErr: "invalid remote attach target",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dialer := &sequenceDialer{}
-			err := client.NewRunner(client.Dependencies{Dialer: dialer}).Run(context.Background(), tt.request)
-			require.ErrorContains(t, err, tt.wantErr)
-			require.Zero(t, dialer.calls.Load(), "invalid request must be rejected before dialing and Hello")
-		})
-	}
+	h1 := helloFromSend(t, tr1)
+	h2 := helloFromSend(t, tr2)
+	h3 := helloFromSend(t, tr3)
+	require.Equal(t, ports.IntentAttach, h1.Intent)
+	require.Zero(t, h1.ResumeToken)
+	require.Equal(t, ports.IntentResume, h2.Intent)
+	require.Equal(t, uint64(11), h2.ResumeToken)
+	require.Equal(t, ports.IntentResume, h3.Intent)
+	require.Equal(t, uint64(22), h3.ResumeToken)
+	require.Equal(t, h1.ClientID, h2.ClientID)
+	require.Equal(t, h1.ClientID, h3.ClientID)
+	require.Contains(t, term.out.String(), "reconnecting…")
+	require.Contains(t, term.out.String(), "\x1b[2K")
 }
 
 func TestAttachRememberRemoteHost(t *testing.T) {

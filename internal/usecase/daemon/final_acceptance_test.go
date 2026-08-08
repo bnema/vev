@@ -5,6 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
@@ -176,4 +177,26 @@ func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing
 	}
 	require.True(t, peerRegistered, "detaching one attachment removed its peer")
 	require.Same(t, sess, second.currentSession())
+}
+
+func TestAcceptanceDirectAttachmentSupportsVerticalSplit(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+	d.ptys = newFactory(t, newQuietPTY())
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	token := sess.attachmentToken(ac, ac.transport())
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+
+	d.enterPalette(sess, ac)
+	d.handlePaletteInput(ac, []byte("SPD\r"))
+
+	sess.mu.Lock()
+	tab := sess.tabs[0]
+	sess.mu.Unlock()
+	tab.mu.Lock()
+	defer tab.mu.Unlock()
+	require.NotNil(t, tab.tree)
+	require.NotNil(t, tab.tree.Root)
+	require.Equal(t, layout.Vertical, tab.tree.Root.Dir)
+	require.Len(t, tab.panes, 2)
 }

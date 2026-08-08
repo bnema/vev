@@ -37,10 +37,7 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 	}
 	token.effect.bindActionEnd(d, "detach")
 	token.effect.End()
-	if view, remote := token.owner.(*remoteView); remote {
-		return d.clientGoneRemote(view, token, explicit)
-	}
-	sess := token.localSession()
+	sess := token.sess
 	if sess == nil {
 		return false
 	}
@@ -54,94 +51,6 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 	}
 	d.finishClientGone(sess, token.ac, token.transport.transport, explicit)
 	return true
-}
-
-// clientGoneRemote retires only the current local-client binding to a remote
-// view. The remote link itself remains a Phase 4 lifecycle concern; a failed
-// local transport parks the stable view owner without inventing a local PTY.
-func (d *Daemon) clientGoneRemote(view *remoteView, token attachmentConnectionToken, explicit bool) bool {
-	if d == nil || view == nil || token.ac == nil || !sameAttachmentOwner(token.owner, view) {
-		return false
-	}
-	ac := token.ac
-	var parkingToken uint64
-	if !explicit {
-		parkingToken = d.markParkingInFlightOwner(view, ac)
-	}
-	if d.beforeClientGoneDetach != nil {
-		d.beforeClientGoneDetach()
-	}
-	if !d.detachRemoteAttachmentCurrent(view, token) {
-		d.clearParkingInFlightIfAbandonedOwner(view, ac, parkingToken)
-		return false
-	}
-	return d.finishRemoteClientGone(view, ac, token.transport.transport, explicit)
-}
-
-// finishRemoteClientGone completes remote local-client teardown only after the
-// exact owner binding has been unpublished. It intentionally leaves remote-link
-// lifecycle ownership to Phase 4.
-func (d *Daemon) finishRemoteClientGone(view *remoteView, ac *attachedClient, transport ports.Transport, explicit bool) bool {
-	if d == nil || view == nil || ac == nil {
-		return false
-	}
-	d.unregisterPreview(ac)
-	if !explicit && d.parkAttachmentOwner(view, ac) {
-		_ = ac.closeCapturedTransport(transport)
-		d.parkRemoteViewWarm(view)
-		return true
-	}
-	d.clearParkingInFlight(ac.resumeToken, ac)
-	d.closePicker(ac)
-	ac.clearPreviousSession()
-	if explicit {
-		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
-	}
-	_ = ac.closeCapturedTransport(transport)
-	d.parkRemoteViewWarm(view)
-	return true
-}
-
-// detachRemoteAttachmentCurrent invalidates exactly the frozen remote-view
-// membership. It performs no transport I/O while architecture locks are held.
-func (d *Daemon) detachRemoteAttachmentCurrent(view *remoteView, token attachmentConnectionToken) bool {
-	return d.detachRemoteAttachmentCurrentUntil(view, token, nil)
-}
-
-// detachRemoteAttachmentCurrentUntil is the deadline-bounded counterpart used
-// by asynchronous failed-send cleanup. A timed-out cleanup leaves ownership
-// intact for a later terminal sweep rather than violating effect-gate ordering.
-func (d *Daemon) detachRemoteAttachmentCurrentUntil(view *remoteView, token attachmentConnectionToken, done func() <-chan struct{}) bool {
-	if d == nil || view == nil || token.ac == nil || token.transport.transport == nil {
-		return false
-	}
-	frozen := freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{done: done}, token.ac)
-	defer frozen.unfreeze()
-	if !frozen.acquired || !frozen.drained {
-		return false
-	}
-	d.mu.Lock()
-	if d.closing || !d.attachmentOwnerRegisteredByDaemonLocked(view) {
-		d.mu.Unlock()
-		return false
-	}
-	view.mu.Lock()
-	current := sameAttachmentOwner(token.owner, view) &&
-		token.generation == token.ac.connectionGeneration.Load() &&
-		sameAttachmentOwner(token.ac.currentAttachmentOwner(), view) &&
-		token.ac.transportSnapshotCurrent(token.transport)
-	if _, registered := view.attachments[token.ac]; !registered {
-		current = false
-	}
-	if current {
-		view.unregisterAttachmentLocked(token.ac)
-		token.ac.connectionGeneration.Add(1)
-		token.ac.setAttachmentOwner(nil)
-		token.ac.invalidateFrozenAttachmentCapability()
-	}
-	view.mu.Unlock()
-	d.mu.Unlock()
-	return current
 }
 
 func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
@@ -174,7 +83,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	// Explicit winners (and non-explicit park failures) must drop any same-
 	// attachment parking marker left by a raced non-explicit teardown so
 	// IntentResume waiters are not stranded on a never-published park.
-	d.clearParkingInFlight(ac.resumeToken, ac)
+	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 	d.closePicker(ac)
 
 	d.resetScreenDefaultColors(sess)
@@ -218,16 +127,7 @@ func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToke
 	if failed == nil || failed != token.transport.transport {
 		return
 	}
-	if view, remote := token.owner.(*remoteView); remote {
-		parkingToken := d.markParkingInFlightOwner(view, token.ac)
-		if d.detachRemoteAttachmentCurrentUntil(view, token, done) {
-			d.finishRemoteClientGone(view, token.ac, failed, false)
-			return
-		}
-		d.clearParkingInFlightIfAbandonedOwner(view, token.ac, parkingToken)
-		return
-	}
-	sess := token.localSession()
+	sess := token.sess
 	if sess == nil {
 		return
 	}
@@ -270,7 +170,7 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 		d.log.Warn("parked client after send error", "session", sess.name)
 		return
 	}
-	d.clearParkingInFlight(ac.resumeToken, ac)
+	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 	d.closePicker(ac)
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()

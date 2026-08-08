@@ -878,6 +878,36 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 	}
 }
 
+func TestPickerNavigationBackSendFailureKeepsPickerOpen(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+	const sendErr = "navigation back send failed"
+	tr := &remotePickerSendErrorTransport{err: errors.New(sendErr)}
+	ac.replaceTransport(tr)
+	ac.startupOverlay = ports.StartupOverlaySessionPicker
+	ac.navigationCapabilities = ports.NavigationCapabilityBack
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
+	ac.overlays.pickerGeneration++
+	ac.overlays.pickerMu.Unlock()
+
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	token := sess.attachmentToken(ac, tr)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+	token.effect = effect
+
+	d.handlePickerInput(ac, []byte("\r"), effect)
+	require.True(t, ac.overlays.pickerActive(), "failed navigation send must leave the picker open")
+	require.Same(t, sess, ac.currentAttachmentSession())
+	history := d.notices.history()
+	require.NotEmpty(t, history)
+	require.Contains(t, history[len(history)-1].Details, sendErr)
+}
+
 func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
@@ -920,7 +950,7 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	targetPane.screen.Write([]byte("TARGET"))
 	targetPane.screen.ClearDamage() // TARGET is already rendered and has no pending VT damage.
 	require.Empty(t, targetPane.screen.Damage(), "target deliberately has no pending VT damage")
-	ac.previousOwner.Set(target)
+	ac.previousSession.Set(target)
 
 	// Exercise the user-facing previous-session route, which delegates to the
 	// real switchToTarget hand-off and immediately emits its required reset.

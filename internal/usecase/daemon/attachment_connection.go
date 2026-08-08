@@ -3,11 +3,11 @@ package daemon
 import "github.com/bnema/vev/internal/ports"
 
 // attachmentConnectionToken is the exact capability for one registered
-// attachment connection incarnation. It is invalid as soon as the owner,
-// attachment membership, connection generation, transport link, or
+// attachment connection incarnation. It is invalid as soon as any of the
+// session, attachment membership, connection generation, transport link, or
 // coordinator lease changes.
 type attachmentConnectionToken struct {
-	owner      attachmentOwner
+	sess       *session
 	ac         *attachedClient
 	generation uint64
 	transport  transportSnapshot
@@ -18,19 +18,11 @@ type attachmentConnectionToken struct {
 	rebase bool
 }
 
-// attachmentToken retains the local-session constructor for the existing
-// local route. Remote-view token construction is added with remote attachment
-// membership in Phase 4; it must not manufacture a local-session capability.
 func attachmentToken(entry *session, ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
-	return attachmentOwnerToken(entry, ac, tr)
-}
-
-func attachmentOwnerToken(owner attachmentOwner, ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
-	owner = normalizeAttachmentOwner(owner)
-	if owner == nil || ac == nil || tr == nil {
+	if entry == nil || entry.core() == nil || ac == nil || tr == nil {
 		return attachmentConnectionToken{}
 	}
-	// Capture one concrete link incarnation before taking the owner lock. The
+	// Capture one concrete link incarnation before taking the session lock. The
 	// same snapshot is revalidated below; do not take a second snapshot and
 	// accidentally bind a replacement link.
 	transport := ac.transportSnapshot()
@@ -40,38 +32,23 @@ func attachmentOwnerToken(owner attachmentOwner, ac *attachedClient, tr ports.Tr
 	if ac.beforeAttachmentTokenValidation != nil {
 		ac.beforeAttachmentTokenValidation()
 	}
-
-	token := attachmentConnectionToken{owner: owner, ac: ac, transport: transport}
-	switch entry := owner.(type) {
-	case *session:
-		if entry.core() == nil {
-			return attachmentConnectionToken{}
-		}
-		core := entry.core()
-		core.mu.Lock()
-		if !attachmentRegisteredLocked(entry, ac) ||
-			!sameAttachmentOwner(ac.currentAttachmentOwner(), owner) ||
-			!ac.transportSnapshotCurrent(transport) {
-			core.mu.Unlock()
-			return attachmentConnectionToken{}
-		}
-		token.generation = ac.connectionGeneration.Load()
-		if rc := core.coordinator.Load(); rc != nil {
-			token.lease = rc.attachmentLease(ac)
-		}
+	core := entry.core()
+	core.mu.Lock()
+	if !attachmentRegisteredLocked(entry, ac) || !ac.transportSnapshotCurrent(transport) {
 		core.mu.Unlock()
-	case *remoteView:
-		entry.mu.Lock()
-		_, registered := entry.attachments[ac]
-		if !registered || !sameAttachmentOwner(ac.currentAttachmentOwner(), owner) || !ac.transportSnapshotCurrent(transport) {
-			entry.mu.Unlock()
-			return attachmentConnectionToken{}
-		}
-		token.generation = ac.connectionGeneration.Load()
-		entry.mu.Unlock()
-	default:
 		return attachmentConnectionToken{}
 	}
+	generation := ac.connectionGeneration.Load()
+	token := attachmentConnectionToken{
+		sess:       entry,
+		ac:         ac,
+		generation: generation,
+		transport:  transport,
+	}
+	if rc := core.coordinator.Load(); rc != nil {
+		token.lease = rc.attachmentLease(ac)
+	}
+	core.mu.Unlock()
 	if !token.current() {
 		return attachmentConnectionToken{}
 	}
@@ -83,39 +60,27 @@ func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attach
 	return attachmentToken(s, ac, tr)
 }
 
-// localSession narrows a token only for explicitly local operations. It is
-// intentionally nil for a remote owner, so local PTY/persistence paths fail
-// closed rather than treating remote metadata as a local session.
-func (t attachmentConnectionToken) localSession() *session {
-	return localSession(t.owner)
-}
-
-// current validates every immutable identity captured by the token. The owner
-// binding is the sole mutable authority; the local session is only a derived
-// capability for local attachment membership and coordinator validation.
+// current validates every immutable identity captured by the token. Membership
+// is the sole authority; there is no owner, replacement, or compatibility role.
 func (t attachmentConnectionToken) current() bool {
-	return t.owner != nil && t.ac != nil &&
+	return t.sess != nil && t.ac != nil &&
 		t.ac.connectionGeneration.Load() == t.generation &&
-		sameAttachmentOwner(t.ac.currentAttachmentOwner(), t.owner) &&
+		t.ac.currentAttachmentSession() == t.sess &&
 		t.ac.transportSnapshotCurrent(t.transport) &&
-		attachmentOwnerRegistered(t.owner, t.ac)
+		attachmentRegistered(t.sess, t.ac)
 }
 
 // attachmentCurrent additionally validates the optional coordinator lease used
 // by render and resize effects. Attachments without that optional lease still
 // own their independent connection lifecycle.
 func (t attachmentConnectionToken) attachmentCurrent() bool {
-	if !t.current() {
+	if !t.current() || t.ac.currentAttachmentSession() != t.sess {
 		return false
 	}
 	if t.lease == nil {
 		return true
 	}
-	entry := t.localSession()
-	if entry == nil {
-		return false
-	}
-	rc := entry.core().coordinator.Load()
+	rc := t.sess.core().coordinator.Load()
 	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)
 }
 
@@ -143,27 +108,23 @@ func (t *attachmentConnectionToken) endAttachmentEffect() {
 	t.effect = nil
 }
 
-// attachmentEffectCurrentSessionLocked is the same check at a local
-// session-owned mutation boundary where sess.core().mu is already held.
+// attachmentEffectCurrentSessionLocked is the same check at a session-owned
+// mutation boundary where sess.core().mu is already held.
 func (t attachmentConnectionToken) attachmentEffectCurrentSessionLocked() bool {
-	entry := t.localSession()
-	if entry == nil {
-		return false
-	}
 	if t.effect != nil && !t.effect.ended.Load() {
 		return true
 	}
-	if t.ac == nil ||
+	if t.sess == nil || t.ac == nil ||
 		t.ac.connectionGeneration.Load() != t.generation ||
 		!t.ac.transportSnapshotCurrent(t.transport) ||
-		!sameAttachmentOwner(t.ac.currentAttachmentOwner(), t.owner) ||
-		!attachmentRegisteredLocked(entry, t.ac) {
+		t.ac.currentAttachmentSession() != t.sess ||
+		!attachmentRegisteredLocked(t.sess, t.ac) {
 		return false
 	}
 	if t.lease == nil {
 		return true
 	}
-	rc := entry.core().coordinator.Load()
+	rc := t.sess.core().coordinator.Load()
 	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)
 }
 

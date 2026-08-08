@@ -135,28 +135,6 @@ func (t *CommandRequestTracker) Fail(requestID, generation uint64, err error) {
 	t.finish(requestID, generation, CommandRequestOutcome{Err: err})
 }
 
-// FailGeneration completes every pending request for one retired transport
-// generation. It releases the tracker lock before publishing outcomes so a
-// caller can immediately wait or begin work on a replacement generation.
-func (t *CommandRequestTracker) FailGeneration(generation uint64, err error) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	pending := make([]commandRequestPending, 0)
-	for requestID, request := range t.pending {
-		if request.generation != generation {
-			continue
-		}
-		delete(t.pending, requestID)
-		pending = append(pending, request)
-	}
-	t.mu.Unlock()
-	for _, request := range pending {
-		request.outcome <- CommandRequestOutcome{Err: err}
-	}
-}
-
 func (t *CommandRequestTracker) finish(requestID, generation uint64, outcome CommandRequestOutcome) {
 	if t == nil {
 		return

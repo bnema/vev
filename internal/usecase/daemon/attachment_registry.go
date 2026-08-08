@@ -23,13 +23,6 @@ type attachmentView struct {
 	revision   uint64
 }
 
-// attachmentViewSnapshot is the immutable value returned to callers that need
-// to inspect attachment-local state without retaining its mutex.
-type attachmentViewSnapshot struct {
-	attachment *attachedClient
-	view       attachmentView
-}
-
 func (ac *attachedClient) viewSnapshot() attachmentView {
 	if ac == nil {
 		return attachmentView{}
@@ -336,18 +329,6 @@ func (s *session) snapshotAttachments() []*attachedClient {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshotAttachmentsLocked()
-}
-
-func (s *session) snapshotAttachmentViews() []attachmentViewSnapshot {
-	attachments := s.snapshotAttachments()
-	if len(attachments) == 0 {
-		return nil
-	}
-	views := make([]attachmentViewSnapshot, 0, len(attachments))
-	for _, ac := range attachments {
-		views = append(views, attachmentViewSnapshot{attachment: ac, view: ac.viewSnapshot()})
-	}
-	return views
 }
 
 // repairAttachmentViewLocked validates stable targets and chooses the nearest

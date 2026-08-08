@@ -31,11 +31,8 @@ type overlayRuntime struct {
 	pickerRemotePreview       picker.Preview
 	pickerRemotePreviewCancel context.CancelFunc
 	pickerPreviewGeneration   uint64
-	// pickerRemoteSelection fences one asynchronous remote picker activation.
-	// It is cleared before the picker accepts another remote activation.
-	pickerRemoteSelection *remotePickerSelection
-	pickerPending         []byte
-	pickerESC             pendingByteTimer
+	pickerPending             []byte
+	pickerESC                 pendingByteTimer
 
 	// Test-only, unsynchronized lifecycle seams. Assign them before picker
 	// publication or goroutine startup. Hooks run without pickerMu or

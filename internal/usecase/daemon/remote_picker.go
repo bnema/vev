@@ -129,11 +129,15 @@ func remoteSessionOrigin(host string) string {
 	return host
 }
 
+func remoteSessionStateStopped(state string) bool {
+	return state == "down" || state == "stopped"
+}
+
 func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
 	key.LifecycleID = session.LifecycleID
 	key.DisplayOrigin = remoteSessionOrigin(key.Host)
 	availability := remotePickerAvailability(status)
-	stopped := session.State == "down"
+	stopped := remoteSessionStateStopped(session.State)
 	broken := session.State == "broken"
 	tabs := ports.CatalogTabs(session)
 	viewTabs := make([]picker.TabEntry, 0, len(tabs))
@@ -178,7 +182,8 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 		}
 		// Keep the structured session identity on rows even when one tab ID is
 		// malformed or a broken session cannot be activated. Cursor navigation
-		// remains possible for diagnostics, but activation fails closed.
+		// must remain possible, while sendRemoteAttachTargetForAttachment will
+		// fail closed on the invalid target.
 		remoteTarget = &target
 	}
 	reason := ""
@@ -193,21 +198,24 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	}
 	ready := status == remoteHostFresh && targetValid && !broken
 	if legacy {
-		// Proxied picker activation requires exact lifecycle and stable-tab
-		// identity. A count-only cached row cannot fall back to client-owned
-		// direct attachment under the v25 protocol contract.
-		reason = "identity_changed"
+		// Count-only peers cannot prove lifecycle/tab identity. Preserve the
+		// historical row for compatibility, but make it read-only until a fresh
+		// catalog response authorizes a name attach.
+		ready = status == remoteHostFresh && !broken && !stopped
+		if status == remoteHostVersionMismatch {
+			reason = remoteReasonForStatus(status)
+		}
 	}
 	detail := remotePickerStatusDetail(status, fetchedAt)
 	if detail == "" {
 		switch session.State {
 		case "up":
-			detail = "up"
+			detail = "running"
 			if session.Attached {
 				detail += " · attached"
 			}
-		case "down":
-			detail = "down"
+		case "down", "stopped":
+			detail = "stopped"
 		case "broken":
 			detail = "broken"
 		}
@@ -454,12 +462,7 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 	if cacheChanged {
 		d.persistRemoteCatalogCache()
 	}
-	// A picker model may have been built from a fresh cached entry just before
-	// this refresh marked its host pending. Rebuild it before the catalog I/O so
-	// Enter cannot commit that stale selectable target during the refresh window.
-	if cacheChanged || len(hosts) != 0 {
-		d.refreshRemoteOpenPickers()
-	}
+	d.refreshRemoteOpenPickers()
 
 	for _, host := range hosts {
 		d.sessWg.Go(func() {
@@ -570,8 +573,8 @@ func (d *Daemon) refreshRemoteOpenPickers() {
 			continue
 		}
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-		// The picker is attachment-local: catalog changes repaint the actual
-		// owner, which can be either the retained local session or a remote view.
-		d.invalidateAttachedOwner(ac, true, "remote_picker.go")
+		if entry := ac.currentAttachmentSession(); entry != nil {
+			d.invalidateRender(entry, ac, true, "remote_picker.go")
+		}
 	}
 }

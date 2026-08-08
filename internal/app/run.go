@@ -888,8 +888,8 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 		seenHandoffs[attachHandoffKey{endpoint: remoteTarget, session: name, intent: intent}] = struct{}{}
 	}
-	var handoff client.AttachHandoffFunc
-	handoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+	pickerHandoff := remoteTarget == ""
+	handoff := func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
 		if err := validateRemoteAttachHandoff(target); err != nil {
 			return nil, client.AttachRequest{}, fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
@@ -915,7 +915,11 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if err != nil {
 			return nil, client.AttachRequest{}, err
 		}
-		return dialer, client.AttachRequest{Intent: target.Intent, SessionName: target.Session, Remote: true, RemoteTarget: selection, EnvironmentPolicy: target.EnvironmentPolicy}, nil
+		policy := target.EnvironmentPolicy
+		if pickerHandoff && target.RemoteTarget == nil {
+			policy = ports.EnvironmentPolicyDaemonOwned
+		}
+		return dialer, client.AttachRequest{Intent: target.Intent, SessionName: target.Session, Remote: true, RemoteTarget: selection, EnvironmentPolicy: policy}, nil
 	}
 
 	for {
@@ -941,6 +945,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			}, client.AttachRequest{
 				Intent:            intent,
 				SessionName:       name,
+				Remote:            true,
 				RemoteTarget:      remoteSelection,
 				EnvironmentPolicy: remoteEnvironmentPolicy,
 			})
@@ -983,6 +988,9 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		intent = handoffErr.Target.Intent
 		remoteSelection = nil
 		remoteEnvironmentPolicy = handoffErr.Target.EnvironmentPolicy
+		if pickerHandoff && remoteEnvironmentPolicy == ports.EnvironmentPolicyClientOwned {
+			remoteEnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+		}
 		if handoffErr.Target.RemoteTarget != nil {
 			copyTarget := *handoffErr.Target.RemoteTarget
 			remoteSelection = &copyTarget

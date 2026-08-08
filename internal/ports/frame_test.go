@@ -3,8 +3,8 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 25 {
-		t.Fatalf("ProtocolVersion = %d, want 25", ProtocolVersion)
+	if ProtocolVersion != 26 {
+		t.Fatalf("ProtocolVersion = %d, want 26", ProtocolVersion)
 	}
 }
 
@@ -17,9 +17,6 @@ func TestControlMsgTypes(t *testing.T) {
 	}
 	if MsgOutputResetRequest != 13 {
 		t.Fatalf("MsgOutputResetRequest = %d, want 13", MsgOutputResetRequest)
-	}
-	if MsgSessionMeta != 23 {
-		t.Fatalf("MsgSessionMeta = %d, want 23", MsgSessionMeta)
 	}
 }
 
@@ -35,8 +32,8 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgCommand", MsgCommand}, {"MsgOutputResetRequest", MsgOutputResetRequest}, {"MsgRemotePreviewRequest", MsgRemotePreviewRequest},
 		{"MsgWelcome", MsgWelcome}, {"MsgError", MsgError}, {"MsgOutput", MsgOutput},
 		{"MsgDetached", MsgDetached}, {"MsgPong", MsgPong}, {"MsgSessions", MsgSessions},
-		{"MsgCommandResult", MsgCommandResult}, {"MsgSessionMeta", MsgSessionMeta},
-		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget},
+		{"MsgCommandResult", MsgCommandResult},
+		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget}, {"MsgNavigationAction", MsgNavigationAction},
 	}
 
 	seen := make(map[MsgType]string, len(tests))
@@ -48,5 +45,19 @@ func TestMsgTypeUnique(t *testing.T) {
 	}
 	if len(seen) != len(tests) {
 		t.Fatalf("expected %d distinct MsgType values, got %d", len(tests), len(seen))
+	}
+}
+
+func TestNavigationActionFrame(t *testing.T) {
+	frame := Frame{Type: MsgNavigationAction, Payload: MarshalNavigationAction(NavigationOpenHomePicker)}
+	if frame.Type != MsgNavigationAction {
+		t.Fatalf("frame type = %d, want %d", frame.Type, MsgNavigationAction)
+	}
+	action, err := UnmarshalNavigationAction(frame.Payload)
+	if err != nil {
+		t.Fatalf("UnmarshalNavigationAction() error = %v", err)
+	}
+	if action != NavigationOpenHomePicker {
+		t.Fatalf("action = %d, want %d", action, NavigationOpenHomePicker)
 	}
 }
