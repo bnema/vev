@@ -1154,14 +1154,8 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
-	rc := sess.renderCoordinator()
-	lease := (*attachmentLease)(nil)
-	if rc != nil {
-		lease = rc.attachmentLease(ac)
-	}
 	expected := ac.transportSnapshot()
 	welcomeToken := sess.attachmentToken(ac, tr)
-	welcomeToken.lease = lease
 	welcomeTicket, admitted := ac.beginAttachmentEffect(welcomeToken)
 	if expected.transport != tr || !admitted || welcomeToken.ac == nil {
 		if admitted {

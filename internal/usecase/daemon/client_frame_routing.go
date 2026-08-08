@@ -278,6 +278,10 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 		return false
 	}
 	ac.sendMu.Lock()
+	if ac.output == nil {
+		ac.sendMu.Unlock()
+		return false
+	}
 	acknowledged := ac.output.ack(epoch, state)
 	ac.sendMu.Unlock()
 	if acknowledged {

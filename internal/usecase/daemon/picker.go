@@ -251,6 +251,8 @@ func remotePickerReasonText(reason string) string {
 		return "session stopped"
 	case "session_broken":
 		return "session broken"
+	case "malformed":
+		return "catalog malformed"
 	case "refreshing":
 		return "refreshing"
 	case "identity_changed":
