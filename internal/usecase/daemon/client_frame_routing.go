@@ -278,10 +278,12 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 		return false
 	}
 	ac.sendMu.Lock()
-	ac.output.ack(epoch, state)
+	acknowledged := ac.output.ack(epoch, state)
 	ac.sendMu.Unlock()
-	if rc := token.sess.core().coordinator.Load(); rc != nil {
-		rc.notifyAckForLease(token.lease)
+	if acknowledged {
+		if rc := token.sess.renderCoordinator(); rc != nil {
+			rc.notifyAckForLease(token.lease)
+		}
 	}
-	return true
+	return acknowledged
 }

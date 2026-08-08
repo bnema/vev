@@ -118,6 +118,15 @@ type session struct {
 	floatingLaunches       map[*floatingLaunch]struct{}
 }
 
+func (s *session) nameSnapshot() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.name
+}
+
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
 	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, and pane map membership

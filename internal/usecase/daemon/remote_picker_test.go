@@ -376,11 +376,22 @@ type fixedRemoteRefreshClock struct{ now time.Time }
 func (c fixedRemoteRefreshClock) Now() time.Time                   { return c.now }
 func (fixedRemoteRefreshClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
 
-type remotePickerClock struct{ now time.Time }
+type remotePickerClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
 
-func (c *remotePickerClock) Now() time.Time                   { return c.now }
+func (c *remotePickerClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
 func (*remotePickerClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
-func (c *remotePickerClock) Advance(d time.Duration)          { c.now = c.now.Add(d) }
+func (c *remotePickerClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
 
 func requireNoRemoteLockViolations(t *testing.T, catalog *channelRemoteCatalog, cache *recordingRemoteCache) {
 	t.Helper()

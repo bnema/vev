@@ -253,7 +253,7 @@ func validateAttachRequest(request AttachRequest) error {
 			return fmt.Errorf("vev: invalid session name: %w", err)
 		}
 	}
-	if err := ports.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.Remote || request.RemoteTarget != nil); err != nil {
+	if err := ports.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
@@ -514,6 +514,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if result.target.RemoteTarget != nil || result.target.Endpoint != "" {
 				if homeRoute == nil && attemptRequest.RemoteTarget == nil {
 					routeRequest := attemptRequest
+					if result.sessionName != "" {
+						routeRequest.SessionName = result.sessionName
+					}
 					routeRequest.Intent = ports.IntentAttach
 					routeRequest.NavigationCapabilities = 0
 					routeRequest.StartupOverlay = ports.StartupOverlayNone
@@ -589,6 +592,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if returnNavigationPending && !returnResumeFallback && homeRoute != nil {
 			returnRoute = nil
 			returnNavigationPending = false
+			dialer = homeRoute.dialer
 			attemptRequest = homeRoute.request
 			attemptRequest.Intent = ports.IntentAttach
 			attemptRequest.NavigationCapabilities = ports.NavigationCapabilityBack

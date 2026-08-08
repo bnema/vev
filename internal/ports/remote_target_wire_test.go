@@ -2,6 +2,7 @@ package ports
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -82,11 +83,12 @@ func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 	target := testRemoteTarget(false)
 	tests := []struct {
-		name        string
-		validate    func() error
-		marshalBad  func() []byte
-		marshalGood func() []byte
-		unmarshal   func([]byte) error
+		name         string
+		validate     func() error
+		marshalBad   func() []byte
+		marshalGood  func() []byte
+		unmarshal    func([]byte) error
+		policyOffset int
 	}{
 		{
 			name: "hello",
@@ -111,7 +113,8 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
 				})
 			},
-			unmarshal: func(payload []byte) error { _, err := UnmarshalHello(payload); return err },
+			unmarshal:    func(payload []byte) error { _, err := UnmarshalHello(payload); return err },
+			policyOffset: 3,
 		},
 		{
 			name: "attach target",
@@ -133,7 +136,8 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
 				})
 			},
-			unmarshal: func(payload []byte) error { _, err := UnmarshalAttachTarget(payload); return err },
+			unmarshal:    func(payload []byte) error { _, err := UnmarshalAttachTarget(payload); return err },
+			policyOffset: 1,
 		},
 	}
 
@@ -158,7 +162,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 			if err := tt.unmarshal(trailing); err == nil {
 				t.Fatal("trailing garbage unexpectedly decoded")
 			}
-			payload[len(payload)-3] = byte(EnvironmentPolicyClientOwned)
+			payload[len(payload)-tt.policyOffset] = byte(EnvironmentPolicyClientOwned)
 			if err := tt.unmarshal(payload); err == nil {
 				t.Fatal("unmarshal accepted client-owned policy for remote target")
 			}
@@ -166,7 +170,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 	}
 }
 
-func TestAttachTargetRejectsTokenlessResume(t *testing.T) {
+func TestAttachTargetRejectsResumeIntent(t *testing.T) {
 	tests := []AttachTarget{
 		{Endpoint: "host", Session: "work", Intent: IntentResume},
 		{
@@ -178,7 +182,7 @@ func TestAttachTargetRejectsTokenlessResume(t *testing.T) {
 		},
 	}
 	for _, target := range tests {
-		if err := ValidateAttachTarget(target); err != ErrInvalidAttachTarget {
+		if err := ValidateAttachTarget(target); !errors.Is(err, ErrInvalidAttachTarget) {
 			t.Fatalf("ValidateAttachTarget(%#v) error = %v, want %v", target, err, ErrInvalidAttachTarget)
 		}
 		if got := MarshalAttachTarget(target); got != nil {

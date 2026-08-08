@@ -70,7 +70,7 @@ func (d *Daemon) markParkingInFlight(sess *session, ac *attachedClient) uint64 {
 		ac.resumeToken = d.nextResumeTokenLocked()
 	}
 	d.ensureParkingInFlightLocked(sess, ac)
-	d.log.Info("parking in flight", "session", sess.name)
+	d.log.Info("parking in flight", "session", sess.nameSnapshot())
 	return ac.resumeToken
 }
 
@@ -178,7 +178,7 @@ func (d *Daemon) waitParkingInFlight(h ports.Hello) bool {
 		d.mu.Unlock()
 		return false
 	}
-	if h.Name != "" && pending.sess != nil && pending.sess.name != h.Name {
+	if h.Name != "" && pending.sess != nil && pending.sess.nameSnapshot() != h.Name {
 		d.mu.Unlock()
 		return false
 	}
@@ -208,7 +208,7 @@ func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
 	// terminal session removal and can strand IntentResume waiters. Callers
 	// that need the detach→park gap advertised must markParkingInFlight while
 	// still the exact live owner. Direct parkAttachment still parks below.
-	d.log.Info("parking client prepared", "session", sess.name)
+	d.log.Info("parking client prepared", "session", sess.nameSnapshot())
 	return true
 }
 
@@ -262,7 +262,7 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 		}
 		oldSame.closeDone()
 	}
-	d.log.Info("client parked for resume", "session", sess.name, "grace", grace)
+	d.log.Info("client parked for resume", "session", sess.nameSnapshot(), "grace", grace)
 	d.watchParkedTimer(token, parked)
 	return true
 }
@@ -291,7 +291,7 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 		d.removeParkedLocked(token, parked)
 		d.mu.Unlock()
 		d.closePickerIfCurrent(parked.ac, nil, parked.pickerGeneration)
-		d.log.Warn("parked client expired", "session", parked.sess.name)
+		d.log.Warn("parked client expired", "session", parked.sess.nameSnapshot())
 		return
 	}
 	d.mu.Unlock()
@@ -501,7 +501,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 
 	if clientMismatch {
 		reason := "client id mismatch"
-		d.log.Warn("resume rejected", "session", sess.name, "err", reason)
+		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "err", reason)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	if !credentialMatch {
@@ -549,7 +549,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	_ = ac.closeCapturedTransport(oldSnap.transport)
-	d.log.Info("live resume credential parked for reconnect", "session", sess.name)
+	d.log.Info("live resume credential parked for reconnect", "session", sess.nameSnapshot())
 	return d.resumeParked(h, tr, sz)
 }
 
@@ -606,7 +606,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	registered := d.sessions[sess.id] == sess
 	if !registered {
 		d.removeParkedLocked(h.ResumeToken, parked)
-		d.log.Warn("resume rejected", "session", sess.name, "registered", false)
+		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "registered", false)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	ac := parked.ac
@@ -615,7 +615,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	}
 	if ac.clientID != h.ClientID {
 		reason := "client id mismatch"
-		d.log.Warn("resume rejected", "session", sess.name, "err", reason)
+		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "err", reason)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	if h.RemoteTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.RemoteTarget) {
@@ -663,6 +663,6 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	}
 	d.deferAttachmentTransitionCleanups(transition)
 	d.touchMRU(sess)
-	d.log.Info("client resumed", "session", sess.name)
+	d.log.Info("client resumed", "session", sess.nameSnapshot())
 	return sess, ac, true, nil
 }

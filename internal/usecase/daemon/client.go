@@ -211,7 +211,12 @@ func (ac *attachedClient) clearGeometryClaim() {
 	ac.sizeMu.Unlock()
 }
 
-func (ac *attachedClient) currentAttachmentSession() *session { return ac.sess.Get() }
+func (ac *attachedClient) currentAttachmentSession() *session {
+	if ac == nil {
+		return nil
+	}
+	return ac.sess.Get()
+}
 
 // currentSession narrows the attachment to its owning local session.
 func (ac *attachedClient) currentSession() *session {
@@ -847,7 +852,7 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 	if !token.attachmentEffectCurrent() {
 		return
 	}
-	if rc := token.sess.core().coordinator.Load(); rc != nil {
+	if rc := sess.renderCoordinator(); rc != nil {
 		rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
 	}
 }

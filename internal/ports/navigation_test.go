@@ -17,8 +17,8 @@ func TestNavigationActionWireTable(t *testing.T) {
 	}{
 		{name: "open home", action: NavigationOpenHomePicker, payload: []byte{1}, valid: true},
 		{name: "back", action: NavigationBack, payload: []byte{2}, valid: true},
-		{name: "zero", action: 0, valid: false},
-		{name: "unknown", action: 3, valid: false},
+		{name: "zero", action: 0, payload: []byte{0}, valid: false},
+		{name: "unknown", action: 3, payload: []byte{3}, valid: false},
 	}
 
 	for _, tt := range tests {

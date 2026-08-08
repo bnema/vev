@@ -708,7 +708,7 @@ func ValidateHello(h Hello) error {
 		return ErrInvalidHello
 	}
 	if err := validateHelloNavigation(h); err != nil {
-		return fmt.Errorf("%w: navigation", ErrInvalidHello)
+		return fmt.Errorf("%w: navigation: %w", ErrInvalidHello, err)
 	}
 	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || len(h.Env) > math.MaxUint32 {
 		return ErrInvalidHello

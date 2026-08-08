@@ -95,7 +95,7 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 			want := append(append([]byte(nil), tt.want...), 0, 0)
 			got := MarshalHello(tt.msg)
 			if !bytes.Equal(got, want) {
-				t.Fatalf("MarshalHello() = %#v, want %#v", got, tt.want)
+				t.Fatalf("MarshalHello() = %#v, want %#v", got, want)
 			}
 			back, err := UnmarshalHello(got)
 			if err != nil {

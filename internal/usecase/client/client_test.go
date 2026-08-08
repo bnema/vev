@@ -90,6 +90,7 @@ func (t *reconnectTestTimer) Reset(d time.Duration) bool {
 	t.mu.Lock()
 	t.duration = d
 	t.fired = false
+	t.stopped = false
 	t.mu.Unlock()
 	return true
 }
