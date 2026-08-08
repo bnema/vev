@@ -1170,6 +1170,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		if !d.abortResumeClaim(ac) {
 			d.clientGone(sess, ac, tr, false)
 		}
+		_ = tr.Close()
 		return
 	}
 	if err := handshakeCtx.Err(); err != nil {

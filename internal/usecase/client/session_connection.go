@@ -20,9 +20,10 @@ type SessionTarget struct {
 func (t SessionTarget) validate() error {
 	switch t.Intent {
 	case ports.IntentEphemeral:
-		if t.SessionName == "" {
-			return nil
+		if t.SessionName != "" {
+			return domain.ErrInvalidSessionName
 		}
+		return nil
 	case ports.IntentNew, ports.IntentAttach, ports.IntentResume:
 		if t.SessionName == "" {
 			return domain.ErrInvalidSessionName

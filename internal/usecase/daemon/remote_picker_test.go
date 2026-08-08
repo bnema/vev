@@ -604,6 +604,9 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
 		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}},
 	}})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status["arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
 	token := sess.attachmentToken(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
@@ -656,6 +659,9 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
 		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}},
 	}})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status["arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
 	const sendErr = "remote attach send failed"
 	tr := &remotePickerSendErrorTransport{err: errors.New(sendErr)}
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}

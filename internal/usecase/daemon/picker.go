@@ -930,14 +930,17 @@ func (d *Daemon) remotePickerTargetReady(key domain.RemoteSessionKey) bool {
 	}
 	d.remoteCatalog.mu.Lock()
 	defer d.remoteCatalog.mu.Unlock()
-	for _, entry := range d.remoteCatalog.cache {
-		if entry.Host != key.Host {
-			continue
-		}
-		for _, session := range entry.Sessions {
-			if session.Name == key.Name {
-				return d.remoteCatalog.status[key.Host] != remoteHostVersionMismatch
-			}
+	if d.remoteCatalog.status[key.Host] != remoteHostFresh {
+		return false
+	}
+	entry, ok := d.remoteCatalog.cache[key.Host]
+	if !ok || remoteCatalogExpired(entry.FetchedAt, d.clock.Now()) {
+		d.remoteCatalog.status[key.Host] = remoteHostStale
+		return false
+	}
+	for _, session := range entry.Sessions {
+		if session.Name == key.Name {
+			return true
 		}
 	}
 	return false

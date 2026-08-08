@@ -41,6 +41,66 @@ func (r *realTimer) C() <-chan time.Time        { return r.t.C }
 func (r *realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
 func (r *realTimer) Stop() bool                 { return r.t.Stop() }
 
+type reconnectTestClock struct {
+	mu     sync.Mutex
+	timers []*reconnectTestTimer
+}
+
+func (c *reconnectTestClock) Now() time.Time { return time.Time{} }
+func (c *reconnectTestClock) NewTimer(d time.Duration) ports.Timer {
+	t := &reconnectTestTimer{ch: make(chan time.Time, 1), duration: d}
+	c.mu.Lock()
+	c.timers = append(c.timers, t)
+	c.mu.Unlock()
+	return t
+}
+
+func (c *reconnectTestClock) fireReconnect(t *testing.T) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, timer := range c.timers {
+			if timer.duration != 100*time.Millisecond {
+				continue
+			}
+			timer.mu.Lock()
+			if !timer.stopped && !timer.fired {
+				timer.fired = true
+				timer.ch <- time.Time{}
+				timer.mu.Unlock()
+				return true
+			}
+			timer.mu.Unlock()
+		}
+		return false
+	}, time.Second, time.Millisecond)
+}
+
+type reconnectTestTimer struct {
+	mu       sync.Mutex
+	ch       chan time.Time
+	duration time.Duration
+	stopped  bool
+	fired    bool
+}
+
+func (t *reconnectTestTimer) C() <-chan time.Time { return t.ch }
+func (t *reconnectTestTimer) Reset(d time.Duration) bool {
+	t.mu.Lock()
+	t.duration = d
+	t.fired = false
+	t.mu.Unlock()
+	return true
+}
+func (t *reconnectTestTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	wasStopped := t.stopped
+	t.stopped = true
+	return !wasStopped
+}
+
 // recvItem is one scripted Recv result.
 type recvItem struct {
 	f   ports.Frame
@@ -882,9 +942,14 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
 	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
-
-	err := runTestClient(context.Background(), testDependencies(d, term, realClock{}, nil, nil), client.AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: false})
-	require.NoError(t, err)
+	clock := &reconnectTestClock{}
+	result := make(chan error, 1)
+	go func() {
+		result <- runTestClient(context.Background(), testDependencies(d, term, clock, nil, nil), client.AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: false})
+	}()
+	clock.fireReconnect(t)
+	clock.fireReconnect(t)
+	require.NoError(t, <-result)
 	require.Equal(t, int32(3), d.calls.Load())
 	require.Equal(t, int32(1), term.rawCount.Load())
 	require.Equal(t, int32(1), term.restoreCount.Load())

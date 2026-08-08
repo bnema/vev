@@ -289,7 +289,9 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			return
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
-			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
+			if current := ac.currentAttachmentSession(); current != nil {
+				d.invalidateRender(current, ac, true, "palette.go")
+			}
 		}
 		return
 	}
@@ -312,7 +314,9 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
-			d.invalidateRender(ac.currentAttachmentSession(), ac, true, "palette.go")
+			if current := ac.currentAttachmentSession(); current != nil {
+				d.invalidateRender(current, ac, true, "palette.go")
+			}
 		}
 		return
 	}

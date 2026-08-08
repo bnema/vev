@@ -32,6 +32,7 @@ func TestSessionTargetValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral}},
+		{name: "named ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral, SessionName: "work"}, wantErr: true},
 		{name: "new", target: client.SessionTarget{Intent: ports.IntentNew, SessionName: "work"}},
 		{name: "attach", target: client.SessionTarget{Intent: ports.IntentAttach, SessionName: "work"}},
 		{name: "resume", target: client.SessionTarget{Intent: ports.IntentResume, SessionName: "work"}},

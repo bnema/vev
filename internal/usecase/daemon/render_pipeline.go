@@ -476,7 +476,11 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	endDiff(0, err == nil)
 	if err != nil {
 		ac.sendMu.Unlock()
-		d.log.Error("render draw failed", "err", err, "session", entry.core().name)
+		core := entry.core()
+		core.mu.Lock()
+		sessionName := core.name
+		core.mu.Unlock()
+		d.log.Error("render draw failed", "err", err, "session", sessionName)
 		// Without a coordinator reportError repaints synchronously. Suppress only
 		// that nested notice repaint; leave the guard before returning so a later,
 		// independent failed transaction can still notify the user.

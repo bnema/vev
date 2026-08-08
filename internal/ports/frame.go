@@ -22,7 +22,7 @@ const MaxFrameLen = 16 << 20
 type MsgType uint8
 
 // Frame message types. Client-originated messages occupy 1–13 and 15;
-// server-originated messages occupy 16–22 and 25–27. Values 14, 23–24 remain
+// server-originated messages occupy 16–23 and 25. Values 14 and 24 remain
 // reserved for future extensions.
 const (
 	MsgHello                MsgType = 1
@@ -49,7 +49,7 @@ const (
 	MsgCommandResult         MsgType = 22
 	MsgAttachTarget          MsgType = 25
 	MsgRemotePreviewResponse MsgType = 26
-	MsgNavigationAction      MsgType = 27
+	MsgNavigationAction      MsgType = 23
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

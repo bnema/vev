@@ -178,7 +178,8 @@ type AttachRequest struct {
 	StartupOverlay         ports.StartupOverlay
 }
 
-// Runner owns the client lifecycle across one or more attachment attempts.
+// attachRoute captures the dialer, request, and resume token needed to
+// restore a previous attachment route after a navigation handoff.
 type attachRoute struct {
 	dialer      ports.Dialer
 	request     AttachRequest
@@ -490,6 +491,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 					return errors.New("vev: stale return navigation action")
 				}
 				route := *returnRoute
+				returnRoute = nil
+				homeNavigationPending = false
 				returnNavigationPending = true
 				dialer = route.dialer
 				attemptRequest = route.request
@@ -549,13 +552,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.SessionName = result.sessionName
 		}
 		if result.err == nil {
-			if result.welcomed {
-				homeNavigationPending = false
-				if returnNavigationPending {
-					returnRoute = nil
-					returnNavigationPending = false
-					returnResumeFallback = false
-				}
+			if result.welcomed && returnNavigationPending {
+				returnRoute = nil
+				returnNavigationPending = false
+				returnResumeFallback = false
 			}
 			if clearErr := reconnect.clear(); clearErr != nil {
 				return clearErr
@@ -566,8 +566,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			route := *returnRoute
 			returnRoute = nil
 			homeNavigationPending = false
-			returnNavigationPending = false
-			returnResumeFallback = false
+			returnNavigationPending = true
+			returnResumeFallback = true
 			dialer = route.dialer
 			attemptRequest = route.request
 			attemptRequest.Intent = ports.IntentResume
