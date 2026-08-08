@@ -890,15 +890,21 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 // the target is sent, the local attachment is detached and the client opens a
 // fresh connection to the owning daemon.
 func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, _ string) error {
+	failUnavailable := func() error {
+		if token.attachmentCurrent() {
+			d.notifyRemotePickerUnavailable(token.sess, target)
+		}
+		return errAttachmentTransition
+	}
 	var handoff ports.AttachTarget
 	if target.RemoteTarget != nil {
 		remoteTarget := *target.RemoteTarget
 		if err := remoteTarget.Validate(); err != nil || target.Stopped != remoteTarget.Stopped || !d.remotePickerTargetReadyTarget(remoteTarget) {
-			return errAttachmentTransition
+			return failUnavailable()
 		}
 		if target.RemoteKey != nil {
 			if target.Session != target.RemoteKey.ID() || target.RemoteKey.Host != remoteTarget.Endpoint || target.RemoteKey.Name != remoteTarget.SessionName || target.RemoteKey.LifecycleID != remoteTarget.LifecycleID {
-				return errAttachmentTransition
+				return failUnavailable()
 			}
 		}
 		handoff = ports.AttachTarget{
@@ -910,13 +916,13 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionT
 		}
 	} else {
 		if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" || !d.remotePickerTargetReady(key) {
-			return errAttachmentTransition
+			return failUnavailable()
 		}
 		handoff = ports.AttachTarget{Endpoint: key.Host, Session: key.Name, Intent: ports.IntentAttach, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}
 	}
 	payload := ports.MarshalAttachTarget(handoff)
 	if payload == nil {
-		return errAttachmentTransition
+		return failUnavailable()
 	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
 		return err

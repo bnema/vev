@@ -71,7 +71,7 @@ func TestRemotePickerRichHandoffRejectsReplacedLifecycle(t *testing.T) {
 	require.ErrorIs(t, d.sendRemoteAttachTargetForAttachment(token, target, key, sessionHandoffGuard{}, "picker-select"), errAttachmentTransition)
 	select {
 	case frame := <-sends:
-		t.Fatalf("rejected handoff sent frame type %d", frame.Type)
+		require.NotEqual(t, ports.MsgAttachTarget, frame.Type, "rejected handoff must not send an attach target")
 	default:
 	}
 }

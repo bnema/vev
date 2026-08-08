@@ -75,24 +75,38 @@ func watchHandshakeTransport(ctx context.Context, transport ports.Transport) fun
 // handshake context remains live. Closing the transport is the interruption
 // mechanism because ports.Transport methods do not accept contexts.
 func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, operation func() error) error {
+	_, err := boundedHandshakeOperationTracked(ctx, transport, operation)
+	return err
+}
+
+// boundedHandshakeOperationTracked also returns a completion signal for the
+// operation worker. Callers that own an effect gate must wait for this signal
+// before releasing the gate after cancellation; the transport operation itself
+// may still be unwinding after Close interrupts it.
+func boundedHandshakeOperationTracked(ctx context.Context, transport ports.Transport, operation func() error) (<-chan struct{}, error) {
+	done := make(chan struct{})
 	if err := ctx.Err(); err != nil {
+		close(done)
 		_ = transport.Close()
-		return err
+		return done, err
 	}
 	completed := make(chan error, 1)
-	go func() { completed <- operation() }()
+	go func() {
+		defer close(done)
+		completed <- operation()
+	}()
 	select {
 	case err := <-completed:
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			_ = transport.Close()
-			return ctxErr
+			return done, ctxErr
 		}
-		return err
+		return done, err
 	case <-ctx.Done():
 		_ = transport.Close()
 		// The result channel is buffered, so the operation can publish its
 		// completion after Close without keeping this cancellation path stuck.
-		return ctx.Err()
+		return done, ctx.Err()
 	}
 }
 

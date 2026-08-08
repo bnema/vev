@@ -1170,9 +1170,11 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
-	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
+	welcomeDone, welcomeErr := boundedHandshakeOperationTracked(handshakeCtx, tr, func() error {
 		return ac.sendExpectedTransportForAttachment(expected, frameWelcome(sess, d.resumeTokenSnapshot(ac)), welcomeTicket)
-	}); err != nil {
+	})
+	if welcomeErr != nil {
+		<-welcomeDone
 		welcomeTicket.End()
 		failAttachment()
 		return
@@ -1202,10 +1204,12 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 	}
 	paintToken := sess.attachmentToken(ac, tr)
 	painted := make(chan bool, 1)
-	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
+	paintDone, paintErr := boundedHandshakeOperationTracked(handshakeCtx, tr, func() error {
 		painted <- d.firstPaintForTransition(paintToken)
 		return nil
-	}); err != nil {
+	})
+	if paintErr != nil {
+		<-paintDone
 		postWelcomeTicket.End()
 		failAttachment()
 		return

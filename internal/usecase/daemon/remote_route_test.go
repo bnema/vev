@@ -37,6 +37,8 @@ func TestFinishRouteAttachRollsBackCreatedSession(t *testing.T) {
 		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
 		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}
+	// finishRouteAttach follows the locked-caller contract: it releases d.mu
+	// on both the success and error paths, so retain the lock across the call.
 	d.mu.Lock()
 	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, terminalEnv{}, hello, true, true)
 	var protocol *protoErr

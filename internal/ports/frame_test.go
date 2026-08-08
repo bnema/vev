@@ -21,6 +21,9 @@ func TestControlMsgTypes(t *testing.T) {
 }
 
 func TestMsgTypeUnique(t *testing.T) {
+	if MsgNavigationAction != 23 {
+		t.Fatalf("MsgNavigationAction = %d, want 23", MsgNavigationAction)
+	}
 	tests := []struct {
 		name string
 		typ  MsgType

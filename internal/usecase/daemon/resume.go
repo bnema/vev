@@ -193,7 +193,7 @@ func (d *Daemon) waitParkingInFlight(h ports.Hello) bool {
 }
 
 func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
-	if !ac.resumeCapable {
+	if sess == nil || ac == nil || !ac.resumeCapable {
 		return false
 	}
 	d.mu.Lock()
