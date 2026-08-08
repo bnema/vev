@@ -236,22 +236,8 @@ func (r *Runner) terminalInput() *terminalInputPump {
 }
 
 func validateAttachRequest(request AttachRequest) error {
-	switch request.Intent {
-	case ports.IntentEphemeral:
-		if request.SessionName != "" {
-			return errors.New("vev: ephemeral attach cannot name a session")
-		}
-	case ports.IntentNew, ports.IntentAttach, ports.IntentResume:
-		if request.SessionName == "" {
-			return errors.New("vev: session name is required")
-		}
-	default:
-		return fmt.Errorf("vev: invalid session intent %d", request.Intent)
-	}
-	if request.SessionName != "" {
-		if err := domain.ValidateSessionName(request.SessionName); err != nil {
-			return fmt.Errorf("vev: invalid session name: %w", err)
-		}
+	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
+		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
 	if err := ports.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)

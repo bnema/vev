@@ -8,7 +8,10 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-var errNilSessionTransport = errors.New("client: nil session transport")
+var (
+	errNilSessionTransport  = errors.New("client: nil session transport")
+	ErrEphemeralSessionName = errors.New("client: ephemeral sessions cannot have a name")
+)
 
 // SessionTarget is the validated daemon-facing session selection. Endpoint
 // details are resolved before a transport is opened and never enter this type.
@@ -21,7 +24,7 @@ func (t SessionTarget) validate() error {
 	switch t.Intent {
 	case ports.IntentEphemeral:
 		if t.SessionName != "" {
-			return domain.ErrInvalidSessionName
+			return ErrEphemeralSessionName
 		}
 		return nil
 	case ports.IntentNew, ports.IntentAttach, ports.IntentResume:

@@ -91,7 +91,7 @@ func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOver
 	}
 	home := capabilities&NavigationCapabilityHomePicker != 0
 	back := capabilities&NavigationCapabilityBack != 0
-	if home && !remoteTarget || back != (overlay == StartupOverlaySessionPicker) {
+	if (home && !remoteTarget) || back != (overlay == StartupOverlaySessionPicker) {
 		return ErrInvalidNavigation
 	}
 	if remoteTarget && back {
