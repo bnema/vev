@@ -67,7 +67,13 @@ func (c *reconnectTestClock) fireReconnect(t *testing.T) {
 			timer.mu.Lock()
 			if !timer.stopped && !timer.fired {
 				timer.fired = true
-				timer.ch <- time.Time{}
+				select {
+				case timer.ch <- time.Time{}:
+				default:
+					timer.fired = false
+					timer.mu.Unlock()
+					continue
+				}
 				timer.mu.Unlock()
 				return true
 			}

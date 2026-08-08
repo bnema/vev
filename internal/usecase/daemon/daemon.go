@@ -1219,14 +1219,15 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
-	postWelcomeTicket.End()
 	if !d.commitResumeClaim(ac) {
+		postWelcomeTicket.End()
 		failAttachment()
 		return
 	}
 	if ac.startupOverlay == ports.StartupOverlaySessionPicker {
 		d.enterPicker(sess, ac)
 	}
+	postWelcomeTicket.End()
 	stopHandshakeTransport()
 	finishHandshake()
 	d.runConnLoop(ac)

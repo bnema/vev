@@ -889,6 +889,12 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		seenHandoffs[attachHandoffKey{endpoint: remoteTarget, session: name, intent: intent}] = struct{}{}
 	}
 	pickerHandoff := remoteTarget == ""
+	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, policy ports.EnvironmentPolicy) ports.EnvironmentPolicy {
+		if pickerHandoff && target == nil {
+			return ports.EnvironmentPolicyDaemonOwned
+		}
+		return policy
+	}
 	handoff := func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
 		if err := validateRemoteAttachHandoff(target); err != nil {
 			return nil, client.AttachRequest{}, fmt.Errorf("vev: invalid remote attach handoff: %w", err)
@@ -915,10 +921,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if err != nil {
 			return nil, client.AttachRequest{}, err
 		}
-		policy := target.EnvironmentPolicy
-		if pickerHandoff && target.RemoteTarget == nil {
-			policy = ports.EnvironmentPolicyDaemonOwned
-		}
+		policy := pickerEnvironmentPolicy(selection, target.EnvironmentPolicy)
 		return dialer, client.AttachRequest{Intent: target.Intent, SessionName: target.Session, Remote: true, RemoteTarget: selection, EnvironmentPolicy: policy}, nil
 	}
 
@@ -987,14 +990,11 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		name = handoffErr.Target.Session
 		intent = handoffErr.Target.Intent
 		remoteSelection = nil
-		remoteEnvironmentPolicy = handoffErr.Target.EnvironmentPolicy
-		if pickerHandoff && remoteEnvironmentPolicy == ports.EnvironmentPolicyClientOwned {
-			remoteEnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
-		}
 		if handoffErr.Target.RemoteTarget != nil {
 			copyTarget := *handoffErr.Target.RemoteTarget
 			remoteSelection = &copyTarget
 		}
+		remoteEnvironmentPolicy = pickerEnvironmentPolicy(remoteSelection, handoffErr.Target.EnvironmentPolicy)
 		if modeErr != nil {
 			return modeErr
 		}

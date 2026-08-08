@@ -387,6 +387,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	}
 
 	for {
+		if err := validateAttachRequest(attemptRequest); err != nil {
+			return err
+		}
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
 		transport, err := boundedDial(handshakeCtx, dialer)
 		if err != nil {
@@ -476,13 +479,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				homeNavigationPending = true
 				dialer = homeRoute.dialer
 				attemptRequest = homeRoute.request
-				attemptRequest.Remote = false
+				attemptRequest.Remote = homeRoute.request.Remote || r.remote
 				attemptRequest.Intent = ports.IntentAttach
 				attemptRequest.NavigationCapabilities = ports.NavigationCapabilityBack
 				attemptRequest.StartupOverlay = ports.StartupOverlaySessionPicker
 				attemptRequest.RemoteTarget = nil
 				attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
-				remote = syncReconnectRemote(reconnect, false)
+				remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
 				resumeToken = 0
 				backoff = defaultReconnectBackoff.initial
 				continue
@@ -599,9 +602,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.StartupOverlay = ports.StartupOverlaySessionPicker
 			attemptRequest.RemoteTarget = nil
 			attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
-			attemptRequest.Remote = false
+			attemptRequest.Remote = homeRoute.request.Remote || r.remote
 			resumeToken = 0
-			remote = syncReconnectRemote(reconnect, false)
+			remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
 			continue
 		}

@@ -43,7 +43,11 @@ func (*attachPaletteClock) Now() time.Time { return time.Time{} }
 func (c *attachPaletteClock) NewTimer(delay time.Duration) ports.Timer {
 	timer := &attachPaletteTimer{ch: make(chan time.Time, 1), stopped: make(chan struct{}), duration: delay}
 	if delay == ports.HandshakeTimeout {
-		c.handshakeTimers <- timer
+		select {
+		case c.handshakeTimers <- timer:
+		default:
+			panic("unexpected extra handshake timer")
+		}
 	} else {
 		c.timers <- timer
 	}

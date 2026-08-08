@@ -373,6 +373,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		d.registerPreviewForSelection(ac)
 	}
 	committing := (result.action == '\r' || result.action == '\n') && ok
+	backNavigationSent := false
 	if result.exit && !committing {
 		back := ac.startupOverlay == ports.StartupOverlaySessionPicker && ac.navigationCapabilities&ports.NavigationCapabilityBack != 0
 		if back && len(effects) != 0 && effects[0] != nil {
@@ -381,6 +382,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
 			}
+			backNavigationSent = true
 		}
 		d.closePicker(ac)
 	}
@@ -420,7 +422,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		}
 		return
 	}
-	if result.exit || result.changed {
+	if (result.exit || result.changed) && !backNavigationSent {
 		d.invalidateRender(sess, ac, true, "picker.go")
 	}
 }

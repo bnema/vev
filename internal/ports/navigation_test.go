@@ -34,6 +34,7 @@ func TestNavigationActionWireTable(t *testing.T) {
 			decoded, err := UnmarshalNavigationAction(got)
 			require.NoError(t, err)
 			require.Equal(t, tt.action, decoded)
+			assertAllPrefixesFail(t, got, UnmarshalNavigationAction)
 			_, err = UnmarshalNavigationAction(append(append([]byte(nil), got...), 0))
 			require.ErrorIs(t, err, ErrInvalidNavigation)
 		})
