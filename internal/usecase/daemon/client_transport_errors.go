@@ -5,6 +5,14 @@ import "github.com/bnema/vev/internal/ports"
 // clientGone detaches ac if it is still the session's current client. The
 // session remains registered and headless after the client is gone.
 func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	d.clientGoneWithNotice(sess, ac, failed, explicit, true)
+}
+
+func (d *Daemon) clientGoneWithoutNotice(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	d.clientGoneWithNotice(sess, ac, failed, explicit, false)
+}
+
+func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed ports.Transport, explicit, notice bool) {
 	if sess == nil || ac == nil {
 		return
 	}
@@ -28,7 +36,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 		d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
 		return // displaced, or the link was rebound after the precheck
 	}
-	d.finishClientGone(sess, ac, failed, explicit)
+	d.finishClientGone(sess, ac, failed, explicit, notice)
 }
 
 func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explicit bool) bool {
@@ -49,11 +57,11 @@ func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explic
 		d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
 		return false
 	}
-	d.finishClientGone(sess, token.ac, token.transport.transport, explicit)
+	d.finishClientGone(sess, token.ac, token.transport.transport, explicit, true)
 	return true
 }
 
-func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit, notice bool) {
 	if sess == nil || ac == nil {
 		return
 	}
@@ -66,18 +74,19 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	d.recalculateSessionGeometryAndInvalidate(sess, nil, "client_transport_errors.go")
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral
+	name := sess.name
 	sess.mu.Unlock()
 	if !ephemeral {
 		d.refreshSessionCwd(sess)
 	}
-	d.log.Info("client detach begin", "session", sess.name, "explicit", explicit, "ephemeral", ephemeral)
+	d.log.Info("client detach begin", "session", name, "explicit", explicit, "ephemeral", ephemeral)
 	oldTr := failed
 	if oldTr == nil {
 		oldTr = ac.transport()
 	}
 	if !explicit && d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(oldTr)
-		d.log.Info("client parked", "session", sess.name)
+		d.log.Info("client parked", "session", sess.nameSnapshot())
 		return
 	}
 	// Explicit winners (and non-explicit park failures) must drop any same-
@@ -88,7 +97,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()
-	if explicit {
+	if explicit && notice {
 		// Synchronous so the ack is delivered before the transport closes
 		// (the client is actively awaiting it), but deadline-bounded so a
 		// wedged client cannot pin this conn handler and hang Serve's
@@ -96,7 +105,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
 	_ = ac.closeCapturedTransport(oldTr)
-	d.log.Info("client detached", "session", sess.name, "explicit", explicit)
+	d.log.Info("client detached", "session", sess.nameSnapshot(), "explicit", explicit)
 }
 
 // detachOnSendError drops a client whose transport failed, leaving the session
@@ -167,7 +176,7 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	d.recalculateSessionGeometryAndInvalidate(sess, nil, "client_transport_errors.go")
 	if d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(failed)
-		d.log.Warn("parked client after send error", "session", sess.name)
+		d.log.Warn("parked client after send error", "session", sess.nameSnapshot())
 		return
 	}
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
@@ -175,5 +184,5 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()
 	_ = ac.closeCapturedTransport(failed)
-	d.log.Warn("detached client after send error", "session", sess.name)
+	d.log.Warn("detached client after send error", "session", sess.nameSnapshot())
 }

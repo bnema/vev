@@ -489,10 +489,14 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				returnNavigationPending = true
 				dialer = route.dialer
 				attemptRequest = route.request
-				attemptRequest.Intent = ports.IntentResume
+				if route.resumeToken != 0 {
+					attemptRequest.Intent = ports.IntentResume
+				} else {
+					attemptRequest.Intent = ports.IntentAttach
+				}
 				attemptRequest.StartupOverlay = ports.StartupOverlayNone
 				resumeToken = route.resumeToken
-				returnResumeFallback = true
+				returnResumeFallback = route.resumeToken != 0
 				remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 				backoff = defaultReconnectBackoff.initial
 				continue

@@ -1147,8 +1147,9 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 
+	welcomeSent := false
 	failAttachment := func() {
-		d.failHandshakeAttachment(sess, ac, tr)
+		d.failHandshakeAttachment(sess, ac, tr, welcomeSent)
 	}
 	if err := handshakeCtx.Err(); err != nil {
 		failAttachment()
@@ -1176,6 +1177,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
+	welcomeSent = true
 	// Release Welcome's effect before discovering post-handshake authority so a
 	// replacement blocked behind the send can publish its generation and lease.
 	welcomeTicket.End()

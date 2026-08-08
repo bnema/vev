@@ -167,7 +167,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 	base := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
 	withCount := func(count byte) []byte {
 		payload := append([]byte(nil), base...)
-		payload[len(payload)-3] = count
+		payload[len(payload)-5] = count
 		return payload
 	}
 	tests := []struct {

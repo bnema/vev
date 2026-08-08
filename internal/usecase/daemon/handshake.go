@@ -114,7 +114,7 @@ func handshakeContextError(parent context.Context, timedOut <-chan struct{}, fal
 // failHandshakeAttachment synchronously retires the exact connection admitted
 // by route. A fresh route-owned session is purged only after its attachment is
 // removed; existing sessions and their unrelated attachments are preserved.
-func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.Transport) {
+func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.Transport, welcomed bool) {
 	if sess == nil || ac == nil {
 		if tr != nil {
 			_ = tr.Close()
@@ -130,7 +130,11 @@ func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr p
 		}
 		return
 	}
-	d.clientGone(sess, ac, tr, true)
+	if welcomed {
+		d.clientGone(sess, ac, tr, true)
+	} else {
+		d.clientGoneWithoutNotice(sess, ac, tr, true)
+	}
 	if tr != nil {
 		_ = tr.Close()
 	}
