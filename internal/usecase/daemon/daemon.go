@@ -1167,10 +1167,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		if admitted {
 			welcomeTicket.End()
 		}
-		if !d.abortResumeClaim(ac) {
-			d.clientGone(sess, ac, tr, false)
-		}
-		_ = tr.Close()
+		failAttachment()
 		return
 	}
 	if err := handshakeCtx.Err(); err != nil {
@@ -1199,27 +1196,30 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
-	if postWelcomeLease != nil && (rc == nil || !rc.markAttachmentReady(postWelcomeLease)) {
+	postWelcomeRC := sess.renderCoordinator()
+	if postWelcomeLease != nil && (postWelcomeRC == nil || !postWelcomeRC.markAttachmentReady(postWelcomeLease)) {
 		postWelcomeTicket.End()
 		// The attachment was detached while Welcome was in flight; never let
 		// this stale handshake emit an Output frame.
 		failAttachment()
 		return
 	}
-	postWelcomeTicket.End()
 	paintToken := sess.attachmentToken(ac, tr)
 	painted := make(chan bool, 1)
 	if err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
 		painted <- d.firstPaintForTransition(paintToken)
 		return nil
 	}); err != nil {
+		postWelcomeTicket.End()
 		failAttachment()
 		return
 	}
 	if !<-painted || handshakeCtx.Err() != nil {
+		postWelcomeTicket.End()
 		failAttachment()
 		return
 	}
+	postWelcomeTicket.End()
 	if !d.commitResumeClaim(ac) {
 		failAttachment()
 		return
