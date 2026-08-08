@@ -1183,7 +1183,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 	// Release Welcome's effect before discovering post-handshake authority so a
 	// replacement blocked behind the send can publish its generation and lease.
 	welcomeTicket.End()
-	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentAttachmentEffect(sess, tr)
+	postWelcomeToken, postWelcomeTicket, admitted := ac.beginCurrentAttachmentEffectContext(handshakeCtx, sess, tr)
 	if !admitted {
 		failAttachment()
 		return

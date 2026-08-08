@@ -879,7 +879,7 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	}
 	token.effect.bindActionEnd(d, action)
 	token.effect.End()
-	if token.sess == nil {
+	if !token.attachmentCurrent() {
 		return errAttachmentTransition
 	}
 	return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)

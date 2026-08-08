@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 
@@ -219,6 +220,13 @@ func (ac *attachedClient) beginAttachmentEffect(token attachmentConnectionToken)
 // after Welcome has completed so a replacement blocked behind that send can
 // publish before readiness or first paint.
 func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
+	return ac.beginCurrentAttachmentEffectContext(context.Background(), sess, tr)
+}
+
+func (ac *attachedClient) beginCurrentAttachmentEffectContext(ctx context.Context, sess *session, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if ac == nil || sess == nil || tr == nil {
 		return attachmentConnectionToken{}, nil, false
 	}
@@ -237,8 +245,12 @@ func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.T
 		if g.phase == attachmentEffectsFrozen {
 			changed := g.changed
 			g.mu.Unlock()
-			<-changed
-			continue
+			select {
+			case <-changed:
+				continue
+			case <-ctx.Done():
+				return token, nil, false
+			}
 		}
 		g.mu.Unlock()
 		// A stable mismatch is only recoverable when a publication raced token

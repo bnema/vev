@@ -355,6 +355,34 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		rawEntered: &rawEntered,
 		stage:      reconnectStageOfflineRetrying,
 	}
+	restoreReturnRoute := func(route attachRoute) {
+		returnNavigationPending = true
+		dialer = route.dialer
+		attemptRequest = route.request
+		if route.resumeToken != 0 {
+			attemptRequest.Intent = ports.IntentResume
+		} else {
+			attemptRequest.Intent = ports.IntentAttach
+		}
+		attemptRequest.StartupOverlay = ports.StartupOverlayNone
+		resumeToken = route.resumeToken
+		returnResumeFallback = route.resumeToken != 0
+		remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
+		backoff = defaultReconnectBackoff.initial
+	}
+	enterHomePicker := func() {
+		dialer = homeRoute.dialer
+		attemptRequest = homeRoute.request
+		attemptRequest.Intent = ports.IntentAttach
+		attemptRequest.NavigationCapabilities = ports.NavigationCapabilityBack
+		attemptRequest.StartupOverlay = ports.StartupOverlaySessionPicker
+		attemptRequest.RemoteTarget = nil
+		attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
+		attemptRequest.Remote = homeRoute.request.Remote || r.remote
+		resumeToken = 0
+		remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
+		backoff = defaultReconnectBackoff.initial
+	}
 	var input *terminalInputPump
 	defer func() {
 		if input != nil {
@@ -467,17 +495,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				}
 				returnRoute = &attachRoute{dialer: dialer, request: returnRequest, resumeToken: result.resumeToken}
 				homeNavigationPending = true
-				dialer = homeRoute.dialer
-				attemptRequest = homeRoute.request
-				attemptRequest.Remote = homeRoute.request.Remote || r.remote
-				attemptRequest.Intent = ports.IntentAttach
-				attemptRequest.NavigationCapabilities = ports.NavigationCapabilityBack
-				attemptRequest.StartupOverlay = ports.StartupOverlaySessionPicker
-				attemptRequest.RemoteTarget = nil
-				attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
-				remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
-				resumeToken = 0
-				backoff = defaultReconnectBackoff.initial
+				enterHomePicker()
 				continue
 			case ports.NavigationBack:
 				if attemptRequest.StartupOverlay != ports.StartupOverlaySessionPicker || returnRoute == nil || attemptRequest.NavigationCapabilities&ports.NavigationCapabilityBack == 0 {
@@ -487,18 +505,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				returnRoute = nil
 				homeNavigationPending = false
 				returnNavigationPending = true
-				dialer = route.dialer
-				attemptRequest = route.request
-				if route.resumeToken != 0 {
-					attemptRequest.Intent = ports.IntentResume
-				} else {
-					attemptRequest.Intent = ports.IntentAttach
-				}
-				attemptRequest.StartupOverlay = ports.StartupOverlayNone
-				resumeToken = route.resumeToken
-				returnResumeFallback = route.resumeToken != 0
-				remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
-				backoff = defaultReconnectBackoff.initial
+				restoreReturnRoute(route)
 				continue
 			default:
 				return errors.New("vev: unsupported navigation action")
@@ -570,18 +577,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			returnRoute = nil
 			homeNavigationPending = false
 			returnNavigationPending = true
-			dialer = route.dialer
-			attemptRequest = route.request
-			if route.resumeToken != 0 {
-				attemptRequest.Intent = ports.IntentResume
-			} else {
-				attemptRequest.Intent = ports.IntentAttach
-			}
-			attemptRequest.StartupOverlay = ports.StartupOverlayNone
-			resumeToken = route.resumeToken
-			returnResumeFallback = route.resumeToken != 0
-			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
-			backoff = defaultReconnectBackoff.initial
+			restoreReturnRoute(route)
 			continue
 		}
 		if returnResumeFallback {
@@ -596,17 +592,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if returnNavigationPending && !returnResumeFallback && homeRoute != nil {
 			returnRoute = nil
 			returnNavigationPending = false
-			dialer = homeRoute.dialer
-			attemptRequest = homeRoute.request
-			attemptRequest.Intent = ports.IntentAttach
-			attemptRequest.NavigationCapabilities = ports.NavigationCapabilityBack
-			attemptRequest.StartupOverlay = ports.StartupOverlaySessionPicker
-			attemptRequest.RemoteTarget = nil
-			attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
-			attemptRequest.Remote = homeRoute.request.Remote || r.remote
-			resumeToken = 0
-			remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
-			backoff = defaultReconnectBackoff.initial
+			enterHomePicker()
 			continue
 		}
 		if !shouldReconnect(result.err) || resumeToken == 0 || ctx.Err() != nil {
