@@ -22,7 +22,7 @@ const MaxFrameLen = 16 << 20
 type MsgType uint8
 
 // Frame message types. Client-originated messages occupy 1–13 and 15;
-// server-originated messages occupy 16–23 and 25. Values 14 and 24 remain
+// server-originated messages occupy 16–23 and 25–26. Values 14 and 24 remain
 // reserved for future extensions.
 const (
 	MsgHello                MsgType = 1

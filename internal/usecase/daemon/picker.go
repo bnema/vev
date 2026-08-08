@@ -944,7 +944,7 @@ func (d *Daemon) remotePickerTargetReady(key domain.RemoteSessionKey) bool {
 	}
 	for _, session := range entry.Sessions {
 		if session.Name == key.Name {
-			return !remoteSessionStateStopped(session.State) && session.State != "broken"
+			return session.State == "up"
 		}
 	}
 	return false

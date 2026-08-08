@@ -461,7 +461,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				if attemptRequest.NavigationCapabilities&ports.NavigationCapabilityHomePicker == 0 || homeRoute == nil {
 					return errors.New("vev: stale home navigation action")
 				}
-				returnRoute = &attachRoute{dialer: dialer, request: attemptRequest, resumeToken: result.resumeToken}
+				returnRequest := attemptRequest
+				if result.sessionName != "" {
+					returnRequest.SessionName = result.sessionName
+				}
+				returnRoute = &attachRoute{dialer: dialer, request: returnRequest, resumeToken: result.resumeToken}
 				homeNavigationPending = true
 				dialer = homeRoute.dialer
 				attemptRequest = homeRoute.request
@@ -542,6 +546,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		if result.sessionName != "" {
 			attemptRequest.SessionName = result.sessionName
+		}
+		if result.welcomed {
+			homeNavigationPending = false
 		}
 		if result.err == nil {
 			if result.welcomed && returnNavigationPending {

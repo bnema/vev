@@ -61,10 +61,11 @@ func (c *reconnectTestClock) fireReconnect(t *testing.T) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		for _, timer := range c.timers {
+			timer.mu.Lock()
 			if timer.duration != 100*time.Millisecond {
+				timer.mu.Unlock()
 				continue
 			}
-			timer.mu.Lock()
 			if !timer.stopped && !timer.fired {
 				timer.fired = true
 				select {

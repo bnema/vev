@@ -104,7 +104,10 @@ func TestTokenlessResumeIsRejectedBeforeNameRouting(t *testing.T) {
 	var protocol *protoErr
 	require.ErrorAs(t, err, &protocol)
 	require.Equal(t, ports.ErrNoSuchSession, protocol.code)
-	require.Empty(t, d.sessions)
+	d.mu.Lock()
+	sessionCount := len(d.sessions)
+	d.mu.Unlock()
+	require.Zero(t, sessionCount)
 }
 
 func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T) {
