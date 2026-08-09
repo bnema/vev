@@ -80,6 +80,10 @@ func cloneAttachRequest(request AttachRequest) AttachRequest {
 		target := *request.RemoteTarget
 		request.RemoteTarget = &target
 	}
+	if request.ExactTarget != nil {
+		target := *request.ExactTarget
+		request.ExactTarget = &target
+	}
 	return request
 }
 

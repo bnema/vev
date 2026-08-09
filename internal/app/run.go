@@ -866,6 +866,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	factory := deps.remoteDialerFactory
 	var remoteSelection *domain.RemoteSessionTarget
 	var remoteEnvironmentPolicy ports.EnvironmentPolicy
+	routeOrigin := ports.RouteOriginLocal
 	seenHandoffs := make(map[attachHandoffKey]struct{})
 	handoffHops := 0
 	admitHandoff := func(next attachHandoffKey) error {
@@ -880,6 +881,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		return nil
 	}
 	if remoteTarget != "" {
+		routeOrigin = ports.RouteOriginRemote
 		if modeErr != nil {
 			return modeErr
 		}
@@ -922,7 +924,14 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			return nil, client.AttachRequest{}, err
 		}
 		policy := pickerEnvironmentPolicy(selection, target.EnvironmentPolicy)
-		return dialer, client.AttachRequest{Intent: target.Intent, SessionName: target.Session, Remote: true, RemoteTarget: selection, EnvironmentPolicy: policy}, nil
+		return dialer, client.AttachRequest{
+			Intent:            target.Intent,
+			SessionName:       target.Session,
+			Remote:            true,
+			Origin:            ports.RouteOriginDiscovery,
+			RemoteTarget:      selection,
+			EnvironmentPolicy: policy,
+		}, nil
 	}
 
 	for {
@@ -945,10 +954,12 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
 				AttachHandoff:     handoff,
 				Remote:            true,
+				Origin:            ports.RouteOriginRemote,
 			}, client.AttachRequest{
 				Intent:            intent,
 				SessionName:       name,
 				Remote:            true,
+				Origin:            routeOrigin,
 				RemoteTarget:      remoteSelection,
 				EnvironmentPolicy: remoteEnvironmentPolicy,
 			})
@@ -964,7 +975,8 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				RuntimeObserver: deps.runtimeObserver,
 				AttachHandoff:   handoff,
 				Remote:          false,
-			}, client.AttachRequest{Intent: intent, SessionName: name})
+				Origin:          ports.RouteOriginLocal,
+			}, client.AttachRequest{Intent: intent, SessionName: name, Origin: ports.RouteOriginLocal})
 		}
 
 		var handoffErr *client.AttachTargetError
@@ -987,6 +999,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			return err
 		}
 		remoteTarget = handoffErr.Target.Endpoint
+		routeOrigin = ports.RouteOriginDiscovery
 		name = handoffErr.Target.Session
 		intent = handoffErr.Target.Intent
 		remoteSelection = nil

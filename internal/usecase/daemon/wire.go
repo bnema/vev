@@ -8,11 +8,19 @@ import (
 
 func frameWelcome(s *session, resumeToken uint64) ports.Frame {
 	s.mu.Lock()
+	var identity *ports.CommittedRouteIdentity
+	if s.incarnation != (domain.SessionLifecycleID{}) {
+		identity = &ports.CommittedRouteIdentity{
+			Target:    ports.ExactSessionTarget{LifecycleID: s.incarnation, SessionName: s.name},
+			Ephemeral: s.ephemeral,
+		}
+	}
 	w := ports.Welcome{
-		SessionID:    string(s.id),
-		SessionName:  s.name,
-		Ephemeral:    s.ephemeral,
-		Capabilities: ports.CapabilityResume,
+		SessionID:         string(s.id),
+		SessionName:       s.name,
+		Ephemeral:         s.ephemeral,
+		Capabilities:      ports.CapabilityResume,
+		CommittedIdentity: identity,
 	}
 	s.mu.Unlock()
 	w.ResumeToken = resumeToken

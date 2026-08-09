@@ -163,6 +163,9 @@ type Dependencies struct {
 	// Remote selects client-side carriage presentation only; it never enters
 	// the daemon-facing session request.
 	Remote bool
+	// Origin is explicit composition metadata for the initial route. A zero
+	// value is normalized to local for direct package callers and old tests.
+	Origin ports.RouteOrigin
 }
 
 // AttachRequest identifies the session for one client run. Remote is
@@ -172,7 +175,9 @@ type AttachRequest struct {
 	Intent                 uint8
 	SessionName            string
 	Remote                 bool
+	Origin                 ports.RouteOrigin
 	RemoteTarget           *domain.RemoteSessionTarget
+	ExactTarget            *ports.ExactSessionTarget
 	EnvironmentPolicy      ports.EnvironmentPolicy
 	NavigationCapabilities ports.NavigationCapabilities
 	StartupOverlay         ports.StartupOverlay
@@ -196,6 +201,8 @@ type Runner struct {
 	remoteHostLearner ports.RemoteHostLearner
 	attachHandoff     AttachHandoffFunc
 	remote            bool
+	origin            ports.RouteOrigin
+	ledger            *routeLedger
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -217,6 +224,8 @@ func NewRunner(deps Dependencies) *Runner {
 		remoteHostLearner: deps.RemoteHostLearner,
 		attachHandoff:     deps.AttachHandoff,
 		remote:            deps.Remote,
+		origin:            normalizeRouteOrigin(deps.Origin, deps.Remote),
+		ledger:            newRouteLedger(),
 	}
 }
 
@@ -236,6 +245,22 @@ func (r *Runner) terminalInput() *terminalInputPump {
 }
 
 func validateAttachRequest(request AttachRequest) error {
+	if request.Origin != 0 {
+		if err := request.Origin.Validate(); err != nil {
+			return fmt.Errorf("vev: invalid route origin: %w", err)
+		}
+	}
+	if request.ExactTarget != nil {
+		if err := request.ExactTarget.Validate(); err != nil {
+			return fmt.Errorf("vev: invalid exact target: %w", err)
+		}
+		if request.SessionName != request.ExactTarget.SessionName {
+			return errors.New("vev: exact target session mismatch")
+		}
+		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != request.ExactTarget.LifecycleID || request.RemoteTarget.SessionName != request.ExactTarget.SessionName) {
+			return errors.New("vev: exact target does not match remote target")
+		}
+	}
 	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
 		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
@@ -271,6 +296,9 @@ func validateAttachRequest(request AttachRequest) error {
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
 	request = cloneAttachRequest(request)
+	if request.Origin == 0 {
+		request.Origin = r.origin
+	}
 	if err := validateAttachRequest(request); err != nil {
 		return err
 	}
@@ -477,6 +505,18 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
+		if result.welcomed && result.err == nil && result.committedIdentity != nil && r.ledger != nil {
+			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != result.committedIdentity.Target {
+				return errRouteTargetChanged
+			}
+			if attemptRequest.RemoteTarget != nil && (attemptRequest.RemoteTarget.LifecycleID != result.committedIdentity.Target.LifecycleID || attemptRequest.RemoteTarget.SessionName != result.committedIdentity.Target.SessionName) {
+				return errRouteTargetChanged
+			}
+			home := r.ledger.homeRef().Key == 0
+			if _, err := r.ledger.commit(routeCandidateForAttach(attemptRequest, *result.committedIdentity, dialer, result.resumeToken, home)); err != nil {
+				return fmt.Errorf("vev: committing route identity: %w", err)
+			}
+		}
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -764,13 +804,14 @@ type attachAttempt struct {
 }
 
 type attachResult struct {
-	resumeToken     uint64
-	sessionName     string
-	welcomed        bool
-	transportClosed bool
-	target          *ports.AttachTarget
-	action          ports.NavigationAction
-	err             error
+	resumeToken       uint64
+	sessionName       string
+	committedIdentity *ports.CommittedRouteIdentity
+	welcomed          bool
+	transportClosed   bool
+	target            *ports.AttachTarget
+	action            ports.NavigationAction
+	err               error
 }
 
 // AttachTargetError requests that the composition root replace the current
@@ -877,6 +918,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	colorTerm := os.Getenv("COLORTERM")
 	trueColor := DetectTrueColor(termEnv, colorTerm)
 	themeState.setTrueColor(trueColor)
+	exactTarget := request.ExactTarget
+	if exactTarget == nil && request.RemoteTarget != nil {
+		exactTarget = &ports.ExactSessionTarget{
+			LifecycleID: request.RemoteTarget.LifecycleID,
+			SessionName: request.RemoteTarget.SessionName,
+		}
+	}
 	hello := ports.Hello{
 		Version:                ports.ProtocolVersion,
 		Intent:                 intent,
@@ -890,6 +938,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		MaxOutputInFlight:      requestedOutputWindow(transport),
 		Env:                    os.Environ(),
 		RemoteTarget:           request.RemoteTarget,
+		ExactTarget:            exactTarget,
 		EnvironmentPolicy:      request.EnvironmentPolicy,
 		NavigationCapabilities: request.NavigationCapabilities,
 		StartupOverlay:         request.StartupOverlay,
@@ -910,8 +959,15 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}); err != nil {
 		return handshakeFailure("awaiting welcome", err)
 	}
+	var committedIdentity *ports.CommittedRouteIdentity
 	result := func(welcomed bool, err error) attachResult {
-		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: welcomed, err: err}
+		return attachResult{
+			resumeToken:       resumeToken,
+			sessionName:       name,
+			committedIdentity: cloneCommittedIdentity(committedIdentity),
+			welcomed:          welcomed,
+			err:               err,
+		}
 	}
 	switch reply.Type {
 	case ports.MsgWelcome:
@@ -921,6 +977,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		resumeToken = welcome.ResumeToken
 		name = welcome.SessionName
+		committedIdentity = cloneCommittedIdentity(welcome.CommittedIdentity)
 		ms.welcomed = true
 		log.Debug("welcomed by daemon", "resume_token_present", resumeToken != 0)
 		if remote {

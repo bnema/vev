@@ -160,7 +160,11 @@ type Hello struct {
 	// RemoteTarget is present only for a picker-selected remote attach. It is
 	// carried through reconnects and is validated by the owning daemon before
 	// it creates or publishes any session resources.
-	RemoteTarget           *domain.RemoteSessionTarget
+	RemoteTarget *domain.RemoteSessionTarget
+	// ExactTarget is an optional lifecycle/name identity selected by the client
+	// ledger. It is transport-neutral and never replaces the daemon's authority
+	// to validate or commit the target.
+	ExactTarget            *ExactSessionTarget
 	EnvironmentPolicy      EnvironmentPolicy
 	NavigationCapabilities NavigationCapabilities
 	StartupOverlay         StartupOverlay
@@ -250,11 +254,12 @@ type Ack struct {
 
 // Welcome is the daemon's reply to a successful Hello.
 type Welcome struct {
-	SessionID    string
-	SessionName  string
-	Ephemeral    bool
-	ResumeToken  uint64
-	Capabilities uint32
+	SessionID         string
+	SessionName       string
+	Ephemeral         bool
+	ResumeToken       uint64
+	Capabilities      uint32
+	CommittedIdentity *CommittedRouteIdentity
 }
 
 // ErrorMsg reports a protocol- or session-level failure to the client.
@@ -386,9 +391,10 @@ func (w *payloadWriter) putLongBytes(b []byte) {
 	w.b = append(w.b, b...)
 }
 
-// marshalRemoteTargetSection writes the required v26 target/policy section.
+// marshalRemoteTargetSection writes the required v27 target/policy section.
 // A target may be absent for direct local attaches, but its presence marker and
-// environment policy are never optional: v26 has no extension or legacy tail.
+// environment policy are never optional: v27 has no extension or legacy tail
+// inside this section; the exact-target section follows it.
 func marshalRemoteTargetSection(w *payloadWriter, target *domain.RemoteSessionTarget, policy EnvironmentPolicy) {
 	if target == nil {
 		w.putBool(false)
@@ -718,6 +724,20 @@ func ValidateHello(h Hello) error {
 			return ErrInvalidHello
 		}
 	}
+	if h.ExactTarget != nil {
+		if h.Intent != IntentAttach && h.Intent != IntentResume {
+			return ErrInvalidHello
+		}
+		if err := h.ExactTarget.Validate(); err != nil {
+			return fmt.Errorf("%w: exact target: %v", ErrInvalidHello, err)
+		}
+		if h.Name != h.ExactTarget.SessionName {
+			return ErrInvalidHello
+		}
+		if h.RemoteTarget != nil && (h.RemoteTarget.LifecycleID != h.ExactTarget.LifecycleID || h.RemoteTarget.SessionName != h.ExactTarget.SessionName) {
+			return ErrInvalidHello
+		}
+	}
 	if h.RemoteTarget == nil {
 		if h.EnvironmentPolicy != EnvironmentPolicyClientOwned && h.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
 			return ErrInvalidHello
@@ -830,6 +850,7 @@ func MarshalHello(h Hello) []byte {
 		w.putLongString(entry)
 	}
 	marshalRemoteTargetSection(&w, h.RemoteTarget, h.EnvironmentPolicy)
+	marshalExactTargetSection(&w, h.ExactTarget)
 	w.putUint8(uint8(h.NavigationCapabilities))
 	w.putUint8(uint8(h.StartupOverlay))
 	return w.b
@@ -888,6 +909,9 @@ func preflightHello(b []byte) error {
 		}
 	}
 	if err := skipRemoteTargetSection(&r); err != nil {
+		return err
+	}
+	if err := skipExactTargetSection(&r); err != nil {
 		return err
 	}
 	if _, err := r.getUint8(); err != nil {
@@ -969,6 +993,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		}
 	}
 	if h.RemoteTarget, h.EnvironmentPolicy, err = unmarshalRemoteTargetSection(&r); err != nil {
+		return Hello{}, err
+	}
+	if h.ExactTarget, err = unmarshalExactTargetSection(&r); err != nil {
 		return Hello{}, err
 	}
 	capabilities, err := r.getUint8()
@@ -1275,6 +1302,7 @@ func MarshalWelcome(m Welcome) []byte {
 	}
 	w.putUint64(m.ResumeToken)
 	w.putUint32(m.Capabilities)
+	marshalCommittedIdentitySection(&w, m.CommittedIdentity)
 	return w.b
 }
 
@@ -1300,6 +1328,12 @@ func UnmarshalWelcome(b []byte) (Welcome, error) {
 	}
 	if m.Capabilities, err = r.getUint32(); err != nil {
 		return Welcome{}, err
+	}
+	if m.CommittedIdentity, err = unmarshalCommittedIdentitySection(&r); err != nil {
+		return Welcome{}, err
+	}
+	if m.CommittedIdentity != nil && (m.CommittedIdentity.Target.SessionName != m.SessionName || m.CommittedIdentity.Ephemeral != m.Ephemeral) {
+		return Welcome{}, fmt.Errorf("%w: committed identity does not match welcome", ErrInvalidRouteWire)
 	}
 	if err := r.done(); err != nil {
 		return Welcome{}, err

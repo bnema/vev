@@ -32,7 +32,10 @@ is a temporary direct handoff; the client keeps one input pump and remembers a
 bounded home route. A remote daemon may request the home picker, and cancelling
 that temporary local picker returns to the parked remote route, first attempting
 resume and then falling back to a fresh attach when the resume token is stale.
-These navigation actions and the strict handshake layout use protocol v26.
+These navigation actions and the strict handshake layout use protocol v27.
+Attach handshakes may carry an exact lifecycle/name target, and successful
+Welcomes can return the daemon's committed identity; the client keeps bounded
+route identity and display snapshots separate from transport capabilities.
 
 ## Durable record compatibility
 

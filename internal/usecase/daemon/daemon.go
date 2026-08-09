@@ -1352,6 +1352,29 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 // route resolves a Hello to a session and a freshly attached client, creating
 // the session for ephemeral/new intents. Direct package callers retain the
 // daemon lifetime context; inbound handshakes use routeWithContext.
+func (d *Daemon) validateExactSessionTarget(ctx context.Context, target ports.ExactSessionTarget) error {
+	if err := target.Validate(); err != nil {
+		return &protoErr{ports.ErrNoSuchSession, "invalid exact session target"}
+	}
+	if err := d.waitForTargetRestore(ctx, target.SessionName); err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if sess := d.findByNameLocked(target.SessionName); sess != nil {
+		if sess.incarnation != target.LifecycleID {
+			return &protoErr{ports.ErrNoSuchSession, "session lifecycle has changed: " + target.SessionName}
+		}
+		return nil
+	}
+	stopped, ok := d.stopped[target.SessionName]
+	if !ok || stopped.purging || stopped.incarnation != target.LifecycleID {
+		return &protoErr{ports.ErrNoSuchSession, "no such session lifecycle: " + target.SessionName}
+	}
+	return nil
+}
+
 func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
 	ctx := d.serveCtx
 	if ctx == nil {
@@ -1377,6 +1400,11 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	}
 	if h.RemoteTarget != nil && h.ResumeToken == 0 {
 		return d.routeRemoteTargetWithContext(ctx, h, tr)
+	}
+	if h.ExactTarget != nil && h.ResumeToken == 0 {
+		if err := d.validateExactSessionTarget(ctx, *h.ExactTarget); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// A non-zero token is an authoritative resume credential. If it is unknown,

@@ -12,7 +12,7 @@ import (
 const HandshakeTimeout = 15 * time.Second
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 26
+const ProtocolVersion uint16 = 27
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.
@@ -22,8 +22,9 @@ const MaxFrameLen = 16 << 20
 type MsgType uint8
 
 // Frame message types. Client-originated messages occupy 1–13 and 15;
-// server-originated messages occupy 16–23 and 25–26. Values 14 and 24 remain
-// reserved for future extensions.
+// server-originated messages occupy 16–23 and 25–27. Values 14 and 24 remain
+// reserved for future extensions. Route snapshot/navigation messages use the
+// next available values 28–30 and remain daemon-neutral until the cutover.
 const (
 	MsgHello                MsgType = 1
 	MsgInput                MsgType = 2
@@ -40,16 +41,20 @@ const (
 	MsgOutputResetRequest   MsgType = 13
 	MsgRemotePreviewRequest MsgType = 15
 
-	MsgWelcome               MsgType = 16
-	MsgError                 MsgType = 17
-	MsgOutput                MsgType = 18
-	MsgDetached              MsgType = 19
-	MsgPong                  MsgType = 20
-	MsgSessions              MsgType = 21
-	MsgCommandResult         MsgType = 22
-	MsgAttachTarget          MsgType = 25
-	MsgRemotePreviewResponse MsgType = 26
-	MsgNavigationAction      MsgType = 23
+	MsgWelcome                MsgType = 16
+	MsgError                  MsgType = 17
+	MsgOutput                 MsgType = 18
+	MsgDetached               MsgType = 19
+	MsgPong                   MsgType = 20
+	MsgSessions               MsgType = 21
+	MsgCommandResult          MsgType = 22
+	MsgAttachTarget           MsgType = 25
+	MsgRemotePreviewResponse  MsgType = 26
+	MsgNavigationAction       MsgType = 23
+	MsgCommittedRouteIdentity MsgType = 27
+	MsgRecentRouteSnapshot    MsgType = 28
+	MsgNavigateRecentRoute    MsgType = 29
+	MsgRouteNavigationFailure MsgType = 30
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited
