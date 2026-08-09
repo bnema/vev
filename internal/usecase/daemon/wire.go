@@ -6,7 +6,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-func frameWelcome(s *session, resumeToken uint64) ports.Frame {
+func frameWelcome(s *session, resumeToken uint64) (ports.Frame, error) {
 	s.mu.Lock()
 	var identity *ports.CommittedRouteIdentity
 	if s.incarnation != (domain.SessionLifecycleID{}) {
@@ -24,7 +24,11 @@ func frameWelcome(s *session, resumeToken uint64) ports.Frame {
 	}
 	s.mu.Unlock()
 	w.ResumeToken = resumeToken
-	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}
+	payload := ports.MarshalWelcome(w)
+	if payload == nil {
+		return ports.Frame{}, ports.ErrInvalidRouteWire
+	}
+	return ports.Frame{Type: ports.MsgWelcome, Payload: payload}, nil
 }
 
 func frameError(code uint16, text string) ports.Frame {

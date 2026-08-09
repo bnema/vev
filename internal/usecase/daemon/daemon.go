@@ -1172,7 +1172,11 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 	welcomeDone, welcomeErr := boundedHandshakeOperationTracked(handshakeCtx, tr, func() error {
-		return ac.sendExpectedTransportForAttachment(expected, frameWelcome(sess, d.resumeTokenSnapshot(ac)), welcomeTicket)
+		frame, err := frameWelcome(sess, d.resumeTokenSnapshot(ac))
+		if err != nil {
+			return err
+		}
+		return ac.sendExpectedTransportForAttachment(expected, frame, welcomeTicket)
 	})
 	if welcomeErr != nil {
 		<-welcomeDone

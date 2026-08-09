@@ -344,6 +344,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	returnNavigationPending := false
 	routeNavigationPending := false
 	routeNavigationResumeFallback := false
+	var routeNavigationSelection *routeNavigationSelection
 	var routeNavigationFallback *attachRoute
 	var routeNavigationAction *ports.RouteNavigationAction
 	backoff := defaultReconnectBackoff.initial
@@ -496,23 +497,24 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			linkEvents = reporter.LinkEvents()
 		}
 		result := (&attachAttempt{
-			runner:                 r,
-			dialer:                 dialer,
-			connection:             connection,
-			remote:                 remote,
-			handshakeCtx:           handshakeCtx,
-			handshakeTimedOut:      timedOut,
-			finishHandshake:        finishHandshake,
-			stopHandshakeTransport: stopHandshakeTransport,
-			request:                attemptRequest,
-			resumeToken:            resumeToken,
-			clientID:               processClientID,
-			milestones:             &ms,
-			themeState:             themeState,
-			enterRaw:               enterRaw,
-			reconnect:              reconnect,
-			linkEvents:             linkEvents,
-			rememberRemoteHost:     rememberRemoteHost,
+			runner:                   r,
+			dialer:                   dialer,
+			connection:               connection,
+			remote:                   remote,
+			handshakeCtx:             handshakeCtx,
+			handshakeTimedOut:        timedOut,
+			finishHandshake:          finishHandshake,
+			stopHandshakeTransport:   stopHandshakeTransport,
+			request:                  attemptRequest,
+			resumeToken:              resumeToken,
+			routeNavigationSelection: routeNavigationSelection,
+			clientID:                 processClientID,
+			milestones:               &ms,
+			themeState:               themeState,
+			enterRaw:                 enterRaw,
+			reconnect:                reconnect,
+			linkEvents:               linkEvents,
+			rememberRemoteHost:       rememberRemoteHost,
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
@@ -540,6 +542,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				attemptRequest.RemoteTarget = nil
 			}
 			attemptRequest.ExactTarget = &identity.Target
+		}
+		if result.err == nil && result.welcomed && routeNavigationPending {
+			routeNavigationPending = false
+			routeNavigationSelection = nil
+			routeNavigationResumeFallback = false
+			routeNavigationFallback = nil
+			routeNavigationAction = nil
 		}
 		if result.routeAction != nil {
 			if r.ledger == nil {
@@ -572,6 +581,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			resumeToken = selection.selected.resumeToken
 			routeNavigationPending = true
+			routeNavigationSelection = &selection
 			routeNavigationResumeFallback = selection.selected.resumeToken != 0
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
@@ -647,12 +657,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			continue
 		}
 		if result.err == nil {
-			if result.welcomed && routeNavigationPending {
-				routeNavigationPending = false
-				routeNavigationResumeFallback = false
-				routeNavigationFallback = nil
-				routeNavigationAction = nil
-			}
 			if result.welcomed && returnNavigationPending {
 				returnNavigationPending = false
 				returnResumeFallback = false
@@ -691,6 +695,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			route := *routeNavigationFallback
 			routeNavigationFallback = nil
 			routeNavigationPending = false
+			routeNavigationSelection = nil
 			routeNavigationResumeFallback = false
 			returnNavigationPending = true
 			restoreReturnRoute(route)
@@ -860,25 +865,26 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 }
 
 type attachAttempt struct {
-	runner                 *Runner
-	dialer                 ports.Dialer
-	connection             *SessionConnection
-	remote                 bool
-	transport              ports.Transport
-	handshakeCtx           context.Context
-	handshakeTimedOut      <-chan struct{}
-	finishHandshake        func()
-	stopHandshakeTransport func()
-	request                AttachRequest
-	resumeToken            uint64
-	clientID               [16]byte
-	milestones             *milestones
-	themeState             *terminalThemeState
-	enterRaw               func() error
-	reconnect              *reconnectUI
-	linkEvents             <-chan ports.LinkEvent
-	rememberRemoteHost     func()
-	terminalInput          func() *terminalInputPump
+	runner                   *Runner
+	dialer                   ports.Dialer
+	connection               *SessionConnection
+	remote                   bool
+	transport                ports.Transport
+	handshakeCtx             context.Context
+	handshakeTimedOut        <-chan struct{}
+	finishHandshake          func()
+	stopHandshakeTransport   func()
+	request                  AttachRequest
+	resumeToken              uint64
+	routeNavigationSelection *routeNavigationSelection
+	clientID                 [16]byte
+	milestones               *milestones
+	themeState               *terminalThemeState
+	enterRaw                 func() error
+	reconnect                *reconnectUI
+	linkEvents               <-chan ports.LinkEvent
+	rememberRemoteHost       func()
+	terminalInput            func() *terminalInputPump
 }
 
 type attachResult struct {
@@ -1084,8 +1090,16 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
 			return welcomedResult(errRouteTargetChanged)
 		}
-		if _, err := a.runner.ledger.commitAttach(routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)); err != nil {
-			return welcomedResult(fmt.Errorf("vev: committing route identity: %w", err))
+		candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
+		var commitErr error
+		if a.routeNavigationSelection != nil {
+			selection := *a.routeNavigationSelection
+			commitErr = a.runner.ledger.commitTransition(selection.selected.identity, selection.snapshotGeneration, selection.active, candidate)
+		} else {
+			_, commitErr = a.runner.ledger.commitAttach(candidate)
+		}
+		if commitErr != nil {
+			return welcomedResult(fmt.Errorf("vev: committing route identity: %w", commitErr))
 		}
 		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
 		if err != nil {
