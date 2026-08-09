@@ -210,18 +210,18 @@ func (ac *attachedClient) clearGeometryClaim() {
 	ac.sizeMu.Unlock()
 }
 
-func (ac *attachedClient) currentAttachmentSession() *session {
+// currentSession returns the attachment's owning local session.
+func (ac *attachedClient) currentSession() *session {
 	if ac == nil {
 		return nil
 	}
 	return ac.sess.Get()
 }
 
-// currentSession is the legacy local-session shorthand used by input and
-// overlay paths; attachment-boundary code uses currentAttachmentSession to
-// make ownership checks explicit.
-func (ac *attachedClient) currentSession() *session {
-	return ac.currentAttachmentSession()
+// currentAttachmentSession is the explicit ownership-boundary alias used by
+// transition and rendering paths.
+func (ac *attachedClient) currentAttachmentSession() *session {
+	return ac.currentSession()
 }
 
 func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
