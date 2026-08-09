@@ -3,7 +3,7 @@ package vt
 import (
 	"unicode/utf8"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev/pkg/vtcore"
 )
 
 // maxEscapeBufferLen must stay large enough for OSC 52 clipboard payloads

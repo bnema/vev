@@ -1,6 +1,6 @@
 package vt
 
-import "github.com/bnema/vev/pkg/renderer"
+import renderer "github.com/bnema/vev/pkg/vtcore"
 
 // buffer owns the visible VT grid and the physical-row boundaries needed to
 // reconstruct logical lines. History deliberately is not part of this type:

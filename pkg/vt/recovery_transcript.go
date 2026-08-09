@@ -1,6 +1,6 @@
 package vt
 
-import "github.com/bnema/vev/pkg/renderer"
+import renderer "github.com/bnema/vev/pkg/vtcore"
 
 // RecoveryTranscriptSnapshot is an owned, immutable capture of the viewport
 // rows that should be replayed after retained terminal history during recovery.

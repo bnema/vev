@@ -1,6 +1,6 @@
 package vt
 
-import "github.com/bnema/vev/pkg/renderer"
+import renderer "github.com/bnema/vev/pkg/vtcore"
 
 // CursorSnapshot is the cursor state captured with a visible screen snapshot.
 type CursorSnapshot struct {

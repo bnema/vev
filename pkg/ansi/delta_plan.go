@@ -1,4 +1,4 @@
-package renderer
+package ansi
 
 // Span identifies a changed horizontal range in a logical frame row.
 type Span struct {
@@ -204,30 +204,12 @@ func (c DeltaCandidate) Commit(dst *Frame) {
 		dst.ScrollUp(scroll.Y, scroll.Y+scroll.Height-1, scroll.Count)
 	}
 	for _, span := range c.Plan.Spans {
-		dstStart := dst.lineOffset[span.Y] + span.X
-		srcStart := c.frame.lineOffset[span.Y] + span.X
-		copy(dst.Cells[dstStart:dstStart+span.Width], c.frame.Cells[srcStart:srcStart+span.Width])
+		dstRow := dst.Row(span.Y)
+		srcRow := c.frame.Row(span.Y)
+		copy(dstRow[span.X:span.X+span.Width], srcRow[span.X:span.X+span.Width])
 	}
 }
 
 func replaceFrame(dst *Frame, src Frame) {
-	sameDimensions := dst.Width == src.Width && dst.Height == src.Height
-	cellCount := src.Width * src.Height
-	if sameDimensions && cap(dst.Cells) >= cellCount {
-		dst.Cells = dst.Cells[:cellCount]
-	} else {
-		dst.Cells = make([]Cell, cellCount)
-	}
-	if sameDimensions && cap(dst.lineOffset) >= src.Height {
-		dst.lineOffset = dst.lineOffset[:src.Height]
-	} else {
-		dst.lineOffset = make([]int, src.Height)
-	}
-	dst.Width = src.Width
-	dst.Height = src.Height
-	for y := range src.Height {
-		start := y * src.Width
-		copy(dst.Cells[start:start+src.Width], src.Row(y))
-		dst.lineOffset[y] = start
-	}
+	dst.Replace(src)
 }

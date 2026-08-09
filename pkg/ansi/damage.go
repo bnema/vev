@@ -1,10 +1,10 @@
-package vt
+package ansi
 
 import "github.com/bnema/vev/pkg/vtcore"
 
-type Damage = vtcore.Damage
-
 type DamageKind = vtcore.DamageKind
+
+type Damage = vtcore.Damage
 
 const (
 	DamageText       = vtcore.DamageText
@@ -12,3 +12,5 @@ const (
 	DamageScrollUp   = vtcore.DamageScrollUp
 	DamageFullRedraw = vtcore.DamageFullRedraw
 )
+
+var FullRedraw = vtcore.FullRedraw

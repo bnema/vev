@@ -1,4 +1,4 @@
-package renderer
+package ansi
 
 import (
 	"bytes"
@@ -17,11 +17,11 @@ type Capabilities struct {
 }
 
 type Renderer struct {
-	caps       Capabilities
-	width      int
-	height     int
-	shadow     []Cell
-	lineOffset []int
+	caps      Capabilities
+	width     int
+	height    int
+	shadow    []Cell
+	committed Frame
 }
 
 // PreparedDraw owns encoded output and its transactional delta until Commit.
@@ -39,7 +39,7 @@ func (r *Renderer) Reset() {
 	r.width = 0
 	r.height = 0
 	r.shadow = nil
-	r.lineOffset = nil
+	r.committed = Frame{}
 }
 
 // Bytes returns the prepared ANSI output. The returned bytes remain valid after
@@ -129,14 +129,14 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 }
 
 func (r *Renderer) committedFrame() Frame {
-	return Frame{Width: r.width, Height: r.height, Cells: r.shadow, lineOffset: r.lineOffset}
+	return r.committed
 }
 
 func (r *Renderer) setCommittedFrame(frame Frame) {
 	r.width = frame.Width
 	r.height = frame.Height
 	r.shadow = frame.Cells
-	r.lineOffset = frame.lineOffset
+	r.committed = frame
 }
 
 // copyBytes copies the buffer contents into a fresh byte slice and is used

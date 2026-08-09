@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev/pkg/vtcore"
 )
 
 func (s *Screen) consumeCSI(data []byte) (consumed int, partial bool) {

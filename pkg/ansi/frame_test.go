@@ -1,4 +1,4 @@
-package renderer
+package ansi
 
 import "testing"
 
@@ -20,11 +20,12 @@ func fillFrame(f Frame, rows []string) {
 	}
 }
 
-func TestNewFrameCanonicalOffsets(t *testing.T) {
+func TestNewFrameHasValidLogicalRows(t *testing.T) {
 	f := NewFrame(4, 3)
-	for y := range f.Height {
-		if f.lineOffset[y] != y*f.Width {
-			t.Fatalf("lineOffset[%d] = %d, want %d", y, f.lineOffset[y], y*f.Width)
+	fillFrame(f, []string{"aaaa", "bbbb", "cccc"})
+	for y, want := range []string{"aaaa", "bbbb", "cccc"} {
+		if got := rowRunes(f, y); got != want {
+			t.Fatalf("row %d = %q, want %q", y, got, want)
 		}
 	}
 	if err := f.CheckInvariants(); err != nil {
@@ -32,26 +33,13 @@ func TestNewFrameCanonicalOffsets(t *testing.T) {
 	}
 }
 
-// TestCheckInvariantsDetectsBrokenRotation is the RED guard: a rotation that
-// duplicates a physical offset (the classic off-by-one bug) must be rejected.
-func TestCheckInvariantsDetectsBrokenRotation(t *testing.T) {
-	f := NewFrame(4, 3)
-	// Corrupt: two logical rows map to the same physical row.
-	f.lineOffset[1] = f.lineOffset[0]
-	if err := f.CheckInvariants(); err == nil {
-		t.Fatal("expected invariant violation for duplicate physical row, got nil")
-	}
-
-	f = NewFrame(4, 3)
-	f.lineOffset[0] = 1 // not a multiple of width
-	if err := f.CheckInvariants(); err == nil {
-		t.Fatal("expected invariant violation for non-multiple offset, got nil")
-	}
-
-	f = NewFrame(4, 3)
-	f.lineOffset[2] = 99 // out of range
-	if err := f.CheckInvariants(); err == nil {
-		t.Fatal("expected invariant violation for out-of-range offset, got nil")
+func TestFrameCloneIsIndependent(t *testing.T) {
+	f := NewFrame(2, 1)
+	f.Set(0, 0, Cell{Rune: 'a', Style: DefaultStyle()})
+	clone := f.Clone()
+	clone.Set(0, 0, Cell{Rune: 'b', Style: DefaultStyle()})
+	if got := f.At(0, 0).Rune; got != 'a' {
+		t.Fatalf("source changed through clone: %q", got)
 	}
 }
 

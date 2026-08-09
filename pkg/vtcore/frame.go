@@ -1,4 +1,4 @@
-package renderer
+package vtcore
 
 import "fmt"
 
@@ -38,6 +38,40 @@ func (f Frame) Clone() Frame {
 		copy(clone.Row(y), f.Row(y))
 	}
 	return clone
+}
+
+// Replace copies src into f while reusing canonical storage when dimensions
+// permit. src is read through logical rows so its physical row rotation is
+// preserved in the resulting contents without exposing layout internals.
+func (f *Frame) Replace(src Frame) {
+	if f == nil {
+		return
+	}
+	if src.Width <= 0 || src.Height <= 0 || len(src.Cells) != src.Width*src.Height {
+		*f = Frame{}
+		return
+	}
+
+	sameDimensions := f.Width == src.Width && f.Height == src.Height
+	cellCount := src.Width * src.Height
+	if sameDimensions && cap(f.Cells) >= cellCount {
+		f.Cells = f.Cells[:cellCount]
+	} else {
+		f.Cells = make([]Cell, cellCount)
+	}
+	if sameDimensions && cap(f.lineOffset) >= src.Height {
+		f.lineOffset = f.lineOffset[:src.Height]
+	} else {
+		f.lineOffset = make([]int, src.Height)
+	}
+	f.Width = src.Width
+	f.Height = src.Height
+	for y := range f.lineOffset {
+		f.lineOffset[y] = y * f.Width
+	}
+	for y := range src.Height {
+		copy(f.Row(y), src.Row(y))
+	}
 }
 
 func (f Frame) Validate() error {
@@ -115,8 +149,8 @@ func (f Frame) ScrollUp(top, bottom, n int) {
 }
 
 // ScrollDown scrolls the logical rows in [top,bottom] down by n lines by
-// rotating their physical offsets. Rows scrolled off the bottom are recycled to
-// the top and blanked in place. See ScrollUp for preconditions.
+// rotating their physical offsets. Rows scrolled off the bottom are recycled
+// to the top and blanked in place. See ScrollUp for preconditions.
 func (f Frame) ScrollDown(top, bottom, n int) {
 	for ; n > 0; n-- {
 		recycled := f.lineOffset[bottom]

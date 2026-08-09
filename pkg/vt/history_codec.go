@@ -8,7 +8,7 @@ import (
 	"slices"
 	"unicode/utf8"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev/pkg/vtcore"
 )
 
 const (

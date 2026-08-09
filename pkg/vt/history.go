@@ -5,7 +5,7 @@ import (
 	"math"
 	"slices"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev/pkg/vtcore"
 )
 
 // ErrHistoryRowTooWide is returned when a row cannot fit within the configured

@@ -1,4 +1,4 @@
-package renderer
+package ansi
 
 const (
 	SyncStartCSI = "\x1b[?2026h"

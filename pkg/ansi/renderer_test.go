@@ -1,4 +1,4 @@
-package renderer
+package ansi
 
 import (
 	"bytes"
@@ -146,7 +146,7 @@ func TestPrepareNoOpDoesNotCloneFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.candidate.frame.Cells != nil || prepared.candidate.frame.lineOffset != nil {
+	if prepared.candidate.frame.Width != 0 || prepared.candidate.frame.Height != 0 || prepared.candidate.frame.Cells != nil {
 		t.Fatal("no-op prepared draw owns frame storage")
 	}
 	prepared.Commit()
@@ -1400,8 +1400,7 @@ func TestRendererPrepare(t *testing.T) {
 
 func TestPlanDeltaRejectsInvalidCommittedFrame(t *testing.T) {
 	frame := NewFrame(2, 1)
-	committed := NewFrame(2, 1)
-	committed.lineOffset = nil
+	committed := Frame{Width: 2, Height: 1, Cells: make([]Cell, 2)}
 
 	if _, err := PlanDelta(frame, nil, committed, false); err == nil {
 		t.Fatal("PlanDelta accepted an invalid committed frame")

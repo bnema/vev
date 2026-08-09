@@ -1,4 +1,4 @@
-package renderer
+package ansi
 
 import (
 	"reflect"
@@ -169,7 +169,7 @@ func TestNoOpDeltaCandidateDoesNotCloneFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanDelta() error = %v", err)
 	}
-	if candidate.frame.Cells != nil || candidate.frame.lineOffset != nil {
+	if candidate.frame.Width != 0 || candidate.frame.Height != 0 || candidate.frame.Cells != nil {
 		t.Fatal("no-op candidate owns frame storage")
 	}
 
@@ -184,8 +184,7 @@ func TestNoOpDeltaCandidateDoesNotCloneFrame(t *testing.T) {
 func TestPlanDeltaDoesNotMutateCommitted(t *testing.T) {
 	committed := testFrame("0000", "1111", "2222", "3333", "4444")
 	committed.ScrollUp(1, 3, 1)
-	beforeCells := append([]Cell(nil), committed.Cells...)
-	beforeOffsets := append([]int(nil), committed.lineOffset...)
+	before := committed.Clone()
 	frame := testFrame("0000", "2222", "3333", "new!", "4444")
 	damage := []Damage{
 		{Kind: DamageScrollUp, X: 0, Y: 1, Width: 4, Height: 3, Count: 1},
@@ -196,11 +195,10 @@ func TestPlanDeltaDoesNotMutateCommitted(t *testing.T) {
 		t.Fatalf("PlanDelta() error = %v", err)
 	}
 
-	if !reflect.DeepEqual(committed.Cells, beforeCells) {
-		t.Fatal("PlanDelta mutated committed cells")
-	}
-	if !reflect.DeepEqual(committed.lineOffset, beforeOffsets) {
-		t.Fatal("PlanDelta mutated committed row offsets")
+	for y := range committed.Height {
+		if !reflect.DeepEqual(committed.Row(y), before.Row(y)) {
+			t.Fatalf("PlanDelta mutated committed row %d", y)
+		}
 	}
 }
 

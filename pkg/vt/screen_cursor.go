@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev/pkg/vtcore"
 )
 
 type cursorState struct {

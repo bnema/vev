@@ -1,4 +1,4 @@
-package renderer
+package vtcore
 
 import "unicode"
 

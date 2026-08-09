@@ -1,6 +1,6 @@
 package vt
 
-import "github.com/bnema/vev/pkg/renderer"
+import renderer "github.com/bnema/vev/pkg/vtcore"
 
 type screenState struct {
 	frame        renderer.Frame

@@ -3,7 +3,7 @@ package vt
 import (
 	"errors"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev/pkg/vtcore"
 )
 
 // index moves to the next physical row, scrolling the region when the cursor

@@ -1,4 +1,4 @@
-package renderer
+package vtcore
 
 type RGB struct {
 	R uint8
