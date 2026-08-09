@@ -37,15 +37,16 @@ func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 }
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
-	// Capture daemon/session state before taking paletteMu: lock ordering forbids
-	// holding an overlay lock while inspecting live sessions.
-	recent := d.recentSessions(sess)
+	// Capture the client-owned route snapshot before taking paletteMu. The
+	// snapshot is immutable for this palette interaction and the daemon never
+	// consults its own session history for recent-route commands.
+	routeSnapshot := ac.routeSnapshotCopy()
 	commands := d.paletteCommands()
 	results := d.paletteResults(sess, commands)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = palette.New(results)
-	ac.overlays.paletteRecent = recent
+	ac.overlays.paletteRouteSnapshot = routeSnapshot
 	ac.overlays.paletteHints = palette.ContextualHints{}
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
@@ -93,13 +94,22 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 	return results
 }
 
-func recentSessionHints(recent []recentSession, args []string) palette.ContextualHints {
-	formatted := formatRecentRoutePresentations(recentRoutePresentations(recent))
+func recentRouteHints(snapshot ports.RecentRouteSnapshot, args []string) palette.ContextualHints {
+	formatted := formatRecentRouteSnapshot(snapshot)
 	names := make([]string, len(formatted))
 	for i, entry := range formatted {
 		names[i] = entry.name
 	}
-	return palette.BuildRecentSessionHints(names, args)
+	hints := palette.BuildRecentSessionHints(names, args)
+	for i, entry := range snapshot.Entries {
+		if i >= len(hints.Recent) {
+			break
+		}
+		hints.Recent[i].SnapshotGeneration = snapshot.Generation
+		hints.Recent[i].Key = entry.Key
+		hints.Recent[i].Generation = entry.Generation
+	}
+	return hints
 }
 
 func (d *Daemon) paletteCommands() []command.Command {
@@ -157,7 +167,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var sessionTarget palette.Result
 	var hasSessionTarget bool
 	var args []string
-	var recent []recentSession
+	var routeSnapshot ports.RecentRouteSnapshot
 	var generation uint64
 	var rawQuery string
 	changed, cancel, execute := false, false, false
@@ -228,7 +238,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 						return
 					}
 					args = action.Args
-					recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
+					routeSnapshot = ac.overlays.paletteRouteSnapshot
+					routeSnapshot.Entries = append([]ports.RecentRouteEntry(nil), routeSnapshot.Entries...)
 				}
 			} else if _, ok := selected.SessionName(); ok {
 				sessionTarget = selected
@@ -245,7 +256,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		ac.overlays.paletteFeedback = ""
 		active, ok := ac.overlays.palette.ArgumentCommand()
 		if ok && active.Slug == "jump-recent-session" {
-			ac.overlays.paletteHints = recentSessionHints(ac.overlays.paletteRecent, paletteArgs(ac.overlays.palette.Query(), active))
+			args := paletteArgs(ac.overlays.palette.Query(), active)
+			if ac.overlays.paletteRouteSnapshot.Generation != 0 {
+				ac.overlays.paletteHints = recentRouteHints(ac.overlays.paletteRouteSnapshot, args)
+			} else {
+				ac.overlays.paletteHints = palette.ContextualHints{}
+			}
 		} else {
 			ac.overlays.paletteHints = palette.ContextualHints{}
 		}
@@ -304,7 +320,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, recent: recent, effect: effect}
+		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, routeSnapshot: routeSnapshot, effect: effect}
 		if err := exec.JumpRecentSession(rank); err != nil {
 			if errors.Is(err, errAttachmentTransition) {
 				return
@@ -371,7 +387,7 @@ func paletteArgs(query string, cmd command.Command) []string {
 func (ac *attachedClient) clearPaletteLocked() {
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = nil
-	ac.overlays.paletteRecent = nil
+	ac.overlays.paletteRouteSnapshot = ports.RecentRouteSnapshot{}
 	ac.overlays.paletteHints = palette.ContextualHints{}
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
@@ -401,7 +417,7 @@ type paletteExec struct {
 	sess                *session
 	attachment          *session
 	ac                  *attachedClient
-	recent              []recentSession
+	routeSnapshot       ports.RecentRouteSnapshot
 	actions             daemonActionRunner
 	effect              *attachmentEffectTicket
 	redrawClosedPalette bool
@@ -634,36 +650,25 @@ func (e paletteExec) YankLastNotification() error {
 }
 
 func (e paletteExec) JumpRecentSession(rank int) error {
-	if rank < 1 || rank > len(e.recent) {
+	if e.routeSnapshot.Generation == 0 || rank < 1 || rank > len(e.routeSnapshot.Entries) {
 		return command.ErrInvalidArguments
 	}
-	target := e.recent[rank-1]
-	if e.d.sessionByID(target.id) == nil {
-		return command.ErrInvalidArguments
+	entry := e.routeSnapshot.Entries[rank-1]
+	action := ports.RouteNavigationAction{
+		SnapshotGeneration: e.routeSnapshot.Generation,
+		Key:                entry.Key,
+		Generation:         entry.Generation,
 	}
 	if e.d.beforeRecentSessionHandoff != nil {
 		e.d.beforeRecentSessionHandoff()
 	}
-	var err error
 	if e.effect != nil {
-		err = e.d.switchToTargetForAttachment(e.effect.connectionToken(), picker.Target{Session: target.id, TabIndex: -1}, sessionHandoffGuard{}, "palette-recent-session")
-	} else {
-		sess := e.attachment
-		if sess == nil {
-			sess = e.sess
-		}
-		if sess == nil {
-			return errAttachmentTransition
-		}
-		err = e.d.switchToTarget(sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})
+		return e.d.sendRecentRouteNavigationActionForAttachment(e.effect.connectionToken(), action)
 	}
-	if e.effect != nil && errors.Is(err, errAttachmentTransition) {
-		return err
+	if e.ac == nil || e.attachment == nil {
+		return errAttachmentTransition
 	}
-	if err != nil {
-		return command.ErrInvalidArguments
-	}
-	return nil
+	return e.d.sendRecentRouteNavigationActionForAttachment(e.attachment.attachmentToken(e.ac, e.ac.transport()), action)
 }
 
 func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeui.Styles) (renderer.Frame, []renderer.Damage) {

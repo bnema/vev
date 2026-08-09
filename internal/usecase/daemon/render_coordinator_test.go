@@ -1136,7 +1136,7 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 var producerFiles = []string{
 	"attention.go", "client.go", "copymode.go", "floating.go", "input.go",
 	"palette.go", "pane_actions.go", "picker.go", "prompt.go", "render.go",
-	"session.go", "session_back.go",
+	"session.go",
 }
 
 func TestProducerInvalidations(t *testing.T) {
@@ -1246,14 +1246,6 @@ func TestProducerInvalidations(t *testing.T) {
 				tb := sess.tabs[1]
 				sess.mu.Unlock()
 				require.NoError(t, d.closeTab(sess, tb, true))
-			},
-		},
-		{
-			file: "session_back.go",
-			name: "back session fallback without a target",
-			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				d.backSession(sess, ac)
-				require.Same(t, sess, ac.currentSession())
 			},
 		},
 	}

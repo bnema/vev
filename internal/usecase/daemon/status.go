@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -224,18 +225,20 @@ func tabDisplayName(tb *tab, index int) string {
 	return strconv.Itoa(index + 1)
 }
 
-func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession) []rankedRecent {
+func rankedRecentForHintsWithSnapshot(hints *palette.ContextualHints, snapshot ports.RecentRouteSnapshot) []rankedRecent {
 	if hints == nil || hints.Kind != command.ContextHintRecentSessions {
 		return nil
 	}
-	formatted := formatRecentRoutePresentations(recentRoutePresentations(recent))
+	var formatted []recentRouteDisplay
+	if snapshot.Generation != 0 {
+		formatted = formatRecentRouteSnapshot(snapshot)
+	}
 	entries := make([]rankedRecent, 0, len(hints.Recent))
 	for i, hint := range hints.Recent {
 		display := recentRouteDisplay{name: hint.Name}
-		// recent was copied with the hint under paletteMu, so this only enriches
-		// the render snapshot and never performs a live domain lookup. The
-		// formatted capture is authoritative when available, keeping ranked
-		// JRS labels identical to normal MRU labels.
+		// The hint and route snapshot are immutable interaction data. The
+		// formatted snapshot is authoritative when available, keeping ranked
+		// JRS labels identical to normal MRU labels without a live lookup.
 		if i < len(formatted) {
 			display = formatted[i]
 		}
@@ -252,25 +255,24 @@ func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession
 }
 
 // barStateForPaletteHints selects snapshot-only contextual composition when a
-// palette interaction has captured recent-session hints. Normal palette state
-// continues to use the canonical, live MRU list.
-func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	var entry *session
-	if cur != nil {
-		entry = cur
-	}
-	return d.barStateForAttachmentPaletteHints(entry, statusFeedback, hints, recent)
+// palette interaction has captured recent-route hints.
+func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints) barState {
+	return d.barStateForAttachmentPaletteHints(cur, statusFeedback, hints)
 }
 
 // barStateForAttachmentPaletteHints composes daemon-owned chrome for an
 // attachment. Bar scripts remain local-session-only because
 // their existing execution contract depends on local tabs and PTYs.
-func (d *Daemon) barStateForAttachmentPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, recent)
+func (d *Daemon) barStateForAttachmentPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints) barState {
+	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, ports.RecentRouteSnapshot{})
 }
 
-func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	ranked := rankedRecentForHints(hints, recent)
+func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, capturedRouteSnapshot ports.RecentRouteSnapshot) barState {
+	routeSnapshot := capturedRouteSnapshot
+	if routeSnapshot.Generation == 0 && ac != nil {
+		routeSnapshot = ac.routeSnapshotCopy()
+	}
+	ranked := rankedRecentForHintsWithSnapshot(hints, routeSnapshot)
 	state := barState{statusFeedback: statusFeedback}
 	if d != nil {
 		state.attentionFrame = d.attentionFrame()
@@ -287,16 +289,14 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 	}
 	if ranked != nil {
 		state.rankedRecent = ranked
-	} else if d != nil {
-		state.mru = formatRecentRoutePresentations(recentRoutePresentations(d.recentSessions(cur)))
+	} else if routeSnapshot.Generation != 0 {
+		state.mru = formatRecentRouteSnapshot(routeSnapshot)
 	}
 	return state
 }
 
 func (d *Daemon) barStateFor(cur *session, statusFeedback string) barState {
-	state := d.barStateBase(cur, statusFeedback)
-	state.mru = formatRecentRoutePresentations(recentRoutePresentations(d.recentSessions(cur)))
-	return state
+	return d.barStateBase(cur, statusFeedback)
 }
 
 func (d *Daemon) barStateBase(cur *session, statusFeedback string) barState {

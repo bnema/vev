@@ -778,197 +778,69 @@ func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 	}
 }
 
-func TestPaletteBackSessionTogglesPreviousSession(t *testing.T) {
+func TestPaletteBackSessionSendsClientPreviousRouteAction(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	transport := ac.transport()
+	rc := d.attachCoordinator(current, nil, ac, true)
+	token := current.attachmentToken(ac, transport)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+	token.effect = effect
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+		Generation: 3,
+		Active:     ports.RouteRef{Key: 3, Generation: 3},
+		Previous:   ports.RouteRef{Key: 2, Generation: 2},
+		Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 2, Name: "recent", Kind: ports.RouteKindLocal}},
+	})
+
+	require.NoError(t, d.backSessionForAttachment(token))
+	frame := awaitFrame(t, sends, ports.MsgNavigateRecentRoute)
+	action, err := ports.UnmarshalRouteNavigationAction(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 3, Key: 2, Generation: 2}, action)
+}
+
+func TestPaletteBackSessionWithoutClientHistoryIsNoop(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.backSession(current, ac)
+
+	require.Same(t, current, ac.currentSession())
+}
+
+func TestBackSessionWithoutSnapshotDoesNotReportDaemonHandoffFailure(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.backSession(current, ac)
+
+	require.Same(t, current, ac.currentSession())
+	require.Empty(t, d.notices.history())
+}
+
+func TestBackSessionWithoutSnapshotDoesNotPublishFrames(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.backSession(current, ac)
+
+	require.Same(t, current, ac.currentSession())
+	requireNoOutputFrame(t, sends)
+}
+
+func TestSwitchSourceDoesNotOwnPreviousRoute(t *testing.T) {
 	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	recent := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
 
-	// Picker-style successful transition records its origin.
 	require.NoError(t, d.switchToTarget(current, ac, picker.Target{Session: recent.id, TabIndex: -1}))
-	for _, sess := range []*session{current, recent, current} {
-		runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
-		require.Same(t, sess, ac.currentSession())
-	}
-}
-
-func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
-	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-	for _, tc := range []struct {
-		name    string
-		prepare func()
-	}{
-		{name: "no target", prepare: func() {}},
-		{name: "stale target", prepare: func() { ac.previousSession.Set("gone") }},
-		{name: "same session", prepare: func() { ac.previousSession.Set(current.id) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ac.clearPreviousSession()
-			tc.prepare()
-			runPaletteCommand(t, d, current, ac, "BSK")
-			require.Same(t, current, ac.currentSession())
-			if tc.name != "no target" {
-				require.Empty(t, ac.previousSession.Get(), "invalid target must not remain toggleable")
-			}
-		})
-	}
-}
-
-func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
-	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-	target := d.sessions[domain.SessionID("recent")]
-	ac.previousSession.Set(target.id)
-
-	// A displaced attachment makes the previously valid handoff stale by the
-	// time switchToTarget commits it.
-	current.mu.Lock()
-	clearAttachmentsForTestLocked(current)
-	current.mu.Unlock()
-
-	d.backSession(current, ac)
-
-	require.Same(t, current, ac.currentSession(), "a stale handoff must leave the attachment on its origin")
-	require.Equal(t, target.id, ac.previousSession.Get(), "a failed handoff remains retryable")
-	history := d.notices.history()
-	require.Len(t, history, 1, "the switch failure must be reported exactly once")
-	require.Equal(t, domain.NoticeSessionUnavailable, history[0].Code)
-}
-
-func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
-	ac := &attachedClient{}
-	stale := &session{sessionCore: sessionCore{id: "stale"}}
-	updated := &session{sessionCore: sessionCore{id: "updated"}}
-	ac.previousSession.Set(stale.id)
-
-	// Model a completed hand-off between observing a stale target and clearing
-	// it. The conditional clear must not erase the newer toggle destination.
-	ac.previousSession.Set(updated.id)
-	ac.clearPreviousSessionIf(stale.id)
-
-	require.Equal(t, updated.id, ac.previousSession.Get())
-}
-
-// backSession's invalid-target fallback is a render producer: it must publish
-// exactly one coordinator invalidation instead of composing directly, while
-// the valid-target hand-off (TestPaletteBackSessionTogglesPreviousSession) and
-// the guarded stale clear (TestStaleBackSessionClearPreservesConcurrentTarget)
-// keep their PR #73 behavior unchanged.
-func TestBackSessionInvalidTargetsFallBackThroughOneInvalidation(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		prepare func(current *session, ac *attachedClient)
-	}{
-		{name: "no previous target", prepare: func(*session, *attachedClient) {}},
-		{name: "stale previous target", prepare: func(_ *session, ac *attachedClient) {
-			ac.previousSession.Set("gone")
-		}},
-		{name: "previous target equals current", prepare: func(current *session, ac *attachedClient) {
-			ac.previousSession.Set(current.id)
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
-			defer releaseAll(releases)
-			invs := make(chan renderInvalidation, 4)
-			current.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
-				clock:        d.clock,
-				wake:         func(renderWake) {},
-				onInvalidate: func(inv renderInvalidation) { invs <- inv },
-			}))
-			tc.prepare(current, ac)
-
-			d.backSession(current, ac)
-
-			require.Same(t, current, ac.currentSession(), "an invalid target must not move the attachment")
-			awaitInvalidation(t, invs)
-			requireNoInvalidation(t, invs)
-			requireNoOutputFrame(t, sends)
-		})
-	}
-}
-
-func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		target      func(*session, *session) picker.Target
-		wantCurrent string
-		wantPrev    string
-	}{
-		{
-			name: "picker cross-session switch records origin",
-			target: func(_ *session, recent *session) picker.Target {
-				return picker.Target{Session: recent.id, TabIndex: -1}
-			},
-			wantCurrent: "recent",
-			wantPrev:    "current",
-		},
-		{
-			name: "attention cross-session switch records origin",
-			target: func(_ *session, recent *session) picker.Target {
-				return picker.Target{Session: recent.id, TabIndex: 0}
-			},
-			wantCurrent: "recent",
-			wantPrev:    "current",
-		},
-		{
-			name: "same-session tab switch does not record",
-			target: func(current *session, _ *session) picker.Target {
-				return picker.Target{Session: current.id, TabIndex: 0}
-			},
-			wantCurrent: "current",
-			wantPrev:    "",
-		},
-		{
-			name: "missing target does not record",
-			target: func(_ *session, _ *session) picker.Target {
-				return picker.Target{Session: "missing", TabIndex: -1}
-			},
-			wantCurrent: "current",
-			wantPrev:    "",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-			defer releaseAll(releases)
-			recent := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
-
-			if tc.name == "missing target does not record" {
-				require.Error(t, d.switchToTarget(current, ac, tc.target(current, recent)))
-			} else {
-				require.NoError(t, d.switchToTarget(current, ac, tc.target(current, recent)))
-			}
-			require.Equal(t, domain.SessionID(tc.wantCurrent), ac.currentSession().id)
-			if tc.wantPrev == "" {
-				require.Empty(t, ac.previousSession.Get())
-				return
-			}
-			require.Equal(t, domain.SessionID(tc.wantPrev), ac.previousSession.Get())
-		})
-	}
-}
-
-func TestTerminalTeardownClearsPreviousSession(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		teardown func(*Daemon, *session, *attachedClient)
-	}{
-		{name: "explicit detach", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.clientGone(sess, ac, ac.transport(), true) }},
-		{name: "non-park send error fallback", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.detachOnSendError(sess, ac, ac.transport()) }},
-		{name: "killed attached session", teardown: func(d *Daemon, sess *session, _ *attachedClient) {
-			require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-			defer releaseAll(releases)
-
-			ac.previousSession.Set(domain.SessionID("recent"))
-			tc.teardown(d, current, ac)
-
-			require.Empty(t, ac.previousSession.Get())
-		})
-	}
+	require.Same(t, recent, ac.currentSession())
+	require.Equal(t, uint64(0), ac.routeSnapshotCopy().Generation, "route ownership starts in the client")
 }
 
 func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
@@ -988,12 +860,6 @@ func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attached
 	recent.mruAt.Store(20)
 	older.mruAt.Store(10)
 	return d, current, ac, sends, []func(){release1, release2, release3}
-}
-
-func runPaletteCommand(t *testing.T, d *Daemon, sess *session, ac *attachedClient, code string) {
-	t.Helper()
-	d.handleInput(sess, ac, []byte("\x1b "))
-	d.handleInput(sess, ac, []byte(code+"\r"))
 }
 
 func releaseAll(releases []func()) {

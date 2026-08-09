@@ -1331,7 +1331,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	require.Zero(t, parked)
 }
 
-func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
+func TestLiveParkAndResumeRetainsAttachmentWithoutDaemonHistory(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
@@ -1339,11 +1339,6 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
 
-	previous := &session{sessionCore: sessionCore{id: "previous"}}
-	d.mu.Lock()
-	d.sessions[previous.id] = previous
-	d.mu.Unlock()
-	ac.previousSession.Set(previous.id)
 	d.clientGone(sess, ac, ac.transport(), false)
 
 	token := ac.resumeToken
@@ -1351,17 +1346,15 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	parked := d.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parked)
-	require.Equal(t, previous.id, ac.previousSession.Get(), "a live parked attachment keeps its toggle")
 
 	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), tr2)
 	require.NoError(t, err)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
-	require.Equal(t, previous.id, resumedAC.previousSession.Get(), "resume keeps the live attachment toggle")
 }
 
-func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
+func TestDiscardingParkedAttachmentDoesNotOwnPreviousSession(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		discard func(*Daemon, uint64, *parkedAttachment) []parkedAttachmentRetirement
@@ -1388,7 +1381,6 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 			require.NoError(t, err)
 
-			ac.previousSession.Set("previous")
 			d.clientGone(sess, ac, ac.transport(), false)
 
 			d.mu.Lock()
@@ -1398,7 +1390,6 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			d.mu.Unlock()
 			d.finishParkedAttachmentRetirements(retirements)
 
-			require.Empty(t, ac.previousSession.Get())
 		})
 	}
 }

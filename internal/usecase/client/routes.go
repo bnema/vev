@@ -115,6 +115,9 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 		if request.RemoteTarget != nil {
 			hostLabel = request.RemoteTarget.DisplayOrigin
 		}
+		if hostLabel == "" {
+			hostLabel = originKey
+		}
 	}
 	request = cloneAttachRequest(request)
 	request.Origin = origin
@@ -139,6 +142,29 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 	}
 }
 
+func routeCandidateForCommittedIdentity(active routeRecord, identity ports.CommittedRouteIdentity) routeCandidate {
+	request := cloneAttachRequest(active.request)
+	request.SessionName = identity.Target.SessionName
+	request.ExactTarget = &identity.Target
+	request.RemoteTarget = nil
+	return routeCandidate{
+		origin:    active.origin,
+		originKey: active.originKey,
+		target:    identity.Target,
+		presentation: routePresentation{
+			name:         identity.Target.SessionName,
+			hostLabel:    active.presentation.hostLabel,
+			kind:         active.presentation.kind,
+			ephemeral:    identity.Ephemeral,
+			reachability: ports.RouteReachabilityReachable,
+		},
+		dialer:      active.dialer,
+		request:     request,
+		resumeToken: active.resumeToken,
+		home:        false,
+	}
+}
+
 func normalizeRouteOrigin(origin ports.RouteOrigin, remote bool) ports.RouteOrigin {
 	if origin != 0 {
 		return origin
@@ -147,6 +173,20 @@ func normalizeRouteOrigin(origin ports.RouteOrigin, remote bool) ports.RouteOrig
 		return ports.RouteOriginRemote
 	}
 	return ports.RouteOriginLocal
+}
+
+func routeFailureCode(err error) ports.RouteFailureCode {
+	var protocolErr *ProtocolError
+	if errors.As(err, &protocolErr) {
+		switch protocolErr.Code {
+		case ports.ErrNoSuchSession, ports.ErrNoSuchTarget:
+			return ports.RouteFailureNoSuchRoute
+		}
+	}
+	if errors.Is(err, errRouteTargetChanged) {
+		return ports.RouteFailureTargetChanged
+	}
+	return ports.RouteFailureUnavailable
 }
 
 func normalizeRouteOriginKey(key string, origin ports.RouteOrigin) string {
@@ -402,33 +442,44 @@ type routeTransitionConnector interface {
 	Restore(context.Context, routeRecord) error
 }
 
-// navigationRecord validates that an action belongs to the latest complete
-// snapshot. The active route is metadata-only and selecting it is a no-op.
-func (l *routeLedger) navigationRecord(action ports.RouteNavigationAction) (routeRecord, bool, bool) {
+// navigationRecords validates an action against the latest complete snapshot
+// and captures both the selected route and the live route that must be
+// restored if the transition fails. Capturing them under one read lock keeps a
+// concurrent committed-identity update from changing the restoration target
+// between validation and dialing.
+func (l *routeLedger) navigationRecords(action ports.RouteNavigationAction) (routeRecord, routeRecord, bool, bool) {
 	if action.SnapshotGeneration == 0 || action.Key == 0 || action.Generation == 0 {
-		return routeRecord{}, false, false
+		return routeRecord{}, routeRecord{}, false, false
 	}
 	identity := identityFromWire(ports.RouteRef{Key: action.Key, Generation: action.Generation})
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if uint64(l.generation) != action.SnapshotGeneration {
-		return routeRecord{}, false, false
+		return routeRecord{}, routeRecord{}, false, false
 	}
 	if identity == l.active {
-		return routeRecord{}, true, true
+		return routeRecord{}, routeRecord{}, true, true
 	}
-	index := l.indexByIdentityLocked(identity)
-	if index < 0 {
-		return routeRecord{}, false, false
+	selectedIndex := l.indexByIdentityLocked(identity)
+	activeIndex := l.indexByIdentityLocked(l.active)
+	if selectedIndex < 0 || activeIndex < 0 {
+		return routeRecord{}, routeRecord{}, false, false
 	}
-	return cloneRouteRecord(l.entries[index]), true, false
+	return cloneRouteRecord(l.entries[selectedIndex]), cloneRouteRecord(l.entries[activeIndex]), true, false
+}
+
+// navigationRecord validates that an action belongs to the latest complete
+// snapshot. The active route is metadata-only and selecting it is a no-op.
+func (l *routeLedger) navigationRecord(action ports.RouteNavigationAction) (routeRecord, bool, bool) {
+	selected, _, ok, noOp := l.navigationRecords(action)
+	return selected, ok, noOp
 }
 
 // navigate resolves a captured key/generation, attempts resume before exact
 // attach, and commits only after the connector returns a matching identity.
 // A failed transition restores the prior live route and leaves history alone.
 func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigationAction, connector routeTransitionConnector) error {
-	record, ok, noOp := l.navigationRecord(action)
+	record, prior, ok, noOp := l.navigationRecords(action)
 	if !ok {
 		return errRouteStaleSelection
 	}
@@ -450,7 +501,7 @@ func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigation
 		target:    record.target,
 	}
 	restoreOnFailure := func(err error) error {
-		if restoreErr := connector.Restore(ctx, record); restoreErr != nil {
+		if restoreErr := connector.Restore(ctx, prior); restoreErr != nil {
 			return errors.Join(err, fmt.Errorf("restoring prior route: %w", restoreErr))
 		}
 		return err

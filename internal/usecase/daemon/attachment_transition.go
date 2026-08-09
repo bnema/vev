@@ -176,6 +176,11 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if err != nil {
 		return result, err
 	}
+	if result.published.ac != nil && result.published.ac.routeSnapshotCopy().Generation != 0 {
+		if identityErr := d.sendCommittedRouteIdentityForAttachment(result.published); identityErr != nil {
+			d.log.Warn("publishing committed route identity failed", "err", identityErr, "action", req.action)
+		}
+	}
 	if result.sourceGeometrySession != nil {
 		d.recalculateSessionGeometryAndInvalidateAsync(result.sourceGeometrySession, "attachment_transition.go")
 	}

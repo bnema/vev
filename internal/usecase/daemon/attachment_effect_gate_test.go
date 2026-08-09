@@ -699,7 +699,12 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	d.mu.Lock()
 	d.sessions[target.id] = target
 	d.mu.Unlock()
-	ac.previousSession.Set(target.id)
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+		Generation: 2,
+		Active:     ports.RouteRef{Key: 2, Generation: 2},
+		Previous:   ports.RouteRef{Key: 1, Generation: 1},
+		Entries:    []ports.RecentRouteEntry{{Key: 1, Generation: 1, Name: "target", Kind: ports.RouteKindLocal}},
+	})
 
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
@@ -713,7 +718,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	require.NoError(t, err)
 
 	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
-	require.Same(t, target, ac.currentAttachmentSession())
+	require.Same(t, source, ac.currentAttachmentSession())
 	frames := transport.Sends()
 	require.NotEmpty(t, frames)
 	var result ports.CommandResult
@@ -726,7 +731,16 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 		break
 	}
 	require.True(t, result.OK, result.Text)
-	require.False(t, transport.Closed(), "local navigation must not tear down the transitioned attachment")
+	var action ports.RouteNavigationAction
+	for _, frame := range frames {
+		if frame.Type != ports.MsgNavigateRecentRoute {
+			continue
+		}
+		action, err = ports.UnmarshalRouteNavigationAction(frame.Payload)
+		require.NoError(t, err)
+	}
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}, action)
+	require.False(t, transport.Closed(), "client navigation must not tear down the attachment")
 }
 
 func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {

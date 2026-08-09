@@ -205,6 +205,7 @@ type Runner struct {
 	remote            bool
 	origin            ports.RouteOrigin
 	ledger            *routeLedger
+	routeFailure      *ports.RouteNavigationFailure
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -341,6 +342,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	returnResumeFallback := false
 	homeNavigationPending := false
 	returnNavigationPending := false
+	routeNavigationPending := false
+	routeNavigationResumeFallback := false
+	var routeNavigationFallback *attachRoute
+	var routeNavigationAction *ports.RouteNavigationAction
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
 	var rememberOnce sync.Once
@@ -519,6 +524,36 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if !result.transportClosed {
 			_ = connection.Close()
 		}
+		if result.routeAction != nil {
+			if r.ledger == nil {
+				return errors.New("vev: route ledger unavailable")
+			}
+			record, prior, valid, noOp := r.ledger.navigationRecords(*result.routeAction)
+			if !valid {
+				return errors.New("vev: stale route navigation action")
+			}
+			if noOp {
+				continue
+			}
+			action := *result.routeAction
+			routeNavigationAction = &action
+			routeNavigationFallback = &attachRoute{dialer: prior.dialer, request: prior.request, resumeToken: prior.resumeToken}
+			dialer = record.dialer
+			attemptRequest = cloneAttachRequest(record.request)
+			if record.resumeToken != 0 {
+				attemptRequest.Intent = ports.IntentResume
+			} else {
+				attemptRequest.Intent = ports.IntentAttach
+			}
+			attemptRequest.StartupOverlay = ports.StartupOverlayNone
+			attemptRequest.NavigationCapabilities = 0
+			resumeToken = record.resumeToken
+			routeNavigationPending = true
+			routeNavigationResumeFallback = record.resumeToken != 0
+			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
+			backoff = defaultReconnectBackoff.initial
+			continue
+		}
 		if result.action != 0 {
 			switch result.action {
 			case ports.NavigationOpenHomePicker:
@@ -594,10 +629,23 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if result.sessionName != "" {
 			attemptRequest.SessionName = result.sessionName
 		}
+		if result.committedIdentity != nil {
+			identity := *result.committedIdentity
+			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != identity.Target {
+				attemptRequest.RemoteTarget = nil
+			}
+			attemptRequest.ExactTarget = &identity.Target
+		}
 		if result.welcomed {
 			homeNavigationPending = false
 		}
 		if result.err == nil {
+			if result.welcomed && routeNavigationPending {
+				routeNavigationPending = false
+				routeNavigationResumeFallback = false
+				routeNavigationFallback = nil
+				routeNavigationAction = nil
+			}
 			if result.welcomed && returnNavigationPending {
 				returnNavigationPending = false
 				returnResumeFallback = false
@@ -611,6 +659,29 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			route := *returnRoute
 			returnRoute = nil
 			homeNavigationPending = false
+			returnNavigationPending = true
+			restoreReturnRoute(route)
+			continue
+		}
+		if routeNavigationPending && routeNavigationResumeFallback {
+			var protocolErr *ProtocolError
+			if errors.As(result.err, &protocolErr) && (protocolErr.Code == ports.ErrNoSuchSession || protocolErr.Code == ports.ErrNoSuchTarget) {
+				attemptRequest.Intent = ports.IntentAttach
+				resumeToken = 0
+				routeNavigationResumeFallback = false
+				continue
+			}
+		}
+		if routeNavigationPending && routeNavigationFallback != nil {
+			if routeNavigationAction != nil {
+				action := *routeNavigationAction
+				r.routeFailure = &ports.RouteNavigationFailure{Key: action.Key, Generation: action.Generation, Code: routeFailureCode(result.err)}
+				routeNavigationAction = nil
+			}
+			route := *routeNavigationFallback
+			routeNavigationFallback = nil
+			routeNavigationPending = false
+			routeNavigationResumeFallback = false
 			returnNavigationPending = true
 			restoreReturnRoute(route)
 			continue
@@ -808,6 +879,7 @@ type attachResult struct {
 	transportClosed   bool
 	target            *ports.AttachTarget
 	action            ports.NavigationAction
+	routeAction       *ports.RouteNavigationAction
 	err               error
 }
 
@@ -1015,6 +1087,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}); err != nil {
 			return welcomedResult(fmt.Errorf("vev: publishing route snapshot: %w", err))
 		}
+	}
+	if a.runner.routeFailure != nil {
+		payload, err := ports.MarshalRouteNavigationFailure(*a.runner.routeFailure)
+		if err != nil {
+			return welcomedResult(fmt.Errorf("vev: encoding route navigation failure: %w", err))
+		}
+		if err := sendHandshake(func() error {
+			return transport.Send(ports.Frame{Type: ports.MsgRouteNavigationFailure, Payload: payload})
+		}); err != nil {
+			return welcomedResult(fmt.Errorf("vev: publishing route navigation failure: %w", err))
+		}
+		a.runner.routeFailure = nil
 	}
 
 	// 3. Enter raw mode after Welcome; Run owns restoration.
@@ -1227,6 +1311,21 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return context.Canceled
 		}
 	}
+	publishRouteSnapshot := func() error {
+		if a.runner.ledger == nil {
+			return errors.New("vev: route ledger unavailable")
+		}
+		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		if err != nil {
+			return err
+		}
+		select {
+		case sendCh <- ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}:
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
 	sendRouteFailure := func(action ports.RouteNavigationAction, code ports.RouteFailureCode) error {
 		payload, err := ports.MarshalRouteNavigationFailure(ports.RouteNavigationFailure{
 			Key:        action.Key,
@@ -1427,15 +1526,28 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if noOp {
 					continue
 				}
-				// Stack 2 validates and rejects stale actions without changing
-				// command authority. The live handoff connector is installed by the
-				// atomic Stack 3 cutover.
-				if ferr := sendRouteFailure(action, ports.RouteFailureUnavailable); ferr != nil {
-					return welcomedResult(ferr)
-				}
+				navigation := welcomedResult(nil)
+				navigation.routeAction = &action
+				return navigation
 			case ports.MsgCommittedRouteIdentity:
-				if _, derr := ports.UnmarshalCommittedRouteIdentity(r.frame.Payload); derr != nil {
+				identity, derr := ports.UnmarshalCommittedRouteIdentity(r.frame.Payload)
+				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding committed route identity: %w", derr))
+				}
+				name = identity.Target.SessionName
+				committedIdentity = cloneCommittedIdentity(&identity)
+				if a.runner.ledger == nil {
+					return welcomedResult(errors.New("vev: route ledger unavailable"))
+				}
+				active, activeOK := a.runner.ledger.lookup(a.runner.ledger.activeRef())
+				if !activeOK {
+					return welcomedResult(errors.New("vev: committed route identity has no active route"))
+				}
+				if _, derr := a.runner.ledger.commit(routeCandidateForCommittedIdentity(active, identity)); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: committing daemon-local route identity: %w", derr))
+				}
+				if derr := publishRouteSnapshot(); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: publishing daemon-local route snapshot: %w", derr))
 				}
 			case ports.MsgRouteNavigationFailure:
 				if _, derr := ports.UnmarshalRouteNavigationFailure(r.frame.Payload); derr != nil {

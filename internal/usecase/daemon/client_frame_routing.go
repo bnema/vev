@@ -4,6 +4,7 @@ import (
 	"errors"
 	"runtime"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 )
@@ -133,9 +134,25 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 			d.log.Warn("malformed recent route snapshot", "err", derr)
 		}
 	case ports.MsgRouteNavigationFailure:
-		if _, derr := ports.UnmarshalRouteNavigationFailure(f.Payload); derr != nil {
+		failure, derr := ports.UnmarshalRouteNavigationFailure(f.Payload)
+		if derr != nil {
 			d.log.Warn("malformed route navigation failure", "err", derr)
+			break
 		}
+		message := "route navigation failed"
+		switch failure.Code {
+		case ports.RouteFailureStaleSelection:
+			message = "that recent route is no longer available"
+		case ports.RouteFailureTargetChanged:
+			message = "that recent route changed before attach"
+		case ports.RouteFailureOriginUnavailable:
+			message = "the original route is no longer available"
+		case ports.RouteFailureUnavailable:
+			message = "the selected route is unavailable"
+		case ports.RouteFailureNoSuchRoute:
+			message = "that recent route no longer exists"
+		}
+		d.notify(token.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)
 	case ports.MsgCommand:
 		request, derr := ports.UnmarshalCommandRequest(f.Payload)
 		if derr != nil {

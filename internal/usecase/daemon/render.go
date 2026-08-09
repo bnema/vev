@@ -388,7 +388,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	if statusFeedback == "" && overlays.resizeActive {
 		statusFeedback = "resize: h/j/k/l or arrows · = equalize · q/esc/enter exit"
 	}
-	bars := d.barStateForAttachmentPaletteHintsFor(entry, ac, statusFeedback, overlays.paletteHints, overlays.paletteRecent)
+	bars := d.barStateForAttachmentPaletteHintsFor(entry, ac, statusFeedback, overlays.paletteHints, overlays.paletteRouteSnapshot)
 	applied := ac.getAppliedTheme()
 	bars.theme = applied.Raw
 	if local {

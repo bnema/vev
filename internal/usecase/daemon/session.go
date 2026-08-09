@@ -460,7 +460,6 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 
 	d.touchMRU(newSess)
-	ac.recordPreviousSession(from)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
@@ -515,9 +514,6 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 	}
 
 	d.touchMRU(created)
-	if token.sess != nil {
-		token.ac.recordPreviousSession(token.sess)
-	}
 	d.log.Info("client attached", "session", created.name, "resume", token.ac.resumeCapable)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
@@ -1614,7 +1610,6 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	}
 	for _, attachment := range attachments {
 		d.unregisterPreview(attachment.ac)
-		attachment.ac.clearPreviousSession()
 		attachment.ac.clearCaptureFrames()
 	}
 

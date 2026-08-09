@@ -859,7 +859,6 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnecti
 		}
 	}
 	d.touchMRU(targetSess)
-	token.ac.recordPreviousSession(token.sess)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
 	return nil
@@ -1203,7 +1202,6 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		return nil, attachmentTransitionResult{}, false
 	}
 	d.touchMRU(targetSess)
-	ac.recordPreviousSession(from)
 	return targetSess, transition, true
 }
 
@@ -1245,7 +1243,6 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 			return targetSess, attachmentTransitionResult{}, false, err
 		}
 		d.touchMRU(targetSess)
-		ac.recordPreviousSession(from)
 		return targetSess, transition, true, nil
 	}
 
@@ -1276,7 +1273,6 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		return targetSess, attachmentTransitionResult{}, false, err
 	}
 	d.touchMRU(targetSess)
-	ac.recordPreviousSession(from)
 	return targetSess, transition, true, nil
 }
 

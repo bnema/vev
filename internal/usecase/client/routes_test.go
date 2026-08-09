@@ -69,6 +69,26 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	require.Equal(t, old, ledger.previousRef(), "the old active route becomes the previous route")
 }
 
+func TestCommittedIdentityDoesNotReassignHomeRoute(t *testing.T) {
+	ledger := newRouteLedger()
+	home := routeTestCandidate(1, ports.RouteOriginLocal)
+	home.home = true
+	homeIdentity, err := ledger.commit(home)
+	require.NoError(t, err)
+	active, ok := ledger.lookup(ledger.activeRef())
+	require.True(t, ok)
+
+	candidate := routeCandidateForCommittedIdentity(active, ports.CommittedRouteIdentity{
+		Target:    routeTestTarget(2),
+		Ephemeral: true,
+	})
+	committed, err := ledger.commit(candidate)
+	require.NoError(t, err)
+	require.Equal(t, uint64(homeIdentity.key), uint64(ledger.homeRef().Key))
+	require.NotEqual(t, ledger.homeRef(), committed.wire())
+	require.False(t, candidate.home)
+}
+
 func TestRouteLedgerUpsertChangesGenerationWithoutChangingOpaqueKey(t *testing.T) {
 	ledger := newRouteLedger()
 	candidate := routeTestCandidate(1, ports.RouteOriginRemote)
@@ -95,12 +115,13 @@ func TestRouteLedgerDiscoveryCyclesAreIndependent(t *testing.T) {
 }
 
 type routeTestConnector struct {
-	resumeErr    error
-	attachErr    error
-	resumeCalls  int
-	attachCalls  int
-	restoreCalls int
-	restoreErr   error
+	resumeErr     error
+	attachErr     error
+	resumeCalls   int
+	attachCalls   int
+	restoreCalls  int
+	restoreErr    error
+	restoreTarget ports.ExactSessionTarget
 }
 
 func (c *routeTestConnector) Resume(context.Context, routeRecord) (routeTransitionCommit, error) {
@@ -111,8 +132,9 @@ func (c *routeTestConnector) Resume(context.Context, routeRecord) (routeTransiti
 	return routeTransitionCommit{}, errors.New("unexpected resume success")
 }
 
-func (c *routeTestConnector) Restore(_ context.Context, _ routeRecord) error {
+func (c *routeTestConnector) Restore(_ context.Context, record routeRecord) error {
 	c.restoreCalls++
+	c.restoreTarget = record.target
 	return c.restoreErr
 }
 
@@ -172,6 +194,7 @@ func TestRouteLedgerNavigateIsTransactionalOnFailureOrTargetChange(t *testing.T)
 	err = ledger.navigate(context.Background(), action, connector)
 	require.Error(t, err)
 	require.Equal(t, before, ledger.snapshot())
+	require.Equal(t, routeTestTarget(5), connector.restoreTarget)
 	require.Equal(t, 1, connector.restoreCalls)
 
 	connector = &routeTestConnector{}
@@ -180,6 +203,7 @@ func TestRouteLedgerNavigateIsTransactionalOnFailureOrTargetChange(t *testing.T)
 	err = ledger.navigate(context.Background(), action, mismatch)
 	require.ErrorIs(t, err, errRouteTargetChanged)
 	require.Equal(t, before, ledger.snapshot())
+	require.Equal(t, routeTestTarget(5), connector.restoreTarget)
 	require.Equal(t, 1, connector.restoreCalls)
 }
 

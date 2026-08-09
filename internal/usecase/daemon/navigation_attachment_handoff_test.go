@@ -33,12 +33,6 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "palette recent session", action: "palette-recent-session",
-			run: func(d *Daemon, source, target *session, ac *attachedClient, effect *attachmentEffectTicket) error {
-				return paletteExec{d: d, sess: source, ac: ac, recent: []recentSession{{id: target.id}}, effect: effect}.JumpRecentSession(1)
-			},
-		},
-		{
 			name: "session overflow", action: "overflow-session",
 			run: func(d *Daemon, source, target *session, ac *attachedClient, effect *attachmentEffectTicket) error {
 				source.mu.Lock()

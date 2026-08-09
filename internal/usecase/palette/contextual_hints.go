@@ -8,8 +8,11 @@ import (
 
 // RecentSessionHint is the immutable display data for one captured MRU rank.
 type RecentSessionHint struct {
-	Rank int
-	Name string
+	Rank               int
+	Name               string
+	SnapshotGeneration uint64
+	Key                uint64
+	Generation         uint64
 }
 
 // ContextualHints is immutable contextual palette guidance.

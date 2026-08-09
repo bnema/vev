@@ -85,22 +85,19 @@ type attachedClient struct {
 	// view is attachment-local navigation state. It is never inferred from a
 	// session-wide active tab, so multiple attachments can observe different
 	// tabs and panes without changing shared session ownership.
-	viewMu       sync.Mutex
-	view         attachmentView
-	sess         Guarded[*session]
-	mouseScan    mouse.Scanner
-	themeMu      sync.Mutex
-	clientTheme  themeui.Theme
-	appliedTheme appliedTheme
-	lastCursor   cursorOut
-	renderStages renderStageHooks // optional render and handoff observability hooks
-	// previousSession is guarded independently. It is retained through temporary
-	// setSession(nil) hand-offs and cleared only on terminal teardown.
-	previousSession Guarded[domain.SessionID]
-	linkMu          sync.Mutex
-	sendMu          sync.Mutex
-	routeMu         sync.RWMutex
-	routeSnapshot   ports.RecentRouteSnapshot
+	viewMu        sync.Mutex
+	view          attachmentView
+	sess          Guarded[*session]
+	mouseScan     mouse.Scanner
+	themeMu       sync.Mutex
+	clientTheme   themeui.Theme
+	appliedTheme  appliedTheme
+	lastCursor    cursorOut
+	renderStages  renderStageHooks // optional render and handoff observability hooks
+	linkMu        sync.Mutex
+	sendMu        sync.Mutex
+	routeMu       sync.RWMutex
+	routeSnapshot ports.RecentRouteSnapshot
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -227,12 +224,6 @@ func (ac *attachedClient) currentSession() *session {
 
 func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
 
-func (ac *attachedClient) clearPreviousSession() {
-	if ac != nil {
-		ac.previousSession.Set("")
-	}
-}
-
 // pruneCaptureFrames releases snapshots for panes that have left their owner.
 // Callers must not hold daemon, session, tab, or pane locks.
 func (ac *attachedClient) pruneCaptureFrames(panes ...*pane) {
@@ -358,6 +349,7 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 }
 
 func (ac *attachedClient) setRouteSnapshot(snapshot ports.RecentRouteSnapshot) {
+	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
 	ac.routeMu.Lock()
 	ac.routeSnapshot = snapshot
 	ac.routeMu.Unlock()

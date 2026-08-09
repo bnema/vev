@@ -301,7 +301,6 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 // has verified d.parked[token] still points at parked when that matters.
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
 	delete(d.parked, token)
-	parked.ac.clearPreviousSession()
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	if parked.timer != nil {
@@ -402,7 +401,6 @@ type parkedAttachmentRetirement struct {
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
 	delete(d.parked, token)
-	parked.ac.clearPreviousSession()
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	parked.ac.connectionGeneration.Add(1)
@@ -538,7 +536,6 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 		// shutdown cannot leave an orphaned open transport with no owner.
 		d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 		d.resetScreenDefaultColors(sess)
-		ac.clearPreviousSession()
 		_ = ac.closeCapturedTransport(ac.revokeTransport(oldSnap.transport))
 		d.mu.Lock()
 		closing := d.closing

@@ -88,6 +88,31 @@ func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionTok
 	return token.sendControl(ports.Frame{Type: ports.MsgNavigationAction, Payload: payload})
 }
 
+func (d *Daemon) sendRecentRouteNavigationActionForAttachment(token attachmentConnectionToken, action ports.RouteNavigationAction) error {
+	payload, err := ports.MarshalRouteNavigationAction(action)
+	if err != nil {
+		return errAttachmentTransition
+	}
+	return token.sendControl(ports.Frame{Type: ports.MsgNavigateRecentRoute, Payload: payload})
+}
+
+func (d *Daemon) sendCommittedRouteIdentityForAttachment(token attachmentConnectionToken) error {
+	if token.sess == nil {
+		return errAttachmentTransition
+	}
+	token.sess.mu.Lock()
+	identity := ports.CommittedRouteIdentity{
+		Target:    ports.ExactSessionTarget{LifecycleID: token.sess.incarnation, SessionName: token.sess.name},
+		Ephemeral: token.sess.ephemeral,
+	}
+	token.sess.mu.Unlock()
+	payload, err := ports.MarshalCommittedRouteIdentity(identity)
+	if err != nil {
+		return errAttachmentTransition
+	}
+	return token.sendControl(ports.Frame{Type: ports.MsgCommittedRouteIdentity, Payload: payload})
+}
+
 func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello, routeCreated, purge bool) (*attachedClient, error) {
 	ac, err := d.finishAttach(sess, tr, sz, term, h)
 	if err != nil && routeCreated {

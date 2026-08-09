@@ -1,8 +1,8 @@
 package daemon
 
 // recentRouteKind identifies the origin represented by a presentation value.
-// It is intentionally daemon-local in this layer; the client route protocol
-// and its wire kind are introduced by the next stacked branch.
+// It is intentionally daemon-local in this layer; ports route kinds are
+// projected into this render-only value at the daemon boundary.
 type recentRouteKind uint8
 
 const (
@@ -10,10 +10,10 @@ const (
 	recentRouteRemote
 )
 
-// recentRoutePresentation is the compact immutable value shared by collection,
-// formatting, and the future client-published snapshot. It contains only
-// display data; it never carries session ownership, selection identity,
-// transport capabilities, credentials, or attach targets.
+// recentRoutePresentation is the compact immutable value shared by snapshot
+// projection and formatting. It contains only display data; it never carries
+// session ownership, selection identity, transport capabilities, credentials,
+// or attach targets.
 type recentRoutePresentation struct {
 	name      string
 	hostLabel string
@@ -29,28 +29,6 @@ type recentRouteDisplay struct {
 	kind      recentRouteKind
 	ephemeral bool
 	attention bool
-}
-
-// routePresentation returns the local daemon's display-only view of a
-// selection value. Selection identity remains in recentSession for palette
-// execution and is not passed into rendering.
-func (entry recentSession) routePresentation() recentRoutePresentation {
-	return recentRoutePresentation{
-		name:      entry.name,
-		kind:      recentRouteLocal,
-		attention: entry.attention,
-	}
-}
-
-func recentRoutePresentations(entries []recentSession) []recentRoutePresentation {
-	if entries == nil {
-		return nil
-	}
-	out := make([]recentRoutePresentation, len(entries))
-	for i, entry := range entries {
-		out[i] = entry.routePresentation()
-	}
-	return out
 }
 
 // formatRecentRoutePresentations is the single label formatter used by the

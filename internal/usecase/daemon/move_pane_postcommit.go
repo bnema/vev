@@ -116,7 +116,6 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 	for _, attachment := range p.retiredAttachments {
 		d.unregisterPreview(attachment.ac)
-		attachment.ac.clearPreviousSession()
 		attachment.ac.clearCaptureFrames()
 		d.notifyDetachedSnapshotAsync(attachment, ports.ReasonSessionKilled)
 	}

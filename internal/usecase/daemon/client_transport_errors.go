@@ -96,7 +96,6 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	d.closePicker(ac)
 
 	d.resetScreenDefaultColors(sess)
-	ac.clearPreviousSession()
 	if explicit && notice {
 		// Synchronous so the ack is delivered before the transport closes
 		// (the client is actively awaiting it), but deadline-bounded so a
@@ -183,7 +182,6 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 	d.closePicker(ac)
 	d.resetScreenDefaultColors(sess)
-	ac.clearPreviousSession()
 	_ = ac.closeCapturedTransport(failed)
 	d.log.Warn("detached client after send error", "session", name)
 }

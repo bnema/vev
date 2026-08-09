@@ -18,6 +18,31 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+func testRecentRouteSnapshot() ports.RecentRouteSnapshot {
+	return ports.RecentRouteSnapshot{
+		Generation: 1,
+		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Entries: []ports.RecentRouteEntry{
+			{Key: 2, Generation: 1, Name: "recent", Kind: ports.RouteKindLocal},
+			{Key: 3, Generation: 1, Name: "older", Kind: ports.RouteKindLocal},
+		},
+	}
+}
+
+func beginRecentRoutePaletteEffect(t *testing.T, d *Daemon, sess *session, ac *attachedClient) attachmentConnectionToken {
+	t.Helper()
+	transport := ac.transport()
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	token := sess.attachmentToken(ac, transport)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	t.Cleanup(effect.End)
+	token.effect = effect
+	return token
+}
+
 func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t *testing.T) {
 	paletteColors := [16]renderer.RGB{}
 	paletteColors[2] = renderer.RGB{R: 10, G: 230, B: 120}
@@ -220,25 +245,6 @@ func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	}, got)
 }
 
-func TestPaletteRecentSessionsExcludeEphemeralSessions(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, current, ac, _ := newManualSessionWithPTYs(t, p)
-	named := &session{sessionCore: sessionCore{id: "named", name: "named"}, tabs: []*tab{{}}}
-	named.mruAt.Store(1)
-	ephemeral := &session{sessionCore: sessionCore{id: "ephemeral", name: "1", ephemeral: true}, tabs: []*tab{{}}}
-	ephemeral.mruAt.Store(2)
-	d.sessions[named.id] = named
-	d.sessions[ephemeral.id] = ephemeral
-
-	d.enterPalette(current, ac)
-	ac.overlays.paletteMu.Lock()
-	defer ac.overlays.paletteMu.Unlock()
-
-	require.Len(t, ac.overlays.paletteRecent, 1)
-	require.Equal(t, named.id, ac.overlays.paletteRecent[0].id)
-}
-
 func TestPaletteSessionFailureFeedbackClearsOnQueryChange(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -359,6 +365,7 @@ func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1, Active: ports.RouteRef{Key: 1, Generation: 1}})
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -380,31 +387,35 @@ func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
 func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
+	ac.setRouteSnapshot(testRecentRouteSnapshot())
+	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 	d.ApplyConfig(domain.Config{Codes: map[string]string{"jump-recent-session": "RJS"}})
 
-	d.handleInput(current, ac, []byte("\x1b "))
+	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(current, ac, []byte("RJS"))
+	d.handleInputForAttachment(token, []byte("RJS"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, command.ContextHintRecentSessions, ac.overlays.paletteHints.Kind)
 	ac.overlays.paletteMu.Unlock()
-	d.handleInput(current, ac, []byte(" 1\r"))
+	d.handleInputForAttachment(token, []byte(" 1\r"))
 
-	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
+	actionFrame := awaitFrame(t, sends, ports.MsgNavigateRecentRoute)
+	action, err := ports.UnmarshalRouteNavigationAction(actionFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 1, Key: 2, Generation: 1}, action)
+	require.Same(t, current, ac.currentSession())
 	require.False(t, ac.overlays.paletteActive())
-	awaitFrame(t, sends, ports.MsgOutput)
-	awaitFrame(t, sends, ports.MsgOutput)
 
-	d.handleInput(ac.currentSession(), ac, []byte("\x1b "))
+	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(ac.currentSession(), ac, []byte("JRS"))
+	d.handleInputForAttachment(token, []byte("JRS"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, command.ContextHintNone, ac.overlays.paletteHints.Kind)
 	ac.overlays.paletteMu.Unlock()
-	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
-	d.handleInput(ac.currentSession(), ac, []byte("\r"))
+	require.Same(t, current, ac.currentSession())
+	d.handleInputForAttachment(token, []byte("\r"))
 	require.True(t, ac.overlays.paletteActive(), "literal JRS must not execute an overridden jump command")
 }
 
@@ -425,62 +436,20 @@ func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
 func TestPaletteJRSUsesCapturedRankAfterMRUChanges(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
-	captured := mustLocalSession(t, d.sessions[domain.SessionID("recent")])
-	d.handleInput(current, ac, []byte("\x1b "))
+	ac.setRouteSnapshot(testRecentRouteSnapshot())
+	token := beginRecentRoutePaletteEffect(t, d, current, ac)
+	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	// Reordering live MRU after opening must not shift rank 1 from its capture.
 	d.sessions[domain.SessionID("older")].core().mruAt.Store(100)
-	d.handleInput(current, ac, []byte("JRS 1\r"))
+	d.handleInputForAttachment(token, []byte("JRS 1\r"))
 
-	require.Same(t, captured, ac.currentSession())
-	require.False(t, ac.overlays.paletteActive())
-	awaitFrame(t, sends, ports.MsgOutput)
-	awaitFrame(t, sends, ports.MsgOutput)
-}
-
-func TestPaletteJRSThenBSKReversesJump(t *testing.T) {
-	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-
-	d.handleInput(current, ac, []byte("\x1b "))
-	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(current, ac, []byte("JRS 1\r"))
-	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
-	awaitFrame(t, sends, ports.MsgOutput)
-	awaitFrame(t, sends, ports.MsgOutput)
-
-	runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
+	actionFrame := awaitFrame(t, sends, ports.MsgNavigateRecentRoute)
+	action, err := ports.UnmarshalRouteNavigationAction(actionFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 1, Key: 2, Generation: 1}, action)
 	require.Same(t, current, ac.currentSession())
-}
-
-func TestPaletteFailedRoleHandoffClosesExecutedInteraction(t *testing.T) {
-	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-
-	// Establish a valid back-session target, then remove that target immediately
-	// after the command releases its role admission.
-	target := d.sessions[domain.SessionID("recent")]
-	ac.previousSession.Set(target.id)
-	invalidations := installPaletteInvalidationObserver(current)
-	d.enterPalette(current, ac)
-	d.handlePaletteInput(ac, []byte("BSK"))
-	d.afterActionAttachmentEffectEnded = func(action string) {
-		if action == "back-session" {
-			d.mu.Lock()
-			delete(d.sessions, target.core().id)
-			d.mu.Unlock()
-		}
-	}
-
-	token := current.attachmentToken(ac, ac.transport())
-	effect, admitted := ac.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	d.handlePaletteInput(ac, []byte("\r"), effect)
-
-	require.False(t, ac.overlays.paletteActive(), "a failed executed handoff must not leave a stale palette")
-	require.Same(t, current, ac.currentSession(), "failed handoff must preserve the source attachment")
-	invalidation := awaitTestValue(t, invalidations, "failed palette handoff did not invalidate rendering")
-	require.True(t, invalidation.reset)
+	require.False(t, ac.overlays.paletteActive())
 }
 
 func TestPaletteDeniedPostHandoffAttachmentEffectClosesAndInvalidates(t *testing.T) {
@@ -505,12 +474,15 @@ func TestPaletteDeniedPostHandoffAttachmentEffectClosesAndInvalidates(t *testing
 	require.True(t, invalidation.reset)
 }
 
-func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
+func TestPaletteJRSDoesNotRevalidateTargetInDaemon(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	target := &session{sessionCore: sessionCore{id: "captured", name: "captured"}}
-	d.sessions[target.id] = target
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+		Generation: 7,
+		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Entries:    []ports.RecentRouteEntry{{Key: 9, Generation: 4, Name: "captured", Kind: ports.RouteKindLocal}},
+	})
 
 	validated := make(chan struct{})
 	releaseHandoff := make(chan struct{})
@@ -518,38 +490,36 @@ func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 		close(validated)
 		<-releaseHandoff
 	}
-	d.handleInput(sess, ac, []byte("\x1b "))
+	token := beginRecentRoutePaletteEffect(t, d, sess, ac)
+	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	inputHandled := make(chan struct{})
 	go func() {
-		d.handleInput(sess, ac, []byte("JRS 1\r"))
+		d.handleInputForAttachment(token, []byte("JRS 1\r"))
 		close(inputHandled)
 	}()
-	awaitTestCompletion(t, validated, "JRS did not validate its captured target")
-	d.mu.Lock()
-	delete(d.sessions, target.core().id)
-	d.mu.Unlock()
+	awaitTestCompletion(t, validated, "JRS did not publish the captured route action")
+	// The daemon must not consult or revalidate the target lifecycle. The
+	// client owns exact-target validation after it receives this action.
 	close(releaseHandoff)
+	awaitTestCompletion(t, inputHandled, "JRS route-action input did not complete")
 
-	// switchToTarget repaints its failed hand-off before handlePaletteInput
-	// records the generation-safe feedback and schedules the feedback repaint.
-	// Wait for the input transaction, rather than mistaking that intermediate
-	// repaint for publication of the final palette state.
-	awaitTestCompletion(t, inputHandled, "JRS displaced-target input did not complete")
-	require.True(t, ac.overlays.paletteActive())
-	ac.overlays.paletteMu.Lock()
-	require.Equal(t, "JRS 1", ac.overlays.palette.Query())
-	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteFeedback)
-	ac.overlays.paletteMu.Unlock()
+	actionFrame := awaitFrame(t, sends, ports.MsgNavigateRecentRoute)
+	action, err := ports.UnmarshalRouteNavigationAction(actionFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 7, Key: 9, Generation: 4}, action)
+	require.False(t, ac.overlays.paletteActive())
 }
 
 func TestPaletteJRSOutOfRangeKeepsPaletteOpenWithoutClamping(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
+	ac.setRouteSnapshot(testRecentRouteSnapshot())
+	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 
-	d.handleInput(current, ac, []byte("\x1b "))
+	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(current, ac, []byte("JRS 3\r"))
+	d.handleInputForAttachment(token, []byte("JRS 3\r"))
 
 	require.Same(t, current, ac.currentSession())
 	require.True(t, ac.overlays.paletteActive())

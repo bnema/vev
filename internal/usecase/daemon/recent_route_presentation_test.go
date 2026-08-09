@@ -3,6 +3,7 @@ package daemon
 import (
 	"testing"
 
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/stretchr/testify/require"
@@ -74,26 +75,19 @@ func TestFormatRecentRoutePresentations(t *testing.T) {
 	}
 }
 
-func TestRecentRoutePresentationsProjectSelectionValues(t *testing.T) {
-	entries := []recentSession{{id: "session-secret", name: "work", attention: true, mruAt: 17}}
-
-	got := recentRoutePresentations(entries)
-
-	require.Equal(t, []recentRoutePresentation{{
-		name: "work", kind: recentRouteLocal, attention: true,
-	}}, got)
-}
-
 func TestRecentSessionHintsAndRankedRenderingShareCanonicalLabels(t *testing.T) {
-	recent := []recentSession{
-		{name: "logs", attention: true},
-		{name: "logs"},
+	snapshot := ports.RecentRouteSnapshot{
+		Generation: 1,
+		Entries: []ports.RecentRouteEntry{
+			{Key: 1, Generation: 1, Name: "logs", Kind: ports.RouteKindLocal, Attention: true},
+			{Key: 2, Generation: 1, Name: "logs", Kind: ports.RouteKindLocal},
+		},
 	}
 
-	hints := recentSessionHints(recent, nil)
+	hints := recentRouteHints(snapshot, nil)
 	require.Equal(t, []palette.RecentSessionHint{
-		{Rank: 1, Name: "logs@local"},
-		{Rank: 2, Name: "logs@local"},
+		{Rank: 1, Name: "logs@local", SnapshotGeneration: 1, Key: 1, Generation: 1},
+		{Rank: 2, Name: "logs@local", SnapshotGeneration: 1, Key: 2, Generation: 1},
 	}, hints.Recent)
 
 	hints = palette.ContextualHints{
@@ -104,7 +98,7 @@ func TestRecentSessionHintsAndRankedRenderingShareCanonicalLabels(t *testing.T) 
 			{Rank: 9, Name: "stale-label"},
 		},
 	}
-	ranked := rankedRecentForHints(&hints, recent)
+	ranked := rankedRecentForHintsWithSnapshot(&hints, snapshot)
 
 	require.Equal(t, []rankedRecent{
 		{rank: 4, name: "logs@local", kind: recentRouteLocal, attention: true},

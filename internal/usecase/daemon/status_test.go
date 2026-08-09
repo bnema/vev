@@ -968,32 +968,33 @@ func TestBarStateForPaletteHintsNormalizesTypedNilSession(t *testing.T) {
 	var sess *session
 
 	require.NotPanics(t, func() {
-		state := d.barStateForPaletteHints(sess, "feedback", nil, nil)
+		state := d.barStateForPaletteHints(sess, "feedback", nil)
 		require.Equal(t, "feedback", state.statusFeedback)
 		require.Empty(t, state.status.session)
 	})
 }
 
-func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.T) {
+func TestBarStateForContextualRecentUsesClientSnapshot(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
-	live := &session{sessionCore: sessionCore{id: "live", name: "live"}, tabs: []*tab{{}}}
-	live.mruAt.Store(1)
-	d.sessions[live.id] = live
 
+	snapshot := ports.RecentRouteSnapshot{
+		Generation: 1,
+		Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 1, Name: "captured", Kind: ports.RouteKindLocal, Attention: true}},
+	}
 	hints := palette.ContextualHints{
 		Kind:         command.ContextHintRecentSessions,
 		SelectedRank: 1,
 		Recent:       []palette.RecentSessionHint{{Rank: 1, Name: "captured"}},
 	}
-	// Hold the registry lock: a call to recentSessions would block here. The
-	// contextual snapshot must still compose because it has no live MRU lookup.
+	// Hold the registry lock: contextual composition must use the immutable
+	// attachment snapshot and never consult daemon session history.
 	var contextual barState
 	done := make(chan struct{})
 	d.mu.Lock()
 	go func() {
-		contextual = d.barStateForPaletteHints(sess, "", &hints, []recentSession{{name: "captured", attention: true}})
+		contextual = d.barStateForAttachmentPaletteHintsFor(sess, ac, "", &hints, snapshot)
 		close(done)
 	}()
 	select {
@@ -1006,88 +1007,6 @@ func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.
 
 	require.Empty(t, contextual.mru, "contextual composition must not read the live MRU")
 	require.Equal(t, []rankedRecent{{rank: 1, name: "captured", attention: true, selected: true}}, contextual.rankedRecent)
-
-	normal := d.barStateFor(sess, "")
-	require.Len(t, normal.mru, 1)
-	require.Equal(t, "live", normal.mru[0].name, "normal composition retains canonical live MRU")
-}
-
-func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-	sess.name = "current"
-	sess.mruAt.Store(100)
-	for i := range 10 {
-		other := &session{sessionCore: sessionCore{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i)}, tabs: []*tab{{attention: i == 8}}}
-		other.mruAt.Store(uint64(i + 1))
-		d.sessions[other.id] = other
-	}
-
-	state := d.barStateFor(sess, "")
-
-	require.Len(t, state.mru, 9)
-	require.Equal(t, "s9", state.mru[0].name)
-	require.Equal(t, "s1", state.mru[8].name)
-	for _, got := range state.mru {
-		require.NotEqual(t, "current", got.name)
-	}
-	require.True(t, state.mru[1].attention, "s8 attention should be carried into MRU state")
-}
-
-func TestBarStateForMRUExcludesEphemeralSessions(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, current, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-
-	persistent := &session{sessionCore: sessionCore{id: "named", name: "named"}, tabs: []*tab{{}}}
-	persistent.mruAt.Store(1)
-	ephemeral := &session{sessionCore: sessionCore{id: "ephemeral", name: "1", ephemeral: true}, tabs: []*tab{{}}}
-	ephemeral.mruAt.Store(2)
-	d.sessions[persistent.id] = persistent
-	d.sessions[ephemeral.id] = ephemeral
-
-	state := d.barStateFor(current, "")
-
-	require.Len(t, state.mru, 1)
-	require.Equal(t, "named", state.mru[0].name)
-}
-
-func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-	for _, name := range []string{"bravo", "alpha", "charlie"} {
-		d.sessions[domain.SessionID(name)] = &session{sessionCore: sessionCore{id: domain.SessionID(name), name: name}, tabs: []*tab{{}}}
-	}
-
-	state := d.barStateFor(sess, "")
-
-	require.GreaterOrEqual(t, len(state.mru), 3)
-	require.Equal(t, []string{"alpha", "bravo", "charlie"}, []string{state.mru[0].name, state.mru[1].name, state.mru[2].name})
-}
-
-func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, releasePTY1 := newBlockingPTY(t)
-	defer releasePTY1()
-	p2, releasePTY2 := newBlockingPTY(t)
-	defer releasePTY2()
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
-	d.stopped["alpha"] = stoppedSession{name: "alpha", cwd: "/tmp/alpha", createdAt: 1, lastUsedSeq: 30}
-	d.stopped["zeta"] = stoppedSession{name: "zeta", cwd: "/tmp/zeta", createdAt: 1, lastUsedSeq: 20}
-	d.mruSeq.Store(30)
-	cur := &session{sessionCore: sessionCore{id: "cur", name: "current"}, tabs: []*tab{{}}}
-	d.sessions[cur.id] = cur
-
-	_, err := createSessionForTest(d, "zeta", false, "/tmp/zeta", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	_, err = createSessionForTest(d, "alpha", false, "/tmp/alpha", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-
-	state := d.barStateFor(cur, "")
-	require.GreaterOrEqual(t, len(state.mru), 2)
-	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
 }
 
 func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(t *testing.T) {
