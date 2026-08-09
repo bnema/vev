@@ -94,8 +94,9 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 }
 
 func recentSessionHints(recent []recentSession, args []string) palette.ContextualHints {
-	names := make([]string, len(recent))
-	for i, entry := range recent {
+	formatted := formatRecentRoutePresentations(recentRoutePresentations(recent))
+	names := make([]string, len(formatted))
+	for i, entry := range formatted {
 		names[i] = entry.name
 	}
 	return palette.BuildRecentSessionHints(names, args)

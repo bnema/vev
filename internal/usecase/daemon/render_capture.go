@@ -28,7 +28,7 @@ type renderCaptureScratch struct {
 	layoutFingerprint string
 	layoutValid       bool
 	statusTabs        []statusTab
-	mru               []recentSession
+	mru               []recentRouteDisplay
 	ranked            []rankedRecent
 	titleIDs          []layout.PaneID
 	receipts          []damageReceipt

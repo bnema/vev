@@ -6,8 +6,10 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-// recentSession is an immutable, value-only description of a session for one
-// interaction. It deliberately does not retain a live session pointer.
+// recentSession is the immutable selection snapshot for one interaction. Its
+// identity and MRU sequence are retained only for daemon-side execution and
+// ordering; render paths project it into recentRoutePresentation, which has no
+// selection identity or lifecycle authority.
 type recentSession struct {
 	id        domain.SessionID
 	name      string

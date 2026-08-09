@@ -87,7 +87,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 		for i, sess := range fittedMRU {
 			style := styles.MRUStyle(i, len(fittedMRU))
-			drawStatusSessionEntry(row, &x, sess.name, sess.attention, style, state.attentionFrame)
+			drawStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
 		}
 	}
 	drawRightPlainText(row, rightText, x, styles.SurfaceBar)
@@ -96,6 +96,8 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 type rankedRecent struct {
 	rank      int
 	name      string
+	kind      recentRouteKind
+	ephemeral bool
 	attention bool
 	selected  bool
 }
@@ -112,9 +114,9 @@ func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent
 	writeStatusText(row, x, " ", style)
 }
 
-func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, attention bool, style renderer.Style, attentionFrame int) {
-	writeStatusText(row, x, " "+name, style)
-	if attention {
+func drawStatusSessionEntry(row []renderer.Cell, x *int, entry recentRouteDisplay, style renderer.Style, attentionFrame int) {
+	writeStatusText(row, x, " "+entry.name, style)
+	if entry.attention {
 		writeStatusText(row, x, " ", style)
 		writeBell(row, x, attentionFrame, style)
 	}
@@ -160,7 +162,7 @@ type barState struct {
 	topRight       string
 	bottomRight    string
 	statusFeedback string
-	mru            []recentSession
+	mru            []recentRouteDisplay
 	rankedRecent   []rankedRecent
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
@@ -226,15 +228,25 @@ func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession
 	if hints == nil || hints.Kind != command.ContextHintRecentSessions {
 		return nil
 	}
+	formatted := formatRecentRoutePresentations(recentRoutePresentations(recent))
 	entries := make([]rankedRecent, 0, len(hints.Recent))
 	for i, hint := range hints.Recent {
-		entry := rankedRecent{rank: hint.Rank, name: hint.Name, selected: hint.Rank == hints.SelectedRank}
+		display := recentRouteDisplay{name: hint.Name}
 		// recent was copied with the hint under paletteMu, so this only enriches
-		// the render snapshot and never performs a live domain lookup.
-		if i < len(recent) {
-			entry.attention = recent[i].attention
+		// the render snapshot and never performs a live domain lookup. The
+		// formatted capture is authoritative when available, keeping ranked
+		// JRS labels identical to normal MRU labels.
+		if i < len(formatted) {
+			display = formatted[i]
 		}
-		entries = append(entries, entry)
+		entries = append(entries, rankedRecent{
+			rank:      hint.Rank,
+			name:      display.name,
+			kind:      display.kind,
+			ephemeral: display.ephemeral,
+			attention: display.attention,
+			selected:  hint.Rank == hints.SelectedRank,
+		})
 	}
 	return entries
 }
@@ -276,14 +288,14 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 	if ranked != nil {
 		state.rankedRecent = ranked
 	} else if d != nil {
-		state.mru = d.recentSessions(cur)
+		state.mru = formatRecentRoutePresentations(recentRoutePresentations(d.recentSessions(cur)))
 	}
 	return state
 }
 
 func (d *Daemon) barStateFor(cur *session, statusFeedback string) barState {
 	state := d.barStateBase(cur, statusFeedback)
-	state.mru = d.recentSessions(cur)
+	state.mru = formatRecentRoutePresentations(recentRoutePresentations(d.recentSessions(cur)))
 	return state
 }
 
@@ -383,33 +395,45 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []fittedTabLab
 	return labels
 }
 
+func recentRouteDisplayWidth(entry recentRouteDisplay) int {
+	width := 2 + statusTextWidth(entry.name)
+	if entry.attention {
+		width += 1 + renderer.RuneWidth(ui.AttentionGlyph)
+	}
+	return width
+}
+
+func fitWholeRecentEntries[T any](entries []T, budget int, cost func(T) int) []T {
+	if budget <= 0 || len(entries) == 0 {
+		return nil
+	}
+	used := 0
+	for i, entry := range entries {
+		used += cost(entry)
+		if used > budget {
+			return entries[:i]
+		}
+	}
+	return entries
+}
+
 func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback string) []rankedRecent {
 	reserve := 1
 	if feedback != "" {
 		reserve = statusTextWidth(feedback) + 2
 	}
 	budget := rowLen - leftUsed - reserve
-	if budget <= 0 {
-		return nil
-	}
-	cost := func(e rankedRecent) int {
-		width := 2 + statusTextWidth(strconv.Itoa(e.rank)+":") + statusTextWidth(e.name)
-		if e.attention {
-			width += 1 + renderer.RuneWidth(ui.AttentionGlyph)
-		}
-		return width
-	}
-	used := 0
-	for i, entry := range entries {
-		if used+cost(entry) > budget {
-			return entries[:i] // whole entries only; ranks remain their original MRU ranks.
-		}
-		used += cost(entry)
-	}
-	return entries
+	return fitWholeRecentEntries(entries, budget, func(entry rankedRecent) int {
+		return recentRouteDisplayWidth(recentRouteDisplay{
+			name:      entry.name,
+			kind:      entry.kind,
+			ephemeral: entry.ephemeral,
+			attention: entry.attention,
+		}) + statusTextWidth(strconv.Itoa(entry.rank)+":")
+	})
 }
 
-func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []recentSession {
+func fitMRU(entries []recentRouteDisplay, rowLen, leftUsed int, feedback string) []recentRouteDisplay {
 	// With no feedback, keep one blank trailing cell; with feedback, reserve
 	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
@@ -420,34 +444,17 @@ func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []re
 	if physicalBudget <= 0 || len(entries) == 0 {
 		return nil
 	}
-	cost := func(e recentSession) int {
-		n := 2 + statusTextWidth(e.name)
-		if e.attention {
-			n += 1 + renderer.RuneWidth(ui.AttentionGlyph)
-		}
-		return n
-	}
 
 	budget := physicalBudget
 	if feedback == "" {
 		budget -= mruFutureRightReserve(rowLen)
 		// Keep at least one recent session when it physically fits; the reserved
 		// right side is only a budget preference, not a reason to hide all recents.
-		if firstCost := cost(entries[0]); firstCost <= physicalBudget && budget < firstCost {
+		if firstCost := recentRouteDisplayWidth(entries[0]); firstCost <= physicalBudget && budget < firstCost {
 			budget = firstCost
 		}
 	}
-	if budget <= 0 {
-		return nil
-	}
-	used := 0
-	for i, e := range entries {
-		used += cost(e)
-		if used > budget {
-			return entries[:i]
-		}
-	}
-	return entries
+	return fitWholeRecentEntries(entries, budget, recentRouteDisplayWidth)
 }
 
 const (
