@@ -105,7 +105,7 @@ func cloneCommittedIdentity(identity *ports.CommittedRouteIdentity) *ports.Commi
 	return &copy
 }
 
-func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRouteIdentity, dialer ports.Dialer, resumeToken uint64, home bool) routeCandidate {
+func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRouteIdentity, dialer ports.Dialer, resumeToken uint64) routeCandidate {
 	origin := normalizeRouteOrigin(request.Origin, request.Remote)
 	originKey := normalizeRouteOriginKey(request.OriginKey, origin)
 	kind := ports.RouteKindLocal
@@ -138,7 +138,6 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 		dialer:      dialer,
 		request:     request,
 		resumeToken: resumeToken,
-		home:        home,
 	}
 }
 
@@ -274,24 +273,68 @@ func (l *routeLedger) evictLocked() {
 	}
 }
 
-func (l *routeLedger) commit(candidate routeCandidate) (routeIdentity, error) {
+func prepareRouteCandidate(candidate routeCandidate) (routeCandidate, error) {
 	if err := candidate.origin.Validate(); err != nil {
-		return routeIdentity{}, err
+		return routeCandidate{}, err
 	}
 	if err := candidate.target.Validate(); err != nil {
-		return routeIdentity{}, err
+		return routeCandidate{}, err
 	}
 	if err := validateRoutePresentation(candidate.presentation); err != nil {
-		return routeIdentity{}, err
+		return routeCandidate{}, err
 	}
 	candidate.originKey = normalizeRouteOriginKey(candidate.originKey, candidate.origin)
 	candidate.request = cloneAttachRequest(candidate.request)
 	candidate.request.Origin = candidate.origin
 	candidate.request.OriginKey = candidate.originKey
 	candidate.request.ExactTarget = &candidate.target
+	return candidate, nil
+}
+
+func (l *routeLedger) commit(candidate routeCandidate) (routeIdentity, error) {
+	candidate, err := prepareRouteCandidate(candidate)
+	if err != nil {
+		return routeIdentity{}, err
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.commitLocked(candidate)
+}
+
+// commitAttach assigns the process home route while holding the same lock as
+// the commit. Two concurrent initial attachments therefore cannot both claim
+// an empty home reference.
+func (l *routeLedger) commitAttach(candidate routeCandidate) (routeIdentity, error) {
+	candidate, err := prepareRouteCandidate(candidate)
+	if err != nil {
+		return routeIdentity{}, err
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	candidate.home = l.home.empty()
+	return l.commitLocked(candidate)
+}
+
+// commitCommittedIdentity snapshots the current active record and commits the
+// daemon's local transition under one lock. The active route, origin, dialer,
+// and attach request cannot be read from different ledger generations.
+func (l *routeLedger) commitCommittedIdentity(identity ports.CommittedRouteIdentity) (routeIdentity, error) {
+	if err := identity.Validate(); err != nil {
+		return routeIdentity{}, err
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	activeIndex := l.indexByIdentityLocked(l.active)
+	if activeIndex < 0 {
+		return routeIdentity{}, errors.New("active route unavailable")
+	}
+	candidate, err := prepareRouteCandidate(routeCandidateForCommittedIdentity(l.entries[activeIndex], identity))
+	if err != nil {
+		return routeIdentity{}, err
+	}
 	return l.commitLocked(candidate)
 }
 
@@ -304,6 +347,7 @@ func (l *routeLedger) commitLocked(candidate routeCandidate) (routeIdentity, err
 	if index >= 0 {
 		identity.key = l.entries[index].identity.key
 	}
+	isHome := candidate.home || (l.home.key != 0 && l.home.key == identity.key)
 	entry := routeRecord{
 		identity:     identity,
 		origin:       candidate.origin,
@@ -313,7 +357,7 @@ func (l *routeLedger) commitLocked(candidate routeCandidate) (routeIdentity, err
 		dialer:       candidate.dialer,
 		request:      candidate.request,
 		resumeToken:  candidate.resumeToken,
-		home:         candidate.home,
+		home:         isHome,
 	}
 	oldActive := l.active
 	l.moveToFrontLocked(index, entry)
@@ -324,7 +368,7 @@ func (l *routeLedger) commitLocked(candidate routeCandidate) (routeIdentity, err
 		l.previous = routeIdentity{}
 	}
 	l.active = identity
-	if candidate.home {
+	if isHome {
 		l.home = identity
 	}
 	if l.home.key == identity.key {
@@ -422,11 +466,13 @@ func (l *routeLedger) homeRef() ports.RouteRef {
 // preserves the original origin and exact target while leaving display labels
 // and transport capabilities separate.
 type routeTransitionPlan struct {
-	identity  routeIdentity
-	record    routeRecord
-	origin    ports.RouteOrigin
-	originKey string
-	target    ports.ExactSessionTarget
+	identity           routeIdentity
+	record             routeRecord
+	snapshotGeneration routeGeneration
+	active             routeIdentity
+	origin             ports.RouteOrigin
+	originKey          string
+	target             ports.ExactSessionTarget
 }
 
 type routeTransitionCommit struct {
@@ -442,50 +488,67 @@ type routeTransitionConnector interface {
 	Restore(context.Context, routeRecord) error
 }
 
-// navigationRecords validates an action against the latest complete snapshot
-// and captures both the selected route and the live route that must be
-// restored if the transition fails. Capturing them under one read lock keeps a
-// concurrent committed-identity update from changing the restoration target
-// between validation and dialing.
-func (l *routeLedger) navigationRecords(action ports.RouteNavigationAction) (routeRecord, routeRecord, bool, bool) {
+type routeNavigationSelection struct {
+	selected           routeRecord
+	prior              routeRecord
+	snapshotGeneration routeGeneration
+	active             routeIdentity
+	noOp               bool
+}
+
+// navigationSelection validates an action against the latest complete
+// snapshot and captures the selected route, live restoration route, snapshot
+// generation, and active identity under one read lock. The commit phase uses
+// the captured generation and active identity to reject interleavings that
+// changed the ledger while dialing.
+func (l *routeLedger) navigationSelection(action ports.RouteNavigationAction) (routeNavigationSelection, bool) {
 	if action.SnapshotGeneration == 0 || action.Key == 0 || action.Generation == 0 {
-		return routeRecord{}, routeRecord{}, false, false
+		return routeNavigationSelection{}, false
 	}
 	identity := identityFromWire(ports.RouteRef{Key: action.Key, Generation: action.Generation})
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if uint64(l.generation) != action.SnapshotGeneration {
-		return routeRecord{}, routeRecord{}, false, false
+		return routeNavigationSelection{}, false
+	}
+	selection := routeNavigationSelection{
+		snapshotGeneration: l.generation,
+		active:             l.active,
 	}
 	if identity == l.active {
-		return routeRecord{}, routeRecord{}, true, true
+		selection.noOp = true
+		return selection, true
 	}
 	selectedIndex := l.indexByIdentityLocked(identity)
 	activeIndex := l.indexByIdentityLocked(l.active)
 	if selectedIndex < 0 || activeIndex < 0 {
-		return routeRecord{}, routeRecord{}, false, false
+		return routeNavigationSelection{}, false
 	}
-	return cloneRouteRecord(l.entries[selectedIndex]), cloneRouteRecord(l.entries[activeIndex]), true, false
+	selection.selected = cloneRouteRecord(l.entries[selectedIndex])
+	selection.prior = cloneRouteRecord(l.entries[activeIndex])
+	return selection, true
 }
 
 // navigationRecord validates that an action belongs to the latest complete
 // snapshot. The active route is metadata-only and selecting it is a no-op.
 func (l *routeLedger) navigationRecord(action ports.RouteNavigationAction) (routeRecord, bool, bool) {
-	selected, _, ok, noOp := l.navigationRecords(action)
-	return selected, ok, noOp
+	selection, ok := l.navigationSelection(action)
+	return selection.selected, ok, selection.noOp
 }
 
 // navigate resolves a captured key/generation, attempts resume before exact
 // attach, and commits only after the connector returns a matching identity.
 // A failed transition restores the prior live route and leaves history alone.
 func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigationAction, connector routeTransitionConnector) error {
-	record, prior, ok, noOp := l.navigationRecords(action)
+	selection, ok := l.navigationSelection(action)
 	if !ok {
 		return errRouteStaleSelection
 	}
-	if noOp {
+	if selection.noOp {
 		return nil
 	}
+	record := selection.selected
+	prior := selection.prior
 	if connector == nil {
 		return errors.New("route transition connector is nil")
 	}
@@ -494,11 +557,13 @@ func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigation
 	}
 	selected := ports.RouteRef{Key: action.Key, Generation: action.Generation}
 	plan := routeTransitionPlan{
-		identity:  identityFromWire(selected),
-		record:    record,
-		origin:    record.origin,
-		originKey: record.originKey,
-		target:    record.target,
+		identity:           identityFromWire(selected),
+		record:             record,
+		snapshotGeneration: selection.snapshotGeneration,
+		active:             selection.active,
+		origin:             record.origin,
+		originKey:          record.originKey,
+		target:             record.target,
 	}
 	restoreOnFailure := func(err error) error {
 		if restoreErr := connector.Restore(ctx, prior); restoreErr != nil {
@@ -543,17 +608,23 @@ func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigation
 	candidate.request.Origin = plan.origin
 	candidate.request.OriginKey = plan.originKey
 	candidate.request.ExactTarget = &candidate.target
-	if err := l.commitTransition(plan.identity, candidate); err != nil {
+	if err := l.commitTransition(plan.identity, plan.snapshotGeneration, plan.active, candidate); err != nil {
 		return restoreOnFailure(err)
 	}
 	return nil
 }
 
-func (l *routeLedger) commitTransition(selected routeIdentity, candidate routeCandidate) error {
+func (l *routeLedger) commitTransition(selected routeIdentity, snapshotGeneration routeGeneration, active routeIdentity, candidate routeCandidate) error {
+	candidate, err := prepareRouteCandidate(candidate)
+	if err != nil {
+		return err
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	index := l.indexByIdentityLocked(selected)
-	if index < 0 {
+	if l.generation != snapshotGeneration || l.active != active {
+		return errRouteStaleSelection
+	}
+	if l.indexByIdentityLocked(selected) < 0 {
 		return errRouteStaleSelection
 	}
 	if _, err := l.commitLocked(candidate); err != nil {

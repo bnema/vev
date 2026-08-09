@@ -75,18 +75,76 @@ func TestCommittedIdentityDoesNotReassignHomeRoute(t *testing.T) {
 	home.home = true
 	homeIdentity, err := ledger.commit(home)
 	require.NoError(t, err)
-	active, ok := ledger.lookup(ledger.activeRef())
-	require.True(t, ok)
-
-	candidate := routeCandidateForCommittedIdentity(active, ports.CommittedRouteIdentity{
+	committed, err := ledger.commitCommittedIdentity(ports.CommittedRouteIdentity{
 		Target:    routeTestTarget(2),
 		Ephemeral: true,
 	})
-	committed, err := ledger.commit(candidate)
 	require.NoError(t, err)
 	require.Equal(t, uint64(homeIdentity.key), uint64(ledger.homeRef().Key))
 	require.NotEqual(t, ledger.homeRef(), committed.wire())
-	require.False(t, candidate.home)
+	active, ok := ledger.lookup(ledger.activeRef())
+	require.True(t, ok)
+	require.Equal(t, committed, active.identity)
+
+	_, err = ledger.commit(routeTestCandidate(1, ports.RouteOriginLocal))
+	require.NoError(t, err)
+	require.True(t, mustRouteRecord(t, ledger, ledger.activeRef()).home, "upserting the home route must retain its marker")
+}
+
+func TestRouteLedgerConcurrentInitialAttachmentsKeepOneHome(t *testing.T) {
+	ledger := newRouteLedger()
+	const attachments = 16
+	errs := make(chan error, attachments)
+	var wg sync.WaitGroup
+	for i := byte(0); i < attachments; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := ledger.commitAttach(routeTestCandidate(i, ports.RouteOriginLocal))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	ledger.mu.RLock()
+	defer ledger.mu.RUnlock()
+	homeCount := 0
+	for _, entry := range ledger.entries {
+		if entry.home {
+			homeCount++
+			require.Equal(t, entry.identity, ledger.home)
+		}
+	}
+	require.Equal(t, 1, homeCount)
+}
+
+func TestRouteLedgerTransitionRejectsConcurrentCommit(t *testing.T) {
+	ledger := newRouteLedger()
+	selected, err := ledger.commit(routeTestCandidate(1, ports.RouteOriginLocal))
+	require.NoError(t, err)
+	_, err = ledger.commit(routeTestCandidate(2, ports.RouteOriginLocal))
+	require.NoError(t, err)
+	selection, ok := ledger.navigationSelection(selected.wireNavigationAction(routeGeneration(ledger.snapshot().Generation)))
+	require.True(t, ok)
+
+	_, err = ledger.commit(routeTestCandidate(3, ports.RouteOriginLocal))
+	require.NoError(t, err)
+	candidate := routeTestCandidate(4, ports.RouteOriginLocal)
+	err = ledger.commitTransition(selected, selection.snapshotGeneration, selection.active, candidate)
+	require.ErrorIs(t, err, errRouteStaleSelection)
+	require.Equal(t, routeTestTarget(3), mustRouteRecord(t, ledger, ledger.activeRef()).target)
+}
+
+func mustRouteRecord(t *testing.T, ledger *routeLedger, ref ports.RouteRef) routeRecord {
+	t.Helper()
+	record, ok := ledger.lookup(ref)
+	require.True(t, ok)
+	return record
 }
 
 func TestRouteLedgerUpsertChangesGenerationWithoutChangingOpaqueKey(t *testing.T) {

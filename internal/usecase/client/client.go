@@ -528,28 +528,28 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if r.ledger == nil {
 				return errors.New("vev: route ledger unavailable")
 			}
-			record, prior, valid, noOp := r.ledger.navigationRecords(*result.routeAction)
+			selection, valid := r.ledger.navigationSelection(*result.routeAction)
 			if !valid {
 				return errors.New("vev: stale route navigation action")
 			}
-			if noOp {
+			if selection.noOp {
 				continue
 			}
 			action := *result.routeAction
 			routeNavigationAction = &action
-			routeNavigationFallback = &attachRoute{dialer: prior.dialer, request: prior.request, resumeToken: prior.resumeToken}
-			dialer = record.dialer
-			attemptRequest = cloneAttachRequest(record.request)
-			if record.resumeToken != 0 {
+			routeNavigationFallback = &attachRoute{dialer: selection.prior.dialer, request: selection.prior.request, resumeToken: selection.prior.resumeToken}
+			dialer = selection.selected.dialer
+			attemptRequest = cloneAttachRequest(selection.selected.request)
+			if selection.selected.resumeToken != 0 {
 				attemptRequest.Intent = ports.IntentResume
 			} else {
 				attemptRequest.Intent = ports.IntentAttach
 			}
 			attemptRequest.StartupOverlay = ports.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
-			resumeToken = record.resumeToken
+			resumeToken = selection.selected.resumeToken
 			routeNavigationPending = true
-			routeNavigationResumeFallback = record.resumeToken != 0
+			routeNavigationResumeFallback = selection.selected.resumeToken != 0
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
 			continue
@@ -1074,8 +1074,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
 			return welcomedResult(errRouteTargetChanged)
 		}
-		home := a.runner.ledger.homeRef().Key == 0
-		if _, err := a.runner.ledger.commit(routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken, home)); err != nil {
+		if _, err := a.runner.ledger.commitAttach(routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)); err != nil {
 			return welcomedResult(fmt.Errorf("vev: committing route identity: %w", err))
 		}
 		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
@@ -1539,11 +1538,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if a.runner.ledger == nil {
 					return welcomedResult(errors.New("vev: route ledger unavailable"))
 				}
-				active, activeOK := a.runner.ledger.lookup(a.runner.ledger.activeRef())
-				if !activeOK {
-					return welcomedResult(errors.New("vev: committed route identity has no active route"))
-				}
-				if _, derr := a.runner.ledger.commit(routeCandidateForCommittedIdentity(active, identity)); derr != nil {
+				if _, derr := a.runner.ledger.commitCommittedIdentity(identity); derr != nil {
 					return welcomedResult(fmt.Errorf("vev: committing daemon-local route identity: %w", derr))
 				}
 				if derr := publishRouteSnapshot(); derr != nil {
