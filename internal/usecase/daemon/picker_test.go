@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,14 @@ var (
 )
 
 // --- test doubles -----------------------------------------------------------
+
+type remotePickerSendErrorTransport struct {
+	err error
+}
+
+func (t *remotePickerSendErrorTransport) Send(ports.Frame) error   { return t.err }
+func (*remotePickerSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*remotePickerSendErrorTransport) Close() error               { return nil }
 
 type refusingSnapshotDeleteRepository struct {
 	noOpSnapshotRepository

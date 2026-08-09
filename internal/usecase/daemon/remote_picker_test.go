@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -678,7 +680,8 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	d.remoteCatalog.status["arch"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
 	cause := errors.New("remote attach send failed")
-	tr := &remotePickerSendErrorTransport{err: cause}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(cause)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "local", tr)
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
@@ -707,14 +710,6 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	}
 	require.Same(t, sess, ac.currentAttachmentSession())
 }
-
-type remotePickerSendErrorTransport struct {
-	err error
-}
-
-func (t *remotePickerSendErrorTransport) Send(ports.Frame) error   { return t.err }
-func (*remotePickerSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (*remotePickerSendErrorTransport) Close() error               { return nil }
 
 func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...ports.Transport) (*session, *attachedClient, chan ports.Frame) {
 	t.Helper()

@@ -20,6 +20,7 @@ func TestAttachmentStatusUsesClientRouteSnapshot(t *testing.T) {
 
 	state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, ports.RecentRouteSnapshot{})
 
+	require.Len(t, state.mru, 2)
 	require.Equal(t, []string{"logs@edge", "work"}, []string{state.mru[0].name, state.mru[1].name})
 }
 
@@ -85,6 +86,7 @@ func TestRecentRouteHintsRetainSnapshotSelectionIdentity(t *testing.T) {
 
 	hints := recentRouteHints(snapshot, nil)
 
+	require.Len(t, hints.Recent, 1)
 	require.Equal(t, "logs@edge", hints.Recent[0].Name)
 	require.Equal(t, uint64(8), hints.Recent[0].SnapshotGeneration)
 	require.Equal(t, uint64(11), hints.Recent[0].Key)

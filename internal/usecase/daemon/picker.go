@@ -946,18 +946,26 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionT
 	return nil
 }
 
+func (d *Daemon) remoteCatalogEntryLocked(host string) (ports.RemoteCatalogCacheEntry, bool) {
+	if d.remoteCatalog.status[host] != remoteHostFresh {
+		return ports.RemoteCatalogCacheEntry{}, false
+	}
+	entry, ok := d.remoteCatalog.cache[host]
+	if !ok || remoteCatalogExpired(entry.FetchedAt, d.clock.Now()) {
+		d.remoteCatalog.status[host] = remoteHostStale
+		return ports.RemoteCatalogCacheEntry{}, false
+	}
+	return entry, true
+}
+
 func (d *Daemon) remotePickerTargetReady(key domain.RemoteSessionKey) bool {
 	if d == nil {
 		return false
 	}
 	d.remoteCatalog.mu.Lock()
 	defer d.remoteCatalog.mu.Unlock()
-	if d.remoteCatalog.status[key.Host] != remoteHostFresh {
-		return false
-	}
-	entry, ok := d.remoteCatalog.cache[key.Host]
-	if !ok || remoteCatalogExpired(entry.FetchedAt, d.clock.Now()) {
-		d.remoteCatalog.status[key.Host] = remoteHostStale
+	entry, ok := d.remoteCatalogEntryLocked(key.Host)
+	if !ok {
 		return false
 	}
 	for _, session := range entry.Sessions {
@@ -974,47 +982,37 @@ func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget
 	}
 	d.remoteCatalog.mu.Lock()
 	defer d.remoteCatalog.mu.Unlock()
-	now := d.clock.Now()
-	if d.remoteCatalog.status[target.Endpoint] == remoteHostFresh {
-		if entry, ok := d.remoteCatalog.cache[target.Endpoint]; ok && remoteCatalogExpired(entry.FetchedAt, now) {
-			d.remoteCatalog.status[target.Endpoint] = remoteHostStale
-		}
-	}
-	if d.remoteCatalog.status[target.Endpoint] != remoteHostFresh {
+	entry, ok := d.remoteCatalogEntryLocked(target.Endpoint)
+	if !ok {
 		return false
 	}
-	for _, entry := range d.remoteCatalog.cache {
-		if entry.Host != target.Endpoint {
+	for _, session := range entry.Sessions {
+		if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
 			continue
 		}
-		for _, session := range entry.Sessions {
-			if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
+		if target.Stopped != remoteSessionStateStopped(session.State) || session.State == "broken" {
+			return false
+		}
+		tabs := ports.CatalogTabs(session)
+		metadata := make([]domain.TabSelectorTab, 0, len(tabs))
+		for _, tab := range tabs {
+			metadata = append(metadata, domain.TabSelectorTab{ID: domain.TabStableID(tab.ID), Name: tab.Name})
+		}
+		if target.Stopped {
+			_, ok := target.StoppedTab.Resolve(metadata)
+			return ok
+		}
+		found := false
+		for _, tab := range tabs {
+			if tab.ID != string(target.LiveTabID) {
 				continue
 			}
-			if target.Stopped != remoteSessionStateStopped(session.State) || session.State == "broken" {
+			if found {
 				return false
 			}
-			tabs := ports.CatalogTabs(session)
-			metadata := make([]domain.TabSelectorTab, 0, len(tabs))
-			for _, tab := range tabs {
-				metadata = append(metadata, domain.TabSelectorTab{ID: domain.TabStableID(tab.ID), Name: tab.Name})
-			}
-			if target.Stopped {
-				_, ok := target.StoppedTab.Resolve(metadata)
-				return ok
-			}
-			found := false
-			for _, tab := range tabs {
-				if tab.ID != string(target.LiveTabID) {
-					continue
-				}
-				if found {
-					return false
-				}
-				found = true
-			}
-			return found
+			found = true
 		}
+		return found
 	}
 	return false
 }

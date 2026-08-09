@@ -405,6 +405,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.Intent = ports.IntentAttach
 		}
 		attemptRequest.StartupOverlay = ports.StartupOverlayNone
+		attemptRequest.NavigationCapabilities &^= ports.NavigationCapabilityBack | ports.NavigationCapabilityHomePicker
 		resumeToken = route.resumeToken
 		returnResumeFallback = route.resumeToken != 0
 		remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
@@ -623,22 +624,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			backoff = defaultReconnectBackoff.initial
 			continue
 		}
-		if result.resumeToken != 0 {
-			resumeToken = result.resumeToken
-		}
-		if result.sessionName != "" {
-			attemptRequest.SessionName = result.sessionName
-		}
-		if result.committedIdentity != nil {
-			identity := *result.committedIdentity
-			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != identity.Target {
-				attemptRequest.RemoteTarget = nil
-			}
-			attemptRequest.ExactTarget = &identity.Target
-		}
-		if result.welcomed {
-			homeNavigationPending = false
-		}
 		if result.err == nil {
 			if result.welcomed && routeNavigationPending {
 				routeNavigationPending = false
@@ -654,6 +639,22 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return clearErr
 			}
 			return nil
+		}
+		if result.resumeToken != 0 {
+			resumeToken = result.resumeToken
+		}
+		if result.sessionName != "" {
+			attemptRequest.SessionName = result.sessionName
+		}
+		if result.committedIdentity != nil {
+			identity := *result.committedIdentity
+			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != identity.Target {
+				attemptRequest.RemoteTarget = nil
+			}
+			attemptRequest.ExactTarget = &identity.Target
+		}
+		if result.welcomed {
+			homeNavigationPending = false
 		}
 		if homeNavigationPending && returnRoute != nil {
 			route := *returnRoute
@@ -1545,9 +1546,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("vev: publishing daemon-local route snapshot: %w", derr))
 				}
 			case ports.MsgRouteNavigationFailure:
-				if _, derr := ports.UnmarshalRouteNavigationFailure(r.frame.Payload); derr != nil {
+				failure, derr := ports.UnmarshalRouteNavigationFailure(r.frame.Payload)
+				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding route navigation failure: %w", derr))
 				}
+				log.Warn("route navigation rejected", "key", failure.Key, "generation", failure.Generation, "code", failure.Code)
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {

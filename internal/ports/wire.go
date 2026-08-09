@@ -84,17 +84,18 @@ func validStartupOverlay(overlay StartupOverlay) bool {
 }
 
 // ValidateNavigation validates route capabilities independently of the rest of
-// the Hello payload.
-func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOverlay, remoteTarget bool) error {
+// the Hello payload. homePickerRoute indicates that the route may open its
+// home/session picker (for example, a remote target or daemon-owned route).
+func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOverlay, homePickerRoute bool) error {
 	if !validNavigationCapabilities(capabilities) || !validStartupOverlay(overlay) {
 		return ErrInvalidNavigation
 	}
 	home := capabilities&NavigationCapabilityHomePicker != 0
 	back := capabilities&NavigationCapabilityBack != 0
-	if (home && !remoteTarget) || back != (overlay == StartupOverlaySessionPicker) {
+	if (home && !homePickerRoute) || back != (overlay == StartupOverlaySessionPicker) {
 		return ErrInvalidNavigation
 	}
-	if remoteTarget && back {
+	if homePickerRoute && back {
 		return ErrInvalidNavigation
 	}
 	return nil
@@ -1302,7 +1303,9 @@ func MarshalWelcome(m Welcome) []byte {
 	}
 	w.putUint64(m.ResumeToken)
 	w.putUint32(m.Capabilities)
-	marshalCommittedIdentitySection(&w, m.CommittedIdentity)
+	if !marshalCommittedIdentitySection(&w, m.CommittedIdentity) {
+		return nil
+	}
 	return w.b
 }
 

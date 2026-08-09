@@ -101,8 +101,8 @@ func cloneCommittedIdentity(identity *ports.CommittedRouteIdentity) *ports.Commi
 	if identity == nil {
 		return nil
 	}
-	copy := *identity
-	return &copy
+	clone := *identity
+	return &clone
 }
 
 func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRouteIdentity, dialer ports.Dialer, resumeToken uint64) routeCandidate {
@@ -553,7 +553,7 @@ func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigation
 		return errors.New("route transition connector is nil")
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		return errors.New("route transition context is nil")
 	}
 	selected := ports.RouteRef{Key: action.Key, Generation: action.Generation}
 	plan := routeTransitionPlan{

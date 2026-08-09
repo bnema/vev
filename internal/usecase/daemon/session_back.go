@@ -13,7 +13,13 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error
 		return nil
 	}
 	snapshot := token.ac.routeSnapshotCopy()
-	if snapshot.Generation == 0 || snapshot.Previous.Key == 0 || snapshot.Previous.Generation == 0 {
+	if snapshot.Generation == 0 {
+		if d.log != nil {
+			d.log.Debug("back-session skipped: attachment has no published route snapshot")
+		}
+		return nil
+	}
+	if snapshot.Previous.Key == 0 || snapshot.Previous.Generation == 0 {
 		return nil
 	}
 	return d.sendRecentRouteNavigationActionForAttachment(token, ports.RouteNavigationAction{

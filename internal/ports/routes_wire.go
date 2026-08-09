@@ -110,17 +110,25 @@ func MarshalCommittedRouteIdentity(identity CommittedRouteIdentity) ([]byte, err
 		return nil, err
 	}
 	w := payloadWriter{}
-	marshalExactSessionTarget(&w, identity.Target)
-	w.putBool(identity.Ephemeral)
+	marshalCommittedRouteIdentityFields(&w, identity)
 	return w.b, nil
 }
 
-func marshalCommittedIdentitySection(w *payloadWriter, identity *CommittedRouteIdentity) {
+func marshalCommittedRouteIdentityFields(w *payloadWriter, identity CommittedRouteIdentity) {
+	marshalExactSessionTarget(w, identity.Target)
+	w.putBool(identity.Ephemeral)
+}
+
+func marshalCommittedIdentitySection(w *payloadWriter, identity *CommittedRouteIdentity) bool {
 	w.putBool(identity != nil)
-	if identity != nil {
-		marshalExactSessionTarget(w, identity.Target)
-		w.putBool(identity.Ephemeral)
+	if identity == nil {
+		return true
 	}
+	if err := validateCommittedRouteIdentity(*identity); err != nil {
+		return false
+	}
+	marshalCommittedRouteIdentityFields(w, *identity)
+	return true
 }
 
 func unmarshalCommittedIdentitySection(r *payloadReader) (*CommittedRouteIdentity, error) {
@@ -246,18 +254,20 @@ func validateRecentRouteSnapshot(snapshot RecentRouteSnapshot) error {
 		}
 		refs[ref] = struct{}{}
 	}
-	for name, ref := range map[string]RouteRef{
-		"active":   snapshot.Active,
-		"previous": snapshot.Previous,
-		"home":     snapshot.Home,
+	for _, item := range []struct {
+		name string
+		ref  RouteRef
+	}{
+		{name: "previous", ref: snapshot.Previous},
+		{name: "home", ref: snapshot.Home},
 	} {
-		if ref.empty() || ref == snapshot.Active {
+		if item.ref.empty() || item.ref == snapshot.Active {
 			// Active is metadata-only and intentionally excluded from the
 			// recent display entries. Home may point at active as well.
 			continue
 		}
-		if _, exists := refs[ref]; !exists {
-			return fmt.Errorf("%w: %s route reference is absent from snapshot", ErrInvalidRouteWire, name)
+		if _, exists := refs[item.ref]; !exists {
+			return fmt.Errorf("%w: %s route reference is absent from snapshot", ErrInvalidRouteWire, item.name)
 		}
 	}
 	return nil
@@ -284,6 +294,9 @@ func MarshalRecentRouteSnapshot(snapshot RecentRouteSnapshot) ([]byte, error) {
 		w.putBool(entry.Attention)
 		w.putUint8(uint8(entry.Reachability))
 	}
+	// Keep the frame bound defensive even though current entry/label bounds
+	// make this unreachable; it protects the wire contract if those bounds
+	// change independently in a future protocol revision.
 	if len(w.b) > MaxFrameLen-1 {
 		return nil, fmt.Errorf("%w: route snapshot is too large", ErrInvalidRouteWire)
 	}

@@ -1,6 +1,7 @@
 package ports
 
 import (
+	"encoding/hex"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -15,15 +16,14 @@ func TestExactSessionTargetCodecIsStrict(t *testing.T) {
 	want := testExactTarget()
 	encoded, err := MarshalExactSessionTarget(want)
 	require.NoError(t, err)
+	require.Equal(t, "010203000000000000000000000000000004776f726b", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalExactSessionTarget)
+	_, err = UnmarshalExactSessionTarget(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
 
 	got, err := UnmarshalExactSessionTarget(encoded)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-
-	for _, payload := range [][]byte{encoded[:len(encoded)-1], append(append([]byte(nil), encoded...), 0)} {
-		_, err := UnmarshalExactSessionTarget(payload)
-		require.Error(t, err)
-	}
 
 	_, err = MarshalExactSessionTarget(ExactSessionTarget{SessionName: "work"})
 	require.ErrorIs(t, err, ErrInvalidRouteWire)
@@ -72,6 +72,11 @@ func TestCommittedRouteIdentityCodec(t *testing.T) {
 	encoded, err := MarshalCommittedRouteIdentity(want)
 	require.NoError(t, err)
 
+	require.Equal(t, "010203000000000000000000000000000004776f726b01", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalCommittedRouteIdentity)
+	_, err = UnmarshalCommittedRouteIdentity(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
+
 	got, err := UnmarshalCommittedRouteIdentity(encoded)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
@@ -103,42 +108,59 @@ func TestRecentRouteSnapshotCodecRoundTripAndBounds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 
-	for _, payload := range [][]byte{encoded[:len(encoded)-1], append(append([]byte(nil), encoded...), 0)} {
-		_, err := UnmarshalRecentRouteSnapshot(payload)
-		require.Error(t, err)
+	require.Equal(t, "0000000000000009000000000000000b0000000000000003000000000000000c0000000000000004000000000000000b000000000000000301000000000000000c000000000000000400046c6f677300046564676502000100", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalRecentRouteSnapshot)
+	_, err = UnmarshalRecentRouteSnapshot(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
+
+	invalidCases := []struct {
+		name   string
+		mutate func(*RecentRouteSnapshot)
+	}{
+		{name: "missing previous reference", mutate: func(snapshot *RecentRouteSnapshot) { snapshot.Previous = RouteRef{Key: 99, Generation: 99} }},
+		{name: "entry is active", mutate: func(snapshot *RecentRouteSnapshot) {
+			snapshot.Entries = append(snapshot.Entries, RecentRouteEntry{Key: 11, Generation: 3, Name: "work", Kind: RouteKindLocal})
+		}},
+		{name: "duplicate entry", mutate: func(snapshot *RecentRouteSnapshot) { snapshot.Entries = append(snapshot.Entries, snapshot.Entries[0]) }},
+		{name: "too many entries", mutate: func(snapshot *RecentRouteSnapshot) {
+			snapshot.Entries = make([]RecentRouteEntry, RouteSnapshotMaxEntries+1)
+			for i := range snapshot.Entries {
+				snapshot.Entries[i] = RecentRouteEntry{Key: uint64(i + 1), Generation: uint64(i + 1), Name: "x", Kind: RouteKindLocal}
+			}
+		}},
 	}
-
-	invalid := want
-	invalid.Previous = RouteRef{Key: 99, Generation: 99}
-	_, err = MarshalRecentRouteSnapshot(invalid)
-	require.ErrorIs(t, err, ErrInvalidRouteWire)
-
-	invalid = want
-	invalid.Entries = append(invalid.Entries, RecentRouteEntry{Key: 11, Generation: 3, Name: "work", Kind: RouteKindLocal})
-	_, err = MarshalRecentRouteSnapshot(invalid)
-	require.ErrorIs(t, err, ErrInvalidRouteWire)
-
-	invalid = want
-	invalid.Entries = append(invalid.Entries, invalid.Entries[0])
-	_, err = MarshalRecentRouteSnapshot(invalid)
-	require.ErrorIs(t, err, ErrInvalidRouteWire)
-
-	invalid = want
-	invalid.Entries = make([]RecentRouteEntry, RouteSnapshotMaxEntries+1)
-	for i := range invalid.Entries {
-		invalid.Entries[i] = RecentRouteEntry{Key: uint64(i + 1), Generation: uint64(i + 1), Name: "x", Kind: RouteKindLocal}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := want
+			tc.mutate(&invalid)
+			_, err := MarshalRecentRouteSnapshot(invalid)
+			require.ErrorIs(t, err, ErrInvalidRouteWire)
+		})
 	}
-	_, err = MarshalRecentRouteSnapshot(invalid)
+}
+
+func TestRecentRouteSnapshotRejectsOversizedFrameBeforeParsing(t *testing.T) {
+	_, err := UnmarshalRecentRouteSnapshot(make([]byte, MaxFrameLen))
 	require.ErrorIs(t, err, ErrInvalidRouteWire)
 }
 
 func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {
-	for _, value := range []string{"line\nfeed", "\x1b[31mred", string([]byte{0xff, 0xfe})} {
-		_, err := MarshalRecentRouteSnapshot(RecentRouteSnapshot{
-			Generation: 1,
-			Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Name: value, Kind: RouteKindLocal}},
+	values := []string{"line\nfeed", "\u2028line-separator", "\u2029paragraph-separator", "\x1b[31mred", "\u202eoverride", string([]byte{0xff, 0xfe})}
+	for _, value := range values {
+		t.Run("name/"+value, func(t *testing.T) {
+			_, err := MarshalRecentRouteSnapshot(RecentRouteSnapshot{
+				Generation: 1,
+				Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Name: value, Kind: RouteKindLocal}},
+			})
+			require.Error(t, err)
 		})
-		require.Error(t, err)
+		t.Run("host/"+value, func(t *testing.T) {
+			_, err := MarshalRecentRouteSnapshot(RecentRouteSnapshot{
+				Generation: 1,
+				Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Name: "work", HostLabel: value, Kind: RouteKindRemote}},
+			})
+			require.Error(t, err)
+		})
 	}
 }
 
@@ -146,6 +168,10 @@ func TestRouteActionAndFailureCodecsAreBounded(t *testing.T) {
 	action := RouteNavigationAction{SnapshotGeneration: 9, Key: 7, Generation: 8}
 	encoded, err := MarshalRouteNavigationAction(action)
 	require.NoError(t, err)
+	require.Equal(t, "000000000000000900000000000000070000000000000008", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalRouteNavigationAction)
+	_, err = UnmarshalRouteNavigationAction(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
 	got, err := UnmarshalRouteNavigationAction(encoded)
 	require.NoError(t, err)
 	require.Equal(t, action, got)
@@ -153,6 +179,10 @@ func TestRouteActionAndFailureCodecsAreBounded(t *testing.T) {
 	failure := RouteNavigationFailure{Key: 7, Generation: 8, Code: RouteFailureStaleSelection}
 	encoded, err = MarshalRouteNavigationFailure(failure)
 	require.NoError(t, err)
+	require.Equal(t, "0000000000000007000000000000000801", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalRouteNavigationFailure)
+	_, err = UnmarshalRouteNavigationFailure(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
 	gotFailure, err := UnmarshalRouteNavigationFailure(encoded)
 	require.NoError(t, err)
 	require.Equal(t, failure, gotFailure)

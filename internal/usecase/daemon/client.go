@@ -860,9 +860,12 @@ func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg po
 	if !token.attachmentEffectCurrent() {
 		return
 	}
-	if rc := sess.renderCoordinator(); rc != nil {
-		rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
+	rc := sess.renderCoordinator()
+	if token.lease == nil || rc == nil {
+		d.invalidateRender(sess, token.ac, true, "client.go")
+		return
 	}
+	rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
 }
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {

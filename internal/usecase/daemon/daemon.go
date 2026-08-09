@@ -1206,6 +1206,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 	paintToken := sess.attachmentToken(ac, tr)
 	painted := make(chan bool, 1)
 	paintDone, paintErr := boundedHandshakeOperationTracked(handshakeCtx, tr, func() error {
+		//nolint:contextcheck // firstPaintForTransition is capability-bounded; the surrounding handshake operation owns cancellation.
 		painted <- d.firstPaintForTransition(paintToken)
 		return nil
 	})
@@ -1352,16 +1353,7 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 // route resolves a Hello to a session and a freshly attached client, creating
 // the session for ephemeral/new intents. Direct package callers retain the
 // daemon lifetime context; inbound handshakes use routeWithContext.
-func (d *Daemon) validateExactSessionTarget(ctx context.Context, target ports.ExactSessionTarget) error {
-	if err := target.Validate(); err != nil {
-		return &protoErr{ports.ErrNoSuchSession, "invalid exact session target"}
-	}
-	if err := d.waitForTargetRestore(ctx, target.SessionName); err != nil {
-		return err
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
+func (d *Daemon) validateExactSessionTargetLocked(target ports.ExactSessionTarget) error {
 	if sess := d.findByNameLocked(target.SessionName); sess != nil {
 		if sess.incarnation != target.LifecycleID {
 			return &protoErr{ports.ErrNoSuchSession, "session lifecycle has changed: " + target.SessionName}
@@ -1373,6 +1365,19 @@ func (d *Daemon) validateExactSessionTarget(ctx context.Context, target ports.Ex
 		return &protoErr{ports.ErrNoSuchSession, "no such session lifecycle: " + target.SessionName}
 	}
 	return nil
+}
+
+func (d *Daemon) validateExactSessionTarget(ctx context.Context, target ports.ExactSessionTarget) error {
+	if err := target.Validate(); err != nil {
+		return &protoErr{ports.ErrNoSuchSession, "invalid exact session target"}
+	}
+	if err := d.waitForTargetRestore(ctx, target.SessionName); err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.validateExactSessionTargetLocked(target)
 }
 
 func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
@@ -1461,6 +1466,15 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	if d.closing {
 		d.mu.Unlock()
 		return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+	}
+	// The first exact-target check happens before restore I/O. Recheck while
+	// holding d.mu so a same-name lifecycle replacement cannot slip between
+	// validation and attachment creation.
+	if h.ExactTarget != nil && h.ResumeToken == 0 {
+		if err := d.validateExactSessionTargetLocked(*h.ExactTarget); err != nil {
+			d.mu.Unlock()
+			return nil, nil, err
+		}
 	}
 	switch h.Intent {
 	case ports.IntentEphemeral:

@@ -80,7 +80,7 @@ func TestCommittedIdentityDoesNotReassignHomeRoute(t *testing.T) {
 		Ephemeral: true,
 	})
 	require.NoError(t, err)
-	require.Equal(t, uint64(homeIdentity.key), uint64(ledger.homeRef().Key))
+	require.Equal(t, uint64(homeIdentity.key), ledger.homeRef().Key)
 	require.NotEqual(t, ledger.homeRef(), committed.wire())
 	active, ok := ledger.lookup(ledger.activeRef())
 	require.True(t, ok)
@@ -97,7 +97,6 @@ func TestRouteLedgerConcurrentInitialAttachmentsKeepOneHome(t *testing.T) {
 	errs := make(chan error, attachments)
 	var wg sync.WaitGroup
 	for i := byte(0); i < attachments; i++ {
-		i := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -301,7 +300,6 @@ func TestRouteLedgerConcurrentSnapshotsAndCommits(t *testing.T) {
 	ledger := newRouteLedger()
 	var wg sync.WaitGroup
 	for worker := byte(0); worker < 4; worker++ {
-		worker := worker
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

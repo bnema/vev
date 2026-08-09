@@ -53,6 +53,11 @@ func assertTrailingGarbageFails[T any](t *testing.T, full []byte, unmarshal func
 	})
 }
 
+func appendNoNavigationTail(payload []byte) []byte {
+	// exact-target absent, navigation capabilities none, startup overlay none
+	return append(payload, 0, 0, 0)
+}
+
 func TestHelloGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -92,7 +97,7 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			want := append(append([]byte(nil), tt.want...), 0, 0, 0)
+			want := appendNoNavigationTail(append([]byte(nil), tt.want...))
 			got := MarshalHello(tt.msg)
 			if !bytes.Equal(got, want) {
 				t.Fatalf("MarshalHello() = %#v, want %#v", got, want)
@@ -139,7 +144,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			0x00, 0x00, 0x00, 0x06, 'X', 'Y', '=', '1', '2', '3',
 			0x00, 0x00, // no remote target, client-owned environment
 		}
-		want = append(want, 0, 0, 0)
+		want = appendNoNavigationTail(want)
 		require.Equal(t, want, got)
 		decoded, err := UnmarshalHello(want)
 		require.NoError(t, err)
@@ -413,6 +418,16 @@ func TestPongGoldenAndRoundTrip(t *testing.T) {
 		t.Fatalf("round trip = %#v, want %#v", back, Pong{})
 	}
 	assertTrailingGarbageFails(t, got, UnmarshalPong)
+}
+
+func TestMarshalWelcomeRejectsInvalidCommittedIdentity(t *testing.T) {
+	got := MarshalWelcome(Welcome{
+		SessionName: "work",
+		CommittedIdentity: &CommittedRouteIdentity{
+			Target: ExactSessionTarget{SessionName: "different"},
+		},
+	})
+	require.Nil(t, got)
 }
 
 func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
@@ -894,7 +909,7 @@ func TestHelloOutputWindowByteExactValues(t *testing.T) {
 			hello := Hello{Version: 14, Size: domain.Size{Cols: 1, Rows: 1}, MaxOutputInFlight: window}
 			// The empty Hello has a fixed 1x1 size before the negotiated output window.
 			want := append(make([]byte, 38), window, 0, 0, 0, 0, 0, 0)
-			want = append(want, 0, 0, 0)
+			want = appendNoNavigationTail(want)
 			want[1] = 14
 			want[30], want[32] = 1, 1
 			got := MarshalHello(hello)

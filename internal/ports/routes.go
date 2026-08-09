@@ -102,6 +102,9 @@ func ValidateRouteLabel(value string, allowEmpty bool) error {
 		if unicode.IsControl(r) {
 			return errors.New("route label contains a control character")
 		}
+		if unicode.Is(unicode.Bidi_Control, r) || r == '\u2028' || r == '\u2029' {
+			return errors.New("route label contains a bidirectional or line-separator control character")
+		}
 	}
 	return nil
 }

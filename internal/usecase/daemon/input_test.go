@@ -804,32 +804,14 @@ func TestPaletteBackSessionSendsClientPreviousRouteAction(t *testing.T) {
 	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 3, Key: 2, Generation: 2}, action)
 }
 
-func TestPaletteBackSessionWithoutClientHistoryIsNoop(t *testing.T) {
-	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-
-	d.backSession(current, ac)
-
-	require.Same(t, current, ac.currentSession())
-}
-
-func TestBackSessionWithoutSnapshotDoesNotReportDaemonHandoffFailure(t *testing.T) {
-	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-
-	d.backSession(current, ac)
-
-	require.Same(t, current, ac.currentSession())
-	require.Empty(t, d.notices.history())
-}
-
-func TestBackSessionWithoutSnapshotDoesNotPublishFrames(t *testing.T) {
+func TestBackSessionWithoutClientHistoryIsNoop(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 
 	d.backSession(current, ac)
 
 	require.Same(t, current, ac.currentSession())
+	require.Empty(t, d.notices.history())
 	requireNoOutputFrame(t, sends)
 }
 

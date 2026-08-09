@@ -31,6 +31,25 @@ func TestRouteExactSessionTargetSelectsLifecycle(t *testing.T) {
 	d.clientGone(sess, ac, tr, false)
 }
 
+func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	sess.incarnation = remoteLifecycleForTest()
+	target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+	replacement := sess.incarnation
+	replacement[0]++
+	sess.incarnation = replacement
+
+	d.mu.Lock()
+	err := d.validateExactSessionTargetLocked(target)
+	d.mu.Unlock()
+
+	var protocol *protoErr
+	require.ErrorAs(t, err, &protocol)
+	require.Equal(t, ports.ErrNoSuchSession, protocol.code)
+}
+
 func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "tab-1", "pane-1")

@@ -27,12 +27,13 @@ func TestSessionConnectionUsesOneAttachShapeForLocalAndRemoteTransports(t *testi
 
 func TestSessionTargetValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		target  client.SessionTarget
-		wantErr bool
+		name      string
+		target    client.SessionTarget
+		wantErr   bool
+		wantErrIs error
 	}{
 		{name: "ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral}},
-		{name: "named ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral, SessionName: "work"}, wantErr: true},
+		{name: "named ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral, SessionName: "work"}, wantErr: true, wantErrIs: client.ErrEphemeralSessionName},
 		{name: "new", target: client.SessionTarget{Intent: ports.IntentNew, SessionName: "work"}},
 		{name: "attach", target: client.SessionTarget{Intent: ports.IntentAttach, SessionName: "work"}},
 		{name: "resume", target: client.SessionTarget{Intent: ports.IntentResume, SessionName: "work"}},
@@ -46,6 +47,9 @@ func TestSessionTargetValidation(t *testing.T) {
 			_, err := client.NewSessionConnection(transport, tt.target)
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrIs != nil {
+					require.ErrorIs(t, err, tt.wantErrIs)
+				}
 				return
 			}
 			require.NoError(t, err)
