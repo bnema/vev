@@ -789,7 +789,7 @@ func ValidateAttachTarget(m AttachTarget) error {
 	if m.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
 		return ErrInvalidAttachTarget
 	}
-	if m.Intent != IntentAttach && m.Intent != IntentResume {
+	if m.Intent != IntentAttach {
 		return ErrInvalidAttachTarget
 	}
 	if err := validateWireRemoteTarget(*m.RemoteTarget); err != nil {

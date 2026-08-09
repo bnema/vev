@@ -908,6 +908,35 @@ func TestPickerNavigationBackSendFailureKeepsPickerOpen(t *testing.T) {
 	require.Contains(t, history[len(history)-1].Details, sendErr)
 }
 
+func TestPickerNavigationBackWithoutCallerTicketKeepsPickerOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		passNil bool
+	}{
+		{name: "empty effects"},
+		{name: "nil first effect", passNil: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, _, releases := newManualTabSession(t, 1)
+			defer releases[0]()
+			ac.startupOverlay = ports.StartupOverlaySessionPicker
+			ac.navigationCapabilities = ports.NavigationCapabilityBack
+			ac.overlays.pickerMu.Lock()
+			ac.overlays.picker = picker.New([]picker.SessionView{{ID: sess.id, Name: sess.name, Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, picker.SelectionConfig{})
+			ac.overlays.pickerGeneration++
+			ac.overlays.pickerMu.Unlock()
+
+			if tc.passNil {
+				d.handlePickerInput(ac, []byte{3}, nil)
+			} else {
+				d.handlePickerInput(ac, []byte{3})
+			}
+
+			require.True(t, ac.overlays.pickerActive(), "back with missing effect must keep picker open when fresh admission is unavailable")
+		})
+	}
+}
+
 func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
@@ -950,7 +979,7 @@ func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	targetPane.screen.Write([]byte("TARGET"))
 	targetPane.screen.ClearDamage() // TARGET is already rendered and has no pending VT damage.
 	require.Empty(t, targetPane.screen.Damage(), "target deliberately has no pending VT damage")
-	ac.previousSession.Set(target)
+	ac.previousSession.Set(target.id)
 
 	// Exercise the user-facing previous-session route, which delegates to the
 	// real switchToTarget hand-off and immediately emits its required reset.

@@ -96,7 +96,7 @@ type attachedClient struct {
 	renderStages renderStageHooks // optional render and handoff observability hooks
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
-	previousSession Guarded[*session]
+	previousSession Guarded[domain.SessionID]
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
 	// routeCreatedSession marks a session created by this attachment's route.
@@ -227,7 +227,7 @@ func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
 
 func (ac *attachedClient) clearPreviousSession() {
 	if ac != nil {
-		ac.previousSession.Set(nil)
+		ac.previousSession.Set("")
 	}
 }
 

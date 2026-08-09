@@ -675,7 +675,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	d.mu.Lock()
 	d.sessions[target.id] = target
 	d.mu.Unlock()
-	ac.previousSession.Set(target)
+	ac.previousSession.Set(target.id)
 
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)

@@ -167,9 +167,10 @@ func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 	require.Nil(t, ac.transport())
 	d.mu.Lock()
 	parked := d.parked[token]
+	claimed := parked != nil && parked.claimed
 	d.mu.Unlock()
 	require.NotNil(t, parked)
-	require.False(t, parked.claimed)
+	require.False(t, claimed)
 	require.Equal(t, token, ac.resumeToken)
 
 	_, resumed, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, defaultSize)

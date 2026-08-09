@@ -11,12 +11,13 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error
 	if d == nil || token.sess == nil || token.ac == nil {
 		return nil
 	}
-	target := token.ac.previousSession.Get()
-	if target == nil || target == token.sess || target.core() == nil || d.sessionByID(target.core().id) != target {
-		token.ac.clearPreviousSessionIf(target)
+	targetID := token.ac.previousSession.Get()
+	target := d.sessionByID(targetID)
+	if target == nil || target == token.sess {
+		token.ac.clearPreviousSessionIf(targetID)
 		return nil
 	}
-	pickerTarget := picker.Target{Session: target.core().id, TabIndex: -1}
+	pickerTarget := picker.Target{Session: targetID, TabIndex: -1}
 	return d.switchToTargetForAttachment(token, pickerTarget, sessionHandoffGuard{}, "back-session")
 }
 
@@ -24,9 +25,10 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 	if d == nil || current == nil || ac == nil {
 		return
 	}
-	target := ac.previousSession.Get()
-	if target == nil || target == current || target.core() == nil || d.sessionByID(target.core().id) != target {
-		ac.clearPreviousSessionIf(target)
+	targetID := ac.previousSession.Get()
+	target := d.sessionByID(targetID)
+	if target == nil || target == current {
+		ac.clearPreviousSessionIf(targetID)
 		d.invalidateRender(current, ac, true, "session_back.go")
 		return
 	}
@@ -45,13 +47,13 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 
 // clearPreviousSessionIf clears target only if it has not been replaced since
 // the caller observed it. This preserves a concurrent successful hand-off.
-func (ac *attachedClient) clearPreviousSessionIf(target *session) {
+func (ac *attachedClient) clearPreviousSessionIf(targetID domain.SessionID) {
 	if ac == nil {
 		return
 	}
-	ac.previousSession.With(func(previous **session) {
-		if *previous == target {
-			*previous = nil
+	ac.previousSession.With(func(previous *domain.SessionID) {
+		if *previous == targetID {
+			*previous = ""
 		}
 	})
 }
@@ -61,6 +63,6 @@ func (ac *attachedClient) clearPreviousSessionIf(target *session) {
 // leave the toggle pair intact.
 func (ac *attachedClient) recordPreviousSession(origin *session) {
 	if ac != nil && origin != nil {
-		ac.previousSession.Set(origin)
+		ac.previousSession.Set(origin.id)
 	}
 }

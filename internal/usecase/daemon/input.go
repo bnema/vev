@@ -397,6 +397,7 @@ func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffect
 			token.effect = effect
 			h.d.afterAttachmentEffectAdmitted(token)
 		}
+		// Keep this defensive check even though token admission normally requires a session.
 		if h.connectionToken.sess == nil {
 			effect.End()
 			return nil, nil, false

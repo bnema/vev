@@ -86,7 +86,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	}
 	if !explicit && d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(oldTr)
-		d.log.Info("client parked", "session", sess.nameSnapshot())
+		d.log.Info("client parked", "session", name)
 		return
 	}
 	// Explicit winners (and non-explicit park failures) must drop any same-
@@ -105,7 +105,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
 	_ = ac.closeCapturedTransport(oldTr)
-	d.log.Info("client detached", "session", sess.nameSnapshot(), "explicit", explicit)
+	d.log.Info("client detached", "session", name, "explicit", explicit)
 }
 
 // detachOnSendError drops a client whose transport failed, leaving the session
@@ -170,13 +170,14 @@ func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentConnectionTok
 }
 
 func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed ports.Transport) {
+	name := sess.nameSnapshot()
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
 	d.recalculateSessionGeometryAndInvalidate(sess, nil, "client_transport_errors.go")
 	if d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(failed)
-		d.log.Warn("parked client after send error", "session", sess.nameSnapshot())
+		d.log.Warn("parked client after send error", "session", name)
 		return
 	}
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
@@ -184,5 +185,5 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	d.resetScreenDefaultColors(sess)
 	ac.clearPreviousSession()
 	_ = ac.closeCapturedTransport(failed)
-	d.log.Warn("detached client after send error", "session", sess.nameSnapshot())
+	d.log.Warn("detached client after send error", "session", name)
 }

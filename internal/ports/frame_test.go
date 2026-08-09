@@ -52,15 +52,36 @@ func TestMsgTypeUnique(t *testing.T) {
 }
 
 func TestNavigationActionFrame(t *testing.T) {
-	frame := Frame{Type: MsgNavigationAction, Payload: MarshalNavigationAction(NavigationOpenHomePicker)}
-	if frame.Type != MsgNavigationAction {
-		t.Fatalf("frame type = %d, want %d", frame.Type, MsgNavigationAction)
+	tests := []struct {
+		name   string
+		action NavigationAction
+		bytes  []byte
+	}{
+		{name: "open home picker", action: NavigationOpenHomePicker, bytes: []byte{1}},
+		{name: "back", action: NavigationBack, bytes: []byte{2}},
 	}
-	action, err := UnmarshalNavigationAction(frame.Payload)
-	if err != nil {
-		t.Fatalf("UnmarshalNavigationAction() error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := Frame{Type: MsgNavigationAction, Payload: MarshalNavigationAction(tt.action)}
+			if frame.Type != MsgNavigationAction {
+				t.Fatalf("frame type = %d, want %d", frame.Type, MsgNavigationAction)
+			}
+			if got := frame.Payload; string(got) != string(tt.bytes) {
+				t.Fatalf("payload = %x, want %x", got, tt.bytes)
+			}
+			action, err := UnmarshalNavigationAction(frame.Payload)
+			if err != nil {
+				t.Fatalf("UnmarshalNavigationAction() error = %v", err)
+			}
+			if action != tt.action {
+				t.Fatalf("action = %d, want %d", action, tt.action)
+			}
+		})
 	}
-	if action != NavigationOpenHomePicker {
-		t.Fatalf("action = %d, want %d", action, NavigationOpenHomePicker)
+
+	for _, payload := range [][]byte{nil, []byte{1, 0, 0}, []byte{2, 0, 0}} {
+		if _, err := UnmarshalNavigationAction(payload); err == nil {
+			t.Fatalf("UnmarshalNavigationAction(%x) succeeded, want error", payload)
+		}
 	}
 }

@@ -799,8 +799,8 @@ func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
 		prepare func()
 	}{
 		{name: "no target", prepare: func() {}},
-		{name: "stale target", prepare: func() { ac.previousSession.Set(&session{sessionCore: sessionCore{id: "gone"}}) }},
-		{name: "same session", prepare: func() { ac.previousSession.Set(current) }},
+		{name: "stale target", prepare: func() { ac.previousSession.Set("gone") }},
+		{name: "same session", prepare: func() { ac.previousSession.Set(current.id) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ac.clearPreviousSession()
@@ -808,7 +808,7 @@ func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
 			runPaletteCommand(t, d, current, ac, "BSK")
 			require.Same(t, current, ac.currentSession())
 			if tc.name != "no target" {
-				require.Nil(t, ac.previousSession.Get(), "invalid target must not remain toggleable")
+				require.Empty(t, ac.previousSession.Get(), "invalid target must not remain toggleable")
 			}
 		})
 	}
@@ -818,7 +818,7 @@ func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
 	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	target := d.sessions[domain.SessionID("recent")]
-	ac.previousSession.Set(target)
+	ac.previousSession.Set(target.id)
 
 	// A displaced attachment makes the previously valid handoff stale by the
 	// time switchToTarget commits it.
@@ -829,7 +829,7 @@ func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
 	d.backSession(current, ac)
 
 	require.Same(t, current, ac.currentSession(), "a stale handoff must leave the attachment on its origin")
-	require.Same(t, target, ac.previousSession.Get(), "a failed handoff remains retryable")
+	require.Equal(t, target.id, ac.previousSession.Get(), "a failed handoff remains retryable")
 	history := d.notices.history()
 	require.Len(t, history, 1, "the switch failure must be reported exactly once")
 	require.Equal(t, domain.NoticeSessionUnavailable, history[0].Code)
@@ -839,14 +839,14 @@ func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
 	ac := &attachedClient{}
 	stale := &session{sessionCore: sessionCore{id: "stale"}}
 	updated := &session{sessionCore: sessionCore{id: "updated"}}
-	ac.previousSession.Set(stale)
+	ac.previousSession.Set(stale.id)
 
 	// Model a completed hand-off between observing a stale target and clearing
 	// it. The conditional clear must not erase the newer toggle destination.
-	ac.previousSession.Set(updated)
-	ac.clearPreviousSessionIf(stale)
+	ac.previousSession.Set(updated.id)
+	ac.clearPreviousSessionIf(stale.id)
 
-	require.Same(t, updated, ac.previousSession.Get())
+	require.Equal(t, updated.id, ac.previousSession.Get())
 }
 
 // backSession's invalid-target fallback is a render producer: it must publish
@@ -861,10 +861,10 @@ func TestBackSessionInvalidTargetsFallBackThroughOneInvalidation(t *testing.T) {
 	}{
 		{name: "no previous target", prepare: func(*session, *attachedClient) {}},
 		{name: "stale previous target", prepare: func(_ *session, ac *attachedClient) {
-			ac.previousSession.Set(&session{sessionCore: sessionCore{id: "gone"}})
+			ac.previousSession.Set("gone")
 		}},
 		{name: "previous target equals current", prepare: func(current *session, ac *attachedClient) {
-			ac.previousSession.Set(current)
+			ac.previousSession.Set(current.id)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -940,10 +940,10 @@ func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
 			}
 			require.Equal(t, domain.SessionID(tc.wantCurrent), ac.currentSession().id)
 			if tc.wantPrev == "" {
-				require.Nil(t, ac.previousSession.Get())
+				require.Empty(t, ac.previousSession.Get())
 				return
 			}
-			require.Equal(t, domain.SessionID(tc.wantPrev), ac.previousSession.Get().core().id)
+			require.Equal(t, domain.SessionID(tc.wantPrev), ac.previousSession.Get())
 		})
 	}
 }
@@ -963,10 +963,10 @@ func TestTerminalTeardownClearsPreviousSession(t *testing.T) {
 			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
 			defer releaseAll(releases)
 
-			ac.previousSession.Set(d.sessions[domain.SessionID("recent")])
+			ac.previousSession.Set(domain.SessionID("recent"))
 			tc.teardown(d, current, ac)
 
-			require.Nil(t, ac.previousSession.Get())
+			require.Empty(t, ac.previousSession.Get())
 		})
 	}
 }

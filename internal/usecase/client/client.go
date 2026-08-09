@@ -531,7 +531,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if handoffErr != nil {
 				return handoffErr
 			}
-			if homeRoute != nil {
+			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned) {
 				nextRequest.NavigationCapabilities |= ports.NavigationCapabilityHomePicker
 			}
 			if attemptRequest.StartupOverlay == ports.StartupOverlaySessionPicker {
@@ -563,7 +563,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		if result.err == nil {
 			if result.welcomed && returnNavigationPending {
-				returnRoute = nil
 				returnNavigationPending = false
 				returnResumeFallback = false
 			}

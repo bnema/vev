@@ -1148,6 +1148,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 	}
 
 	welcomeSent := false
+	//nolint:contextcheck // handshakeCtx is intentionally not propagated: cancellation teardown must complete its geometry and ownership cleanup.
 	failAttachment := func() {
 		d.failHandshakeAttachment(sess, ac, tr, welcomeSent)
 	}

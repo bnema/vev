@@ -89,6 +89,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 		marshalGood  func() []byte
 		unmarshal    func([]byte) error
 		policyOffset int
+		wantErr      error
 	}{
 		{
 			name: "hello",
@@ -115,6 +116,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 			},
 			unmarshal:    func(payload []byte) error { _, err := UnmarshalHello(payload); return err },
 			policyOffset: 3,
+			wantErr:      ErrInvalidHello,
 		},
 		{
 			name: "attach target",
@@ -138,13 +140,14 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 			},
 			unmarshal:    func(payload []byte) error { _, err := UnmarshalAttachTarget(payload); return err },
 			policyOffset: 1,
+			wantErr:      ErrInvalidAttachTarget,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.validate(); err == nil {
-				t.Fatal("direct validation accepted client-owned policy for remote target")
+			if err := tt.validate(); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("direct validation error = %v, want %v", err, tt.wantErr)
 			}
 			if payload := tt.marshalBad(); payload != nil {
 				t.Fatalf("marshal accepted client-owned policy: %x", payload)
@@ -163,8 +166,8 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 				t.Fatal("trailing garbage unexpectedly decoded")
 			}
 			payload[len(payload)-tt.policyOffset] = byte(EnvironmentPolicyClientOwned)
-			if err := tt.unmarshal(payload); err == nil {
-				t.Fatal("unmarshal accepted client-owned policy for remote target")
+			if err := tt.unmarshal(payload); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("mutated policy error = %v, want %v", err, tt.wantErr)
 			}
 		})
 	}

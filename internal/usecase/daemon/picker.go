@@ -378,8 +378,21 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	backNavigationSent := false
 	if result.exit && !committing {
 		back := ac.startupOverlay == ports.StartupOverlaySessionPicker && ac.navigationCapabilities&ports.NavigationCapabilityBack != 0
-		if back && len(effects) != 0 && effects[0] != nil {
-			if err := d.sendNavigationActionForAttachment(effects[0].connectionToken(), ports.NavigationBack); err != nil {
+		if back {
+			var token attachmentConnectionToken
+			if len(effects) != 0 && effects[0] != nil {
+				token = effects[0].connectionToken()
+			} else {
+				var effect *attachmentEffectTicket
+				var admitted bool
+				token, effect, admitted = ac.beginCurrentAttachmentEffect(sess, ac.transport())
+				if !admitted {
+					d.invalidateRender(sess, ac, true, "picker.go")
+					return
+				}
+				defer effect.End()
+			}
+			if err := d.sendNavigationActionForAttachment(token, ports.NavigationBack); err != nil {
 				d.reportAttachmentError(sess, err)
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
@@ -925,7 +938,7 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionT
 		return failUnavailable()
 	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
-		return err
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to remote session", err)
 	}
 	if guard.closePicker {
 		d.closePicker(token.ac)

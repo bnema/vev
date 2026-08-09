@@ -107,8 +107,8 @@ func (d *Daemon) clearParkingInFlight(token uint64, ac *attachedClient) {
 
 // clearParkingInFlightIfAbandoned drops a pre-detach parking marker when this
 // teardown lost the seat while still the live owner (stale transport fence).
-// If another path already detached/unrouted, that path
-// owns park publication.
+// The live owner clears its own marker; if another path already detached or
+// unrouted, that owning teardown is responsible for park publication/cleanup.
 func (d *Daemon) clearParkingInFlightIfAbandoned(sess *session, ac *attachedClient, token uint64) {
 	if token == 0 || ac == nil {
 		return

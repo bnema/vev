@@ -108,8 +108,11 @@ func (t *attachmentConnectionToken) endAttachmentEffect() {
 	t.effect = nil
 }
 
-// attachmentEffectCurrentSessionLocked is the same check at a session-owned
-// mutation boundary where sess.core().mu is already held.
+// attachmentEffectCurrentSessionLocked validates authority at a session-owned
+// mutation boundary where sess.core().mu is already held. A live effect ticket
+// preserves the exact capability it captured for the effect because attachment
+// transitions drain the gate before changing identity. This differs from
+// attachmentCurrent, which revalidates the attachment's currently published identity.
 func (t attachmentConnectionToken) attachmentEffectCurrentSessionLocked() bool {
 	if t.effect != nil && !t.effect.ended.Load() {
 		return true

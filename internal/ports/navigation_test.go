@@ -43,6 +43,10 @@ func TestNavigationActionWireTable(t *testing.T) {
 
 func TestHelloNavigationValidationTable(t *testing.T) {
 	base := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
+	remoteTarget := &domain.RemoteSessionTarget{
+		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: domain.SessionLifecycleID{1},
+		SessionName: "work", LiveTabID: "tab-1",
+	}
 	tests := []struct {
 		name        string
 		hello       Hello
@@ -54,8 +58,10 @@ func TestHelloNavigationValidationTable(t *testing.T) {
 		{name: "ordinary", hello: base, valid: true},
 		{name: "resume route", hello: Hello{Version: ProtocolVersion, Intent: IntentResume, Size: domain.Size{Cols: 80, Rows: 24}}, valid: true},
 		{name: "daemon-owned home picker", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityHomePicker, EnvironmentPolicy: EnvironmentPolicyDaemonOwned}, valid: true, capability: NavigationCapabilityHomePicker},
+		{name: "remote-target home picker", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: remoteTarget, NavigationCapabilities: NavigationCapabilityHomePicker, EnvironmentPolicy: EnvironmentPolicyDaemonOwned}, valid: true, capability: NavigationCapabilityHomePicker},
 		{name: "client-owned home picker rejected", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityHomePicker}, valid: false},
 		{name: "daemon-owned back picker rejected", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker, EnvironmentPolicy: EnvironmentPolicyDaemonOwned}, valid: false},
+		{name: "remote-target back picker rejected", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: remoteTarget, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker, EnvironmentPolicy: EnvironmentPolicyDaemonOwned}, valid: false},
 		{name: "startup picker requires back", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker}, valid: true, capability: NavigationCapabilityBack, overlay: StartupOverlaySessionPicker, wantPayload: "001a02" + "00000000000000000000000000000000" + "0000000000000000" + "0000" + "00500018" + "0000" + "0000" + "00" + "00" + "00000000" + "00" + "00" + "0201"},
 		{name: "new rejects navigation", hello: Hello{Version: ProtocolVersion, Intent: IntentNew, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker}, valid: false},
 		{name: "unknown capability", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: 4}, valid: false},

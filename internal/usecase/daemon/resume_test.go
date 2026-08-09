@@ -160,9 +160,10 @@ func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
 	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
 	d.mu.Lock()
 	parked := d.parked[token]
+	claimed := parked != nil && parked.claimed
 	d.mu.Unlock()
 	require.NotNil(t, parked)
-	require.False(t, parked.claimed, "mismatched target must not claim the parked attachment")
+	require.False(t, claimed, "mismatched target must not claim the parked attachment")
 
 	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 }
@@ -200,9 +201,10 @@ func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 	require.NotSame(t, parkTimer, rearmedTimer)
 	d.mu.Lock()
 	rearmed := d.parked[token]
+	claimed := rearmed != nil && rearmed.claimed
 	d.mu.Unlock()
 	require.NotNil(t, rearmed)
-	require.False(t, rearmed.claimed)
+	require.False(t, claimed)
 	rearmedTimer.ch <- time.Time{}
 	d.expireParked(token, rearmed)
 	d.mu.Lock()
@@ -1338,7 +1340,10 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := &session{sessionCore: sessionCore{id: "previous"}}
-	ac.previousSession.Set(previous)
+	d.mu.Lock()
+	d.sessions[previous.id] = previous
+	d.mu.Unlock()
+	ac.previousSession.Set(previous.id)
 	d.clientGone(sess, ac, ac.transport(), false)
 
 	token := ac.resumeToken
@@ -1346,14 +1351,14 @@ func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
 	parked := d.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parked)
-	require.Same(t, previous, ac.previousSession.Get(), "a live parked attachment keeps its toggle")
+	require.Equal(t, previous.id, ac.previousSession.Get(), "a live parked attachment keeps its toggle")
 
 	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), tr2)
 	require.NoError(t, err)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
-	require.Same(t, previous, resumedAC.previousSession.Get(), "resume keeps the live attachment toggle")
+	require.Equal(t, previous.id, resumedAC.previousSession.Get(), "resume keeps the live attachment toggle")
 }
 
 func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
@@ -1383,7 +1388,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 			require.NoError(t, err)
 
-			ac.previousSession.Set(&session{sessionCore: sessionCore{id: "previous"}})
+			ac.previousSession.Set("previous")
 			d.clientGone(sess, ac, ac.transport(), false)
 
 			d.mu.Lock()
@@ -1393,7 +1398,7 @@ func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 			d.mu.Unlock()
 			d.finishParkedAttachmentRetirements(retirements)
 
-			require.Nil(t, ac.previousSession.Get())
+			require.Empty(t, ac.previousSession.Get())
 		})
 	}
 }

@@ -45,7 +45,7 @@ type attachmentTransitionRequest struct {
 }
 
 func transitionSourceTokenMatchesRequest(token attachmentConnectionToken, source *session, req attachmentTransitionRequest) bool {
-	return token.sess == source && token.ac == req.next &&
+	return source != nil && token.sess != nil && token.sess == source && token.ac == req.next &&
 		token.generation == req.next.connectionGeneration.Load() &&
 		token.transport.transport == req.expectedTransport.transport &&
 		token.transport.incarnation == req.expectedTransport.incarnation

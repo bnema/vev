@@ -130,7 +130,7 @@ func remoteSessionOrigin(host string) string {
 }
 
 func remoteSessionStateStopped(state string) bool {
-	return state == "down"
+	return state == "down" || state == "stopped"
 }
 
 func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {

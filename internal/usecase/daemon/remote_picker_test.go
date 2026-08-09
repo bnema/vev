@@ -56,24 +56,28 @@ func newRemotePickerDaemon(store ports.RemoteHostStore) *Daemon {
 }
 
 func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) {
-	lifecycle := remoteLifecycleForTest()
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle}
-	session := ports.RemoteCatalogSession{
-		LifecycleID: lifecycle, Name: "work", State: "down",
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
-	}
-	live := remotePickerView(key, session, remoteHostFresh, time.Unix(100, 0))
-	require.True(t, live.Stopped)
-	require.NotNil(t, live.RemoteTarget)
-	require.True(t, live.RemoteTarget.Stopped)
-	require.True(t, live.RemoteAttachReady, "structured stopped rows have an explicit safe restore target")
+	for _, state := range []string{"down", "stopped"} {
+		t.Run(state, func(t *testing.T) {
+			lifecycle := remoteLifecycleForTest()
+			key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle}
+			session := ports.RemoteCatalogSession{
+				LifecycleID: lifecycle, Name: "work", State: state,
+				Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+			}
+			view := remotePickerView(key, session, remoteHostFresh, time.Unix(100, 0))
+			require.True(t, view.Stopped)
+			require.NotNil(t, view.RemoteTarget)
+			require.True(t, view.RemoteTarget.Stopped)
+			require.True(t, view.RemoteAttachReady, "structured stopped rows have an explicit safe restore target")
 
-	legacy := session
-	legacy.LifecycleID = domain.SessionLifecycleID{}
-	legacyView := remotePickerView(domain.RemoteSessionKey{Host: "arch", Name: "work"}, legacy, remoteHostFresh, time.Unix(100, 0))
-	require.True(t, legacyView.Stopped)
-	require.True(t, legacyView.ConnectOnly)
-	require.False(t, legacyView.RemoteAttachReady, "legacy stopped rows cannot be selected without lifecycle identity")
+			legacy := session
+			legacy.LifecycleID = domain.SessionLifecycleID{}
+			legacyView := remotePickerView(domain.RemoteSessionKey{Host: "arch", Name: "work"}, legacy, remoteHostFresh, time.Unix(100, 0))
+			require.True(t, legacyView.Stopped)
+			require.True(t, legacyView.ConnectOnly)
+			require.False(t, legacyView.RemoteAttachReady, "legacy stopped rows cannot be selected without lifecycle identity")
+		})
+	}
 }
 
 func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
@@ -673,15 +677,9 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.status["arch"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
-	const sendErr = "remote attach send failed"
-	tr := &remotePickerSendErrorTransport{err: errors.New(sendErr)}
-	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac.initOverlays()
-	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
-	sess := &session{sessionCore: sessionCore{id: "local", name: "local", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}}
-	publishTiledPaneOwners(sess, tb)
-	ac.setSession(sess)
-	d.sessions[sess.id] = sess
+	cause := errors.New("remote attach send failed")
+	tr := &remotePickerSendErrorTransport{err: cause}
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "local", tr)
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
 	ac.overlays.pickerGeneration++
@@ -697,7 +695,10 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key}
 	err := d.sendRemoteAttachTargetForAttachment(token, target, key, sessionHandoffGuard{closePicker: true}, "picker-select")
-	require.EqualError(t, err, sendErr)
+	var userErr *domain.UserError
+	require.ErrorAs(t, err, &userErr)
+	require.Equal(t, "couldn't attach to remote session", userErr.Msg)
+	require.ErrorIs(t, err, cause)
 	require.True(t, ac.overlays.pickerActive(), "failed control send must leave the picker open")
 	select {
 	case <-gone:
@@ -715,9 +716,15 @@ func (t *remotePickerSendErrorTransport) Send(ports.Frame) error   { return t.er
 func (*remotePickerSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
 func (*remotePickerSendErrorTransport) Close() error               { return nil }
 
-func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID) (*session, *attachedClient, chan ports.Frame) {
+func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...ports.Transport) (*session, *attachedClient, chan ports.Frame) {
 	t.Helper()
-	tr, sends := newCapturingTransport(t)
+	var tr ports.Transport
+	var sends chan ports.Frame
+	if len(transports) != 0 {
+		tr = transports[0]
+	} else {
+		tr, sends = newCapturingTransport(t)
+	}
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac.initOverlays()
 	tb := newTab(newQuietPTY(), domain.Size{Cols: 80, Rows: 22})

@@ -11,19 +11,30 @@ import (
 )
 
 func TestDaemonOwnedNoExactTargetRejectsNewAndEphemeral(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	for _, intent := range []uint8{ports.IntentNew, ports.IntentEphemeral} {
-		hello := ports.Hello{
-			Version: ports.ProtocolVersion, Intent: intent, Name: "work",
-			Size: domain.Size{Cols: 80, Rows: 24}, Cwd: "/untrusted/cwd",
-			Env: []string{"UNTRUSTED=client"}, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-		}
-		_, _, err := d.route(hello, &closeTrackingTransport{})
-		var protocol *protoErr
-		require.ErrorAs(t, err, &protocol)
-		require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	for _, tt := range []struct {
+		name   string
+		intent uint8
+	}{
+		{name: "new", intent: ports.IntentNew},
+		{name: "ephemeral", intent: ports.IntentEphemeral},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			hello := ports.Hello{
+				Version: ports.ProtocolVersion, Intent: tt.intent, Name: "work",
+				Size: domain.Size{Cols: 80, Rows: 24}, Cwd: "/untrusted/cwd",
+				Env: []string{"UNTRUSTED=client"}, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			}
+			_, _, err := d.route(hello, &closeTrackingTransport{})
+			var protocol *protoErr
+			require.ErrorAs(t, err, &protocol)
+			require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+			d.mu.Lock()
+			sessions := len(d.sessions)
+			d.mu.Unlock()
+			require.Zero(t, sessions)
+		})
 	}
-	require.Empty(t, d.sessions)
 }
 
 func TestLegacyDaemonOwnedStoppedAttachUsesDaemonEnvironment(t *testing.T) {

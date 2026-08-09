@@ -35,7 +35,7 @@ func capabilityFromToken(token attachmentConnectionToken) attachmentCapability {
 }
 
 func (c attachmentCapability) matches(token attachmentConnectionToken) bool {
-	return token.ac != nil && c.sess == token.sess &&
+	return token.ac != nil && c.sess != nil && token.sess != nil && c.sess == token.sess &&
 		c.generation == token.generation && c.transport.transport == token.transport.transport &&
 		c.transport.incarnation == token.transport.incarnation && c.lease == token.lease
 }
@@ -220,6 +220,7 @@ func (ac *attachedClient) beginAttachmentEffect(token attachmentConnectionToken)
 // after Welcome has completed so a replacement blocked behind that send can
 // publish before readiness or first paint.
 func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
+	//nolint:contextcheck // This compatibility wrapper deliberately delegates with a fresh context; cancellable callers use the context variant below.
 	return ac.beginCurrentAttachmentEffectContext(context.Background(), sess, tr)
 }
 
