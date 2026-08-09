@@ -119,6 +119,8 @@ func marshalCommittedRouteIdentityFields(w *payloadWriter, identity CommittedRou
 	w.putBool(identity.Ephemeral)
 }
 
+// marshalCommittedIdentitySection shares the standalone identity body and
+// validates embedded identities before Welcome serialization.
 func marshalCommittedIdentitySection(w *payloadWriter, identity *CommittedRouteIdentity) bool {
 	w.putBool(identity != nil)
 	if identity == nil {

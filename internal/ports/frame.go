@@ -41,16 +41,18 @@ const (
 	MsgOutputResetRequest   MsgType = 13
 	MsgRemotePreviewRequest MsgType = 15
 
-	MsgWelcome                MsgType = 16
-	MsgError                  MsgType = 17
-	MsgOutput                 MsgType = 18
-	MsgDetached               MsgType = 19
-	MsgPong                   MsgType = 20
-	MsgSessions               MsgType = 21
-	MsgCommandResult          MsgType = 22
-	MsgAttachTarget           MsgType = 25
-	MsgRemotePreviewResponse  MsgType = 26
-	MsgNavigationAction       MsgType = 23
+	MsgWelcome               MsgType = 16
+	MsgError                 MsgType = 17
+	MsgOutput                MsgType = 18
+	MsgDetached              MsgType = 19
+	MsgPong                  MsgType = 20
+	MsgSessions              MsgType = 21
+	MsgCommandResult         MsgType = 22
+	MsgNavigationAction      MsgType = 23
+	MsgAttachTarget          MsgType = 25
+	MsgRemotePreviewResponse MsgType = 26
+	// Route navigation metadata/control frames occupy the post-26 server range;
+	// 14 and 24 remain reserved for compatibility with older peers.
 	MsgCommittedRouteIdentity MsgType = 27
 	MsgRecentRouteSnapshot    MsgType = 28
 	MsgNavigateRecentRoute    MsgType = 29

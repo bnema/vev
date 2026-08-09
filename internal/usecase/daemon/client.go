@@ -217,7 +217,9 @@ func (ac *attachedClient) currentAttachmentSession() *session {
 	return ac.sess.Get()
 }
 
-// currentSession narrows the attachment to its owning local session.
+// currentSession is the legacy local-session shorthand used by input and
+// overlay paths; attachment-boundary code uses currentAttachmentSession to
+// make ownership checks explicit.
 func (ac *attachedClient) currentSession() *session {
 	return ac.currentAttachmentSession()
 }
