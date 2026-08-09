@@ -125,6 +125,17 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		if _, derr := ports.UnmarshalOutputResetRequest(f.Payload); derr == nil {
 			d.resetOutput(token)
 		}
+	case ports.MsgRecentRouteSnapshot:
+		snapshot, derr := ports.UnmarshalRecentRouteSnapshot(f.Payload)
+		if derr == nil {
+			token.ac.setRouteSnapshot(snapshot)
+		} else {
+			d.log.Warn("malformed recent route snapshot", "err", derr)
+		}
+	case ports.MsgRouteNavigationFailure:
+		if _, derr := ports.UnmarshalRouteNavigationFailure(f.Payload); derr != nil {
+			d.log.Warn("malformed route navigation failure", "err", derr)
+		}
 	case ports.MsgCommand:
 		request, derr := ports.UnmarshalCommandRequest(f.Payload)
 		if derr != nil {

@@ -36,3 +36,13 @@ objection with its resolution and acceptance check.
 - **Snapshot leakage:** `RecentRouteEntry` contains only opaque key/generation and display fields. Dialers, requests, resume credentials, and exact targets remain in private `routeRecord` values and are copied out only through navigation lookup.
 - **Transactional navigation:** connector failure, stale key/generation, or committed-target mismatch returns before ledger commit; origin is restored from the selected private record rather than connector input.
 - **Bounds/strictness:** snapshot entry count, labels, refs, closed enums, bool encodings, truncation, trailing bytes, and protocol-version peeking are covered by tests; focused race tests pass.
+
+## Follow-up fixes
+
+The implementation now commits a successful Welcome into the private ledger before
+raw-mode entry, publishes a complete snapshot frame, and accepts/validates that
+frame on the daemon attachment. The active route is metadata-only, the private
+history cap is 20, origin keys distinguish daemon endpoints, route labels reject
+invalid UTF-8/control text, navigation actions carry the snapshot generation,
+active selection is a no-op, and failed transitions invoke the prior-route
+restore hook before returning failure.

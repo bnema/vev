@@ -99,6 +99,8 @@ type attachedClient struct {
 	previousSession Guarded[domain.SessionID]
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
+	routeMu         sync.RWMutex
+	routeSnapshot   ports.RecentRouteSnapshot
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -353,6 +355,20 @@ func (ac *attachedClient) transportIs(tr ports.Transport) bool {
 
 func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
+}
+
+func (ac *attachedClient) setRouteSnapshot(snapshot ports.RecentRouteSnapshot) {
+	ac.routeMu.Lock()
+	ac.routeSnapshot = snapshot
+	ac.routeMu.Unlock()
+}
+
+func (ac *attachedClient) routeSnapshotCopy() ports.RecentRouteSnapshot {
+	ac.routeMu.RLock()
+	defer ac.routeMu.RUnlock()
+	snapshot := ac.routeSnapshot
+	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
+	return snapshot
 }
 
 func (ac *attachedClient) ackOutputState(epoch, state uint64) {

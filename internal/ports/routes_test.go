@@ -89,7 +89,6 @@ func testRouteSnapshot() RecentRouteSnapshot {
 		Previous:   RouteRef{Key: 12, Generation: 4},
 		Home:       RouteRef{Key: 11, Generation: 3},
 		Entries: []RecentRouteEntry{
-			{Key: 11, Generation: 3, Name: "work", Kind: RouteKindLocal, Reachability: RouteReachabilityReachable},
 			{Key: 12, Generation: 4, Name: "logs", HostLabel: "edge", Kind: RouteKindRemote, Attention: true, Reachability: RouteReachabilityUnknown},
 		},
 	}
@@ -110,7 +109,12 @@ func TestRecentRouteSnapshotCodecRoundTripAndBounds(t *testing.T) {
 	}
 
 	invalid := want
-	invalid.Active = RouteRef{Key: 99, Generation: 99}
+	invalid.Previous = RouteRef{Key: 99, Generation: 99}
+	_, err = MarshalRecentRouteSnapshot(invalid)
+	require.ErrorIs(t, err, ErrInvalidRouteWire)
+
+	invalid = want
+	invalid.Entries = append(invalid.Entries, RecentRouteEntry{Key: 11, Generation: 3, Name: "work", Kind: RouteKindLocal})
 	_, err = MarshalRecentRouteSnapshot(invalid)
 	require.ErrorIs(t, err, ErrInvalidRouteWire)
 
@@ -128,8 +132,18 @@ func TestRecentRouteSnapshotCodecRoundTripAndBounds(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRouteWire)
 }
 
+func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {
+	for _, value := range []string{"line\nfeed", "\x1b[31mred", string([]byte{0xff, 0xfe})} {
+		_, err := MarshalRecentRouteSnapshot(RecentRouteSnapshot{
+			Generation: 1,
+			Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Name: value, Kind: RouteKindLocal}},
+		})
+		require.Error(t, err)
+	}
+}
+
 func TestRouteActionAndFailureCodecsAreBounded(t *testing.T) {
-	action := RouteNavigationAction{Key: 7, Generation: 8}
+	action := RouteNavigationAction{SnapshotGeneration: 9, Key: 7, Generation: 8}
 	encoded, err := MarshalRouteNavigationAction(action)
 	require.NoError(t, err)
 	got, err := UnmarshalRouteNavigationAction(encoded)
@@ -143,7 +157,7 @@ func TestRouteActionAndFailureCodecsAreBounded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, failure, gotFailure)
 
-	for _, invalid := range []RouteNavigationAction{{}, {Key: 1}, {Generation: 1}} {
+	for _, invalid := range []RouteNavigationAction{{}, {SnapshotGeneration: 1, Key: 1}, {SnapshotGeneration: 1, Generation: 1}, {Key: 1, Generation: 1}} {
 		_, err := MarshalRouteNavigationAction(invalid)
 		require.Error(t, err)
 	}

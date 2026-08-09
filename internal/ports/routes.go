@@ -3,6 +3,8 @@ package ports
 import (
 	"errors"
 	"fmt"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -83,6 +85,27 @@ func (r RouteReachability) Validate() error {
 	return nil
 }
 
+// ValidateRouteLabel rejects malformed or terminal-control text before it can
+// enter a daemon-rendered route snapshot. Empty labels are allowed only when
+// the caller explicitly marks them optional.
+func ValidateRouteLabel(value string, allowEmpty bool) error {
+	if !allowEmpty && value == "" {
+		return errors.New("route label is empty")
+	}
+	if len(value) > RouteLabelMaxBytes {
+		return errors.New("route label is too long")
+	}
+	if !utf8.ValidString(value) {
+		return errors.New("route label is not valid UTF-8")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return errors.New("route label contains a control character")
+		}
+	}
+	return nil
+}
+
 // ExactSessionTarget is the daemon-neutral identity required to attach to a
 // specific session lifecycle. The transport endpoint is deliberately absent:
 // the selected route's dialer owns that boundary.
@@ -159,11 +182,12 @@ type RecentRouteSnapshot struct {
 	Entries    []RecentRouteEntry
 }
 
-// RouteNavigationAction asks the client to resolve one captured route key and
-// generation. It carries no session name, endpoint, or credential.
+// RouteNavigationAction asks the client to resolve one entry from a specific
+// complete snapshot. It carries no session name, endpoint, or credential.
 type RouteNavigationAction struct {
-	Key        uint64
-	Generation uint64
+	SnapshotGeneration uint64
+	Key                uint64
+	Generation         uint64
 }
 
 // RouteNavigationFailure is a bounded taxonomy for a rejected or stale route
@@ -195,7 +219,8 @@ func (c RouteFailureCode) valid() bool {
 
 const (
 	// RouteSnapshotMaxEntries bounds one immutable publication and the amount
-	// of work a receiver performs before returning to its transport loop.
+	// of work a receiver performs before returning to its transport loop. The
+	// private client history may use a smaller product cap.
 	RouteSnapshotMaxEntries = 32
 	RouteLabelMaxBytes      = 128
 )

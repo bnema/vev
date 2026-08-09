@@ -414,6 +414,46 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	}
 }
 
+func TestAttachPublishesCommittedRouteSnapshot(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	lifecycle := domain.SessionLifecycleID{9, 8, 7}
+	tr := &recordingTransport{recvs: []recvItem{
+		{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID:   "s1",
+			SessionName: "main",
+			CommittedIdentity: &ports.CommittedRouteIdentity{
+				Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "main"},
+			},
+		}))},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+
+	err := runTestClient(context.Background(), attachTestDependencies(tr, term, realClock{}), client.AttachRequest{
+		Intent:      ports.IntentAttach,
+		SessionName: "main",
+		Origin:      ports.RouteOriginLocal,
+		OriginKey:   "local",
+	})
+	require.NoError(t, err)
+
+	var snapshot ports.RecentRouteSnapshot
+	found := false
+	for _, frame := range tr.sends {
+		if frame.Type != ports.MsgRecentRouteSnapshot {
+			continue
+		}
+		var err error
+		snapshot, err = ports.UnmarshalRecentRouteSnapshot(frame.Payload)
+		require.NoError(t, err)
+		found = true
+	}
+	require.True(t, found, "successful Welcome must publish a route snapshot")
+	require.NotZero(t, snapshot.Generation)
+	require.NotZero(t, snapshot.Active.Key)
+	require.Empty(t, snapshot.Entries, "the active route is metadata-only")
+}
+
 func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()

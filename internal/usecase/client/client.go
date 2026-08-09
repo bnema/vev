@@ -165,7 +165,8 @@ type Dependencies struct {
 	Remote bool
 	// Origin is explicit composition metadata for the initial route. A zero
 	// value is normalized to local for direct package callers and old tests.
-	Origin ports.RouteOrigin
+	Origin    ports.RouteOrigin
+	OriginKey string
 }
 
 // AttachRequest identifies the session for one client run. Remote is
@@ -176,6 +177,7 @@ type AttachRequest struct {
 	SessionName            string
 	Remote                 bool
 	Origin                 ports.RouteOrigin
+	OriginKey              string
 	RemoteTarget           *domain.RemoteSessionTarget
 	ExactTarget            *ports.ExactSessionTarget
 	EnvironmentPolicy      ports.EnvironmentPolicy
@@ -248,6 +250,11 @@ func validateAttachRequest(request AttachRequest) error {
 	if request.Origin != 0 {
 		if err := request.Origin.Validate(); err != nil {
 			return fmt.Errorf("vev: invalid route origin: %w", err)
+		}
+	}
+	if request.OriginKey != "" {
+		if err := ports.ValidateRouteLabel(request.OriginKey, false); err != nil {
+			return fmt.Errorf("vev: invalid route origin key: %w", err)
 		}
 	}
 	if request.ExactTarget != nil {
@@ -484,6 +491,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		result := (&attachAttempt{
 			runner:                 r,
+			dialer:                 dialer,
 			connection:             connection,
 			remote:                 remote,
 			handshakeCtx:           handshakeCtx,
@@ -505,18 +513,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
-		if result.welcomed && result.err == nil && result.committedIdentity != nil && r.ledger != nil {
-			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != result.committedIdentity.Target {
-				return errRouteTargetChanged
-			}
-			if attemptRequest.RemoteTarget != nil && (attemptRequest.RemoteTarget.LifecycleID != result.committedIdentity.Target.LifecycleID || attemptRequest.RemoteTarget.SessionName != result.committedIdentity.Target.SessionName) {
-				return errRouteTargetChanged
-			}
-			home := r.ledger.homeRef().Key == 0
-			if _, err := r.ledger.commit(routeCandidateForAttach(attemptRequest, *result.committedIdentity, dialer, result.resumeToken, home)); err != nil {
-				return fmt.Errorf("vev: committing route identity: %w", err)
-			}
-		}
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -784,6 +780,7 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 
 type attachAttempt struct {
 	runner                 *Runner
+	dialer                 ports.Dialer
 	connection             *SessionConnection
 	remote                 bool
 	transport              ports.Transport
@@ -998,6 +995,27 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return handshakeFailure("validating welcome", err)
 	}
 	welcomedResult := func(err error) attachResult { return result(true, err) }
+	if committedIdentity != nil && a.runner.ledger != nil {
+		if request.ExactTarget != nil && *request.ExactTarget != committedIdentity.Target {
+			return welcomedResult(errRouteTargetChanged)
+		}
+		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
+			return welcomedResult(errRouteTargetChanged)
+		}
+		home := a.runner.ledger.homeRef().Key == 0
+		if _, err := a.runner.ledger.commit(routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken, home)); err != nil {
+			return welcomedResult(fmt.Errorf("vev: committing route identity: %w", err))
+		}
+		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		if err != nil {
+			return welcomedResult(fmt.Errorf("vev: encoding route snapshot: %w", err))
+		}
+		if err := sendHandshake(func() error {
+			return transport.Send(ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload})
+		}); err != nil {
+			return welcomedResult(fmt.Errorf("vev: publishing route snapshot: %w", err))
+		}
+	}
 
 	// 3. Enter raw mode after Welcome; Run owns restoration.
 	if err := enterRaw(); err != nil {
@@ -1209,6 +1227,22 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return context.Canceled
 		}
 	}
+	sendRouteFailure := func(action ports.RouteNavigationAction, code ports.RouteFailureCode) error {
+		payload, err := ports.MarshalRouteNavigationFailure(ports.RouteNavigationFailure{
+			Key:        action.Key,
+			Generation: action.Generation,
+			Code:       code,
+		})
+		if err != nil {
+			return err
+		}
+		select {
+		case sendCh <- ports.Frame{Type: ports.MsgRouteNavigationFailure, Payload: payload}:
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
 	dismissReconnect := func() error {
 		if !reconnect.showing {
 			return nil
@@ -1372,6 +1406,41 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				navigation := welcomedResult(nil)
 				navigation.action = action
 				return navigation
+			case ports.MsgNavigateRecentRoute:
+				action, derr := ports.UnmarshalRouteNavigationAction(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding route navigation action: %w", derr))
+				}
+				if a.runner.ledger == nil {
+					if ferr := sendRouteFailure(action, ports.RouteFailureUnavailable); ferr != nil {
+						return welcomedResult(ferr)
+					}
+					continue
+				}
+				_, valid, noOp := a.runner.ledger.navigationRecord(action)
+				if !valid {
+					if ferr := sendRouteFailure(action, ports.RouteFailureStaleSelection); ferr != nil {
+						return welcomedResult(ferr)
+					}
+					continue
+				}
+				if noOp {
+					continue
+				}
+				// Stack 2 validates and rejects stale actions without changing
+				// command authority. The live handoff connector is installed by the
+				// atomic Stack 3 cutover.
+				if ferr := sendRouteFailure(action, ports.RouteFailureUnavailable); ferr != nil {
+					return welcomedResult(ferr)
+				}
+			case ports.MsgCommittedRouteIdentity:
+				if _, derr := ports.UnmarshalCommittedRouteIdentity(r.frame.Payload); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding committed route identity: %w", derr))
+				}
+			case ports.MsgRouteNavigationFailure:
+				if _, derr := ports.UnmarshalRouteNavigationFailure(r.frame.Payload); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding route navigation failure: %w", derr))
+				}
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {

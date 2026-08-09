@@ -45,8 +45,12 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	}
 
 	snapshot := ledger.snapshot()
-	require.Len(t, snapshot.Entries, maxRouteLedgerEntries)
+	require.Len(t, ledger.entries, maxRouteLedgerEntries)
+	require.Len(t, snapshot.Entries, maxRouteLedgerEntries-1)
 	require.Equal(t, uint64(keys[len(keys)-1]), snapshot.Active.Key)
+	for _, entry := range snapshot.Entries {
+		require.NotEqual(t, snapshot.Active, ports.RouteRef{Key: entry.Key, Generation: entry.Generation})
+	}
 	require.Equal(t, uint64(keys[len(keys)-2]), snapshot.Previous.Key)
 	require.Equal(t, uint64(keys[0]), snapshot.Home.Key, "home is retained when older entries are evicted")
 
@@ -91,10 +95,12 @@ func TestRouteLedgerDiscoveryCyclesAreIndependent(t *testing.T) {
 }
 
 type routeTestConnector struct {
-	resumeErr   error
-	attachErr   error
-	resumeCalls int
-	attachCalls int
+	resumeErr    error
+	attachErr    error
+	resumeCalls  int
+	attachCalls  int
+	restoreCalls int
+	restoreErr   error
 }
 
 func (c *routeTestConnector) Resume(context.Context, routeRecord) (routeTransitionCommit, error) {
@@ -103,6 +109,11 @@ func (c *routeTestConnector) Resume(context.Context, routeRecord) (routeTransiti
 		return routeTransitionCommit{}, c.resumeErr
 	}
 	return routeTransitionCommit{}, errors.New("unexpected resume success")
+}
+
+func (c *routeTestConnector) Restore(_ context.Context, _ routeRecord) error {
+	c.restoreCalls++
+	return c.restoreErr
 }
 
 func (c *routeTestConnector) Attach(_ context.Context, record routeRecord) (routeTransitionCommit, error) {
@@ -124,19 +135,25 @@ func (c *routeTestConnector) Attach(_ context.Context, record routeRecord) (rout
 func TestRouteLedgerNavigateResumesThenFallsBackAndRestoresOrigin(t *testing.T) {
 	ledger := newRouteLedger()
 	candidate := routeTestCandidate(2, ports.RouteOriginDiscovery)
+	candidate.originKey = "daemon-discovered"
 	candidate.resumeToken = 77
 	identity, err := ledger.commit(candidate)
 	require.NoError(t, err)
+	_, err = ledger.commit(routeTestCandidate(4, ports.RouteOriginLocal))
+	require.NoError(t, err)
 
 	connector := &routeTestConnector{resumeErr: errRouteResumeUnavailable}
-	err = ledger.navigate(context.Background(), ports.RouteNavigationAction{Key: uint64(identity.key), Generation: uint64(identity.generation)}, connector)
+	action := identity.wireNavigationAction(routeGeneration(ledger.snapshot().Generation))
+	err = ledger.navigate(context.Background(), action, connector)
 	require.NoError(t, err)
 	require.Equal(t, 1, connector.resumeCalls)
 	require.Equal(t, 1, connector.attachCalls)
+	require.Zero(t, connector.restoreCalls)
 
 	active, ok := ledger.lookup(ledger.activeRef())
 	require.True(t, ok)
 	require.Equal(t, ports.RouteOriginDiscovery, active.origin)
+	require.Equal(t, "daemon-discovered", active.originKey)
 	require.Equal(t, ports.RouteOriginDiscovery, active.request.Origin)
 	require.Equal(t, candidate.target, active.target)
 	require.Greater(t, active.identity.generation, identity.generation)
@@ -146,20 +163,43 @@ func TestRouteLedgerNavigateIsTransactionalOnFailureOrTargetChange(t *testing.T)
 	ledger := newRouteLedger()
 	identity, err := ledger.commit(routeTestCandidate(3, ports.RouteOriginLocal))
 	require.NoError(t, err)
+	_, err = ledger.commit(routeTestCandidate(5, ports.RouteOriginLocal))
+	require.NoError(t, err)
 	before := ledger.snapshot()
+	action := identity.wireNavigationAction(routeGeneration(before.Generation))
 
 	connector := &routeTestConnector{attachErr: errors.New("offline")}
-	err = ledger.navigate(context.Background(), identity.wireNavigationAction(), connector)
+	err = ledger.navigate(context.Background(), action, connector)
 	require.Error(t, err)
 	require.Equal(t, before, ledger.snapshot())
+	require.Equal(t, 1, connector.restoreCalls)
 
 	connector = &routeTestConnector{}
-	connector.attachErr = nil
 	// Force a mismatched committed target through a small wrapper.
 	mismatch := mismatchingRouteConnector{routeTestConnector: connector}
-	err = ledger.navigate(context.Background(), identity.wireNavigationAction(), mismatch)
+	err = ledger.navigate(context.Background(), action, mismatch)
 	require.ErrorIs(t, err, errRouteTargetChanged)
 	require.Equal(t, before, ledger.snapshot())
+	require.Equal(t, 1, connector.restoreCalls)
+}
+
+func TestRouteLedgerNavigationRejectsStaleActionsAndActiveNoOp(t *testing.T) {
+	ledger := newRouteLedger()
+	active, err := ledger.commit(routeTestCandidate(6, ports.RouteOriginLocal))
+	require.NoError(t, err)
+	firstSnapshot := ledger.snapshot()
+	before := ledger.snapshot()
+
+	require.NoError(t, ledger.navigate(context.Background(), active.wireNavigationAction(routeGeneration(firstSnapshot.Generation)), nil))
+	require.Equal(t, before, ledger.snapshot())
+
+	_, err = ledger.commit(routeTestCandidate(7, ports.RouteOriginLocal))
+	require.NoError(t, err)
+	stale := active.wireNavigationAction(routeGeneration(firstSnapshot.Generation))
+	connector := &routeTestConnector{}
+	require.ErrorIs(t, ledger.navigate(context.Background(), stale, connector), errRouteStaleSelection)
+	require.Zero(t, connector.resumeCalls)
+	require.Zero(t, connector.attachCalls)
 }
 
 type mismatchingRouteConnector struct{ *routeTestConnector }
@@ -171,8 +211,8 @@ func (c mismatchingRouteConnector) Attach(_ context.Context, record routeRecord)
 	}, nil
 }
 
-func (i routeIdentity) wireNavigationAction() ports.RouteNavigationAction {
-	return ports.RouteNavigationAction{Key: uint64(i.key), Generation: uint64(i.generation)}
+func (i routeIdentity) wireNavigationAction(snapshotGeneration routeGeneration) ports.RouteNavigationAction {
+	return ports.RouteNavigationAction{SnapshotGeneration: uint64(snapshotGeneration), Key: uint64(i.key), Generation: uint64(i.generation)}
 }
 
 func TestRouteLedgerConcurrentSnapshotsAndCommits(t *testing.T) {
@@ -190,5 +230,21 @@ func TestRouteLedgerConcurrentSnapshotsAndCommits(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	require.LessOrEqual(t, len(ledger.snapshot().Entries), maxRouteLedgerEntries)
+	require.LessOrEqual(t, len(ledger.snapshot().Entries), maxRouteLedgerEntries-1)
+}
+
+func TestRouteLedgerSeparatesRemoteDaemonOrigins(t *testing.T) {
+	ledger := newRouteLedger()
+	firstCandidate := routeTestCandidate(40, ports.RouteOriginRemote)
+	firstCandidate.originKey = "daemon-a"
+	secondCandidate := firstCandidate
+	secondCandidate.originKey = "daemon-b"
+
+	first, err := ledger.commit(firstCandidate)
+	require.NoError(t, err)
+	second, err := ledger.commit(secondCandidate)
+	require.NoError(t, err)
+
+	require.NotEqual(t, first.key, second.key)
+	require.Len(t, ledger.snapshot().Entries, 1)
 }

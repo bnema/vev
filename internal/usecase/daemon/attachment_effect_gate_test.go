@@ -667,6 +667,30 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 	}
 }
 
+func TestAttachedRouteSnapshotIsAcceptedAsAnAttachmentValue(t *testing.T) {
+	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+	transport := &closeTrackingTransport{}
+	ac.replaceTransport(transport)
+	rc := d.attachCoordinator(source, nil, ac, true)
+	token := source.attachmentToken(ac, transport)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+
+	snapshot := ports.RecentRouteSnapshot{
+		Generation: 4,
+		Active:     ports.RouteRef{Key: 8, Generation: 4},
+		Home:       ports.RouteRef{Key: 8, Generation: 4},
+		Entries: []ports.RecentRouteEntry{{
+			Key: 7, Generation: 3, Name: "previous", Kind: ports.RouteKindLocal,
+		}},
+	}
+	payload, err := ports.MarshalRecentRouteSnapshot(snapshot)
+	require.NoError(t, err)
+
+	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}))
+	require.Equal(t, snapshot, ac.routeSnapshotCopy())
+}
+
 func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) {
 	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
 	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{

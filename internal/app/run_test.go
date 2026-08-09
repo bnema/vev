@@ -959,11 +959,11 @@ func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T)
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			if deps.Remote {
 				remoteCalls++
-				require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "picked", Remote: true, Origin: ports.RouteOriginDiscovery, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, request)
+				require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "picked", Remote: true, Origin: ports.RouteOriginDiscovery, OriginKey: "selected.example", EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, request)
 				return nil
 			}
 			localCalls++
-			require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", Origin: ports.RouteOriginLocal}, request)
+			require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", Origin: ports.RouteOriginLocal, OriginKey: "local"}, request)
 			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
 		},
 	})

@@ -8,11 +8,8 @@ import (
 var ErrInvalidRouteWire = errors.New("invalid route wire message")
 
 func validateRouteString(value, field string, allowEmpty bool) error {
-	if !allowEmpty && value == "" {
-		return fmt.Errorf("%s is empty", field)
-	}
-	if len(value) > RouteLabelMaxBytes {
-		return fmt.Errorf("%s is too long", field)
+	if err := ValidateRouteLabel(value, allowEmpty); err != nil {
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
 }
@@ -237,6 +234,9 @@ func validateRecentRouteSnapshot(snapshot RecentRouteSnapshot) error {
 	}
 	refs := make(map[RouteRef]struct{}, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
+		if snapshot.Active == (RouteRef{Key: entry.Key, Generation: entry.Generation}) {
+			return fmt.Errorf("%w: active route must be metadata-only", ErrInvalidRouteWire)
+		}
 		if err := validateRecentRouteEntry(entry); err != nil {
 			return err
 		}
@@ -246,12 +246,18 @@ func validateRecentRouteSnapshot(snapshot RecentRouteSnapshot) error {
 		}
 		refs[ref] = struct{}{}
 	}
-	for _, ref := range []RouteRef{snapshot.Active, snapshot.Previous, snapshot.Home} {
-		if ref.empty() {
+	for name, ref := range map[string]RouteRef{
+		"active":   snapshot.Active,
+		"previous": snapshot.Previous,
+		"home":     snapshot.Home,
+	} {
+		if ref.empty() || ref == snapshot.Active {
+			// Active is metadata-only and intentionally excluded from the
+			// recent display entries. Home may point at active as well.
 			continue
 		}
 		if _, exists := refs[ref]; !exists {
-			return fmt.Errorf("%w: route reference is absent from snapshot", ErrInvalidRouteWire)
+			return fmt.Errorf("%w: %s route reference is absent from snapshot", ErrInvalidRouteWire, name)
 		}
 	}
 	return nil
@@ -357,7 +363,7 @@ func UnmarshalRecentRouteSnapshot(b []byte) (RecentRouteSnapshot, error) {
 }
 
 func validateRouteNavigationAction(action RouteNavigationAction) error {
-	if action.Key == 0 || action.Generation == 0 {
+	if action.SnapshotGeneration == 0 || action.Key == 0 || action.Generation == 0 {
 		return fmt.Errorf("%w: navigation action identity is zero", ErrInvalidRouteWire)
 	}
 	return nil
@@ -368,6 +374,7 @@ func MarshalRouteNavigationAction(action RouteNavigationAction) ([]byte, error) 
 		return nil, err
 	}
 	w := payloadWriter{}
+	w.putUint64(action.SnapshotGeneration)
 	w.putUint64(action.Key)
 	w.putUint64(action.Generation)
 	return w.b, nil
@@ -377,6 +384,9 @@ func UnmarshalRouteNavigationAction(b []byte) (RouteNavigationAction, error) {
 	r := payloadReader{b: b}
 	var action RouteNavigationAction
 	var err error
+	if action.SnapshotGeneration, err = r.getUint64(); err != nil {
+		return RouteNavigationAction{}, err
+	}
 	if action.Key, err = r.getUint64(); err != nil {
 		return RouteNavigationAction{}, err
 	}
