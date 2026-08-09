@@ -1,7 +1,7 @@
 # VT extraction preparation checkpoint
 
 The standalone module owns the frontend-neutral VT engine and ANSI renderer;
-vev consumes the released `github.com/bnema/vev-vt v0.1.0` module. VT behavior,
+vev consumes the released `github.com/bnema/vev-vt v0.2.1` module. VT behavior,
 renderer output, wire bytes, transport, ACK/rebase, and cursor-tail policy remain
 unchanged.
 
