@@ -184,13 +184,24 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 			effect.End()
 		}
 		if identityErr != nil {
-			d.log.Warn("publishing committed route identity failed", "err", identityErr, "action", req.action)
+			d.abortPublishedAttachmentTransition(result)
+			return attachmentTransitionResult{}, identityErr
 		}
 	}
 	if result.sourceGeometrySession != nil {
 		d.recalculateSessionGeometryAndInvalidateAsync(result.sourceGeometrySession, "attachment_transition.go")
 	}
 	return result, nil
+}
+
+// abortPublishedAttachmentTransition tears down the newly published link before
+// a post-publication control failure escapes to callers. The transition result is
+// deliberately not handed back because its target membership is no longer valid.
+func (d *Daemon) abortPublishedAttachmentTransition(result attachmentTransitionResult) {
+	if result.published.ac != nil && result.published.transport.transport != nil {
+		d.clientGoneWithoutNotice(result.published.sess, result.published.ac, result.published.transport.transport, true)
+	}
+	d.deferAttachmentTransitionCleanups(result)
 }
 
 func (d *Daemon) deferAttachmentTransitionCleanups(result attachmentTransitionResult) {

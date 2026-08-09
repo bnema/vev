@@ -1403,6 +1403,9 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	if h.Intent == ports.IntentResume && h.ResumeToken == 0 {
 		return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is required"}
 	}
+	if h.ExactTarget != nil && h.ResumeToken == 0 && h.Name != h.ExactTarget.SessionName {
+		return nil, nil, &protoErr{ports.ErrNoSuchSession, "exact session target name mismatch"}
+	}
 	if h.RemoteTarget != nil && h.ResumeToken == 0 {
 		return d.routeRemoteTargetWithContext(ctx, h, tr)
 	}

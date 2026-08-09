@@ -1293,6 +1293,9 @@ func UnmarshalAck(b []byte) (Ack, error) {
 
 // MarshalWelcome encodes m into a Welcome message payload.
 func MarshalWelcome(m Welcome) []byte {
+	if m.CommittedIdentity != nil && (m.SessionName != m.CommittedIdentity.Target.SessionName || m.Ephemeral != m.CommittedIdentity.Ephemeral) {
+		return nil
+	}
 	w := payloadWriter{}
 	w.putString(m.SessionID)
 	w.putString(m.SessionName)

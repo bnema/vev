@@ -490,6 +490,7 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	localLifecycle := domain.SessionLifecycleID{1, 1, 1}
 	remoteLifecycle := domain.SessionLifecycleID{2, 2, 2}
 	newLifecycle := domain.SessionLifecycleID{3, 3, 3}
+	remoteNewLifecycle := domain.SessionLifecycleID{4, 4, 4}
 	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) ports.Frame {
 		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
 			SessionID:    name + "-id",
@@ -526,7 +527,7 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	}}
 	local3 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("test", localLifecycle, 11)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+		{f: frameOf(ports.MsgNavigationAction, ports.MarshalNavigationAction(ports.NavigationBack))},
 	}}
 	remote1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("remote-manual", remoteLifecycle, 22)},
@@ -534,10 +535,17 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	}}
 	remote2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("remote-manual", remoteLifecycle, 22)},
+		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(ports.CommittedRouteIdentity{
+			Target: ports.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"},
+		}))},
 		{f: frameOf(ports.MsgNavigationAction, ports.MarshalNavigationAction(ports.NavigationOpenHomePicker))},
 	}}
+	remote3 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("remote-new", remoteNewLifecycle, 22)},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
 	localDialer := &sequenceDialer{trs: []ports.Transport{local1, local2, local3}}
-	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote1, remote2}}
+	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote1, remote2, remote3}}
 
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
 	deps.AttachHandoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
@@ -556,6 +564,9 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	require.NoError(t, err)
 
 	require.Equal(t, ports.NavigationCapabilityHomePicker, remoteHello.NavigationCapabilities)
+	remoteNewHello := helloFromSend(t, remote3)
+	require.Equal(t, "remote-new", remoteNewHello.Name)
+	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"}, remoteNewHello.ExactTarget)
 }
 
 func mustMarshalCommittedIdentity(identity ports.CommittedRouteIdentity) []byte {

@@ -63,8 +63,7 @@ func TestWelcomeRejectsMismatchedCommittedIdentity(t *testing.T) {
 	identity := &CommittedRouteIdentity{Target: testExactTarget()}
 	payload := MarshalWelcome(Welcome{SessionID: "daemon-session", SessionName: "other", CommittedIdentity: identity})
 
-	_, err := UnmarshalWelcome(payload)
-	require.ErrorIs(t, err, ErrInvalidRouteWire)
+	require.Nil(t, payload)
 }
 
 func TestCommittedRouteIdentityCodec(t *testing.T) {

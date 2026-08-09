@@ -430,6 +430,29 @@ func TestMarshalWelcomeRejectsInvalidCommittedIdentity(t *testing.T) {
 	require.Nil(t, got)
 }
 
+func TestMarshalWelcomeRejectsCommittedIdentityMetadataMismatch(t *testing.T) {
+	base := Welcome{
+		SessionID:   "session",
+		SessionName: "work",
+		Ephemeral:   true,
+		CommittedIdentity: &CommittedRouteIdentity{
+			Target:    ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"},
+			Ephemeral: true,
+		},
+	}
+	for name, mutate := range map[string]func(*Welcome){
+		"session name": func(w *Welcome) { w.SessionName = "other" },
+		"ephemeral":    func(w *Welcome) { w.Ephemeral = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := base
+			mutate(&got)
+			require.Nil(t, MarshalWelcome(got))
+		})
+	}
+	require.NotNil(t, MarshalWelcome(base))
+}
+
 func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string

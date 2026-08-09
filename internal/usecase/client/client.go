@@ -525,6 +525,22 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if !result.transportClosed {
 			_ = connection.Close()
 		}
+		// Apply metadata from every processed frame before dispatching its
+		// navigation action. A committed identity can arrive immediately before
+		// a home/back action and must become the route request's authority first.
+		if result.resumeToken != 0 {
+			resumeToken = result.resumeToken
+		}
+		if result.sessionName != "" {
+			attemptRequest.SessionName = result.sessionName
+		}
+		if result.committedIdentity != nil {
+			identity := *result.committedIdentity
+			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != identity.Target {
+				attemptRequest.RemoteTarget = nil
+			}
+			attemptRequest.ExactTarget = &identity.Target
+		}
 		if result.routeAction != nil {
 			if r.ledger == nil {
 				return errors.New("vev: route ledger unavailable")
@@ -645,19 +661,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return clearErr
 			}
 			return nil
-		}
-		if result.resumeToken != 0 {
-			resumeToken = result.resumeToken
-		}
-		if result.sessionName != "" {
-			attemptRequest.SessionName = result.sessionName
-		}
-		if result.committedIdentity != nil {
-			identity := *result.committedIdentity
-			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != identity.Target {
-				attemptRequest.RemoteTarget = nil
-			}
-			attemptRequest.ExactTarget = &identity.Target
 		}
 		if result.welcomed {
 			homeNavigationPending = false
