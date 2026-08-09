@@ -483,6 +483,97 @@ func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	require.Equal(t, request.StartupOverlay, hello.StartupOverlay)
 }
 
+func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1, 1, 1}
+	remoteLifecycle := domain.SessionLifecycleID{2, 2, 2}
+	newLifecycle := domain.SessionLifecycleID{3, 3, 3}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID:    name + "-id",
+			SessionName:  name,
+			ResumeToken:  token,
+			Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{
+				Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
+			},
+		}))
+	}
+	remoteTarget := domain.RemoteSessionTarget{
+		Endpoint:      "remote",
+		DisplayOrigin: "remote",
+		LifecycleID:   remoteLifecycle,
+		SessionName:   "remote-manual",
+		LiveTabID:     "tab-1",
+	}
+	remoteHandoff := ports.AttachTarget{
+		Endpoint: "remote", Session: "remote-manual", Intent: ports.IntentAttach,
+		RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}
+
+	local1 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("test", localLifecycle, 11)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(remoteHandoff))},
+	}}
+	local2 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("test", localLifecycle, 11)},
+		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(ports.CommittedRouteIdentity{
+			Target: ports.ExactSessionTarget{LifecycleID: newLifecycle, SessionName: "new"},
+		}))},
+		{f: frameOf(ports.MsgNavigateRecentRoute, mustMarshalRouteAction(ports.RouteNavigationAction{SnapshotGeneration: 4, Key: 2, Generation: 2}))},
+	}}
+	local3 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("test", localLifecycle, 11)},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+	remote1 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("remote-manual", remoteLifecycle, 22)},
+		{f: frameOf(ports.MsgNavigateRecentRoute, mustMarshalRouteAction(ports.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}))},
+	}}
+	remote2 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("remote-manual", remoteLifecycle, 22)},
+		{f: frameOf(ports.MsgNavigationAction, ports.MarshalNavigationAction(ports.NavigationOpenHomePicker))},
+	}}
+	localDialer := &sequenceDialer{trs: []ports.Transport{local1, local2, local3}}
+	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote1, remote2}}
+
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.AttachHandoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+		require.Equal(t, remoteHandoff, target)
+		return remoteDialer, client.AttachRequest{
+			Intent: ports.IntentAttach, SessionName: target.Session, Remote: true,
+			Origin: ports.RouteOriginDiscovery, OriginKey: target.Endpoint,
+			RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}, nil
+	}
+
+	err := runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "test", Origin: ports.RouteOriginLocal, OriginKey: "local",
+	})
+	remoteHello := helloFromSend(t, remote2)
+	require.NoError(t, err)
+
+	require.Equal(t, ports.NavigationCapabilityHomePicker, remoteHello.NavigationCapabilities)
+}
+
+func mustMarshalCommittedIdentity(identity ports.CommittedRouteIdentity) []byte {
+	payload, err := ports.MarshalCommittedRouteIdentity(identity)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+func mustMarshalRouteAction(action ports.RouteNavigationAction) []byte {
+	payload, err := ports.MarshalRouteNavigationAction(action)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
 func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32

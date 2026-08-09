@@ -546,8 +546,14 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			} else {
 				attemptRequest.Intent = ports.IntentAttach
 			}
+			// Back is transient to the picker overlay. Re-derive the home-picker
+			// capability from the selected route instead of trusting request
+			// metadata, which may have been cleared after a daemon-side switch.
 			attemptRequest.StartupOverlay = ports.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
+			if homeRoute != nil && selection.selected.presentation.kind == ports.RouteKindRemote {
+				attemptRequest.NavigationCapabilities = ports.NavigationCapabilityHomePicker
+			}
 			resumeToken = selection.selected.resumeToken
 			routeNavigationPending = true
 			routeNavigationResumeFallback = selection.selected.resumeToken != 0

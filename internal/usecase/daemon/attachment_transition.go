@@ -167,17 +167,23 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	}
 
 	frozen, err := d.freezeAttachmentTransition(req, participants)
-	defer frozen.unfreeze()
 	if err != nil {
+		frozen.unfreeze()
 		return attachmentTransitionResult{}, err
 	}
 
 	result, err := d.publishAttachmentTransition(req)
+	frozen.unfreeze()
 	if err != nil {
 		return result, err
 	}
 	if result.published.ac != nil && result.published.ac.routeSnapshotCopy().Generation != 0 {
-		if identityErr := d.sendCommittedRouteIdentityForAttachment(result.published); identityErr != nil {
+		identityErr := errAttachmentTransition
+		if effect, admitted := result.published.ac.beginAttachmentEffect(result.published); admitted {
+			identityErr = d.sendCommittedRouteIdentityForAttachment(effect.connectionToken())
+			effect.End()
+		}
+		if identityErr != nil {
 			d.log.Warn("publishing committed route identity failed", "err", identityErr, "action", req.action)
 		}
 	}
