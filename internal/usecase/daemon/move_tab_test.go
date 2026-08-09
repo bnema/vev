@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestMoveTabPreservesWholeTabAndActivatesLogicalNeighbor(t *testing.T) {

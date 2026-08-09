@@ -1,7 +1,7 @@
 # VT extraction preparation checkpoint
 
-The extraction boundary is ready for standalone ownership. Compatibility
-coverage and the first dependency-inversion step are complete; VT behavior,
+The standalone module owns the frontend-neutral VT engine and ANSI renderer;
+vev consumes the released `github.com/bnema/vev-vt v0.1.0` module. VT behavior,
 renderer output, wire bytes, transport, ACK/rebase, and cursor-tail policy remain
 unchanged.
 
@@ -23,19 +23,17 @@ unchanged.
   retained in the implementation run rather than committed as machine-specific
   data.
 - `git diff --check` passes.
-- `pkg/vtcore` owns the frontend-neutral Cell, Style, RGB, Frame, Damage, and
-  RuneWidth model; `pkg/vt` has no production dependency on the ANSI package.
-- `pkg/ansi` owns ANSI output planning and encoding and consumes `vtcore`; the
-  old `pkg/renderer` path forwards to it without a second implementation owner.
-- A core-only frame consumer test builds ANSI output without importing the VT
-  parser.
+- The standalone module owns the frontend-neutral Cell, Style, RGB, Frame,
+  Damage, RuneWidth, VT parser, history, snapshots, and ANSI output packages.
+- The cutover has no local VT, core, ANSI, or renderer implementation owner;
+  vev resolves the released module through normal module download semantics.
+- A standalone core-only frame consumer test builds ANSI output without
+  importing the VT parser.
 
 ## Scope guard
 
-The production changes in this checkpoint only move model ownership behind an
-explicit core package and adapt ANSI delta commits to the core Frame API. No VT
-parser behavior, VTH3/VEVS bytes, or wire/protocol definition changed. The
-compatibility import path is a temporary cutover bridge; the standalone release
-must not retain it or a local module replacement. Any unrelated behavior, wire,
-or dependency change discovered while extracting the standalone module must be
-split into a separate plan.
+The vev cutover changes only module ownership and import paths; no VT parser
+behavior, VTH3/VEVS bytes, or wire/protocol definition changed. There is no
+committed `replace` directive or compatibility owner in vev. Any unrelated
+behavior, wire, or dependency change discovered while maintaining the standalone
+module must be split into a separate plan.

@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/pkg/vt"
+import vt "github.com/bnema/vev-vt"
 
 func newTestHistory(rows int) *vt.History { return vt.NewHistory(vt.HistoryConfig{MaxRows: rows}) }
 

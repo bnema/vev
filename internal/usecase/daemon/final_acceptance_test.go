@@ -3,10 +3,10 @@ package daemon
 import (
 	"testing"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 

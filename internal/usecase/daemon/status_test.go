@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -19,7 +20,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // stubClock returns timers whose channel never fires, so a scheduler under it

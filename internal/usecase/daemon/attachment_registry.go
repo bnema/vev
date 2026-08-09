@@ -5,8 +5,8 @@ import (
 	"cmp"
 	"slices"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // attachmentView is the mutable viewport owned by one attachment. Tab and

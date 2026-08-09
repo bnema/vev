@@ -7,10 +7,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	vt "github.com/bnema/vev-vt"
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
-	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 func TestMarshalSnapshotTailSelectsCanonicalEncoder(t *testing.T) {

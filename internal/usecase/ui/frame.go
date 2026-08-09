@@ -1,8 +1,8 @@
 package ui
 
 import (
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // VerticalAnchor controls which end of a source is retained when its height

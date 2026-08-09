@@ -5,10 +5,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/mouse"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestCopyMouseMapTopBarAndContent(t *testing.T) {

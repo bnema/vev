@@ -5,8 +5,8 @@ import (
 	"encoding/hex"
 	"testing"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 func TestVEVSV4GoldenRestoreCompatibility(t *testing.T) {

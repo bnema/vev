@@ -12,11 +12,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestCountingSnapshotRepositoryPublishCountsAndRetainsManifest(t *testing.T) {

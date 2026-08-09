@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
@@ -13,7 +14,6 @@ import (
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}

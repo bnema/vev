@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // snapshotQueueCapacity bounds retained immutable captures. A full queue never

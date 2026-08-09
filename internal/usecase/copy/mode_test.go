@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	vt "github.com/bnema/vev-vt"
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 

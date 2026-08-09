@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 func preflightSession(body []byte) error {

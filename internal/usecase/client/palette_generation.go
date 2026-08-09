@@ -3,8 +3,8 @@ package client
 import (
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // Palette queries always have a DECRQM boundary. The first marker drains

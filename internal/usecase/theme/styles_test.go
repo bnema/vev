@@ -3,7 +3,7 @@ package theme
 import (
 	"testing"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev-vt"
 	"github.com/stretchr/testify/require"
 )
 

@@ -6,8 +6,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 const (

@@ -5,9 +5,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // outputStateStream owns the terminal-output dependency chain for one
