@@ -181,6 +181,7 @@ type AttachRequest struct {
 	RemoteTarget           *domain.RemoteSessionTarget
 	ExactTarget            *ports.ExactSessionTarget
 	PreferredTabID         domain.TabStableID
+	RemoteOrigin           string
 	EnvironmentPolicy      ports.EnvironmentPolicy
 	NavigationCapabilities ports.NavigationCapabilities
 	StartupOverlay         ports.StartupOverlay
@@ -616,7 +617,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				enterHomePicker()
 				continue
 			case ports.NavigationBack:
-				if attemptRequest.StartupOverlay != ports.StartupOverlaySessionPicker || returnRoute == nil || attemptRequest.NavigationCapabilities&ports.NavigationCapabilityBack == 0 {
+				// As with Home, the daemon accepted Back in Hello before sending
+				// this action. The retained concrete route is the durable client
+				// prerequisite; request metadata may have been rebased meanwhile.
+				if returnRoute == nil {
 					return errors.New("vev: stale return navigation action")
 				}
 				route := *returnRoute
@@ -691,14 +695,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			restoreReturnRoute(route)
 			continue
 		}
-		if routeNavigationPending && routeNavigationResumeFallback {
-			var protocolErr *ProtocolError
-			if errors.As(result.err, &protocolErr) && (protocolErr.Code == ports.ErrNoSuchSession || protocolErr.Code == ports.ErrNoSuchTarget) {
-				attemptRequest.Intent = ports.IntentAttach
-				resumeToken = 0
-				routeNavigationResumeFallback = false
-				continue
-			}
+		if routeNavigationPending && routeNavigationResumeFallback && resumeNeedsExactAttach(result.err) {
+			attemptRequest.Intent = ports.IntentAttach
+			resumeToken = 0
+			routeNavigationResumeFallback = false
+			continue
 		}
 		if routeNavigationPending && routeNavigationFallback != nil {
 			if routeNavigationAction != nil {
@@ -715,14 +716,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			restoreReturnRoute(route)
 			continue
 		}
-		if returnResumeFallback {
-			var protocolErr *ProtocolError
-			if errors.As(result.err, &protocolErr) && (protocolErr.Code == ports.ErrNoSuchSession || protocolErr.Code == ports.ErrNoSuchTarget) {
-				attemptRequest.Intent = ports.IntentAttach
-				resumeToken = 0
-				returnResumeFallback = false
-				continue
-			}
+		if returnResumeFallback && resumeNeedsExactAttach(result.err) {
+			attemptRequest.Intent = ports.IntentAttach
+			resumeToken = 0
+			returnResumeFallback = false
+			continue
 		}
 		if returnNavigationPending && !returnResumeFallback && homeRoute != nil {
 			returnRoute = nil
@@ -1040,6 +1038,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		RemoteTarget:           request.RemoteTarget,
 		ExactTarget:            exactTarget,
 		PreferredTabID:         request.PreferredTabID,
+		RemoteOrigin:           request.RemoteOrigin,
 		EnvironmentPolicy:      request.EnvironmentPolicy,
 		NavigationCapabilities: request.NavigationCapabilities,
 		StartupOverlay:         request.StartupOverlay,

@@ -132,6 +132,7 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 	request.OriginKey = originKey
 	request.SessionName = identity.Target.SessionName
 	request.ExactTarget = &identity.Target
+	request.RemoteOrigin = hostLabel
 	// Discovery targets are point-in-time attach authority, including a live
 	// tab selector. Once Welcome commits an exact route, mutable tab memory is
 	// carried independently by PreferredTabID.

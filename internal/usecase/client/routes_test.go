@@ -33,6 +33,18 @@ func routeTestCandidate(index byte, origin ports.RouteOrigin) routeCandidate {
 	}
 }
 
+func TestRouteCandidateRetainsRemoteOriginWithoutDiscoveryTarget(t *testing.T) {
+	target := routeTestTarget(1)
+	candidate := routeCandidateForAttach(AttachRequest{
+		Intent: ports.IntentAttach, SessionName: target.SessionName, Remote: true,
+		Origin: ports.RouteOriginRemote, OriginKey: "remote",
+	}, ports.CommittedRouteIdentity{Target: target}, nil, 0)
+
+	require.Nil(t, candidate.request.RemoteTarget)
+	require.Equal(t, "remote", candidate.request.RemoteOrigin)
+	require.Equal(t, "remote", candidate.presentation.hostLabel)
+}
+
 func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	ledger := newRouteLedger()
 	var keys []routeKey

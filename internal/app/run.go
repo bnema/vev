@@ -855,6 +855,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	factory := deps.remoteDialerFactory
 	var remoteSelection *domain.RemoteSessionTarget
 	var remoteEnvironmentPolicy ports.EnvironmentPolicy
+	remoteDisplayOrigin := remoteTarget
 	routeOrigin := ports.RouteOriginLocal
 	routeOriginKey := "local"
 	if remoteTarget != "" {
@@ -894,6 +895,10 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			return nil, client.AttachRequest{}, err
 		}
 		policy := pickerEnvironmentPolicy(selection, target.EnvironmentPolicy)
+		displayOrigin := target.Endpoint
+		if selection != nil {
+			displayOrigin = selection.DisplayOrigin
+		}
 		return dialer, client.AttachRequest{
 			Intent:            target.Intent,
 			SessionName:       target.Session,
@@ -901,6 +906,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			Origin:            ports.RouteOriginDiscovery,
 			OriginKey:         target.Endpoint,
 			RemoteTarget:      selection,
+			RemoteOrigin:      displayOrigin,
 			EnvironmentPolicy: policy,
 		}, nil
 	}
@@ -934,6 +940,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Origin:            routeOrigin,
 				OriginKey:         routeOriginKey,
 				RemoteTarget:      remoteSelection,
+				RemoteOrigin:      remoteDisplayOrigin,
 				EnvironmentPolicy: remoteEnvironmentPolicy,
 			})
 		} else {
@@ -964,6 +971,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
 		remoteTarget = handoffErr.Target.Endpoint
+		remoteDisplayOrigin = remoteTarget
 		routeOrigin = ports.RouteOriginDiscovery
 		routeOriginKey = remoteTarget
 		name = handoffErr.Target.Session
@@ -972,6 +980,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if handoffErr.Target.RemoteTarget != nil {
 			copyTarget := *handoffErr.Target.RemoteTarget
 			remoteSelection = &copyTarget
+			remoteDisplayOrigin = copyTarget.DisplayOrigin
 		}
 		remoteEnvironmentPolicy = pickerEnvironmentPolicy(remoteSelection, handoffErr.Target.EnvironmentPolicy)
 		if modeErr != nil {

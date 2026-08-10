@@ -12,7 +12,7 @@ import (
 const HandshakeTimeout = 15 * time.Second
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 28
+const ProtocolVersion uint16 = 29
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.

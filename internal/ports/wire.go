@@ -169,6 +169,7 @@ type Hello struct {
 	// PreferredTabID is a client-owned route cursor. The daemon treats it as an
 	// attachment-local hint and falls back when the stable tab no longer exists.
 	PreferredTabID         domain.TabStableID
+	RemoteOrigin           string
 	EnvironmentPolicy      EnvironmentPolicy
 	NavigationCapabilities NavigationCapabilities
 	StartupOverlay         StartupOverlay
@@ -728,6 +729,11 @@ func ValidateHello(h Hello) error {
 			return ErrInvalidHello
 		}
 	}
+	if h.RemoteOrigin != "" {
+		if err := domain.ValidateRemoteDisplayOrigin(h.RemoteOrigin); err != nil {
+			return fmt.Errorf("%w: remote origin: %v", ErrInvalidHello, err)
+		}
+	}
 	if h.PreferredTabID != "" {
 		if h.Intent != IntentAttach && h.Intent != IntentResume {
 			return ErrInvalidHello
@@ -864,6 +870,7 @@ func MarshalHello(h Hello) []byte {
 	marshalRemoteTargetSection(&w, h.RemoteTarget, h.EnvironmentPolicy)
 	marshalExactTargetSection(&w, h.ExactTarget)
 	w.putString(string(h.PreferredTabID))
+	w.putString(h.RemoteOrigin)
 	w.putUint8(uint8(h.NavigationCapabilities))
 	w.putUint8(uint8(h.StartupOverlay))
 	return w.b
@@ -925,6 +932,9 @@ func preflightHello(b []byte) error {
 		return err
 	}
 	if err := skipExactTargetSection(&r); err != nil {
+		return err
+	}
+	if err := r.skipString(); err != nil {
 		return err
 	}
 	if err := r.skipString(); err != nil {
@@ -1019,6 +1029,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	h.PreferredTabID = domain.TabStableID(preferredTabID)
+	if h.RemoteOrigin, err = r.getString(); err != nil {
+		return Hello{}, err
+	}
 	capabilities, err := r.getUint8()
 	if err != nil {
 		return Hello{}, err
