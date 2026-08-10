@@ -210,10 +210,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	if detail == "" {
 		switch session.State {
 		case "up":
-			detail = "running"
-			if session.Attached {
-				detail += " · attached"
-			}
+			detail = "up"
 		case "down", "stopped":
 			detail = "stopped"
 		case "broken":

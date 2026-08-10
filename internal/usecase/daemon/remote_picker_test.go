@@ -82,6 +82,16 @@ func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) 
 	}
 }
 
+func TestRemotePickerUsesCompactUpDetailRegardlessOfAttachment(t *testing.T) {
+	for _, attached := range []bool{false, true} {
+		view := remotePickerView(domain.RemoteSessionKey{Host: "remote", Name: "work"}, ports.RemoteCatalogSession{
+			LifecycleID: remoteLifecycleForTest(), Name: "work", State: "up", Attached: attached,
+			Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0}},
+		}, remoteHostFresh, time.Now())
+		require.Equal(t, "up", view.RemoteDetail)
+	}
+}
+
 func TestRemotePickerDeduplicatesSameLifecycleReachedThroughHostAliases(t *testing.T) {
 	store := &remoteRefreshHostStore{hosts: []string{"remote", "vev@remote"}}
 	d := newRemotePickerDaemon(store)
