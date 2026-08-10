@@ -1,13 +1,13 @@
 package daemon
 
 import (
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // capturedRenderState is the immutable hand-off from authoritative daemon

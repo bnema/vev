@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
+	vt "github.com/bnema/vev-vt"
+	renderer "github.com/bnema/vev-vt/ansi"
 )
 
 func privateDir(t *testing.T) string {

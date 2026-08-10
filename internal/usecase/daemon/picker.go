@@ -7,12 +7,12 @@ import (
 	"sort"
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -13,7 +14,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 const (

@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
@@ -29,7 +30,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // These integration tests drive the real daemon over a real unix socket with a

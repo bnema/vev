@@ -9,11 +9,11 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // TestWithSnapshotRepositoryRejectsTypedNil verifies typed nil repositories are disabled.

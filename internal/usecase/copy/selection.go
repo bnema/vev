@@ -1,6 +1,6 @@
 package copy
 
-import "github.com/bnema/vev/pkg/renderer"
+import renderer "github.com/bnema/vev-vt"
 
 // Granularity controls how a selection's endpoints become display-cell ranges.
 type Granularity uint8

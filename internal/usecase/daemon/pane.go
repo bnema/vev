@@ -5,10 +5,10 @@ import (
 	"sync"
 	"sync/atomic"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // paneProcessLifetime owns the context passed to PTYFactory.Open. Its daemon

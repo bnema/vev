@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // frameText joins every row of frame into one newline-separated string so

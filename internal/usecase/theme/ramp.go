@@ -1,6 +1,6 @@
 package theme
 
-import "github.com/bnema/vev/pkg/renderer"
+import renderer "github.com/bnema/vev-vt"
 
 const (
 	normalTextContrast = 4.5

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/bnema/vev/pkg/renderer"
+	renderer "github.com/bnema/vev-vt"
 )
 
 type paletteEvent struct {

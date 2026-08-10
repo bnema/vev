@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"math"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // errShortPayload is returned when a payload ends before a required field

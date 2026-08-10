@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
@@ -19,7 +20,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 var (

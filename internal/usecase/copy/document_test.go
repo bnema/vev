@@ -3,8 +3,8 @@ package copy
 import (
 	"testing"
 
-	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
+	vt "github.com/bnema/vev-vt"
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/stretchr/testify/require"
 )
 

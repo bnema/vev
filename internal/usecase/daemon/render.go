@@ -4,11 +4,11 @@ package daemon
 import (
 	"bytes"
 
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // completedSynchronizedUpdate reports a full DEC 2026 batch contained in one

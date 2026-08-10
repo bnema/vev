@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
 

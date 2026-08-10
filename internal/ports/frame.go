@@ -3,8 +3,8 @@ package ports
 import (
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // HandshakeTimeout bounds every transport handshake from connect through the

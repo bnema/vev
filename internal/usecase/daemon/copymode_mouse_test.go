@@ -7,10 +7,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 type manualMouseClock struct{ now time.Time }

@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/bnema/vev/pkg/renderer"
+import renderer "github.com/bnema/vev-vt"
 
 // TextInput stores editable text as runes for terminal overlay input models.
 type TextInput struct {

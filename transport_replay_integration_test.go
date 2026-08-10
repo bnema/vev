@@ -6,12 +6,12 @@ import (
 	"sync"
 	"testing"
 
+	vt "github.com/bnema/vev-vt"
+	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/testutil/replaytest"
-	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 

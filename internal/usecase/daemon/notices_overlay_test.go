@@ -9,11 +9,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/notices"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestCaptureNoticesOverlayUsesTerminalBackgroundOutsideSelection(t *testing.T) {

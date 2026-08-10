@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // manualPaletteClock applies only declarative coordinator timer actions. Its

@@ -1,9 +1,9 @@
 package prompt
 
 import (
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // RenderStyles contains daemon-supplied semantic chrome roles. The zero value
