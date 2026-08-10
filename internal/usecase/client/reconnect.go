@@ -49,14 +49,19 @@ func nextReconnectBackoff(cur, limit time.Duration) time.Duration {
 	return cur
 }
 
+func resumeNeedsExactAttach(err error) bool {
+	if errors.Is(err, errRouteTargetChanged) {
+		return true
+	}
+	protocolErr, ok := errors.AsType[*ProtocolError](err)
+	return ok && (protocolErr.Code == ports.ErrNoSuchSession || protocolErr.Code == ports.ErrNoSuchTarget)
+}
+
 func shouldReconnect(err error) bool {
 	if err == nil {
 		return false
 	}
 	if _, ok := errors.AsType[*ProtocolError](err); ok {
-		return false
-	}
-	if errors.Is(err, errRenderModeMismatch) {
 		return false
 	}
 	_, ok := errors.AsType[*DetachedError](err)

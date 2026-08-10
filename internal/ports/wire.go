@@ -49,13 +49,8 @@ var ErrInvalidAck = errors.New("ports: invalid ack")
 // ErrInvalidAttachTarget reports a malformed attach target.
 var ErrInvalidAttachTarget = errors.New("ports: invalid attach target")
 
-// ErrInvalidSessionMeta reports metadata that cannot be represented by the
-// protocol's ordered uint16-indexed tab layout.
-var ErrInvalidSessionMeta = errors.New("ports: invalid session metadata")
-
-// ErrSessionMetaStringTooLong reports metadata containing a string too large
-// for the protocol's uint16 string encoding.
-var ErrSessionMetaStringTooLong = errors.New("ports: session metadata string too long")
+// ErrInvalidNavigation reports an unknown or impossible navigation value.
+var ErrInvalidNavigation = errors.New("ports: invalid navigation")
 
 // Intent values carried by Hello, describing what the client wants to do.
 const (
@@ -80,17 +75,40 @@ func validEnvironmentPolicy(policy EnvironmentPolicy) bool {
 	return policy == EnvironmentPolicyClientOwned || policy == EnvironmentPolicyDaemonOwned
 }
 
-// RenderMode determines whether the daemon emits a complete terminal view or
-// only the private remote content surface requested by another daemon.
-type RenderMode uint8
+func validNavigationCapabilities(capabilities NavigationCapabilities) bool {
+	return capabilities&^(NavigationCapabilityHomePicker|NavigationCapabilityBack) == 0
+}
 
-const (
-	RenderModeFullTerminal RenderMode = iota
-	RenderModeProxiedContent
-)
+func validStartupOverlay(overlay StartupOverlay) bool {
+	return overlay == StartupOverlayNone || overlay == StartupOverlaySessionPicker
+}
 
-func validRenderMode(mode RenderMode) bool {
-	return mode == RenderModeFullTerminal || mode == RenderModeProxiedContent
+// ValidateNavigation validates route capabilities independently of the rest of
+// the Hello payload. homePickerRoute indicates that the route may open its
+// home/session picker (for example, a remote target or daemon-owned route).
+func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOverlay, homePickerRoute bool) error {
+	if !validNavigationCapabilities(capabilities) || !validStartupOverlay(overlay) {
+		return ErrInvalidNavigation
+	}
+	home := capabilities&NavigationCapabilityHomePicker != 0
+	back := capabilities&NavigationCapabilityBack != 0
+	if (home && !homePickerRoute) || back != (overlay == StartupOverlaySessionPicker) {
+		return ErrInvalidNavigation
+	}
+	if homePickerRoute && back {
+		return ErrInvalidNavigation
+	}
+	return nil
+}
+
+func validateHelloNavigation(h Hello) error {
+	if h.Intent != IntentAttach && h.Intent != IntentResume {
+		if h.NavigationCapabilities != 0 || h.StartupOverlay != StartupOverlayNone {
+			return ErrInvalidNavigation
+		}
+		return nil
+	}
+	return ValidateNavigation(h.NavigationCapabilities, h.StartupOverlay, h.RemoteTarget != nil || h.EnvironmentPolicy == EnvironmentPolicyDaemonOwned)
 }
 
 // Capability bits advertised in Welcome.
@@ -127,7 +145,6 @@ const (
 type Hello struct {
 	Version     uint16
 	Intent      uint8
-	RenderMode  RenderMode
 	ClientID    [16]byte
 	ResumeToken uint64
 	Name        string
@@ -144,8 +161,18 @@ type Hello struct {
 	// RemoteTarget is present only for a picker-selected remote attach. It is
 	// carried through reconnects and is validated by the owning daemon before
 	// it creates or publishes any session resources.
-	RemoteTarget      *domain.RemoteSessionTarget
-	EnvironmentPolicy EnvironmentPolicy
+	RemoteTarget *domain.RemoteSessionTarget
+	// ExactTarget is an optional lifecycle/name identity selected by the client
+	// ledger. It is transport-neutral and never replaces the daemon's authority
+	// to validate or commit the target.
+	ExactTarget *ExactSessionTarget
+	// PreferredTabID is a client-owned route cursor. The daemon treats it as an
+	// attachment-local hint and falls back when the stable tab no longer exists.
+	PreferredTabID         domain.TabStableID
+	RemoteOrigin           string
+	EnvironmentPolicy      EnvironmentPolicy
+	NavigationCapabilities NavigationCapabilities
+	StartupOverlay         StartupOverlay
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -232,12 +259,12 @@ type Ack struct {
 
 // Welcome is the daemon's reply to a successful Hello.
 type Welcome struct {
-	SessionID    string
-	SessionName  string
-	Ephemeral    bool
-	ResumeToken  uint64
-	RenderMode   RenderMode
-	Capabilities uint32
+	SessionID         string
+	SessionName       string
+	Ephemeral         bool
+	ResumeToken       uint64
+	Capabilities      uint32
+	CommittedIdentity *CommittedRouteIdentity
 }
 
 // ErrorMsg reports a protocol- or session-level failure to the client.
@@ -313,21 +340,6 @@ type OutputResetRequest struct{}
 
 // SessionTabMeta describes one tab in a remote session's metadata snapshot.
 // ID is stable for the lifetime of its remote tab and ordered only for display.
-type SessionTabMeta struct {
-	ID        domain.TabStableID
-	Name      string
-	Attention bool
-}
-
-// SessionMeta is an authoritative, revisioned snapshot of remote tab metadata.
-type SessionMeta struct {
-	LifecycleID domain.SessionLifecycleID
-	Revision    uint64
-	SessionName string
-	ActiveTabID domain.TabStableID
-	Tabs        []SessionTabMeta
-}
-
 // payloadWriter builds a message payload by appending fields in wire order.
 type payloadWriter struct {
 	b []byte
@@ -384,9 +396,10 @@ func (w *payloadWriter) putLongBytes(b []byte) {
 	w.b = append(w.b, b...)
 }
 
-// marshalRemoteTargetSection writes the required v25 target/policy section.
+// marshalRemoteTargetSection writes the required v27 target/policy section.
 // A target may be absent for direct local attaches, but its presence marker and
-// environment policy are never optional: v25 has no extension or legacy tail.
+// environment policy are never optional: v27 has no extension or legacy tail
+// inside this section; the exact-target section follows it.
 func marshalRemoteTargetSection(w *payloadWriter, target *domain.RemoteSessionTarget, policy EnvironmentPolicy) {
 	if target == nil {
 		w.putBool(false)
@@ -699,14 +712,14 @@ func ValidateHello(h Hello) error {
 	if h.Intent != IntentEphemeral && h.Intent != IntentNew && h.Intent != IntentAttach && h.Intent != IntentResume {
 		return ErrInvalidHello
 	}
-	if !validRenderMode(h.RenderMode) {
-		return ErrInvalidHello
-	}
 	if err := ValidateSize(h.Size); err != nil {
 		return fmt.Errorf("%w: size", ErrInvalidHello)
 	}
 	if !validEnvironmentPolicy(h.EnvironmentPolicy) {
 		return ErrInvalidHello
+	}
+	if err := validateHelloNavigation(h); err != nil {
+		return fmt.Errorf("%w: navigation: %w", ErrInvalidHello, err)
 	}
 	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || len(h.Env) > math.MaxUint32 {
 		return ErrInvalidHello
@@ -716,8 +729,35 @@ func ValidateHello(h Hello) error {
 			return ErrInvalidHello
 		}
 	}
+	if h.RemoteOrigin != "" {
+		if err := domain.ValidateRemoteDisplayOrigin(h.RemoteOrigin); err != nil {
+			return fmt.Errorf("%w: remote origin: %v", ErrInvalidHello, err)
+		}
+	}
+	if h.PreferredTabID != "" {
+		if h.Intent != IntentAttach && h.Intent != IntentResume {
+			return ErrInvalidHello
+		}
+		if err := domain.ValidateTabStableID(h.PreferredTabID); err != nil {
+			return fmt.Errorf("%w: preferred tab: %v", ErrInvalidHello, err)
+		}
+	}
+	if h.ExactTarget != nil {
+		if h.Intent != IntentAttach && h.Intent != IntentResume {
+			return ErrInvalidHello
+		}
+		if err := h.ExactTarget.Validate(); err != nil {
+			return fmt.Errorf("%w: exact target: %v", ErrInvalidHello, err)
+		}
+		if h.Name != h.ExactTarget.SessionName {
+			return ErrInvalidHello
+		}
+		if h.RemoteTarget != nil && (h.RemoteTarget.LifecycleID != h.ExactTarget.LifecycleID || h.RemoteTarget.SessionName != h.ExactTarget.SessionName) {
+			return ErrInvalidHello
+		}
+	}
 	if h.RemoteTarget == nil {
-		if h.EnvironmentPolicy != EnvironmentPolicyClientOwned || h.RenderMode == RenderModeProxiedContent {
+		if h.EnvironmentPolicy != EnvironmentPolicyClientOwned && h.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
 			return ErrInvalidHello
 		}
 		return nil
@@ -775,19 +815,19 @@ func ValidateAttachTarget(m AttachTarget) error {
 	if m.Intent != IntentEphemeral && m.Intent != IntentNew && m.Intent != IntentAttach && m.Intent != IntentResume {
 		return ErrInvalidAttachTarget
 	}
+	if m.Intent == IntentResume {
+		return ErrInvalidAttachTarget
+	}
 	if !validEnvironmentPolicy(m.EnvironmentPolicy) {
 		return ErrInvalidAttachTarget
 	}
 	if m.RemoteTarget == nil {
-		if m.EnvironmentPolicy != EnvironmentPolicyClientOwned {
-			return ErrInvalidAttachTarget
-		}
 		return nil
 	}
 	if m.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
 		return ErrInvalidAttachTarget
 	}
-	if m.Intent != IntentAttach && m.Intent != IntentResume {
+	if m.Intent != IntentAttach {
 		return ErrInvalidAttachTarget
 	}
 	if err := validateWireRemoteTarget(*m.RemoteTarget); err != nil {
@@ -814,7 +854,6 @@ func MarshalHello(h Hello) []byte {
 	w := payloadWriter{}
 	w.putUint16(h.Version)
 	w.putUint8(h.Intent)
-	w.putUint8(uint8(h.RenderMode))
 	w.putBytes(h.ClientID[:])
 	w.putUint64(h.ResumeToken)
 	w.putString(h.Name)
@@ -829,6 +868,11 @@ func MarshalHello(h Hello) []byte {
 		w.putLongString(entry)
 	}
 	marshalRemoteTargetSection(&w, h.RemoteTarget, h.EnvironmentPolicy)
+	marshalExactTargetSection(&w, h.ExactTarget)
+	w.putString(string(h.PreferredTabID))
+	w.putString(h.RemoteOrigin)
+	w.putUint8(uint8(h.NavigationCapabilities))
+	w.putUint8(uint8(h.StartupOverlay))
 	return w.b
 }
 
@@ -843,13 +887,6 @@ func preflightHello(b []byte) error {
 	}
 	if _, err := r.getUint8(); err != nil {
 		return err
-	}
-	mode, err := r.getUint8()
-	if err != nil {
-		return err
-	}
-	if !validRenderMode(RenderMode(mode)) {
-		return errInvalidEnum
 	}
 	if len(r.b) < 16 {
 		return errShortPayload
@@ -894,6 +931,21 @@ func preflightHello(b []byte) error {
 	if err := skipRemoteTargetSection(&r); err != nil {
 		return err
 	}
+	if err := skipExactTargetSection(&r); err != nil {
+		return err
+	}
+	if err := r.skipString(); err != nil {
+		return err
+	}
+	if err := r.skipString(); err != nil {
+		return err
+	}
+	if _, err := r.getUint8(); err != nil {
+		return err
+	}
+	if _, err := r.getUint8(); err != nil {
+		return err
+	}
 	return r.done()
 }
 
@@ -915,11 +967,6 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	if h.Intent, err = r.getUint8(); err != nil {
 		return Hello{}, err
 	}
-	mode, err := r.getUint8()
-	if err != nil {
-		return Hello{}, err
-	}
-	h.RenderMode = RenderMode(mode)
 	clientID, err := r.getBytes(len(h.ClientID))
 	if err != nil {
 		return Hello{}, err
@@ -974,6 +1021,27 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	if h.RemoteTarget, h.EnvironmentPolicy, err = unmarshalRemoteTargetSection(&r); err != nil {
 		return Hello{}, err
 	}
+	if h.ExactTarget, err = unmarshalExactTargetSection(&r); err != nil {
+		return Hello{}, err
+	}
+	preferredTabID, err := r.getString()
+	if err != nil {
+		return Hello{}, err
+	}
+	h.PreferredTabID = domain.TabStableID(preferredTabID)
+	if h.RemoteOrigin, err = r.getString(); err != nil {
+		return Hello{}, err
+	}
+	capabilities, err := r.getUint8()
+	if err != nil {
+		return Hello{}, err
+	}
+	h.NavigationCapabilities = NavigationCapabilities(capabilities)
+	overlay, err := r.getUint8()
+	if err != nil {
+		return Hello{}, err
+	}
+	h.StartupOverlay = StartupOverlay(overlay)
 	if err := r.done(); err != nil {
 		return Hello{}, err
 	}
@@ -1258,7 +1326,7 @@ func UnmarshalAck(b []byte) (Ack, error) {
 
 // MarshalWelcome encodes m into a Welcome message payload.
 func MarshalWelcome(m Welcome) []byte {
-	if !validRenderMode(m.RenderMode) {
+	if m.CommittedIdentity != nil && (m.SessionName != m.CommittedIdentity.Target.SessionName || m.Ephemeral != m.CommittedIdentity.Ephemeral) {
 		return nil
 	}
 	w := payloadWriter{}
@@ -1270,8 +1338,10 @@ func MarshalWelcome(m Welcome) []byte {
 		w.putUint8(0)
 	}
 	w.putUint64(m.ResumeToken)
-	w.putUint8(uint8(m.RenderMode))
 	w.putUint32(m.Capabilities)
+	if !marshalCommittedIdentitySection(&w, m.CommittedIdentity) {
+		return nil
+	}
 	return w.b
 }
 
@@ -1295,16 +1365,14 @@ func UnmarshalWelcome(b []byte) (Welcome, error) {
 	if m.ResumeToken, err = r.getUint64(); err != nil {
 		return Welcome{}, err
 	}
-	mode, err := r.getUint8()
-	if err != nil {
-		return Welcome{}, err
-	}
-	m.RenderMode = RenderMode(mode)
-	if !validRenderMode(m.RenderMode) {
-		return Welcome{}, errInvalidEnum
-	}
 	if m.Capabilities, err = r.getUint32(); err != nil {
 		return Welcome{}, err
+	}
+	if m.CommittedIdentity, err = unmarshalCommittedIdentitySection(&r); err != nil {
+		return Welcome{}, err
+	}
+	if m.CommittedIdentity != nil && (m.CommittedIdentity.Target.SessionName != m.SessionName || m.CommittedIdentity.Ephemeral != m.Ephemeral) {
+		return Welcome{}, fmt.Errorf("%w: committed identity does not match welcome", ErrInvalidRouteWire)
 	}
 	if err := r.done(); err != nil {
 		return Welcome{}, err
@@ -1532,111 +1600,6 @@ func UnmarshalOutputResetRequest(b []byte) (OutputResetRequest, error) {
 	return OutputResetRequest{}, nil
 }
 
-// ValidateSessionMeta validates a revisioned authoritative remote metadata
-// snapshot. Ordered tabs remain display order, while IDs are the only identity.
-func ValidateSessionMeta(m SessionMeta) error {
-	if m.LifecycleID == (domain.SessionLifecycleID{}) || m.Revision == 0 ||
-		m.SessionName == "" || len(m.Tabs) == 0 || len(m.Tabs) > math.MaxUint16 {
-		return ErrInvalidSessionMeta
-	}
-	if len(m.SessionName) > math.MaxUint16 || len(m.ActiveTabID) > math.MaxUint16 {
-		return ErrSessionMetaStringTooLong
-	}
-	if err := domain.ValidateTabStableID(m.ActiveTabID); err != nil {
-		return ErrInvalidSessionMeta
-	}
-	activeFound := false
-	seen := make(map[domain.TabStableID]struct{}, len(m.Tabs))
-	for _, tab := range m.Tabs {
-		if len(tab.ID) > math.MaxUint16 || len(tab.Name) > math.MaxUint16 {
-			return ErrSessionMetaStringTooLong
-		}
-		if err := domain.ValidateTabStableID(tab.ID); err != nil {
-			return ErrInvalidSessionMeta
-		}
-		if _, duplicate := seen[tab.ID]; duplicate {
-			return ErrInvalidSessionMeta
-		}
-		seen[tab.ID] = struct{}{}
-		activeFound = activeFound || tab.ID == m.ActiveTabID
-	}
-	if !activeFound {
-		return ErrInvalidSessionMeta
-	}
-	return nil
-}
-
-// MarshalSessionMeta encodes a strict v25 revisioned metadata snapshot.
-func MarshalSessionMeta(m SessionMeta) ([]byte, error) {
-	if err := ValidateSessionMeta(m); err != nil {
-		return nil, err
-	}
-	w := payloadWriter{}
-	w.putBytes(m.LifecycleID[:])
-	w.putUint64(m.Revision)
-	w.putString(m.SessionName)
-	w.putString(string(m.ActiveTabID))
-	w.putUint16(uint16(len(m.Tabs)))
-	for _, tab := range m.Tabs {
-		w.putString(string(tab.ID))
-		w.putString(tab.Name)
-		w.putBool(tab.Attention)
-	}
-	return w.b, nil
-}
-
-// UnmarshalSessionMeta decodes a strict v25 authoritative metadata snapshot.
-func UnmarshalSessionMeta(b []byte) (SessionMeta, error) {
-	r := payloadReader{b: b}
-	var m SessionMeta
-	lifecycle, err := r.getBytes(len(m.LifecycleID))
-	if err != nil {
-		return SessionMeta{}, err
-	}
-	copy(m.LifecycleID[:], lifecycle)
-	if m.Revision, err = r.getUint64(); err != nil {
-		return SessionMeta{}, err
-	}
-	if m.SessionName, err = r.getString(); err != nil {
-		return SessionMeta{}, err
-	}
-	activeTabID, err := r.getString()
-	if err != nil {
-		return SessionMeta{}, err
-	}
-	m.ActiveTabID = domain.TabStableID(activeTabID)
-	count, err := r.getUint16()
-	if err != nil {
-		return SessionMeta{}, err
-	}
-	if count == 0 || uint64(count) > uint64(len(r.b)/5) {
-		return SessionMeta{}, errShortPayload
-	}
-	m.Tabs = make([]SessionTabMeta, 0, int(count))
-	for range int(count) {
-		var tab SessionTabMeta
-		id, err := r.getString()
-		if err != nil {
-			return SessionMeta{}, err
-		}
-		tab.ID = domain.TabStableID(id)
-		if tab.Name, err = r.getString(); err != nil {
-			return SessionMeta{}, err
-		}
-		if tab.Attention, err = r.getBool(); err != nil {
-			return SessionMeta{}, err
-		}
-		m.Tabs = append(m.Tabs, tab)
-	}
-	if err := r.done(); err != nil {
-		return SessionMeta{}, err
-	}
-	if err := ValidateSessionMeta(m); err != nil {
-		return SessionMeta{}, err
-	}
-	return m, nil
-}
-
 // MarshalKill encodes m into a Kill message payload.
 func MarshalKill(m Kill) []byte {
 	w := payloadWriter{}
@@ -1735,7 +1698,6 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 	}
 	return Sessions{Sessions: sessions}, nil
 }
-
 func putInt16(w *payloadWriter, n int) { w.putUint16(uint16(int16(n))) }
 
 func getInt16(r *payloadReader) (int, error) {
@@ -2002,4 +1964,29 @@ func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 		return p, err
 	}
 	return p, nil
+}
+
+// MarshalNavigationAction encodes one bounded navigation action.
+func MarshalNavigationAction(action NavigationAction) []byte {
+	if action != NavigationOpenHomePicker && action != NavigationBack {
+		return nil
+	}
+	return []byte{byte(action)}
+}
+
+// UnmarshalNavigationAction decodes one strict navigation action payload.
+func UnmarshalNavigationAction(b []byte) (NavigationAction, error) {
+	r := payloadReader{b: b}
+	value, err := r.getUint8()
+	if err != nil {
+		return 0, ErrInvalidNavigation
+	}
+	if err := r.done(); err != nil {
+		return 0, ErrInvalidNavigation
+	}
+	action := NavigationAction(value)
+	if action != NavigationOpenHomePicker && action != NavigationBack {
+		return 0, ErrInvalidNavigation
+	}
+	return action, nil
 }

@@ -45,7 +45,7 @@ type attachmentTransitionRequest struct {
 }
 
 func transitionSourceTokenMatchesRequest(token attachmentConnectionToken, source *session, req attachmentTransitionRequest) bool {
-	return sameAttachmentOwner(token.owner, source) && token.ac == req.next &&
+	return source != nil && token.sess != nil && token.sess == source && token.ac == req.next &&
 		token.generation == req.next.connectionGeneration.Load() &&
 		token.transport.transport == req.expectedTransport.transport &&
 		token.transport.incarnation == req.expectedTransport.incarnation
@@ -55,9 +55,9 @@ func transitionSourceTokenMatchesRequest(token attachmentConnectionToken, source
 // lease exists, sourceCoordinator.mu. It is the canonical exact-connection
 // handoff check for client-originated navigation and lifecycle mutations.
 func transitionSourceTokenCurrentLocked(token attachmentConnectionToken, source *session, sourceCoordinator *renderCoordinator, req attachmentTransitionRequest) bool {
-	if !sameAttachmentOwner(token.owner, source) || token.ac != req.next ||
+	if token.sess != source || token.ac != req.next ||
 		token.generation != req.next.connectionGeneration.Load() ||
-		token.localSession() == nil || !sameAttachmentOwner(token.ac.currentAttachmentOwner(), source) ||
+		token.sess == nil || token.ac.currentAttachmentSession() != source ||
 		!attachmentRegisteredLocked(source, req.next) ||
 		!req.next.transportSnapshotCurrent(token.transport) {
 		return false
@@ -167,19 +167,44 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	}
 
 	frozen, err := d.freezeAttachmentTransition(req, participants)
-	defer frozen.unfreeze()
 	if err != nil {
+		frozen.unfreeze()
 		return attachmentTransitionResult{}, err
 	}
 
 	result, err := d.publishAttachmentTransition(req)
+	frozen.unfreeze()
 	if err != nil {
 		return result, err
+	}
+	// A not-ready publication is still inside the Hello handshake. Welcome
+	// carries the committed identity for those attachments and must remain the
+	// first server frame. Ready transitions notify an already-running client.
+	if req.ready && result.published.ac != nil && result.published.ac.routeSnapshotCopy().Generation != 0 {
+		identityErr := errAttachmentTransition
+		if effect, admitted := result.published.ac.beginAttachmentEffect(result.published); admitted {
+			identityErr = d.sendCommittedRouteIdentityForAttachment(effect.connectionToken())
+			effect.End()
+		}
+		if identityErr != nil {
+			d.abortPublishedAttachmentTransition(result)
+			return attachmentTransitionResult{}, identityErr
+		}
 	}
 	if result.sourceGeometrySession != nil {
 		d.recalculateSessionGeometryAndInvalidateAsync(result.sourceGeometrySession, "attachment_transition.go")
 	}
 	return result, nil
+}
+
+// abortPublishedAttachmentTransition tears down the newly published link before
+// a post-publication control failure escapes to callers. The transition result is
+// deliberately not handed back because its target membership is no longer valid.
+func (d *Daemon) abortPublishedAttachmentTransition(result attachmentTransitionResult) {
+	if result.published.ac != nil && result.published.transport.transport != nil {
+		d.clientGoneWithoutNotice(result.published.sess, result.published.ac, result.published.transport.transport, true)
+	}
+	d.deferAttachmentTransitionCleanups(result)
 }
 
 func (d *Daemon) deferAttachmentTransitionCleanups(result attachmentTransitionResult) {

@@ -667,6 +667,82 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 	}
 }
 
+func TestAttachedRouteSnapshotIsAcceptedAsAnAttachmentValue(t *testing.T) {
+	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+	transport := &closeTrackingTransport{}
+	ac.replaceTransport(transport)
+	rc := d.attachCoordinator(source, nil, ac, true)
+	token := source.attachmentToken(ac, transport)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+
+	snapshot := ports.RecentRouteSnapshot{
+		Generation: 4,
+		Active:     ports.RouteRef{Key: 8, Generation: 4},
+		Home:       ports.RouteRef{Key: 8, Generation: 4},
+		Entries: []ports.RecentRouteEntry{{
+			Key: 7, Generation: 3, Name: "previous", Kind: ports.RouteKindLocal,
+		}},
+	}
+	payload, err := ports.MarshalRecentRouteSnapshot(snapshot)
+	require.NoError(t, err)
+
+	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}))
+	require.Equal(t, snapshot, ac.routeSnapshotCopy())
+}
+
+func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) {
+	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+		newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+	}}
+	d.mu.Lock()
+	d.sessions[target.id] = target
+	d.mu.Unlock()
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+		Generation: 2,
+		Active:     ports.RouteRef{Key: 2, Generation: 2},
+		Previous:   ports.RouteRef{Key: 1, Generation: 1},
+		Entries:    []ports.RecentRouteEntry{{Key: 1, Generation: 1, Name: "target", Kind: ports.RouteKindLocal}},
+	})
+
+	transport := &closeTrackingTransport{}
+	ac.replaceTransport(transport)
+	rc := d.attachCoordinator(source, nil, ac, true)
+	token := source.attachmentToken(ac, transport)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+	payload, err := ports.MarshalCommandRequest(ports.CommandRequest{
+		Version: ports.ProtocolVersion, RequestID: 1, Slug: "back-session", Attached: true,
+	})
+	require.NoError(t, err)
+
+	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
+	require.Same(t, source, ac.currentAttachmentSession())
+	frames := transport.Sends()
+	require.NotEmpty(t, frames)
+	var result ports.CommandResult
+	for _, frame := range frames {
+		if frame.Type != ports.MsgCommandResult {
+			continue
+		}
+		result, err = ports.UnmarshalCommandResult(frame.Payload)
+		require.NoError(t, err)
+		break
+	}
+	require.True(t, result.OK, result.Text)
+	var action ports.RouteNavigationAction
+	for _, frame := range frames {
+		if frame.Type != ports.MsgNavigateRecentRoute {
+			continue
+		}
+		action, err = ports.UnmarshalRouteNavigationAction(frame.Payload)
+		require.NoError(t, err)
+	}
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}, action)
+	require.False(t, transport.Closed(), "client navigation must not tear down the attachment")
+}
+
 func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)

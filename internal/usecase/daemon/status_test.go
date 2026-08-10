@@ -968,32 +968,33 @@ func TestBarStateForPaletteHintsNormalizesTypedNilSession(t *testing.T) {
 	var sess *session
 
 	require.NotPanics(t, func() {
-		state := d.barStateForPaletteHints(sess, "feedback", nil, nil)
+		state := d.barStateForPaletteHints(sess, "feedback", nil)
 		require.Equal(t, "feedback", state.statusFeedback)
 		require.Empty(t, state.status.session)
 	})
 }
 
-func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.T) {
+func TestBarStateForContextualRecentUsesClientSnapshot(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
-	live := &session{sessionCore: sessionCore{id: "live", name: "live"}, tabs: []*tab{{}}}
-	live.mruAt.Store(1)
-	d.sessions[live.id] = live
 
+	snapshot := ports.RecentRouteSnapshot{
+		Generation: 1,
+		Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 1, Name: "captured", Kind: ports.RouteKindLocal, Attention: true}},
+	}
 	hints := palette.ContextualHints{
 		Kind:         command.ContextHintRecentSessions,
 		SelectedRank: 1,
 		Recent:       []palette.RecentSessionHint{{Rank: 1, Name: "captured"}},
 	}
-	// Hold the registry lock: a call to recentSessions would block here. The
-	// contextual snapshot must still compose because it has no live MRU lookup.
+	// Hold the registry lock: contextual composition must use the immutable
+	// attachment snapshot and never consult daemon session history.
 	var contextual barState
 	done := make(chan struct{})
 	d.mu.Lock()
 	go func() {
-		contextual = d.barStateForPaletteHints(sess, "", &hints, []recentSession{{name: "captured", attention: true}})
+		contextual = d.barStateForAttachmentPaletteHintsFor(sess, ac, "", &hints, snapshot)
 		close(done)
 	}()
 	select {
@@ -1006,88 +1007,6 @@ func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.
 
 	require.Empty(t, contextual.mru, "contextual composition must not read the live MRU")
 	require.Equal(t, []rankedRecent{{rank: 1, name: "captured", attention: true, selected: true}}, contextual.rankedRecent)
-
-	normal := d.barStateFor(sess, "")
-	require.Len(t, normal.mru, 1)
-	require.Equal(t, "live", normal.mru[0].name, "normal composition retains canonical live MRU")
-}
-
-func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-	sess.name = "current"
-	sess.mruAt.Store(100)
-	for i := range 10 {
-		other := &session{sessionCore: sessionCore{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i)}, tabs: []*tab{{attention: i == 8}}}
-		other.mruAt.Store(uint64(i + 1))
-		d.sessions[other.id] = other
-	}
-
-	state := d.barStateFor(sess, "")
-
-	require.Len(t, state.mru, 9)
-	require.Equal(t, "s9", state.mru[0].name)
-	require.Equal(t, "s1", state.mru[8].name)
-	for _, got := range state.mru {
-		require.NotEqual(t, "current", got.name)
-	}
-	require.True(t, state.mru[1].attention, "s8 attention should be carried into MRU state")
-}
-
-func TestBarStateForMRUExcludesEphemeralSessions(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, current, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-
-	persistent := &session{sessionCore: sessionCore{id: "named", name: "named"}, tabs: []*tab{{}}}
-	persistent.mruAt.Store(1)
-	ephemeral := &session{sessionCore: sessionCore{id: "ephemeral", name: "1", ephemeral: true}, tabs: []*tab{{}}}
-	ephemeral.mruAt.Store(2)
-	d.sessions[persistent.id] = persistent
-	d.sessions[ephemeral.id] = ephemeral
-
-	state := d.barStateFor(current, "")
-
-	require.Len(t, state.mru, 1)
-	require.Equal(t, "named", state.mru[0].name)
-}
-
-func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-	for _, name := range []string{"bravo", "alpha", "charlie"} {
-		d.sessions[domain.SessionID(name)] = &session{sessionCore: sessionCore{id: domain.SessionID(name), name: name}, tabs: []*tab{{}}}
-	}
-
-	state := d.barStateFor(sess, "")
-
-	require.GreaterOrEqual(t, len(state.mru), 3)
-	require.Equal(t, []string{"alpha", "bravo", "charlie"}, []string{state.mru[0].name, state.mru[1].name, state.mru[2].name})
-}
-
-func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
-	sz := domain.Size{Cols: 80, Rows: 24}
-	p1, releasePTY1 := newBlockingPTY(t)
-	defer releasePTY1()
-	p2, releasePTY2 := newBlockingPTY(t)
-	defer releasePTY2()
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
-	d.stopped["alpha"] = stoppedSession{name: "alpha", cwd: "/tmp/alpha", createdAt: 1, lastUsedSeq: 30}
-	d.stopped["zeta"] = stoppedSession{name: "zeta", cwd: "/tmp/zeta", createdAt: 1, lastUsedSeq: 20}
-	d.mruSeq.Store(30)
-	cur := &session{sessionCore: sessionCore{id: "cur", name: "current"}, tabs: []*tab{{}}}
-	d.sessions[cur.id] = cur
-
-	_, err := createSessionForTest(d, "zeta", false, "/tmp/zeta", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-	_, err = createSessionForTest(d, "alpha", false, "/tmp/alpha", sz, terminalEnv{}, d.baseEnv)
-	require.NoError(t, err)
-
-	state := d.barStateFor(cur, "")
-	require.GreaterOrEqual(t, len(state.mru), 2)
-	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
 }
 
 func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(t *testing.T) {
@@ -1111,7 +1030,7 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 		drawStatusBarState(row, state.bars, resolveStyles(nil))
 		return rowText(row)
 	}
-	normal := barState{status: statusSnapshot{session: "cur"}, mru: []recentSession{{name: "vty"}, {name: "misc"}}}
+	normal := barState{status: statusSnapshot{session: "cur"}, mru: []recentRouteDisplay{{name: "vty"}, {name: "misc"}}}
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 
@@ -1147,7 +1066,7 @@ func TestStatusBarRendersMRUNamesAndInlineBell(t *testing.T) {
 	state := barState{
 		status:         statusSnapshot{session: "cur"},
 		attentionFrame: 1,
-		mru: []recentSession{
+		mru: []recentRouteDisplay{
 			{name: "fresh"},
 			{name: "tmp", attention: true},
 		},
@@ -1219,7 +1138,7 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 	theme.Palette[10] = theme.Palette[2]
 	theme.PaletteKnown = 1<<2 | 1<<10
 	resolved := themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})
-	state := barState{status: statusSnapshot{session: "c"}, mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	state := barState{status: statusSnapshot{session: "c"}, mru: []recentRouteDisplay{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 16)
 
 	drawStatusBarState(row, state, resolved.Styles)
@@ -1235,7 +1154,7 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 }
 
 func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, mru: []recentSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, mru: []recentRouteDisplay{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
 	row := make([]renderer.Cell, 21)
 
 	drawStatusBarState(row, state, resolveStyles(nil))
@@ -1247,9 +1166,9 @@ func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
 }
 
 func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
-	mru := make([]recentSession, 0, maxMRUSessions)
+	mru := make([]recentRouteDisplay, 0, maxMRUSessions)
 	for i := 1; i <= maxMRUSessions; i++ {
-		mru = append(mru, recentSession{name: "recent" + strconv.Itoa(i)})
+		mru = append(mru, recentRouteDisplay{name: "recent" + strconv.Itoa(i)})
 	}
 	state := barState{status: statusSnapshot{session: "cur"}, mru: mru}
 
@@ -1309,27 +1228,27 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		{
 			name:         "script text and copy feedback",
 			width:        32,
-			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", statusFeedback: "copied", mru: []recentSession{{name: "a"}}},
+			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", statusFeedback: "copied", mru: []recentRouteDisplay{{name: "a"}}},
 			wantContains: []string{" a"},
 			wantSuffix:   " main ↑3 * copied",
 		},
 		{
 			name:            "hide on overlap",
 			width:           16,
-			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", statusFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", statusFeedback: "copied", mru: []recentRouteDisplay{{name: "fresh"}}},
 			want:            " cur            ",
 			wantNotContains: []string{"main", "copied"},
 		},
 		{
 			name:  "empty script keeps copy feedback behavior",
 			width: 12,
-			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", statusFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
+			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", statusFeedback: "copied", mru: []recentRouteDisplay{{name: "fresh"}}},
 			want:  " cur  copied",
 		},
 		{
 			name:            "mru whole entry fitting with script text",
 			width:           24,
-			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []recentSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}},
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []recentRouteDisplay{{name: "fresh"}, {name: "middle"}, {name: "old"}}},
 			wantContains:    []string{" fresh"},
 			wantNotContains: []string{"middle"},
 			wantSuffix:      " git",
@@ -1337,7 +1256,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		{
 			name:              "mru fitting reserves wide right anchor width",
 			width:             12,
-			state:             barState{status: statusSnapshot{session: "cur"}, bottomRight: "界界", mru: []recentSession{{name: "a"}}},
+			state:             barState{status: statusSnapshot{session: "cur"}, bottomRight: "界界", mru: []recentRouteDisplay{{name: "a"}}},
 			wantNotContains:   []string{" a "},
 			wantSuffix:        " 界 界 ",
 			continuationCells: []int{9, 11},
@@ -1345,7 +1264,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		{
 			name:            "mru fitting counts wide session names",
 			width:           20,
-			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []recentSession{{name: "界"}, {name: "界"}, {name: "b"}}},
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []recentRouteDisplay{{name: "界"}, {name: "界"}, {name: "b"}}},
 			wantContains:    []string{" 界 "},
 			wantNotContains: []string{" b "},
 			wantSuffix:      " git",
@@ -1378,7 +1297,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 }
 
 func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, statusFeedback: "copied", mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, statusFeedback: "copied", mru: []recentRouteDisplay{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 20)
 
 	drawStatusBarState(row, state, resolveStyles(nil))
@@ -1391,7 +1310,7 @@ func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
 }
 
 func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, statusFeedback: "copied", mru: []recentSession{{name: "fresh"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, statusFeedback: "copied", mru: []recentRouteDisplay{{name: "fresh"}}}
 	tests := []struct {
 		name string
 		cols int
@@ -1448,7 +1367,7 @@ func TestStatusBarsUseCompleteSemanticSurfaces(t *testing.T) {
 		state := barState{
 			status:      statusSnapshot{session: "current"},
 			bottomRight: "script ok",
-			mru:         []recentSession{{name: "new"}, {name: "middle"}, {name: "old"}},
+			mru:         []recentRouteDisplay{{name: "new"}, {name: "middle"}, {name: "old"}},
 		}
 		drawStatusBarState(row, state, styles)
 		for i := range len(" current ") {
@@ -1485,7 +1404,7 @@ func TestStatusBarsUseCompleteSemanticSurfaces(t *testing.T) {
 		}
 
 		single := make([]renderer.Cell, 20)
-		drawStatusBarState(single, barState{status: statusSnapshot{session: "current"}, mru: []recentSession{{name: "only"}}}, styles)
+		drawStatusBarState(single, barState{status: statusSnapshot{session: "current"}, mru: []recentRouteDisplay{{name: "only"}}}, styles)
 		only := strings.Index(rowText(single), "only")
 		require.GreaterOrEqual(t, only, 0)
 		require.True(t, single[only].Style.Equal(styles.SurfaceRecent), "a singleton MRU must retain the 22 percent recent surface")
@@ -1549,5 +1468,4 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	releasePTY2()
 	hg.Wait()
 	d.sessWg.Wait()
-	d.waitNotifies()
 }

@@ -419,49 +419,6 @@ func TestComposeFrameAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
 	}
 }
 
-// TestCloseRingingTabRefreshesOtherSessionBottomBar covers Fix 2c: closing a
-// ringing tab in one session must refresh the bottom bar of a client attached
-// to a DIFFERENT session, since that client's bar shows the ringing session's
-// bell until it stops.
-func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
-	pA1, releaseA1 := newBlockingPTY(t)
-	pA2, releaseA2 := newBlockingPTY(t)
-	pB, releaseB := newBlockingPTY(t)
-	defer releaseA1()
-	defer releaseA2()
-	defer releaseB()
-
-	d, sessA, _, sendsA := newManualSessionWithPTYs(t, pA1, pA2)
-	sessA.name = "ringer"
-	ringing := sessA.tabs[1]
-	sessA.mu.Lock()
-	ringing.attention = true
-	ringing.attentionAt = time.Unix(1, 0)
-	sessA.mu.Unlock()
-	d.setAttentionFrame(1) // pulse frame 0 renders the bell glyph as blank
-
-	trB, sendsB := newCapturingTransport(t)
-	acB := &attachedClient{tr: trB, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	acB.initOverlays()
-	sctxB, cancelB := context.WithCancel(d.serveCtx)
-	t.Cleanup(cancelB)
-	tbB := newTestTabWithContext(pB, sctxB, cancelB)
-	sessB := &session{sessionCore: sessionCore{id: "sessB", name: "other", attachments: map[*attachedClient]struct{}{acB: {}}}, ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}}
-	acB.setSession(sessB)
-	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB}, nil)
-	d.sessions[sessB.id] = sessB
-
-	d.paint(sessB, acB, true, nil)
-	before := mustOutputData(t, sendsB)
-	require.Contains(t, string(before), string(ui.AttentionGlyph))
-
-	require.NoError(t, d.closeTab(sessA, ringing, true))
-	_ = mustOutputData(t, sendsA)
-
-	after := mustOutputData(t, sendsB)
-	require.NotContains(t, string(after), string(ui.AttentionGlyph))
-}
-
 func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 3)
 	sess.mu.Lock()

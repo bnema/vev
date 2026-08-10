@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -31,11 +32,8 @@ type overlayRuntime struct {
 	pickerRemotePreview       picker.Preview
 	pickerRemotePreviewCancel context.CancelFunc
 	pickerPreviewGeneration   uint64
-	// pickerRemoteSelection fences one asynchronous remote picker activation.
-	// It is cleared before the picker accepts another remote activation.
-	pickerRemoteSelection *remotePickerSelection
-	pickerPending         []byte
-	pickerESC             pendingByteTimer
+	pickerPending             []byte
+	pickerESC                 pendingByteTimer
 
 	// Test-only, unsynchronized lifecycle seams. Assign them before picker
 	// publication or goroutine startup. Hooks run without pickerMu or
@@ -43,13 +41,13 @@ type overlayRuntime struct {
 	beforeRemotePickerRegistration func()
 	afterPickerRefreshBuild        func(*picker.Model)
 
-	paletteMu         sync.Mutex
-	palette           *palette.Model
-	paletteRecent     []recentSession // immutable for this palette interaction
-	paletteGeneration uint64
-	paletteHints      palette.ContextualHints
-	paletteFeedback   string
-	palettePending    []byte
+	paletteMu            sync.Mutex
+	palette              *palette.Model
+	paletteRouteSnapshot ports.RecentRouteSnapshot
+	paletteGeneration    uint64
+	paletteHints         palette.ContextualHints
+	paletteFeedback      string
+	palettePending       []byte
 
 	promptMu               sync.Mutex
 	prompt                 *promptui.Model
@@ -307,10 +305,10 @@ type overlayRenderSnapshot struct {
 	paletteModel  *palette.Model
 	// paletteHints is a copy captured under paletteMu. Rendering must use this
 	// immutable interaction snapshot rather than consult live session state.
-	paletteHints    *palette.ContextualHints
-	paletteFeedback string
-	paletteRecent   []recentSession
-	paletteLocked   bool
+	paletteHints         *palette.ContextualHints
+	paletteFeedback      string
+	paletteRouteSnapshot ports.RecentRouteSnapshot
+	paletteLocked        bool
 
 	promptActive bool
 	promptModel  *promptui.Model
@@ -381,7 +379,8 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		hints.Recent = append([]palette.RecentSessionHint(nil), hints.Recent...)
 		snap.paletteHints = &hints
 		snap.paletteFeedback = rt.paletteFeedback
-		snap.paletteRecent = append([]recentSession(nil), rt.paletteRecent...)
+		snap.paletteRouteSnapshot = rt.paletteRouteSnapshot
+		snap.paletteRouteSnapshot.Entries = append([]ports.RecentRouteEntry(nil), rt.paletteRouteSnapshot.Entries...)
 		snap.paletteLocked = true
 	} else {
 		rt.paletteMu.Unlock()

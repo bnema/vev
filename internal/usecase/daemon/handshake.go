@@ -75,24 +75,38 @@ func watchHandshakeTransport(ctx context.Context, transport ports.Transport) fun
 // handshake context remains live. Closing the transport is the interruption
 // mechanism because ports.Transport methods do not accept contexts.
 func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, operation func() error) error {
+	_, err := boundedHandshakeOperationTracked(ctx, transport, operation)
+	return err
+}
+
+// boundedHandshakeOperationTracked also returns a completion signal for the
+// operation worker. Callers that own an effect gate must wait for this signal
+// before releasing the gate after cancellation; the transport operation itself
+// may still be unwinding after Close interrupts it.
+func boundedHandshakeOperationTracked(ctx context.Context, transport ports.Transport, operation func() error) (<-chan struct{}, error) {
+	done := make(chan struct{})
 	if err := ctx.Err(); err != nil {
+		close(done)
 		_ = transport.Close()
-		return err
+		return done, err
 	}
 	completed := make(chan error, 1)
-	go func() { completed <- operation() }()
+	go func() {
+		defer close(done)
+		completed <- operation()
+	}()
 	select {
 	case err := <-completed:
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			_ = transport.Close()
-			return ctxErr
+			return done, ctxErr
 		}
-		return err
+		return done, err
 	case <-ctx.Done():
 		_ = transport.Close()
 		// The result channel is buffered, so the operation can publish its
 		// completion after Close without keeping this cancellation path stuck.
-		return ctx.Err()
+		return done, ctx.Err()
 	}
 }
 
@@ -114,14 +128,8 @@ func handshakeContextError(parent context.Context, timedOut <-chan struct{}, fal
 // failHandshakeAttachment synchronously retires the exact connection admitted
 // by route. A fresh route-owned session is purged only after its attachment is
 // removed; existing sessions and their unrelated attachments are preserved.
-func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.Transport) {
-	d.failHandshakeAttachmentOwner(sess, ac, tr)
-}
-
-// failHandshakeAttachmentOwner synchronously retires an admitted local-client
-// handshake without assuming that its attachment owner owns a local session.
-func (d *Daemon) failHandshakeAttachmentOwner(owner attachmentOwner, ac *attachedClient, tr ports.Transport) {
-	if normalizeAttachmentOwner(owner) == nil || ac == nil {
+func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.Transport, welcomed bool) {
+	if sess == nil || ac == nil {
 		if tr != nil {
 			_ = tr.Close()
 		}
@@ -136,15 +144,15 @@ func (d *Daemon) failHandshakeAttachmentOwner(owner attachmentOwner, ac *attache
 		}
 		return
 	}
-	if view, remote := owner.(*remoteView); remote {
-		d.clientGoneRemote(view, attachmentOwnerToken(view, ac, tr), true)
-	} else if sess := localSession(owner); sess != nil {
+	if welcomed {
 		d.clientGone(sess, ac, tr, true)
+	} else {
+		d.clientGoneWithoutNotice(sess, ac, tr, true)
 	}
 	if tr != nil {
 		_ = tr.Close()
 	}
-	if sess := localSession(owner); sess != nil && ac.routeCreatedSession {
+	if ac.routeCreatedSession {
 		sess.mu.Lock()
 		empty := len(sess.attachments) == 0
 		sess.mu.Unlock()

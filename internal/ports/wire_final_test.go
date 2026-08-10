@@ -11,8 +11,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 25 {
-		t.Fatalf("ProtocolVersion = %d, want 25", ProtocolVersion)
+	if ProtocolVersion != 29 {
+		t.Fatalf("ProtocolVersion = %d, want 29", ProtocolVersion)
 	}
 	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -26,8 +26,8 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 25, 2, 0}, make([]byte, 16+8)...)
-	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	want := append([]byte{0, 29, 2}, make([]byte, 16+8)...)
+	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Hello bytes = %x, want %x", got, want)
@@ -197,10 +197,6 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 }
 
 func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
-	meta, err := MarshalSessionMeta(SessionMeta{LifecycleID: domain.SessionLifecycleID{1}, Revision: 1, SessionName: "work", ActiveTabID: "tab", Tabs: []SessionTabMeta{{ID: "tab", Name: "tab"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	tests := []struct {
 		name    string
 		payload []byte
@@ -252,7 +248,6 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 			}(),
 			decode: func(b []byte) error { _, err := UnmarshalSessions(b); return err },
 		},
-		{name: "session metadata boolean", payload: func() []byte { b := append([]byte(nil), meta...); b[len(b)-1] = 2; return b }(), decode: func(b []byte) error { _, err := UnmarshalSessionMeta(b); return err }},
 		{name: "theme flags", payload: func() []byte { b := make([]byte, 57); b[0] = 0x20; return b }(), decode: func(b []byte) error { _, err := UnmarshalTheme(b); return err }},
 	}
 	for _, tt := range tests {

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 
@@ -18,7 +19,7 @@ const (
 // effect admission. It deliberately contains no independently mutable state:
 // a ticket is admitted only when every field matches the frame's token.
 type attachmentCapability struct {
-	owner      attachmentOwner
+	sess       *session
 	generation uint64
 	transport  transportSnapshot
 	lease      *attachmentLease
@@ -26,7 +27,7 @@ type attachmentCapability struct {
 
 func capabilityFromToken(token attachmentConnectionToken) attachmentCapability {
 	return attachmentCapability{
-		owner:      token.owner,
+		sess:       token.sess,
 		generation: token.generation,
 		transport:  token.transport,
 		lease:      token.lease,
@@ -34,7 +35,7 @@ func capabilityFromToken(token attachmentConnectionToken) attachmentCapability {
 }
 
 func (c attachmentCapability) matches(token attachmentConnectionToken) bool {
-	return token.ac != nil && sameAttachmentOwner(c.owner, token.owner) &&
+	return token.ac != nil && c.sess != nil && token.sess != nil && c.sess == token.sess &&
 		c.generation == token.generation && c.transport.transport == token.transport.transport &&
 		c.transport.incarnation == token.transport.incarnation && c.lease == token.lease
 }
@@ -219,19 +220,19 @@ func (ac *attachedClient) beginAttachmentEffect(token attachmentConnectionToken)
 // after Welcome has completed so a replacement blocked behind that send can
 // publish before readiness or first paint.
 func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
-	return ac.beginCurrentAttachmentOwnerEffect(sess, tr)
+	//nolint:contextcheck // This compatibility wrapper deliberately delegates with a fresh context; cancellable callers use the context variant below.
+	return ac.beginCurrentAttachmentEffectContext(context.Background(), sess, tr)
 }
 
-// beginCurrentAttachmentOwnerEffect waits out a transition that already froze
-// ac, then admits the capability derived from one exact attachment owner.
-// Handshakes use it after Welcome so a resumed remote view follows the same
-// generation-fenced client lifecycle as a local session.
-func (ac *attachedClient) beginCurrentAttachmentOwnerEffect(owner attachmentOwner, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
-	if ac == nil || normalizeAttachmentOwner(owner) == nil || tr == nil {
+func (ac *attachedClient) beginCurrentAttachmentEffectContext(ctx context.Context, sess *session, tr ports.Transport) (attachmentConnectionToken, *attachmentEffectTicket, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ac == nil || sess == nil || tr == nil {
 		return attachmentConnectionToken{}, nil, false
 	}
 	for {
-		token := attachmentOwnerToken(owner, ac, tr)
+		token := sess.attachmentToken(ac, tr)
 		if token.ac == nil {
 			return token, nil, false
 		}
@@ -245,8 +246,12 @@ func (ac *attachedClient) beginCurrentAttachmentOwnerEffect(owner attachmentOwne
 		if g.phase == attachmentEffectsFrozen {
 			changed := g.changed
 			g.mu.Unlock()
-			<-changed
-			continue
+			select {
+			case <-changed:
+				continue
+			case <-ctx.Done():
+				return token, nil, false
+			}
 		}
 		g.mu.Unlock()
 		// A stable mismatch is only recoverable when a publication raced token
@@ -279,13 +284,13 @@ func (ac *attachedClient) publishAttachmentCapability(token attachmentConnection
 // bootstrapAttachmentCapability supports direct/headless session construction. It
 // never changes an existing or frozen production publication.
 func (ac *attachedClient) bootstrapAttachmentCapability(token attachmentConnectionToken) {
-	if ac == nil || token.owner == nil || token.ac != ac {
+	if ac == nil || token.sess == nil || token.ac != ac {
 		return
 	}
 	g := &ac.attachmentEffects
 	g.mu.Lock()
 	g.initLocked()
-	if g.phase == attachmentEffectsStable && g.capability.owner == nil {
+	if g.phase == attachmentEffectsStable && g.capability.sess == nil {
 		g.capability = capabilityFromToken(token)
 		g.failedTransport = transportSnapshot{}
 	}

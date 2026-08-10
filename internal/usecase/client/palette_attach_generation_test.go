@@ -35,7 +35,7 @@ type attachPaletteTimer struct {
 func newAttachPaletteClock() *attachPaletteClock {
 	return &attachPaletteClock{
 		timers:          make(chan *attachPaletteTimer, 16),
-		handshakeTimers: make(chan *attachPaletteTimer, 4),
+		handshakeTimers: make(chan *attachPaletteTimer, 1),
 	}
 }
 
@@ -43,7 +43,11 @@ func (*attachPaletteClock) Now() time.Time { return time.Time{} }
 func (c *attachPaletteClock) NewTimer(delay time.Duration) ports.Timer {
 	timer := &attachPaletteTimer{ch: make(chan time.Time, 1), stopped: make(chan struct{}), duration: delay}
 	if delay == ports.HandshakeTimeout {
-		c.handshakeTimers <- timer
+		select {
+		case c.handshakeTimers <- timer:
+		default:
+			panic("unexpected extra handshake timer")
+		}
 	} else {
 		c.timers <- timer
 	}
@@ -246,6 +250,18 @@ func (h *attachPaletteHarness) detach(t *testing.T) {
 
 func paletteReply(foreground, background string, slot uint8, color string) string {
 	return "\x1b]10;" + foreground + "\a\x1b]11;" + background + "\a\x1b]4;" + string(rune('0'+slot)) + ";" + color + "\a\x1b[?2031;1$y"
+}
+
+func TestAttachHandshakeDeadlineStopsBeforeRuntimeWithoutInitialOutput(t *testing.T) {
+	h := startAttachPaletteHarness(&terminalThemeState{})
+	select {
+	case <-h.handshakeTimer.stopped:
+		// Welcome and synchronous client publications commit the handshake. A
+		// quiet runtime is allowed to produce no Output frame.
+	case <-time.After(2 * time.Second):
+		t.Fatal("handshake deadline still owned the long-lived runtime transport")
+	}
+	h.detach(t)
 }
 
 func TestAttachReconnectClearsRetainedPaletteInOnePublication(t *testing.T) {

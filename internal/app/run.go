@@ -835,16 +835,7 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 	}, nil
 }
 
-type attachHandoffKey struct {
-	endpoint  string
-	session   string
-	intent    uint8
-	lifecycle domain.SessionLifecycleID
-	liveTab   domain.TabStableID
-	stopped   domain.TabSelector
-}
-
-const maxAttachHandoffHops = 32
+const maxAttachTargetHandoffs = 32
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
@@ -866,30 +857,27 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	factory := deps.remoteDialerFactory
 	var remoteSelection *domain.RemoteSessionTarget
 	var remoteEnvironmentPolicy ports.EnvironmentPolicy
-	seenHandoffs := make(map[attachHandoffKey]struct{})
-	handoffHops := 0
-	admitHandoff := func(next attachHandoffKey) error {
-		if _, seen := seenHandoffs[next]; seen {
-			return fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
-		}
-		if handoffHops >= maxAttachHandoffHops {
-			return fmt.Errorf("vev: attach handoff exceeded maximum of %d hops", maxAttachHandoffHops)
-		}
-		handoffHops++
-		seenHandoffs[next] = struct{}{}
-		return nil
-	}
+	remoteDisplayOrigin := remoteTarget
+	routeOrigin := ports.RouteOriginLocal
+	routeOriginKey := "local"
 	if remoteTarget != "" {
+		routeOrigin = ports.RouteOriginRemote
+		routeOriginKey = remoteTarget
 		if modeErr != nil {
 			return modeErr
 		}
 		if factory == nil {
 			factory = defaultRemoteDialerFactory()
 		}
-		seenHandoffs[attachHandoffKey{endpoint: remoteTarget, session: name, intent: intent}] = struct{}{}
 	}
-	var handoff client.AttachHandoffFunc
-	handoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+	pickerHandoff := remoteTarget == ""
+	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, policy ports.EnvironmentPolicy) ports.EnvironmentPolicy {
+		if pickerHandoff && target == nil {
+			return ports.EnvironmentPolicyDaemonOwned
+		}
+		return policy
+	}
+	handoff := func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
 		if err := validateRemoteAttachHandoff(target); err != nil {
 			return nil, client.AttachRequest{}, fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
@@ -899,25 +887,33 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if factory == nil {
 			factory = defaultRemoteDialerFactory()
 		}
-		next := attachHandoffKey{endpoint: target.Endpoint, session: target.Session, intent: target.Intent}
 		var selection *domain.RemoteSessionTarget
 		if target.RemoteTarget != nil {
 			copyTarget := *target.RemoteTarget
 			selection = &copyTarget
-			next.lifecycle = copyTarget.LifecycleID
-			next.liveTab = copyTarget.LiveTabID
-			next.stopped = copyTarget.StoppedTab
-		}
-		if err := admitHandoff(next); err != nil {
-			return nil, client.AttachRequest{}, err
 		}
 		dialer, err := factory.DialerForRemote(target.Endpoint, target.Session, mode, log)
 		if err != nil {
 			return nil, client.AttachRequest{}, err
 		}
-		return dialer, client.AttachRequest{Intent: target.Intent, SessionName: target.Session, Remote: true, RemoteTarget: selection, EnvironmentPolicy: target.EnvironmentPolicy}, nil
+		policy := pickerEnvironmentPolicy(selection, target.EnvironmentPolicy)
+		displayOrigin := target.Endpoint
+		if selection != nil {
+			displayOrigin = selection.DisplayOrigin
+		}
+		return dialer, client.AttachRequest{
+			Intent:            target.Intent,
+			SessionName:       target.Session,
+			Remote:            true,
+			Origin:            ports.RouteOriginDiscovery,
+			OriginKey:         target.Endpoint,
+			RemoteTarget:      selection,
+			RemoteOrigin:      displayOrigin,
+			EnvironmentPolicy: policy,
+		}, nil
 	}
 
+	handoffAttempts := 0
 	for {
 		var err error
 		if remoteTarget != "" {
@@ -938,10 +934,16 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
 				AttachHandoff:     handoff,
 				Remote:            true,
+				Origin:            ports.RouteOriginRemote,
+				OriginKey:         remoteTarget,
 			}, client.AttachRequest{
 				Intent:            intent,
 				SessionName:       name,
+				Remote:            true,
+				Origin:            routeOrigin,
+				OriginKey:         routeOriginKey,
 				RemoteTarget:      remoteSelection,
+				RemoteOrigin:      remoteDisplayOrigin,
 				EnvironmentPolicy: remoteEnvironmentPolicy,
 			})
 		} else {
@@ -956,7 +958,9 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				RuntimeObserver: deps.runtimeObserver,
 				AttachHandoff:   handoff,
 				Remote:          false,
-			}, client.AttachRequest{Intent: intent, SessionName: name})
+				Origin:          ports.RouteOriginLocal,
+				OriginKey:       "local",
+			}, client.AttachRequest{Intent: intent, SessionName: name, Origin: ports.RouteOriginLocal, OriginKey: "local"})
 		}
 
 		var handoffErr *client.AttachTargetError
@@ -969,24 +973,23 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if err := validateRemoteAttachHandoff(handoffErr.Target); err != nil {
 			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
-		next := attachHandoffKey{endpoint: handoffErr.Target.Endpoint, session: handoffErr.Target.Session, intent: handoffErr.Target.Intent}
-		if handoffErr.Target.RemoteTarget != nil {
-			next.lifecycle = handoffErr.Target.RemoteTarget.LifecycleID
-			next.liveTab = handoffErr.Target.RemoteTarget.LiveTabID
-			next.stopped = handoffErr.Target.RemoteTarget.StoppedTab
+		if handoffAttempts >= maxAttachTargetHandoffs {
+			return fmt.Errorf("vev: attach handoff exceeded maximum of %d attempts", maxAttachTargetHandoffs)
 		}
-		if err := admitHandoff(next); err != nil {
-			return err
-		}
+		handoffAttempts++
 		remoteTarget = handoffErr.Target.Endpoint
+		remoteDisplayOrigin = remoteTarget
+		routeOrigin = ports.RouteOriginDiscovery
+		routeOriginKey = remoteTarget
 		name = handoffErr.Target.Session
 		intent = handoffErr.Target.Intent
 		remoteSelection = nil
-		remoteEnvironmentPolicy = handoffErr.Target.EnvironmentPolicy
 		if handoffErr.Target.RemoteTarget != nil {
 			copyTarget := *handoffErr.Target.RemoteTarget
 			remoteSelection = &copyTarget
+			remoteDisplayOrigin = copyTarget.DisplayOrigin
 		}
+		remoteEnvironmentPolicy = pickerEnvironmentPolicy(remoteSelection, handoffErr.Target.EnvironmentPolicy)
 		if modeErr != nil {
 			return modeErr
 		}

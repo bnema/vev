@@ -3,8 +3,8 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 25 {
-		t.Fatalf("ProtocolVersion = %d, want 25", ProtocolVersion)
+	if ProtocolVersion != 29 {
+		t.Fatalf("ProtocolVersion = %d, want 29", ProtocolVersion)
 	}
 }
 
@@ -18,12 +18,12 @@ func TestControlMsgTypes(t *testing.T) {
 	if MsgOutputResetRequest != 13 {
 		t.Fatalf("MsgOutputResetRequest = %d, want 13", MsgOutputResetRequest)
 	}
-	if MsgSessionMeta != 23 {
-		t.Fatalf("MsgSessionMeta = %d, want 23", MsgSessionMeta)
-	}
 }
 
 func TestMsgTypeUnique(t *testing.T) {
+	if MsgNavigationAction != 23 {
+		t.Fatalf("MsgNavigationAction = %d, want 23", MsgNavigationAction)
+	}
 	tests := []struct {
 		name string
 		typ  MsgType
@@ -35,8 +35,11 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgCommand", MsgCommand}, {"MsgOutputResetRequest", MsgOutputResetRequest}, {"MsgRemotePreviewRequest", MsgRemotePreviewRequest},
 		{"MsgWelcome", MsgWelcome}, {"MsgError", MsgError}, {"MsgOutput", MsgOutput},
 		{"MsgDetached", MsgDetached}, {"MsgPong", MsgPong}, {"MsgSessions", MsgSessions},
-		{"MsgCommandResult", MsgCommandResult}, {"MsgSessionMeta", MsgSessionMeta},
-		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget},
+		{"MsgCommandResult", MsgCommandResult},
+		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget}, {"MsgNavigationAction", MsgNavigationAction},
+		{"MsgCommittedRouteIdentity", MsgCommittedRouteIdentity}, {"MsgRecentRouteSnapshot", MsgRecentRouteSnapshot},
+		{"MsgNavigateRecentRoute", MsgNavigateRecentRoute}, {"MsgRouteNavigationFailure", MsgRouteNavigationFailure},
+		{"MsgRoutePosition", MsgRoutePosition},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

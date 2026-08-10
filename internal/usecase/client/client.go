@@ -40,10 +40,6 @@ func (e *ProtocolError) Error() string {
 	return fmt.Sprintf("vev: %s", e.Text)
 }
 
-// errRenderModeMismatch is a permanent attach failure: retrying the same
-// request cannot make a daemon accept a different render contract.
-var errRenderModeMismatch = errors.New("vev: daemon accepted render mode")
-
 // DetachedError reports that the daemon detached this client for a reason
 // other than an ordinary user-initiated detach.
 type DetachedError struct {
@@ -167,21 +163,38 @@ type Dependencies struct {
 	// Remote selects client-side carriage presentation only; it never enters
 	// the daemon-facing session request.
 	Remote bool
+	// Origin is explicit composition metadata for the initial route. A zero
+	// value is normalized to local for direct package callers and old tests.
+	Origin    ports.RouteOrigin
+	OriginKey string
 }
 
 // AttachRequest identifies the session for one client run. Remote is
 // client-only presentation metadata. RemoteTarget is an optional exact picker
 // handoff and is serialized into Hello only when present.
 type AttachRequest struct {
-	Intent            uint8
-	SessionName       string
-	RenderMode        ports.RenderMode
-	Remote            bool
-	RemoteTarget      *domain.RemoteSessionTarget
-	EnvironmentPolicy ports.EnvironmentPolicy
+	Intent                 uint8
+	SessionName            string
+	Remote                 bool
+	Origin                 ports.RouteOrigin
+	OriginKey              string
+	RemoteTarget           *domain.RemoteSessionTarget
+	ExactTarget            *ports.ExactSessionTarget
+	PreferredTabID         domain.TabStableID
+	RemoteOrigin           string
+	EnvironmentPolicy      ports.EnvironmentPolicy
+	NavigationCapabilities ports.NavigationCapabilities
+	StartupOverlay         ports.StartupOverlay
 }
 
-// Runner owns the client lifecycle across one or more attachment attempts.
+// attachRoute captures the dialer, request, and resume token needed to
+// restore a previous attachment route after a navigation handoff.
+type attachRoute struct {
+	dialer      ports.Dialer
+	request     AttachRequest
+	resumeToken uint64
+}
+
 type Runner struct {
 	dialer            ports.Dialer
 	term              ports.Terminal
@@ -192,6 +205,9 @@ type Runner struct {
 	remoteHostLearner ports.RemoteHostLearner
 	attachHandoff     AttachHandoffFunc
 	remote            bool
+	origin            ports.RouteOrigin
+	ledger            *routeLedger
+	routeFailure      *ports.RouteNavigationFailure
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -213,6 +229,8 @@ func NewRunner(deps Dependencies) *Runner {
 		remoteHostLearner: deps.RemoteHostLearner,
 		attachHandoff:     deps.AttachHandoff,
 		remote:            deps.Remote,
+		origin:            normalizeRouteOrigin(deps.Origin, deps.Remote),
+		ledger:            newRouteLedger(),
 	}
 }
 
@@ -232,33 +250,41 @@ func (r *Runner) terminalInput() *terminalInputPump {
 }
 
 func validateAttachRequest(request AttachRequest) error {
-	switch request.RenderMode {
-	case ports.RenderModeFullTerminal, ports.RenderModeProxiedContent:
-	default:
-		return fmt.Errorf("vev: invalid render mode %d", request.RenderMode)
-	}
-	switch request.Intent {
-	case ports.IntentEphemeral:
-	case ports.IntentNew, ports.IntentAttach, ports.IntentResume:
-		if request.SessionName == "" {
-			return domain.ErrInvalidSessionName
+	if request.Origin != 0 {
+		if err := request.Origin.Validate(); err != nil {
+			return fmt.Errorf("vev: invalid route origin: %w", err)
 		}
-	default:
-		return fmt.Errorf("vev: invalid session intent %d", request.Intent)
 	}
-	if request.SessionName != "" {
-		if err := domain.ValidateSessionName(request.SessionName); err != nil {
-			return err
+	if request.OriginKey != "" {
+		if err := ports.ValidateRouteLabel(request.OriginKey, false); err != nil {
+			return fmt.Errorf("vev: invalid route origin key: %w", err)
 		}
+	}
+	if request.ExactTarget != nil {
+		if err := request.ExactTarget.Validate(); err != nil {
+			return fmt.Errorf("vev: invalid exact target: %w", err)
+		}
+		if request.SessionName != request.ExactTarget.SessionName {
+			return errors.New("vev: exact target session mismatch")
+		}
+		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != request.ExactTarget.LifecycleID || request.RemoteTarget.SessionName != request.ExactTarget.SessionName) {
+			return errors.New("vev: exact target does not match remote target")
+		}
+	}
+	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
+		return fmt.Errorf("vev: invalid session target: %w", err)
+	}
+	if err := ports.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned); err != nil {
+		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
-		if request.RenderMode == ports.RenderModeProxiedContent {
-			return errors.New("vev: proxied attach request requires remote target")
+		if request.EnvironmentPolicy == ports.EnvironmentPolicyClientOwned {
+			return nil
 		}
-		if request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned {
-			return errors.New("vev: attach request without remote target requires client-owned environment")
+		if request.Remote && request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned {
+			return nil
 		}
-		return nil
+		return errors.New("vev: attach without remote target requires a matching environment policy")
 	}
 	if err := request.RemoteTarget.Validate(); err != nil {
 		return fmt.Errorf("vev: invalid remote attach target: %w", err)
@@ -270,7 +296,7 @@ func validateAttachRequest(request AttachRequest) error {
 		return errors.New("vev: remote attach target requires daemon-owned environment")
 	}
 	if request.Intent != ports.IntentAttach && request.Intent != ports.IntentResume {
-		return errors.New("vev: remote attach target requires attach or resume intent")
+		return errors.New("vev: remote attach target requires attach or resume")
 	}
 	return nil
 }
@@ -280,6 +306,9 @@ func validateAttachRequest(request AttachRequest) error {
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
 	request = cloneAttachRequest(request)
+	if request.Origin == 0 {
+		request.Origin = r.origin
+	}
 	if err := validateAttachRequest(request); err != nil {
 		return err
 	}
@@ -310,6 +339,16 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	resumeToken := uint64(0)
 	attemptRequest := request
 	dialer := r.dialer
+	var homeRoute *attachRoute
+	var returnRoute *attachRoute
+	returnResumeFallback := false
+	homeNavigationPending := false
+	returnNavigationPending := false
+	routeNavigationPending := false
+	routeNavigationResumeFallback := false
+	var routeNavigationSelection *routeNavigationSelection
+	var routeNavigationFallback *attachRoute
+	var routeNavigationAction *ports.RouteNavigationAction
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
 	var rememberOnce sync.Once
@@ -359,6 +398,35 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		rawEntered: &rawEntered,
 		stage:      reconnectStageOfflineRetrying,
 	}
+	restoreReturnRoute := func(route attachRoute) {
+		returnNavigationPending = true
+		dialer = route.dialer
+		attemptRequest = route.request
+		if route.resumeToken != 0 {
+			attemptRequest.Intent = ports.IntentResume
+		} else {
+			attemptRequest.Intent = ports.IntentAttach
+		}
+		attemptRequest.StartupOverlay = ports.StartupOverlayNone
+		attemptRequest.NavigationCapabilities &^= ports.NavigationCapabilityBack | ports.NavigationCapabilityHomePicker
+		resumeToken = route.resumeToken
+		returnResumeFallback = route.resumeToken != 0
+		remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
+		backoff = defaultReconnectBackoff.initial
+	}
+	enterHomePicker := func() {
+		dialer = homeRoute.dialer
+		attemptRequest = homeRoute.request
+		attemptRequest.Intent = ports.IntentAttach
+		attemptRequest.NavigationCapabilities = ports.NavigationCapabilityBack
+		attemptRequest.StartupOverlay = ports.StartupOverlaySessionPicker
+		attemptRequest.RemoteTarget = nil
+		attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
+		attemptRequest.Remote = homeRoute.request.Remote || r.remote
+		resumeToken = 0
+		remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
+		backoff = defaultReconnectBackoff.initial
+	}
 	var input *terminalInputPump
 	defer func() {
 		if input != nil {
@@ -377,6 +445,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	}
 
 	for {
+		if err := validateAttachRequest(attemptRequest); err != nil {
+			return err
+		}
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
 		transport, err := boundedDial(handshakeCtx, dialer)
 		if err != nil {
@@ -412,7 +483,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return errors.New("vev: dialer returned nil transport")
 		}
 		stopHandshakeTransport := watchHandshakeTransport(handshakeCtx, transport)
-		connection, err := NewSessionConnection(transport, attemptRequest)
+		connection, err := NewSessionConnection(transport, SessionTarget{
+			Intent:      attemptRequest.Intent,
+			SessionName: attemptRequest.SessionName,
+		})
 		if err != nil {
 			stopHandshakeTransport()
 			finishHandshake()
@@ -425,22 +499,24 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			linkEvents = reporter.LinkEvents()
 		}
 		result := (&attachAttempt{
-			runner:                 r,
-			connection:             connection,
-			remote:                 remote,
-			handshakeCtx:           handshakeCtx,
-			handshakeTimedOut:      timedOut,
-			finishHandshake:        finishHandshake,
-			stopHandshakeTransport: stopHandshakeTransport,
-			request:                attemptRequest,
-			resumeToken:            resumeToken,
-			clientID:               processClientID,
-			milestones:             &ms,
-			themeState:             themeState,
-			enterRaw:               enterRaw,
-			reconnect:              reconnect,
-			linkEvents:             linkEvents,
-			rememberRemoteHost:     rememberRemoteHost,
+			runner:                   r,
+			dialer:                   dialer,
+			connection:               connection,
+			remote:                   remote,
+			handshakeCtx:             handshakeCtx,
+			handshakeTimedOut:        timedOut,
+			finishHandshake:          finishHandshake,
+			stopHandshakeTransport:   stopHandshakeTransport,
+			request:                  attemptRequest,
+			resumeToken:              resumeToken,
+			routeNavigationSelection: routeNavigationSelection,
+			clientID:                 processClientID,
+			milestones:               &ms,
+			themeState:               themeState,
+			enterRaw:                 enterRaw,
+			reconnect:                reconnect,
+			linkEvents:               linkEvents,
+			rememberRemoteHost:       rememberRemoteHost,
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
@@ -453,13 +529,136 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if !result.transportClosed {
 			_ = connection.Close()
 		}
+		// Apply metadata from every processed frame before dispatching its
+		// navigation action. A committed identity can arrive immediately before
+		// a home/back action and must become the route request's authority first.
+		if result.resumeToken != 0 {
+			resumeToken = result.resumeToken
+		}
+		if result.sessionName != "" {
+			attemptRequest.SessionName = result.sessionName
+		}
+		if result.committedIdentity != nil {
+			identity := *result.committedIdentity
+			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != identity.Target {
+				attemptRequest.PreferredTabID = ""
+			}
+			if remoteTarget := attemptRequest.RemoteTarget; remoteTarget != nil &&
+				(remoteTarget.LifecycleID != identity.Target.LifecycleID || remoteTarget.SessionName != identity.Target.SessionName) {
+				attemptRequest.RemoteTarget = nil
+			}
+			attemptRequest.ExactTarget = &identity.Target
+		}
+		if result.routePosition != nil && attemptRequest.ExactTarget != nil &&
+			*attemptRequest.ExactTarget == result.routePosition.Target {
+			attemptRequest.PreferredTabID = result.routePosition.ActiveTabID
+			attemptRequest.RemoteTarget = nil
+		}
+		if result.err == nil && result.welcomed && routeNavigationPending {
+			routeNavigationPending = false
+			routeNavigationSelection = nil
+			routeNavigationResumeFallback = false
+			routeNavigationFallback = nil
+			routeNavigationAction = nil
+		}
+		if result.routeAction != nil {
+			if r.ledger == nil {
+				return errors.New("vev: route ledger unavailable")
+			}
+			selection, valid := r.ledger.navigationSelection(*result.routeAction)
+			if !valid {
+				return errors.New("vev: stale route navigation action")
+			}
+			if selection.noOp {
+				continue
+			}
+			action := *result.routeAction
+			routeNavigationAction = &action
+			routeNavigationFallback = &attachRoute{dialer: selection.prior.dialer, request: selection.prior.request, resumeToken: selection.prior.resumeToken}
+			dialer = selection.selected.dialer
+			attemptRequest = cloneAttachRequest(selection.selected.request)
+			if selection.selected.resumeToken != 0 {
+				attemptRequest.Intent = ports.IntentResume
+			} else {
+				attemptRequest.Intent = ports.IntentAttach
+			}
+			// Back is transient to the picker overlay. Re-derive the home-picker
+			// capability from the selected route instead of trusting request
+			// metadata, which may have been cleared after a daemon-side switch.
+			attemptRequest.StartupOverlay = ports.StartupOverlayNone
+			attemptRequest.NavigationCapabilities = 0
+			if homeRoute != nil && selection.selected.presentation.kind == ports.RouteKindRemote {
+				attemptRequest.NavigationCapabilities = ports.NavigationCapabilityHomePicker
+			}
+			resumeToken = selection.selected.resumeToken
+			routeNavigationPending = true
+			routeNavigationSelection = &selection
+			routeNavigationResumeFallback = selection.selected.resumeToken != 0
+			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
+			backoff = defaultReconnectBackoff.initial
+			continue
+		}
+		if result.action != 0 {
+			switch result.action {
+			case ports.NavigationOpenHomePicker:
+				// The daemon only sends this action after accepting a Hello that
+				// advertised Home support. The durable client-side prerequisite is
+				// the captured route itself; request metadata may have been rebased by
+				// committed identity or cursor updates since that Hello.
+				if homeRoute == nil {
+					return errors.New("vev: stale home navigation action")
+				}
+				returnRequest := attemptRequest
+				if result.sessionName != "" {
+					returnRequest.SessionName = result.sessionName
+				}
+				returnRoute = &attachRoute{dialer: dialer, request: returnRequest, resumeToken: result.resumeToken}
+				homeNavigationPending = true
+				enterHomePicker()
+				continue
+			case ports.NavigationBack:
+				// As with Home, the daemon accepted Back in Hello before sending
+				// this action. The retained concrete route is the durable client
+				// prerequisite; request metadata may have been rebased meanwhile.
+				if returnRoute == nil {
+					return errors.New("vev: stale return navigation action")
+				}
+				route := *returnRoute
+				returnRoute = nil
+				homeNavigationPending = false
+				returnNavigationPending = true
+				restoreReturnRoute(route)
+				continue
+			default:
+				return errors.New("vev: unsupported navigation action")
+			}
+		}
 		if result.target != nil {
 			if r.attachHandoff == nil {
 				return &AttachTargetError{Target: *result.target}
 			}
+			if result.target.RemoteTarget != nil || result.target.Endpoint != "" {
+				if homeRoute == nil && attemptRequest.RemoteTarget == nil {
+					routeRequest := attemptRequest
+					if result.sessionName != "" {
+						routeRequest.SessionName = result.sessionName
+					}
+					routeRequest.Intent = ports.IntentAttach
+					routeRequest.NavigationCapabilities = 0
+					routeRequest.StartupOverlay = ports.StartupOverlayNone
+					homeRoute = &attachRoute{dialer: dialer, request: routeRequest}
+				}
+			}
 			nextDialer, nextRequest, handoffErr := r.attachHandoff(*result.target)
 			if handoffErr != nil {
 				return handoffErr
+			}
+			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned) {
+				nextRequest.NavigationCapabilities |= ports.NavigationCapabilityHomePicker
+			}
+			if attemptRequest.StartupOverlay == ports.StartupOverlaySessionPicker {
+				returnRoute = nil
+				returnResumeFallback = false
 			}
 			nextRequest = cloneAttachRequest(nextRequest)
 			if err := validateAttachRequest(nextRequest); err != nil {
@@ -470,23 +669,64 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			dialer = nextDialer
 			attemptRequest = nextRequest
-			remote = attemptRequest.Remote || r.remote
-			reconnect.remote = remote
+			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			resumeToken = 0
 			backoff = defaultReconnectBackoff.initial
 			continue
 		}
-		if result.resumeToken != 0 {
-			resumeToken = result.resumeToken
-		}
-		if result.sessionName != "" {
-			attemptRequest.SessionName = result.sessionName
-		}
 		if result.err == nil {
+			if result.welcomed && returnNavigationPending {
+				returnNavigationPending = false
+				returnResumeFallback = false
+			}
 			if clearErr := reconnect.clear(); clearErr != nil {
 				return clearErr
 			}
 			return nil
+		}
+		if result.welcomed {
+			homeNavigationPending = false
+		}
+		if homeNavigationPending && returnRoute != nil {
+			route := *returnRoute
+			returnRoute = nil
+			homeNavigationPending = false
+			returnNavigationPending = true
+			restoreReturnRoute(route)
+			continue
+		}
+		if routeNavigationPending && routeNavigationResumeFallback && resumeNeedsExactAttach(result.err) {
+			attemptRequest.Intent = ports.IntentAttach
+			resumeToken = 0
+			routeNavigationResumeFallback = false
+			continue
+		}
+		if routeNavigationPending && routeNavigationFallback != nil {
+			if routeNavigationAction != nil {
+				action := *routeNavigationAction
+				r.routeFailure = &ports.RouteNavigationFailure{Key: action.Key, Generation: action.Generation, Code: routeFailureCode(result.err)}
+				routeNavigationAction = nil
+			}
+			route := *routeNavigationFallback
+			routeNavigationFallback = nil
+			routeNavigationPending = false
+			routeNavigationSelection = nil
+			routeNavigationResumeFallback = false
+			returnNavigationPending = true
+			restoreReturnRoute(route)
+			continue
+		}
+		if returnResumeFallback && resumeNeedsExactAttach(result.err) {
+			attemptRequest.Intent = ports.IntentAttach
+			resumeToken = 0
+			returnResumeFallback = false
+			continue
+		}
+		if returnNavigationPending && !returnResumeFallback && homeRoute != nil {
+			returnRoute = nil
+			returnNavigationPending = false
+			enterHomePicker()
+			continue
 		}
 		if !shouldReconnect(result.err) || resumeToken == 0 || ctx.Err() != nil {
 			if clearErr := reconnect.clear(); clearErr != nil {
@@ -522,6 +762,13 @@ type reconnectUI struct {
 	rawEntered *bool
 	showing    bool
 	stage      reconnectStage
+}
+
+func syncReconnectRemote(reconnect *reconnectUI, remote bool) bool {
+	if reconnect != nil {
+		reconnect.remote = remote
+	}
+	return remote
 }
 
 func (u *reconnectUI) redraw(size domain.Size) error {
@@ -630,33 +877,39 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 }
 
 type attachAttempt struct {
-	runner                 *Runner
-	connection             *SessionConnection
-	remote                 bool
-	transport              ports.Transport
-	handshakeCtx           context.Context
-	handshakeTimedOut      <-chan struct{}
-	finishHandshake        func()
-	stopHandshakeTransport func()
-	request                AttachRequest
-	resumeToken            uint64
-	clientID               [16]byte
-	milestones             *milestones
-	themeState             *terminalThemeState
-	enterRaw               func() error
-	reconnect              *reconnectUI
-	linkEvents             <-chan ports.LinkEvent
-	rememberRemoteHost     func()
-	terminalInput          func() *terminalInputPump
+	runner                   *Runner
+	dialer                   ports.Dialer
+	connection               *SessionConnection
+	remote                   bool
+	transport                ports.Transport
+	handshakeCtx             context.Context
+	handshakeTimedOut        <-chan struct{}
+	finishHandshake          func()
+	stopHandshakeTransport   func()
+	request                  AttachRequest
+	resumeToken              uint64
+	routeNavigationSelection *routeNavigationSelection
+	clientID                 [16]byte
+	milestones               *milestones
+	themeState               *terminalThemeState
+	enterRaw                 func() error
+	reconnect                *reconnectUI
+	linkEvents               <-chan ports.LinkEvent
+	rememberRemoteHost       func()
+	terminalInput            func() *terminalInputPump
 }
 
 type attachResult struct {
-	resumeToken     uint64
-	sessionName     string
-	welcomed        bool
-	transportClosed bool
-	target          *ports.AttachTarget
-	err             error
+	resumeToken       uint64
+	sessionName       string
+	committedIdentity *ports.CommittedRouteIdentity
+	routePosition     *ports.RoutePosition
+	welcomed          bool
+	transportClosed   bool
+	target            *ports.AttachTarget
+	action            ports.NavigationAction
+	routeAction       *ports.RouteNavigationAction
+	err               error
 }
 
 // AttachTargetError requests that the composition root replace the current
@@ -696,11 +949,10 @@ func requestedOutputWindow(transport ports.Transport) uint8 {
 
 func (a *attachAttempt) run(ctx context.Context) attachResult {
 	transport := a.transport
-	request := a.request
 	if a.connection != nil {
 		transport = a.connection.Transport()
-		request = a.connection.AttachRequest()
 	}
+	request := a.request
 	term := a.runner.term
 	clk := a.runner.clock
 	intent := request.Intent
@@ -712,7 +964,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	enterRaw := a.enterRaw
 	reconnect := a.reconnect
 	linkEvents := a.linkEvents
-	remote := a.remote || request.Remote
+	remote := a.remote || a.request.Remote
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -764,21 +1016,32 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	colorTerm := os.Getenv("COLORTERM")
 	trueColor := DetectTrueColor(termEnv, colorTerm)
 	themeState.setTrueColor(trueColor)
+	exactTarget := request.ExactTarget
+	if exactTarget == nil && request.RemoteTarget != nil {
+		exactTarget = &ports.ExactSessionTarget{
+			LifecycleID: request.RemoteTarget.LifecycleID,
+			SessionName: request.RemoteTarget.SessionName,
+		}
+	}
 	hello := ports.Hello{
-		Version:           ports.ProtocolVersion,
-		Intent:            intent,
-		ClientID:          clientID,
-		ResumeToken:       resumeToken,
-		Name:              name,
-		RenderMode:        request.RenderMode,
-		Size:              size,
-		TermEnv:           termEnv,
-		Cwd:               cwd,
-		TrueColor:         trueColor,
-		MaxOutputInFlight: requestedOutputWindow(transport),
-		Env:               os.Environ(),
-		RemoteTarget:      request.RemoteTarget,
-		EnvironmentPolicy: request.EnvironmentPolicy,
+		Version:                ports.ProtocolVersion,
+		Intent:                 intent,
+		ClientID:               clientID,
+		ResumeToken:            resumeToken,
+		Name:                   name,
+		Size:                   size,
+		TermEnv:                termEnv,
+		Cwd:                    cwd,
+		TrueColor:              trueColor,
+		MaxOutputInFlight:      requestedOutputWindow(transport),
+		Env:                    os.Environ(),
+		RemoteTarget:           request.RemoteTarget,
+		ExactTarget:            exactTarget,
+		PreferredTabID:         request.PreferredTabID,
+		RemoteOrigin:           request.RemoteOrigin,
+		EnvironmentPolicy:      request.EnvironmentPolicy,
+		NavigationCapabilities: request.NavigationCapabilities,
+		StartupOverlay:         request.StartupOverlay,
 	}
 	if err := sendHandshake(func() error {
 		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
@@ -796,8 +1059,17 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}); err != nil {
 		return handshakeFailure("awaiting welcome", err)
 	}
+	var committedIdentity *ports.CommittedRouteIdentity
+	var routePosition *ports.RoutePosition
 	result := func(welcomed bool, err error) attachResult {
-		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: welcomed, err: err}
+		return attachResult{
+			resumeToken:       resumeToken,
+			sessionName:       name,
+			committedIdentity: cloneCommittedIdentity(committedIdentity),
+			routePosition:     cloneRoutePosition(routePosition),
+			welcomed:          welcomed,
+			err:               err,
+		}
 	}
 	switch reply.Type {
 	case ports.MsgWelcome:
@@ -805,11 +1077,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if derr != nil {
 			return result(false, fmt.Errorf("vev: decoding welcome: %w", derr))
 		}
-		if welcome.RenderMode != request.RenderMode {
-			return result(false, fmt.Errorf("%w %d, want %d", errRenderModeMismatch, welcome.RenderMode, request.RenderMode))
-		}
 		resumeToken = welcome.ResumeToken
 		name = welcome.SessionName
+		committedIdentity = cloneCommittedIdentity(welcome.CommittedIdentity)
 		ms.welcomed = true
 		log.Debug("welcomed by daemon", "resume_token_present", resumeToken != 0)
 		if remote {
@@ -830,6 +1100,46 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return handshakeFailure("validating welcome", err)
 	}
 	welcomedResult := func(err error) attachResult { return result(true, err) }
+	if committedIdentity != nil && a.runner.ledger != nil {
+		if request.ExactTarget != nil && *request.ExactTarget != committedIdentity.Target {
+			return welcomedResult(errRouteTargetChanged)
+		}
+		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
+			return welcomedResult(errRouteTargetChanged)
+		}
+		candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
+		var commitErr error
+		if a.routeNavigationSelection != nil {
+			selection := *a.routeNavigationSelection
+			commitErr = a.runner.ledger.commitTransition(selection.selected.identity, selection.snapshotGeneration, selection.active, candidate)
+		} else {
+			_, commitErr = a.runner.ledger.commitAttach(candidate)
+		}
+		if commitErr != nil {
+			return welcomedResult(fmt.Errorf("vev: committing route identity: %w", commitErr))
+		}
+		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		if err != nil {
+			return welcomedResult(fmt.Errorf("vev: encoding route snapshot: %w", err))
+		}
+		if err := sendHandshake(func() error {
+			return transport.Send(ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload})
+		}); err != nil {
+			return welcomedResult(fmt.Errorf("vev: publishing route snapshot: %w", err))
+		}
+	}
+	if a.runner.routeFailure != nil {
+		payload, err := ports.MarshalRouteNavigationFailure(*a.runner.routeFailure)
+		if err != nil {
+			return welcomedResult(fmt.Errorf("vev: encoding route navigation failure: %w", err))
+		}
+		if err := sendHandshake(func() error {
+			return transport.Send(ports.Frame{Type: ports.MsgRouteNavigationFailure, Payload: payload})
+		}); err != nil {
+			return welcomedResult(fmt.Errorf("vev: publishing route navigation failure: %w", err))
+		}
+		a.runner.routeFailure = nil
+	}
 
 	// 3. Enter raw mode after Welcome; Run owns restoration.
 	if err := enterRaw(); err != nil {
@@ -998,6 +1308,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return welcomedResult(err)
 		}
 	}
+	// Welcome and every synchronous initial publication have committed. The
+	// handshake deadline must not own the long-lived runtime transport: a quiet
+	// or unchanged screen may legitimately produce no initial Output frame.
+	endHandshake()
 	senderStarted = true
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
 	stdinDone := make(chan struct{})
@@ -1036,6 +1350,37 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		select {
 		case sendCh <- ports.Frame{Type: ports.MsgResize, Payload: payload}:
 			awaitingReconnectReset = true
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
+	publishRouteSnapshot := func() error {
+		if a.runner.ledger == nil {
+			return errors.New("vev: route ledger unavailable")
+		}
+		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		if err != nil {
+			return err
+		}
+		select {
+		case sendCh <- ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}:
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
+	sendRouteFailure := func(action ports.RouteNavigationAction, code ports.RouteFailureCode) error {
+		payload, err := ports.MarshalRouteNavigationFailure(ports.RouteNavigationFailure{
+			Key:        action.Key,
+			Generation: action.Generation,
+			Code:       code,
+		})
+		if err != nil {
+			return err
+		}
+		select {
+		case sendCh <- ports.Frame{Type: ports.MsgRouteNavigationFailure, Payload: payload}:
 			return nil
 		case <-loopCtx.Done():
 			return context.Canceled
@@ -1196,6 +1541,72 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				handoff := welcomedResult(nil)
 				handoff.target = &target
 				return handoff
+			case ports.MsgNavigationAction:
+				action, derr := ports.UnmarshalNavigationAction(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding navigation action: %w", derr))
+				}
+				navigation := welcomedResult(nil)
+				navigation.action = action
+				return navigation
+			case ports.MsgNavigateRecentRoute:
+				action, derr := ports.UnmarshalRouteNavigationAction(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding route navigation action: %w", derr))
+				}
+				if a.runner.ledger == nil {
+					if ferr := sendRouteFailure(action, ports.RouteFailureUnavailable); ferr != nil {
+						return welcomedResult(ferr)
+					}
+					continue
+				}
+				_, valid, noOp := a.runner.ledger.navigationRecord(action)
+				if !valid {
+					if ferr := sendRouteFailure(action, ports.RouteFailureStaleSelection); ferr != nil {
+						return welcomedResult(ferr)
+					}
+					continue
+				}
+				if noOp {
+					continue
+				}
+				navigation := welcomedResult(nil)
+				navigation.routeAction = &action
+				return navigation
+			case ports.MsgCommittedRouteIdentity:
+				identity, derr := ports.UnmarshalCommittedRouteIdentity(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding committed route identity: %w", derr))
+				}
+				name = identity.Target.SessionName
+				committedIdentity = cloneCommittedIdentity(&identity)
+				if a.runner.ledger == nil {
+					return welcomedResult(errors.New("vev: route ledger unavailable"))
+				}
+				if _, derr := a.runner.ledger.commitCommittedIdentity(identity); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: committing daemon-local route identity: %w", derr))
+				}
+				if derr := publishRouteSnapshot(); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: publishing daemon-local route snapshot: %w", derr))
+				}
+			case ports.MsgRoutePosition:
+				position, derr := ports.UnmarshalRoutePosition(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding route position: %w", derr))
+				}
+				if a.runner.ledger == nil {
+					return welcomedResult(errors.New("vev: route ledger unavailable"))
+				}
+				if derr := a.runner.ledger.updateRoutePosition(position); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: remembering route position: %w", derr))
+				}
+				routePosition = cloneRoutePosition(&position)
+			case ports.MsgRouteNavigationFailure:
+				failure, derr := ports.UnmarshalRouteNavigationFailure(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding route navigation failure: %w", derr))
+				}
+				log.Warn("route navigation rejected", "key", failure.Key, "generation", failure.Generation, "code", failure.Code)
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {

@@ -354,6 +354,24 @@ func newReconnectAttachAttempt(term ports.Terminal, transport ports.Transport, c
 	}
 }
 
+func TestResumeNeedsExactAttach(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "moved resume token", err: errRouteTargetChanged, want: true},
+		{name: "missing target", err: &ProtocolError{Code: ports.ErrNoSuchTarget}, want: true},
+		{name: "missing session", err: &ProtocolError{Code: ports.ErrNoSuchSession}, want: true},
+		{name: "internal", err: &ProtocolError{Code: ports.ErrInternal}},
+		{name: "transport", err: io.EOF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, resumeNeedsExactAttach(test.err))
+		})
+	}
+}
+
 func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	out := newReconnectToastOutputRecorder()
 	var flushes atomic.Int32

@@ -137,6 +137,7 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	oldToken := ac.resumeToken
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
 	d.clientGone(sess, ac, oldTransport, false)
 
 	resumedTransport := &closeTrackingTransport{}
@@ -150,6 +151,7 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	require.False(t, oldRetained)
 	require.NotNil(t, newParked)
 	require.NotEmpty(t, resumedTransport.Sends())
+	require.Equal(t, ports.MsgWelcome, resumedTransport.Sends()[0].Type, "Welcome must remain the first server frame after Hello")
 }
 
 func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
@@ -167,9 +169,10 @@ func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 	require.Nil(t, ac.transport())
 	d.mu.Lock()
 	parked := d.parked[token]
+	claimed := parked != nil && parked.claimed
 	d.mu.Unlock()
 	require.NotNil(t, parked)
-	require.False(t, parked.claimed)
+	require.False(t, claimed)
 	require.Equal(t, token, ac.resumeToken)
 
 	_, resumed, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, defaultSize)

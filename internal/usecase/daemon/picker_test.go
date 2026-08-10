@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,6 @@ import (
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 var (
@@ -28,6 +28,14 @@ var (
 )
 
 // --- test doubles -----------------------------------------------------------
+
+type remotePickerSendErrorTransport struct {
+	err error
+}
+
+func (t *remotePickerSendErrorTransport) Send(ports.Frame) error   { return t.err }
+func (*remotePickerSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*remotePickerSendErrorTransport) Close() error               { return nil }
 
 type refusingSnapshotDeleteRepository struct {
 	noOpSnapshotRepository
@@ -878,6 +886,65 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 	}
 }
 
+func TestPickerNavigationBackSendFailureKeepsPickerOpen(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+	const sendErr = "navigation back send failed"
+	tr := &remotePickerSendErrorTransport{err: errors.New(sendErr)}
+	ac.replaceTransport(tr)
+	ac.startupOverlay = ports.StartupOverlaySessionPicker
+	ac.navigationCapabilities = ports.NavigationCapabilityBack
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
+	ac.overlays.pickerGeneration++
+	ac.overlays.pickerMu.Unlock()
+
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	token := sess.attachmentToken(ac, tr)
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+	token.effect = effect
+
+	d.handlePickerInput(ac, []byte("\r"), effect)
+	require.True(t, ac.overlays.pickerActive(), "failed navigation send must leave the picker open")
+	require.Same(t, sess, ac.currentAttachmentSession())
+	history := d.notices.history()
+	require.NotEmpty(t, history)
+	require.Contains(t, history[len(history)-1].Details, sendErr)
+}
+
+func TestPickerNavigationBackWithoutCallerTicketKeepsPickerOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		passNil bool
+	}{
+		{name: "empty effects"},
+		{name: "nil first effect", passNil: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, _, releases := newManualTabSession(t, 1)
+			defer releases[0]()
+			ac.startupOverlay = ports.StartupOverlaySessionPicker
+			ac.navigationCapabilities = ports.NavigationCapabilityBack
+			ac.overlays.pickerMu.Lock()
+			ac.overlays.picker = picker.New([]picker.SessionView{{ID: sess.id, Name: sess.name, Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, picker.SelectionConfig{})
+			ac.overlays.pickerGeneration++
+			ac.overlays.pickerMu.Unlock()
+
+			if tc.passNil {
+				d.handlePickerInput(ac, []byte{3}, nil)
+			} else {
+				d.handlePickerInput(ac, []byte{3})
+			}
+
+			require.True(t, ac.overlays.pickerActive(), "back with missing effect must keep picker open when fresh admission is unavailable")
+		})
+	}
+}
+
 func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
@@ -891,46 +958,6 @@ func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	require.True(t, ac.overlays.pickerActive())
 	timer.ch <- time.Now()
 	require.Eventually(t, func() bool { return !ac.overlays.pickerActive() }, time.Second, 5*time.Millisecond)
-}
-
-func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	defer releasePTY1()
-	defer releasePTY2()
-	d, source, ac, sends := newManualSessionWithPTYs(t, p1)
-	source.id, source.name = "source", "source"
-	delete(d.sessions, domain.SessionID("manual"))
-	d.sessions[source.id] = source
-	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {},
-		tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 22})},
-	}
-	d.sessions[target.id] = target
-
-	sourcePane := source.tabs[0].focusedPane()
-	targetPane := target.tabs[0].focusedPane()
-	require.Equal(t, layout.PaneID("pane-1"), sourcePane.id, "source uses reusable pane-1")
-	require.Equal(t, sourcePane.id, targetPane.id, "target deliberately reuses pane-1")
-	sourcePane.screen.Write([]byte("SOURCE"))
-	client := vt.NewScreen(80, 25)
-	d.firstPaint(source, ac)
-	sourceOutput := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
-	ac.ackOutputState(sourceOutput.Epoch, sourceOutput.New)
-
-	targetPane.screen.Write([]byte("TARGET"))
-	targetPane.screen.ClearDamage() // TARGET is already rendered and has no pending VT damage.
-	require.Empty(t, targetPane.screen.Damage(), "target deliberately has no pending VT damage")
-	ac.previousOwner.Set(target)
-
-	// Exercise the user-facing previous-session route, which delegates to the
-	// real switchToTarget hand-off and immediately emits its required reset.
-	d.backSession(source, ac)
-	firstReset := awaitFrame(t, sends, ports.MsgOutput)
-	out := mustApplyOutput(t, client, firstReset)
-	require.Zero(t, out.Base, "the first target frame must be the reset, not an eventual repair")
-	frame := strings.Join(frameRows(client.Frame), "\n")
-	require.NotContains(t, frame, "SOURCE", "first target reset must not reuse source capture")
-	require.Contains(t, frame, "TARGET", "first target reset must immediately show clean target VT state")
 }
 
 func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {

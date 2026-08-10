@@ -11,6 +11,17 @@ import (
 
 var errResumeTokenLifecycleRace = errors.New("resume token lifecycle race")
 
+// resumeTokenSnapshot reads the credential under the same daemon lock used by
+// its lifecycle writers. Callers must not hold d.mu.
+func (d *Daemon) resumeTokenSnapshot(ac *attachedClient) uint64 {
+	if ac == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return ac.resumeToken
+}
+
 func newResumeToken() uint64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -41,48 +52,47 @@ func (d *Daemon) nextResumeTokenLocked() uint64 {
 // it returns 0 and never creates a marker after terminal
 // cleanup. Returns the resume token, or 0 when parking cannot be advertised.
 func (d *Daemon) markParkingInFlight(sess *session, ac *attachedClient) uint64 {
-	return d.markParkingInFlightOwner(sess, ac)
-}
-
-// markParkingInFlightOwner advertises a stable attachment binding before its
-// live membership is removed. The resume credential identifies this owner
-// binding, never a local session name.
-func (d *Daemon) markParkingInFlightOwner(owner attachmentOwner, ac *attachedClient) uint64 {
-	if normalizeAttachmentOwner(owner) == nil || ac == nil || !ac.resumeCapable {
+	if sess == nil || ac == nil || !ac.resumeCapable {
 		return 0
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.closing || !d.attachmentOwnerRegisteredByDaemonLocked(owner) || !attachmentOwnerRegistered(owner, ac) {
+	if d.closing || d.sessions[sess.id] != sess {
+		return 0
+	}
+	sess.mu.Lock()
+	registered := attachmentRegisteredLocked(sess, ac)
+	sess.mu.Unlock()
+	if !registered {
 		return 0
 	}
 	if ac.resumeToken == 0 {
 		ac.resumeToken = d.nextResumeTokenLocked()
 	}
-	d.ensureParkingInFlightLocked(owner, ac)
-	d.log.Info("parking in flight", "session", attachmentOwnerName(owner))
+	d.ensureParkingInFlightLocked(sess, ac)
+	d.log.Info("parking in flight", "session", sess.nameSnapshot())
 	return ac.resumeToken
 }
 
 // ensureParkingInFlightLocked records or refreshes the in-flight marker for ac.
 // Caller holds d.mu and has verified the daemon is not closing.
-func (d *Daemon) ensureParkingInFlightLocked(owner attachmentOwner, ac *attachedClient) {
+func (d *Daemon) ensureParkingInFlightLocked(sess *session, ac *attachedClient) {
 	token := ac.resumeToken
 	if token == 0 {
 		return
 	}
 	if existing := d.parking[token]; existing != nil {
 		if existing.ac == ac {
-			existing.owner = owner
+			existing.sess = sess
 			return
 		}
 		delete(d.parking, token)
 		existing.closeDone()
 	}
 	d.parking[token] = &parkingAttachment{
-		owner: owner,
-		ac:    ac,
-		done:  make(chan struct{}),
+		sess: sess,
+		ac:   ac,
+		done: make(chan struct{}),
 	}
 }
 
@@ -97,19 +107,24 @@ func (d *Daemon) clearParkingInFlight(token uint64, ac *attachedClient) {
 
 // clearParkingInFlightIfAbandoned drops a pre-detach parking marker when this
 // teardown lost the seat while still the live owner (stale transport fence).
-// If another path already detached/unrouted, that path
-// owns park publication.
+// The live owner clears its own marker; if another path already detached or
+// unrouted, that owning teardown is responsible for park publication/cleanup.
 func (d *Daemon) clearParkingInFlightIfAbandoned(sess *session, ac *attachedClient, token uint64) {
-	d.clearParkingInFlightIfAbandonedOwner(sess, ac, token)
-}
-
-func (d *Daemon) clearParkingInFlightIfAbandonedOwner(owner attachmentOwner, ac *attachedClient, token uint64) {
 	if token == 0 || ac == nil {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.parked[token] != nil || !d.attachmentOwnerRegisteredByDaemonLocked(owner) || !attachmentOwnerRegistered(owner, ac) {
+	if d.parked[token] != nil {
+		return
+	}
+	stillOwner := false
+	if sess != nil {
+		sess.mu.Lock()
+		stillOwner = attachmentRegisteredLocked(sess, ac)
+		sess.mu.Unlock()
+	}
+	if !stillOwner {
 		return
 	}
 	d.clearParkingInFlightLocked(token, ac)
@@ -139,22 +154,8 @@ func (d *Daemon) purgeAllParkingLocked() {
 // the session is removed before park publication. Caller holds d.mu.
 func (d *Daemon) purgeParkingForSessionLocked(sess *session) {
 	for token, pending := range d.parking {
-		if localSession(pending.owner) == sess {
+		if pending.sess == sess {
 			delete(d.parking, token)
-			pending.closeDone()
-		}
-	}
-}
-
-// purgeParkingForRemoteViewLocked invalidates in-flight resume publication for
-// one terminal remote view. At this point the view has no attachment members,
-// so clearing the credential cannot race a live owner.
-func (d *Daemon) purgeParkingForRemoteViewLocked(view *remoteView) {
-	for token, pending := range d.parking {
-		if owner, remote := normalizeAttachmentOwner(pending.owner).(*remoteView); remote && owner == view {
-			delete(d.parking, token)
-			pending.ac.resumeToken = 0
-			pending.ac.parked = false
 			pending.closeDone()
 		}
 	}
@@ -177,7 +178,7 @@ func (d *Daemon) waitParkingInFlight(h ports.Hello) bool {
 		d.mu.Unlock()
 		return false
 	}
-	if sess := localSession(pending.owner); h.Name != "" && sess != nil && sess.name != h.Name {
+	if h.Name != "" && pending.sess != nil && pending.sess.nameSnapshot() != h.Name {
 		d.mu.Unlock()
 		return false
 	}
@@ -192,34 +193,27 @@ func (d *Daemon) waitParkingInFlight(h ports.Hello) bool {
 }
 
 func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
-	return d.prepareParkAttachmentOwner(sess, ac)
-}
-
-func (d *Daemon) prepareParkAttachmentOwner(owner attachmentOwner, ac *attachedClient) bool {
-	if normalizeAttachmentOwner(owner) == nil || ac == nil || !ac.resumeCapable {
+	if sess == nil || ac == nil || !ac.resumeCapable {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.closing || !d.attachmentOwnerRegisteredByDaemonLocked(owner) {
+	if d.closing {
 		return false
 	}
 	if ac.resumeToken == 0 {
 		ac.resumeToken = d.nextResumeTokenLocked()
 	}
 	// Do not recreate parking markers here: post-detach publication races
-	// terminal owner removal and can strand IntentResume waiters. Callers that
-	// need the detach→park gap advertised must publish it while still exact.
-	d.log.Info("parking client prepared", "session", attachmentOwnerName(owner))
+	// terminal session removal and can strand IntentResume waiters. Callers
+	// that need the detach→park gap advertised must markParkingInFlight while
+	// still the exact live owner. Direct parkAttachment still parks below.
+	d.log.Info("parking client prepared", "session", sess.nameSnapshot())
 	return true
 }
 
 func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
-	return d.parkAttachmentOwner(sess, ac)
-}
-
-func (d *Daemon) parkAttachmentOwner(owner attachmentOwner, ac *attachedClient) bool {
-	if !d.prepareParkAttachmentOwner(owner, ac) {
+	if !d.prepareParkAttachment(sess, ac) {
 		return false
 	}
 	// A parked attachment has no session owner. Release pane snapshots before
@@ -234,7 +228,7 @@ func (d *Daemon) parkAttachmentOwner(owner attachmentOwner, ac *attachedClient) 
 		ac.overlays.pickerMu.Unlock()
 	}
 	d.mu.Lock()
-	if d.closing || !d.attachmentOwnerRegisteredByDaemonLocked(owner) {
+	if d.closing || d.sessions[sess.id] != sess {
 		d.clearParkingInFlightLocked(ac.resumeToken, ac)
 		d.mu.Unlock()
 		return false
@@ -254,7 +248,7 @@ func (d *Daemon) parkAttachmentOwner(owner attachmentOwner, ac *attachedClient) 
 	}
 	grace := d.resumeParkGrace
 	timer := d.clock.NewTimer(grace)
-	parked := &parkedAttachment{owner: owner, ac: ac, pickerGeneration: pickerGeneration, timer: timer, done: make(chan struct{})}
+	parked := &parkedAttachment{sess: sess, ac: ac, pickerGeneration: pickerGeneration, timer: timer, done: make(chan struct{})}
 	ac.parked = true
 	d.parked[token] = parked
 	d.clearParkingInFlightLocked(token, ac)
@@ -268,7 +262,7 @@ func (d *Daemon) parkAttachmentOwner(owner attachmentOwner, ac *attachedClient) 
 		}
 		oldSame.closeDone()
 	}
-	d.log.Info("client parked for resume", "session", attachmentOwnerName(owner), "grace", grace)
+	d.log.Info("client parked for resume", "session", sess.nameSnapshot(), "grace", grace)
 	d.watchParkedTimer(token, parked)
 	return true
 }
@@ -297,7 +291,7 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 		d.removeParkedLocked(token, parked)
 		d.mu.Unlock()
 		d.closePickerIfCurrent(parked.ac, nil, parked.pickerGeneration)
-		d.log.Warn("parked client expired", "session", attachmentOwnerName(parked.owner))
+		d.log.Warn("parked client expired", "session", parked.sess.nameSnapshot())
 		return
 	}
 	d.mu.Unlock()
@@ -307,7 +301,6 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 // has verified d.parked[token] still points at parked when that matters.
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
 	delete(d.parked, token)
-	parked.ac.clearPreviousSession()
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	if parked.timer != nil {
@@ -366,16 +359,11 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	ac.resumeToken = token
 	ac.parked = true
 	ac.connectionGeneration.Add(1)
-	sess := localSession(parked.owner)
-	view, remote := normalizeAttachmentOwner(parked.owner).(*remoteView)
+	sess := parked.sess
 	if sess != nil {
 		sess.mu.Lock()
 		sess.unregisterAttachmentLocked(ac)
 		sess.mu.Unlock()
-	} else if remote {
-		view.mu.Lock()
-		view.unregisterAttachmentLocked(ac)
-		view.mu.Unlock()
 	}
 	// Recreate the parked entry and its watcher instead of restoring a timer
 	// that may already have fired while the claim held the old entry. This also
@@ -385,7 +373,7 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	}
 	parked.closeDone()
 	rearmed := &parkedAttachment{
-		owner:            parked.owner,
+		sess:             parked.sess,
 		ac:               ac,
 		pickerGeneration: parked.pickerGeneration,
 		timer:            d.clock.NewTimer(d.resumeParkGrace),
@@ -397,9 +385,6 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	d.mu.Unlock()
 	if sess != nil {
 		d.recalculateSessionGeometryAndInvalidate(sess, nil, "resume.go")
-	}
-	if remote {
-		d.parkRemoteViewWarm(view)
 	}
 	d.watchParkedTimer(token, rearmed)
 	if captured != nil {
@@ -416,7 +401,6 @@ type parkedAttachmentRetirement struct {
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
 	delete(d.parked, token)
-	parked.ac.clearPreviousSession()
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	parked.ac.connectionGeneration.Add(1)
@@ -434,20 +418,7 @@ func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttach
 func (d *Daemon) purgeParkedForSessionLocked(sess *session) []parkedAttachmentRetirement {
 	var retirements []parkedAttachmentRetirement
 	for token, parked := range d.parked {
-		if localSession(parked.owner) == sess {
-			retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
-		}
-	}
-	return retirements
-}
-
-// purgeParkedForRemoteViewLocked retires every resume credential owned by the
-// exact remote view. The caller completes the returned external cleanup after
-// releasing d.mu.
-func (d *Daemon) purgeParkedForRemoteViewLocked(view *remoteView) []parkedAttachmentRetirement {
-	var retirements []parkedAttachmentRetirement
-	for token, parked := range d.parked {
-		if owner, remote := normalizeAttachmentOwner(parked.owner).(*remoteView); remote && owner == view {
+		if parked.sess == sess {
 			retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
 		}
 	}
@@ -520,11 +491,15 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 		d.mu.Unlock()
 		return d.resumeParked(h, tr, sz)
 	}
+	if credentialMatch && h.RemoteTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.RemoteTarget) {
+		d.mu.Unlock()
+		return nil, nil, false, &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
+	}
 	d.mu.Unlock()
 
 	if clientMismatch {
 		reason := "client id mismatch"
-		d.log.Warn("resume rejected", "session", sess.name, "err", reason)
+		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "err", reason)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	if !credentialMatch {
@@ -559,9 +534,8 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 	if !d.parkAttachment(sess, ac) {
 		// Detach already published; retire the captured link exactly once so
 		// shutdown cannot leave an orphaned open transport with no owner.
-		d.clearParkingInFlight(ac.resumeToken, ac)
+		d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 		d.resetScreenDefaultColors(sess)
-		ac.clearPreviousSession()
 		_ = ac.closeCapturedTransport(ac.revokeTransport(oldSnap.transport))
 		d.mu.Lock()
 		closing := d.closing
@@ -572,7 +546,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	_ = ac.closeCapturedTransport(oldSnap.transport)
-	d.log.Info("live resume credential parked for reconnect", "session", sess.name)
+	d.log.Info("live resume credential parked for reconnect", "session", sess.nameSnapshot())
 	return d.resumeParked(h, tr, sz)
 }
 
@@ -600,7 +574,7 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 		return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 	}
 	if d.parked[h.ResumeToken] != parked || parked.claimed {
-		if sess := localSession(parked.owner); sess != nil && d.sessions[sess.id] == sess {
+		if d.sessions[parked.sess.id] == parked.sess {
 			d.mu.Unlock()
 			ac.sendMu.Unlock()
 			return nil, nil, false, errResumeTokenLifecycleRace
@@ -625,11 +599,11 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	if parked == nil || h.ResumeToken == 0 {
 		return nil, nil, false, nil
 	}
-	sess := localSession(parked.owner)
-	registered := sess != nil && d.sessions[sess.id] == sess
+	sess := parked.sess
+	registered := d.sessions[sess.id] == sess
 	if !registered {
 		d.removeParkedLocked(h.ResumeToken, parked)
-		d.log.Warn("resume rejected", "session", attachmentOwnerName(parked.owner), "registered", false)
+		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "registered", false)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	ac := parked.ac
@@ -638,8 +612,11 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	}
 	if ac.clientID != h.ClientID {
 		reason := "client id mismatch"
-		d.log.Warn("resume rejected", "session", sess.name, "err", reason)
+		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "err", reason)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+	}
+	if h.RemoteTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.RemoteTarget) {
+		return nil, nil, false, &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
 	}
 	// Claim the attachment while retaining the old credential until Welcome is
 	// accepted. A failed handshake can therefore restore this exact parked
@@ -659,9 +636,12 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// The resumed session's snapshot is the sole source for future PTY children.
 	// Existing PTYs retain the environment they were started with.
 	sess.mu.Lock()
-	sess.env = copyEnvironment(h.Env)
+	if h.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+		sess.env = copyEnvironment(h.Env)
+	}
 	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
 	sess.mu.Unlock()
+	preferredTabIndex := preferredTabIndex(sess, h.PreferredTabID)
 	// Resume preparation used sendMu -> d.mu, but freeze/drain must run with
 	// neither held. Reacquire them before returning to preserve this helper's
 	// locked-caller contract.
@@ -672,6 +652,8 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 		next:   ac,
 
 		expectedTransport: ac.transportSnapshot(),
+		activateTargetTab: preferredTabIndex >= 0,
+		targetTabIndex:    preferredTabIndex,
 		ready:             false,
 	})
 	ac.sendMu.Lock()
@@ -681,6 +663,6 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	}
 	d.deferAttachmentTransitionCleanups(transition)
 	d.touchMRU(sess)
-	d.log.Info("client resumed", "session", sess.name)
+	d.log.Info("client resumed", "session", sess.nameSnapshot())
 	return sess, ac, true, nil
 }

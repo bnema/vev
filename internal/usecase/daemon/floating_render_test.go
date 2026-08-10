@@ -749,7 +749,7 @@ func benchmarkCapturedRenderState() capturedRenderState {
 			status:      statusSnapshot{session: "main", tabs: []statusTab{{name: "main", paneTitle: "shell", active: true}}},
 			topRight:    "vev",
 			bottomRight: "main",
-			mru:         []recentSession{{name: "work"}, {name: "logs"}},
+			mru:         []recentRouteDisplay{{name: "work"}, {name: "logs"}},
 			theme:       terminalTheme,
 		},
 		theme: terminalTheme,

@@ -3,79 +3,53 @@ package client_test
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/require"
 )
 
-func TestSessionConnectionOwnsCompleteAttachRequestForLocalAndRemoteTransports(t *testing.T) {
-	var lifecycle domain.SessionLifecycleID
-	lifecycle[0] = 1
-	target := &domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
-		SessionName: "work", LiveTabID: "tab-1",
-	}
-	wantTarget := *target
-	request := client.AttachRequest{
-		Intent:            ports.IntentAttach,
-		SessionName:       "work",
-		RenderMode:        ports.RenderModeProxiedContent,
-		Remote:            true,
-		RemoteTarget:      target,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-	}
-	wantRequest := request
-	wantRequest.RemoteTarget = &wantTarget
+func TestSessionConnectionUsesOneAttachShapeForLocalAndRemoteTransports(t *testing.T) {
+	target := client.SessionTarget{Intent: ports.IntentAttach, SessionName: "work"}
 	local := portsmocks.NewMockTransport(t)
 	remote := portsmocks.NewMockTransport(t)
 
-	localConnection, err := client.NewSessionConnection(local, request)
+	localConnection, err := client.NewSessionConnection(local, target)
 	require.NoError(t, err)
-	remoteConnection, err := client.NewSessionConnection(remote, request)
+	remoteConnection, err := client.NewSessionConnection(remote, target)
 	require.NoError(t, err)
-
-	target.LiveTabID = "mutated-tab"
-	target.LifecycleID = domain.SessionLifecycleID{}
-	returned := localConnection.AttachRequest()
-	returned.RemoteTarget.LiveTabID = "mutated-returned-tab"
 
 	require.Equal(t, localConnection.AttachRequest(), remoteConnection.AttachRequest())
-	require.Equal(t, wantRequest, localConnection.AttachRequest())
+	require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}, localConnection.AttachRequest())
 	require.Same(t, local, localConnection.Transport())
 	require.Same(t, remote, remoteConnection.Transport())
 }
 
-func TestSessionConnectionAttachRequestValidation(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1}
-	remoteTarget := &domain.RemoteSessionTarget{
-		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
-		SessionName: "work", LiveTabID: "tab-1",
-	}
+func TestSessionTargetValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		request client.AttachRequest
-		wantErr bool
+		name      string
+		target    client.SessionTarget
+		wantErr   bool
+		wantErrIs error
 	}{
-		{name: "ephemeral", request: client.AttachRequest{Intent: ports.IntentEphemeral}},
-		{name: "new", request: client.AttachRequest{Intent: ports.IntentNew, SessionName: "work"}},
-		{name: "attach", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
-		{name: "resume", request: client.AttachRequest{Intent: ports.IntentResume, SessionName: "work"}},
-		{name: "missing named session", request: client.AttachRequest{Intent: ports.IntentAttach}, wantErr: true},
-		{name: "unsafe session", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "my work"}, wantErr: true},
-		{name: "unknown intent", request: client.AttachRequest{Intent: 99, SessionName: "work"}, wantErr: true},
-		{name: "invalid render mode", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", RenderMode: ports.RenderMode(99)}, wantErr: true},
-		{name: "proxied without remote target", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", RenderMode: ports.RenderModeProxiedContent}, wantErr: true},
-		{name: "remote target with new intent", request: client.AttachRequest{Intent: ports.IntentNew, SessionName: "work", RemoteTarget: remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, wantErr: true},
-		{name: "daemon-owned without remote target", request: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, wantErr: true},
+		{name: "ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral}},
+		{name: "named ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral, SessionName: "work"}, wantErr: true, wantErrIs: client.ErrEphemeralSessionName},
+		{name: "new", target: client.SessionTarget{Intent: ports.IntentNew, SessionName: "work"}},
+		{name: "attach", target: client.SessionTarget{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "resume", target: client.SessionTarget{Intent: ports.IntentResume, SessionName: "work"}},
+		{name: "missing named session", target: client.SessionTarget{Intent: ports.IntentAttach}, wantErr: true},
+		{name: "unsafe session", target: client.SessionTarget{Intent: ports.IntentAttach, SessionName: "my work"}, wantErr: true},
+		{name: "unknown intent", target: client.SessionTarget{Intent: 99, SessionName: "work"}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := portsmocks.NewMockTransport(t)
-			_, err := client.NewSessionConnection(transport, tt.request)
+			_, err := client.NewSessionConnection(transport, tt.target)
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrIs != nil {
+					require.ErrorIs(t, err, tt.wantErrIs)
+				}
 				return
 			}
 			require.NoError(t, err)
@@ -84,6 +58,6 @@ func TestSessionConnectionAttachRequestValidation(t *testing.T) {
 }
 
 func TestSessionConnectionRequiresTransport(t *testing.T) {
-	_, err := client.NewSessionConnection(nil, client.AttachRequest{Intent: ports.IntentEphemeral})
+	_, err := client.NewSessionConnection(nil, client.SessionTarget{Intent: ports.IntentEphemeral})
 	require.Error(t, err)
 }

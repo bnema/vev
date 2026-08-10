@@ -99,9 +99,9 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 				NewCommandResult(cmd("ZZZ", "", "work tools")),
 			},
 			query:         "work",
-			wantText:      []string{"WORK", "work", "work", "WQORRK", "ZZZ"},
-			wantKinds:     []ResultKind{ResultKindCommand, ResultKindActiveSession, ResultKindStoppedSession, ResultKindCommand, ResultKindCommand},
-			wantPositions: [][]int{{0, 1, 2, 3}, {0, 1, 2, 3}, {0, 1, 2, 3}, {0, 2, 3, 5}, nil},
+			wantText:      []string{"WORK", "Resume session work", "WQORRK", "Switch to session work", "ZZZ"},
+			wantKinds:     []ResultKind{ResultKindCommand, ResultKindStoppedSession, ResultKindCommand, ResultKindActiveSession, ResultKindCommand},
+			wantPositions: [][]int{{0, 1, 2, 3}, {15, 16, 17, 18}, {0, 2, 3, 5}, {1, 8, 20, 21}, nil},
 		},
 		{
 			name: "equivalent sessions sort by normalized text",
@@ -110,12 +110,12 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 				NewStoppedSessionResult("aAlpha", time.Time{}),
 			},
 			query:         "a",
-			wantText:      []string{"aAlpha", "aBravo"},
+			wantText:      []string{"Resume session aAlpha", "Resume session aBravo"},
 			wantKinds:     []ResultKind{ResultKindStoppedSession, ResultKindStoppedSession},
-			wantPositions: [][]int{{0}, {0}},
+			wantPositions: [][]int{{15}, {15}},
 		},
 		{
-			name: "kind then normalized text then stable order",
+			name: "display prefix positions sort before later active names",
 			results: []Result{
 				NewStoppedSessionResult("aBravo", time.Time{}),
 				NewStoppedSessionResult("aAlpha", time.Time{}),
@@ -125,10 +125,10 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 				NewCommandResult(cmd("AX", "", "")),
 			},
 			query:         "a",
-			wantText:      []string{"AX", "aEcho", "aEcho", "aZulu", "aAlpha", "aBravo"},
-			wantKinds:     []ResultKind{ResultKindCommand, ResultKindActiveSession, ResultKindActiveSession, ResultKindActiveSession, ResultKindStoppedSession, ResultKindStoppedSession},
-			wantPositions: [][]int{{0}, {0}, {0}, {0}, {0}, {0}},
-			wantActiveIDs: map[int]domain.SessionID{1: "e", 2: "e2", 3: "z"},
+			wantText:      []string{"AX", "Resume session aAlpha", "Resume session aBravo", "Switch to session aEcho", "Switch to session aEcho", "Switch to session aZulu"},
+			wantKinds:     []ResultKind{ResultKindCommand, ResultKindStoppedSession, ResultKindStoppedSession, ResultKindActiveSession, ResultKindActiveSession, ResultKindActiveSession},
+			wantPositions: [][]int{{0}, {15}, {15}, {18}, {18}, {18}},
+			wantActiveIDs: map[int]domain.SessionID{3: "e", 4: "e2", 5: "z"},
 		},
 	}
 

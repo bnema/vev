@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -87,7 +88,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 		for i, sess := range fittedMRU {
 			style := styles.MRUStyle(i, len(fittedMRU))
-			drawStatusSessionEntry(row, &x, sess.name, sess.attention, style, state.attentionFrame)
+			drawStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
 		}
 	}
 	drawRightPlainText(row, rightText, x, styles.SurfaceBar)
@@ -96,6 +97,8 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 type rankedRecent struct {
 	rank      int
 	name      string
+	kind      recentRouteKind
+	ephemeral bool
 	attention bool
 	selected  bool
 }
@@ -112,9 +115,9 @@ func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent
 	writeStatusText(row, x, " ", style)
 }
 
-func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, attention bool, style renderer.Style, attentionFrame int) {
-	writeStatusText(row, x, " "+name, style)
-	if attention {
+func drawStatusSessionEntry(row []renderer.Cell, x *int, entry recentRouteDisplay, style renderer.Style, attentionFrame int) {
+	writeStatusText(row, x, " "+entry.name, style)
+	if entry.attention {
 		writeStatusText(row, x, " ", style)
 		writeBell(row, x, attentionFrame, style)
 	}
@@ -160,7 +163,7 @@ type barState struct {
 	topRight       string
 	bottomRight    string
 	statusFeedback string
-	mru            []recentSession
+	mru            []recentRouteDisplay
 	rankedRecent   []rankedRecent
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
@@ -222,43 +225,54 @@ func tabDisplayName(tb *tab, index int) string {
 	return strconv.Itoa(index + 1)
 }
 
-func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession) []rankedRecent {
+func rankedRecentForHintsWithSnapshot(hints *palette.ContextualHints, snapshot ports.RecentRouteSnapshot) []rankedRecent {
 	if hints == nil || hints.Kind != command.ContextHintRecentSessions {
 		return nil
 	}
+	var formatted []recentRouteDisplay
+	if snapshot.Generation != 0 {
+		formatted = formatRecentRouteSnapshot(snapshot)
+	}
 	entries := make([]rankedRecent, 0, len(hints.Recent))
 	for i, hint := range hints.Recent {
-		entry := rankedRecent{rank: hint.Rank, name: hint.Name, selected: hint.Rank == hints.SelectedRank}
-		// recent was copied with the hint under paletteMu, so this only enriches
-		// the render snapshot and never performs a live domain lookup.
-		if i < len(recent) {
-			entry.attention = recent[i].attention
+		display := recentRouteDisplay{name: hint.Name}
+		// The hint and route snapshot are immutable interaction data. The
+		// formatted snapshot is authoritative when available, keeping ranked
+		// JRS labels identical to normal MRU labels without a live lookup.
+		if i < len(formatted) {
+			display = formatted[i]
 		}
-		entries = append(entries, entry)
+		entries = append(entries, rankedRecent{
+			rank:      hint.Rank,
+			name:      display.name,
+			kind:      display.kind,
+			ephemeral: display.ephemeral,
+			attention: display.attention,
+			selected:  hint.Rank == hints.SelectedRank,
+		})
 	}
 	return entries
 }
 
 // barStateForPaletteHints selects snapshot-only contextual composition when a
-// palette interaction has captured recent-session hints. Normal palette state
-// continues to use the canonical, live MRU list.
-func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	var entry *session
-	if cur != nil {
-		entry = cur
-	}
-	return d.barStateForAttachmentPaletteHints(entry, statusFeedback, hints, recent)
+// palette interaction has captured recent-route hints.
+func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints) barState {
+	return d.barStateForAttachmentPaletteHints(cur, statusFeedback, hints)
 }
 
 // barStateForAttachmentPaletteHints composes daemon-owned chrome for an
 // attachment. Bar scripts remain local-session-only because
 // their existing execution contract depends on local tabs and PTYs.
-func (d *Daemon) barStateForAttachmentPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, recent)
+func (d *Daemon) barStateForAttachmentPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints) barState {
+	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, ports.RecentRouteSnapshot{})
 }
 
-func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
-	ranked := rankedRecentForHints(hints, recent)
+func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, capturedRouteSnapshot ports.RecentRouteSnapshot) barState {
+	routeSnapshot := capturedRouteSnapshot
+	if routeSnapshot.Generation == 0 && ac != nil {
+		routeSnapshot = ac.routeSnapshotCopy()
+	}
+	ranked := rankedRecentForHintsWithSnapshot(hints, routeSnapshot)
 	state := barState{statusFeedback: statusFeedback}
 	if d != nil {
 		state.attentionFrame = d.attentionFrame()
@@ -275,16 +289,14 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 	}
 	if ranked != nil {
 		state.rankedRecent = ranked
-	} else if d != nil {
-		state.mru = d.recentSessionsForAttachment(cur, ac)
+	} else if routeSnapshot.Generation != 0 {
+		state.mru = formatRecentRouteSnapshot(routeSnapshot)
 	}
 	return state
 }
 
 func (d *Daemon) barStateFor(cur *session, statusFeedback string) barState {
-	state := d.barStateBase(cur, statusFeedback)
-	state.mru = d.recentSessions(cur)
-	return state
+	return d.barStateBase(cur, statusFeedback)
 }
 
 func (d *Daemon) barStateBase(cur *session, statusFeedback string) barState {
@@ -383,33 +395,45 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []fittedTabLab
 	return labels
 }
 
+func recentRouteDisplayWidth(entry recentRouteDisplay) int {
+	width := 2 + statusTextWidth(entry.name)
+	if entry.attention {
+		width += 1 + renderer.RuneWidth(ui.AttentionGlyph)
+	}
+	return width
+}
+
+func fitWholeRecentEntries[T any](entries []T, budget int, cost func(T) int) []T {
+	if budget <= 0 || len(entries) == 0 {
+		return nil
+	}
+	used := 0
+	for i, entry := range entries {
+		used += cost(entry)
+		if used > budget {
+			return entries[:i]
+		}
+	}
+	return entries
+}
+
 func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback string) []rankedRecent {
 	reserve := 1
 	if feedback != "" {
 		reserve = statusTextWidth(feedback) + 2
 	}
 	budget := rowLen - leftUsed - reserve
-	if budget <= 0 {
-		return nil
-	}
-	cost := func(e rankedRecent) int {
-		width := 2 + statusTextWidth(strconv.Itoa(e.rank)+":") + statusTextWidth(e.name)
-		if e.attention {
-			width += 1 + renderer.RuneWidth(ui.AttentionGlyph)
-		}
-		return width
-	}
-	used := 0
-	for i, entry := range entries {
-		if used+cost(entry) > budget {
-			return entries[:i] // whole entries only; ranks remain their original MRU ranks.
-		}
-		used += cost(entry)
-	}
-	return entries
+	return fitWholeRecentEntries(entries, budget, func(entry rankedRecent) int {
+		return recentRouteDisplayWidth(recentRouteDisplay{
+			name:      entry.name,
+			kind:      entry.kind,
+			ephemeral: entry.ephemeral,
+			attention: entry.attention,
+		}) + statusTextWidth(strconv.Itoa(entry.rank)+":")
+	})
 }
 
-func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []recentSession {
+func fitMRU(entries []recentRouteDisplay, rowLen, leftUsed int, feedback string) []recentRouteDisplay {
 	// With no feedback, keep one blank trailing cell; with feedback, reserve
 	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
@@ -420,34 +444,17 @@ func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []re
 	if physicalBudget <= 0 || len(entries) == 0 {
 		return nil
 	}
-	cost := func(e recentSession) int {
-		n := 2 + statusTextWidth(e.name)
-		if e.attention {
-			n += 1 + renderer.RuneWidth(ui.AttentionGlyph)
-		}
-		return n
-	}
 
 	budget := physicalBudget
 	if feedback == "" {
 		budget -= mruFutureRightReserve(rowLen)
 		// Keep at least one recent session when it physically fits; the reserved
 		// right side is only a budget preference, not a reason to hide all recents.
-		if firstCost := cost(entries[0]); firstCost <= physicalBudget && budget < firstCost {
+		if firstCost := recentRouteDisplayWidth(entries[0]); firstCost <= physicalBudget && budget < firstCost {
 			budget = firstCost
 		}
 	}
-	if budget <= 0 {
-		return nil
-	}
-	used := 0
-	for i, e := range entries {
-		used += cost(e)
-		if used > budget {
-			return entries[:i]
-		}
-	}
-	return entries
+	return fitWholeRecentEntries(entries, budget, recentRouteDisplayWidth)
 }
 
 const (

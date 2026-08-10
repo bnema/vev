@@ -24,9 +24,9 @@ type tabView struct {
 }
 
 // sessionView is an immutable, value-only description of a session. It
-// deliberately retains no live pointers, mirroring recentSession
-// (recent_sessions.go). Listing paths (picker, MRU bar, palette, and
-// list-sessions) read local session state through snapshotView.
+// deliberately retains no live pointers, mirroring route snapshot entries.
+// Listing paths (picker, palette, and list-sessions) read local session state
+// through snapshotView.
 type sessionView struct {
 	id           domain.SessionID
 	incarnation  domain.IncarnationID
