@@ -54,8 +54,9 @@ func assertTrailingGarbageFails[T any](t *testing.T, full []byte, unmarshal func
 }
 
 func appendNoNavigationTail(payload []byte) []byte {
-	// exact-target absent, navigation capabilities none, startup overlay none
-	return append(payload, 0, 0, 0)
+	// exact-target absent, preferred-tab absent, navigation capabilities none,
+	// startup overlay none.
+	return append(payload, 0, 0, 0, 0, 0)
 }
 
 func TestHelloGoldenAndRoundTrip(t *testing.T) {
@@ -130,7 +131,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 		}
 		got := MarshalHello(msg)
 		want := []byte{
-			0x00, 0x1b, 0x00, // version, intent, first client ID byte
+			0x00, 0x1c, 0x00, // version, intent, first client ID byte
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -349,7 +350,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(27), ProtocolVersion)
+	require.Equal(t, uint16(28), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -510,7 +511,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "minimal",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
 			want: []byte{
-				0x00, 0x1b,
+				0x00, 0x1c,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x00, // self
@@ -533,7 +534,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 				JSON:          true,
 			},
 			want: []byte{
-				0x00, 0x1b,
+				0x00, 0x1c,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x01, // self
@@ -962,7 +963,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "attached",
 			msg:  CommandRequest{Version: ProtocolVersion, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
 			want: []byte{
-				0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
+				0x00, 0x1c, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, '-', '-', 'v', 'e', 'r', 't', 'i', 'c', 'a', 'l',
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -972,7 +973,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "control",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "ls"},
 			want: []byte{
-				0x00, 0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x02, 'l', 's', 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			},

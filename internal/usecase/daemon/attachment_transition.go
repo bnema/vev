@@ -177,7 +177,10 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if err != nil {
 		return result, err
 	}
-	if result.published.ac != nil && result.published.ac.routeSnapshotCopy().Generation != 0 {
+	// A not-ready publication is still inside the Hello handshake. Welcome
+	// carries the committed identity for those attachments and must remain the
+	// first server frame. Ready transitions notify an already-running client.
+	if req.ready && result.published.ac != nil && result.published.ac.routeSnapshotCopy().Generation != 0 {
 		identityErr := errAttachmentTransition
 		if effect, admitted := result.published.ac.beginAttachmentEffect(result.published); admitted {
 			identityErr = d.sendCommittedRouteIdentityForAttachment(effect.connectionToken())

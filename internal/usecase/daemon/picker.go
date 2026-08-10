@@ -179,8 +179,15 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 	for _, item := range live {
 		views = append(views, item.view.pickerView())
 	}
+	seenRemoteLifecycles := make(map[domain.SessionLifecycleID]struct{}, catalogRows)
 	for _, host := range catalog {
 		for _, session := range host.entry.Sessions {
+			if session.LifecycleID != (domain.SessionLifecycleID{}) {
+				if _, duplicate := seenRemoteLifecycles[session.LifecycleID]; duplicate {
+					continue
+				}
+				seenRemoteLifecycles[session.LifecycleID] = struct{}{}
+			}
 			key := domain.RemoteSessionKey{Host: host.entry.Host, Name: session.Name}
 			if key.Validate() != nil {
 				continue

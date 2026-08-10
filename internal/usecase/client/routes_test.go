@@ -69,6 +69,34 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	require.Equal(t, old, ledger.previousRef(), "the old active route becomes the previous route")
 }
 
+func TestRouteLedgerRemembersTabsIndependentlyPerExactRoute(t *testing.T) {
+	ledger := newRouteLedger()
+	first := routeTestCandidate(1, ports.RouteOriginLocal)
+	firstIdentity, err := ledger.commit(first)
+	require.NoError(t, err)
+	firstRef := ledger.activeRef()
+	firstSnapshotGeneration := ledger.snapshot().Generation
+	require.NoError(t, ledger.updateRoutePosition(ports.RoutePosition{Target: first.target, ActiveTabID: "tab-first"}))
+	require.Equal(t, firstRef, ledger.activeRef(), "tab memory must not rotate route identity")
+	require.Equal(t, firstSnapshotGeneration, ledger.snapshot().Generation, "tab memory must not stale navigation snapshots")
+
+	second := routeTestCandidate(2, ports.RouteOriginRemote)
+	secondIdentity, err := ledger.commit(second)
+	require.NoError(t, err)
+	secondRef := ledger.activeRef()
+	secondSnapshotGeneration := ledger.snapshot().Generation
+	require.NoError(t, ledger.updateRoutePosition(ports.RoutePosition{Target: second.target, ActiveTabID: "tab-second"}))
+	require.Equal(t, secondRef, ledger.activeRef(), "tab memory must not rotate route identity")
+	require.Equal(t, secondSnapshotGeneration, ledger.snapshot().Generation, "tab memory must not stale navigation snapshots")
+
+	firstRecord, ok := ledger.lookup(firstIdentity.wire())
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("tab-first"), firstRecord.request.PreferredTabID)
+	secondRecord, ok := ledger.lookup(secondIdentity.wire())
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("tab-second"), secondRecord.request.PreferredTabID)
+}
+
 func TestCommittedIdentityDoesNotReassignHomeRoute(t *testing.T) {
 	ledger := newRouteLedger()
 	home := routeTestCandidate(1, ports.RouteOriginLocal)

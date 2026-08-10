@@ -419,6 +419,63 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 	require.True(t, ac.overlays.paletteActive(), "literal JRS must not execute an overridden jump command")
 }
 
+func TestPaletteResultsDeduplicateRoutesLocalToCurrentRemoteDaemon(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	current := addControlSession(d, "hi", "tab-1", "pane-1")
+	represented := addControlSession(d, "remote-manual", "tab-2", "pane-2")
+	represented.ephemeral = false
+	snapshot := ports.RecentRouteSnapshot{
+		Generation: 2,
+		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Entries: []ports.RecentRouteEntry{{
+			Key: 2, Generation: 1, Name: "remote-manual", HostLabel: "remote", Kind: ports.RouteKindRemote,
+		}},
+	}
+
+	for _, test := range []struct {
+		name          string
+		currentOrigin string
+		want          []string
+	}{
+		{name: "remote daemon", currentOrigin: "remote", want: []string{"Switch to session remote-manual"}},
+		{name: "home daemon keeps distinct remote", want: []string{"Switch to session remote-manual", "Switch to session remote-manual@remote"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			results := d.paletteResults(current, nil, snapshot, test.currentOrigin)
+			var matching []string
+			for _, result := range results {
+				if result.DisplayText() == "Switch to session remote-manual" || result.DisplayText() == "Switch to session remote-manual@remote" {
+					matching = append(matching, result.DisplayText())
+				}
+			}
+			require.Equal(t, test.want, matching)
+		})
+	}
+}
+
+func TestPaletteFuzzyRemoteRecentRouteSendsExactNavigationAction(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+		Generation: 9,
+		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Entries: []ports.RecentRouteEntry{{
+			Key: 8, Generation: 4, Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
+		}},
+	})
+	token := beginRecentRoutePaletteEffect(t, d, current, ac)
+
+	d.handleInputForAttachment(token, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInputForAttachment(token, []byte("logs@edge\r"))
+
+	actionFrame := awaitFrame(t, sends, ports.MsgNavigateRecentRoute)
+	action, err := ports.UnmarshalRouteNavigationAction(actionFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 9, Key: 8, Generation: 4}, action)
+	require.False(t, ac.overlays.paletteActive())
+}
+
 func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()

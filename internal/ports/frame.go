@@ -12,7 +12,7 @@ import (
 const HandshakeTimeout = 15 * time.Second
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 27
+const ProtocolVersion uint16 = 28
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.
@@ -22,9 +22,9 @@ const MaxFrameLen = 16 << 20
 type MsgType uint8
 
 // Frame message types. Client-originated messages occupy 1–13 and 15;
-// server-originated messages occupy 16–23 and 25–27. Values 14 and 24 remain
-// reserved for future extensions. Route snapshot/navigation messages use the
-// next available values 28–30 and remain daemon-neutral until the cutover.
+// server-originated messages occupy 16–23 and 25–31. Values 14 and 24 remain
+// reserved for future extensions. Route metadata/navigation messages use the
+// post-26 range.
 const (
 	MsgHello                MsgType = 1
 	MsgInput                MsgType = 2
@@ -57,6 +57,7 @@ const (
 	MsgRecentRouteSnapshot    MsgType = 28
 	MsgNavigateRecentRoute    MsgType = 29
 	MsgRouteNavigationFailure MsgType = 30
+	MsgRoutePosition          MsgType = 31
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

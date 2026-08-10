@@ -835,17 +835,6 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 	}, nil
 }
 
-type attachHandoffKey struct {
-	endpoint  string
-	session   string
-	intent    uint8
-	lifecycle domain.SessionLifecycleID
-	liveTab   domain.TabStableID
-	stopped   domain.TabSelector
-}
-
-const maxAttachHandoffHops = 32
-
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == ports.IntentNew {
@@ -868,19 +857,6 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	var remoteEnvironmentPolicy ports.EnvironmentPolicy
 	routeOrigin := ports.RouteOriginLocal
 	routeOriginKey := "local"
-	seenHandoffs := make(map[attachHandoffKey]struct{})
-	handoffHops := 0
-	admitHandoff := func(next attachHandoffKey) error {
-		if _, seen := seenHandoffs[next]; seen {
-			return fmt.Errorf("vev: attach handoff loop for %q/%q", next.endpoint, next.session)
-		}
-		if handoffHops >= maxAttachHandoffHops {
-			return fmt.Errorf("vev: attach handoff exceeded maximum of %d hops", maxAttachHandoffHops)
-		}
-		handoffHops++
-		seenHandoffs[next] = struct{}{}
-		return nil
-	}
 	if remoteTarget != "" {
 		routeOrigin = ports.RouteOriginRemote
 		routeOriginKey = remoteTarget
@@ -890,7 +866,6 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if factory == nil {
 			factory = defaultRemoteDialerFactory()
 		}
-		seenHandoffs[attachHandoffKey{endpoint: remoteTarget, session: name, intent: intent}] = struct{}{}
 	}
 	pickerHandoff := remoteTarget == ""
 	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, policy ports.EnvironmentPolicy) ports.EnvironmentPolicy {
@@ -909,17 +884,10 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if factory == nil {
 			factory = defaultRemoteDialerFactory()
 		}
-		next := attachHandoffKey{endpoint: target.Endpoint, session: target.Session, intent: target.Intent}
 		var selection *domain.RemoteSessionTarget
 		if target.RemoteTarget != nil {
 			copyTarget := *target.RemoteTarget
 			selection = &copyTarget
-			next.lifecycle = copyTarget.LifecycleID
-			next.liveTab = copyTarget.LiveTabID
-			next.stopped = copyTarget.StoppedTab
-		}
-		if err := admitHandoff(next); err != nil {
-			return nil, client.AttachRequest{}, err
 		}
 		dialer, err := factory.DialerForRemote(target.Endpoint, target.Session, mode, log)
 		if err != nil {
@@ -994,15 +962,6 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 		if err := validateRemoteAttachHandoff(handoffErr.Target); err != nil {
 			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
-		}
-		next := attachHandoffKey{endpoint: handoffErr.Target.Endpoint, session: handoffErr.Target.Session, intent: handoffErr.Target.Intent}
-		if handoffErr.Target.RemoteTarget != nil {
-			next.lifecycle = handoffErr.Target.RemoteTarget.LifecycleID
-			next.liveTab = handoffErr.Target.RemoteTarget.LiveTabID
-			next.stopped = handoffErr.Target.RemoteTarget.StoppedTab
-		}
-		if err := admitHandoff(next); err != nil {
-			return err
 		}
 		remoteTarget = handoffErr.Target.Endpoint
 		routeOrigin = ports.RouteOriginDiscovery

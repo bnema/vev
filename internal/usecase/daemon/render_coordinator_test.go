@@ -268,10 +268,16 @@ func awaitLatestCoordinatorTimer(t *testing.T, clk *coordinatorMockClock) *coord
 
 func requireNoCoordinatorOutputFrame(t *testing.T, sends chan ports.Frame) {
 	t.Helper()
-	select {
-	case frame := <-sends:
-		t.Fatalf("unexpected output frame: %+v", frame)
-	default:
+	for {
+		select {
+		case frame := <-sends:
+			if frame.Type == ports.MsgRoutePosition {
+				continue
+			}
+			t.Fatalf("unexpected output frame: %+v", frame)
+		default:
+			return
+		}
 	}
 }
 

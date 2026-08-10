@@ -46,3 +46,49 @@ history cap is 20, origin keys distinguish daemon endpoints, route labels reject
 invalid UTF-8/control text, navigation actions carry the snapshot generation,
 active selection is a no-op, and failed transitions invoke the prior-route
 restore hook before returning failure.
+
+# Client-owned route-position red-team
+
+## Builder decision
+
+Keep live tab/view authority on each daemon attachment, but remember the last
+stable tab ID per exact client route in the process-local route ledger. Add an
+optional preferred stable tab to Hello and a daemon-to-client route-position
+publication bound to an exact lifecycle/name target. A missing preferred tab is
+a hint miss and falls back to the daemon's normal attachment tab; it never
+changes session identity or shared session tab state.
+
+## Critic pass
+
+- **Multiple clients:** daemon-global or session-global memory would couple
+  clients. The remembered cursor stays in each Runner's private route ledger;
+  the daemon applies it only to the requesting attachment.
+- **Stale/out-of-order publications:** a tab ID without session identity could
+  corrupt the route selected by a concurrent transition. RoutePosition carries
+  the exact lifecycle/name target, and the ledger applies it only to that route.
+- **Handshake ordering:** publishing another server frame before Welcome would
+  recreate the resume-token failure found during manual testing. Initial route
+  position is emitted only by post-Welcome rendering; Welcome stays first.
+- **Deleted tabs:** remembered positions are hints, not exact picker authority.
+  The daemon validates stable IDs under target-session ownership and falls back
+  without rejecting the attachment when the tab no longer exists.
+- **Discovery metadata:** RemoteTarget includes a point-in-time live tab and must
+  not become route memory. Committed route records drop that catalog selector;
+  PreferredTabID is the independent mutable cursor.
+- **Resume and identity authority:** a preferred tab cannot select a session. It
+  is accepted only for attach/resume and only after resume-token or exact-target
+  session resolution succeeds.
+- **Untrusted IDs:** both Hello and RoutePosition reject empty/oversized/control
+  stable IDs and trailing or truncated payloads.
+- **Publication completeness:** tab selection and repair always invalidate a
+  render. RoutePosition is serialized with the attachment's post-commit output
+  transaction and cached per transport incarnation; output rebase forces an
+  initial publication after attach/resume.
+
+## Accepted risks
+
+- The state is intentionally process-memory only. Restarting the client loses
+  remembered tabs; restarting a daemon does not make the daemon the memory
+  owner, and missing/replaced stable IDs safely fall back.
+- RoutePosition is an additional small control frame only when the exact target
+  or active stable tab changes, not on every output diff.

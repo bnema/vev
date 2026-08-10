@@ -641,6 +641,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	}
 	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
 	sess.mu.Unlock()
+	preferredTabIndex := preferredTabIndex(sess, h.PreferredTabID)
 	// Resume preparation used sendMu -> d.mu, but freeze/drain must run with
 	// neither held. Reacquire them before returning to preserve this helper's
 	// locked-caller contract.
@@ -651,6 +652,8 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 		next:   ac,
 
 		expectedTransport: ac.transportSnapshot(),
+		activateTargetTab: preferredTabIndex >= 0,
+		targetTabIndex:    preferredTabIndex,
 		ready:             false,
 	})
 	ac.sendMu.Lock()

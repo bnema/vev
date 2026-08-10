@@ -105,6 +105,14 @@ func cloneCommittedIdentity(identity *ports.CommittedRouteIdentity) *ports.Commi
 	return &clone
 }
 
+func cloneRoutePosition(position *ports.RoutePosition) *ports.RoutePosition {
+	if position == nil {
+		return nil
+	}
+	clone := *position
+	return &clone
+}
+
 func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRouteIdentity, dialer ports.Dialer, resumeToken uint64) routeCandidate {
 	origin := normalizeRouteOrigin(request.Origin, request.Remote)
 	originKey := normalizeRouteOriginKey(request.OriginKey, origin)
@@ -124,6 +132,10 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 	request.OriginKey = originKey
 	request.SessionName = identity.Target.SessionName
 	request.ExactTarget = &identity.Target
+	// Discovery targets are point-in-time attach authority, including a live
+	// tab selector. Once Welcome commits an exact route, mutable tab memory is
+	// carried independently by PreferredTabID.
+	request.RemoteTarget = nil
 	return routeCandidate{
 		origin:    origin,
 		originKey: originKey,
@@ -146,6 +158,9 @@ func routeCandidateForCommittedIdentity(active routeRecord, identity ports.Commi
 	request.SessionName = identity.Target.SessionName
 	request.ExactTarget = &identity.Target
 	request.RemoteTarget = nil
+	if active.target != identity.Target {
+		request.PreferredTabID = ""
+	}
 	return routeCandidate{
 		origin:    active.origin,
 		originKey: active.originKey,
@@ -336,6 +351,31 @@ func (l *routeLedger) commitCommittedIdentity(identity ports.CommittedRouteIdent
 		return routeIdentity{}, err
 	}
 	return l.commitLocked(candidate)
+}
+
+// updateRoutePosition remembers a cursor only for the currently active exact
+// route. Delayed frames from a prior transition are valid wire messages but do
+// not mutate another route.
+func (l *routeLedger) updateRoutePosition(position ports.RoutePosition) error {
+	if err := position.Validate(); err != nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	activeIndex := l.indexByIdentityLocked(l.active)
+	if activeIndex < 0 || l.entries[activeIndex].target != position.Target {
+		return nil
+	}
+	entry := &l.entries[activeIndex]
+	if entry.request.PreferredTabID == position.ActiveTabID {
+		return nil
+	}
+	// The tab cursor is mutable payload on an otherwise unchanged route.
+	// Rotating the route generation here would invalidate navigation actions
+	// captured immediately before a paint published the new cursor.
+	entry.request.PreferredTabID = position.ActiveTabID
+	entry.request.RemoteTarget = nil
+	return nil
 }
 
 func (l *routeLedger) commitLocked(candidate routeCandidate) (routeIdentity, error) {

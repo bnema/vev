@@ -3,8 +3,8 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 27 {
-		t.Fatalf("ProtocolVersion = %d, want 27", ProtocolVersion)
+	if ProtocolVersion != 28 {
+		t.Fatalf("ProtocolVersion = %d, want 28", ProtocolVersion)
 	}
 }
 
@@ -39,6 +39,7 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget}, {"MsgNavigationAction", MsgNavigationAction},
 		{"MsgCommittedRouteIdentity", MsgCommittedRouteIdentity}, {"MsgRecentRouteSnapshot", MsgRecentRouteSnapshot},
 		{"MsgNavigateRecentRoute", MsgNavigateRecentRoute}, {"MsgRouteNavigationFailure", MsgRouteNavigationFailure},
+		{"MsgRoutePosition", MsgRoutePosition},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

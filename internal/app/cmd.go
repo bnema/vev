@@ -128,11 +128,20 @@ type cmdDeps struct {
 	stdout io.Writer
 	getenv func(string) string
 	dial   func(context.Context, string) (ports.Transport, error)
+	ensure func(context.Context, string) (ports.Transport, error)
 	clock  ports.Clock
 }
 
 func runCmd(ctx context.Context, invocation cmdInvocation) error {
-	return runCmdWithDeps(ctx, invocation, cmdDeps{stdout: os.Stdout, getenv: os.Getenv, dial: realDial, clock: clock.New()})
+	return runCmdWithDeps(ctx, invocation, cmdDeps{
+		stdout: os.Stdout,
+		getenv: os.Getenv,
+		dial:   realDial,
+		ensure: func(ctx context.Context, dir string) (ports.Transport, error) {
+			return ensureDaemonWithLifecycle(ctx, dir, realDial, realSpawn, defaultBackoff)
+		},
+		clock: clock.New(),
+	})
 }
 
 func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps) error {
@@ -166,7 +175,11 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return fmt.Errorf("encoding command: %w", err)
 	}
 
-	transport, err := deps.dial(ctx, ipc.SocketDir())
+	dial := deps.dial
+	if invocation.slug == "remote-catalog" && deps.ensure != nil {
+		dial = deps.ensure
+	}
+	transport, err := dial(ctx, ipc.SocketDir())
 	if err != nil {
 		return &exitCoded{code: 3, err: fmt.Errorf("%w: %w", errDaemonUnreachable, err)}
 	}

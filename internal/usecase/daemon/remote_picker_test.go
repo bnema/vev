@@ -82,6 +82,34 @@ func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) 
 	}
 }
 
+func TestRemotePickerDeduplicatesSameLifecycleReachedThroughHostAliases(t *testing.T) {
+	store := &remoteRefreshHostStore{hosts: []string{"remote", "vev@remote"}}
+	d := newRemotePickerDaemon(store)
+	lifecycle := remoteLifecycleForTest()
+	session := ports.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: "up",
+		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	}
+	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{
+		{Host: "remote", FetchedAt: time.Unix(100, 0), Sessions: []ports.RemoteCatalogSession{session}},
+		{Host: "vev@remote", FetchedAt: time.Unix(100, 0), Sessions: []ports.RemoteCatalogSession{session}},
+	})
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.status["remote"] = remoteHostFresh
+	d.remoteCatalog.status["vev@remote"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	views, _ := d.pickerViews(nil, nil)
+	var targets []*domain.RemoteSessionTarget
+	for _, view := range views {
+		if view.RemoteTarget != nil {
+			targets = append(targets, view.RemoteTarget)
+		}
+	}
+	require.Len(t, targets, 1)
+	require.Equal(t, "remote", targets[0].Endpoint, "first pinned alias must remain the attach endpoint")
+}
+
 func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
 	now := time.Unix(100, 0)
 	clock := &remotePickerClock{now: now}

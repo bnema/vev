@@ -196,7 +196,7 @@ func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle boo
 		name += "*"
 	}
 	if ac != nil && ac.remoteOrigin != "" {
-		name += " at " + ac.remoteOrigin
+		name += "@" + ac.remoteOrigin
 	}
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	activeIndex := 0

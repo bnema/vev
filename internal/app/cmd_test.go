@@ -156,6 +156,25 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 	}
 }
 
+func TestRemoteCatalogCommandEnsuresDaemon(t *testing.T) {
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+	ensureCalls := 0
+	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "remote-catalog", jsonOut: true}, cmdDeps{
+		stdout: io.Discard,
+		getenv: func(string) string { return "" },
+		dial: func(context.Context, string) (ports.Transport, error) {
+			t.Fatal("remote catalog used non-starting daemon dial")
+			return nil, errors.New("unexpected dial")
+		},
+		ensure: func(context.Context, string) (ports.Transport, error) {
+			ensureCalls++
+			return transport, nil
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, ensureCalls)
+}
+
 func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
 	for _, invocation := range []cmdInvocation{
 		{slug: "move-pane"},

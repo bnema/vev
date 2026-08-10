@@ -9,6 +9,16 @@ import (
 
 const testWaitTimeout = 2 * time.Second
 
+func testFramesOfType(frames []ports.Frame, typ ports.MsgType) []ports.Frame {
+	matched := make([]ports.Frame, 0, len(frames))
+	for _, frame := range frames {
+		if frame.Type == typ {
+			matched = append(matched, frame)
+		}
+	}
+	return matched
+}
+
 func awaitTestValue[T any](t *testing.T, ch <-chan T, failure string) T {
 	t.Helper()
 	timer := time.NewTimer(testWaitTimeout)
@@ -41,6 +51,9 @@ func awaitCoordinatorOutput(
 	for {
 		select {
 		case frame := <-sends:
+			if frame.Type == ports.MsgRoutePosition {
+				continue
+			}
 			if frame.Type != ports.MsgOutput {
 				t.Fatalf("unexpected frame type %d %s", frame.Type, frameContext)
 			}

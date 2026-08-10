@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
@@ -14,6 +15,7 @@ const (
 	ResultKindCommand ResultKind = iota
 	ResultKindActiveSession
 	ResultKindStoppedSession
+	ResultKindRecentRoute
 )
 
 // Result is an immutable palette target. Its kind is the sole discriminator
@@ -22,12 +24,18 @@ type Result struct {
 	kind    ResultKind
 	command command.Command
 	session sessionPayload
+	route   routePayload
 }
 
 type sessionPayload struct {
 	name      string
 	createdAt time.Time
 	sessionID domain.SessionID
+}
+
+type routePayload struct {
+	label  string
+	action ports.RouteNavigationAction
 }
 
 // NewCommandResult creates a static command palette target.
@@ -51,11 +59,19 @@ func NewStoppedSessionResult(name string, createdAt time.Time) Result {
 	}
 }
 
+// NewRecentRouteResult creates an immutable client-ledger route target.
+func NewRecentRouteResult(label string, action ports.RouteNavigationAction) Result {
+	return Result{kind: ResultKindRecentRoute, route: routePayload{label: label, action: action}}
+}
+
 func (r Result) Kind() ResultKind { return r.kind }
 
 func (r Result) DisplayText() string {
 	if r.kind == ResultKindCommand {
 		return r.command.Code
+	}
+	if r.kind == ResultKindRecentRoute {
+		return activeSessionDisplayPrefix + r.route.label
 	}
 	return r.sessionDisplayPrefix() + r.session.name
 }
@@ -78,17 +94,23 @@ func (r Result) Command() (command.Command, bool) {
 
 // SessionName returns the session name only for session results.
 func (r Result) SessionName() (string, bool) {
-	return r.session.name, r.kind != ResultKindCommand
+	return r.session.name, r.kind == ResultKindActiveSession || r.kind == ResultKindStoppedSession
 }
 
 // SessionCreatedAt returns the session creation time only for session results.
 func (r Result) SessionCreatedAt() (time.Time, bool) {
-	return r.session.createdAt, r.kind != ResultKindCommand
+	return r.session.createdAt, r.kind == ResultKindActiveSession || r.kind == ResultKindStoppedSession
 }
 
 // SessionID returns the lifecycle identity only for active session results.
 func (r Result) SessionID() (domain.SessionID, bool) {
 	return r.session.sessionID, r.kind == ResultKindActiveSession
+}
+
+// RouteNavigationAction returns the exact client-ledger target only for a
+// recent-route result.
+func (r Result) RouteNavigationAction() (ports.RouteNavigationAction, bool) {
+	return r.route.action, r.kind == ResultKindRecentRoute
 }
 
 const (

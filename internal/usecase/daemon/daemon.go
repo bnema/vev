@@ -1266,6 +1266,12 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 			return nil, &protoErr{ports.ErrNoSuchTarget, "remote tab no longer exists"}
 		}
 	}
+	if h.PreferredTabID != "" {
+		// Route memory is a best-effort attachment cursor, not attach authority.
+		// It overrides point-in-time picker tab metadata when still present and
+		// otherwise falls back to the session's normal first-tab repair.
+		initialTabIndex = preferredTabIndex(sess, h.PreferredTabID)
+	}
 	// Session state is the sole source for future PTY children. Update it before
 	// publishing the attachment; existing PTYs keep their original environment.
 	// A picker handoff deliberately leaves the daemon-owned environment and CWD
@@ -1305,6 +1311,20 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	d.finishAttachedClient(sess, ac, opts)
 	d.deferAttachmentTransitionCleanups(result)
 	return ac, nil
+}
+
+func preferredTabIndex(sess *session, preferred domain.TabStableID) int {
+	if sess == nil || preferred == "" {
+		return -1
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	for i, candidate := range sess.tabs {
+		if candidate != nil && domain.TabStableID(candidate.stableID) == preferred {
+			return i
+		}
+	}
+	return -1
 }
 
 func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {

@@ -142,6 +142,24 @@ func (i CommittedRouteIdentity) Validate() error {
 	return nil
 }
 
+// RoutePosition is mutable per-client route state published by the daemon.
+// Target binds the tab cursor to one exact session lifecycle so delayed frames
+// cannot update another route.
+type RoutePosition struct {
+	Target      ExactSessionTarget
+	ActiveTabID domain.TabStableID
+}
+
+func (p RoutePosition) Validate() error {
+	if err := p.Target.Validate(); err != nil {
+		return err
+	}
+	if err := domain.ValidateTabStableID(p.ActiveTabID); err != nil {
+		return fmt.Errorf("invalid active tab ID: %w", err)
+	}
+	return nil
+}
+
 // RouteRef is an opaque client-ledger reference. It is intentionally not a
 // lifecycle identifier and is meaningful only with the matching generation.
 type RouteRef struct {

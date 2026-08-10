@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -916,36 +915,24 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 	require.Equal(t, 2, calls, "a picker handoff must close the old connection and open a fresh direct connection")
 }
 
-func TestRunAttachWithDepsRejectsHandoffLoop(t *testing.T) {
+func TestRunAttachWithDepsAllowsRevisitingRemoteHandoff(t *testing.T) {
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-revisit"}, nil).Once()
 
-	calls := 0
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
-		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
-			calls++
-			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}}
+		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
+			dialer, request, err := deps.AttachHandoff(ports.AttachTarget{
+				Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, dialer)
+			require.Equal(t, "work", request.SessionName)
+			return nil
 		},
 	})
-	require.ErrorContains(t, err, "attach handoff loop")
-	require.Equal(t, 1, calls)
-}
-
-func TestRunAttachWithDepsCapsUniqueHandoffHops(t *testing.T) {
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote(mock.Anything, mock.Anything, ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(maxAttachHandoffHops + 1)
-
-	calls := 0
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
-		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
-			calls++
-			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: fmt.Sprintf("remote-%d.example", calls), Session: "work", Intent: ports.IntentAttach}}
-		},
-	})
-	require.ErrorContains(t, err, "exceeded maximum")
-	require.Equal(t, maxAttachHandoffHops+1, calls)
+	require.NoError(t, err)
 }
 
 func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {

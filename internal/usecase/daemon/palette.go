@@ -42,7 +42,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	// consults its own session history for recent-route commands.
 	routeSnapshot := ac.routeSnapshotCopy()
 	commands := d.paletteCommands()
-	results := d.paletteResults(sess, commands)
+	results := d.paletteResults(sess, commands, routeSnapshot, ac.remoteOrigin)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = palette.New(results)
@@ -56,7 +56,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 
 // paletteResults captures eligible named sessions before paletteMu so the
 // palette has an immutable lifecycle target without violating lock ordering.
-func (d *Daemon) paletteResults(current *session, commands []command.Command) []palette.Result {
+func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot ports.RecentRouteSnapshot, currentRemoteOrigin string) []palette.Result {
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
 	stopped := make([]stoppedSession, 0, len(d.stopped))
@@ -67,7 +67,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 	}
 	d.mu.Unlock()
 
-	results := make([]palette.Result, 0, len(commands)+len(sessions)+len(stopped))
+	results := make([]palette.Result, 0, len(commands)+len(sessions)+len(stopped)+len(routeSnapshot.Entries))
 	for _, cmd := range commands {
 		results = append(results, palette.NewCommandResult(cmd))
 	}
@@ -88,8 +88,36 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 	})
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 	results = append(results, active...)
+	localNames := make(map[string]struct{}, len(active)+len(stopped))
+	for _, candidate := range active {
+		name, _ := candidate.SessionName()
+		localNames[name] = struct{}{}
+	}
 	for _, candidate := range stopped {
 		results = append(results, palette.NewStoppedSessionResult(candidate.name, time.Unix(0, candidate.createdAt)))
+		localNames[candidate.name] = struct{}{}
+	}
+	formattedRoutes := formatRecentRouteSnapshot(routeSnapshot)
+	for i, entry := range routeSnapshot.Entries {
+		if i >= len(formattedRoutes) {
+			break
+		}
+		label := formattedRoutes[i].name
+		if label == "" {
+			continue
+		}
+		if _, represented := localNames[entry.Name]; represented {
+			localRoute := entry.Kind == ports.RouteKindLocal
+			currentRemoteRoute := entry.Kind == ports.RouteKindRemote && currentRemoteOrigin != "" && entry.HostLabel == currentRemoteOrigin
+			if localRoute || currentRemoteRoute {
+				continue
+			}
+		}
+		results = append(results, palette.NewRecentRouteResult(label, ports.RouteNavigationAction{
+			SnapshotGeneration: routeSnapshot.Generation,
+			Key:                entry.Key,
+			Generation:         entry.Generation,
+		}))
 	}
 	return results
 }
@@ -166,6 +194,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var cmd command.Command
 	var sessionTarget palette.Result
 	var hasSessionTarget bool
+	var routeTarget ports.RouteNavigationAction
+	var hasRouteTarget bool
 	var args []string
 	var routeSnapshot ports.RecentRouteSnapshot
 	var generation uint64
@@ -241,6 +271,9 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 					routeSnapshot = ac.overlays.paletteRouteSnapshot
 					routeSnapshot.Entries = append([]ports.RecentRouteEntry(nil), routeSnapshot.Entries...)
 				}
+			} else if action, ok := selected.RouteNavigationAction(); ok {
+				routeTarget = action
+				hasRouteTarget = true
 			} else if _, ok := selected.SessionName(); ok {
 				sessionTarget = selected
 				hasSessionTarget = true
@@ -276,6 +309,22 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	}
 	if !execute {
 		if changed {
+			d.invalidateRender(entry, ac, true, "palette.go")
+		}
+		return
+	}
+
+	if hasRouteTarget {
+		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, effect: effect}
+		if err := exec.NavigateRecentRoute(routeTarget); err != nil {
+			if errors.Is(err, errAttachmentTransition) {
+				return
+			}
+			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
+		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.invalidateRender(entry, ac, true, "palette.go")
 		}
 		return
@@ -654,11 +703,14 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 		return command.ErrInvalidArguments
 	}
 	entry := e.routeSnapshot.Entries[rank-1]
-	action := ports.RouteNavigationAction{
+	return e.NavigateRecentRoute(ports.RouteNavigationAction{
 		SnapshotGeneration: e.routeSnapshot.Generation,
 		Key:                entry.Key,
 		Generation:         entry.Generation,
-	}
+	})
+}
+
+func (e paletteExec) NavigateRecentRoute(action ports.RouteNavigationAction) error {
 	if e.d.beforeRecentSessionHandoff != nil {
 		e.d.beforeRecentSessionHandoff()
 	}

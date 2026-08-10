@@ -1184,7 +1184,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	require.Same(t, ac, resumedAC)
 	d.paint(resumedSess, resumedAC, true, nil)
 
-	sends := newTr.Sends()
+	sends := testFramesOfType(newTr.Sends(), ports.MsgOutput)
 	require.Len(t, sends, 1)
 	first, err := ports.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
@@ -1194,7 +1194,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(resumedSess, resumedAC, false, nil)
-	sends = newTr.Sends()
+	sends = testFramesOfType(newTr.Sends(), ports.MsgOutput)
 	require.Len(t, sends, 2)
 	second, err := ports.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
@@ -1244,7 +1244,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
 	d.firstPaint(resumedSess, resumedAC)
 
-	sends := newTransport.Sends()
+	sends := testFramesOfType(newTransport.Sends(), ports.MsgOutput)
 	require.Len(t, sends, 1)
 	output, err := ports.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)

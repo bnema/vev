@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +46,20 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	require.Equal(t, "Resume session archive", stopped.DisplayText())
 	require.Equal(t, "Resume session archive", stopped.SearchText())
 	_, ok = stopped.SessionID()
+	require.False(t, ok)
+}
+
+func TestRecentRouteResultCarriesExactNavigationAction(t *testing.T) {
+	action := ports.RouteNavigationAction{SnapshotGeneration: 4, Key: 7, Generation: 3}
+	result := NewRecentRouteResult("logs@edge", action)
+
+	require.Equal(t, ResultKindRecentRoute, result.Kind())
+	require.Equal(t, "Switch to session logs@edge", result.DisplayText())
+	require.Equal(t, "Switch to session logs@edge", result.SearchText())
+	got, ok := result.RouteNavigationAction()
+	require.True(t, ok)
+	require.Equal(t, action, got)
+	_, ok = result.SessionName()
 	require.False(t, ok)
 }
 

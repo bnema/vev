@@ -252,6 +252,18 @@ func paletteReply(foreground, background string, slot uint8, color string) strin
 	return "\x1b]10;" + foreground + "\a\x1b]11;" + background + "\a\x1b]4;" + string(rune('0'+slot)) + ";" + color + "\a\x1b[?2031;1$y"
 }
 
+func TestAttachHandshakeDeadlineStopsBeforeRuntimeWithoutInitialOutput(t *testing.T) {
+	h := startAttachPaletteHarness(&terminalThemeState{})
+	select {
+	case <-h.handshakeTimer.stopped:
+		// Welcome and synchronous client publications commit the handshake. A
+		// quiet runtime is allowed to produce no Output frame.
+	case <-time.After(2 * time.Second):
+		t.Fatal("handshake deadline still owned the long-lived runtime transport")
+	}
+	h.detach(t)
+}
+
 func TestAttachReconnectClearsRetainedPaletteInOnePublication(t *testing.T) {
 	t.Setenv("COLORTERM", "truecolor")
 	state := &terminalThemeState{}

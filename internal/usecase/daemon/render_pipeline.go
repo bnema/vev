@@ -448,6 +448,13 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	entry.core().mu.Lock()
 	_, owned := entry.core().attachments[ac]
+	position := ports.RoutePosition{
+		Target: ports.ExactSessionTarget{
+			LifecycleID: entry.core().incarnation,
+			SessionName: entry.core().name,
+		},
+		ActiveTabID: state.view.tabID,
+	}
 	entry.core().mu.Unlock()
 	if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
 		ac.sendMu.Unlock()
@@ -557,6 +564,43 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		commitDamageReceipts(state.receipts)
 		if ac.renderStages.emit != nil {
 			ac.renderStages.emit()
+		}
+
+		if position.ActiveTabID != "" && position != ac.lastRoutePosition {
+			payload, positionMarshalErr := ports.MarshalRoutePosition(position)
+			if positionMarshalErr != nil {
+				d.log.Error("marshal route position", "err", positionMarshalErr)
+			} else {
+				sendTransport := ac.transportSnapshot()
+				sendTr = sendTransport.transport
+				interruptible := false
+				if marks.attachmentEffect != nil {
+					interruptible = marks.attachmentEffect.beginTransportSend(sendTransport)
+					if !interruptible {
+						sendErr = errAttachmentTransition
+					}
+				}
+				if sendErr == nil {
+					if sendTr == nil {
+						sendErr = errors.New("client transport is nil")
+					} else {
+						send := sendTr.Send
+						if async, ok := sendTr.(ports.AsyncTransport); ok {
+							send = async.SendAsync
+						}
+						sendErr = send(ports.Frame{Type: ports.MsgRoutePosition, Payload: payload})
+					}
+				}
+				if marks.attachmentEffect != nil && interruptible {
+					if sendErr != nil {
+						marks.attachmentEffect.reportTransportFailure(sendTransport)
+					}
+					marks.attachmentEffect.endTransportSend()
+				}
+				if sendErr == nil {
+					ac.lastRoutePosition = position
+				}
+			}
 		}
 	}
 	ac.sendMu.Unlock()

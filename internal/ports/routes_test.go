@@ -32,11 +32,12 @@ func TestExactSessionTargetCodecIsStrict(t *testing.T) {
 func TestHelloExactTargetRoundTrip(t *testing.T) {
 	target := testExactTarget()
 	msg := Hello{
-		Version:     ProtocolVersion,
-		Intent:      IntentAttach,
-		Name:        target.SessionName,
-		Size:        domain.Size{Cols: 80, Rows: 24},
-		ExactTarget: &target,
+		Version:        ProtocolVersion,
+		Intent:         IntentAttach,
+		Name:           target.SessionName,
+		Size:           domain.Size{Cols: 80, Rows: 24},
+		ExactTarget:    &target,
+		PreferredTabID: "tab-2",
 	}
 
 	encoded := MarshalHello(msg)
@@ -48,6 +49,29 @@ func TestHelloExactTargetRoundTrip(t *testing.T) {
 	invalid := msg
 	invalid.Intent = IntentNew
 	require.Error(t, ValidateHello(invalid))
+
+	invalid = msg
+	invalid.PreferredTabID = "bad tab"
+	require.Error(t, ValidateHello(invalid))
+}
+
+func TestRoutePositionCodecIsStrict(t *testing.T) {
+	want := RoutePosition{Target: testExactTarget(), ActiveTabID: "tab-2"}
+	encoded, err := MarshalRoutePosition(want)
+	require.NoError(t, err)
+	require.Equal(t, "010203000000000000000000000000000004776f726b00057461622d32", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalRoutePosition)
+	_, err = UnmarshalRoutePosition(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
+
+	got, err := UnmarshalRoutePosition(encoded)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	_, err = MarshalRoutePosition(RoutePosition{Target: testExactTarget()})
+	require.ErrorIs(t, err, ErrInvalidRouteWire)
+	_, err = MarshalRoutePosition(RoutePosition{Target: testExactTarget(), ActiveTabID: "bad tab"})
+	require.ErrorIs(t, err, ErrInvalidRouteWire)
 }
 
 func TestWelcomeCarriesCommittedRouteIdentity(t *testing.T) {

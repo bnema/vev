@@ -281,7 +281,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if err := sendRawInput(local, "\r"); err != nil {
 		return fmt.Errorf("commit remote picker target: %w", err)
 	}
-	if err := awaitOutputContains(ctx, local, remoteSession+" at remote"); err != nil {
+	if err := awaitOutputContains(ctx, local, remoteSession+"@remote"); err != nil {
 		return fmt.Errorf("publish remote content on local transport: %w", err)
 	}
 	if !local.probe.contains(previewMarker) {

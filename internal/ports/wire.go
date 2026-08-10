@@ -165,7 +165,10 @@ type Hello struct {
 	// ExactTarget is an optional lifecycle/name identity selected by the client
 	// ledger. It is transport-neutral and never replaces the daemon's authority
 	// to validate or commit the target.
-	ExactTarget            *ExactSessionTarget
+	ExactTarget *ExactSessionTarget
+	// PreferredTabID is a client-owned route cursor. The daemon treats it as an
+	// attachment-local hint and falls back when the stable tab no longer exists.
+	PreferredTabID         domain.TabStableID
 	EnvironmentPolicy      EnvironmentPolicy
 	NavigationCapabilities NavigationCapabilities
 	StartupOverlay         StartupOverlay
@@ -725,6 +728,14 @@ func ValidateHello(h Hello) error {
 			return ErrInvalidHello
 		}
 	}
+	if h.PreferredTabID != "" {
+		if h.Intent != IntentAttach && h.Intent != IntentResume {
+			return ErrInvalidHello
+		}
+		if err := domain.ValidateTabStableID(h.PreferredTabID); err != nil {
+			return fmt.Errorf("%w: preferred tab: %v", ErrInvalidHello, err)
+		}
+	}
 	if h.ExactTarget != nil {
 		if h.Intent != IntentAttach && h.Intent != IntentResume {
 			return ErrInvalidHello
@@ -852,6 +863,7 @@ func MarshalHello(h Hello) []byte {
 	}
 	marshalRemoteTargetSection(&w, h.RemoteTarget, h.EnvironmentPolicy)
 	marshalExactTargetSection(&w, h.ExactTarget)
+	w.putString(string(h.PreferredTabID))
 	w.putUint8(uint8(h.NavigationCapabilities))
 	w.putUint8(uint8(h.StartupOverlay))
 	return w.b
@@ -913,6 +925,9 @@ func preflightHello(b []byte) error {
 		return err
 	}
 	if err := skipExactTargetSection(&r); err != nil {
+		return err
+	}
+	if err := r.skipString(); err != nil {
 		return err
 	}
 	if _, err := r.getUint8(); err != nil {
@@ -999,6 +1014,11 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	if h.ExactTarget, err = unmarshalExactTargetSection(&r); err != nil {
 		return Hello{}, err
 	}
+	preferredTabID, err := r.getString()
+	if err != nil {
+		return Hello{}, err
+	}
+	h.PreferredTabID = domain.TabStableID(preferredTabID)
 	capabilities, err := r.getUint8()
 	if err != nil {
 		return Hello{}, err

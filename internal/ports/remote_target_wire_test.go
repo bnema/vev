@@ -115,7 +115,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 				})
 			},
 			unmarshal:    func(payload []byte) error { _, err := UnmarshalHello(payload); return err },
-			policyOffset: 4,
+			policyOffset: 6,
 			wantErr:      ErrInvalidHello,
 		},
 		{

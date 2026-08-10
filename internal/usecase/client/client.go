@@ -180,6 +180,7 @@ type AttachRequest struct {
 	OriginKey              string
 	RemoteTarget           *domain.RemoteSessionTarget
 	ExactTarget            *ports.ExactSessionTarget
+	PreferredTabID         domain.TabStableID
 	EnvironmentPolicy      ports.EnvironmentPolicy
 	NavigationCapabilities ports.NavigationCapabilities
 	StartupOverlay         ports.StartupOverlay
@@ -539,9 +540,18 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if result.committedIdentity != nil {
 			identity := *result.committedIdentity
 			if attemptRequest.ExactTarget != nil && *attemptRequest.ExactTarget != identity.Target {
+				attemptRequest.PreferredTabID = ""
+			}
+			if remoteTarget := attemptRequest.RemoteTarget; remoteTarget != nil &&
+				(remoteTarget.LifecycleID != identity.Target.LifecycleID || remoteTarget.SessionName != identity.Target.SessionName) {
 				attemptRequest.RemoteTarget = nil
 			}
 			attemptRequest.ExactTarget = &identity.Target
+		}
+		if result.routePosition != nil && attemptRequest.ExactTarget != nil &&
+			*attemptRequest.ExactTarget == result.routePosition.Target {
+			attemptRequest.PreferredTabID = result.routePosition.ActiveTabID
+			attemptRequest.RemoteTarget = nil
 		}
 		if result.err == nil && result.welcomed && routeNavigationPending {
 			routeNavigationPending = false
@@ -590,7 +600,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if result.action != 0 {
 			switch result.action {
 			case ports.NavigationOpenHomePicker:
-				if attemptRequest.NavigationCapabilities&ports.NavigationCapabilityHomePicker == 0 || homeRoute == nil {
+				// The daemon only sends this action after accepting a Hello that
+				// advertised Home support. The durable client-side prerequisite is
+				// the captured route itself; request metadata may have been rebased by
+				// committed identity or cursor updates since that Hello.
+				if homeRoute == nil {
 					return errors.New("vev: stale home navigation action")
 				}
 				returnRequest := attemptRequest
@@ -891,6 +905,7 @@ type attachResult struct {
 	resumeToken       uint64
 	sessionName       string
 	committedIdentity *ports.CommittedRouteIdentity
+	routePosition     *ports.RoutePosition
 	welcomed          bool
 	transportClosed   bool
 	target            *ports.AttachTarget
@@ -1024,6 +1039,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		Env:                    os.Environ(),
 		RemoteTarget:           request.RemoteTarget,
 		ExactTarget:            exactTarget,
+		PreferredTabID:         request.PreferredTabID,
 		EnvironmentPolicy:      request.EnvironmentPolicy,
 		NavigationCapabilities: request.NavigationCapabilities,
 		StartupOverlay:         request.StartupOverlay,
@@ -1045,11 +1061,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return handshakeFailure("awaiting welcome", err)
 	}
 	var committedIdentity *ports.CommittedRouteIdentity
+	var routePosition *ports.RoutePosition
 	result := func(welcomed bool, err error) attachResult {
 		return attachResult{
 			resumeToken:       resumeToken,
 			sessionName:       name,
 			committedIdentity: cloneCommittedIdentity(committedIdentity),
+			routePosition:     cloneRoutePosition(routePosition),
 			welcomed:          welcomed,
 			err:               err,
 		}
@@ -1291,6 +1309,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return welcomedResult(err)
 		}
 	}
+	// Welcome and every synchronous initial publication have committed. The
+	// handshake deadline must not own the long-lived runtime transport: a quiet
+	// or unchanged screen may legitimately produce no initial Output frame.
+	endHandshake()
 	senderStarted = true
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
 	stdinDone := make(chan struct{})
@@ -1568,6 +1590,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if derr := publishRouteSnapshot(); derr != nil {
 					return welcomedResult(fmt.Errorf("vev: publishing daemon-local route snapshot: %w", derr))
 				}
+			case ports.MsgRoutePosition:
+				position, derr := ports.UnmarshalRoutePosition(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding route position: %w", derr))
+				}
+				if a.runner.ledger == nil {
+					return welcomedResult(errors.New("vev: route ledger unavailable"))
+				}
+				if derr := a.runner.ledger.updateRoutePosition(position); derr != nil {
+					return welcomedResult(fmt.Errorf("vev: remembering route position: %w", derr))
+				}
+				routePosition = cloneRoutePosition(&position)
 			case ports.MsgRouteNavigationFailure:
 				failure, derr := ports.UnmarshalRouteNavigationFailure(r.frame.Payload)
 				if derr != nil {

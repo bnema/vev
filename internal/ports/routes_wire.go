@@ -3,6 +3,8 @@ package ports
 import (
 	"errors"
 	"fmt"
+
+	"github.com/bnema/vev/internal/domain"
 )
 
 var ErrInvalidRouteWire = errors.New("invalid route wire message")
@@ -174,6 +176,39 @@ func UnmarshalCommittedRouteIdentity(b []byte) (CommittedRouteIdentity, error) {
 		return CommittedRouteIdentity{}, err
 	}
 	return identity, nil
+}
+
+// MarshalRoutePosition encodes one exact session and its attachment-local tab
+// cursor. Route positions are mutable client memory, not attach authority.
+func MarshalRoutePosition(position RoutePosition) ([]byte, error) {
+	if err := position.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: route position: %v", ErrInvalidRouteWire, err)
+	}
+	w := payloadWriter{}
+	marshalExactSessionTarget(&w, position.Target)
+	w.putString(string(position.ActiveTabID))
+	return w.b, nil
+}
+
+// UnmarshalRoutePosition decodes one strict route-position payload.
+func UnmarshalRoutePosition(b []byte) (RoutePosition, error) {
+	r := payloadReader{b: b}
+	target, err := unmarshalExactSessionTarget(&r)
+	if err != nil {
+		return RoutePosition{}, err
+	}
+	activeTabID, err := r.getString()
+	if err != nil {
+		return RoutePosition{}, err
+	}
+	if err := r.done(); err != nil {
+		return RoutePosition{}, err
+	}
+	position := RoutePosition{Target: target, ActiveTabID: domain.TabStableID(activeTabID)}
+	if err := position.Validate(); err != nil {
+		return RoutePosition{}, fmt.Errorf("%w: route position: %v", ErrInvalidRouteWire, err)
+	}
+	return position, nil
 }
 
 func validateRouteRef(ref RouteRef) error {

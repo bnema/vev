@@ -85,19 +85,20 @@ type attachedClient struct {
 	// view is attachment-local navigation state. It is never inferred from a
 	// session-wide active tab, so multiple attachments can observe different
 	// tabs and panes without changing shared session ownership.
-	viewMu        sync.Mutex
-	view          attachmentView
-	sess          Guarded[*session]
-	mouseScan     mouse.Scanner
-	themeMu       sync.Mutex
-	clientTheme   themeui.Theme
-	appliedTheme  appliedTheme
-	lastCursor    cursorOut
-	renderStages  renderStageHooks // optional render and handoff observability hooks
-	linkMu        sync.Mutex
-	sendMu        sync.Mutex
-	routeMu       sync.RWMutex
-	routeSnapshot ports.RecentRouteSnapshot
+	viewMu            sync.Mutex
+	view              attachmentView
+	sess              Guarded[*session]
+	mouseScan         mouse.Scanner
+	themeMu           sync.Mutex
+	clientTheme       themeui.Theme
+	appliedTheme      appliedTheme
+	lastCursor        cursorOut
+	lastRoutePosition ports.RoutePosition
+	renderStages      renderStageHooks // optional render and handoff observability hooks
+	linkMu            sync.Mutex
+	sendMu            sync.Mutex
+	routeMu           sync.RWMutex
+	routeSnapshot     ports.RecentRouteSnapshot
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -382,6 +383,7 @@ func (ac *attachedClient) rebaseOutput() {
 	if ac.output != nil {
 		ac.output.rebase()
 	}
+	ac.lastRoutePosition = ports.RoutePosition{}
 }
 
 var errTransportReplaced = errors.New("client transport was replaced")
