@@ -6,7 +6,7 @@
 - Module checksum: `h1:sb5XWVVIgiYd82KSYb3gHvkHVt9r5oRoEK0hqO1B+Aw=`
 - Go module checksum: `h1:QdV0QI7vUnlAF+7+CiPhThHDpDSkxMEZmCYl/Eo+xCA=`
 - Standalone release commit: `7bd1a3c4`
-- vev cutover commit: `df9964b7`
+- vev cutover commit: `3fd4a02d`
 
 ## Acceptance evidence
 
