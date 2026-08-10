@@ -173,16 +173,24 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 	base := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
 	withCount := func(count byte) []byte {
 		payload := append([]byte(nil), base...)
-		payload[len(payload)-6] = count
+		// The uint32 environment count occupies bytes len-13 through len-10.
+		payload[len(payload)-10] = count
 		return payload
+	}
+	withEntries := func(count byte, entries ...byte) []byte {
+		payload := withCount(count)
+		// The nine-byte tail follows the environment-count field.
+		tail := append([]byte(nil), payload[len(payload)-9:]...)
+		payload = append(payload[:len(payload)-9], entries...)
+		return append(payload, tail...)
 	}
 	tests := []struct {
 		name    string
 		payload []byte
 	}{
 		{name: "truncated count", payload: base[:len(base)-1]},
-		{name: "truncated entry length", payload: append(withCount(1), 0, 0)},
-		{name: "truncated entry body", payload: append(withCount(1), 0, 0, 0, 3, 'x')},
+		{name: "truncated entry length", payload: withEntries(1, 0, 0)},
+		{name: "truncated entry body", payload: withEntries(1, 0, 0, 0, 3, 'x')},
 		{name: "impossible count", payload: withCount(2)},
 		{name: "trailing garbage", payload: append(append([]byte(nil), base...), 0xff)},
 	}
@@ -190,6 +198,9 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := UnmarshalHello(tt.payload)
 			require.Error(t, err)
+			if tt.name != "trailing garbage" {
+				require.ErrorIs(t, err, errShortPayload)
+			}
 		})
 	}
 }

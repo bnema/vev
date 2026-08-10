@@ -835,6 +835,8 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 	}, nil
 }
 
+const maxAttachTargetHandoffs = 32
+
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == ports.IntentNew {
@@ -911,6 +913,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}, nil
 	}
 
+	handoffAttempts := 0
 	for {
 		var err error
 		if remoteTarget != "" {
@@ -970,6 +973,10 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if err := validateRemoteAttachHandoff(handoffErr.Target); err != nil {
 			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
+		if handoffAttempts >= maxAttachTargetHandoffs {
+			return fmt.Errorf("vev: attach handoff exceeded maximum of %d attempts", maxAttachTargetHandoffs)
+		}
+		handoffAttempts++
 		remoteTarget = handoffErr.Target.Endpoint
 		remoteDisplayOrigin = remoteTarget
 		routeOrigin = ports.RouteOriginDiscovery

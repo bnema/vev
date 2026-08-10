@@ -935,6 +935,22 @@ func TestRunAttachWithDepsAllowsRevisitingRemoteHandoff(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(maxAttachTargetHandoffs + 1)
+
+	calls := 0
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
+			calls++
+			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}}
+		},
+	})
+	require.ErrorContains(t, err, "attach handoff exceeded maximum")
+	require.Equal(t, maxAttachTargetHandoffs+1, calls)
+}
+
 func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
