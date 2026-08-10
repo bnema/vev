@@ -490,6 +490,42 @@ func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 	}
 }
 
+func TestSplitPaneActionFocusesNewPaneForInitiatingAttachment(t *testing.T) {
+	d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+	ac := registryTestAttachment(1)
+	other := registryTestAttachment(2)
+	require.True(t, sess.registerAttachment(ac))
+	require.True(t, sess.registerAttachment(other))
+	newPTY := portsmocks.NewMockPTY(t)
+	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
+	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(newPTY, nil).Once()
+
+	target := resolveDaemonActionTargetForAttachment(sess, ac)
+	require.NoError(t, (daemonActions{d: d}).Run(daemonActionRequest{
+		kind:      daemonActionSplitPane,
+		target:    target,
+		direction: layout.Right,
+	}))
+
+	_, focused := sess.paneForAttachment(ac)
+	require.NotNil(t, focused)
+	require.Equal(t, layout.PaneID("pane-2"), focused.id)
+	_, otherFocused := sess.paneForAttachment(other)
+	require.NotNil(t, otherFocused)
+	require.Equal(t, layout.PaneID("pane-1"), otherFocused.id)
+
+	target = resolveDaemonActionTargetForAttachment(sess, ac)
+	require.NoError(t, (daemonActions{d: d}).Run(daemonActionRequest{
+		kind:      daemonActionFocusPane,
+		target:    target,
+		direction: layout.Left,
+	}))
+	_, focused = sess.paneForAttachment(ac)
+	require.NotNil(t, focused)
+	require.Equal(t, layout.PaneID("pane-1"), focused.id)
+}
+
 func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 	d, sess, _, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 4})
 	tb := testAttachmentTab(sess)
@@ -603,10 +639,10 @@ func TestFocusDirAtReturnsDepartingSpanAndMapsNoNeighbor(t *testing.T) {
 			tb.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 			tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
 
-			span, err := d.focusDirAt(sess, tb, target, tt.direction)
+			change, err := d.focusDirAt(sess, tb, target, tt.direction)
 
 			require.ErrorIs(t, err, tt.wantErr)
-			require.Equal(t, domain.Rect{Width: 20, Height: 10}, span)
+			require.Equal(t, domain.Rect{Width: 20, Height: 10}, change.span)
 			require.Equal(t, tt.wantFocus, tb.tree.Focus)
 		})
 	}

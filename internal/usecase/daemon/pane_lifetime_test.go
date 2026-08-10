@@ -108,7 +108,7 @@ func TestPaneOpenErrorsReleaseReturnedPTYWithoutPublication(t *testing.T) {
 				tb := newTab(newQuietPTY(), domain.Size{Cols: 41, Rows: 10})
 				tb.ctx, tb.cancel = context.WithCancel(sessCtx)
 				sess := &session{sessionCore: sessionCore{id: "work", name: "work"}, cwd: "/tmp", ctx: sessCtx, cancel: cancelSession, tabs: []*tab{tb}}
-				err := d.splitPaneAt(sess, tb, tb.focusedPane(), layout.Right)
+				_, err := d.splitPaneAt(sess, tb, tb.focusedPane(), layout.Right)
 				return []*tab{tb}, func() {
 					cancelSession()
 					tb.closeAllPanes()

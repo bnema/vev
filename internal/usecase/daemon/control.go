@@ -346,9 +346,17 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 	case daemonActionCloseTab:
 		return a.d.closeTabLockedWithEffect(target.session, target.tab, true, request.effect)
 	case daemonActionSplitPane:
-		return a.d.splitPaneAt(target.session, target.tab, target.pane, request.direction)
+		change, err := a.d.splitPaneAt(target.session, target.tab, target.pane, request.direction)
+		if err == nil {
+			publishPaneFocusForAttachment(target.session, target.attachment, change)
+		}
+		return err
 	case daemonActionStackPane:
-		return a.d.stackPaneAt(target.session, target.tab, target.pane)
+		change, err := a.d.stackPaneAt(target.session, target.tab, target.pane)
+		if err == nil {
+			publishPaneFocusForAttachment(target.session, target.attachment, change)
+		}
+		return err
 	case daemonActionToggleStack:
 		return a.d.toggleStackAt(target.session, target.tab, target.pane)
 	case daemonActionClosePane:
@@ -366,7 +374,10 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		}
 		return nil
 	case daemonActionFocusPane:
-		_, err := a.d.focusDirAt(target.session, target.tab, target.pane, request.direction, target.attachment)
+		change, err := a.d.focusDirAt(target.session, target.tab, target.pane, request.direction)
+		if err == nil {
+			publishPaneFocusForAttachment(target.session, target.attachment, change)
+		}
 		return err
 	case daemonActionNextTab:
 		return a.switchRelative(target.session, target.attachment, 1)

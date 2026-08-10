@@ -70,6 +70,21 @@ func TestAttachmentFocusActionUpdatesOnlyInitiatingPaneView(t *testing.T) {
 	require.Equal(t, domain.PaneStableID(secondPane.stableID), second.viewSnapshot().paneID)
 }
 
+func TestAttachmentFocusActionCommitsWhenLayoutAlreadyFocusesDestination(t *testing.T) {
+	sess, _, secondPane := multiPaneAttachmentSession(t)
+	ac := registryTestAttachment(1)
+	require.True(t, sess.registerAttachment(ac))
+
+	tb := sess.tabs[0]
+	tb.mu.Lock()
+	tb.tree.Focus = secondPane.id
+	tb.mu.Unlock()
+
+	d := newTestDaemon(t, nil, stubClock{})
+	require.NoError(t, d.focusDir(sess, ac, layout.Right, nil))
+	require.Equal(t, domain.PaneStableID(secondPane.stableID), ac.viewSnapshot().paneID)
+}
+
 func TestPaneRemovalRepairsEachAttachmentViewIndependently(t *testing.T) {
 	sess, firstPane, secondPane := multiPaneAttachmentSession(t)
 	first, second := registryTestAttachment(1), registryTestAttachment(2)

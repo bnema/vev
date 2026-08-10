@@ -9,16 +9,24 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
+type paneFocusChange struct {
+	tab           *tab
+	focused       *pane
+	span          domain.Rect
+	layoutChanged bool
+}
+
 func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Direction) error {
 	target := resolveDaemonActionTargetForAttachment(sess, ac)
-	err := d.splitPaneAt(sess, target.tab, target.pane, dir)
+	change, err := d.splitPaneAt(sess, target.tab, target.pane, dir)
 	if err == nil && ac != nil {
+		publishPaneFocusForAttachment(sess, ac, change)
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	return err
 }
 
-func (d *Daemon) splitPaneAt(sess *session, tb *tab, target *pane, dir layout.Direction) error {
+func (d *Daemon) splitPaneAt(sess *session, tb *tab, target *pane, dir layout.Direction) (paneFocusChange, error) {
 	after := dir == layout.Right || dir == layout.Down
 	return d.spawnPaneOpAt(sess, tb, target, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
 		return tree.Split(oldFocus, dir, after, newID, area)
@@ -30,12 +38,12 @@ func (d *Daemon) spawnPaneOpAt(
 	tb *tab,
 	target *pane,
 	mutate func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error,
-) error {
+) (paneFocusChange, error) {
 	if d.ptys == nil {
-		return nil
+		return paneFocusChange{}, nil
 	}
 	if tb == nil || target == nil {
-		return layout.ErrNotFound
+		return paneFocusChange{}, layout.ErrNotFound
 	}
 
 	sess.mu.Lock()
@@ -47,12 +55,12 @@ func (d *Daemon) spawnPaneOpAt(
 	tb.mu.Lock()
 	if tb.tree == nil || tb.tree.Root == nil {
 		tb.mu.Unlock()
-		return layout.ErrNotFound
+		return paneFocusChange{}, layout.ErrNotFound
 	}
 	oldFocus := target.id
 	if tb.panes[oldFocus] != target || !layout.ContainsLeaf(tb.tree.Root, oldFocus) {
 		tb.mu.Unlock()
-		return layout.ErrNotFound
+		return paneFocusChange{}, layout.ErrNotFound
 	}
 	newID := layout.PaneID(fmt.Sprintf("pane-%d", tb.nextPaneID))
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
@@ -60,15 +68,15 @@ func (d *Daemon) spawnPaneOpAt(
 	if err := mutate(candidate, oldFocus, newID, area); err != nil {
 		tb.mu.Unlock()
 		if errors.Is(err, layout.ErrTooSmall) {
-			return domain.UserWarn(domain.NoticeLayoutTooSmall, "not enough space to split", err)
+			return paneFocusChange{}, domain.UserWarn(domain.NoticeLayoutTooSmall, "not enough space to split", err)
 		}
-		return err
+		return paneFocusChange{}, err
 	}
 	tb.nextPaneID++
 	placements, ok := layout.Solve(candidate.Root, area)
 	if !ok {
 		tb.mu.Unlock()
-		return domain.UserWarn(domain.NoticeLayoutTooSmall, "not enough space to split", layout.ErrTooSmall)
+		return paneFocusChange{}, domain.UserWarn(domain.NoticeLayoutTooSmall, "not enough space to split", layout.ErrTooSmall)
 	}
 	newRect := placementContent(placements, newID)
 	tabStableID := tb.stableID
@@ -77,7 +85,7 @@ func (d *Daemon) spawnPaneOpAt(
 
 	paneStableID, err := newStableID("p")
 	if err != nil {
-		return fmt.Errorf("daemon: generating pane identity: %w", err)
+		return paneFocusChange{}, fmt.Errorf("daemon: generating pane identity: %w", err)
 	}
 	command, args := d.ptyCommand(env)
 	lifetime := d.newPaneProcessLifetime(tb.ctx)
@@ -88,7 +96,7 @@ func (d *Daemon) spawnPaneOpAt(
 			_ = pty.Close()
 		}
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
-		return domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
+		return paneFocusChange{}, domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
 	}
 
 	p := newPaneWithStableID(newID, paneStableID, pty, rectSize(newRect))
@@ -99,12 +107,12 @@ func (d *Daemon) spawnPaneOpAt(
 		tb.mu.Unlock()
 		lifetime.abort()
 		_ = pty.Close()
-		return layout.ErrNotFound
+		return paneFocusChange{}, layout.ErrNotFound
 	}
 	if !lifetime.publish(p) {
 		tb.mu.Unlock()
 		_ = pty.Close()
-		return layout.ErrNotFound
+		return paneFocusChange{}, layout.ErrNotFound
 	}
 	// The tab lock excludes membership observers while pane.mu publishes the
 	// initial owner generation.
@@ -116,7 +124,7 @@ func (d *Daemon) spawnPaneOpAt(
 
 	d.applyTabLayout(sess, tb)
 	d.startPaneGoroutines(sess, tb, p)
-	return nil
+	return paneFocusChange{tab: tb, focused: p, layoutChanged: true}, nil
 }
 
 func placementContent(placements []layout.Placement, id layout.PaneID) domain.Rect {
@@ -132,14 +140,15 @@ func rectSize(r domain.Rect) domain.Size { return domain.Size{Cols: r.Width, Row
 
 func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
 	target := resolveDaemonActionTargetForAttachment(sess, ac)
-	err := d.stackPaneAt(sess, target.tab, target.pane)
+	change, err := d.stackPaneAt(sess, target.tab, target.pane)
 	if err == nil && ac != nil {
+		publishPaneFocusForAttachment(sess, ac, change)
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	return err
 }
 
-func (d *Daemon) stackPaneAt(sess *session, tb *tab, target *pane) error {
+func (d *Daemon) stackPaneAt(sess *session, tb *tab, target *pane) (paneFocusChange, error) {
 	return d.spawnPaneOpAt(sess, tb, target, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
 		return tree.StackNew(oldFocus, newID, area)
 	})
@@ -402,13 +411,15 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	if target.pane != nil {
 		oldFocus = target.pane.id
 	}
-	span, err := d.focusDirAt(sess, target.tab, target.pane, dir, ac)
+	change, err := d.focusDirAt(sess, target.tab, target.pane, dir)
 	if err == nil {
 		if ac != nil {
+			publishPaneFocusForAttachment(sess, ac, change)
 			d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "pane_actions.go")
 		}
 		return nil
 	}
+	span := change.span
 	if !errors.Is(err, errNoNeighbor) || target.tab == nil {
 		return err
 	}
@@ -443,6 +454,16 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	return nil
 }
 
+func publishPaneFocusForAttachment(sess *session, ac *attachedClient, change paneFocusChange) bool {
+	if sess == nil || ac == nil || change.tab == nil || change.focused == nil {
+		return false
+	}
+	sess.mu.Lock()
+	changed := sess.setAttachmentPaneLocked(ac, change.tab, change.focused)
+	sess.mu.Unlock()
+	return changed
+}
+
 // finishPaneFocusForClient applies the attachment lifecycle shared by every
 // successful directional focus move. Keep copy-mode exit before the optional
 // stack title refresh, and both before render invalidation.
@@ -451,10 +472,6 @@ func (d *Daemon) finishPaneFocusForClient(sess *session, ac *attachedClient, tb 
 	var newPane *pane
 	var pl layout.Placement
 	var hasPlacement bool
-	beforePaneID := domain.PaneStableID("")
-	if ac != nil {
-		beforePaneID = ac.viewSnapshot().paneID
-	}
 	if tb != nil {
 		tb.mu.Lock()
 		if ac != nil {
@@ -480,15 +497,7 @@ func (d *Daemon) finishPaneFocusForClient(sess *session, ac *attachedClient, tb 
 		tb.mu.Unlock()
 	}
 
-	moved := newFocus != oldFocus
-	if ac != nil && newPane != nil {
-		sess.mu.Lock()
-		sess.setAttachmentPaneLocked(ac, tb, newPane)
-		sess.mu.Unlock()
-		after := ac.viewSnapshot()
-		moved = beforePaneID != after.paneID
-	}
-	if moved {
+	if newFocus != oldFocus {
 		d.exitCopyMode(ac)
 		if hasPlacement && pl.InStack {
 			d.refreshPaneTitleOnFocus(sess, newFocus, tb)
@@ -510,46 +519,35 @@ func panePlacementLocked(tb *tab, id layout.PaneID) (layout.Placement, bool) {
 	return layout.Placement{}, false
 }
 
-func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction, initiating ...*attachedClient) (domain.Rect, error) {
+func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction) (paneFocusChange, error) {
+	change := paneFocusChange{tab: tb}
 	if tb == nil || target == nil {
-		return domain.Rect{}, layout.ErrNotFound
-	}
-	var ac *attachedClient
-	if len(initiating) > 0 {
-		ac = initiating[0]
+		return change, layout.ErrNotFound
 	}
 	tb.mu.Lock()
 	if tb.tree == nil || tb.panes[target.id] != target || !layout.ContainsLeaf(tb.tree.Root, target.id) {
 		tb.mu.Unlock()
-		return domain.Rect{}, layout.ErrNotFound
+		return change, layout.ErrNotFound
 	}
 	candidate := tb.tree.Clone()
 	candidate.Focus = target.id
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
-	span, _ := candidate.FocusSpan(area)
+	change.span, _ = candidate.FocusSpan(area)
 	err := candidate.FocusDir(dir, area)
-	currentFocus := tb.focusedPane()
-	committed := err == nil && currentFocus != nil && candidate.Focus != currentFocus.id
-	var focusedPane *pane
-	if committed {
-		focusedPane = tb.panes[candidate.Focus]
-		tb.tree = candidate
-		tb.bumpLayoutGenerationLocked()
+	if err == nil {
+		change.focused = tb.panes[candidate.Focus]
+		change.layoutChanged = change.focused != nil && (candidate.Focus != tb.tree.Focus || layoutFingerprint(candidate.Root) != layoutFingerprint(tb.tree.Root))
+		if change.layoutChanged {
+			tb.tree = candidate
+			tb.bumpLayoutGenerationLocked()
+		}
 	}
 	tb.mu.Unlock()
-	if committed {
-		if ac != nil {
-			d.exitCopyMode(ac)
-		}
-		if sess != nil && ac != nil && focusedPane != nil {
-			sess.mu.Lock()
-			sess.setAttachmentPaneLocked(ac, tb, focusedPane)
-			sess.mu.Unlock()
-		}
+	if change.layoutChanged {
 		d.applyTabLayout(sess, tb)
 	}
 	if errors.Is(err, layout.ErrNoPane) {
-		return span, errNoNeighbor
+		return change, errNoNeighbor
 	}
-	return span, err
+	return change, err
 }
