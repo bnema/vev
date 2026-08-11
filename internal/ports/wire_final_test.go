@@ -211,6 +211,29 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	}
 }
 
+func TestAttachTargetExactTargetWireStrict(t *testing.T) {
+	var lifecycle domain.SessionLifecycleID
+	lifecycle[0] = 1
+	target := AttachTarget{Session: "work", Intent: IntentAttach, ExactTarget: &ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}}
+	payload := MarshalAttachTarget(target)
+	want := append([]byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 1, 1}, make([]byte, 15)...)
+	want = append(want, 0, 4, 'w', 'o', 'r', 'k')
+	if !bytes.Equal(payload, want) {
+		t.Fatalf("exact target bytes = %x, want %x", payload, want)
+	}
+	back, err := UnmarshalAttachTarget(payload)
+	if err != nil || !reflect.DeepEqual(back, target) {
+		t.Fatalf("exact target = %+v, error %v, want %+v", back, err, target)
+	}
+	assertAllPrefixesFail(t, payload, UnmarshalAttachTarget)
+	assertTrailingGarbageFails(t, payload, UnmarshalAttachTarget)
+	mismatched := target
+	mismatched.ExactTarget = &ExactSessionTarget{LifecycleID: lifecycle, SessionName: "other"}
+	if got := MarshalAttachTarget(mismatched); got != nil {
+		t.Fatalf("MarshalAttachTarget accepted mismatched target: %x", got)
+	}
+}
+
 func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 	tests := []struct {
 		name    string

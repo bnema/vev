@@ -17,6 +17,27 @@ func remoteLifecycleForTest() domain.SessionLifecycleID {
 	return id
 }
 
+func TestLocalPickerHandoffCarriesExactLifecycle(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "source")
+	target, _, _ := addRemoteRefreshPickerOwner(t, d, "target")
+	target.incarnation = remoteLifecycleForTest()
+	token := source.attachmentToken(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	token.effect = effect
+	defer effect.End()
+
+	require.NoError(t, d.sendLocalAttachTargetForAttachment(token, picker.Target{Session: target.id}, sessionHandoffGuard{}, "picker-select"))
+	frame := receiveRemotePicker(t, sends, "local attach target")
+	got, err := ports.UnmarshalAttachTarget(frame.Payload)
+	require.NoError(t, err)
+	require.Empty(t, got.Endpoint)
+	require.Equal(t, ports.IntentAttach, got.Intent)
+	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: target.name}, got.ExactTarget)
+	require.Nil(t, ac.currentAttachmentSession())
+}
+
 func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	lifecycle := remoteLifecycleForTest()
