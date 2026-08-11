@@ -143,7 +143,7 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 			require.Equal(t, first.target.SessionName, request.SessionName)
 			require.Equal(t, tt.wantExactTarget, request.ExactTarget)
 			require.Equal(t, tt.wantTab, request.PreferredTabID)
-			require.Equal(t, ports.EnvironmentPolicyDaemonOwned, request.EnvironmentPolicy)
+			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
 		})
 	}
 }

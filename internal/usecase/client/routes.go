@@ -537,6 +537,10 @@ func (l *routeLedger) snapshot() ports.RecentRouteSnapshot {
 func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachTarget) AttachRequest {
 	origin := normalizeRouteOrigin(active.Origin, active.Remote)
 	originKey := normalizeRouteOriginKey(active.OriginKey, origin)
+	environmentPolicy := target.EnvironmentPolicy
+	if origin == ports.RouteOriginLocal {
+		environmentPolicy = ports.EnvironmentPolicyClientOwned
+	}
 
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -553,7 +557,7 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 		// original discovery target would make its Hello request a second,
 		// incorrect remote handoff instead of a same-peer session switch.
 		request.RemoteTarget = nil
-		request.EnvironmentPolicy = target.EnvironmentPolicy
+		request.EnvironmentPolicy = environmentPolicy
 		request.ExactTarget = target.ExactTarget
 		if target.ExactTarget == nil {
 			request.PreferredTabID = ""
@@ -567,7 +571,7 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 	request.ExactTarget = target.ExactTarget
 	request.PreferredTabID = ""
 	request.RemoteTarget = nil
-	request.EnvironmentPolicy = target.EnvironmentPolicy
+	request.EnvironmentPolicy = environmentPolicy
 	return request
 }
 
