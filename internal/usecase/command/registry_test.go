@@ -9,7 +9,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := PaletteRegistry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -47,13 +47,13 @@ func TestMoveCommandsExposeExactRegistryContracts(t *testing.T) {
 		wantCall                      string
 	}{
 		{
-			code: "MPN", slug: "move-pane", name: "Move pane to tab",
-			desc: "Move the focused pane to another live tab", usage: "move-pane <destination-session> <destination-tab-id>",
+			code: "MFP", slug: "move-pane", name: "Move pane to tab",
+			desc: "Move focused pane to tab", usage: "move-pane <destination-session> <destination-tab-id>",
 			target: TargetPane, args: []string{"work", "t_dest"}, wantCall: "move-pane:work:t_dest",
 		},
 		{
-			code: "MTB", slug: "move-tab", name: "Move tab to session",
-			desc: "Move the active tab to another live session", usage: "move-tab <destination-session>",
+			code: "MAT", slug: "move-tab", name: "Move tab to session",
+			desc: "Move active tab to session", usage: "move-tab <destination-session>",
 			target: TargetTab, args: []string{"work"}, wantCall: "move-tab:work",
 		},
 	}
@@ -354,12 +354,12 @@ func (s *controlSpy) RemoteCatalog(json bool) (string, error) {
 }
 
 func TestRegistryIncludesFloatingPaneToggle(t *testing.T) {
-	cmd, ok := ByCode("FLT")
+	cmd, ok := ByCode("TFP")
 	if !ok {
-		t.Fatal("ByCode(\"FLT\") ok = false, want true")
+		t.Fatal("ByCode(\"TFP\") ok = false, want true")
 	}
-	if cmd.Slug != "toggle-floating-pane" || cmd.Code != "FLT" || cmd.Name != "Toggle floating pane" {
-		t.Fatalf("floating command = %#v, want toggle-floating-pane/FLT/Toggle floating pane", cmd)
+	if cmd.Slug != "toggle-floating-pane" || cmd.Code != "TFP" || cmd.Name != "Toggle floating pane" {
+		t.Fatalf("floating command = %#v, want toggle-floating-pane/TFP/Toggle floating pane", cmd)
 	}
 }
 
@@ -412,14 +412,14 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "SPL", expect: func(ctx *MockContext) { ctx.EXPECT().SplitLeft().Return(nil).Once() }},
 		{code: "SPU", expect: func(ctx *MockContext) { ctx.EXPECT().SplitUp().Return(nil).Once() }},
 		{code: "SPD", expect: func(ctx *MockContext) { ctx.EXPECT().SplitDown().Return(nil).Once() }},
-		{code: "CEL", expect: func(ctx *MockContext) { ctx.EXPECT().ConsumeOrExpelPaneLeft().Return(nil).Once() }},
-		{code: "CER", expect: func(ctx *MockContext) { ctx.EXPECT().ConsumeOrExpelPaneRight().Return(nil).Once() }},
+		{code: "MPL", expect: func(ctx *MockContext) { ctx.EXPECT().ConsumeOrExpelPaneLeft().Return(nil).Once() }},
+		{code: "MPR", expect: func(ctx *MockContext) { ctx.EXPECT().ConsumeOrExpelPaneRight().Return(nil).Once() }},
 		{code: "STP", expect: func(ctx *MockContext) { ctx.EXPECT().StackPane().Return(nil).Once() }},
-		{code: "TST", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleStack().Return(nil).Once() }},
-		{code: "FLT", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleFloatingPane().Return(nil).Once() }},
-		{code: "CLP", expect: func(ctx *MockContext) { ctx.EXPECT().ClosePane().Return(nil).Once() }},
-		{code: "MPN", expect: func(ctx *MockContext) { ctx.EXPECT().OpenMovePanePicker().Return(nil).Once() }},
-		{code: "MTB", expect: func(ctx *MockContext) { ctx.EXPECT().OpenMoveTabPicker().Return(nil).Once() }},
+		{code: "TFS", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleStack().Return(nil).Once() }},
+		{code: "TFP", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleFloatingPane().Return(nil).Once() }},
+		{code: "CFP", expect: func(ctx *MockContext) { ctx.EXPECT().ClosePane().Return(nil).Once() }},
+		{code: "MFP", expect: func(ctx *MockContext) { ctx.EXPECT().OpenMovePanePicker().Return(nil).Once() }},
+		{code: "MAT", expect: func(ctx *MockContext) { ctx.EXPECT().OpenMoveTabPicker().Return(nil).Once() }},
 		{code: "FPL", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneLeft().Return(nil).Once() }},
 		{code: "FPR", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneRight().Return(nil).Once() }},
 		{code: "FPU", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneUp().Return(nil).Once() }},
@@ -432,7 +432,7 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "EQP", expect: func(ctx *MockContext) { ctx.EXPECT().EqualizePanes().Return(nil).Once() }},
 		{code: "NXT", expect: func(ctx *MockContext) { ctx.EXPECT().NextTab().Return(nil).Once() }},
 		{code: "PVT", expect: func(ctx *MockContext) { ctx.EXPECT().PrevTab().Return(nil).Once() }},
-		{code: "BSK", expect: func(ctx *MockContext) { ctx.EXPECT().BackSession().Return(nil).Once() }},
+		{code: "BCK", expect: func(ctx *MockContext) { ctx.EXPECT().BackSession().Return(nil).Once() }},
 		{code: "JRS", expect: func(ctx *MockContext) { ctx.EXPECT().JumpRecentSession(1).Return(nil).Once() }},
 		{code: "SSP", expect: func(ctx *MockContext) { ctx.EXPECT().OpenSessionPicker().Return(nil).Once() }},
 		{code: "NTC", expect: func(ctx *MockContext) { ctx.EXPECT().OpenNotifications().Return(nil).Once() }},

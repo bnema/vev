@@ -116,8 +116,8 @@ func TestMoveCommandHelpUsesExactUsages(t *testing.T) {
 	for _, tt := range []struct {
 		slug, usage, desc string
 	}{
-		{"move-pane", "move-pane <destination-session> <destination-tab-id>", "Move the focused pane to another live tab"},
-		{"move-tab", "move-tab <destination-session>", "Move the active tab to another live session"},
+		{"move-pane", "move-pane <destination-session> <destination-tab-id>", "Move focused pane to tab"},
+		{"move-tab", "move-tab <destination-session>", "Move active tab to session"},
 	} {
 		t.Run(tt.slug, func(t *testing.T) {
 			got := cmdHelp(cmdInvocation{slug: tt.slug})

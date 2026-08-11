@@ -9,7 +9,7 @@ import (
 
 func TestParseActionExactEffectiveToken(t *testing.T) {
 	results := CommandResults([]command.Command{
-		{Code: "BSK", Arguments: command.ArgumentsNone},
+		{Code: "BCK", Arguments: command.ArgumentsNone},
 		{Code: "JRS", Arguments: command.ArgumentsRequired, ContextHint: command.ContextHintRecentSessions},
 	})
 	tests := []struct {
@@ -19,11 +19,11 @@ func TestParseActionExactEffectiveToken(t *testing.T) {
 		code  string
 		args  []string
 	}{
-		{name: "static token ignores case and whitespace", input: "  bSk  ", ok: true, code: "BSK"},
+		{name: "static token ignores case and whitespace", input: "  bCk  ", ok: true, code: "BCK"},
 		{name: "required arguments accept repeated whitespace", input: " JRS   2 ", ok: true, code: "JRS", args: []string{"2"}},
 		{name: "partial token rejected", input: "JR", ok: false},
 		{name: "concatenated token rejected", input: "JRS2", ok: false},
-		{name: "static arguments rejected", input: "BSK 2", ok: false},
+		{name: "static arguments rejected", input: "BCK 2", ok: false},
 		{name: "missing required argument rejected", input: "JRS", ok: false},
 	}
 	for _, tt := range tests {

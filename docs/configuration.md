@@ -56,22 +56,22 @@ code.split-right = SPR
 code.split-left = SPL
 code.split-up = SPU
 code.split-down = SPD
-code.consume-or-expel-pane-left = CEL
-code.consume-or-expel-pane-right = CER
+code.consume-or-expel-pane-left = MPL
+code.consume-or-expel-pane-right = MPR
 code.stack-pane = STP
-code.toggle-stack = TST
-code.close-pane = CLP
+code.toggle-stack = TFS
+code.close-pane = CFP
 code.focus-pane-left = FPL
 code.focus-pane-right = FPR
 code.focus-pane-up = FPU
 code.focus-pane-down = FPD
 code.next-tab = NXT
 code.previous-tab = PVT
-code.back-session = BSK
+code.back-session = BCK
 code.jump-recent-session = JRS
 code.session-picker = SSP
 code.visual-mode = VIS
-code.toggle-floating-pane = FLT
+code.toggle-floating-pane = TFP
 code.rename-session = RNS
 code.rename-tab = RNT
 code.detach = DET
@@ -113,7 +113,7 @@ Key specs: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` through 
 
 ## Pane consume or expel
 
-The `consume-or-expel-pane-left` and `consume-or-expel-pane-right` actions are unbound by default; the commented Alt+H/Alt+L bindings above are optional examples. Use palette codes `CEL` and `CER`, or script them as `vev cmd consume-or-expel-pane-left` and `vev cmd consume-or-expel-pane-right`.
+The `consume-or-expel-pane-left` and `consume-or-expel-pane-right` actions are unbound by default; the commented Alt+H/Alt+L bindings above are optional examples. Use palette codes `MPL` and `MPR`, or script them as `vev cmd consume-or-expel-pane-left` and `vev cmd consume-or-expel-pane-right`.
 
 A singleton pane moves into the immediate column on the requested side; at the outer edge, nothing changes. A pane in a multi-member vertical or stack column moves out as an adjacent singleton column. This works only with canonical column layouts: one column, or a top-level horizontal split of columns, where each column is a singleton pane, a vertical split of panes, or a pane stack. Nested mixed splits are unsupported.
 
