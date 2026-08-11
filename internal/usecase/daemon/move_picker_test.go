@@ -56,7 +56,7 @@ func TestPaletteMovePaneCapturesSourceAndOpensPicker(t *testing.T) {
 
 	d.handleInput(source, ac, []byte("\x1b "))
 	require.True(t, ac.overlays.paletteActive())
-	d.handleInput(source, ac, []byte("MPN\r"))
+	d.handleInput(source, ac, []byte("MFP\r"))
 	require.False(t, ac.overlays.paletteActive())
 	require.True(t, ac.overlays.pickerActive())
 
@@ -77,7 +77,7 @@ func TestPaletteMoveTabCapturesActiveTabAndOpensPicker(t *testing.T) {
 	sourceTab.stableID = "active-tab"
 
 	d.handleInput(source, ac, []byte("\x1b "))
-	d.handleInput(source, ac, []byte("MTB\r"))
+	d.handleInput(source, ac, []byte("MAT\r"))
 	require.True(t, ac.overlays.pickerActive())
 
 	ac.overlays.pickerMu.Lock()
@@ -97,7 +97,7 @@ func TestPaletteMoveWithoutDestinationShowsToastAndNoPicker(t *testing.T) {
 	d.mu.Unlock()
 
 	d.handleInput(source, ac, []byte("\x1b "))
-	d.handleInput(source, ac, []byte("MPN\r"))
+	d.handleInput(source, ac, []byte("MFP\r"))
 
 	require.False(t, ac.overlays.pickerActive())
 	history := d.notices.history()
@@ -302,7 +302,7 @@ func TestMovePickerDispatchMuNotHeldWhileOpen(t *testing.T) {
 	defer releaseAll(releases)
 
 	d.handleInput(source, ac, []byte("\x1b "))
-	d.handleInput(source, ac, []byte("MPN\r"))
+	d.handleInput(source, ac, []byte("MFP\r"))
 	require.True(t, ac.overlays.pickerActive())
 	require.True(t, source.dispatchMu.TryLock(), "dispatchMu must not remain held while the move picker is open")
 	source.dispatchMu.Unlock()

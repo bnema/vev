@@ -65,7 +65,7 @@ No prefix key; everything is Alt.
 | Alt+h/j/k/l, Alt+Arrow | focus pane |
 | Alt+a | jump to a session needing attention |
 
-The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. `MPN` (`Move pane to tab`) and `MTB` (`Move tab to session`) open live-destination pickers; the unbound pane consume/expel actions are discoverable there as `CEL` and `CER`. Named active and stopped sessions are fuzzy-searchable for navigation, and selecting a stopped session resumes it. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
+The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. `MFP` (`Move pane to tab`) and `MAT` (`Move tab to session`) open live-destination pickers; the unbound pane consume/expel actions are discoverable there as `MPL` and `MPR`. Named active and stopped sessions are fuzzy-searchable for navigation, and selecting a stopped session resumes it. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
 
 ## Remote attach
 

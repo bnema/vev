@@ -30,7 +30,7 @@ PTYs, rendering, input, resize, effects, and teardown. The client does not
 proxy remote content through the local daemon. A single client process keeps a
 bounded, in-memory route history across local, direct remote, and picker-
 discovered attachments. The daemon renders the latest attachment snapshot;
-active routes are metadata-only, while `JRS` and `BSK` send typed key/generation
+active routes are metadata-only, while `JRS` and `BCK` send typed key/generation
 actions back to the client. History is process-local and is not persisted or
 shared between clients.
 

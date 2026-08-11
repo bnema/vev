@@ -178,13 +178,13 @@ func TestPaletteCommandNoticeErrorPreservesTypedErrorsAndMapsMoveFailures(t *tes
 		wantSame            bool
 	}{
 		{name: "CNT typed command error", slug: "new-tab", err: typedTabSpawn, code: domain.NoticeTabSpawn, severity: domain.NoticeError, message: "couldn't open tab", wantSame: true},
-		{name: "MPN no destination", slug: "move-pane", err: errNoMoveDestination, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "No destination available."},
-		{name: "MTB warming floating", slug: "move-tab", err: errMoveFloatingWarming, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Wait for the floating pane to finish opening."},
-		{name: "MPN final pane with floating slot", slug: "move-pane", err: errMoveFinalSourceFloating, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Close the floating pane or move the whole tab."},
-		{name: "MPN destination too small", slug: "move-pane", err: errMoveTooSmall, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Not enough space in destination tab."},
-		{name: "MTB stale destination", slug: "move-tab", err: errMoveStaleTarget, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Destination is no longer available."},
-		{name: "MPN generic invalid", slug: "move-pane", err: errMovePaneInvalid, code: domain.NoticeInternal, severity: domain.NoticeError, message: "Move failed."},
-		{name: "MPN typed application error", slug: "move-pane", err: typedTabSpawn, code: domain.NoticeTabSpawn, severity: domain.NoticeError, message: "couldn't open tab", wantSame: true},
+		{name: "MFP no destination", slug: "move-pane", err: errNoMoveDestination, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "No destination available."},
+		{name: "MAT warming floating", slug: "move-tab", err: errMoveFloatingWarming, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Wait for the floating pane to finish opening."},
+		{name: "MFP final pane with floating slot", slug: "move-pane", err: errMoveFinalSourceFloating, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Close the floating pane or move the whole tab."},
+		{name: "MFP destination too small", slug: "move-pane", err: errMoveTooSmall, code: domain.NoticeLayoutTooSmall, severity: domain.NoticeWarn, message: "Not enough space in destination tab."},
+		{name: "MAT stale destination", slug: "move-tab", err: errMoveStaleTarget, code: domain.NoticeSessionUnavailable, severity: domain.NoticeWarn, message: "Destination is no longer available."},
+		{name: "MFP generic invalid", slug: "move-pane", err: errMovePaneInvalid, code: domain.NoticeInternal, severity: domain.NoticeError, message: "Move failed."},
+		{name: "MFP typed application error", slug: "move-pane", err: typedTabSpawn, code: domain.NoticeTabSpawn, severity: domain.NoticeError, message: "couldn't open tab", wantSame: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -516,9 +516,9 @@ func TestPaletteDeniedPostHandoffAttachmentEffectClosesAndInvalidates(t *testing
 	invalidations := installPaletteInvalidationObserver(sess)
 
 	d.enterPalette(sess, ac)
-	d.handlePaletteInput(ac, []byte("BSK"))
+	d.handlePaletteInput(ac, []byte("BCK"))
 	// Make the attachment token detached while retaining currentSession. The
-	// no-op BSK command succeeds, but its post-execution beginAttachmentEffect is
+	// no-op BCK command succeeds, but its post-execution beginAttachmentEffect is
 	// deterministically denied.
 	sess.mu.Lock()
 	clearAttachmentsForTestLocked(sess)
@@ -640,7 +640,7 @@ func TestPaletteFailureDoesNotOverwriteNewerInteraction(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
-func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
+func TestPaletteTFPExecutesFloatingToggle(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -649,7 +649,7 @@ func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(sess, ac, []byte("FLT\r"))
+	d.handleInput(sess, ac, []byte("TFP\r"))
 
 	require.False(t, ac.overlays.paletteActive())
 	tb.mu.Lock()
@@ -769,12 +769,12 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "CEL", "CER", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BSK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BCK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	d := &Daemon{}
-	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "MPN", "MTB", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	var wg sync.WaitGroup
 	for range 50 {
