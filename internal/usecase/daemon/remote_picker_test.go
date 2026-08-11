@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -82,6 +83,17 @@ func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) 
 			require.Equal(t, "stopped — exact identity required", legacyView.RemoteDetail)
 		})
 	}
+}
+
+func TestRemotePickerClampsStoppedOrdinalTabCount(t *testing.T) {
+	tabs := make([]ports.RemoteCatalogTab, math.MaxUint16+1)
+	tabs[0] = ports.RemoteCatalogTab{Name: "main"}
+	view := remotePickerView(domain.RemoteSessionKey{Host: "arch", Name: "work"}, ports.RemoteCatalogSession{
+		LifecycleID: remoteLifecycleForTest(), Name: "work", State: "down", Tabs: tabs,
+	}, remoteHostFresh, time.Unix(100, 0))
+
+	require.NotNil(t, view.RemoteTarget)
+	require.Equal(t, uint16(math.MaxUint16), view.RemoteTarget.StoppedTab.ExpectedCount)
 }
 
 func TestRemotePickerUsesCompactUpDetailRegardlessOfAttachment(t *testing.T) {
@@ -750,9 +762,9 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}, transport)
 	require.NoError(t, err)
+	t.Cleanup(func() { remote.clientGone(restored, attachment, transport, false) })
 	require.Equal(t, lifecycle, restored.incarnation)
 	require.Equal(t, domain.TabStableID("tab-b"), attachment.viewSnapshot().tabID)
-	remote.clientGone(restored, attachment, transport, false)
 }
 
 func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {

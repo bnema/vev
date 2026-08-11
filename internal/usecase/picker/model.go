@@ -1,6 +1,8 @@
 package picker
 
 import (
+	"math"
+
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -329,7 +331,8 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 						if tab.TabID != "" {
 							remoteTarget.StoppedTab = domain.NewStableTabSelector(tab.TabID)
 						} else {
-							remoteTarget.StoppedTab = domain.NewOrdinalTabSelector(uint16(i), tab.RawName, uint16(len(session.Tabs)))
+							tabCount := min(len(session.Tabs), math.MaxUint16)
+							remoteTarget.StoppedTab = domain.NewOrdinalTabSelector(uint16(i), tab.RawName, uint16(tabCount))
 						}
 					} else {
 						remoteTarget.StoppedTab = domain.TabSelector{}

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -166,7 +167,8 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 			if first.ID != "" {
 				target.StoppedTab = domain.NewStableTabSelector(domain.TabStableID(first.ID))
 			} else {
-				target.StoppedTab = domain.NewOrdinalTabSelector(0, first.Name, uint16(len(tabs)))
+				tabCount := min(len(tabs), math.MaxUint16)
+				target.StoppedTab = domain.NewOrdinalTabSelector(0, first.Name, uint16(tabCount))
 			}
 		} else {
 			target.LiveTabID = domain.TabStableID(tabs[active].ID)
