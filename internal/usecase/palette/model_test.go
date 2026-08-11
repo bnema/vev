@@ -396,6 +396,8 @@ func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) 
 func TestModelCompleteSelected(t *testing.T) {
 	jrs := cmd("JRS", "Jump", "Jump to recent session")
 	jrs.Arguments = command.ArgumentsRequired
+	optional := cmd("CNS", "New session", "Create named session")
+	optional.Arguments = command.ArgumentsOptional
 	registryFirst := command.Registry()[0]
 
 	tests := []struct {
@@ -419,6 +421,7 @@ func TestModelCompleteSelected(t *testing.T) {
 		{name: "argument command appends required space", commands: []command.Command{jrs}, query: "jrs", want: "JRS ", wantChange: true},
 		{name: "partial token preserves unicode whitespace argument bytes", commands: []command.Command{jrs}, query: "jr\u2003 \tα  β", want: "JRS α  β", wantChange: true},
 		{name: "exact code and argument is unchanged", commands: []command.Command{jrs}, query: "JRS\u2003  α  β", want: "JRS\u2003  α  β", wantChange: false},
+		{name: "leading whitespace optional argument does not duplicate token", commands: []command.Command{optional}, query: "\u2003CNS name", want: "\u2003CNS name", wantChange: false},
 		{name: "no match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "zzz", want: "zzz", wantChange: false},
 		{name: "effective override code", commands: []command.Command{{Slug: "new-tab", Code: "NT", Desc: "Create tab"}}, query: "n", want: "NT", wantChange: true},
 	}

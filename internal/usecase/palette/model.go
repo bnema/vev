@@ -1,6 +1,7 @@
 package palette
 
 import (
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -124,6 +125,7 @@ func (m *Model) CompleteSelected() bool {
 	query := m.Query()
 	completed := cmd.Code
 	if cmd.Arguments != command.ArgumentsNone {
+		query = strings.TrimLeftFunc(query, unicode.IsSpace)
 		token, args, hasSeparator := completionParts(query)
 		if token == cmd.Code && hasSeparator && args != "" {
 			return false

@@ -80,6 +80,9 @@ func paletteOptionalOne(slug, code, name, desc string, target TargetKind, prompt
 			}
 			return desc
 		}
+		if len(args) > 1 {
+			return "Use one name"
+		}
 		switch slug {
 		case "new-session":
 			return "Create session “" + args[0] + "”"
