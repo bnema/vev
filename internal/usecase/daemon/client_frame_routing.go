@@ -132,10 +132,11 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 			d.log.Warn("malformed recent route snapshot", "err", derr)
 			break
 		}
-		if !token.ac.setRouteSnapshot(snapshot) {
+		replayIdentity := token.ac.setRouteSnapshot(snapshot)
+		d.invalidateRender(token.sess, token.ac, false, "client_frame_routing.go:route-snapshot")
+		if !replayIdentity {
 			break
 		}
-		d.invalidateRender(token.sess, token.ac, false, "client_frame_routing.go:route-snapshot")
 		if err := d.sendCommittedRouteIdentityForAttachment(token); err != nil {
 			d.detachOnAttachmentSendError(token, token.transport.transport)
 		}
