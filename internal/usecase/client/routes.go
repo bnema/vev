@@ -549,6 +549,10 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 		}
 		request := cloneAttachRequest(entry.request)
 		request.Intent = target.Intent
+		// The active dialer already reaches this daemon. Retaining the route's
+		// original discovery target would make its Hello request a second,
+		// incorrect remote handoff instead of a same-peer session switch.
+		request.RemoteTarget = nil
 		request.EnvironmentPolicy = target.EnvironmentPolicy
 		request.ExactTarget = target.ExactTarget
 		if target.ExactTarget == nil {

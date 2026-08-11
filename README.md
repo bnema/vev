@@ -1,11 +1,18 @@
 <h1 align="center">vev</h1>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
+  <a href="https://github.com/bnema/vev/releases"><img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-blue?style=flat-square" alt="Platforms: Linux and macOS"></a>
+  <a href="https://github.com/bnema/vev/commits/main"><img src="https://badgen.net/github/last-commit/bnema/vev/main?icon=github" alt="Last commit"></a>
+  <a href="https://github.com/bnema/vev/stargazers"><img src="https://badgen.net/github/stars/bnema/vev?icon=github" alt="GitHub stars"></a>
+</p>
+
 <p align="center"><em>Norwegian: to weave</em></p>
 
 <p align="center">A terminal multiplexer for Linux and macOS.<br>
 Like tmux, minus the prefix key. Like mosh, minus mosh. One binary.</p>
 
-<p align="center"><img src="docs/assets/demo.gif" alt="vev demo: named sessions, splits, stacked panes, floating window, agent bell notification, detach and re-attach" width="800"></p>
+<p align="center"><img src="docs/assets/demo.gif" alt="vev demo: local and remote sessions, splits, stacked panes, floating window, notifications, detach and re-attach" width="800"></p>
 
 ---
 
@@ -133,5 +140,5 @@ Optional file at `~/.config/vev/config`, reloaded live. Themes, key bindings, pa
 make test   # go test ./... -race
 make lint   # goimports check, go vet
 make mocks  # regenerate mocks
-make demo   # regenerate docs/assets/demo.gif (needs Docker and ~/.claude credentials)
+make demo   # regenerate docs/assets/demo.gif (needs Docker)
 ```

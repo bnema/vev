@@ -20,13 +20,34 @@ Set WaitTimeout 30s
 # (70-160ms) and short hesitations at word boundaries so the rhythm
 # reads irregular/human; palette codes (CNS/SSP/…) stay single-speed.
 
-# ── Session "work": a colourful split (eza + ticker) ─────
-Type@90ms "vev "
-Sleep 160ms
-Type@75ms "new "
-Type@140ms "work"
+# ── Local and remote history, shown immediately ──────────
+Type@180ms "vev"
+Sleep 600ms
 Enter
 Sleep 1.1s
+# Keep the initial local shell so the final detach/attach cycle is meaningful.
+Alt+" "
+Sleep 550ms
+Type "RNS"
+Enter
+Sleep 550ms
+Backspace
+Type@95ms "local"
+Enter
+Sleep 1s
+
+# The picker starts with the local shell plus two ready remote sessions.
+Alt+" "
+Sleep 550ms
+Type "SSP"
+Enter
+Sleep 1.5s
+Down 2
+Sleep 700ms
+Enter
+Sleep 2.5s
+
+# The selected work session belongs to the remote container.
 Type@85ms "eza "
 Sleep 200ms
 Type@75ms "-la "
@@ -44,9 +65,7 @@ Enter
 Sleep 1.5s
 
 # ── Session "agents": launch the bell job early so its
-#    sleep overlaps the middle scenes. claude -p prints the
-#    answer but emits no bell of its own (verified), so the
-#    pane rings it with printf. ───────────────────────────
+#    sleep overlaps the middle scenes. ─────────────────────
 Alt+" "
 Sleep 550ms
 Type "CNS"
@@ -56,13 +75,9 @@ Type@95ms "agents"
 Enter
 Sleep 900ms
 Type@80ms "sleep "
-Type@140ms "10 "
-Sleep 170ms
-Type@90ms "&& claude "
-Type@150ms "-p "
-Type@105ms `"say hello world" `
+Type@140ms "10"
 Sleep 220ms
-Type@85ms "&& printf "
+Type@85ms " && printf "
 Type@130ms `'\a'`
 Enter
 Sleep 1s
@@ -148,35 +163,30 @@ Sleep 900ms
 Alt+a
 Sleep 1.9s
 
-# ── Session picker now lists all three sessions ──────────
+# ── Session picker now lists local and remote sessions ───
 Alt+" "
 Sleep 550ms
 Type "SSP"
 Enter
-Sleep 1.2s
-Down
-Sleep 450ms
-Down
-Sleep 450ms
-Down
+Sleep 1.5s
+Escape
 Sleep 650ms
-Enter
-Sleep 1.2s
 
-# ── Detach / re-attach: three sessions survive, ticker on ─
+# ── Detach / re-attach: local sessions survive, ticker on ─
 Alt+" "
 Sleep 550ms
 Type "DET"
 Enter
 Sleep 1s
 Type@90ms "vev "
-Type@75ms "ls"
+Type@75ms "ls "
+Type@120ms "--all"
 Enter
 Sleep 1.8s
 Type@90ms "vev "
 Sleep 150ms
 Type@80ms "attach "
-Type@140ms "work"
+Type@140ms "local"
 Enter
 Sleep 2.2s
 Sleep 400ms

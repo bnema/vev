@@ -62,6 +62,19 @@ func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
 	}
 }
 
+func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	token := sess.attachmentToken(ac, ac.transport())
+	ac.publishAttachmentCapability(token)
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+
+	payload, err := ports.MarshalRecentRouteSnapshot(ports.RecentRouteSnapshot{Generation: 2})
+	require.NoError(t, err)
+	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}))
+
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
 func TestAttachmentRouteSnapshotCopiesPublishedEntries(t *testing.T) {
 	_, _, ac, _ := newManualSessionWithPTYs(t, nil)
 	entries := []ports.RecentRouteEntry{{Key: 1, Generation: 2, Name: "before", Kind: ports.RouteKindLocal}}

@@ -107,10 +107,17 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			continue
 		}
 		if _, represented := localNames[entry.Name]; represented {
-			localRoute := entry.Kind == ports.RouteKindLocal
-			currentRemoteRoute := entry.Kind == ports.RouteKindRemote && currentRemoteOrigin != "" && entry.HostLabel == currentRemoteOrigin
-			if localRoute || currentRemoteRoute {
+			sameOrigin := (entry.Kind == ports.RouteKindLocal && currentRemoteOrigin == "") ||
+				(entry.Kind == ports.RouteKindRemote && currentRemoteOrigin != "" && entry.HostLabel == currentRemoteOrigin)
+			if sameOrigin {
 				continue
+			}
+			if entry.Kind == ports.RouteKindLocal && currentRemoteOrigin != "" {
+				label = formatRecentRouteName(recentRoutePresentation{
+					name:      entry.Name,
+					kind:      recentRouteLocal,
+					ephemeral: entry.Ephemeral,
+				}, true)
 			}
 		}
 		results = append(results, palette.NewRecentRouteResult(label, ports.RouteNavigationAction{
