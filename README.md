@@ -18,61 +18,52 @@ Like tmux, minus the prefix key. Like mosh, minus mosh. One binary.</p>
 
 ## Install
 
-Install a pre-built release on Linux x86_64/arm64 or macOS Apple silicon (arm64):
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
+# Arch Linux: yay -S vev-bin
+# or: go install github.com/bnema/vev@latest
 ```
 
-On Arch Linux, install [`vev-bin`](https://aur.archlinux.org/packages/vev-bin) from the AUR:
-
-```sh
-yay -S vev-bin
-# or
-paru -S vev-bin
-```
-
-Alternatively, build and install the binary with Go:
-
-```sh
-go install github.com/bnema/vev@latest
-```
-
-The default UI runs entirely from the `vev` binary. The pre-built installer also installs optional external bar anchors, which only take effect when configured in `~/.config/vev/config`.
+Releases support Linux x86_64/arm64 and macOS Apple silicon.
 
 ## Usage
 
 ```text
 vev                              create an ephemeral session
 vev new <name>                   create a named session
-vev attach <name>                attach to a session (alias: a)
-vev attach user@host[:session]   attach to a remote daemon over SSH
-vev ls                           list local sessions
-vev ls <host>                    list sessions on a known remote host
-vev ls --all                     list local and remote sessions
-vev host add <host>              add a pinned remote host
-vev host rm <host>               remove a pinned remote host
-vev host list                    list known remote hosts
-vev kill <name>                  kill a session (--all kills everything)
+vev attach <name>                attach to a local session (alias: a)
+vev attach user@host[:session]   attach to a remote daemon
+vev ls [<host>|--all]            list sessions
+vev host add|rm <host>           manage remote hosts
+vev host list                    list remote hosts
+vev kill <name>|--all            kill sessions
 ```
 
-The daemon starts on first use and exits with the last session. Ephemeral sessions are numbered, survive detach, and disappear with the daemon. Named sessions persist across daemon restarts and come back with their layout, recovered terminal transcript, and allowlisted processes.
+The daemon starts on first use and exits after the last session. Numbered sessions survive detach; named sessions also survive daemon restarts. See [durable-session recovery](docs/durable-session-recovery.md).
 
-A session may have multiple attachments. The session owns the PTYs, VT state, tabs, panes, shared PTY content geometry, and ordered mutations. Each attachment owns its window, view, copy mode, overlays, rendering/output state, and reconnect lifecycle, so attachments can focus different tabs or panes without changing one another's view. The latest valid, non-superseded attachment attach, resume, or resize claim controls shared PTY geometry; detaching that attachment falls back to the most recently claimed remaining valid attachment while preserving every attachment's own outer window.
+## Keys and palette
 
-## Keys
-
-No prefix key; everything is Alt.
+No prefix key; bindings use Alt.
 
 | Key | Action |
 |---|---|
 | Alt+Space | command palette |
-| Alt+f | floating terminal for the current tab |
-| Alt+1 .. 9 | switch tab |
-| Alt+h/j/k/l, Alt+Arrow | focus pane |
+| Alt+f | floating terminal |
+| Alt+1 … 9 | switch tab |
+| Alt+h/j/k/l or Alt+Arrow | focus pane |
 | Alt+a | jump to a session needing attention |
 
-The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. `MFP` (`Move pane to tab`) and `MAT` (`Move tab to session`) open live-destination pickers; the unbound pane consume/expel actions are discoverable there as `MPL` and `MPR`. Named active and stopped sessions are fuzzy-searchable for navigation, and selecting a stopped session resumes it. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
+Type a code or fuzzy-search the palette. Common default codes:
+
+| Code | Action | Code | Action |
+|---|---|---|---|
+| `CNT` | new tab | `CNS` | new named session |
+| `SPR` / `SPL` | split right / left | `SPU` / `SPD` | split up / down |
+| `STP` / `TFS` | stack / toggle stack | `TFP` | floating terminal |
+| `MFP` / `MAT` | move pane / tab | `SSP` | session picker |
+| `DET` | detach | `NTC` | notifications |
+
+Scroll up to enter copy mode; use vim motions, `v` to select, and `y` to copy. All codes and bindings are configurable in [configuration](docs/configuration.md).
 
 ## Remote attach
 
@@ -80,36 +71,11 @@ The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, 
 vev attach user@host[:session]
 ```
 
-The client opens a direct connection to the selected remote daemon. UDP is the default: SSH bootstraps an authenticated UDP endpoint, then the session runs over that connection and resumes after sleep or Wi-Fi changes. vev must be installed on the remote. If your firewall only allows SSH, open the UDP range first (default `61000:61023`, override with `VEV_UDP_PORT_RANGE`):
-
-```sh
-sudo ufw allow 61000:61023/udp
-```
-
-Where UDP is not an option, set `VEV_REMOTE_TRANSPORT=stdio` to keep the direct connection inside SSH; this is an explicit transport choice. Every connection has a 15-second handshake deadline, and each command request has a 10-second deadline. Details in [docs/remote-resilience.md](docs/remote-resilience.md).
-
-List sessions on a known host (OpenSSH resolves aliases from your SSH config):
-
-```sh
-vev ls arch
-vev ls --all
-```
-
-Remote session names appear as `session@host`. `vev ls --all` prints local sessions first, then remote sessions in host order. If one host fails, vev still prints the rest and exits non-zero.
-
-Manage pinned hosts in the unified host state file through the CLI:
-
-```sh
-vev host add arch
-vev host rm arch
-vev host list
-```
-
-Successful attaches learn hosts into `$XDG_STATE_HOME/vev/hosts.json`; that file stores both pinned and learned hosts. See [docs/configuration.md](docs/configuration.md#remote-hosts).
+SSH bootstraps an authenticated direct UDP connection that resumes after sleep or network changes. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. The remote host needs vev installed; see [remote resilience](docs/remote-resilience.md) for firewall, transport, and host-list details.
 
 ## Scripting
 
-`vev cmd` runs control commands against a running daemon; it never starts one. For example:
+`vev cmd` controls a running daemon without starting one:
 
 ```sh
 vev cmd split-right
@@ -117,22 +83,15 @@ vev cmd toast -l warn "build failed"
 vev cmd list-panes --json
 ```
 
-Target a session explicitly with `-s` (`vev cmd -s work new-tab`). Inside a pane, `--self` targets that pane; it cannot be combined with `-s`. Otherwise vev uses `$VEV` inside a pane, then the only live session; ambiguous targets fail. Run `vev cmd --help` for the scriptable command list and `vev cmd <command> --help` for command usage.
+Use `vev cmd --help` for commands and targeting options.
 
-Move the focused pane or active tab with these exact forms:
+## Documentation
 
-```text
-vev cmd [-s <source-session>] [--self] move-pane <destination-session> <destination-tab-id>
-vev cmd [-s <source-session>] [--self] move-tab <destination-session>
-```
-
-Use `vev cmd -s <destination-session> list-tabs` to find stable destination tab IDs. Destinations must be live, but may be named or ephemeral; stopped sessions are not eligible. A moved pane is split to the right of the destination tab's focused pane and becomes that tab's internal focus without activating the tab. A moved tab is appended to the destination in the background. If the move empties the source session, its attachment follows the moved pane or tab and activates the destination; existing destination attachments keep their own views.
-
-Moving the final tiled pane out of a tab is rejected while that tab has a floating pane slot; close the floating pane or move the whole tab instead. Named-session persistence is best-effort across a move, not crash-atomic across source and destination snapshots.
-
-## Configuration
-
-Optional file at `~/.config/vev/config`, reloaded live. Themes, key bindings, palette codes, the floating terminal, status bar scripts: see [docs/configuration.md](docs/configuration.md). Terminal color and VT compatibility notes live in [docs/terminal.md](docs/terminal.md).
+- [Configuration](docs/configuration.md): bindings, palette, theme, overlays, and bar anchors
+- [Terminal compatibility](docs/terminal.md)
+- [Remote resilience](docs/remote-resilience.md)
+- [Durable session recovery](docs/durable-session-recovery.md)
+- [Performance](docs/performance.md)
 
 ## Development
 
