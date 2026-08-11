@@ -708,45 +708,36 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }
 
-func TestPaletteCNSArgumentCreatesNamedSessionWithoutPrompt(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
-	defer release1()
-	defer release2()
-	d.ptys = newFactorySeq(t, p2)
+func TestPaletteDirectSessionCreation(t *testing.T) {
+	cases := []struct {
+		name, input, wantName string
+		ephemeral             bool
+	}{
+		{name: "named", input: "CNS scratch\r", wantName: "scratch"},
+		{name: "ephemeral", input: "CES\r", wantName: "0", ephemeral: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p1, release1 := newBlockingPTY(t)
+			p2, release2 := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+			defer release1()
+			defer release2()
+			d.ptys = newFactorySeq(t, p2)
 
-	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(sess, ac, []byte("CNS scratch\r"))
-	awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, []byte("\x1b "))
+			awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, []byte(tc.input))
+			awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.overlays.paletteActive())
-	require.False(t, ac.overlays.promptActive())
-	require.Equal(t, 2, sessionCount(d))
-	newSess := ac.currentSession()
-	require.Equal(t, "scratch", newSess.name)
-	require.False(t, newSess.ephemeral)
-}
-
-func TestPaletteCESCreatesAndSwitchesToEphemeralSession(t *testing.T) {
-	p1, release1 := newBlockingPTY(t)
-	p2, release2 := newBlockingPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
-	defer release1()
-	defer release2()
-	d.ptys = newFactorySeq(t, p2)
-
-	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(sess, ac, []byte("CES\r"))
-	awaitFrame(t, sends, ports.MsgOutput)
-
-	require.False(t, ac.overlays.paletteActive())
-	require.Equal(t, 2, sessionCount(d))
-	newSess := ac.currentSession()
-	require.Equal(t, "0", newSess.name)
-	require.True(t, newSess.ephemeral)
+			require.False(t, ac.overlays.paletteActive())
+			require.False(t, ac.overlays.promptActive())
+			require.Equal(t, 2, sessionCount(d))
+			newSess := ac.currentSession()
+			require.Equal(t, tc.wantName, newSess.name)
+			require.Equal(t, tc.ephemeral, newSess.ephemeral)
+		})
+	}
 }
 
 func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
