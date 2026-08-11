@@ -25,6 +25,17 @@ const (
 	RemoteVersionMismatch
 )
 
+// RemoteActivation is the picker action authorized by the current remote
+// catalog snapshot. It is presentation state only; RemoteSessionTarget remains
+// the exact route and is revalidated when the picker hands off the client.
+type RemoteActivation uint8
+
+const (
+	RemoteUnavailable RemoteActivation = iota
+	RemoteAttach
+	RemoteRestart
+)
+
 type SessionView struct {
 	ID                domain.SessionID
 	Incarnation       domain.IncarnationID
@@ -43,8 +54,8 @@ type SessionView struct {
 	RemoteAvailability RemoteAvailability
 	RemoteDetail       string
 	RemoteReason       string
+	RemoteActivation   RemoteActivation
 	ConnectOnly        bool
-	RemoteAttachReady  bool
 	// CannotAcceptMoves reports whether this session cannot receive a moved tab
 	// or pane. False for ordinary local (and stopped) sessions; true for
 	// restricted remote rows.
@@ -275,28 +286,25 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	header.selectable = header.kind.selectable(config.Mode)
 	header.focusable = header.selectable
 	if common.remote {
-		if remoteDetail := remoteRowDetail(session); remoteDetail != "" {
+		if session.RemoteDetail != "" {
 			if header.detail != "" {
-				header.detail += " (" + remoteDetail + ")"
+				header.detail += " (" + session.RemoteDetail + ")"
 			} else {
-				header.detail = remoteDetail
+				header.detail = session.RemoteDetail
 			}
 		}
-		// Rich catalog rows use tab targets. Legacy count-only/connect-only
-		// callers retain their header target until all peers carry the richer
-		// identity contract.
 		if common.hasRemoteTarget {
 			header.selectable = false
 			header.focusable = config.Mode == SelectNavigationTab && len(session.Tabs) == 0
 		} else {
-			header.selectable = common.hasRemoteKey && config.Mode == SelectNavigationTab && session.ConnectOnly && remoteSelectable(session)
+			header.selectable = common.hasRemoteKey && config.Mode == SelectNavigationTab && session.ConnectOnly && remoteActivatable(session)
 			header.focusable = header.selectable
 			if !common.hasRemoteKey && !common.hasRemoteTarget {
 				header.focusable = config.Mode == SelectNavigationTab
 			}
 		}
 		header.unavailableReason = session.RemoteReason
-		header.dim = remoteDim(session)
+		header.dim = session.RemoteActivation == RemoteUnavailable
 	}
 	if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
 		header.selectable, header.focusable, header.dim = false, false, true
@@ -334,14 +342,14 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 					tabRow.hasRemoteTarget = true
 				}
 				if !tabRow.hasRemoteTarget {
-					legacyRemote := common.hasRemoteKey && config.Mode == SelectNavigationTab && remoteSelectable(session)
+					legacyRemote := common.hasRemoteKey && config.Mode == SelectNavigationTab && remoteActivatable(session)
 					tabRow.focusable = legacyRemote
 					tabRow.selectable = legacyRemote
 				} else {
 					tabRow.focusable = true
-					tabRow.selectable = tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteSelectable(session)
+					tabRow.selectable = tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteActivatable(session)
 				}
-				tabRow.dim = remoteDim(session)
+				tabRow.dim = session.RemoteActivation == RemoteUnavailable
 			}
 			if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
 				tabRow.selectable, tabRow.focusable, tabRow.dim = false, false, true
@@ -355,22 +363,8 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	return rows
 }
 
-func remoteSelectable(session SessionView) bool {
-	return session.RemoteAttachReady && session.RemoteAvailability != RemoteVersionMismatch && session.RemoteReason == ""
-}
-
-func remoteDim(session SessionView) bool {
-	return !session.RemoteAttachReady || session.RemoteAvailability == RemoteStale || session.RemoteAvailability == RemoteVersionMismatch
-}
-
-func remoteRowDetail(session SessionView) string {
-	if session.RemoteDetail != "" && (session.RemoteAvailability == RemoteStale || session.RemoteAvailability == RemoteVersionMismatch) {
-		return session.RemoteDetail
-	}
-	if !session.RemoteAttachReady {
-		return "proxy activation pending"
-	}
-	return session.RemoteDetail
+func remoteActivatable(session SessionView) bool {
+	return session.RemoteActivation == RemoteAttach || session.RemoteActivation == RemoteRestart
 }
 
 func sourceMatchesSession(source SourceFilter, session SessionView) bool {
