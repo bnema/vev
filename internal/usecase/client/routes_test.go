@@ -118,7 +118,11 @@ func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) 
 	other := routeTestCandidate(1, ports.RouteOriginLocal)
 	_, err = ledger.commit(other)
 	require.NoError(t, err)
-	active := routeTestCandidate(2, ports.RouteOriginRemote)
+	otherRemote := routeTestCandidate(2, ports.RouteOriginRemote)
+	otherRemote.originKey = "host-b"
+	_, err = ledger.commit(otherRemote)
+	require.NoError(t, err)
+	active := routeTestCandidate(3, ports.RouteOriginRemote)
 	active.originKey = "host-a"
 	_, err = ledger.commit(active)
 	require.NoError(t, err)

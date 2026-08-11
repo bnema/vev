@@ -21,10 +21,10 @@ const MaxFrameLen = 16 << 20
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8
 
-// Frame message types. Client-originated messages occupy 1–13, 15, and 32;
-// server-originated messages occupy 16–23 and 25–31. Values 14 and 24 remain
-// reserved for future extensions. Route metadata/navigation messages use the
-// post-26 range.
+// Frame message types use non-contiguous allocations: the legacy client range
+// is 1–13 and 15, and newer client subscriptions use 32. Server-originated
+// messages occupy 16–23 and 25–31. Values 14 and 24 remain reserved for future
+// extensions.
 const (
 	MsgHello                      MsgType = 1
 	MsgInput                      MsgType = 2

@@ -99,6 +99,7 @@ type attachedClient struct {
 	sendMu                     sync.Mutex
 	routeMu                    sync.RWMutex
 	routeSnapshot              ports.RecentRouteSnapshot
+	pendingRouteIdentity       bool
 	routeAttentionSubscription ports.RouteAttentionSubscription
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
@@ -352,11 +353,31 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
-func (ac *attachedClient) setRouteSnapshot(snapshot ports.RecentRouteSnapshot) {
+// setRouteSnapshot records a client-owned route view and reports whether a
+// rename identity was deferred until that first usable publication.
+func (ac *attachedClient) setRouteSnapshot(snapshot ports.RecentRouteSnapshot) bool {
 	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
 	ac.routeMu.Lock()
 	ac.routeSnapshot = snapshot
+	replayPendingIdentity := snapshot.Generation != 0 && ac.pendingRouteIdentity
+	if replayPendingIdentity {
+		ac.pendingRouteIdentity = false
+	}
 	ac.routeMu.Unlock()
+	return replayPendingIdentity
+}
+
+// deferRouteIdentityUntilSnapshot records a rename that happens before the
+// client has published its route ledger. It returns false once a snapshot is
+// already available and the identity may be sent immediately.
+func (ac *attachedClient) deferRouteIdentityUntilSnapshot() bool {
+	ac.routeMu.Lock()
+	defer ac.routeMu.Unlock()
+	if ac.routeSnapshot.Generation != 0 {
+		return false
+	}
+	ac.pendingRouteIdentity = true
+	return true
 }
 
 func (ac *attachedClient) routeSnapshotCopy() ports.RecentRouteSnapshot {

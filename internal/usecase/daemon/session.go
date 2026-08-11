@@ -925,7 +925,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 // prior route record.
 func (d *Daemon) publishRenamedSessionRouteIdentity(sess *session) {
 	for _, ac := range sess.snapshotAttachments() {
-		if ac.routeSnapshotCopy().Generation == 0 {
+		if ac.deferRouteIdentityUntilSnapshot() {
 			continue
 		}
 		token := sess.attachmentToken(ac, ac.transport())

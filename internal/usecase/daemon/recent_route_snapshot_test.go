@@ -26,29 +26,40 @@ func TestAttachmentStatusUsesClientRouteSnapshot(t *testing.T) {
 }
 
 func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
-	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-	sess.mu.Lock()
-	sess.incarnation = domain.SessionLifecycleID{9}
-	sess.tabs[0].attention = true
-	sess.mu.Unlock()
-	ref := ports.RouteRef{Key: 2, Generation: 1}
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
-		Generation: 2,
-		Active:     ports.RouteRef{Key: 3, Generation: 2},
-		Entries:    []ports.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Name: sess.name, Kind: ports.RouteKindLocal}},
-	})
-	ac.setRouteAttentionSubscription(ports.RouteAttentionSubscription{Targets: []ports.RouteAttentionTarget{{
-		Ref: ref,
-		Target: ports.ExactSessionTarget{
-			LifecycleID: sess.incarnation,
-			SessionName: sess.name,
-		},
-	}}})
+	for _, tt := range []struct {
+		name      string
+		targetID  domain.SessionLifecycleID
+		attention bool
+	}{
+		{name: "matching lifecycle", targetID: domain.SessionLifecycleID{9}, attention: true},
+		{name: "stale lifecycle", targetID: domain.SessionLifecycleID{8}, attention: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+			sess.mu.Lock()
+			sess.incarnation = domain.SessionLifecycleID{9}
+			sess.tabs[0].attention = true
+			sess.mu.Unlock()
+			ref := ports.RouteRef{Key: 2, Generation: 1}
+			ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+				Generation: 2,
+				Active:     ports.RouteRef{Key: 3, Generation: 2},
+				Entries:    []ports.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Name: sess.name, Kind: ports.RouteKindLocal}},
+			})
+			ac.setRouteAttentionSubscription(ports.RouteAttentionSubscription{Targets: []ports.RouteAttentionTarget{{
+				Ref: ref,
+				Target: ports.ExactSessionTarget{
+					LifecycleID: tt.targetID,
+					SessionName: sess.name,
+				},
+			}}})
 
-	state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, ports.RecentRouteSnapshot{})
+			state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, ports.RecentRouteSnapshot{})
 
-	require.Len(t, state.mru, 1)
-	require.True(t, state.mru[0].attention)
+			require.Len(t, state.mru, 1)
+			require.Equal(t, tt.attention, state.mru[0].attention)
+		})
+	}
 }
 
 func TestAttachmentRouteSnapshotCopiesPublishedEntries(t *testing.T) {
