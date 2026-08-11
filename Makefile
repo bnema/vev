@@ -53,10 +53,9 @@ demo:
 		-y -v error -i /out/demo.gif -i /out/border.png -i /out/mask.png \
 		-filter_complex "[0:v][1:v]overlay=0:0[bordered];[2:v]format=gray[m];[bordered][m]alphamerge,split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128" \
 		/out/demo-masked.gif
-	# --lossy above 30 smears the near-identical darks of the window chrome
-	# (window bar vs terminal background) into visible banding, and the
-	# conserve-memory fallback for huge inputs roughly doubles the output.
-	docker run --rm --entrypoint gifsicle -v "$(CURDIR)/scripts/demo/out:/out" vev-demo --no-conserve-memory -O3 --lossy=30 -o /out/demo.gif /out/demo-masked.gif
+	# Keep the final GIF lossless: the streaming FFmpeg pass has already
+	# bounded memory, and preserving terminal chrome avoids color banding.
+	docker run --rm --entrypoint gifsicle -v "$(CURDIR)/scripts/demo/out:/out" vev-demo --no-conserve-memory -O3 -o /out/demo.gif /out/demo-masked.gif
 	# Temp files are owned by the container's subuid, so remove them from
 	# inside a container rather than the host.
 	docker run --rm --entrypoint sh -v "$(CURDIR)/scripts/demo/out:/out" vev-demo -c 'rm /out/demo-masked.gif /out/mask.png /out/border.png'

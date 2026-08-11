@@ -1,0 +1,17 @@
+name: vev-demo
+
+services:
+  remote:
+    image: vev-demo
+    hostname: remote
+    user: root
+    entrypoint: ["/usr/bin/sshd", "-D", "-e"]
+
+  client:
+    image: vev-demo
+    depends_on:
+      - remote
+    volumes:
+      - ../../scripts/demo:/tape:ro
+      - ../../scripts/demo/out:/home/demo/out
+      - ../../scripts/demo/out/local:/home/demo/.local

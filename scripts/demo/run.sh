@@ -3,50 +3,52 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 TAPE="${1:-demo.tape}"
+COMPOSE_FILE="scripts/demo/compose.yaml"
 install -d -m 0777 scripts/demo/out
+# Demo containers use a rootless subuid mapping, so reset generated state
+# from the same container identity rather than relying on host ownership.
+docker run --rm --entrypoint sh -v "$PWD/scripts/demo/out:/out" vev-demo -c 'rm -rf /out/local && mkdir -m 0777 /out/local'
 
-CLAUDE_TMP=$(mktemp -d)
-# claude writes files into the temp HOME as the container's demo user, which
-# rootless docker maps to a subuid the host cannot delete directly. Clean up
-# through the container first, where the creating uid can unlink its own
-# files, then remove the (now-empty) temp dir from the host. This never
-# suppresses a leftover: if anything still remains, it's reported so a
-# credentials-bearing directory doesn't silently linger in /tmp.
+compose() {
+	docker compose -f "$COMPOSE_FILE" "$@"
+}
+
 cleanup() {
-	# Every step here is best-effort: under `set -e`, an unguarded failure in an
-	# EXIT trap would abort the trap early and replace the script's real exit
-	# status with the failing cleanup command's. Guard each step with `|| true`
-	# so cleanup always runs to completion and never masks the vhs run's result;
-	# the final check below is what surfaces an unrecovered leftover.
-	rm -rf "$CLAUDE_TMP" 2>/dev/null || true
-	if [ -d "$CLAUDE_TMP" ]; then
-		docker run --rm -v "$CLAUDE_TMP:/cleanup" --entrypoint sh vev-demo \
-			-c 'rm -rf /cleanup/.claude /cleanup/.claude.json' 2>/dev/null || true
-		rmdir "$CLAUDE_TMP" 2>/dev/null || true
-	fi
-	if [ -d "$CLAUDE_TMP" ]; then
-		echo "warning: could not remove claude temp home, left at $CLAUDE_TMP" >&2
-	fi
-	return 0
+	compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-mkdir -p "$CLAUDE_TMP/.claude"
-cp "$HOME/.claude/.credentials.json" "$CLAUDE_TMP/.claude/"
-cp scripts/demo/claude-settings.json "$CLAUDE_TMP/.claude/settings.json"
-printf '{"hasCompletedOnboarding": true, "theme": "dark", "projects": {"/home/demo": {"hasTrustDialogAccepted": true, "hasCompletedProjectOnboarding": true, "projectOnboardingSeenCount": 1}}}\n' > "$CLAUDE_TMP/.claude.json"
 
-# Rootless docker maps host-owned files (uid 1000) to container root, but the
-# container runs as demo (uid 1000 -> a subuid), so demo cannot read the
-# credentials or write its config dir. Open up the throwaway home's contents so
-# claude can authenticate and write transcripts, then restore the mktemp
-# parent to 0700: bind mounts hand the container the inner paths directly, but
-# other host users would have to traverse the parent, which now blocks them.
-chmod -R a+rwX "$CLAUDE_TMP"
-chmod 0700 "$CLAUDE_TMP"
+compose up -d remote
 
-docker run --rm --hostname vev-demo \
-  -v "$PWD/scripts/demo:/tape:ro" \
-  -v "$PWD/scripts/demo/out:/home/demo/out" \
-  -v "$CLAUDE_TMP/.claude:/home/demo/.claude" \
-  -v "$CLAUDE_TMP/.claude.json:/home/demo/.claude.json" \
-  vev-demo "/tape/$TAPE"
+ready=""
+for _ in $(seq 60); do
+	if compose run --rm --entrypoint ssh client remote true >/dev/null 2>&1; then
+		ready=yes
+		break
+	fi
+	sleep 0.5
+done
+if [ -z "$ready" ]; then
+	echo "error: sshd on the remote container never accepted a connection" >&2
+	compose logs remote >&2 || true
+	exit 1
+fi
+
+start_remote_session() {
+	local name=$1 scene=$2
+	if ! compose exec -u demo -T remote env VEV=demo-bootstrap SHELL=/usr/local/bin/demo-shell VEV_DEMO_SCENE="$scene" vev new "$name"; then
+		echo "error: could not create remote session '$name'" >&2
+		return 1
+	fi
+	if ! compose exec -u demo -T remote vev ls | grep -q "^$name"; then
+		echo "error: remote session '$name' was not retained" >&2
+		compose exec -u demo -T remote vev ls >&2 || true
+		return 1
+	fi
+}
+
+start_remote_session work remote-deploys
+start_remote_session ticker remote-ticker
+
+compose run --rm --entrypoint vev client host add remote
+compose run --rm client "/tape/$TAPE"

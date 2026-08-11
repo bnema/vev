@@ -12,7 +12,7 @@
 <p align="center">A terminal multiplexer for Linux and macOS.<br>
 Like tmux, minus the prefix key. Like mosh, minus mosh. One binary.</p>
 
-<p align="center"><img src="docs/assets/demo.gif" alt="vev demo: named sessions, splits, stacked panes, floating window, agent bell notification, detach and re-attach" width="800"></p>
+<p align="center"><img src="docs/assets/demo.gif" alt="vev demo: local and remote sessions, splits, stacked panes, floating window, notifications, detach and re-attach" width="800"></p>
 
 ---
 
@@ -140,5 +140,5 @@ Optional file at `~/.config/vev/config`, reloaded live. Themes, key bindings, pa
 make test   # go test ./... -race
 make lint   # goimports check, go vet
 make mocks  # regenerate mocks
-make demo   # regenerate docs/assets/demo.gif (needs Docker and ~/.claude credentials)
+make demo   # regenerate docs/assets/demo.gif (needs Docker)
 ```
