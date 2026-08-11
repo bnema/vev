@@ -293,6 +293,7 @@ type AttachTarget struct {
 	Session           string
 	Intent            uint8
 	RemoteTarget      *domain.RemoteSessionTarget
+	ExactTarget       *ExactSessionTarget
 	EnvironmentPolicy EnvironmentPolicy
 }
 
@@ -806,10 +807,14 @@ func ValidateAck(m Ack) error {
 	return nil
 }
 
-// ValidateAttachTarget validates route fields and, when present, the exact
-// picker identity carried by the handoff.
+// ValidateAttachTarget validates a client-owned route handoff. An empty
+// Endpoint selects another session on the currently connected daemon; a
+// non-empty Endpoint selects a discovered remote daemon.
 func ValidateAttachTarget(m AttachTarget) error {
-	if m.Endpoint == "" || m.Session == "" || len(m.Endpoint) > math.MaxUint16 || len(m.Session) > math.MaxUint16 {
+	if m.Session == "" || len(m.Endpoint) > math.MaxUint16 || len(m.Session) > math.MaxUint16 {
+		return ErrInvalidAttachTarget
+	}
+	if err := domain.ValidateSessionName(m.Session); err != nil {
 		return ErrInvalidAttachTarget
 	}
 	if m.Intent != IntentEphemeral && m.Intent != IntentNew && m.Intent != IntentAttach && m.Intent != IntentResume {
@@ -819,6 +824,9 @@ func ValidateAttachTarget(m AttachTarget) error {
 		return ErrInvalidAttachTarget
 	}
 	if !validEnvironmentPolicy(m.EnvironmentPolicy) {
+		return ErrInvalidAttachTarget
+	}
+	if m.ExactTarget != nil && (m.ExactTarget.SessionName != m.Session || m.ExactTarget.Validate() != nil) {
 		return ErrInvalidAttachTarget
 	}
 	if m.RemoteTarget == nil {
@@ -1498,6 +1506,7 @@ func MarshalAttachTarget(m AttachTarget) []byte {
 	w.putString(m.Session)
 	w.putUint8(m.Intent)
 	marshalRemoteTargetSection(&w, m.RemoteTarget, m.EnvironmentPolicy)
+	marshalExactTargetSection(&w, m.ExactTarget)
 	return w.b
 }
 
@@ -1506,7 +1515,7 @@ func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
 	// Preflight lengths and intent before getString can allocate either value.
 	probe := payloadReader{b: b}
 	endpointLen, err := probe.getUint16()
-	if err != nil || endpointLen == 0 || int(endpointLen) > len(probe.b) {
+	if err != nil || int(endpointLen) > len(probe.b) {
 		return AttachTarget{}, ErrInvalidAttachTarget
 	}
 	probe.b = probe.b[endpointLen:]
@@ -1520,6 +1529,9 @@ func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
 		return AttachTarget{}, ErrInvalidAttachTarget
 	}
 	if err := skipRemoteTargetSection(&probe); err != nil {
+		return AttachTarget{}, ErrInvalidAttachTarget
+	}
+	if err := skipExactTargetSection(&probe); err != nil {
 		return AttachTarget{}, ErrInvalidAttachTarget
 	}
 	if err := probe.done(); err != nil {
@@ -1538,6 +1550,9 @@ func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
 		return AttachTarget{}, err
 	}
 	if m.RemoteTarget, m.EnvironmentPolicy, err = unmarshalRemoteTargetSection(&r); err != nil {
+		return AttachTarget{}, err
+	}
+	if m.ExactTarget, err = unmarshalExactTargetSection(&r); err != nil {
 		return AttachTarget{}, err
 	}
 	if err := r.done(); err != nil {

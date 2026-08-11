@@ -634,9 +634,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 		}
 		if result.target != nil {
-			if r.attachHandoff == nil {
-				return &AttachTargetError{Target: *result.target}
-			}
 			if result.target.RemoteTarget != nil || result.target.Endpoint != "" {
 				if homeRoute == nil && attemptRequest.RemoteTarget == nil {
 					routeRequest := attemptRequest
@@ -649,9 +646,28 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 					homeRoute = &attachRoute{dialer: dialer, request: routeRequest}
 				}
 			}
-			nextDialer, nextRequest, handoffErr := r.attachHandoff(*result.target)
-			if handoffErr != nil {
-				return handoffErr
+			var (
+				nextDialer  ports.Dialer
+				nextRequest AttachRequest
+				handoffErr  error
+			)
+			if result.target.Endpoint == "" {
+				if r.ledger == nil {
+					return errors.New("vev: route ledger unavailable")
+				}
+				nextDialer = dialer
+				nextRequest = r.ledger.samePeerHandoff(attemptRequest, *result.target)
+			} else {
+				if r.attachHandoff == nil {
+					return &AttachTargetError{Target: *result.target}
+				}
+				nextDialer, nextRequest, handoffErr = r.attachHandoff(*result.target)
+				if handoffErr != nil {
+					return handoffErr
+				}
+			}
+			if result.target.ExactTarget != nil {
+				nextRequest.ExactTarget = result.target.ExactTarget
 			}
 			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned) {
 				nextRequest.NavigationCapabilities |= ports.NavigationCapabilityHomePicker
@@ -662,10 +678,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			nextRequest = cloneAttachRequest(nextRequest)
 			if err := validateAttachRequest(nextRequest); err != nil {
-				return fmt.Errorf("vev: invalid remote attach handoff request: %w", err)
+				return fmt.Errorf("vev: invalid route handoff request: %w", err)
 			}
 			if nextDialer == nil {
-				return errors.New("vev: remote attach handoff returned nil dialer")
+				return errors.New("vev: route handoff returned nil dialer")
 			}
 			dialer = nextDialer
 			attemptRequest = nextRequest

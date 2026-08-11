@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -122,20 +121,13 @@ func remotePickerStatusDetail(status remoteHostStatus, fetchedAt time.Time) stri
 	}
 }
 
-func remoteSessionOrigin(host string) string {
-	if i := strings.LastIndexByte(host, '@'); i >= 0 && i+1 < len(host) {
-		return host[i+1:]
-	}
-	return host
-}
-
 func remoteSessionStateStopped(state string) bool {
 	return state == "down" || state == "stopped"
 }
 
 func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
 	key.LifecycleID = session.LifecycleID
-	key.DisplayOrigin = remoteSessionOrigin(key.Host)
+	key.DisplayOrigin = domain.RemoteDisplayOrigin(key.Host)
 	availability := remotePickerAvailability(status)
 	stopped := remoteSessionStateStopped(session.State)
 	broken := session.State == "broken"
