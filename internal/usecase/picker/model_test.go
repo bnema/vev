@@ -752,8 +752,8 @@ func TestRemoteRowsCarryStructuredIdentityAndRemainNonSelectable(t *testing.T) {
 			RemoteKey:          &key,
 			RemoteAvailability: state,
 			RemoteDetail:       "remote state detail",
+			RemoteActivation:   RemoteUnavailable,
 			ConnectOnly:        true,
-			RemoteAttachReady:  false,
 		})
 	}
 
@@ -765,11 +765,7 @@ func TestRemoteRowsCarryStructuredIdentityAndRemainNonSelectable(t *testing.T) {
 		require.True(t, pickerRow.hasRemoteKey)
 		require.False(t, pickerRow.selectable, "remote state %d must remain gated in phase 5", availability[i])
 		require.True(t, pickerRow.dim, "remote state %d is visibly unavailable", availability[i])
-		wantDetail := "@mule (proxy activation pending)"
-		if availability[i] == RemoteStale || availability[i] == RemoteVersionMismatch {
-			wantDetail = "@mule (remote state detail)"
-		}
-		require.Equal(t, wantDetail, pickerRow.detail)
+		require.Equal(t, "@mule (remote state detail)", pickerRow.detail)
 	}
 	_, ok := model.Selected()
 	require.False(t, ok)
@@ -783,7 +779,7 @@ func TestRemoteCursorIdentitySurvivesCacheToLiveUpgradeWithoutActivation(t *test
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
 	cached := New([]SessionView{{
 		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteAvailability: RemoteCached,
-		ConnectOnly: true, RemoteAttachReady: false,
+		RemoteActivation: RemoteUnavailable, ConnectOnly: true,
 	}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: key.ID()}})
 
 	cursor, ok := cached.Cursor()
@@ -795,7 +791,7 @@ func TestRemoteCursorIdentitySurvivesCacheToLiveUpgradeWithoutActivation(t *test
 
 	live := New([]SessionView{{
 		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteAvailability: RemoteFresh,
-		ConnectOnly: true, RemoteAttachReady: false,
+		RemoteActivation: RemoteUnavailable, ConnectOnly: true,
 	}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{
 		Session: cursor.Session, Incarnation: cursor.Incarnation, TabID: cursor.TabID, RemoteKey: cursor.RemoteKey,
 	}})
@@ -815,7 +811,7 @@ func TestRemoteTabsRemainNonSelectableWhileAttachmentIsGated(t *testing.T) {
 		Tabs:               []TabEntry{{TabID: "remote-tab", Name: "metadata"}},
 		RemoteKey:          &key,
 		RemoteAvailability: RemoteFresh,
-		RemoteAttachReady:  false,
+		RemoteActivation:   RemoteUnavailable,
 	}}, SelectionConfig{Mode: SelectNavigationTab})
 
 	require.Len(t, model.rows, 2)
@@ -827,15 +823,15 @@ func TestRemoteTabsRemainNonSelectableWhileAttachmentIsGated(t *testing.T) {
 
 func TestRemoteConnectOnlyTargetUsesStructuredKey(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "user@build.example", Name: "work"}
-	wantKey := key
 	model := New([]SessionView{{
 		ID:                 key.ID(),
 		Name:               "not a parseable remote display label",
 		RemoteKey:          &key,
 		RemoteAvailability: RemoteFresh,
+		RemoteActivation:   RemoteAttach,
 		ConnectOnly:        true,
-		RemoteAttachReady:  true,
 	}}, SelectionConfig{Mode: SelectNavigationTab})
+	wantKey := key
 	key.Host = "mutated-after-model-construction"
 
 	got, ok := model.Selected()
@@ -873,8 +869,7 @@ func TestRemoteRowsCannotAcceptMovesInEitherMoveMode(t *testing.T) {
 				Tabs:               []TabEntry{{TabID: "remote-tab", Name: "metadata"}},
 				RemoteKey:          &key,
 				RemoteAvailability: availabilityCase.state,
-				ConnectOnly:        true,
-				RemoteAttachReady:  true,
+				RemoteActivation:   RemoteAttach,
 				CannotAcceptMoves:  true,
 			}
 			for _, mode := range modes {

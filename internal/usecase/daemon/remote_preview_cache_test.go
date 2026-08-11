@@ -271,7 +271,7 @@ func TestRemotePickerPreviewLateResponseCannotPublishAfterCloseAndReopen(t *test
 		ID: firstKey.ID(), Name: firstTarget.SessionName,
 		Tabs:      []picker.TabEntry{{TabID: firstTarget.LiveTabID, Name: "main"}},
 		RemoteKey: &firstKey, RemoteTarget: &firstTarget,
-		RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true,
+		RemoteAvailability: picker.RemoteFresh, RemoteActivation: picker.RemoteAttach,
 	}
 	firstModel := picker.New([]picker.SessionView{firstView}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
 	firstSelected, ok := firstModel.Selected()
@@ -301,7 +301,7 @@ func TestRemotePickerPreviewLateResponseCannotPublishAfterCloseAndReopen(t *test
 		ID: secondKey.ID(), Name: secondTarget.SessionName,
 		Tabs:      []picker.TabEntry{{TabID: secondTarget.LiveTabID, Name: "replacement"}},
 		RemoteKey: &secondKey, RemoteTarget: &secondTarget,
-		RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true,
+		RemoteAvailability: picker.RemoteFresh, RemoteActivation: picker.RemoteAttach,
 	}
 	secondModel := picker.New([]picker.SessionView{secondView}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
 	secondSelected, ok := secondModel.Selected()
@@ -353,8 +353,8 @@ func TestRemotePickerPreviewSelectionChangeFencesOldTarget(t *testing.T) {
 	firstKey := domain.RemoteSessionKey{Host: firstTarget.Endpoint, Name: firstTarget.SessionName, LifecycleID: firstTarget.LifecycleID, DisplayOrigin: firstTarget.DisplayOrigin}
 	secondKey := domain.RemoteSessionKey{Host: secondTarget.Endpoint, Name: secondTarget.SessionName, LifecycleID: secondTarget.LifecycleID, DisplayOrigin: secondTarget.DisplayOrigin}
 	views := []picker.SessionView{
-		{ID: firstKey.ID(), Name: firstTarget.SessionName, Tabs: []picker.TabEntry{{TabID: firstTarget.LiveTabID, Name: "first"}}, RemoteKey: &firstKey, RemoteTarget: &firstTarget, RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true},
-		{ID: secondKey.ID(), Name: secondTarget.SessionName, Tabs: []picker.TabEntry{{TabID: secondTarget.LiveTabID, Name: "second"}}, RemoteKey: &secondKey, RemoteTarget: &secondTarget, RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true},
+		{ID: firstKey.ID(), Name: firstTarget.SessionName, Tabs: []picker.TabEntry{{TabID: firstTarget.LiveTabID, Name: "first"}}, RemoteKey: &firstKey, RemoteTarget: &firstTarget, RemoteAvailability: picker.RemoteFresh, RemoteActivation: picker.RemoteAttach},
+		{ID: secondKey.ID(), Name: secondTarget.SessionName, Tabs: []picker.TabEntry{{TabID: secondTarget.LiveTabID, Name: "second"}}, RemoteKey: &secondKey, RemoteTarget: &secondTarget, RemoteAvailability: picker.RemoteFresh, RemoteActivation: picker.RemoteAttach},
 	}
 	model := picker.New(views, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
 	ac.overlays.pickerMu.Lock()
@@ -396,8 +396,8 @@ func TestRemotePickerPreviewErrorCannotPublishAfterSelectionChange(t *testing.T)
 	firstKey := domain.RemoteSessionKey{Host: firstTarget.Endpoint, Name: firstTarget.SessionName, LifecycleID: firstTarget.LifecycleID, DisplayOrigin: firstTarget.DisplayOrigin}
 	secondKey := domain.RemoteSessionKey{Host: secondTarget.Endpoint, Name: secondTarget.SessionName, LifecycleID: secondTarget.LifecycleID, DisplayOrigin: secondTarget.DisplayOrigin}
 	model := picker.New([]picker.SessionView{
-		{ID: firstKey.ID(), Name: firstTarget.SessionName, Tabs: []picker.TabEntry{{TabID: firstTarget.LiveTabID, Name: "first"}}, RemoteKey: &firstKey, RemoteTarget: &firstTarget, RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true},
-		{ID: secondKey.ID(), Name: secondTarget.SessionName, Tabs: []picker.TabEntry{{TabID: secondTarget.LiveTabID, Name: "second"}}, RemoteKey: &secondKey, RemoteTarget: &secondTarget, RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true},
+		{ID: firstKey.ID(), Name: firstTarget.SessionName, Tabs: []picker.TabEntry{{TabID: firstTarget.LiveTabID, Name: "first"}}, RemoteKey: &firstKey, RemoteTarget: &firstTarget, RemoteAvailability: picker.RemoteFresh, RemoteActivation: picker.RemoteAttach},
+		{ID: secondKey.ID(), Name: secondTarget.SessionName, Tabs: []picker.TabEntry{{TabID: secondTarget.LiveTabID, Name: "second"}}, RemoteKey: &secondKey, RemoteTarget: &secondTarget, RemoteAvailability: picker.RemoteFresh, RemoteActivation: picker.RemoteAttach},
 	}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
 	selected, ok := model.Selected()
 	require.True(t, ok)
@@ -438,7 +438,7 @@ func TestRemotePickerPreviewRefreshesAfterAttachmentResize(t *testing.T) {
 		ID: key.ID(), Name: target.SessionName,
 		Tabs:      []picker.TabEntry{{TabID: target.LiveTabID, Name: "main"}},
 		RemoteKey: &key, RemoteTarget: &target,
-		RemoteAvailability: picker.RemoteFresh, RemoteAttachReady: true,
+		RemoteAvailability: picker.RemoteFresh, RemoteActivation: picker.RemoteAttach,
 	}
 	model := picker.New([]picker.SessionView{view}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
 	selected, ok := model.Selected()

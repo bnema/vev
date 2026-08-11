@@ -21,7 +21,7 @@ func TestRemoteSessionHeaderIncludesOrigin(t *testing.T) {
 	target := domain.RemoteSessionTarget{Endpoint: key.Host, DisplayOrigin: key.DisplayOrigin, LifecycleID: lifecycle, SessionName: key.Name, LiveTabID: "tab-1"}
 	model := New([]SessionView{{
 		ID: key.ID(), Name: key.Name, Tabs: []TabEntry{{TabID: "tab-1", Name: "main"}},
-		RemoteKey: &key, RemoteTarget: &target, RemoteAvailability: RemoteFresh, RemoteAttachReady: true,
+		RemoteKey: &key, RemoteTarget: &target, RemoteAvailability: RemoteFresh, RemoteActivation: RemoteAttach,
 	}}, SelectionConfig{Mode: SelectNavigationTab})
 
 	require.Equal(t, "work", model.rows[0].dispName)
@@ -47,11 +47,11 @@ func TestRemoteRowsWithDuplicateLabelsKeepDistinctRoutingIdentity(t *testing.T) 
 	model := New([]SessionView{
 		{
 			ID: firstKey.ID(), Name: "same visible label", Tabs: []TabEntry{{TabID: "tab-a", Name: "main"}},
-			RemoteKey: &firstKey, RemoteTarget: &firstTarget, RemoteAvailability: RemoteFresh, RemoteAttachReady: true,
+			RemoteKey: &firstKey, RemoteTarget: &firstTarget, RemoteAvailability: RemoteFresh, RemoteActivation: RemoteAttach,
 		},
 		{
 			ID: secondKey.ID(), Name: "same visible label", Tabs: []TabEntry{{TabID: "tab-b", Name: "main"}},
-			RemoteKey: &secondKey, RemoteTarget: &secondTarget, RemoteAvailability: RemoteFresh, RemoteAttachReady: true,
+			RemoteKey: &secondKey, RemoteTarget: &secondTarget, RemoteAvailability: RemoteFresh, RemoteActivation: RemoteAttach,
 		},
 	}, SelectionConfig{Mode: SelectNavigationTab})
 
