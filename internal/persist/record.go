@@ -7,11 +7,13 @@ import (
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 )
 
 const (
-	catalogueRecordVersion       uint16 = 4
-	legacyCatalogueRecordVersion uint16 = 3
+	catalogueRecordVersion             uint16 = 5
+	protocolLessCatalogueRecordVersion uint16 = 4
+	legacyCatalogueRecordVersion       uint16 = 3
 )
 
 var errMalformedRecord = errors.New("persist: malformed catalogue record")
@@ -22,12 +24,17 @@ var catalogueMagic = [4]byte{'V', 'E', 'V', 'C'}
 type Record = domain.CatalogueRecord
 
 func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
+	return encodeRecordValueForProtocol(record, ports.ProtocolVersion)
+}
+
+func encodeRecordValueForProtocol(record domain.CatalogueRecord, protocolVersion uint16) ([]byte, error) {
 	if err := record.Validate(); err != nil {
 		return nil, fmt.Errorf("persist: invalid catalogue record: %w", err)
 	}
 	buf := make([]byte, 0, 128)
 	buf = append(buf, catalogueMagic[:]...)
 	buf = binary.BigEndian.AppendUint16(buf, catalogueRecordVersion)
+	buf = binary.BigEndian.AppendUint16(buf, protocolVersion)
 	buf = append(buf, record.IncarnationID[:]...)
 	var err error
 	buf, err = appendCheckedString(buf, record.Cwd)
@@ -66,45 +73,62 @@ func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
 	return buf, err
 }
 
+type storedRecord struct {
+	record          domain.CatalogueRecord
+	protocolVersion uint16
+}
+
 func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error) {
+	stored, err := decodeStoredRecordValue(name, value)
+	return stored.record, err
+}
+
+func decodeStoredRecordValue(name string, value []byte) (storedRecord, error) {
 	if err := domain.ValidateSessionName(name); err != nil {
-		return domain.CatalogueRecord{}, err
+		return storedRecord{}, err
 	}
 	reader := valueReader{data: value}
 	magic, ok := reader.take(4)
 	if !ok || string(magic) != string(catalogueMagic[:]) {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	version, ok := reader.u16()
-	if !ok || (version != catalogueRecordVersion && version != legacyCatalogueRecordVersion) {
-		return domain.CatalogueRecord{}, errMalformedRecord
+	if !ok || (version != catalogueRecordVersion && version != protocolLessCatalogueRecordVersion && version != legacyCatalogueRecordVersion) {
+		return storedRecord{}, errMalformedRecord
+	}
+	var protocolVersion uint16
+	if version == catalogueRecordVersion {
+		protocolVersion, ok = reader.u16()
+		if !ok {
+			return storedRecord{}, errMalformedRecord
+		}
 	}
 	id, ok := reader.take(16)
 	if !ok {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	record := domain.CatalogueRecord{Name: name}
 	copy(record.IncarnationID[:], id)
 	var valid bool
 	if record.Cwd, valid = reader.str(); !valid {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	created, ok := reader.u64()
 	if !ok {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	record.CreatedAt = int64(created)
 	updated, ok := reader.u64()
 	if !ok {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	record.UpdatedAt = int64(updated)
 	if record.LastUsedSeq, ok = reader.u64(); !ok {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	count, ok := reader.u32()
 	if !ok || uint64(count) > uint64(reader.remaining())/4 {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	if count > 0 {
 		record.TabNames = make([]string, 0, int(count))
@@ -112,7 +136,7 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 	for range count {
 		tab, ok := reader.str()
 		if !ok {
-			return domain.CatalogueRecord{}, errMalformedRecord
+			return storedRecord{}, errMalformedRecord
 		}
 		record.TabNames = append(record.TabNames, tab)
 	}
@@ -126,7 +150,7 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 	} else {
 		tabRecordCount, ok := reader.u32()
 		if !ok || uint64(tabRecordCount) > uint64(reader.remaining())/8 {
-			return domain.CatalogueRecord{}, errMalformedRecord
+			return storedRecord{}, errMalformedRecord
 		}
 		if tabRecordCount > 0 {
 			record.TabRecords = make([]domain.CatalogueTabRecord, 0, int(tabRecordCount))
@@ -135,21 +159,21 @@ func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error
 			stableID, stableOK := reader.str()
 			name, nameOK := reader.str()
 			if !stableOK || !nameOK {
-				return domain.CatalogueRecord{}, errMalformedRecord
+				return storedRecord{}, errMalformedRecord
 			}
 			record.TabRecords = append(record.TabRecords, domain.CatalogueTabRecord{StableID: domain.TabStableID(stableID), Name: name})
 		}
 	}
 	if record.Committed, ok = reader.ref(); !ok {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	if record.DegradedReason, ok = reader.str(); !ok || reader.remaining() != 0 {
-		return domain.CatalogueRecord{}, errMalformedRecord
+		return storedRecord{}, errMalformedRecord
 	}
 	if err := record.Validate(); err != nil {
-		return domain.CatalogueRecord{}, errors.Join(errMalformedRecord, fmt.Errorf("persist: invalid catalogue record: %w", err))
+		return storedRecord{}, errors.Join(errMalformedRecord, fmt.Errorf("persist: invalid catalogue record: %w", err))
 	}
-	return record, nil
+	return storedRecord{record: record, protocolVersion: protocolVersion}, nil
 }
 
 func appendCheckedString(buf []byte, value string) ([]byte, error) {

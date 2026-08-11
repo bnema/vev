@@ -235,6 +235,36 @@ func healthyTransactionRecord() domain.CatalogueRecord {
 	}
 }
 
+func TestResetProtocolIncompatibleKeepsOnlySessionName(t *testing.T) {
+	t.Parallel()
+	old := healthyTransactionRecord()
+	old.TabRecords = []domain.CatalogueTabRecord{{StableID: "tab-1", Name: "shell"}}
+	old.DegradedReason = ""
+	catalogue := newTransactionCatalogue(old)
+	repository := &transactionRepository{}
+	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+
+	fresh, committed, err := coordinator.ResetProtocolIncompatible(context.Background(), old.Name, old.IncarnationID)
+
+	require.NoError(t, err)
+	require.True(t, committed)
+	require.Equal(t, old.Name, fresh.Name)
+	require.Equal(t, domain.IncarnationID(bytes.Repeat([]byte{2}, 16)), fresh.IncarnationID)
+	require.Empty(t, fresh.Cwd)
+	require.Zero(t, fresh.CreatedAt)
+	require.Zero(t, fresh.UpdatedAt)
+	require.Zero(t, fresh.LastUsedSeq)
+	require.Empty(t, fresh.TabNames)
+	require.Empty(t, fresh.TabRecords)
+	require.Nil(t, fresh.Committed)
+	require.Empty(t, fresh.DegradedReason)
+	stored, ok, recordErr := catalogue.Record(old.Name)
+	require.NoError(t, recordErr)
+	require.True(t, ok)
+	require.True(t, fresh.Equal(stored))
+	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deleteCalls)
+}
+
 func TestResetIncompatibleReplacesExactHealthyCheckpoint(t *testing.T) {
 	t.Parallel()
 	old := healthyTransactionRecord()
