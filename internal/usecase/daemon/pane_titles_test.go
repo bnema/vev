@@ -162,24 +162,19 @@ func TestRefreshFloatingPaneTitleUsesShellFallbackForEmptyCommand(t *testing.T) 
 	require.Equal(t, "zsh", d.refreshPaneDisplayTitle(nil, p, true))
 }
 
-func TestRefreshPaneTitleUpdatesNormalPaneShellFallback(t *testing.T) {
+func TestRefreshPaneTitleRetainsNormalPaneShellFallback(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, nil)
 	p := testAttachmentTab(sess).focusedPane()
+	p.setDisplayFallback("fish")
 
-	d.shell = "/usr/bin/fish"
+	d.shell = "/bin/zsh"
 	require.Equal(t, "fish", d.refreshPaneTitle(sess, "pane-1"))
 	p.mu.Lock()
 	firstGeneration := p.title.generation
 	p.mu.Unlock()
 	require.Equal(t, "fish", d.refreshPaneTitle(sess, "pane-1"))
 	p.mu.Lock()
-	require.Equal(t, firstGeneration, p.title.generation, "unchanged displayed title must not damage the title row")
-	p.mu.Unlock()
-
-	d.shell = "/bin/zsh"
-	require.Equal(t, "zsh", d.refreshPaneTitle(sess, "pane-1"))
-	p.mu.Lock()
-	require.Equal(t, firstGeneration+1, p.title.generation)
+	require.Equal(t, firstGeneration, p.title.generation, "a title refresh must preserve the pane-owned shell fallback")
 	p.mu.Unlock()
 }
 

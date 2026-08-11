@@ -1618,9 +1618,11 @@ func TestAttachEnvironmentReplacesFuturePTYInputs(t *testing.T) {
 
 	require.Equal(t, "/usr/bin/fish", commands[0])
 	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
+	require.Equal(t, "fish", sess.tabs[0].focusedPaneTitle(false), "the initial tab title identifies the shell requested by its creator")
 	require.NoError(t, d.createTab(sess, ac.size))
 	require.Equal(t, "/bin/bash", commands[1])
 	require.Equal(t, []string{"SECRET=second", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[1].stableID + ",pane=" + sess.tabs[1].panes["pane-1"].stableID}, envs[1])
+	require.Equal(t, "bash", sess.tabs[1].focusedPaneTitle(false), "later tabs use the most recently attached shell")
 }
 
 func TestChildEnvFromPreservesNonReservedEntriesVerbatimAndInOrder(t *testing.T) {

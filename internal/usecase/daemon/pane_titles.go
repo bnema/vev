@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -116,7 +115,6 @@ func (d *Daemon) refreshSessionFocusedTitles(sess *session) {
 	if sess == nil {
 		return
 	}
-	fallback := d.paneTitleFallback()
 	sess.mu.Lock()
 	panes := make([]*pane, 0, len(sess.tabs))
 	for _, tb := range sess.tabs {
@@ -128,17 +126,8 @@ func (d *Daemon) refreshSessionFocusedTitles(sess *session) {
 	}
 	sess.mu.Unlock()
 	for _, p := range panes {
-		p.setDisplayFallback(fallback)
 		d.refreshPaneDisplayTitle(sess, p, false)
 	}
-}
-
-func (d *Daemon) paneTitleFallback() string {
-	fallback := filepath.Base(d.shell)
-	if fallback == "." || fallback == string(filepath.Separator) || fallback == "" {
-		return d.shell
-	}
-	return fallback
 }
 
 func (d *Daemon) refreshPaneTitle(sess *session, id layout.PaneID, owningTab ...*tab) string {
@@ -153,9 +142,8 @@ func (d *Daemon) refreshPaneTitleOnFocus(sess *session, id layout.PaneID, owning
 // current tab supplies it explicitly; direct callers refresh every matching
 // tab because layout pane IDs are local to a tab and may repeat.
 func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force bool, owningTab ...*tab) string {
-	fallback := d.paneTitleFallback()
 	if sess == nil {
-		return fallback
+		return defaultShellTitle
 	}
 	tabs := owningTab
 	if len(tabs) == 0 || tabs[0] == nil {
@@ -163,7 +151,7 @@ func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force b
 		tabs = append([]*tab(nil), sess.tabs...)
 		sess.mu.Unlock()
 	}
-	title := fallback
+	title := ""
 	for _, tb := range tabs {
 		if tb == nil {
 			continue
@@ -174,7 +162,6 @@ func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force b
 		if p == nil {
 			continue
 		}
-		p.setDisplayFallback(fallback)
 		title = d.refreshPaneDisplayTitle(sess, p, force)
 	}
 	return title
@@ -185,7 +172,7 @@ func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force b
 // callers that already render under pane locking cannot recurse on that lock.
 func (d *Daemon) refreshPaneDisplayTitle(_ *session, p *pane, force bool) string {
 	if p == nil {
-		return d.paneTitleFallback()
+		return defaultShellTitle
 	}
 	now := d.clock.Now()
 	p.mu.Lock()

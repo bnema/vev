@@ -781,6 +781,41 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	require.NotContains(t, listAfter.Output, "old")
 }
 
+func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	sess.incarnation[0] = 1
+	tb := sess.tabs[0]
+	tb.name = "shell"
+	p := tb.focusedPane()
+	pty := portsmocks.NewMockPTY(t)
+	pty.EXPECT().ForegroundPgid().Return(1234, nil).Once()
+	p.pty = pty
+	d.procComm = func(pid int) (string, error) {
+		require.Equal(t, 1234, pid)
+		return "fish", nil
+	}
+
+	result := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", JSON: true})
+	require.True(t, result.OK, result.Text)
+	var catalog ports.RemoteCatalog
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
+	require.Equal(t, []ports.RemoteCatalogSession{{
+		LifecycleID: sess.incarnation,
+		Name:        "work",
+		State:       "up",
+		Ephemeral:   true,
+		Tabs: []ports.RemoteCatalogTab{{
+			ID:     "t_work",
+			Index:  0,
+			Name:   "shell",
+			Detail: " (fish)",
+		}},
+		ActiveTabID: "t_work",
+		LastUsedSeq: 1,
+	}}, catalog.Sessions)
+}
+
 func TestRemoteCatalogTabCountSaturates(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_work", "p_work")

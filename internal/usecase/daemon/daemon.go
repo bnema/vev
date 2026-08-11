@@ -588,10 +588,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	if clock == nil {
 		clock = systemClock{}
 	}
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
 		sessions:          make(map[domain.SessionID]*session),
@@ -605,7 +601,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		clock:             clock,
 		log:               log,
 		baseEnv:           os.Environ(),
-		shell:             shell,
+		shell:             defaultShellCommand,
 		dirOrHome:         dirOrHome,
 		done:              make(chan struct{}),
 		restoreDone:       make(chan struct{}),

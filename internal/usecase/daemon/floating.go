@@ -377,9 +377,9 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 	if tabCtx == nil {
 		tabCtx = context.Background()
 	}
-	command, args := d.ptyCommand(env)
+	launch := d.shellLaunch(env)
 	if cfg.Command != "" {
-		args = []string{"-lc", cfg.Command}
+		launch.args = []string{"-lc", cfg.Command}
 	}
 	return floatingLaunchSpec{
 		sessionName:  name,
@@ -388,9 +388,9 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		geometry:     geometry,
 		paneStableID: paneStableID,
 		env:          childEnvFrom(env, name, tabStableID, paneStableID, term),
-		command:      command,
-		args:         args,
-		fallback:     floatingCommandFallback(cfg.Command, command),
+		command:      launch.command,
+		args:         launch.args,
+		fallback:     floatingCommandFallback(cfg.Command, launch.command),
 		parentCtx:    tabCtx,
 		userOpen:     userOpen,
 	}, nil
@@ -424,10 +424,9 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, err)
 		return
 	}
-	p := newPaneWithStableID(layout.PaneID("floating"), spec.paneStableID, pty, spec.size)
+	p := newPaneWithStableIDAndTitle(layout.PaneID("floating"), spec.paneStableID, pty, spec.size, spec.fallback)
 	p.rect = spec.geometry.ptyRect()
 	p.popupGeometry = spec.geometry
-	p.title.displayFallback = spec.fallback
 	if !lifetime.publish(p) {
 		_ = pty.Close()
 		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, lifetime.ctx.Err())
