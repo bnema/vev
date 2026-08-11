@@ -11,6 +11,7 @@ func TestParseActionExactEffectiveToken(t *testing.T) {
 	results := CommandResults([]command.Command{
 		{Code: "BCK", Arguments: command.ArgumentsNone},
 		{Code: "JRS", Arguments: command.ArgumentsRequired, ContextHint: command.ContextHintRecentSessions},
+		{Code: "CNS", Arguments: command.ArgumentsOptional},
 	})
 	tests := []struct {
 		name  string
@@ -25,6 +26,8 @@ func TestParseActionExactEffectiveToken(t *testing.T) {
 		{name: "concatenated token rejected", input: "JRS2", ok: false},
 		{name: "static arguments rejected", input: "BCK 2", ok: false},
 		{name: "missing required argument rejected", input: "JRS", ok: false},
+		{name: "optional argument omitted", input: "CNS", ok: true, code: "CNS"},
+		{name: "optional argument provided", input: "CNS toto", ok: true, code: "CNS", args: []string{"toto"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

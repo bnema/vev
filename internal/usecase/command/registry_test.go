@@ -9,7 +9,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := PaletteRegistry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))

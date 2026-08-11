@@ -521,6 +521,81 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 	return nil
 }
 
+func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClient) error {
+	sz := ac.sizeSnapshot()
+	d.mu.Lock()
+	if d.closing {
+		d.mu.Unlock()
+		return errors.New("daemon is shutting down")
+	}
+	from.mu.Lock()
+	cwd, term, env := from.cwd, from.terminal, copyEnvironment(from.env)
+	_, attached := from.attachments[ac]
+	from.mu.Unlock()
+	if !attached {
+		d.mu.Unlock()
+		return errors.New("client detached")
+	}
+	name := d.allocEphemeralNameLocked()
+	newSess, err := d.createSessionLockedWithMode(name, true, cwd, sz, term, env)
+	d.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	transition, err := d.transitionAttachment(attachmentTransitionRequest{
+		source: from, target: newSess, next: ac,
+		expectedTransport: ac.transportSnapshot(), ready: true,
+	})
+	if err != nil {
+		_ = d.killSession(newSess, ports.ReasonSessionKilled, true)
+		return err
+	}
+	d.touchMRU(newSess)
+	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
+	d.deferAttachmentTransitionCleanups(transition)
+	d.firstPaintForTransition(transition.published)
+	return nil
+}
+
+func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(token attachmentConnectionToken) error {
+	if token.sess == nil || token.ac == nil || token.effect == nil {
+		return errAttachmentTransition
+	}
+	token.effect.bindActionEnd(d, "create-ephemeral-session")
+	token.effect.End()
+
+	var created *session
+	transition, err := d.transitionAttachment(attachmentTransitionRequest{
+		source: token.sess, next: token.ac,
+		expectedTransport: token.transport, sourceToken: &token, action: "create-ephemeral-session",
+		copySourceEnvironment: true, ready: true,
+		createTargetLocked: func() (*session, error) {
+			if token.sess == nil || d.closing {
+				return nil, errAttachmentTransition
+			}
+			source := token.sess
+			source.mu.Lock()
+			cwd, term, env := source.cwd, source.terminal, copyEnvironment(source.env)
+			source.mu.Unlock()
+			name := d.allocEphemeralNameLocked()
+			var createErr error
+			created, createErr = d.createSessionLockedWithMode(name, true, cwd, token.ac.sizeSnapshot(), term, env)
+			return created, createErr
+		},
+	})
+	if err != nil {
+		if created != nil {
+			_ = d.killSession(created, ports.ReasonSessionKilled, true)
+		}
+		return err
+	}
+	d.touchMRU(created)
+	d.log.Info("client attached", "session", created.name, "resume", token.ac.resumeCapable)
+	d.deferAttachmentTransitionCleanups(transition)
+	d.firstPaintForTransition(transition.published)
+	return nil
+}
+
 func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	return d.createTabForAttachment(sess, nil, sz)
 }

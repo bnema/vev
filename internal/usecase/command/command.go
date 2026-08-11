@@ -39,6 +39,8 @@ func ParsePositiveDecimal(args []string) (int, error) {
 type Context interface {
 	CreateTab() error
 	CreateSession() error
+	CreateSessionNamed(name string) error
+	CreateEphemeralSession() error
 	CloseTab() error
 	SplitRight() error
 	SplitLeft() error
@@ -68,7 +70,9 @@ type Context interface {
 	Detach() error
 	EnterVisualMode() error
 	RenameSession() error
+	RenameSessionTo(name string) error
 	RenameTab() error
+	RenameTabTo(name string) error
 	OpenSessionPicker() error
 	OpenNotifications() error
 	YankLastNotification() error
@@ -80,6 +84,7 @@ type Arguments uint8
 
 const (
 	ArgumentsNone Arguments = iota
+	ArgumentsOptional
 	ArgumentsRequired
 )
 
@@ -163,11 +168,14 @@ type Command struct {
 	Slug, Code, Name, Desc string
 	Usage                  string
 	Arguments              Arguments
-	ContextHint            ContextHint
-	Scriptable             bool
-	PaletteVisible         bool
-	Target                 TargetKind
-	Scope                  CommandScope
-	Run                    func(Context, []string) error
-	Control                func(ControlContext, []string, ControlOptions) (ControlResult, error)
+	// Preview describes the selected palette command while its exact token is
+	// being entered. hasArgument is true after whitespace following the token.
+	Preview        func(args []string, hasArgument bool) string
+	ContextHint    ContextHint
+	Scriptable     bool
+	PaletteVisible bool
+	Target         TargetKind
+	Scope          CommandScope
+	Run            func(Context, []string) error
+	Control        func(ControlContext, []string, ControlOptions) (ControlResult, error)
 }

@@ -26,6 +26,9 @@ type RenderStyles struct {
 type RenderOptions struct {
 	Styles   RenderStyles
 	Guidance string
+	// Preview is the current exact command's action description. It replaces
+	// the selected row's static description unless Feedback is present.
+	Preview string
 	// Feedback is interaction-scoped daemon feedback. It replaces the selected
 	// row's contextual detail without adding a searchable result or row.
 	Feedback string
@@ -120,7 +123,7 @@ func (m *Model) CompleteSelected() bool {
 
 	query := m.Query()
 	completed := cmd.Code
-	if cmd.Arguments == command.ArgumentsRequired {
+	if cmd.Arguments != command.ArgumentsNone {
 		token, args, hasSeparator := completionParts(query)
 		if token == cmd.Code && hasSeparator && args != "" {
 			return false
@@ -180,13 +183,16 @@ func (m *Model) Matches() []Match {
 func (m *Model) refresh() {
 	query := m.input.Value()
 	m.matches = Fuzzy(m.results, query)
-	// Once an argument-taking static token is exact, retain its row while its
-	// arguments make ordinary fuzzy matching inapplicable.
-	if result, _, ok := argumentResult(m.results, query); ok {
+	// Keep an exact command row selected over fuzzy session matches.
+	if result, ok := ExactCommandResult(m.results, query); ok {
+		m.prependMatch(result)
+		// Once an argument-taking static token is exact, retain its row while its
+		// arguments make ordinary fuzzy matching inapplicable.
+	} else if result, _, ok := argumentResult(m.results, query); ok {
 		m.prependMatch(result)
 	} else if len(m.matches) == 0 {
 		// Arguments are not part of static command matching. When they would
-		// otherwise clear the list, keep required-argument candidates matched by
+		// otherwise clear the list, keep argument-capable candidates matched by
 		// the partial first token so Tab can complete them.
 		token, _, hasSeparator := completionParts(query)
 		if hasSeparator {
@@ -200,7 +206,7 @@ func requiredArgumentResults(results []Result) []Result {
 	commands := make([]Result, 0, len(results))
 	for _, result := range results {
 		cmd, ok := result.Command()
-		if ok && cmd.Arguments == command.ArgumentsRequired {
+		if ok && cmd.Arguments != command.ArgumentsNone {
 			commands = append(commands, result)
 		}
 	}
@@ -290,7 +296,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		if cmd, ok := match.Result.Command(); ok {
-			m.renderCommand(frame, y+start, style, selection, desc, selectionDesc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Feedback, idx == m.selected)
+			m.renderCommand(frame, y+start, style, selection, desc, selectionDesc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Preview, opts.Feedback, idx == m.selected)
 			continue
 		}
 		m.renderSession(frame, y+start, style, selection, match, opts.Feedback, idx == m.selected)
@@ -298,7 +304,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	return frame
 }
 
-func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc, selectionDesc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance, feedback string, selected bool) {
+func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc, selectionDesc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance, preview, feedback string, selected bool) {
 	x, nextHighlight := 0, 0
 	for _, r := range cmd.Code {
 		cellStyle := style
@@ -320,6 +326,8 @@ func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, des
 	description := cmd.Desc
 	if feedback != "" && selected {
 		description = feedback
+	} else if preview != "" && selected {
+		description = preview
 	} else if guidance != "" && activeOK && cmd.ContextHint != command.ContextHintNone && activeCmd.Code == cmd.Code {
 		description = guidance
 	}

@@ -46,6 +46,7 @@ type overlayRuntime struct {
 	paletteRouteSnapshot ports.RecentRouteSnapshot
 	paletteGeneration    uint64
 	paletteHints         palette.ContextualHints
+	palettePreview       string
 	paletteFeedback      string
 	palettePending       []byte
 
@@ -306,6 +307,7 @@ type overlayRenderSnapshot struct {
 	// paletteHints is a copy captured under paletteMu. Rendering must use this
 	// immutable interaction snapshot rather than consult live session state.
 	paletteHints         *palette.ContextualHints
+	palettePreview       string
 	paletteFeedback      string
 	paletteRouteSnapshot ports.RecentRouteSnapshot
 	paletteLocked        bool
@@ -378,6 +380,7 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		hints := rt.paletteHints
 		hints.Recent = append([]palette.RecentSessionHint(nil), hints.Recent...)
 		snap.paletteHints = &hints
+		snap.palettePreview = rt.palettePreview
 		snap.paletteFeedback = rt.paletteFeedback
 		snap.paletteRouteSnapshot = rt.paletteRouteSnapshot
 		snap.paletteRouteSnapshot.Entries = append([]ports.RecentRouteEntry(nil), rt.paletteRouteSnapshot.Entries...)
