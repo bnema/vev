@@ -148,6 +148,39 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 	}
 }
 
+func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
+	ledger := newRouteLedger()
+	work := routeTestCandidate(1, ports.RouteOriginRemote)
+	work.originKey = "remote"
+	work.request.Remote = true
+	work.request.OriginKey = "remote"
+	work.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	work.request.RemoteTarget = &domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: work.target.LifecycleID,
+		SessionName: work.target.SessionName, LiveTabID: "tab-work",
+	}
+	_, err := ledger.commit(work)
+	require.NoError(t, err)
+
+	agents := routeTestCandidate(2, ports.RouteOriginRemote)
+	agents.originKey = "remote"
+	agents.request.Remote = true
+	agents.request.OriginKey = "remote"
+	agents.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+
+	request := ledger.samePeerHandoff(agents.request, ports.AttachTarget{
+		Session:           work.target.SessionName,
+		Intent:            ports.IntentAttach,
+		ExactTarget:       &work.target,
+		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	})
+
+	require.True(t, request.Remote)
+	require.Equal(t, ports.RouteOriginRemote, request.Origin)
+	require.Equal(t, "remote", request.OriginKey)
+	require.Nil(t, request.RemoteTarget)
+}
+
 func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) {
 	ledger := newRouteLedger()
 	first := routeTestCandidate(0, ports.RouteOriginRemote)
