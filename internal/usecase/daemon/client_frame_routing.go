@@ -135,6 +135,7 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		if !token.ac.setRouteSnapshot(snapshot) {
 			break
 		}
+		d.invalidateRender(token.sess, token.ac, false, "client_frame_routing.go:route-snapshot")
 		if err := d.sendCommittedRouteIdentityForAttachment(token); err != nil {
 			d.detachOnAttachmentSendError(token, token.transport.transport)
 		}
