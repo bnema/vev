@@ -6,7 +6,8 @@ import "strings"
 func Registry() []Command {
 	commands := []Command{
 		paletteControl("new-tab", "CNT", "New tab", "Create a new tab", TargetSession, func(ctx Context, _ []string) error { return ctx.CreateTab() }, func(ctx ControlContext) error { return ctx.CreateTab() }),
-		paletteControlOne("new-session", "CNS", "New session", "Create and switch to a named session", TargetSession, func(ctx Context, _ []string) error { return ctx.CreateSession() }, func(ctx ControlContext, name string) error { return ctx.CreateSessionNamed(name) }),
+		paletteOptionalOne("new-session", "CNS", "New session", "Create named session", TargetSession, func(ctx Context) error { return ctx.CreateSession() }, func(ctx Context, name string) error { return ctx.CreateSessionNamed(name) }, func(ctx ControlContext, name string) error { return ctx.CreateSessionNamed(name) }),
+		paletteOnly("create-ephemeral-session", "CES", "New ephemeral session", "Create ephemeral session", func(ctx Context, _ []string) error { return ctx.CreateEphemeralSession() }),
 		paletteControl("close-tab", "CLT", "Close tab", "Close the current tab", TargetTab, func(ctx Context, _ []string) error { return ctx.CloseTab() }, func(ctx ControlContext) error { return ctx.CloseTab() }),
 		paletteControl("split-right", "SPR", "Split right", "Split the focused pane to the right", TargetPane, func(ctx Context, _ []string) error { return ctx.SplitRight() }, func(ctx ControlContext) error { return ctx.SplitRight() }),
 		paletteControl("split-left", "SPL", "Split left", "Split the focused pane to the left", TargetPane, func(ctx Context, _ []string) error { return ctx.SplitLeft() }, func(ctx ControlContext) error { return ctx.SplitLeft() }),
@@ -29,10 +30,10 @@ func Registry() []Command {
 		paletteControl("shrink-pane-width", "SPW", "Shrink pane width", "Shrink the pane by two columns", TargetPane, func(ctx Context, _ []string) error { return ctx.ShrinkPaneWidth() }, func(ctx ControlContext) error { return ctx.ShrinkPaneWidth() }),
 		paletteControl("grow-pane-height", "GPH", "Grow pane height", "Grow the pane by one row", TargetPane, func(ctx Context, _ []string) error { return ctx.GrowPaneHeight() }, func(ctx ControlContext) error { return ctx.GrowPaneHeight() }),
 		paletteControl("shrink-pane-height", "SPH", "Shrink pane height", "Shrink the pane by one row", TargetPane, func(ctx Context, _ []string) error { return ctx.ShrinkPaneHeight() }, func(ctx ControlContext) error { return ctx.ShrinkPaneHeight() }),
-		paletteControl("equalize-panes", "EQP", "Equalize panes", "Restore equal pane shares in the tab", TargetTab, func(ctx Context, _ []string) error { return ctx.EqualizePanes() }, func(ctx ControlContext) error { return ctx.EqualizePanes() }),
+		paletteControl("equalize-panes", "EQP", "Equalize panes", "Equalize pane sizes", TargetTab, func(ctx Context, _ []string) error { return ctx.EqualizePanes() }, func(ctx ControlContext) error { return ctx.EqualizePanes() }),
 		paletteControl("next-tab", "NXT", "Next tab", "Switch to the next tab", TargetSession, func(ctx Context, _ []string) error { return ctx.NextTab() }, func(ctx ControlContext) error { return ctx.NextTab() }),
 		paletteControl("previous-tab", "PVT", "Previous tab", "Switch to the previous tab", TargetSession, func(ctx Context, _ []string) error { return ctx.PrevTab() }, func(ctx ControlContext) error { return ctx.PrevTab() }),
-		paletteOnly("back-session", "BCK", "Previous session", "Toggle the previously active session", func(ctx Context, _ []string) error { return ctx.BackSession() }),
+		paletteOnly("back-session", "BCK", "Previous session", "Switch to previous session", func(ctx Context, _ []string) error { return ctx.BackSession() }),
 		{Slug: "jump-recent-session", Code: "JRS", Name: "Jump to recent session", Desc: "Jump to a recent session by rank", Usage: "jump-recent-session <rank>", PaletteVisible: true, Arguments: ArgumentsRequired, ContextHint: ContextHintRecentSessions, Run: func(ctx Context, args []string) error {
 			rank, err := ParsePositiveDecimal(args)
 			if err != nil {
@@ -42,10 +43,10 @@ func Registry() []Command {
 		}},
 		paletteOnly("session-picker", "SSP", "Session picker", "Open the session picker", func(ctx Context, _ []string) error { return ctx.OpenSessionPicker() }),
 		paletteOnly("notifications", "NTC", "Notifications", "Show notification history", func(ctx Context, _ []string) error { return ctx.OpenNotifications() }),
-		paletteOnly("yank-last-notification", "YLN", "Yank last notification", "Copy the most recent notification's details to the clipboard", func(ctx Context, _ []string) error { return ctx.YankLastNotification() }),
+		paletteOnly("yank-last-notification", "YLN", "Yank last notification", "Copy last notice", func(ctx Context, _ []string) error { return ctx.YankLastNotification() }),
 		paletteOnly("visual-mode", "VIS", "Visual mode", "Enter visual mode", func(ctx Context, _ []string) error { return ctx.EnterVisualMode() }),
-		paletteControlOne("rename-session", "RNS", "Rename session", "Rename the session (an ephemeral session becomes named)", TargetSession, func(ctx Context, _ []string) error { return ctx.RenameSession() }, func(ctx ControlContext, name string) error { return ctx.RenameSessionTo(name) }),
-		paletteControlOne("rename-tab", "RNT", "Rename tab", "Rename the current tab", TargetTab, func(ctx Context, _ []string) error { return ctx.RenameTab() }, func(ctx ControlContext, name string) error { return ctx.RenameTabTo(name) }),
+		paletteOptionalOne("rename-session", "RNS", "Rename session", "Rename session", TargetSession, func(ctx Context) error { return ctx.RenameSession() }, func(ctx Context, name string) error { return ctx.RenameSessionTo(name) }, func(ctx ControlContext, name string) error { return ctx.RenameSessionTo(name) }),
+		paletteOptionalOne("rename-tab", "RNT", "Rename tab", "Rename the current tab", TargetTab, func(ctx Context) error { return ctx.RenameTab() }, func(ctx Context, name string) error { return ctx.RenameTabTo(name) }, func(ctx ControlContext, name string) error { return ctx.RenameTabTo(name) }),
 		paletteOnly("detach", "DET", "Detach", "Detach from the session", func(ctx Context, _ []string) error { return ctx.Detach() }),
 		toastCommand(),
 		listCommand("list-sessions", "List sessions", "List sessions with active markers", TargetNone, func(ctx ControlContext, json bool) (string, error) { return ctx.ListSessions(json) }),
@@ -70,8 +71,37 @@ func paletteControl(slug, code, name, desc string, target TargetKind, run func(C
 	}}
 }
 
-func paletteControlOne(slug, code, name, desc string, target TargetKind, run func(Context, []string) error, control func(ControlContext, string) error) Command {
-	cmd := Command{Slug: slug, Code: code, Name: name, Desc: desc, Usage: slug + " <name>", PaletteVisible: true, Scriptable: true, Target: target, Run: run}
+func paletteOptionalOne(slug, code, name, desc string, target TargetKind, prompt func(Context) error, direct func(Context, string) error, control func(ControlContext, string) error) Command {
+	cmd := Command{Slug: slug, Code: code, Name: name, Desc: desc, Usage: slug + " [name]", PaletteVisible: true, Scriptable: true, Target: target, Arguments: ArgumentsOptional}
+	cmd.Preview = func(args []string, hasArgument bool) string {
+		if len(args) == 0 {
+			if hasArgument {
+				return "Type a name, or press Enter"
+			}
+			return desc
+		}
+		if len(args) > 1 {
+			return "Use one name"
+		}
+		switch slug {
+		case "new-session":
+			return "Create session “" + args[0] + "”"
+		case "rename-session":
+			return "Rename this session to “" + args[0] + "”"
+		default:
+			return "Rename this tab to “" + args[0] + "”"
+		}
+	}
+	cmd.Run = func(ctx Context, args []string) error {
+		switch len(args) {
+		case 0:
+			return prompt(ctx)
+		case 1:
+			return direct(ctx, args[0])
+		default:
+			return ErrInvalidArguments
+		}
+	}
 	cmd.Control = func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
 		if len(args) != 1 || args[0] == "" {
 			return ControlResult{}, ErrInvalidArguments

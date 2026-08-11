@@ -255,6 +255,50 @@ func (_c *MockContext_ConsumeOrExpelPaneRight_Call) RunAndReturn(run func() erro
 	return _c
 }
 
+// CreateEphemeralSession provides a mock function for the type MockContext
+func (_mock *MockContext) CreateEphemeralSession() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateEphemeralSession")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_CreateEphemeralSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateEphemeralSession'
+type MockContext_CreateEphemeralSession_Call struct {
+	*mock.Call
+}
+
+// CreateEphemeralSession is a helper method to define mock.On call
+func (_e *MockContext_Expecter) CreateEphemeralSession() *MockContext_CreateEphemeralSession_Call {
+	return &MockContext_CreateEphemeralSession_Call{Call: _e.mock.On("CreateEphemeralSession")}
+}
+
+func (_c *MockContext_CreateEphemeralSession_Call) Run(run func()) *MockContext_CreateEphemeralSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_CreateEphemeralSession_Call) Return(err error) *MockContext_CreateEphemeralSession_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_CreateEphemeralSession_Call) RunAndReturn(run func() error) *MockContext_CreateEphemeralSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateSession provides a mock function for the type MockContext
 func (_mock *MockContext) CreateSession() error {
 	ret := _mock.Called()
@@ -295,6 +339,57 @@ func (_c *MockContext_CreateSession_Call) Return(err error) *MockContext_CreateS
 }
 
 func (_c *MockContext_CreateSession_Call) RunAndReturn(run func() error) *MockContext_CreateSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CreateSessionNamed provides a mock function for the type MockContext
+func (_mock *MockContext) CreateSessionNamed(name string) error {
+	ret := _mock.Called(name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateSessionNamed")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(string) error); ok {
+		r0 = returnFunc(name)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_CreateSessionNamed_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateSessionNamed'
+type MockContext_CreateSessionNamed_Call struct {
+	*mock.Call
+}
+
+// CreateSessionNamed is a helper method to define mock.On call
+//   - name string
+func (_e *MockContext_Expecter) CreateSessionNamed(name any) *MockContext_CreateSessionNamed_Call {
+	return &MockContext_CreateSessionNamed_Call{Call: _e.mock.On("CreateSessionNamed", name)}
+}
+
+func (_c *MockContext_CreateSessionNamed_Call) Run(run func(name string)) *MockContext_CreateSessionNamed_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockContext_CreateSessionNamed_Call) Return(err error) *MockContext_CreateSessionNamed_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_CreateSessionNamed_Call) RunAndReturn(run func(name string) error) *MockContext_CreateSessionNamed_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1142,6 +1237,57 @@ func (_c *MockContext_RenameSession_Call) RunAndReturn(run func() error) *MockCo
 	return _c
 }
 
+// RenameSessionTo provides a mock function for the type MockContext
+func (_mock *MockContext) RenameSessionTo(name string) error {
+	ret := _mock.Called(name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RenameSessionTo")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(string) error); ok {
+		r0 = returnFunc(name)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_RenameSessionTo_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RenameSessionTo'
+type MockContext_RenameSessionTo_Call struct {
+	*mock.Call
+}
+
+// RenameSessionTo is a helper method to define mock.On call
+//   - name string
+func (_e *MockContext_Expecter) RenameSessionTo(name any) *MockContext_RenameSessionTo_Call {
+	return &MockContext_RenameSessionTo_Call{Call: _e.mock.On("RenameSessionTo", name)}
+}
+
+func (_c *MockContext_RenameSessionTo_Call) Run(run func(name string)) *MockContext_RenameSessionTo_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockContext_RenameSessionTo_Call) Return(err error) *MockContext_RenameSessionTo_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_RenameSessionTo_Call) RunAndReturn(run func(name string) error) *MockContext_RenameSessionTo_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // RenameTab provides a mock function for the type MockContext
 func (_mock *MockContext) RenameTab() error {
 	ret := _mock.Called()
@@ -1182,6 +1328,57 @@ func (_c *MockContext_RenameTab_Call) Return(err error) *MockContext_RenameTab_C
 }
 
 func (_c *MockContext_RenameTab_Call) RunAndReturn(run func() error) *MockContext_RenameTab_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RenameTabTo provides a mock function for the type MockContext
+func (_mock *MockContext) RenameTabTo(name string) error {
+	ret := _mock.Called(name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RenameTabTo")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(string) error); ok {
+		r0 = returnFunc(name)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_RenameTabTo_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RenameTabTo'
+type MockContext_RenameTabTo_Call struct {
+	*mock.Call
+}
+
+// RenameTabTo is a helper method to define mock.On call
+//   - name string
+func (_e *MockContext_Expecter) RenameTabTo(name any) *MockContext_RenameTabTo_Call {
+	return &MockContext_RenameTabTo_Call{Call: _e.mock.On("RenameTabTo", name)}
+}
+
+func (_c *MockContext_RenameTabTo_Call) Run(run func(name string)) *MockContext_RenameTabTo_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockContext_RenameTabTo_Call) Return(err error) *MockContext_RenameTabTo_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_RenameTabTo_Call) RunAndReturn(run func(name string) error) *MockContext_RenameTabTo_Call {
 	_c.Call.Return(run)
 	return _c
 }

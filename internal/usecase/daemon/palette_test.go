@@ -708,6 +708,38 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }
 
+func TestPaletteDirectSessionCreation(t *testing.T) {
+	cases := []struct {
+		name, input, wantName string
+		ephemeral             bool
+	}{
+		{name: "named", input: "CNS scratch\r", wantName: "scratch"},
+		{name: "ephemeral", input: "CES\r", wantName: "0", ephemeral: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p1, release1 := newBlockingPTY(t)
+			p2, release2 := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+			defer release1()
+			defer release2()
+			d.ptys = newFactorySeq(t, p2)
+
+			d.handleInput(sess, ac, []byte("\x1b "))
+			awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, []byte(tc.input))
+			awaitFrame(t, sends, ports.MsgOutput)
+
+			require.False(t, ac.overlays.paletteActive())
+			require.False(t, ac.overlays.promptActive())
+			require.Equal(t, 2, sessionCount(d))
+			newSess := ac.currentSession()
+			require.Equal(t, tc.wantName, newSess.name)
+			require.Equal(t, tc.ephemeral, newSess.ephemeral)
+		})
+	}
+}
+
 func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	sess.mu.Lock()
@@ -774,12 +806,12 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BCK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "MPL", "MPR", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "PVT", "BCK", "JRS", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	d := &Daemon{}
-	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	codes := []string{"CNT", "CNS", "CES", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TFS", "TFP", "CFP", "MFP", "MAT", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BCK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	var wg sync.WaitGroup
 	for range 50 {

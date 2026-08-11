@@ -48,6 +48,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.palette = palette.New(results)
 	ac.overlays.paletteRouteSnapshot = routeSnapshot
 	ac.overlays.paletteHints = palette.ContextualHints{}
+	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
@@ -266,15 +267,16 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			rawQuery = ac.overlays.palette.Query()
 			if selectedCommand, ok := selected.Command(); ok {
 				cmd = selectedCommand
-				// JRS is contextual: fuzzy selection cannot turn an unrelated
-				// query into a jump.
-				if cmd.Slug == "jump-recent-session" {
+				if cmd.Arguments != command.ArgumentsNone {
 					action, valid := palette.ParseAction([]palette.Result{selected}, rawQuery)
-					if !valid {
+					if valid {
+						args = action.Args
+					} else if cmd.Arguments == command.ArgumentsRequired {
 						changed = true
 						return
 					}
-					args = action.Args
+				}
+				if cmd.ContextHint == command.ContextHintRecentSessions {
 					routeSnapshot = ac.overlays.paletteRouteSnapshot
 					routeSnapshot.Entries = append([]ports.RecentRouteEntry(nil), routeSnapshot.Entries...)
 				}
@@ -294,7 +296,11 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	})
 	if changed {
 		ac.overlays.paletteFeedback = ""
+		ac.overlays.palettePreview = ""
 		active, ok := ac.overlays.palette.ArgumentCommand()
+		if ok {
+			ac.overlays.palettePreview = palette.Preview(active, ac.overlays.palette.Query())
+		}
 		if ok && active.Slug == "jump-recent-session" {
 			args := paletteArgs(ac.overlays.palette.Query(), active)
 			if ac.overlays.paletteRouteSnapshot.Generation != 0 {
@@ -445,6 +451,7 @@ func (ac *attachedClient) clearPaletteLocked() {
 	ac.overlays.palette = nil
 	ac.overlays.paletteRouteSnapshot = ports.RecentRouteSnapshot{}
 	ac.overlays.paletteHints = palette.ContextualHints{}
+	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 }
@@ -523,6 +530,20 @@ func (e paletteExec) CreateSession() error {
 		return e.d.createSessionAndSwitchForAttachment(token, name)
 	})
 	return nil
+}
+
+func (e paletteExec) CreateSessionNamed(name string) error {
+	if e.effect == nil {
+		return e.d.createSessionAndSwitch(e.sess, e.ac, name)
+	}
+	return e.d.createSessionAndSwitchForAttachment(e.effect.connectionToken(), name)
+}
+
+func (e paletteExec) CreateEphemeralSession() error {
+	if e.effect == nil {
+		return e.d.createEphemeralSessionAndSwitch(e.sess, e.ac)
+	}
+	return e.d.createEphemeralSessionAndSwitchForAttachment(e.effect.connectionToken())
 }
 
 func (e paletteExec) CloseTab() error {
@@ -651,6 +672,10 @@ func (e paletteExec) RenameSession() error {
 	return nil
 }
 
+func (e paletteExec) RenameSessionTo(name string) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionRenameSession, name: name})
+}
+
 func (e paletteExec) RenameTab() error {
 	tb := e.sess.tabForAttachment(e.ac)
 	if e.ac == nil {
@@ -673,6 +698,17 @@ func (e paletteExec) RenameTab() error {
 		return e.runAction(daemonActionRequest{kind: daemonActionRenameTab, target: daemonActionTarget{session: e.sess, tab: tb}, name: name})
 	})
 	return nil
+}
+
+func (e paletteExec) RenameTabTo(name string) error {
+	tb := e.sess.tabForAttachment(e.ac)
+	if e.ac == nil {
+		tb = e.sess.firstTab()
+	}
+	if tb == nil {
+		return nil
+	}
+	return e.runAction(daemonActionRequest{kind: daemonActionRenameTab, target: daemonActionTarget{session: e.sess, tab: tb}, name: name})
 }
 
 func (e paletteExec) OpenSessionPicker() error {
