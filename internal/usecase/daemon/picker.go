@@ -896,11 +896,6 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	if target.RemoteKey != nil {
 		return d.sendRemoteAttachTargetForAttachment(token, target, *target.RemoteKey, guard, action)
 	}
-	token.effect.bindActionEnd(d, action)
-	token.effect.End()
-	if !token.attachmentCurrent() {
-		return errAttachmentTransition
-	}
 	return d.sendLocalAttachTargetForAttachment(token, target, guard, action)
 }
 
