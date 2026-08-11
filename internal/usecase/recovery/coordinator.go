@@ -115,11 +115,13 @@ func (c *Coordinator) Create(ctx context.Context, record domain.CatalogueRecord)
 	} else if exists {
 		return domain.CatalogueRecord{}, fmt.Errorf("recovery: session %q already exists", record.Name)
 	}
-	id, err := domain.NewIncarnationID(c.random)
-	if err != nil {
-		return domain.CatalogueRecord{}, fmt.Errorf("recovery: generate incarnation: %w", err)
+	if record.IncarnationID == (domain.IncarnationID{}) {
+		id, err := domain.NewIncarnationID(c.random)
+		if err != nil {
+			return domain.CatalogueRecord{}, fmt.Errorf("recovery: generate incarnation: %w", err)
+		}
+		record.IncarnationID = id
 	}
-	record.IncarnationID = id
 	record.Committed = nil
 	record.DegradedReason = ""
 	if err := record.Validate(); err != nil {

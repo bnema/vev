@@ -65,6 +65,25 @@ func TestRenameDefersCommittedRouteIdentityUntilFirstRouteSnapshot(t *testing.T)
 	require.False(t, identity.Ephemeral)
 }
 
+func TestEphemeralPromotionPreservesIncarnation(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(t, store)(d)
+
+	sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	sess.mu.Lock()
+	original := sess.incarnation
+	sess.mu.Unlock()
+	require.NotZero(t, original)
+
+	require.NoError(t, d.renameSession(sess, "local"))
+	require.Equal(t, original, sess.incarnation)
+	require.Equal(t, original, state.record(t, "local").IncarnationID)
+}
+
 func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := &retryablePurgeRepository{}
