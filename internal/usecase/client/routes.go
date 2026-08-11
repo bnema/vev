@@ -347,9 +347,31 @@ func (l *routeLedger) commitCommittedIdentity(identity ports.CommittedRouteIdent
 	if activeIndex < 0 {
 		return routeIdentity{}, errors.New("active route unavailable")
 	}
-	candidate, err := prepareRouteCandidate(routeCandidateForCommittedIdentity(l.entries[activeIndex], identity))
+	active := l.entries[activeIndex]
+	candidate, err := prepareRouteCandidate(routeCandidateForCommittedIdentity(active, identity))
 	if err != nil {
 		return routeIdentity{}, err
+	}
+	// A session rename changes its exact attach target but not its lifecycle.
+	// Keep the active route's process-local identity so the obsolete name cannot
+	// survive as a separately selectable history entry.
+	if active.target.LifecycleID == candidate.target.LifecycleID {
+		if l.generation == ^routeGeneration(0) {
+			return routeIdentity{}, errors.New("route ledger identity space exhausted")
+		}
+		l.generation++
+		l.entries[activeIndex] = routeRecord{
+			identity:     active.identity,
+			origin:       candidate.origin,
+			originKey:    candidate.originKey,
+			target:       candidate.target,
+			presentation: candidate.presentation,
+			dialer:       candidate.dialer,
+			request:      candidate.request,
+			resumeToken:  candidate.resumeToken,
+			home:         active.home,
+		}
+		return active.identity, nil
 	}
 	return l.commitLocked(candidate)
 }
@@ -451,6 +473,30 @@ func (l *routeLedger) lookup(ref ports.RouteRef) (routeRecord, bool) {
 func cloneRouteRecord(entry routeRecord) routeRecord {
 	entry.request = cloneAttachRequest(entry.request)
 	return entry
+}
+
+// attentionSubscription publishes only routes served by the active route's
+// daemon. Other route origins remain private to their owning daemon.
+func (l *routeLedger) attentionSubscription() ports.RouteAttentionSubscription {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	activeIndex := l.indexByIdentityLocked(l.active)
+	if activeIndex < 0 {
+		return ports.RouteAttentionSubscription{}
+	}
+	active := l.entries[activeIndex]
+	subscription := ports.RouteAttentionSubscription{Targets: make([]ports.RouteAttentionTarget, 0, len(l.entries))}
+	for _, entry := range l.entries {
+		if entry.identity == active.identity || entry.origin != active.origin || entry.originKey != active.originKey {
+			continue
+		}
+		subscription.Targets = append(subscription.Targets, ports.RouteAttentionTarget{
+			Ref:    entry.identity.wire(),
+			Target: entry.target,
+		})
+	}
+	return subscription
 }
 
 func (l *routeLedger) snapshot() ports.RecentRouteSnapshot {

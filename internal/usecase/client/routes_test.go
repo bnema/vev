@@ -109,6 +109,59 @@ func TestRouteLedgerRemembersTabsIndependentlyPerExactRoute(t *testing.T) {
 	require.Equal(t, domain.TabStableID("tab-second"), secondRecord.request.PreferredTabID)
 }
 
+func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) {
+	ledger := newRouteLedger()
+	first := routeTestCandidate(0, ports.RouteOriginRemote)
+	first.originKey = "host-a"
+	firstIdentity, err := ledger.commit(first)
+	require.NoError(t, err)
+	other := routeTestCandidate(1, ports.RouteOriginLocal)
+	_, err = ledger.commit(other)
+	require.NoError(t, err)
+	otherRemote := routeTestCandidate(2, ports.RouteOriginRemote)
+	otherRemote.originKey = "host-b"
+	_, err = ledger.commit(otherRemote)
+	require.NoError(t, err)
+	active := routeTestCandidate(3, ports.RouteOriginRemote)
+	active.originKey = "host-a"
+	_, err = ledger.commit(active)
+	require.NoError(t, err)
+
+	subscription := ledger.attentionSubscription()
+
+	require.Equal(t, []ports.RouteAttentionTarget{{
+		Ref:    firstIdentity.wire(),
+		Target: first.target,
+	}}, subscription.Targets)
+}
+
+func TestCommittedIdentityRenamesActiveRouteInPlace(t *testing.T) {
+	ledger := newRouteLedger()
+	original := routeTestCandidate(0, ports.RouteOriginLocal)
+	original.target = ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "0"}
+	original.presentation.name = "0"
+	original.request.SessionName = "0"
+	identity, err := ledger.commit(original)
+	require.NoError(t, err)
+	before := ledger.snapshot()
+
+	committed, err := ledger.commitCommittedIdentity(ports.CommittedRouteIdentity{
+		Target:    ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "vps-infra"},
+		Ephemeral: false,
+	})
+	require.NoError(t, err)
+
+	snapshot := ledger.snapshot()
+	require.Equal(t, identity, committed, "a rename must retain the route's process-local identity")
+	require.Greater(t, snapshot.Generation, before.Generation, "a rename invalidates prior route snapshots")
+	require.Empty(t, snapshot.Entries, "the old ephemeral label must not remain in route history")
+	active, ok := ledger.lookup(snapshot.Active)
+	require.True(t, ok)
+	require.Equal(t, "vps-infra", active.presentation.name)
+	require.Equal(t, "vps-infra", active.target.SessionName)
+	require.False(t, active.presentation.ephemeral)
+}
+
 func TestCommittedIdentityDoesNotReassignHomeRoute(t *testing.T) {
 	ledger := newRouteLedger()
 	home := routeTestCandidate(1, ports.RouteOriginLocal)

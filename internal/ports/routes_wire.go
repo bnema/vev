@@ -340,6 +340,73 @@ func MarshalRecentRouteSnapshot(snapshot RecentRouteSnapshot) ([]byte, error) {
 	return w.b, nil
 }
 
+func validateRouteAttentionSubscription(subscription RouteAttentionSubscription) error {
+	if len(subscription.Targets) > RouteSnapshotMaxEntries {
+		return fmt.Errorf("%w: too many attention targets", ErrInvalidRouteWire)
+	}
+	refs := make(map[RouteRef]struct{}, len(subscription.Targets))
+	for _, target := range subscription.Targets {
+		if err := validateRouteRef(target.Ref); err != nil || target.Ref.empty() {
+			return fmt.Errorf("%w: invalid attention route reference", ErrInvalidRouteWire)
+		}
+		if err := target.Target.Validate(); err != nil {
+			return fmt.Errorf("%w: invalid attention target: %v", ErrInvalidRouteWire, err)
+		}
+		if _, exists := refs[target.Ref]; exists {
+			return fmt.Errorf("%w: duplicate attention route reference", ErrInvalidRouteWire)
+		}
+		refs[target.Ref] = struct{}{}
+	}
+	return nil
+}
+
+// MarshalRouteAttentionSubscription encodes the bounded client mapping used
+// by the connected daemon to resolve live route-attention indicators.
+func MarshalRouteAttentionSubscription(subscription RouteAttentionSubscription) ([]byte, error) {
+	if err := validateRouteAttentionSubscription(subscription); err != nil {
+		return nil, err
+	}
+	w := payloadWriter{}
+	w.putUint8(uint8(len(subscription.Targets)))
+	for _, target := range subscription.Targets {
+		marshalRouteRef(&w, target.Ref)
+		marshalExactSessionTarget(&w, target.Target)
+	}
+	return w.b, nil
+}
+
+// UnmarshalRouteAttentionSubscription decodes one strict bounded attention
+// mapping and rejects truncated, malformed, and trailing payloads.
+func UnmarshalRouteAttentionSubscription(b []byte) (RouteAttentionSubscription, error) {
+	r := payloadReader{b: b}
+	count, err := r.getUint8()
+	if err != nil {
+		return RouteAttentionSubscription{}, err
+	}
+	if int(count) > RouteSnapshotMaxEntries {
+		return RouteAttentionSubscription{}, fmt.Errorf("%w: too many attention targets", ErrInvalidRouteWire)
+	}
+	subscription := RouteAttentionSubscription{Targets: make([]RouteAttentionTarget, 0, int(count))}
+	for range int(count) {
+		ref, err := unmarshalRouteRef(&r)
+		if err != nil {
+			return RouteAttentionSubscription{}, err
+		}
+		target, err := unmarshalExactSessionTarget(&r)
+		if err != nil {
+			return RouteAttentionSubscription{}, err
+		}
+		subscription.Targets = append(subscription.Targets, RouteAttentionTarget{Ref: ref, Target: target})
+	}
+	if err := r.done(); err != nil {
+		return RouteAttentionSubscription{}, err
+	}
+	if err := validateRouteAttentionSubscription(subscription); err != nil {
+		return RouteAttentionSubscription{}, err
+	}
+	return subscription, nil
+}
+
 // UnmarshalRecentRouteSnapshot decodes and strictly validates one complete
 // immutable snapshot, including every referenced active/previous/home entry.
 func UnmarshalRecentRouteSnapshot(b []byte) (RecentRouteSnapshot, error) {

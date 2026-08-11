@@ -85,20 +85,22 @@ type attachedClient struct {
 	// view is attachment-local navigation state. It is never inferred from a
 	// session-wide active tab, so multiple attachments can observe different
 	// tabs and panes without changing shared session ownership.
-	viewMu            sync.Mutex
-	view              attachmentView
-	sess              Guarded[*session]
-	mouseScan         mouse.Scanner
-	themeMu           sync.Mutex
-	clientTheme       themeui.Theme
-	appliedTheme      appliedTheme
-	lastCursor        cursorOut
-	lastRoutePosition ports.RoutePosition
-	renderStages      renderStageHooks // optional render and handoff observability hooks
-	linkMu            sync.Mutex
-	sendMu            sync.Mutex
-	routeMu           sync.RWMutex
-	routeSnapshot     ports.RecentRouteSnapshot
+	viewMu                     sync.Mutex
+	view                       attachmentView
+	sess                       Guarded[*session]
+	mouseScan                  mouse.Scanner
+	themeMu                    sync.Mutex
+	clientTheme                themeui.Theme
+	appliedTheme               appliedTheme
+	lastCursor                 cursorOut
+	lastRoutePosition          ports.RoutePosition
+	renderStages               renderStageHooks // optional render and handoff observability hooks
+	linkMu                     sync.Mutex
+	sendMu                     sync.Mutex
+	routeMu                    sync.RWMutex
+	routeSnapshot              ports.RecentRouteSnapshot
+	pendingRouteIdentity       bool
+	routeAttentionSubscription ports.RouteAttentionSubscription
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -351,11 +353,31 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
-func (ac *attachedClient) setRouteSnapshot(snapshot ports.RecentRouteSnapshot) {
+// setRouteSnapshot records a client-owned route view and reports whether a
+// rename identity was deferred until that first usable publication.
+func (ac *attachedClient) setRouteSnapshot(snapshot ports.RecentRouteSnapshot) bool {
 	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
 	ac.routeMu.Lock()
 	ac.routeSnapshot = snapshot
+	replayPendingIdentity := snapshot.Generation != 0 && ac.pendingRouteIdentity
+	if replayPendingIdentity {
+		ac.pendingRouteIdentity = false
+	}
 	ac.routeMu.Unlock()
+	return replayPendingIdentity
+}
+
+// deferRouteIdentityUntilSnapshot records a rename that happens before the
+// client has published its route ledger. It returns false once a snapshot is
+// already available and the identity may be sent immediately.
+func (ac *attachedClient) deferRouteIdentityUntilSnapshot() bool {
+	ac.routeMu.Lock()
+	defer ac.routeMu.Unlock()
+	if ac.routeSnapshot.Generation != 0 {
+		return false
+	}
+	ac.pendingRouteIdentity = true
+	return true
 }
 
 func (ac *attachedClient) routeSnapshotCopy() ports.RecentRouteSnapshot {
@@ -364,6 +386,24 @@ func (ac *attachedClient) routeSnapshotCopy() ports.RecentRouteSnapshot {
 	snapshot := ac.routeSnapshot
 	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
 	return snapshot
+}
+
+func (ac *attachedClient) setRouteAttentionSubscription(subscription ports.RouteAttentionSubscription) {
+	subscription.Targets = append([]ports.RouteAttentionTarget(nil), subscription.Targets...)
+	ac.routeMu.Lock()
+	ac.routeAttentionSubscription = subscription
+	ac.routeMu.Unlock()
+}
+
+func (ac *attachedClient) routeAttentionTarget(ref ports.RouteRef) (ports.ExactSessionTarget, bool) {
+	ac.routeMu.RLock()
+	defer ac.routeMu.RUnlock()
+	for _, target := range ac.routeAttentionSubscription.Targets {
+		if target.Ref == ref {
+			return target.Target, true
+		}
+	}
+	return ports.ExactSessionTarget{}, false
 }
 
 func (ac *attachedClient) ackOutputState(epoch, state uint64) {

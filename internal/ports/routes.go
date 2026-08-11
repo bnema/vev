@@ -167,6 +167,20 @@ type RouteRef struct {
 	Generation uint64
 }
 
+// RouteAttentionTarget binds one displayed route reference to an exact
+// lifecycle on the daemon currently serving the client. It carries no dialer,
+// credential, or endpoint.
+type RouteAttentionTarget struct {
+	Ref    RouteRef
+	Target ExactSessionTarget
+}
+
+// RouteAttentionSubscription is the bounded, client-owned mapping a daemon
+// uses solely to resolve live attention while rendering its route snapshot.
+type RouteAttentionSubscription struct {
+	Targets []RouteAttentionTarget
+}
+
 func (r RouteRef) empty() bool { return r.Key == 0 && r.Generation == 0 }
 
 func (r RouteRef) Validate() error {

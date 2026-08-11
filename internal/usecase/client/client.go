@@ -1118,12 +1118,19 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if commitErr != nil {
 			return welcomedResult(fmt.Errorf("vev: committing route identity: %w", commitErr))
 		}
-		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		snapshotPayload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
 		if err != nil {
 			return welcomedResult(fmt.Errorf("vev: encoding route snapshot: %w", err))
 		}
+		attentionPayload, err := ports.MarshalRouteAttentionSubscription(a.runner.ledger.attentionSubscription())
+		if err != nil {
+			return welcomedResult(fmt.Errorf("vev: encoding route attention subscription: %w", err))
+		}
 		if err := sendHandshake(func() error {
-			return transport.Send(ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload})
+			if err := transport.Send(ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: snapshotPayload}); err != nil {
+				return err
+			}
+			return transport.Send(ports.Frame{Type: ports.MsgRouteAttentionSubscription, Payload: attentionPayload})
 		}); err != nil {
 			return welcomedResult(fmt.Errorf("vev: publishing route snapshot: %w", err))
 		}
@@ -1359,16 +1366,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if a.runner.ledger == nil {
 			return errors.New("vev: route ledger unavailable")
 		}
-		payload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		snapshotPayload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
 		if err != nil {
 			return err
 		}
-		select {
-		case sendCh <- ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}:
-			return nil
-		case <-loopCtx.Done():
-			return context.Canceled
+		attentionPayload, err := ports.MarshalRouteAttentionSubscription(a.runner.ledger.attentionSubscription())
+		if err != nil {
+			return err
 		}
+		for _, frame := range []ports.Frame{
+			{Type: ports.MsgRecentRouteSnapshot, Payload: snapshotPayload},
+			{Type: ports.MsgRouteAttentionSubscription, Payload: attentionPayload},
+		} {
+			select {
+			case sendCh <- frame:
+			case <-loopCtx.Done():
+				return context.Canceled
+			}
+		}
+		return nil
 	}
 	sendRouteFailure := func(action ports.RouteNavigationAction, code ports.RouteFailureCode) error {
 		payload, err := ports.MarshalRouteNavigationFailure(ports.RouteNavigationFailure{
