@@ -901,7 +901,63 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	if !token.attachmentCurrent() {
 		return errAttachmentTransition
 	}
-	return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)
+	return d.sendLocalAttachTargetForAttachment(token, target, guard, action)
+}
+
+// sendLocalAttachTargetForAttachment makes local picker navigation follow the
+// same client-owned handoff path as remote navigation. The client reconnects
+// to this daemon and restores its per-route tab from the route ledger.
+func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
+	d.mu.Lock()
+	var targetSess *session
+	var sessionName string
+	var exactTarget *ports.ExactSessionTarget
+	var matches bool
+	if target.Name != "" {
+		var stopped stoppedSession
+		var stoppedTarget bool
+		targetSess, stopped, stoppedTarget, matches = d.resolveNamedLifecycleTargetLocked(target)
+		if stoppedTarget && matches {
+			sessionName = stopped.name
+			exactTarget = &ports.ExactSessionTarget{LifecycleID: stopped.incarnation, SessionName: sessionName}
+		}
+	} else {
+		targetSess = d.sessions[target.Session]
+		matches = targetSess != nil
+	}
+	if matches && targetSess != nil {
+		targetSess.mu.Lock()
+		sessionName = targetSess.name
+		exactTarget = &ports.ExactSessionTarget{LifecycleID: targetSess.incarnation, SessionName: sessionName}
+		targetSess.mu.Unlock()
+	}
+	d.mu.Unlock()
+	if !matches || !token.attachmentCurrent() {
+		return errAttachmentTransition
+	}
+	if target.TabID != "" {
+		// An explicit tab row is a direct user choice, not route memory; retain
+		// the daemon-side transition so it opens exactly that tab.
+		return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)
+	}
+
+	payload := ports.MarshalAttachTarget(ports.AttachTarget{
+		Session:           sessionName,
+		Intent:            ports.IntentAttach,
+		ExactTarget:       exactTarget,
+		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	})
+	if payload == nil {
+		return errAttachmentTransition
+	}
+	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to local session", err)
+	}
+	if guard.closePicker {
+		d.closePicker(token.ac)
+	}
+	d.clientGoneForAttachment(token, false)
+	return nil
 }
 
 // sendRemoteAttachTargetForAttachment validates the catalog row and hands the

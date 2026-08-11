@@ -109,6 +109,45 @@ func TestRouteLedgerRemembersTabsIndependentlyPerExactRoute(t *testing.T) {
 	require.Equal(t, domain.TabStableID("tab-second"), secondRecord.request.PreferredTabID)
 }
 
+func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
+	ledger := newRouteLedger()
+	first := routeTestCandidate(1, ports.RouteOriginLocal)
+	first.originKey = "local"
+	_, err := ledger.commit(first)
+	require.NoError(t, err)
+	require.NoError(t, ledger.updateRoutePosition(ports.RoutePosition{Target: first.target, ActiveTabID: "tab-first"}))
+
+	second := routeTestCandidate(2, ports.RouteOriginLocal)
+	second.originKey = "local"
+	_, err = ledger.commit(second)
+	require.NoError(t, err)
+
+	recreated := first.target
+	recreated.LifecycleID[0]++
+	for _, tt := range []struct {
+		name            string
+		target          ports.ExactSessionTarget
+		wantExactTarget *ports.ExactSessionTarget
+		wantTab         domain.TabStableID
+	}{
+		{name: "matching lifecycle restores remembered tab", target: first.target, wantExactTarget: &first.target, wantTab: "tab-first"},
+		{name: "recreated session does not reuse remembered tab", target: recreated, wantExactTarget: &recreated},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := ledger.samePeerHandoff(second.request, ports.AttachTarget{
+				Session:           first.target.SessionName,
+				Intent:            ports.IntentAttach,
+				ExactTarget:       &tt.target,
+				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			})
+			require.Equal(t, first.target.SessionName, request.SessionName)
+			require.Equal(t, tt.wantExactTarget, request.ExactTarget)
+			require.Equal(t, tt.wantTab, request.PreferredTabID)
+			require.Equal(t, ports.EnvironmentPolicyDaemonOwned, request.EnvironmentPolicy)
+		})
+	}
+}
+
 func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) {
 	ledger := newRouteLedger()
 	first := routeTestCandidate(0, ports.RouteOriginRemote)

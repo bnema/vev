@@ -11,8 +11,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 30 {
-		t.Fatalf("ProtocolVersion = %d, want 30", ProtocolVersion)
+	if ProtocolVersion != 31 {
+		t.Fatalf("ProtocolVersion = %d, want 31", ProtocolVersion)
 	}
 	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -26,7 +26,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 30, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 31, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
@@ -178,7 +178,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	msg := AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach}
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0}
+	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0}
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AttachTarget bytes = %x, want %x", got, want)
@@ -189,7 +189,22 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	}
 	assertAllPrefixesFail(t, got, UnmarshalAttachTarget)
 	assertTrailingGarbageFails(t, got, UnmarshalAttachTarget)
-	for _, bad := range []AttachTarget{{Session: "work", Intent: IntentAttach}, {Endpoint: "host", Intent: IntentAttach}, {Endpoint: "host", Session: "work", Intent: 99}} {
+	local := AttachTarget{Session: "work", Intent: IntentAttach}
+	localPayload := MarshalAttachTarget(local)
+	if localPayload == nil {
+		t.Fatal("MarshalAttachTarget rejected same-peer route handoff")
+	}
+	wantLocal := []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 0}
+	if !bytes.Equal(localPayload, wantLocal) {
+		t.Fatalf("same-peer bytes = %x, want %x", localPayload, wantLocal)
+	}
+	decodedLocal, err := UnmarshalAttachTarget(localPayload)
+	if err != nil || decodedLocal != local {
+		t.Fatalf("same-peer target = %+v, error %v, want %+v", decodedLocal, err, local)
+	}
+	assertAllPrefixesFail(t, localPayload, UnmarshalAttachTarget)
+	assertTrailingGarbageFails(t, localPayload, UnmarshalAttachTarget)
+	for _, bad := range []AttachTarget{{Endpoint: "host", Intent: IntentAttach}, {Endpoint: "host", Session: "work", Intent: 99}} {
 		if got := MarshalAttachTarget(bad); got != nil {
 			t.Fatalf("MarshalAttachTarget(%+v) = %x, want nil", bad, got)
 		}

@@ -37,14 +37,22 @@ func (k RemoteSessionKey) ID() SessionID {
 	return SessionID("remote:" + host + "." + name)
 }
 
+// RemoteDisplayOrigin returns the host-facing portion of a remote endpoint.
+// Routing retains the full user@host target; presentation consistently omits
+// the login prefix regardless of whether the route came from the CLI or a
+// discovered picker entry.
+func RemoteDisplayOrigin(endpoint string) string {
+	if i := strings.LastIndexByte(endpoint, '@'); i > 0 && i < len(endpoint)-1 {
+		return endpoint[i+1:]
+	}
+	return endpoint
+}
+
 // Display returns the presentation label for this remote session.
 func (k RemoteSessionKey) Display() string {
 	origin := k.DisplayOrigin
 	if origin == "" {
-		origin = k.Host
-		if i := strings.LastIndexByte(origin, '@'); i > 0 && i < len(origin)-1 {
-			origin = origin[i+1:]
-		}
+		origin = RemoteDisplayOrigin(k.Host)
 	}
 	return k.Name + "@" + origin
 }

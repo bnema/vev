@@ -531,6 +531,42 @@ func (l *routeLedger) snapshot() ports.RecentRouteSnapshot {
 	return snapshot
 }
 
+// samePeerHandoff restores a previously committed route on the daemon already
+// connected to by the client. The daemon deliberately sends no tab state: the
+// ledger is the sole owner of per-route view memory.
+func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachTarget) AttachRequest {
+	origin := normalizeRouteOrigin(active.Origin, active.Remote)
+	originKey := normalizeRouteOriginKey(active.OriginKey, origin)
+
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, entry := range l.entries {
+		if entry.origin != origin || entry.originKey != originKey || entry.target.SessionName != target.Session {
+			continue
+		}
+		if target.ExactTarget != nil && entry.target != *target.ExactTarget {
+			continue
+		}
+		request := cloneAttachRequest(entry.request)
+		request.Intent = target.Intent
+		request.EnvironmentPolicy = target.EnvironmentPolicy
+		request.ExactTarget = target.ExactTarget
+		if target.ExactTarget == nil {
+			request.PreferredTabID = ""
+		}
+		return request
+	}
+
+	request := cloneAttachRequest(active)
+	request.Intent = target.Intent
+	request.SessionName = target.Session
+	request.ExactTarget = target.ExactTarget
+	request.PreferredTabID = ""
+	request.RemoteTarget = nil
+	request.EnvironmentPolicy = target.EnvironmentPolicy
+	return request
+}
+
 func (l *routeLedger) activeRef() ports.RouteRef {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

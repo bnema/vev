@@ -139,7 +139,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 				})
 			},
 			unmarshal:    func(payload []byte) error { _, err := UnmarshalAttachTarget(payload); return err },
-			policyOffset: 1,
+			policyOffset: 2,
 			wantErr:      ErrInvalidAttachTarget,
 		},
 	}
@@ -195,7 +195,7 @@ func TestAttachTargetRejectsResumeIntent(t *testing.T) {
 }
 
 func TestTargetWireIncludesRequiredV27Section(t *testing.T) {
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0}
+	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 0}
 	got := MarshalAttachTarget(AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach})
 	if !bytes.Equal(got, want) {
 		t.Fatalf("target bytes = %x, want %x", got, want)

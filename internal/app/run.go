@@ -857,7 +857,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	factory := deps.remoteDialerFactory
 	var remoteSelection *domain.RemoteSessionTarget
 	var remoteEnvironmentPolicy ports.EnvironmentPolicy
-	remoteDisplayOrigin := remoteTarget
+	remoteDisplayOrigin := domain.RemoteDisplayOrigin(remoteTarget)
 	routeOrigin := ports.RouteOriginLocal
 	routeOriginKey := "local"
 	if remoteTarget != "" {
@@ -897,7 +897,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			return nil, client.AttachRequest{}, err
 		}
 		policy := pickerEnvironmentPolicy(selection, target.EnvironmentPolicy)
-		displayOrigin := target.Endpoint
+		displayOrigin := domain.RemoteDisplayOrigin(target.Endpoint)
 		if selection != nil {
 			displayOrigin = selection.DisplayOrigin
 		}
@@ -978,7 +978,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 		handoffAttempts++
 		remoteTarget = handoffErr.Target.Endpoint
-		remoteDisplayOrigin = remoteTarget
+		remoteDisplayOrigin = domain.RemoteDisplayOrigin(remoteTarget)
 		routeOrigin = ports.RouteOriginDiscovery
 		routeOriginKey = remoteTarget
 		name = handoffErr.Target.Session
