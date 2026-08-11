@@ -438,13 +438,18 @@ func TestPaletteResultsDeduplicateRoutesLocalToCurrentRemoteDaemon(t *testing.T)
 		want          []string
 	}{
 		{name: "remote daemon", currentOrigin: "remote", want: []string{"Switch to session remote-manual"}},
+		{name: "remote daemon keeps distinct local route", currentOrigin: "remote", want: []string{"Switch to session remote-manual", "Switch to session remote-manual@local"}},
 		{name: "home daemon keeps distinct remote", want: []string{"Switch to session remote-manual", "Switch to session remote-manual@remote"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			results := d.paletteResults(current, nil, snapshot, test.currentOrigin)
+			testSnapshot := snapshot
+			if test.name == "remote daemon keeps distinct local route" {
+				testSnapshot.Entries = append(testSnapshot.Entries, ports.RecentRouteEntry{Key: 3, Generation: 1, Name: "remote-manual", Kind: ports.RouteKindLocal})
+			}
+			results := d.paletteResults(current, nil, testSnapshot, test.currentOrigin)
 			var matching []string
 			for _, result := range results {
-				if result.DisplayText() == "Switch to session remote-manual" || result.DisplayText() == "Switch to session remote-manual@remote" {
+				if result.DisplayText() == "Switch to session remote-manual" || result.DisplayText() == "Switch to session remote-manual@local" || result.DisplayText() == "Switch to session remote-manual@remote" {
 					matching = append(matching, result.DisplayText())
 				}
 			}
