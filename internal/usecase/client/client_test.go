@@ -438,17 +438,26 @@ func TestAttachPublishesCommittedRouteSnapshot(t *testing.T) {
 	require.NoError(t, err)
 
 	var snapshot ports.RecentRouteSnapshot
-	found := false
+	var subscription ports.RouteAttentionSubscription
+	foundSnapshot := false
+	foundSubscription := false
 	for _, frame := range tr.Sends() {
-		if frame.Type != ports.MsgRecentRouteSnapshot {
-			continue
+		switch frame.Type {
+		case ports.MsgRecentRouteSnapshot:
+			var err error
+			snapshot, err = ports.UnmarshalRecentRouteSnapshot(frame.Payload)
+			require.NoError(t, err)
+			foundSnapshot = true
+		case ports.MsgRouteAttentionSubscription:
+			var err error
+			subscription, err = ports.UnmarshalRouteAttentionSubscription(frame.Payload)
+			require.NoError(t, err)
+			foundSubscription = true
 		}
-		var err error
-		snapshot, err = ports.UnmarshalRecentRouteSnapshot(frame.Payload)
-		require.NoError(t, err)
-		found = true
 	}
-	require.True(t, found, "successful Welcome must publish a route snapshot")
+	require.True(t, foundSnapshot, "successful Welcome must publish a route snapshot")
+	require.True(t, foundSubscription, "successful Welcome must publish a route attention subscription")
+	require.Empty(t, subscription.Targets, "the active route itself needs no status subscription")
 	require.NotZero(t, snapshot.Generation)
 	require.NotZero(t, snapshot.Active.Key)
 	require.Empty(t, snapshot.Entries, "the active route is metadata-only")

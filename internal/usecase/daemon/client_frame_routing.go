@@ -133,6 +133,14 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		} else {
 			d.log.Warn("malformed recent route snapshot", "err", derr)
 		}
+	case ports.MsgRouteAttentionSubscription:
+		subscription, derr := ports.UnmarshalRouteAttentionSubscription(f.Payload)
+		if derr != nil {
+			d.log.Warn("malformed route attention subscription", "err", derr)
+			break
+		}
+		token.ac.setRouteAttentionSubscription(subscription)
+		d.invalidateRender(token.sess, token.ac, false, "client_frame_routing.go:route-attention")
 	case ports.MsgRouteNavigationFailure:
 		failure, derr := ports.UnmarshalRouteNavigationFailure(f.Payload)
 		if derr != nil {

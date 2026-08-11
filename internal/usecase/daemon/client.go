@@ -85,20 +85,21 @@ type attachedClient struct {
 	// view is attachment-local navigation state. It is never inferred from a
 	// session-wide active tab, so multiple attachments can observe different
 	// tabs and panes without changing shared session ownership.
-	viewMu            sync.Mutex
-	view              attachmentView
-	sess              Guarded[*session]
-	mouseScan         mouse.Scanner
-	themeMu           sync.Mutex
-	clientTheme       themeui.Theme
-	appliedTheme      appliedTheme
-	lastCursor        cursorOut
-	lastRoutePosition ports.RoutePosition
-	renderStages      renderStageHooks // optional render and handoff observability hooks
-	linkMu            sync.Mutex
-	sendMu            sync.Mutex
-	routeMu           sync.RWMutex
-	routeSnapshot     ports.RecentRouteSnapshot
+	viewMu                     sync.Mutex
+	view                       attachmentView
+	sess                       Guarded[*session]
+	mouseScan                  mouse.Scanner
+	themeMu                    sync.Mutex
+	clientTheme                themeui.Theme
+	appliedTheme               appliedTheme
+	lastCursor                 cursorOut
+	lastRoutePosition          ports.RoutePosition
+	renderStages               renderStageHooks // optional render and handoff observability hooks
+	linkMu                     sync.Mutex
+	sendMu                     sync.Mutex
+	routeMu                    sync.RWMutex
+	routeSnapshot              ports.RecentRouteSnapshot
+	routeAttentionSubscription ports.RouteAttentionSubscription
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -364,6 +365,24 @@ func (ac *attachedClient) routeSnapshotCopy() ports.RecentRouteSnapshot {
 	snapshot := ac.routeSnapshot
 	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
 	return snapshot
+}
+
+func (ac *attachedClient) setRouteAttentionSubscription(subscription ports.RouteAttentionSubscription) {
+	subscription.Targets = append([]ports.RouteAttentionTarget(nil), subscription.Targets...)
+	ac.routeMu.Lock()
+	ac.routeAttentionSubscription = subscription
+	ac.routeMu.Unlock()
+}
+
+func (ac *attachedClient) routeAttentionTarget(ref ports.RouteRef) (ports.ExactSessionTarget, bool) {
+	ac.routeMu.RLock()
+	defer ac.routeMu.RUnlock()
+	for _, target := range ac.routeAttentionSubscription.Targets {
+		if target.Ref == ref {
+			return target.Target, true
+		}
+	}
+	return ports.ExactSessionTarget{}, false
 }
 
 func (ac *attachedClient) ackOutputState(epoch, state uint64) {

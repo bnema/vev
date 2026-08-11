@@ -12,7 +12,7 @@ import (
 const HandshakeTimeout = 15 * time.Second
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 29
+const ProtocolVersion uint16 = 30
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.
@@ -21,25 +21,26 @@ const MaxFrameLen = 16 << 20
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8
 
-// Frame message types. Client-originated messages occupy 1–13 and 15;
+// Frame message types. Client-originated messages occupy 1–13, 15, and 32;
 // server-originated messages occupy 16–23 and 25–31. Values 14 and 24 remain
 // reserved for future extensions. Route metadata/navigation messages use the
 // post-26 range.
 const (
-	MsgHello                MsgType = 1
-	MsgInput                MsgType = 2
-	MsgResize               MsgType = 3
-	MsgDetach               MsgType = 4
-	MsgPing                 MsgType = 5
-	MsgList                 MsgType = 6
-	MsgKill                 MsgType = 7
-	MsgTheme                MsgType = 8
-	MsgAck                  MsgType = 9
-	MsgImagePush            MsgType = 10
-	MsgClientNotice         MsgType = 11
-	MsgCommand              MsgType = 12
-	MsgOutputResetRequest   MsgType = 13
-	MsgRemotePreviewRequest MsgType = 15
+	MsgHello                      MsgType = 1
+	MsgInput                      MsgType = 2
+	MsgResize                     MsgType = 3
+	MsgDetach                     MsgType = 4
+	MsgPing                       MsgType = 5
+	MsgList                       MsgType = 6
+	MsgKill                       MsgType = 7
+	MsgTheme                      MsgType = 8
+	MsgAck                        MsgType = 9
+	MsgImagePush                  MsgType = 10
+	MsgClientNotice               MsgType = 11
+	MsgCommand                    MsgType = 12
+	MsgOutputResetRequest         MsgType = 13
+	MsgRemotePreviewRequest       MsgType = 15
+	MsgRouteAttentionSubscription MsgType = 32
 
 	MsgWelcome               MsgType = 16
 	MsgError                 MsgType = 17

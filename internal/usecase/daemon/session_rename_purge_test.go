@@ -6,8 +6,32 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
+
+func TestRenamePublishesCommittedRouteIdentityToAttachedClients(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t)
+	sess.mu.Lock()
+	sess.name = "0"
+	sess.ephemeral = true
+	sess.incarnation = domain.IncarnationID{1}
+	sess.mu.Unlock()
+	token := sess.attachmentToken(ac, ac.transport())
+	ac.publishAttachmentCapability(token)
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+
+	require.NoError(t, d.renameSession(sess, "vps-infra"))
+
+	frame := awaitFrame(t, sends, ports.MsgCommittedRouteIdentity)
+	identity, err := ports.UnmarshalCommittedRouteIdentity(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ExactSessionTarget{
+		LifecycleID: domain.IncarnationID{1},
+		SessionName: "vps-infra",
+	}, identity.Target)
+	require.False(t, identity.Ephemeral)
+}
 
 func TestRenamePreservesIncarnationSnapshotSources(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})

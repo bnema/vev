@@ -162,6 +162,27 @@ func TestRecentRouteSnapshotCodecRoundTripAndBounds(t *testing.T) {
 	}
 }
 
+func TestRouteAttentionSubscriptionCodecIsStrict(t *testing.T) {
+	want := RouteAttentionSubscription{Targets: []RouteAttentionTarget{{
+		Ref:    RouteRef{Key: 7, Generation: 3},
+		Target: testExactTarget(),
+	}}}
+	encoded, err := MarshalRouteAttentionSubscription(want)
+	require.NoError(t, err)
+	assertAllPrefixesFail(t, encoded, UnmarshalRouteAttentionSubscription)
+	_, err = UnmarshalRouteAttentionSubscription(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
+
+	got, err := UnmarshalRouteAttentionSubscription(encoded)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	_, err = MarshalRouteAttentionSubscription(RouteAttentionSubscription{Targets: []RouteAttentionTarget{
+		want.Targets[0], want.Targets[0],
+	}})
+	require.ErrorIs(t, err, ErrInvalidRouteWire)
+}
+
 func TestRecentRouteSnapshotRejectsOversizedFrameBeforeParsing(t *testing.T) {
 	_, err := UnmarshalRecentRouteSnapshot(make([]byte, MaxFrameLen))
 	require.ErrorIs(t, err, ErrInvalidRouteWire)

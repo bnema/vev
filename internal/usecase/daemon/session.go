@@ -915,7 +915,34 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		sess.snapshotMu.Unlock()
 	}
 	markSnapshotDirty(sess)
+	d.publishRenamedSessionRouteIdentity(sess)
 	return nil
+}
+
+// publishRenamedSessionRouteIdentity updates each ready client's exact route
+// target after a session rename. A renamed session retains its lifecycle but
+// its old name is no longer attachable, so clients must replace—not retain—the
+// prior route record.
+func (d *Daemon) publishRenamedSessionRouteIdentity(sess *session) {
+	for _, ac := range sess.snapshotAttachments() {
+		if ac.routeSnapshotCopy().Generation == 0 {
+			continue
+		}
+		token := sess.attachmentToken(ac, ac.transport())
+		if token.ac == nil {
+			continue
+		}
+		effect, admitted := ac.beginAttachmentEffect(token)
+		if !admitted {
+			continue
+		}
+		token = effect.connectionToken()
+		err := d.sendCommittedRouteIdentityForAttachment(token)
+		effect.End()
+		if err != nil {
+			d.detachOnAttachmentSendError(token, token.transport.transport)
+		}
+	}
 }
 
 func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
