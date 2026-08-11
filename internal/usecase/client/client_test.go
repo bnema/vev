@@ -463,6 +463,47 @@ func TestAttachPublishesCommittedRouteSnapshot(t *testing.T) {
 	require.Empty(t, snapshot.Entries, "the active route is metadata-only")
 }
 
+func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	firstLifecycle := domain.SessionLifecycleID{1}
+	secondLifecycle := domain.SessionLifecycleID{2}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{
+				Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
+			},
+		}))
+	}
+	secondTarget := ports.ExactSessionTarget{LifecycleID: secondLifecycle, SessionName: "second"}
+	first := &recordingTransport{recvs: []recvItem{
+		{f: welcome("first", firstLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Session: "second", Intent: ports.IntentAttach, ExactTarget: &secondTarget,
+			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	second := &recordingTransport{recvs: []recvItem{
+		{f: welcome("second", secondLifecycle)},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+	dialer := &sequenceDialer{trs: []ports.Transport{first, second}}
+
+	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "first",
+		Origin: ports.RouteOriginLocal, OriginKey: "local",
+		EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
+	})
+
+	require.NoError(t, err)
+	hello := helloFromSend(t, second)
+	require.Equal(t, "second", hello.Name)
+	require.Equal(t, ports.EnvironmentPolicyClientOwned, hello.EnvironmentPolicy)
+	require.Nil(t, hello.RemoteTarget)
+}
+
 func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()

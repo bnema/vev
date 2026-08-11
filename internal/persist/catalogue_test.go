@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/bnema/vev/pkg/safedir"
 )
@@ -48,6 +50,51 @@ func testCatalogueRecordRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOpenOrCreateReportsRecordsFromOlderProtocol(t *testing.T) {
+	record := domain.CatalogueRecord{
+		Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/workspace",
+		CreatedAt: 11, UpdatedAt: 22, LastUsedSeq: 33,
+		TabNames:  []string{"shell", "logs"},
+		Committed: &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
+	}
+	olderProtocol, err := encodeRecordValueForProtocol(record, ports.ProtocolVersion-1)
+	require.NoError(t, err)
+	protocolLess, err := encodeRecordValue(record)
+	require.NoError(t, err)
+	binary.BigEndian.PutUint16(protocolLess[len(catalogueMagic):], protocolLessCatalogueRecordVersion)
+	protocolLess = append(protocolLess[:len(catalogueMagic)+2], protocolLess[len(catalogueMagic)+4:]...)
+
+	currentProtocol, err := encodeRecordValue(record)
+	require.NoError(t, err)
+	for _, tt := range []struct {
+		name         string
+		encoded      []byte
+		incompatible bool
+	}{
+		{name: "current protocol", encoded: currentProtocol},
+		{name: "recorded older protocol", encoded: olderProtocol, incompatible: true},
+		{name: "protocol-less v4 record", encoded: protocolLess, incompatible: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := privateDir(t)
+			store, err := kv.Open(StorePath(dir))
+			require.NoError(t, err)
+			require.NoError(t, store.Set([]byte(record.Name), tt.encoded))
+			require.NoError(t, store.Close())
+
+			opened, err := OpenOrCreate(dir)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, opened.Catalogue.Close()) }()
+			require.Equal(t, []domain.CatalogueRecord{record}, opened.Records)
+			if tt.incompatible {
+				require.Equal(t, []domain.CatalogueRecord{record}, opened.IncompatibleRecords)
+			} else {
+				require.Empty(t, opened.IncompatibleRecords)
+			}
+		})
+	}
+}
+
 func TestDecodeRecordValueRejectsMalformedCheckpointMarker(t *testing.T) {
 	encoded, err := encodeRecordValue(validRecord("work", 1))
 	require.NoError(t, err)
@@ -60,7 +107,7 @@ func TestDecodeRecordValueRejectsMalformedCheckpointMarker(t *testing.T) {
 func checkpointMarkerOffset(t *testing.T, encoded []byte) int {
 	t.Helper()
 	r := valueReader{data: encoded}
-	_, ok := r.take(len(catalogueMagic) + 2 + len(domain.IncarnationID{}))
+	_, ok := r.take(len(catalogueMagic) + 2 + 2 + len(domain.IncarnationID{}))
 	require.True(t, ok)
 	_, ok = r.str()
 	require.True(t, ok)

@@ -28,9 +28,10 @@ var ErrCatalogueUnreadable = errors.New("persist: catalogue unreadable")
 
 // OpenResult is the outcome of opening durable session state at startup.
 type OpenResult struct {
-	Catalogue  *Persister
-	Records    []domain.CatalogueRecord
-	NewInstall bool
+	Catalogue           *Persister
+	Records             []domain.CatalogueRecord
+	IncompatibleRecords []domain.CatalogueRecord
+	NewInstall          bool
 }
 
 func StorePath(dir string) string { return filepath.Join(dir, filename) }
@@ -87,7 +88,11 @@ func OpenOrCreate(dir string) (OpenResult, error) {
 	if err != nil {
 		return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
 	}
-	return OpenResult{Catalogue: catalogue, Records: records, NewInstall: !existed}, nil
+	incompatible, err := catalogue.loadIncompatibleRecords()
+	if err != nil {
+		return OpenResult{}, errors.Join(fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err), catalogue.Close())
+	}
+	return OpenResult{Catalogue: catalogue, Records: records, IncompatibleRecords: incompatible, NewInstall: !existed}, nil
 }
 
 func New(store ports.Store) *Persister { return &Persister{store: store} }
@@ -431,6 +436,33 @@ func (p *Persister) Delete(name string) error {
 	return p.Apply(map[string]*domain.CatalogueRecord{name: nil})
 }
 func (p *Persister) LoadAll() ([]domain.CatalogueRecord, error) { return p.LoadCatalogue() }
+
+func (p *Persister) loadIncompatibleRecords() ([]domain.CatalogueRecord, error) {
+	if p == nil || p.store == nil {
+		return nil, errPersistenceUnavailable
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.terminalLocked(); err != nil {
+		return nil, err
+	}
+	var records []domain.CatalogueRecord
+	var decodeErr error
+	p.store.Range(func(key, value []byte) bool {
+		stored, err := decodeStoredRecordValue(string(key), value)
+		if err != nil {
+			decodeErr = err
+			return false
+		}
+		if stored.protocolVersion != ports.ProtocolVersion {
+			records = append(records, stored.record)
+		}
+		return true
+	})
+	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })
+	return records, decodeErr
+}
+
 func (p *Persister) LoadCatalogue() ([]domain.CatalogueRecord, error) {
 	if p == nil {
 		return []domain.CatalogueRecord{}, nil

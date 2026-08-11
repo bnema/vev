@@ -12,9 +12,15 @@ vev opens named-session state only while holding `$XDG_RUNTIME_DIR/vev/lifecycle
 
 Discard creates a new incarnation and retains the old record and snapshots under `snapshots/quarantine/` until an explicit later purge.
 
+## Protocol upgrades
+
+Each catalogue record stores the protocol version that wrote it. At startup, a record from any other protocol—including a newer protocol after a downgrade—is atomically replaced with a fresh incarnation before the daemon publishes its socket. Only the session name is retained; the working directory, layout, tabs, terminal history, recovery transcript, process-recovery state, and checkpoints are discarded. Records created before protocol tracking are treated the same way.
+
+This reset is per named session and crash-safe. Once the fresh catalogue authority is committed, leftover snapshot objects are no longer authoritative and startup garbage collection can remove them. Catalogue corruption is not treated as a protocol mismatch and remains fail-closed.
+
 ## Incompatible checkpoints
 
-After verifying a VEVM manifest's digest, vev treats any VEVM version mismatch as an incompatible healthy checkpoint. It atomically replaces only that named session's exact healthy checkpoint with a fresh incarnation. The replacement retains the session name and working directory, but has no checkpoint, tabs, terminal history, or recovery transcript.
+After verifying a VEVM manifest's digest, vev treats any VEVM version mismatch as an incompatible healthy checkpoint. It atomically replaces only that named session's exact healthy checkpoint with a fresh incarnation. Unlike a protocol reset, this replacement retains the session name and working directory, but has no checkpoint, tabs, terminal history, or recovery transcript.
 
 Digest mismatches, corruption, validation failures, I/O errors, and ambiguous failures are never reset or purged. The session remains degraded for explicit recovery.
 

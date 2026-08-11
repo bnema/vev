@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing.T) {
+func TestNavigationHandoffDoesNotMutateAfterInitiatorIncarnationChanges(t *testing.T) {
 	tests := []struct {
 		name   string
 		rebind func(*testing.T, *Daemon, *session, *attachedClient)
@@ -39,7 +39,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, source, ac, _ := newManualSessionWithPTYs(t, nil)
-			target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+			target := &session{sessionCore: sessionCore{id: "target", name: "target", incarnation: domain.SessionLifecycleID{1}}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
 				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
 				newTab(nil, domain.Size{Cols: 80, Rows: 23}),
 			}}
@@ -57,7 +57,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 			ended := make(chan struct{})
 			release := make(chan struct{})
 			d.afterActionAttachmentEffectEnded = func(action string) {
-				if action == "test-handoff" {
+				if action == "detach" {
 					close(ended)
 					<-release
 				}
@@ -69,7 +69,7 @@ func TestNavigationHandoffRejectsResumedOrReboundInitiatorIncarnation(t *testing
 			awaitTestCompletion(t, ended, "test handoff did not release its role ticket")
 			tt.rebind(t, d, source, ac)
 			close(release)
-			require.ErrorIs(t, awaitTestValue(t, done, "test handoff did not finish"), errAttachmentTransition)
+			require.NoError(t, awaitTestValue(t, done, "test handoff did not finish"))
 
 			require.Same(t, source, ac.currentSession())
 			target.mu.Lock()

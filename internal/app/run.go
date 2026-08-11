@@ -568,6 +568,33 @@ func runDaemon() (retErr error) {
 	}, lifecycleStartupDependencies(log))
 }
 
+func resetProtocolIncompatibleRecords(ctx context.Context, log *slog.Logger, coordinator *recovery.Coordinator, records, incompatible []domain.CatalogueRecord) ([]domain.CatalogueRecord, error) {
+	if len(incompatible) == 0 {
+		return records, nil
+	}
+	byName := make(map[string]int, len(records))
+	for i := range records {
+		byName[records[i].Name] = i
+	}
+	for _, old := range incompatible {
+		fresh, committed, err := coordinator.ResetProtocolIncompatible(ctx, old.Name, old.IncarnationID)
+		if !committed {
+			if err != nil {
+				return nil, fmt.Errorf("reset protocol-incompatible session %q: %w", old.Name, err)
+			}
+			return nil, fmt.Errorf("reset protocol-incompatible session %q: catalogue authority changed", old.Name)
+		}
+		if index, ok := byName[old.Name]; ok {
+			records[index] = fresh
+		}
+		log.Info("protocol_incompatible_session_reset", "session", old.Name, "stored_incarnation", old.IncarnationID.String())
+		if err != nil {
+			log.Warn("protocol_incompatible_snapshot_cleanup_failed", "session", old.Name, "err", err)
+		}
+	}
+	return records, nil
+}
+
 func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, recoveryMode string) {
 	log.Info("catalogue_validated", "records", len(records), "recovery", recoveryMode)
 }
@@ -666,8 +693,15 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if opened.NewInstall {
 		recoveryMode = "new-install"
 	}
-	logCatalogueRecovery(log, opened.Records, recoveryMode)
 	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, rand.Reader)
+	opened.Records, err = resetProtocolIncompatibleRecords(ctx, log, coordinator, opened.Records, opened.IncompatibleRecords)
+	if err != nil {
+		return errors.Join(fmt.Errorf("vev: reset protocol-incompatible durable sessions: %w", err), opened.Catalogue.Close())
+	}
+	if len(opened.IncompatibleRecords) != 0 {
+		recoveryMode = "protocol-reset"
+	}
+	logCatalogueRecovery(log, opened.Records, recoveryMode)
 	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))
 	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository))
 	log.Info("session persistence enabled", "path", storePath)

@@ -143,7 +143,47 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 			require.Equal(t, first.target.SessionName, request.SessionName)
 			require.Equal(t, tt.wantExactTarget, request.ExactTarget)
 			require.Equal(t, tt.wantTab, request.PreferredTabID)
-			require.Equal(t, ports.EnvironmentPolicyDaemonOwned, request.EnvironmentPolicy)
+			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
+		})
+	}
+}
+
+func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *testing.T) {
+	active := routeTestCandidate(2, ports.RouteOriginLocal)
+	active.originKey = "local"
+	active.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	active.request.NavigationCapabilities = ports.NavigationCapabilityHomePicker
+	active.request.StartupOverlay = ports.StartupOverlaySessionPicker
+
+	for _, tt := range []struct {
+		name    string
+		matched bool
+	}{
+		{name: "matched route", matched: true},
+		{name: "fallback route"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := newRouteLedger()
+			target := routeTestTarget(1)
+			if tt.matched {
+				stored := routeTestCandidate(1, ports.RouteOriginLocal)
+				stored.originKey = "local"
+				stored.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+				stored.request.NavigationCapabilities = ports.NavigationCapabilityHomePicker
+				stored.request.StartupOverlay = ports.StartupOverlaySessionPicker
+				_, err := ledger.commit(stored)
+				require.NoError(t, err)
+			}
+
+			request := ledger.samePeerHandoff(active.request, ports.AttachTarget{
+				Session: target.SessionName, Intent: ports.IntentAttach, ExactTarget: &target,
+				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			})
+
+			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
+			require.Zero(t, request.NavigationCapabilities)
+			require.Equal(t, ports.StartupOverlayNone, request.StartupOverlay)
+			require.NoError(t, validateAttachRequest(request))
 		})
 	}
 }

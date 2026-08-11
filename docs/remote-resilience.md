@@ -37,17 +37,19 @@ shared between clients.
 A picker-selected remote target is a direct handoff with one input pump. Exact
 lifecycle/name identities are carried separately from display labels, and a
 successful daemon-local switch publishes a new committed identity before the
-client republishes its snapshot. These navigation actions and the strict
-handshake layout use protocol v27. Attach handshakes may carry an exact target,
-and successful Welcomes can return the daemon's committed identity.
+client republishes its snapshot. These navigation actions use the strict,
+exact-match protocol version. Attach handshakes may carry an exact target, and
+successful Welcomes can return the daemon's committed identity.
 
 ## Durable record compatibility
 
-The catalogue record format is currently version 4 because records now retain
-stable tab identity metadata. Readers accept version 3 for one-way upgrades, but
-older binaries reject records written at version 4. Back up the vev state
-before a rollback; downgrading after an upgrade can leave newer catalogue
-records unreadable and may require recreating those sessions.
+Catalogue record format version 5 stores the protocol version alongside stable
+tab identity metadata. At daemon startup, version 3 and 4 records and version 5
+records written by another protocol are decoded only to retain their session
+names; all other session state is reset before socket publication. Compatible
+version 5 records restore normally. Older binaries reject version 5 records, so
+a downgrade also resets sessions when the older binary can read the catalogue,
+or fails closed when it cannot. Back up the vev state before a rollback.
 
 Remote catalogues are bounded and versioned. Complete catalogues contain ordered
 tab IDs, names, state, active tab, attachment state, and MRU sequence. Stopped
