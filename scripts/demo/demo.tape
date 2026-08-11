@@ -28,10 +28,7 @@ Sleep 1.1s
 # Keep the initial local shell so the final detach/attach cycle is meaningful.
 Alt+" "
 Sleep 550ms
-Type "RNS"
-Enter
-Sleep 550ms
-Backspace
+Type "RNS "
 Type@95ms "local"
 Enter
 Sleep 1s
@@ -68,9 +65,7 @@ Sleep 1.5s
 #    sleep overlaps the middle scenes. ─────────────────────
 Alt+" "
 Sleep 550ms
-Type "CNS"
-Enter
-Sleep 550ms
+Type "CNS "
 Type@95ms "agents"
 Enter
 Sleep 900ms
@@ -135,9 +130,7 @@ Sleep 500ms
 #    never split. ─────────────────────────────────────────
 Alt+" "
 Sleep 550ms
-Type "CNS"
-Enter
-Sleep 550ms
+Type "CNS "
 Type@95ms "monitor"
 Enter
 Sleep 900ms
