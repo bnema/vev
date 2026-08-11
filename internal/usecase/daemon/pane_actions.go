@@ -87,9 +87,9 @@ func (d *Daemon) spawnPaneOpAt(
 	if err != nil {
 		return paneFocusChange{}, fmt.Errorf("daemon: generating pane identity: %w", err)
 	}
-	command, args := d.ptyCommand(env)
+	launch := d.shellLaunch(env)
 	lifetime := d.newPaneProcessLifetime(tb.ctx)
-	pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
@@ -99,7 +99,7 @@ func (d *Daemon) spawnPaneOpAt(
 		return paneFocusChange{}, domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
 	}
 
-	p := newPaneWithStableID(newID, paneStableID, pty, rectSize(newRect))
+	p := newPaneWithStableIDAndTitle(newID, paneStableID, pty, rectSize(newRect), launch.title)
 	p.rect = newRect
 
 	tb.mu.Lock()

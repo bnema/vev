@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -269,9 +270,9 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 			closeTabs(tabs)
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 		}
-		command, args := d.ptyCommand(env)
+		launch := d.shellLaunch(env)
 		lifetime := d.newPaneProcessLifetime(d.serveCtx)
-		pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
+		pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
 			lifetime.abort()
 			if pty != nil {
@@ -281,7 +282,7 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", err)
 		}
-		tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
+		tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
 		if !lifetime.publish(tb.focusedPane()) {
 			lifetime.abort()
 			_ = pty.Close()
@@ -537,9 +538,9 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	if err != nil {
 		return err
 	}
-	command, args := d.ptyCommand(env)
+	launch := d.shellLaunch(env)
 	lifetime := d.newPaneProcessLifetime(sess.ctx)
-	pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
@@ -548,7 +549,7 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
-	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
+	tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
 	themeClient := ac
 	if themeClient == nil && len(attachments) != 0 {
 		themeClient = attachments[0]
@@ -605,8 +606,12 @@ func newTab(pty ports.PTY, sz domain.Size) *tab {
 }
 
 func newTabWithStableID(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size) *tab {
+	return newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, sz, defaultShellTitle)
+}
+
+func newTabWithStableIDAndTitle(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size, title string) *tab {
 	id := layout.PaneID("pane-1")
-	p := newPaneWithStableID(id, paneStableID, pty, sz)
+	p := newPaneWithStableIDAndTitle(id, paneStableID, pty, sz, title)
 	return &tab{
 		stableID:   tabStableID,
 		tree:       layout.NewTree(id),
@@ -1831,11 +1836,34 @@ func terminalEnvFromEnvironment(env []string) terminalEnv {
 	return terminalEnv{TrueColor: ports.DetectTrueColor(term, colorTerm)}
 }
 
-func (d *Daemon) ptyCommand(env []string) (string, []string) {
+const defaultShellCommand = "/bin/sh"
+const defaultShellTitle = "sh"
+
+type shellLaunchSpec struct {
+	command string
+	args    []string
+	title   string
+}
+
+// shellLaunch resolves the command and display fallback for one normal PTY.
+// Both values come from the same client environment snapshot (or explicit
+// daemon override), so headless catalogues identify the shell they actually run.
+func (d *Daemon) shellLaunch(env []string) shellLaunchSpec {
+	command := shellFromEnvironment(env)
+	var args []string
 	if d.shellOverride {
-		return d.shell, append([]string(nil), d.shellArgs...)
+		command = d.shell
+		args = append([]string(nil), d.shellArgs...)
 	}
-	return shellFromEnvironment(env), nil
+	return shellLaunchSpec{command: command, args: args, title: shellDisplayName(command)}
+}
+
+func shellDisplayName(command string) string {
+	title := filepath.Base(command)
+	if title == "." || title == string(filepath.Separator) || title == "" {
+		return command
+	}
+	return title
 }
 
 func shellFromEnvironment(env []string) string {
@@ -1846,7 +1874,7 @@ func shellFromEnvironment(env []string) string {
 		}
 	}
 	if shell == "" {
-		return "/bin/sh"
+		return defaultShellCommand
 	}
 	return shell
 }

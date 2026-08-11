@@ -739,6 +739,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 
 	rows := make([]ports.RemoteCatalogSession, 0, len(sessions)+len(stopped))
 	for _, sess := range sessions {
+		e.d.refreshSessionFocusedTitles(sess)
 		snap := sess.snapshotView(viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: false})
 		tabs, err := remoteCatalogTabs(snap)
 		if err != nil {

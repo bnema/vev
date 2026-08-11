@@ -163,6 +163,10 @@ func newPane(id layout.PaneID, pty ports.PTY, sz domain.Size) *pane {
 }
 
 func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size) *pane {
+	return newPaneWithStableIDAndTitle(id, stableID, pty, sz, defaultShellTitle)
+}
+
+func newPaneWithStableIDAndTitle(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size, title string) *pane {
 	screen := vt.NewScreenWithHistory(sz.Cols, sz.Rows, vt.HistoryConfig{MaxRows: defaultScrollbackRows, MaxCells: defaultScrollbackCells})
 	return &pane{
 		id:       id,
@@ -171,6 +175,6 @@ func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz do
 		screen:   screen,
 		history:  screen.History(),
 		rect:     domain.Rect{Width: sz.Cols, Height: sz.Rows},
-		title:    paneTitleState{displayFallback: "sh"},
+		title:    paneTitleState{displayFallback: title},
 	}
 }

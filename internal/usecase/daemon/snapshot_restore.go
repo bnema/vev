@@ -260,9 +260,9 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 			return nil, fmt.Errorf("snapshot: generating pane identity: %w", err)
 		}
 	}
-	command, args := d.ptyCommand(restoreEnv)
+	launch := d.shellLaunch(restoreEnv)
 	lifetime := d.newPaneProcessLifetime(ctx, tabCtx)
-	pty, err := d.ptys.Open(lifetime.ctx, command, args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
@@ -270,7 +270,7 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 		}
 		return nil, err
 	}
-	p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, restorePTYSize(contentRect, tabSize))
+	p := newPaneWithStableIDAndTitle(paneSnap.ID, paneStableID, pty, restorePTYSize(contentRect, tabSize), launch.title)
 	if !lifetime.publish(p) {
 		_ = pty.Close()
 		return nil, lifetime.ctx.Err()
