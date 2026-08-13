@@ -43,6 +43,62 @@ func TestSolveSplitGeometry(t *testing.T) {
 	}
 }
 
+func TestRepeatedSplitHalvesFocusedPane(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		dir    Direction
+		area   domain.Rect
+		first  map[PaneID]domain.Rect
+		second map[PaneID]domain.Rect
+	}{
+		{
+			name: "horizontal",
+			dir:  Right,
+			area: domain.Rect{Width: 123, Height: 5},
+			first: map[PaneID]domain.Rect{
+				"a": {Width: 61, Height: 5},
+				"b": {X: 62, Width: 61, Height: 5},
+			},
+			second: map[PaneID]domain.Rect{
+				"a": {Width: 61, Height: 5},
+				"b": {X: 62, Width: 30, Height: 5},
+				"c": {X: 93, Width: 30, Height: 5},
+			},
+		},
+		{
+			name: "vertical",
+			dir:  Down,
+			area: domain.Rect{Width: 40, Height: 15},
+			first: map[PaneID]domain.Rect{
+				"a": {Width: 40, Height: 7},
+				"b": {Y: 8, Width: 40, Height: 7},
+			},
+			second: map[PaneID]domain.Rect{
+				"a": {Width: 40, Height: 7},
+				"b": {Y: 8, Width: 40, Height: 3},
+				"c": {Y: 12, Width: 40, Height: 3},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := NewTree("a")
+			require.NoError(t, tr.Split("a", tt.dir, true, "b", tt.area))
+			first, ok := Solve(tr.Root, tt.area)
+			require.True(t, ok)
+			require.Equal(t, tt.first, contents(first))
+
+			require.NoError(t, tr.Split("b", tt.dir, true, "c", tt.area))
+			second, ok := Solve(tr.Root, tt.area)
+			require.True(t, ok)
+			require.Equal(t, tt.second, contents(second))
+		})
+	}
+}
+
 func TestSolveNestedTrees(t *testing.T) {
 	t.Parallel()
 	root := &Node{Kind: Split, Dir: Horizontal, Children: []*Node{

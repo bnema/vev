@@ -224,6 +224,13 @@ func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID
 			newLeaf := NewLeaf(newID)
 			if n.Kind == Split && n.Dir == axis {
 				normalizeChildWeightsFromArea(n, area)
+				targetExtent := childAreas[i].Width
+				if axis == Vertical {
+					targetExtent = childAreas[i].Height
+				}
+				firstExtent := (targetExtent - 1) / 2
+				child.Weight = float64(firstExtent)
+				newLeaf.Weight = float64(targetExtent - 1 - firstExtent)
 				at := i
 				if after {
 					at++
