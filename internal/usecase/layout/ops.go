@@ -486,13 +486,28 @@ func closeNode(n *Node, target PaneID) (*Node, bool) {
 		return n, false
 	}
 	removed := false
+	removedChild := -1
+	removedWeight := 0.0
 	children := n.Children[:0]
-	for _, child := range n.Children {
+	for i, child := range n.Children {
 		newChild, didRemove := closeNode(child, target)
 		removed = removed || didRemove
 		if newChild != nil {
 			children = append(children, newChild)
+			continue
 		}
+		removedChild = i
+		removedWeight = effectiveWeight(child.Weight)
+	}
+	if n.Kind == Split && removedChild >= 0 && len(children) > 0 {
+		for _, child := range children {
+			child.Weight = effectiveWeight(child.Weight)
+		}
+		recipient := removedChild - 1
+		if recipient < 0 {
+			recipient = 0
+		}
+		children[recipient].Weight += removedWeight
 	}
 	n.Children = children
 	if !removed {

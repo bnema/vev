@@ -266,6 +266,59 @@ func TestWeightToggleStackClearsMemberWeights(t *testing.T) {
 	}
 }
 
+func TestClosePreservesFreedEqualizedShareUntilNextEqualize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		dir        SplitDir
+		area       domain.Rect
+		before     map[PaneID]int
+		afterClose map[PaneID]int
+		afterEQP   map[PaneID]int
+		extents    func([]Placement) map[PaneID]int
+	}{
+		{
+			name:       "horizontal",
+			dir:        Horizontal,
+			area:       domain.Rect{Width: 92, Height: 5},
+			before:     map[PaneID]int{"a": 30, "b": 30, "c": 30},
+			afterClose: map[PaneID]int{"a": 30, "b": 61},
+			afterEQP:   map[PaneID]int{"a": 46, "b": 45},
+			extents:    placementWidths,
+		},
+		{
+			name:       "vertical",
+			dir:        Vertical,
+			area:       domain.Rect{Width: 40, Height: 17},
+			before:     map[PaneID]int{"a": 5, "b": 5, "c": 5},
+			afterClose: map[PaneID]int{"a": 5, "b": 11},
+			afterEQP:   map[PaneID]int{"a": 8, "b": 8},
+			extents:    placementHeights,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := &Tree{Root: split(tt.dir, NewLeaf("a"), NewLeaf("b"), NewLeaf("c")), Focus: "c"}
+			require.NoError(t, tr.Equalize(tt.area))
+			before, ok := Solve(tr.Root, tt.area)
+			require.True(t, ok)
+			require.Equal(t, tt.before, tt.extents(before))
+
+			require.NoError(t, tr.Close("c"))
+			afterClose, ok := Solve(tr.Root, tt.area)
+			require.True(t, ok)
+			require.Equal(t, tt.afterClose, tt.extents(afterClose))
+
+			require.NoError(t, tr.Equalize(tt.area))
+			afterEQP, ok := Solve(tr.Root, tt.area)
+			require.True(t, ok)
+			require.Equal(t, tt.afterEQP, tt.extents(afterEQP))
+		})
+	}
+}
+
 func TestWeightClosePromotionTransfersContainerShare(t *testing.T) {
 	t.Parallel()
 
