@@ -159,7 +159,7 @@ func TestWeightedSplitRecursiveMinima(t *testing.T) {
 	}
 }
 
-func TestWeightSameAxisSplitNormalizesSolvedExtentsBeforeInsertion(t *testing.T) {
+func TestWeightSameAxisSplitHalvesTargetSolvedExtent(t *testing.T) {
 	t.Parallel()
 
 	tr := &Tree{Root: split(Horizontal, weightedLeaf("a", 2), weightedLeaf("b", 1)), Focus: "a"}
@@ -167,8 +167,8 @@ func TestWeightSameAxisSplitNormalizesSolvedExtentsBeforeInsertion(t *testing.T)
 	require.NoError(t, tr.Split("b", Right, true, "c", area))
 
 	require.Equal(t, 54.0, tr.Root.Children[0].Weight)
-	require.Equal(t, 27.0, tr.Root.Children[1].Weight)
-	require.Zero(t, tr.Root.Children[2].Weight)
+	require.Equal(t, 13.0, tr.Root.Children[1].Weight)
+	require.Equal(t, 13.0, tr.Root.Children[2].Weight)
 	placements, ok := Solve(tr.Root, area)
 	require.True(t, ok)
 	require.Equal(t, map[PaneID]int{"a": 40, "b": 20, "c": 20}, placementWidths(placements))
