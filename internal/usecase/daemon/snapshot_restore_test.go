@@ -232,7 +232,6 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	require.NotNil(t, restored)
 	require.False(t, restored.snapDirty.Load(), "a loaded generation must begin clean")
 	require.Equal(t, uint64(9), restored.snapshotPublishedGeneration, "the loaded manifest is the repository generation head")
-	require.True(t, restored.terminal.TrueColor, "restored sessions must retain startup terminal capability for future panes")
 	require.Equal(t, 0, testAttachmentTabIndex(restored))
 	require.Equal(t, "/snapshot/cwd", restored.cwd)
 	require.Len(t, restored.tabs, 1)
@@ -321,7 +320,7 @@ func TestSnapshotRestoreUsesDaemonTerminalCapabilities(t *testing.T) {
 				"XDG_RUNTIME_DIR=/run/user/1000",
 				"WAYLAND_DISPLAY=wayland-1",
 			},
-			wantTerm:       "TERM=xterm-direct",
+			wantTerm:       "TERM=xterm-256color",
 			wantColorTerm:  "COLORTERM=truecolor",
 			notWantEntries: []string{"TERM=xterm-kitty"},
 		},
@@ -334,7 +333,8 @@ func TestSnapshotRestoreUsesDaemonTerminalCapabilities(t *testing.T) {
 				"WAYLAND_DISPLAY=wayland-1",
 			},
 			wantTerm:       "TERM=xterm-256color",
-			notWantEntries: []string{"COLORTERM=old", "COLORTERM=truecolor"},
+			wantColorTerm:  "COLORTERM=truecolor",
+			notWantEntries: []string{"COLORTERM=old"},
 		},
 	}
 

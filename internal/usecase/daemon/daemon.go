@@ -1249,7 +1249,7 @@ func (e *protoErr) Error() string { return e.text }
 // unlocking d.mu before returning, including every error path. It publishes
 // terminal and role state before releasing d.mu, then defers coordinator
 // cleanup so obsolete workers never delay the new handshake.
-func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) (*attachedClient, error) {
+func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, h ports.Hello) (*attachedClient, error) {
 	initialTabIndex := -1
 	if h.RemoteTarget != nil {
 		var ok bool
@@ -1276,8 +1276,12 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	if h.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
 		sess.env = copyEnvironment(h.Env)
 	}
-	sess.terminal = term
 	sess.mu.Unlock()
+	terminalCapabilities := ports.DetectTerminalCapabilities(h.Env)
+	if h.TrueColor && !terminalCapabilities.TrueColor() {
+		terminalCapabilities.ColorMode = ports.TerminalColorTrueColor
+		terminalCapabilities.ColorSource = ports.TerminalCapabilityDeclared
+	}
 	opts := attachClientOptions{
 		clientID:               h.ClientID,
 		resumeCapable:          true,
@@ -1285,6 +1289,8 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		navigationCapabilities: h.NavigationCapabilities,
 		startupOverlay:         h.StartupOverlay,
 		remoteOrigin:           h.RemoteOrigin,
+		terminalCapabilities:   terminalCapabilities,
+		capabilitiesSet:        true,
 	}
 	if opts.remoteOrigin == "" && h.RemoteTarget != nil {
 		opts.remoteOrigin = h.RemoteTarget.DisplayOrigin
@@ -1420,7 +1426,6 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	if !sz.Valid() {
 		return nil, nil, &protoErr{ports.ErrInternal, "invalid terminal size"}
 	}
-	term := terminalEnv{TrueColor: h.TrueColor}
 	if h.Intent == ports.IntentResume && h.ResumeToken == 0 {
 		return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is required"}
 	}
@@ -1503,12 +1508,12 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	switch h.Intent {
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, sz, term, h.Env)
+		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, sz, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		ac, err := d.finishRouteAttach(sess, tr, sz, term, h, true, true)
+		ac, err := d.finishRouteAttach(sess, tr, sz, h, true, true)
 		return sess, ac, err
 
 	case ports.IntentNew:
@@ -1524,12 +1529,12 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, sz, term, h.Env)
+		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, sz, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		ac, err := d.finishRouteAttach(sess, tr, sz, term, h, true, true)
+		ac, err := d.finishRouteAttach(sess, tr, sz, h, true, true)
 		return sess, ac, err
 
 	case ports.IntentAttach:
@@ -1547,14 +1552,14 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 				env = copyEnvironment(d.baseEnv)
 			}
 			var err error
-			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, term, env, stopped.tabNames)
+			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, env, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
 			}
 			created = true
 		}
-		ac, err := d.finishRouteAttach(sess, tr, sz, term, h, created, false)
+		ac, err := d.finishRouteAttach(sess, tr, sz, h, created, false)
 		return sess, ac, err
 
 	default:

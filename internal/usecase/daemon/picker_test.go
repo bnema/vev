@@ -1415,11 +1415,8 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	d.resumeStoppedAndSwitch(sess, ac, picker.Target{Name: "old", Stopped: true})
 	got := ac.currentSession()
 	require.NotNil(t, got)
-	got.mu.Lock()
-	require.True(t, got.terminal.TrueColor)
-	got.mu.Unlock()
 	require.Len(t, opens, 2)
-	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "TERM=xterm-256color")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 	require.Eventually(t, func() bool {

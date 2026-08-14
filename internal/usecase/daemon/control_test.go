@@ -649,7 +649,6 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	source.mu.Lock()
 	source.cwd = "/tmp/work"
 	source.env = []string{"INHERITED=yes"}
-	source.terminal = terminalEnv{TrueColor: true}
 	source.tabs[0].size = domain.Size{Cols: 118, Rows: 38}
 	source.mu.Unlock()
 
@@ -664,7 +663,6 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	require.Empty(t, created.snapshotAttachmentsLocked())
 	require.Equal(t, "/tmp/work", created.cwd)
 	require.Equal(t, []string{"INHERITED=yes"}, created.env)
-	require.True(t, created.terminal.TrueColor)
 	tb := created.tabs[0]
 	created.mu.Unlock()
 	tb.mu.Lock()

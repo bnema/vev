@@ -176,7 +176,6 @@ func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool
 		req.target.activateAttachmentViewLocked(req.next, req.targetTabIndex)
 	}
 	if req.copySourceEnvironment && publication.source != nil && req.target != nil {
-		req.target.terminal = publication.source.terminal
 		req.target.env = copyEnvironment(publication.source.env)
 	}
 	return req.preserveAttachment

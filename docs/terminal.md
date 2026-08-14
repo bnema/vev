@@ -2,7 +2,9 @@
 
 ## Color
 
-When the client reports truecolor, new panes get `TERM=xterm-direct` and `COLORTERM=truecolor`; otherwise `TERM=xterm-256color`. The capability travels inside vev's own protocol, so it works over SSH without `SendEnv`/`AcceptEnv`. Panes restored from a snapshot derive the same capability from the daemon's startup environment until a client attaches and refreshes it.
+Panes always receive vev's stable compatibility contract: `TERM=xterm-256color`, `COLORTERM=truecolor`, and `TERM_PROGRAM=vev`. This contract does not mirror the terminal attached outside vev.
+
+Each attachment independently detects its output color support from terminal environment signals. vev preserves RGB pane state and converts it to the xterm 256-color palette only for attachments that do not advertise truecolor. An attachment reporting a 256-color terminal receives a one-time warning before its first paint. Environment signals are advisory—especially through nested multiplexers—and do not advertise Kitty graphics support.
 
 ## Environment
 

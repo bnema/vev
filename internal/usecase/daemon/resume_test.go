@@ -1607,11 +1607,10 @@ func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
 	sess.mu.Lock()
 	future := sess.tabs[1].focusedPane()
 	futureTabID, futurePaneID := sess.tabs[1].stableID, future.stableID
-	require.True(t, sess.terminal.TrueColor)
 	require.Equal(t, resumeHello.Env, sess.env)
 	sess.mu.Unlock()
 	require.Equal(t, []string{"/bin/sh", "/usr/bin/fish"}, commands)
-	require.Equal(t, []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
+	require.Equal(t, []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
 }
 
 func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {

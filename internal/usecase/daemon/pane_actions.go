@@ -48,7 +48,6 @@ func (d *Daemon) spawnPaneOpAt(
 
 	sess.mu.Lock()
 	name, cwd := sess.name, sess.cwd
-	term := sess.terminal
 	env := copyEnvironment(sess.env)
 	sess.mu.Unlock()
 
@@ -89,7 +88,7 @@ func (d *Daemon) spawnPaneOpAt(
 	}
 	launch := d.shellLaunch(env)
 	lifetime := d.newPaneProcessLifetime(tb.ctx)
-	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, rectSize(newRect))
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
