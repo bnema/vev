@@ -37,6 +37,46 @@ func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
 	require.Equal(t, uint64(2), stream.outstanding())
 }
 
+func TestOutputStateStreamUsesTerminalColorProfile(t *testing.T) {
+	frame := renderer.NewFrame(1, 1)
+	frame.Set(0, 0, renderer.Cell{Rune: 'X', Style: renderer.Style{
+		Foreground:           -1,
+		Background:           -1,
+		HasForegroundRGB:     true,
+		ForegroundRGB:        renderer.RGB{R: 255, G: 0, B: 0},
+		HasBackgroundRGB:     true,
+		BackgroundRGB:        renderer.RGB{R: 0, G: 0, B: 255},
+		HasUnderlineColorRGB: true,
+		UnderlineColorRGB:    renderer.RGB{R: 0, G: 255, B: 0},
+	}})
+
+	cases := []struct {
+		name         string
+		capabilities ports.TerminalCapabilities
+		want         string
+	}{
+		{
+			name:         "truecolor",
+			capabilities: ports.TerminalCapabilities{ColorMode: ports.TerminalColorTrueColor},
+			want:         "\x1b[1;1H\x1b[0;38;2;255;0;0;48;2;0;0;255;58;2;0;255;0mX\x1b[0m",
+		},
+		{
+			name:         "indexed 256",
+			capabilities: ports.TerminalCapabilities{ColorMode: ports.TerminalColorIndexed256},
+			want:         "\x1b[1;1H\x1b[0;38;5;196;48;5;21;58;5;46mX\x1b[0m",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := newOutputStateStreamForCapabilities(tc.capabilities)
+			prepared, err := stream.prepare(frame, nil, true)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(prepared.data))
+		})
+	}
+}
+
 func TestOutputStateStreamCapacityProbeDoesNotRaceWithSend(t *testing.T) {
 	stream := newOutputStateStream(1)
 	frame := renderer.NewFrame(3, 1)

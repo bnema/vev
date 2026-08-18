@@ -40,7 +40,7 @@ func TestFinishRouteAttachRollsBackCreatedSession(t *testing.T) {
 	// The caller must hold d.mu on entry; finishRouteAttach releases it on
 	// both success and error paths before returning.
 	d.mu.Lock()
-	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, terminalEnv{}, hello, true, true)
+	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, hello, true, true)
 	var protocol *protoErr
 	require.ErrorAs(t, err, &protocol)
 	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)

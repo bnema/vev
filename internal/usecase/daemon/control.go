@@ -480,7 +480,7 @@ func (e controlExec) CreateSessionNamed(name string) error {
 		return command.ErrInvalidArguments
 	}
 	e.sess.mu.Lock()
-	cwd, term, env := e.sess.cwd, e.sess.terminal, copyEnvironment(e.sess.env)
+	cwd, env := e.sess.cwd, copyEnvironment(e.sess.env)
 	e.sess.mu.Unlock()
 	size := e.sess.fullViewportSize()
 	e.d.mu.Lock()
@@ -491,7 +491,7 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	if e.d.nameLiveOrStoppedLocked(name) {
 		return errSessionNameInUse
 	}
-	_, err := e.d.createSessionLocked(name, false, cwd, size, term, env)
+	_, err := e.d.createSessionLocked(name, false, cwd, size, env)
 	return err
 }
 func (e controlExec) CloseTab() error {

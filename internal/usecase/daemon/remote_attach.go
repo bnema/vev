@@ -48,7 +48,7 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote tab no longer exists"}
 		}
-		ac, err := d.finishRouteAttach(live, tr, h.Size, terminalEnv{TrueColor: h.TrueColor}, h, false, false)
+		ac, err := d.finishRouteAttach(live, tr, h.Size, h, false, false)
 		return live, ac, err
 	}
 
@@ -71,12 +71,12 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 	// trusted for this branch.
 	env := copyEnvironment(d.baseEnv)
 	cwd := d.dirOrHome(stopped.cwd)
-	sess, err := d.createSessionLockedWithMode(target.SessionName, false, cwd, h.Size, terminalEnv{TrueColor: h.TrueColor}, env, stopped.tabNames)
+	sess, err := d.createSessionLockedWithMode(target.SessionName, false, cwd, h.Size, env, stopped.tabNames)
 	if err != nil {
 		d.mu.Unlock()
 		return nil, nil, err
 	}
-	ac, err := d.finishRouteAttach(sess, tr, h.Size, terminalEnv{TrueColor: h.TrueColor}, h, true, false)
+	ac, err := d.finishRouteAttach(sess, tr, h.Size, h, true, false)
 	return sess, ac, err
 }
 
@@ -113,8 +113,8 @@ func (d *Daemon) sendCommittedRouteIdentityForAttachment(token attachmentConnect
 	return token.sendControl(ports.Frame{Type: ports.MsgCommittedRouteIdentity, Payload: payload})
 }
 
-func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello, routeCreated, purge bool) (*attachedClient, error) {
-	ac, err := d.finishAttach(sess, tr, sz, term, h)
+func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, h ports.Hello, routeCreated, purge bool) (*attachedClient, error) {
+	ac, err := d.finishAttach(sess, tr, sz, h)
 	if err != nil && routeCreated {
 		if cleanupErr := d.killSession(sess, ports.ReasonSessionKilled, purge); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)

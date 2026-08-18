@@ -639,7 +639,6 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	if h.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
 		sess.env = copyEnvironment(h.Env)
 	}
-	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
 	sess.mu.Unlock()
 	preferredTabIndex := preferredTabIndex(sess, h.PreferredTabID)
 	// Resume preparation used sendMu -> d.mu, but freeze/drain must run with

@@ -25,10 +25,6 @@ var (
 	errSessionNameInUse    = errors.New("name already in use")
 )
 
-type terminalEnv struct {
-	TrueColor bool
-}
-
 type session struct {
 	sessionCore
 
@@ -62,7 +58,6 @@ type session struct {
 	clipboardQueue         []clipboardForward
 	clipboardWorkerRunning bool
 	cwd                    string
-	terminal               terminalEnv
 	// env is the authoritative immutable environment snapshot for future PTY children.
 	// It is guarded by mu and is always copied on ingress and egress.
 	env          []string
@@ -187,11 +182,11 @@ func (d *Daemon) touchMRU(entry *session) {
 	entry.mu.Unlock()
 }
 
-func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithMode(name, ephemeral, cwd, sz, term, env, restoredTabNames...)
+func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, env []string, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithMode(name, ephemeral, cwd, sz, env, restoredTabNames...)
 }
 
-func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
+func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, sz domain.Size, env []string, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
 	if _, reserved := d.creating[name]; reserved {
 		return nil, errSessionNameInUse
@@ -272,7 +267,7 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 		}
 		launch := d.shellLaunch(env)
 		lifetime := d.newPaneProcessLifetime(d.serveCtx)
-		pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
+		pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, tbSize)
 		if err != nil {
 			lifetime.abort()
 			if pty != nil {
@@ -321,7 +316,6 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 		cancel:       cancel,
 		tabs:         tabs,
 		cwd:          cwd,
-		terminal:     term,
 		env:          env,
 		snapshotWake: d.snapshotWake,
 	}
@@ -430,7 +424,6 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Lock()
 	cwd := from.cwd
-	term := from.terminal
 	env := copyEnvironment(from.env)
 	_, attached := from.attachments[ac]
 	from.mu.Unlock()
@@ -439,7 +432,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		return errors.New("client detached")
 	}
 
-	newSess, err := d.createSessionLockedWithMode(name, false, cwd, sz, term, env)
+	newSess, err := d.createSessionLockedWithMode(name, false, cwd, sz, env)
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -500,10 +493,10 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 				return nil, errSessionNameInUse
 			}
 			source.mu.Lock()
-			cwd, term, env := source.cwd, source.terminal, copyEnvironment(source.env)
+			cwd, env := source.cwd, copyEnvironment(source.env)
 			source.mu.Unlock()
 			var createErr error
-			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.sizeSnapshot(), term, env)
+			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.sizeSnapshot(), env)
 			return created, createErr
 		},
 	})
@@ -529,7 +522,7 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 		return errors.New("daemon is shutting down")
 	}
 	from.mu.Lock()
-	cwd, term, env := from.cwd, from.terminal, copyEnvironment(from.env)
+	cwd, env := from.cwd, copyEnvironment(from.env)
 	_, attached := from.attachments[ac]
 	from.mu.Unlock()
 	if !attached {
@@ -537,7 +530,7 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 		return errors.New("client detached")
 	}
 	name := d.allocEphemeralNameLocked()
-	newSess, err := d.createSessionLockedWithMode(name, true, cwd, sz, term, env)
+	newSess, err := d.createSessionLockedWithMode(name, true, cwd, sz, env)
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -575,11 +568,11 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(token attachmentCo
 			}
 			source := token.sess
 			source.mu.Lock()
-			cwd, term, env := source.cwd, source.terminal, copyEnvironment(source.env)
+			cwd, env := source.cwd, copyEnvironment(source.env)
 			source.mu.Unlock()
 			name := d.allocEphemeralNameLocked()
 			var createErr error
-			created, createErr = d.createSessionLockedWithMode(name, true, cwd, token.ac.sizeSnapshot(), term, env)
+			created, createErr = d.createSessionLockedWithMode(name, true, cwd, token.ac.sizeSnapshot(), env)
 			return created, createErr
 		},
 	})
@@ -604,7 +597,6 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	sess.mu.Lock()
 	name := sess.name
 	cwd := sess.cwd
-	term := sess.terminal
 	env := copyEnvironment(sess.env)
 	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
@@ -615,7 +607,7 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	}
 	launch := d.shellLaunch(env)
 	lifetime := d.newPaneProcessLifetime(sess.ctx)
-	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, tbSize)
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
@@ -1881,8 +1873,8 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 
 // childEnv retains the daemon-environment helper for daemon-local legacy callers.
 // Interactive PTY launch paths use childEnvFrom with their session snapshot.
-func (d *Daemon) childEnv(name, tabStableID, paneStableID string, term terminalEnv) []string {
-	return childEnvFrom(d.baseEnv, name, tabStableID, paneStableID, term)
+func (d *Daemon) childEnv(name, tabStableID, paneStableID string) []string {
+	return childEnvFrom(d.baseEnv, name, tabStableID, paneStableID)
 }
 
 func copyEnvironment(env []string) []string {
@@ -1892,23 +1884,6 @@ func copyEnvironment(env []string) []string {
 func environmentEntry(entry string) (name, value string, ok bool) {
 	name, value, ok = strings.Cut(entry, "=")
 	return name, value, ok
-}
-
-func terminalEnvFromEnvironment(env []string) terminalEnv {
-	var term, colorTerm string
-	for _, entry := range env {
-		name, value, ok := environmentEntry(entry)
-		if !ok {
-			continue
-		}
-		switch name {
-		case "TERM":
-			term = value
-		case "COLORTERM":
-			colorTerm = value
-		}
-	}
-	return terminalEnv{TrueColor: ports.DetectTrueColor(term, colorTerm)}
 }
 
 const defaultShellCommand = "/bin/sh"
@@ -1956,7 +1931,7 @@ func shellFromEnvironment(env []string) string {
 
 // childEnvFrom preserves the supplied environment byte-for-byte and in order,
 // except for exact reserved variable names which vev owns.
-func childEnvFrom(env []string, name, tabStableID, paneStableID string, term terminalEnv) []string {
+func childEnvFrom(env []string, name, tabStableID, paneStableID string) []string {
 	out := make([]string, 0, len(env)+4)
 	for _, entry := range env {
 		key, _, ok := environmentEntry(entry)
@@ -1965,11 +1940,7 @@ func childEnvFrom(env []string, name, tabStableID, paneStableID string, term ter
 		}
 		out = append(out, entry)
 	}
-	if term.TrueColor {
-		out = append(out, "TERM=xterm-direct", "COLORTERM=truecolor")
-	} else {
-		out = append(out, "TERM=xterm-256color")
-	}
+	out = append(out, "TERM=xterm-256color", "COLORTERM=truecolor")
 	return append(out,
 		"TERM_PROGRAM=vev",
 		"VEV=session="+escapeVEVComponent(name)+",tab="+tabStableID+",pane="+paneStableID,

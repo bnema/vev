@@ -220,7 +220,7 @@ func assertChildEnvironment(t *testing.T, tr ports.Transport, p *pump, sz domain
 		"SHELL=" + filepath.Base(wantShell),
 		"XDG_RUNTIME_DIR=" + wantRuntimeDir,
 		"WAYLAND_DISPLAY=" + wantWayland,
-		"TERM=xterm-direct",
+		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"TERM_PROGRAM=vev",
 		"VEV_PREFIX=session=environment,tab=",

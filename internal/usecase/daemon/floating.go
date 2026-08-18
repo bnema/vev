@@ -350,7 +350,7 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 
 func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.FloatingConfig, userOpen bool) (floatingLaunchSpec, error) {
 	sess.mu.Lock()
-	name, cwd, term, sessCtx := sess.name, sess.cwd, sess.terminal, sess.ctx
+	name, cwd, sessCtx := sess.name, sess.cwd, sess.ctx
 	env := copyEnvironment(sess.env)
 	sess.mu.Unlock()
 	tb.mu.Lock()
@@ -387,7 +387,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		size:         size,
 		geometry:     geometry,
 		paneStableID: paneStableID,
-		env:          childEnvFrom(env, name, tabStableID, paneStableID, term),
+		env:          childEnvFrom(env, name, tabStableID, paneStableID),
 		command:      launch.command,
 		args:         launch.args,
 		fallback:     floatingCommandFallback(cfg.Command, launch.command),

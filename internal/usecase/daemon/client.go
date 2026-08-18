@@ -42,6 +42,7 @@ type attachedClient struct {
 	// remoteOrigin is attachment-specific presentation metadata supplied by a
 	// validated picker handoff; it never participates in routing.
 	remoteOrigin           string
+	terminalCapabilities   ports.TerminalCapabilities
 	navigationCapabilities ports.NavigationCapabilities
 	startupOverlay         ports.StartupOverlay
 	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
@@ -628,6 +629,8 @@ type attachClientOptions struct {
 	resumeCapable          bool
 	maxOutputInFlight      uint8
 	remoteOrigin           string
+	terminalCapabilities   ports.TerminalCapabilities
+	capabilitiesSet        bool
 	navigationCapabilities ports.NavigationCapabilities
 	startupOverlay         ports.StartupOverlay
 }
@@ -657,6 +660,16 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", sess.name, "resume", opts.resumeCapable)
+	if ac.terminalCapabilities.ColorSource == ports.TerminalCapabilityDeclared && !ac.terminalCapabilities.TrueColor() {
+		d.publishToast(ac, domain.Notification{
+			Code:      domain.NoticeUser,
+			Severity:  domain.NoticeWarn,
+			Message:   "TrueColor was not detected; rendering with 256 colors.",
+			Time:      d.clock.Now(),
+			Count:     1,
+			SessionID: sess.id,
+		})
+	}
 	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
 }
 
@@ -668,7 +681,10 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
 	}
-	output := newOutputStateStream(opts.maxOutputInFlight)
+	if !opts.capabilitiesSet {
+		opts.terminalCapabilities = ports.TerminalCapabilities{ColorMode: ports.TerminalColorTrueColor}
+	}
+	output := newOutputStateStreamForCapabilities(opts.terminalCapabilities, opts.maxOutputInFlight)
 	ac := &attachedClient{
 		tr:                     tr,
 		output:                 output,
@@ -676,6 +692,7 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		view:                   attachmentView{windowRows: sz.Rows, windowSet: true},
 		clientID:               opts.clientID,
 		remoteOrigin:           opts.remoteOrigin,
+		terminalCapabilities:   opts.terminalCapabilities,
 		navigationCapabilities: opts.navigationCapabilities,
 		startupOverlay:         opts.startupOverlay,
 		resumeCapable:          opts.resumeCapable,

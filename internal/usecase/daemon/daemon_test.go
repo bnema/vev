@@ -68,10 +68,14 @@ func newTestDaemon(t testing.TB, ptys ports.PTYFactory, clk ports.Clock) *Daemon
 	return newTestDaemonWithCleanup(t, ptys, clk, true)
 }
 
-func createSessionForTest(d *Daemon, name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
+type terminalEnv struct {
+	TrueColor bool
+}
+
+func createSessionForTest(d *Daemon, name string, ephemeral bool, cwd string, sz domain.Size, _ terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.createSessionLocked(name, ephemeral, cwd, sz, term, env, restoredTabNames...)
+	return d.createSessionLocked(name, ephemeral, cwd, sz, env, restoredTabNames...)
 }
 
 func newTestDaemonWithCleanup(t testing.TB, ptys ports.PTYFactory, clk ports.Clock, registerCleanup bool) *Daemon {

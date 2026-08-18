@@ -1239,7 +1239,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 func TestChildEnvEscapesLegacySessionName(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 
-	got := d.childEnv("legacy,name=value", "t_alpha", "p_beta", terminalEnv{TrueColor: true})
+	got := d.childEnv("legacy,name=value", "t_alpha", "p_beta")
 
 	require.Contains(t, got, "VEV=session=legacy%2Cname%3Dvalue,tab=t_alpha,pane=p_beta")
 }
@@ -1285,7 +1285,7 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 	require.NotContains(t, gotEnv, "COLORTERM=old")
 	require.NotContains(t, gotEnv, "TERM_PROGRAM=old")
 	require.NotContains(t, gotEnv, "VEV=old")
-	require.Contains(t, gotEnv, "TERM=xterm-direct")
+	require.Contains(t, gotEnv, "TERM=xterm-256color")
 	require.Contains(t, gotEnv, "COLORTERM=truecolor")
 	require.Contains(t, gotEnv, "TERM_PROGRAM=vev")
 	require.Contains(t, gotEnv, "VEV=session=work,tab="+tabStableID+",pane="+paneStableID)
@@ -1385,7 +1385,7 @@ func TestChildEnvTrueColorCapability(t *testing.T) {
 			term:    terminalEnv{TrueColor: true},
 			wantContain: []string{
 				"KEEP=1",
-				"TERM=xterm-direct",
+				"TERM=xterm-256color",
 				"COLORTERM=truecolor",
 				"TERM_PROGRAM=vev",
 				"VEV=session=work,tab=t_alpha,pane=p_beta",
@@ -1393,11 +1393,10 @@ func TestChildEnvTrueColorCapability(t *testing.T) {
 			wantNotContain: []string{"TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"},
 		},
 		{
-			name:           "omits truecolor when unsupported",
+			name:           "uses the fixed pane contract",
 			baseEnv:        []string{"COLORTERM=old"},
-			term:           terminalEnv{},
-			wantContain:    []string{"TERM=xterm-256color", "TERM_PROGRAM=vev"},
-			wantNotContain: []string{"TERM=xterm-direct", "COLORTERM=truecolor"},
+			wantContain:    []string{"TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev"},
+			wantNotContain: []string{"TERM=xterm-direct"},
 		},
 	}
 
@@ -1406,7 +1405,7 @@ func TestChildEnvTrueColorCapability(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
 			d.baseEnv = tt.baseEnv
 
-			got := d.childEnv("work", "t_alpha", "p_beta", tt.term)
+			got := d.childEnv("work", "t_alpha", "p_beta")
 
 			for _, want := range tt.wantContain {
 				require.Contains(t, got, want)
@@ -1452,11 +1451,11 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 		d.sessWg.Wait()
 	}()
 
-	require.Contains(t, opens[0], "TERM=xterm-direct")
+	require.Contains(t, opens[0], "TERM=xterm-256color")
 	require.Contains(t, opens[0], "COLORTERM=truecolor")
 	require.Contains(t, opens[0], "TERM_PROGRAM=vev")
 	require.NoError(t, d.createTab(sess, ac.size))
-	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "TERM=xterm-256color")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 }
@@ -1500,9 +1499,9 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	}()
 
 	require.Contains(t, opens[0], "TERM=xterm-256color")
-	require.NotContains(t, opens[0], "COLORTERM=truecolor")
+	require.Contains(t, opens[0], "COLORTERM=truecolor")
 	require.NoError(t, d.createTab(sess, ac.size))
-	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "TERM=xterm-256color")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 }
@@ -1562,10 +1561,9 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	require.Equal(t, uint64(1), ac.output.next-ac.output.acked, "only the destination first paint may follow the rebase")
 	ac.sendMu.Unlock()
 	got.mu.Lock()
-	require.True(t, got.terminal.TrueColor)
 	got.mu.Unlock()
 	require.Len(t, opens, 2)
-	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "TERM=xterm-256color")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 	_ = d.killSession(got, ports.ReasonSessionKilled, false)
@@ -1617,20 +1615,20 @@ func TestAttachEnvironmentReplacesFuturePTYInputs(t *testing.T) {
 	}()
 
 	require.Equal(t, "/usr/bin/fish", commands[0])
-	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
+	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
 	require.Equal(t, "fish", sess.tabs[0].focusedPaneTitle(false), "the initial tab title identifies the shell requested by its creator")
 	require.NoError(t, d.createTab(sess, ac.size))
 	require.Equal(t, "/bin/bash", commands[1])
-	require.Equal(t, []string{"SECRET=second", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[1].stableID + ",pane=" + sess.tabs[1].panes["pane-1"].stableID}, envs[1])
+	require.Equal(t, []string{"SECRET=second", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[1].stableID + ",pane=" + sess.tabs[1].panes["pane-1"].stableID}, envs[1])
 	require.Equal(t, "bash", sess.tabs[1].focusedPaneTitle(false), "later tabs use the most recently attached shell")
 }
 
 func TestChildEnvFromPreservesNonReservedEntriesVerbatimAndInOrder(t *testing.T) {
 	env := []string{"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "EMPTY="}
-	got := childEnvFrom(env, "work", "tab", "pane", terminalEnv{})
+	got := childEnvFrom(env, "work", "tab", "pane")
 	require.Equal(t, []string{
 		"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "EMPTY=",
-		"TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
+		"TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
 	}, got)
 }
 

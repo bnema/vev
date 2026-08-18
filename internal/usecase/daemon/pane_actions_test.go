@@ -961,23 +961,16 @@ func blockingRead(t *testing.T) func([]byte) (int, error) {
 func TestSplitPaneUsesExactAuthoritativeEnvironment(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		term terminalEnv
 		want []string
 	}{
 		{
-			name: "truecolor",
-			term: terminalEnv{TrueColor: true},
-			want: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev"},
-		},
-		{
-			name: "no truecolor",
-			want: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=xterm-256color", "TERM_PROGRAM=vev"},
+			name: "fixed pane terminal",
+			want: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 			d.shellOverride = false
-			sess.terminal = tt.term
 			sess.env = []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 			newPTY := portsmocks.NewMockPTY(t)
 			oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()

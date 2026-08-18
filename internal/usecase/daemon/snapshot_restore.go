@@ -142,7 +142,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, rep
 		}
 	}()
 
-	sess := d.newRestoredSession(snap, sctx, cancel, opened, terminalEnvFromEnvironment(d.baseEnv))
+	sess := d.newRestoredSession(snap, sctx, cancel, opened)
 	// The loaded manifest is the repository head for this name. Future dirty
 	// checkpoints must continue from it rather than reuse generation one.
 	sess.snapshotPublishedGeneration = repositoryGeneration
@@ -165,10 +165,9 @@ func (d *Daemon) restoredSessionAlreadyExists(name string) bool {
 }
 
 func (d *Daemon) restoreSnapshotTabs(ctx, sctx context.Context, snap snapcodec.Session) ([]*tab, error) {
-	// Restore runs before client Hello. Use the daemon's startup environment,
-	// including its terminal capability, until an attach supplies a fresher one.
+	// Restore runs before client Hello. Pane terminal identity is stable and does
+	// not depend on the daemon's startup environment.
 	restoreEnv := copyEnvironment(d.baseEnv)
-	restoreTerm := terminalEnvFromEnvironment(restoreEnv)
 	allowlist := d.restoreProcessAllowlistSnapshot()
 	stoppedTabNames := d.restoredSessionTabNames(snap.Name)
 	opened := make([]*tab, 0, len(snap.Tabs))
@@ -181,7 +180,7 @@ func (d *Daemon) restoreSnapshotTabs(ctx, sctx context.Context, snap snapcodec.S
 		if index < len(stoppedTabNames) {
 			tabName = stoppedTabNames[index]
 		}
-		tb, err := d.restoreSnapshotTab(ctx, sctx, snap.Name, tabName, tabSnap, restoreEnv, restoreTerm, allowlist)
+		tb, err := d.restoreSnapshotTab(ctx, sctx, snap.Name, tabName, tabSnap, restoreEnv, allowlist)
 		if err != nil {
 			closeRestoredTabs(opened)
 			return nil, err
@@ -205,7 +204,7 @@ func (d *Daemon) restoredSessionTabNames(name string) []string {
 	return append([]string(nil), d.stopped[name].tabNames...)
 }
 
-func (d *Daemon) restoreSnapshotTab(ctx, sctx context.Context, sessionName, tabName string, tabSnap snapcodec.Tab, restoreEnv []string, restoreTerm terminalEnv, allowlist map[string]struct{}) (*tab, error) {
+func (d *Daemon) restoreSnapshotTab(ctx, sctx context.Context, sessionName, tabName string, tabSnap snapcodec.Tab, restoreEnv []string, allowlist map[string]struct{}) (*tab, error) {
 	tbSize := domain.Size{Cols: int(tabSnap.Cols), Rows: int(tabSnap.Rows)}
 	if !tbSize.Valid() {
 		return nil, fmt.Errorf("snapshot: invalid tab size")
@@ -241,7 +240,7 @@ func (d *Daemon) restoreSnapshotTab(ctx, sctx context.Context, sessionName, tabN
 			tb.closeAllPanes()
 			return nil, fmt.Errorf("snapshot: missing pane placement")
 		}
-		p, err := d.restoreSnapshotPane(ctx, sessionName, tabStableID, paneSnap, contentRect, tbSize, restoreEnv, restoreTerm, allowlist, tb.ctx)
+		p, err := d.restoreSnapshotPane(ctx, sessionName, tabStableID, paneSnap, contentRect, tbSize, restoreEnv, allowlist, tb.ctx)
 		if err != nil {
 			tb.closeAllPanes()
 			return nil, err
@@ -251,7 +250,7 @@ func (d *Daemon) restoreSnapshotTab(ctx, sctx context.Context, sessionName, tabN
 	return tb, nil
 }
 
-func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStableID string, paneSnap snapcodec.Pane, contentRect domain.Rect, tabSize domain.Size, restoreEnv []string, restoreTerm terminalEnv, allowlist map[string]struct{}, tabCtx context.Context) (*pane, error) {
+func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStableID string, paneSnap snapcodec.Pane, contentRect domain.Rect, tabSize domain.Size, restoreEnv []string, allowlist map[string]struct{}, tabCtx context.Context) (*pane, error) {
 	paneStableID := paneSnap.StableID
 	if paneStableID == "" {
 		var err error
@@ -262,7 +261,7 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 	}
 	launch := d.shellLaunch(restoreEnv)
 	lifetime := d.newPaneProcessLifetime(ctx, tabCtx)
-	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
@@ -289,10 +288,10 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 	return p, nil
 }
 
-func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab, term terminalEnv) *session {
+func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab) *session {
 	// Restored sessions keep ordered tabs; attachment repair deterministically
 	// selects the first tab instead of restoring an interactive client view.
-	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, terminal: term, env: copyEnvironment(d.baseEnv), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
+	sess := &session{sessionCore: sessionCore{name: snap.Name, createdAt: int64(snap.CreatedAt)}, ctx: sctx, cancel: cancel, tabs: tabs, env: copyEnvironment(d.baseEnv), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
 	// Restored tabs remain private until persistAndRegisterRestoredSession.
 	// Initialize owners now so registration and reader startup cannot expose an
 	// ownerless pane.

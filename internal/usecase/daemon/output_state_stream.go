@@ -61,12 +61,24 @@ func (s *outputStateStream) unlockView() {
 }
 
 func newOutputStateStream(windowSize ...uint8) *outputStateStream {
+	return newOutputStateStreamForProfile(renderer.ColorProfileTrueColor, windowSize...)
+}
+
+func newOutputStateStreamForCapabilities(capabilities ports.TerminalCapabilities, windowSize ...uint8) *outputStateStream {
+	profile := renderer.ColorProfileANSI256
+	if capabilities.TrueColor() {
+		profile = renderer.ColorProfileTrueColor
+	}
+	return newOutputStateStreamForProfile(profile, windowSize...)
+}
+
+func newOutputStateStreamForProfile(profile renderer.ColorProfile, windowSize ...uint8) *outputStateStream {
 	window := uint8(maxUnackedOutputStates)
 	if len(windowSize) > 0 {
 		window = normalizeOutputWindow(windowSize[0])
 	}
 	stream := &outputStateStream{
-		renderer:       renderer.New(renderer.Capabilities{}),
+		renderer:       renderer.NewWithColorProfile(renderer.Capabilities{}, profile),
 		epoch:          1,
 		maxOutstanding: uint64(window),
 	}

@@ -172,7 +172,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	cwd := t.TempDir()
 	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
-	sess := &session{sessionCore: sessionCore{name: "work"}, cwd: cwd, terminal: terminalEnv{TrueColor: true}, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{sessionCore: sessionCore{name: "work"}, cwd: cwd, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
 	d.ensureFloatingWarm(sess, tb)
 	// Open has started while this goroutine owns tab.mu: an external factory
@@ -196,7 +196,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	floating := tb.floating.pane
 	tb.mu.Unlock()
 	require.NotNil(t, floating)
-	require.Equal(t, []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + tb.stableID + ",pane=" + floating.stableID}, openCall.env)
+	require.Equal(t, []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + tb.stableID + ",pane=" + floating.stableID}, openCall.env)
 	assertPaneDefaultColors(t, floating, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
 	assertPaneColorScheme(t, floating, false)
 	require.Equal(t, "/bin/custom-shell", openCall.command)
