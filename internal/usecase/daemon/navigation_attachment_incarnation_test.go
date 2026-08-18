@@ -8,6 +8,46 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNavigationHandoffRejectsReplacedTargetLifecycleAtPublication(t *testing.T) {
+	d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+	target := &session{sessionCore: sessionCore{id: "target", name: "target", incarnation: domain.SessionLifecycleID{1}}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+		newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+		newTab(nil, domain.Size{Cols: 80, Rows: 23}),
+	}}
+	d.mu.Lock()
+	d.sessions[target.id] = target
+	d.mu.Unlock()
+
+	rc := d.attachCoordinator(source, nil, ac, true)
+	token := source.attachmentToken(ac, ac.transport())
+	token.lease = rc.attachmentLease(ac)
+	ac.publishAttachmentCapability(token)
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+
+	d.afterAttachmentTransitionCoordinatorsLocked = func() {
+		// This hook runs with the target session locked, immediately before the
+		// transition's lifecycle fence is validated.
+		target.incarnation = domain.SessionLifecycleID{2}
+	}
+	err := d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{
+		Session:     target.id,
+		Incarnation: domain.SessionLifecycleID{1},
+		TabID:       domain.TabStableID(target.tabs[1].stableID),
+		TabIndex:    1,
+	}, sessionHandoffGuard{}, "test-handoff")
+
+	require.Error(t, err)
+	var userErr *domain.UserError
+	require.ErrorAs(t, err, &userErr)
+	require.Equal(t, domain.NoticeSessionUnavailable, userErr.Code)
+	require.Same(t, source, ac.currentSession())
+	target.mu.Lock()
+	require.Empty(t, target.snapshotAttachmentsLocked())
+	require.Zero(t, testAttachmentTabIndexLocked(target))
+	target.mu.Unlock()
+}
+
 func TestNavigationHandoffDoesNotMutateAfterInitiatorIncarnationChanges(t *testing.T) {
 	tests := []struct {
 		name   string

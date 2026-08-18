@@ -21,8 +21,9 @@ import (
 
 func testRecentRouteSnapshot() ports.RecentRouteSnapshot {
 	return ports.RecentRouteSnapshot{
-		Generation: 1,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Generation:  1,
+		Active:      ports.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: testRouteEntry(1, 1, "current", 1, ports.RouteKindLocal),
 		Entries: []ports.RecentRouteEntry{
 			testRouteEntry(2, 1, "recent", 2, ports.RouteKindLocal),
 			testRouteEntry(3, 1, "older", 3, ports.RouteKindLocal),
@@ -476,10 +477,13 @@ func TestPaletteLifecycleTargetRejectsSameNameReplacement(t *testing.T) {
 
 	require.ErrorIs(t, err, errAttachmentTransition)
 	require.Same(t, current, ac.currentSession())
-	select {
-	case frame := <-sends:
-		require.NotEqual(t, ports.MsgAttachTarget, frame.Type)
-	default:
+	for {
+		select {
+		case frame := <-sends:
+			require.NotEqual(t, ports.MsgAttachTarget, frame.Type)
+		default:
+			return
+		}
 	}
 }
 
@@ -487,8 +491,9 @@ func TestPaletteFuzzyRemoteRecentRouteSendsExactNavigationAction(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
-		Generation: 9,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Generation:  9,
+		Active:      ports.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: testRouteEntry(1, 1, current.name, 1, ports.RouteKindLocal),
 		Entries: []ports.RecentRouteEntry{{
 			Key: 8, Generation: 4, Target: testRouteTarget("logs", 8), Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
 		}},
@@ -566,9 +571,10 @@ func TestPaletteJRSDoesNotRevalidateTargetInDaemon(t *testing.T) {
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
-		Generation: 7,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
-		Entries:    []ports.RecentRouteEntry{testRouteEntry(9, 4, "captured", 9, ports.RouteKindLocal)},
+		Generation:  7,
+		Active:      ports.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: testRouteEntry(1, 1, sess.name, 1, ports.RouteKindLocal),
+		Entries:     []ports.RecentRouteEntry{testRouteEntry(9, 4, "captured", 9, ports.RouteKindLocal)},
 	})
 
 	validated := make(chan struct{})

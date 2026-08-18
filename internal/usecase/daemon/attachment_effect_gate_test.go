@@ -701,10 +701,11 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	d.sessions[target.id] = target
 	d.mu.Unlock()
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
-		Generation: 2,
-		Active:     ports.RouteRef{Key: 2, Generation: 2},
-		Previous:   ports.RouteRef{Key: 1, Generation: 1},
-		Entries:    []ports.RecentRouteEntry{testRouteEntry(1, 1, "target", 1, ports.RouteKindLocal)},
+		Generation:  2,
+		Active:      ports.RouteRef{Key: 2, Generation: 2},
+		ActiveEntry: testRouteEntry(2, 2, source.name, 2, ports.RouteKindLocal),
+		Previous:    ports.RouteRef{Key: 1, Generation: 1},
+		Entries:     []ports.RecentRouteEntry{testRouteEntry(1, 1, "target", 1, ports.RouteKindLocal)},
 	})
 
 	transport := &closeTrackingTransport{}

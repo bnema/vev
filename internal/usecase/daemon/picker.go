@@ -1203,8 +1203,13 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		transition, err := d.transitionAttachment(attachmentTransitionRequest{
 			source: from, target: targetSess, next: ac,
 
-			expectedTransport: sourceToken.transport, sourceToken: sourceToken, action: action,
-			activateTargetTab: true, targetTabIndex: target.TabIndex, preserveAttachment: true,
+			expectedTransport:       sourceToken.transport,
+			sourceToken:             sourceToken,
+			action:                  action,
+			expectedTargetLifecycle: pickerTargetLifecycleFence(target),
+			activateTargetTab:       true,
+			targetTabIndex:          target.TabIndex,
+			preserveAttachment:      true,
 		})
 		d.mu.Lock()
 		return targetSess, transition, err == nil
@@ -1244,14 +1249,15 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		target: targetSess,
 		next:   ac,
 
-		expectedTransport:     expectedTransport,
-		sourceToken:           sourceToken,
-		action:                action,
-		expectedSourceTab:     guard.expectedSource,
-		activateTargetTab:     target.TabIndex >= 0,
-		targetTabIndex:        target.TabIndex,
-		copySourceEnvironment: true,
-		ready:                 true,
+		expectedTransport:       expectedTransport,
+		sourceToken:             sourceToken,
+		action:                  action,
+		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
+		expectedSourceTab:       guard.expectedSource,
+		activateTargetTab:       target.TabIndex >= 0,
+		targetTabIndex:          target.TabIndex,
+		copySourceEnvironment:   true,
+		ready:                   true,
 	})
 	d.mu.Lock()
 	if err != nil {
