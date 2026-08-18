@@ -79,8 +79,8 @@ func TestRecentSessionHintsAndRankedRenderingShareCanonicalLabels(t *testing.T) 
 	snapshot := ports.RecentRouteSnapshot{
 		Generation: 1,
 		Entries: []ports.RecentRouteEntry{
-			{Key: 1, Generation: 1, Name: "logs", Kind: ports.RouteKindLocal, Attention: true},
-			{Key: 2, Generation: 1, Name: "logs", Kind: ports.RouteKindLocal},
+			{Key: 1, Generation: 1, Target: testRouteTarget("logs", 1), Name: "logs", Kind: ports.RouteKindLocal, Attention: true},
+			testRouteEntry(2, 1, "logs", 2, ports.RouteKindLocal),
 		},
 	}
 

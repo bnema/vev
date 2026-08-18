@@ -3,7 +3,6 @@ package palette
 import (
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 )
@@ -30,7 +29,7 @@ type Result struct {
 type sessionPayload struct {
 	name      string
 	createdAt time.Time
-	sessionID domain.SessionID
+	target    ports.ExactSessionTarget
 }
 
 type routePayload struct {
@@ -44,18 +43,18 @@ func NewCommandResult(cmd command.Command) Result {
 }
 
 // NewActiveSessionResult creates an immutable active named-session target.
-func NewActiveSessionResult(name string, createdAt time.Time, sessionID domain.SessionID) Result {
+func NewActiveSessionResult(name string, createdAt time.Time, target ports.ExactSessionTarget) Result {
 	return Result{
 		kind:    ResultKindActiveSession,
-		session: sessionPayload{name: name, createdAt: createdAt, sessionID: sessionID},
+		session: sessionPayload{name: name, createdAt: createdAt, target: target},
 	}
 }
 
 // NewStoppedSessionResult creates an immutable stopped named-session target.
-func NewStoppedSessionResult(name string, createdAt time.Time) Result {
+func NewStoppedSessionResult(name string, createdAt time.Time, target ports.ExactSessionTarget) Result {
 	return Result{
 		kind:    ResultKindStoppedSession,
-		session: sessionPayload{name: name, createdAt: createdAt},
+		session: sessionPayload{name: name, createdAt: createdAt, target: target},
 	}
 }
 
@@ -102,9 +101,10 @@ func (r Result) SessionCreatedAt() (time.Time, bool) {
 	return r.session.createdAt, r.kind == ResultKindActiveSession || r.kind == ResultKindStoppedSession
 }
 
-// SessionID returns the lifecycle identity only for active session results.
-func (r Result) SessionID() (domain.SessionID, bool) {
-	return r.session.sessionID, r.kind == ResultKindActiveSession
+// SessionTarget returns the exact lifecycle UUID and name for local active and
+// stopped session results.
+func (r Result) SessionTarget() (ports.ExactSessionTarget, bool) {
+	return r.session.target, r.kind == ResultKindActiveSession || r.kind == ResultKindStoppedSession
 }
 
 // RouteNavigationAction returns the exact client-ledger target only for a

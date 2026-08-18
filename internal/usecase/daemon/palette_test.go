@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -23,8 +24,8 @@ func testRecentRouteSnapshot() ports.RecentRouteSnapshot {
 		Generation: 1,
 		Active:     ports.RouteRef{Key: 1, Generation: 1},
 		Entries: []ports.RecentRouteEntry{
-			{Key: 2, Generation: 1, Name: "recent", Kind: ports.RouteKindLocal},
-			{Key: 3, Generation: 1, Name: "older", Kind: ports.RouteKindLocal},
+			testRouteEntry(2, 1, "recent", 2, ports.RouteKindLocal),
+			testRouteEntry(3, 1, "older", 3, ports.RouteKindLocal),
 		},
 	}
 }
@@ -419,43 +420,34 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 	require.True(t, ac.overlays.paletteActive(), "literal JRS must not execute an overridden jump command")
 }
 
-func TestPaletteResultsDeduplicateRoutesLocalToCurrentRemoteDaemon(t *testing.T) {
+func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	current := addControlSession(d, "hi", "tab-1", "pane-1")
-	represented := addControlSession(d, "remote-manual", "tab-2", "pane-2")
-	represented.ephemeral = false
+	local := addControlSession(d, "vev", "tab-2", "pane-2")
+	local.ephemeral = false
+	remoteOne := ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{21}, SessionName: "vev"}
+	remoteTwo := ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{22}, SessionName: "vev"}
 	snapshot := ports.RecentRouteSnapshot{
 		Generation: 2,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
-		Entries: []ports.RecentRouteEntry{{
-			Key: 2, Generation: 1, Name: "remote-manual", HostLabel: "remote", Kind: ports.RouteKindRemote,
-		}},
+		Entries: []ports.RecentRouteEntry{
+			{Key: 2, Generation: 1, Target: ports.ExactSessionTarget{LifecycleID: local.incarnation, SessionName: "vev"}, Name: "vev", Kind: ports.RouteKindLocal},
+			{Key: 3, Generation: 1, Target: remoteOne, Name: "vev", HostLabel: "arch", Kind: ports.RouteKindRemote},
+			{Key: 4, Generation: 1, Target: remoteTwo, Name: "vev", HostLabel: "arch", Kind: ports.RouteKindRemote},
+		},
 	}
 
-	for _, test := range []struct {
-		name          string
-		currentOrigin string
-		want          []string
-	}{
-		{name: "remote daemon", currentOrigin: "remote", want: []string{"Switch to session remote-manual"}},
-		{name: "remote daemon keeps distinct local route", currentOrigin: "remote", want: []string{"Switch to session remote-manual", "Switch to session remote-manual@local"}},
-		{name: "home daemon keeps distinct remote", want: []string{"Switch to session remote-manual", "Switch to session remote-manual@remote"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			testSnapshot := snapshot
-			if test.name == "remote daemon keeps distinct local route" {
-				testSnapshot.Entries = append(testSnapshot.Entries, ports.RecentRouteEntry{Key: 3, Generation: 1, Name: "remote-manual", Kind: ports.RouteKindLocal})
-			}
-			results := d.paletteResults(current, nil, testSnapshot, test.currentOrigin)
-			var matching []string
-			for _, result := range results {
-				if result.DisplayText() == "Switch to session remote-manual" || result.DisplayText() == "Switch to session remote-manual@local" || result.DisplayText() == "Switch to session remote-manual@remote" {
-					matching = append(matching, result.DisplayText())
-				}
-			}
-			require.Equal(t, test.want, matching)
-		})
+	results := d.paletteResults(current, nil, snapshot)
+	var matching []string
+	for _, result := range results {
+		if strings.Contains(result.DisplayText(), "session vev") {
+			matching = append(matching, result.DisplayText())
+		}
 	}
+	require.Equal(t, []string{
+		"Switch to session vev",
+		"Switch to session vev@arch",
+		"Switch to session vev@arch",
+	}, matching)
 }
 
 func TestPaletteFuzzyRemoteRecentRouteSendsExactNavigationAction(t *testing.T) {
@@ -465,7 +457,7 @@ func TestPaletteFuzzyRemoteRecentRouteSendsExactNavigationAction(t *testing.T) {
 		Generation: 9,
 		Active:     ports.RouteRef{Key: 1, Generation: 1},
 		Entries: []ports.RecentRouteEntry{{
-			Key: 8, Generation: 4, Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
+			Key: 8, Generation: 4, Target: testRouteTarget("logs", 8), Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
 		}},
 	})
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
@@ -543,7 +535,7 @@ func TestPaletteJRSDoesNotRevalidateTargetInDaemon(t *testing.T) {
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
 		Generation: 7,
 		Active:     ports.RouteRef{Key: 1, Generation: 1},
-		Entries:    []ports.RecentRouteEntry{{Key: 9, Generation: 4, Name: "captured", Kind: ports.RouteKindLocal}},
+		Entries:    []ports.RecentRouteEntry{testRouteEntry(9, 4, "captured", 9, ports.RouteKindLocal)},
 	})
 
 	validated := make(chan struct{})

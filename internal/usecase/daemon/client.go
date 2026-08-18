@@ -33,15 +33,12 @@ type appliedTheme struct {
 }
 
 type attachedClient struct {
-	tr                   ports.Transport
-	transportIncarnation uint64
-	output               *outputStateStream
-	overlays             *overlayRuntime
-	overlayOnce          sync.Once
-	clientID             [16]byte
-	// remoteOrigin is attachment-specific presentation metadata supplied by a
-	// validated picker handoff; it never participates in routing.
-	remoteOrigin           string
+	tr                     ports.Transport
+	transportIncarnation   uint64
+	output                 *outputStateStream
+	overlays               *overlayRuntime
+	overlayOnce            sync.Once
+	clientID               [16]byte
 	terminalCapabilities   ports.TerminalCapabilities
 	navigationCapabilities ports.NavigationCapabilities
 	startupOverlay         ports.StartupOverlay
@@ -628,7 +625,6 @@ type attachClientOptions struct {
 	clientID               [16]byte
 	resumeCapable          bool
 	maxOutputInFlight      uint8
-	remoteOrigin           string
 	terminalCapabilities   ports.TerminalCapabilities
 	capabilitiesSet        bool
 	navigationCapabilities ports.NavigationCapabilities
@@ -691,7 +687,6 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		size:                   sz,
 		view:                   attachmentView{windowRows: sz.Rows, windowSet: true},
 		clientID:               opts.clientID,
-		remoteOrigin:           opts.remoteOrigin,
 		terminalCapabilities:   opts.terminalCapabilities,
 		navigationCapabilities: opts.navigationCapabilities,
 		startupOverlay:         opts.startupOverlay,

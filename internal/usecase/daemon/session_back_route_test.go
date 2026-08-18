@@ -23,9 +23,7 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 		Generation: 5,
 		Active:     ports.RouteRef{Key: 9, Generation: 5},
 		Previous:   ports.RouteRef{Key: 7, Generation: 3},
-		Entries: []ports.RecentRouteEntry{{
-			Key: 7, Generation: 3, Name: "previous", Kind: ports.RouteKindLocal,
-		}},
+		Entries:    []ports.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, ports.RouteKindLocal)},
 	})
 
 	require.NoError(t, d.backSessionForAttachment(token))

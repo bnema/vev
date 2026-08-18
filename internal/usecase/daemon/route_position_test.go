@@ -10,24 +10,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-func TestRouteRetainsRemoteOriginWithoutDiscoveryTarget(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-	sess := addControlSession(d, "work", "tab-1", "pane-1")
-	sess.incarnation = domain.SessionLifecycleID{1}
-	tr := &closeTrackingTransport{}
-	target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: sess.name,
-		Size: defaultSize, ExactTarget: &target, RemoteOrigin: "remote",
-		EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
-	}
-
-	_, ac, err := d.routeWithContext(context.Background(), hello, tr)
-	require.NoError(t, err)
-	require.Equal(t, "remote", ac.remoteOrigin)
-	d.clientGone(sess, ac, tr, false)
-}
-
 func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
 	for _, test := range []struct {
 		name      string

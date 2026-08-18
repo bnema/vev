@@ -33,15 +33,15 @@ func routeTestCandidate(index byte, origin ports.RouteOrigin) routeCandidate {
 	}
 }
 
-func TestRouteCandidateRetainsRemoteOriginWithoutDiscoveryTarget(t *testing.T) {
+func TestRouteCandidateRetainsHostLabelWithoutDiscoveryTarget(t *testing.T) {
 	target := routeTestTarget(1)
 	candidate := routeCandidateForAttach(AttachRequest{
 		Intent: ports.IntentAttach, SessionName: target.SessionName, Remote: true,
-		Origin: ports.RouteOriginRemote, OriginKey: "remote",
+		Origin: ports.RouteOriginRemote, OriginKey: "user@remote", HostLabel: "remote",
 	}, ports.CommittedRouteIdentity{Target: target}, nil, 0)
 
 	require.Nil(t, candidate.request.RemoteTarget)
-	require.Equal(t, "remote", candidate.request.RemoteOrigin)
+	require.Equal(t, "remote", candidate.request.HostLabel)
 	require.Equal(t, "remote", candidate.presentation.hostLabel)
 }
 
@@ -60,7 +60,11 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	require.Len(t, ledger.entries, maxRouteLedgerEntries)
 	require.Len(t, snapshot.Entries, maxRouteLedgerEntries-1)
 	require.Equal(t, uint64(keys[len(keys)-1]), snapshot.Active.Key)
+	require.Equal(t, routeTestTarget(maxRouteLedgerEntries+7), snapshot.ActiveEntry.Target)
+	require.Equal(t, snapshot.Active, ports.RouteRef{Key: snapshot.ActiveEntry.Key, Generation: snapshot.ActiveEntry.Generation})
 	for _, entry := range snapshot.Entries {
+		require.NoError(t, entry.Target.Validate())
+		require.Equal(t, entry.Name, entry.Target.SessionName)
 		require.NotEqual(t, snapshot.Active, ports.RouteRef{Key: entry.Key, Generation: entry.Generation})
 	}
 	require.Equal(t, uint64(keys[len(keys)-2]), snapshot.Previous.Key)

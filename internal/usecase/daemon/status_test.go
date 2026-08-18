@@ -109,29 +109,31 @@ func TestStatusCompositionGolden(t *testing.T) {
 	}
 }
 
-func TestStatusSegmentsIncludesAttachmentRemoteOrigin(t *testing.T) {
-	tests := []struct {
-		name              string
-		remoteOrigin      string
-		wantAttachmentBar string
-	}{
-		{name: "remote origin", remoteOrigin: "arch", wantAttachmentBar: "vive@arch"},
-		{name: "local attachment", wantAttachmentBar: "vive"},
+func TestStatusSegmentsResolvesActiveLifecyclePresentation(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	_, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+
+	sess.name = "vive"
+	sess.incarnation = domain.SessionLifecycleID{1}
+	ref := ports.RouteRef{Key: 1, Generation: 1}
+	target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+	snapshot := ports.RecentRouteSnapshot{
+		Generation: 1,
+		Active:     ref,
+		ActiveEntry: ports.RecentRouteEntry{
+			Key: ref.Key, Generation: ref.Generation, Target: target,
+			Name: "vive", HostLabel: "user@arch", Kind: ports.RouteKindRemote,
+		},
 	}
+	ac.setRouteSnapshot(snapshot)
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			p, releasePTY := newBlockingPTY(t)
-			_, sess, ac, _ := newManualSessionWithPTYs(t, p)
-			defer releasePTY()
+	require.Equal(t, "vive@arch", sess.statusSegmentsFor(ac, true).session)
+	require.Equal(t, "vive", sess.statusSegments(true).session, "route presentation belongs only to the selected attachment")
 
-			sess.name = "vive"
-			ac.remoteOrigin = test.remoteOrigin
-
-			require.Equal(t, test.wantAttachmentBar, sess.statusSegmentsFor(ac, true).session)
-			require.Equal(t, "vive", sess.statusSegments(true).session, "remote provenance belongs only to the selected attachment")
-		})
-	}
+	snapshot.ActiveEntry.Target.LifecycleID = domain.SessionLifecycleID{99}
+	ac.setRouteSnapshot(snapshot)
+	require.Equal(t, "vive", sess.statusSegmentsFor(ac, true).session, "a stale UUID must not label the active session")
 }
 
 func TestStatusSegmentsIncludesFocusedPaneTitle(t *testing.T) {
@@ -981,7 +983,7 @@ func TestBarStateForContextualRecentUsesClientSnapshot(t *testing.T) {
 
 	snapshot := ports.RecentRouteSnapshot{
 		Generation: 1,
-		Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 1, Name: "captured", Kind: ports.RouteKindLocal, Attention: true}},
+		Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 1, Target: testRouteTarget("captured", 2), Name: "captured", Kind: ports.RouteKindLocal, Attention: true}},
 	}
 	hints := palette.ContextualHints{
 		Kind:         command.ContextHintRecentSessions,

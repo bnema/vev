@@ -14,8 +14,8 @@ func TestAttachmentStatusUsesClientRouteSnapshot(t *testing.T) {
 		Generation: 2,
 		Active:     ports.RouteRef{Key: 3, Generation: 2},
 		Entries: []ports.RecentRouteEntry{
-			{Key: 2, Generation: 1, Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote},
-			{Key: 1, Generation: 1, Name: "work", Kind: ports.RouteKindLocal},
+			{Key: 2, Generation: 1, Target: testRouteTarget("logs", 2), Name: "logs", HostLabel: "user@edge", Kind: ports.RouteKindRemote},
+			testRouteEntry(1, 1, "work", 1, ports.RouteKindLocal),
 		},
 	})
 
@@ -44,7 +44,7 @@ func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
 			ac.setRouteSnapshot(ports.RecentRouteSnapshot{
 				Generation: 2,
 				Active:     ports.RouteRef{Key: 3, Generation: 2},
-				Entries:    []ports.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Name: sess.name, Kind: ports.RouteKindLocal}},
+				Entries:    []ports.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Target: ports.ExactSessionTarget{LifecycleID: tt.targetID, SessionName: sess.name}, Name: sess.name, Kind: ports.RouteKindLocal}},
 			})
 			ac.setRouteAttentionSubscription(ports.RouteAttentionSubscription{Targets: []ports.RouteAttentionTarget{{
 				Ref: ref,
@@ -77,7 +77,7 @@ func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {
 
 func TestAttachmentRouteSnapshotCopiesPublishedEntries(t *testing.T) {
 	_, _, ac, _ := newManualSessionWithPTYs(t, nil)
-	entries := []ports.RecentRouteEntry{{Key: 1, Generation: 2, Name: "before", Kind: ports.RouteKindLocal}}
+	entries := []ports.RecentRouteEntry{testRouteEntry(1, 2, "before", 1, ports.RouteKindLocal)}
 	snapshot := ports.RecentRouteSnapshot{Generation: 3, Entries: entries}
 	ac.setRouteSnapshot(snapshot)
 
@@ -105,7 +105,7 @@ func TestPaletteRecentRouteSelectionSendsTypedClientAction(t *testing.T) {
 		d: d, sess: source, attachment: source, ac: ac,
 		routeSnapshot: ports.RecentRouteSnapshot{
 			Generation: 4,
-			Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 3, Name: "remote", Kind: ports.RouteKindRemote}},
+			Entries:    []ports.RecentRouteEntry{testRouteEntry(2, 3, "remote", 2, ports.RouteKindRemote)},
 		},
 		effect: effect,
 	}
@@ -131,7 +131,7 @@ func TestRecentRouteHintsRetainSnapshotSelectionIdentity(t *testing.T) {
 	snapshot := ports.RecentRouteSnapshot{
 		Generation: 8,
 		Entries: []ports.RecentRouteEntry{{
-			Key: 11, Generation: 7, Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
+			Key: 11, Generation: 7, Target: testRouteTarget("logs", 11), Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
 		}},
 	}
 

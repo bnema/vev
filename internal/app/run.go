@@ -942,7 +942,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			Origin:            ports.RouteOriginDiscovery,
 			OriginKey:         target.Endpoint,
 			RemoteTarget:      selection,
-			RemoteOrigin:      displayOrigin,
+			HostLabel:         displayOrigin,
 			EnvironmentPolicy: policy,
 		}, nil
 	}
@@ -977,7 +977,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Origin:            routeOrigin,
 				OriginKey:         routeOriginKey,
 				RemoteTarget:      remoteSelection,
-				RemoteOrigin:      remoteDisplayOrigin,
+				HostLabel:         remoteDisplayOrigin,
 				EnvironmentPolicy: remoteEnvironmentPolicy,
 			})
 		} else {

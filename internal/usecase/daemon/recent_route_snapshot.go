@@ -1,6 +1,9 @@
 package daemon
 
-import "github.com/bnema/vev/internal/ports"
+import (
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+)
 
 func recentRoutePresentationsFromSnapshot(snapshot ports.RecentRouteSnapshot) []recentRoutePresentation {
 	if snapshot.Entries == nil {
@@ -14,7 +17,7 @@ func recentRoutePresentationsFromSnapshot(snapshot ports.RecentRouteSnapshot) []
 		}
 		out[i] = recentRoutePresentation{
 			name:      entry.Name,
-			hostLabel: entry.HostLabel,
+			hostLabel: domain.RemoteDisplayOrigin(entry.HostLabel),
 			kind:      kind,
 			ephemeral: entry.Ephemeral,
 			attention: entry.Attention,

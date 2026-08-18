@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -23,7 +24,7 @@ var (
 // routeKey is process-local identity. It is never derived from a daemon
 // lifecycle ID and is not exposed outside the client ledger. originKey keeps
 // distinct daemon endpoints separate even when their lifecycle/name pairs
-// happen to match; neither is serialized into the route snapshot.
+// happen to match; it is not serialized into the route snapshot.
 type routeKey uint64
 
 type routeGeneration uint64
@@ -121,10 +122,13 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 	if request.Remote || request.RemoteTarget != nil || origin != ports.RouteOriginLocal {
 		kind = ports.RouteKindRemote
 		if request.RemoteTarget != nil {
-			hostLabel = request.RemoteTarget.DisplayOrigin
+			hostLabel = domain.RemoteDisplayOrigin(request.RemoteTarget.DisplayOrigin)
 		}
 		if hostLabel == "" {
-			hostLabel = originKey
+			hostLabel = domain.RemoteDisplayOrigin(request.HostLabel)
+		}
+		if hostLabel == "" {
+			hostLabel = domain.RemoteDisplayOrigin(originKey)
 		}
 	}
 	request = cloneAttachRequest(request)
@@ -132,7 +136,7 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 	request.OriginKey = originKey
 	request.SessionName = identity.Target.SessionName
 	request.ExactTarget = &identity.Target
-	request.RemoteOrigin = hostLabel
+	request.HostLabel = hostLabel
 	// Discovery targets are point-in-time attach authority, including a live
 	// tab selector. Once Welcome commits an exact route, mutable tab memory is
 	// carried independently by PreferredTabID.
@@ -499,6 +503,20 @@ func (l *routeLedger) attentionSubscription() ports.RouteAttentionSubscription {
 	return subscription
 }
 
+func (r routeRecord) snapshotEntry() ports.RecentRouteEntry {
+	return ports.RecentRouteEntry{
+		Key:          uint64(r.identity.key),
+		Generation:   uint64(r.identity.generation),
+		Target:       r.target,
+		Name:         r.presentation.name,
+		HostLabel:    r.presentation.hostLabel,
+		Kind:         r.presentation.kind,
+		Ephemeral:    r.presentation.ephemeral,
+		Attention:    r.presentation.attention,
+		Reachability: r.presentation.reachability,
+	}
+}
+
 func (l *routeLedger) snapshot() ports.RecentRouteSnapshot {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -515,18 +533,10 @@ func (l *routeLedger) snapshot() ports.RecentRouteSnapshot {
 	snapshot.Entries = make([]ports.RecentRouteEntry, 0, len(l.entries))
 	for _, entry := range l.entries {
 		if entry.identity == l.active {
+			snapshot.ActiveEntry = entry.snapshotEntry()
 			continue
 		}
-		snapshot.Entries = append(snapshot.Entries, ports.RecentRouteEntry{
-			Key:          uint64(entry.identity.key),
-			Generation:   uint64(entry.identity.generation),
-			Name:         entry.presentation.name,
-			HostLabel:    entry.presentation.hostLabel,
-			Kind:         entry.presentation.kind,
-			Ephemeral:    entry.presentation.ephemeral,
-			Attention:    entry.presentation.attention,
-			Reachability: entry.presentation.reachability,
-		})
+		snapshot.Entries = append(snapshot.Entries, entry.snapshotEntry())
 	}
 	return snapshot
 }

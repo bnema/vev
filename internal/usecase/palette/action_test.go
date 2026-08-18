@@ -54,7 +54,7 @@ func TestArgumentCommandKeepsExactRowVisible(t *testing.T) {
 
 func TestArgumentResultReturnsTheMatchingRowAndCommand(t *testing.T) {
 	jrs := command.Command{Code: "JRS", Arguments: command.ArgumentsRequired}
-	results := []Result{NewStoppedSessionResult("JRS", time.Time{}), NewCommandResult(jrs)}
+	results := []Result{NewStoppedSessionResult("JRS", time.Time{}, testExactTarget("JRS", 1)), NewCommandResult(jrs)}
 
 	result, got, ok := argumentResult(results, "jrs 1")
 

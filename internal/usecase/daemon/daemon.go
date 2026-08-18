@@ -1288,12 +1288,8 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		maxOutputInFlight:      normalizeOutputWindow(h.MaxOutputInFlight),
 		navigationCapabilities: h.NavigationCapabilities,
 		startupOverlay:         h.StartupOverlay,
-		remoteOrigin:           h.RemoteOrigin,
 		terminalCapabilities:   terminalCapabilities,
 		capabilitiesSet:        true,
-	}
-	if opts.remoteOrigin == "" && h.RemoteTarget != nil {
-		opts.remoteOrigin = h.RemoteTarget.DisplayOrigin
 	}
 	ac := d.prepareAttachedClientLocked(tr, sz, opts)
 	d.mu.Unlock()

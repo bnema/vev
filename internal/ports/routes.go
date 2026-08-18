@@ -193,12 +193,13 @@ func (r RouteRef) Validate() error {
 	return nil
 }
 
-// RecentRouteEntry is the complete daemon-neutral display view of one route.
-// It contains no dialer, credential, endpoint, live session pointer, or attach
-// target. The client ledger keeps those private beside this value.
+// RecentRouteEntry is the complete daemon-neutral identity and display view of
+// one route. Target carries only the committed lifecycle UUID and name; it
+// contains no dialer, credential, endpoint, or live session pointer.
 type RecentRouteEntry struct {
 	Key          uint64
 	Generation   uint64
+	Target       ExactSessionTarget
 	Name         string
 	HostLabel    string
 	Kind         RouteKind
@@ -212,9 +213,13 @@ type RecentRouteEntry struct {
 type RecentRouteSnapshot struct {
 	Generation uint64
 	Active     RouteRef
-	Previous   RouteRef
-	Home       RouteRef
-	Entries    []RecentRouteEntry
+	// ActiveEntry maps Active's committed lifecycle UUID to its presentation.
+	// It is not a navigation candidate and therefore remains separate from
+	// Entries, which are ordered from most recent to least recent.
+	ActiveEntry RecentRouteEntry
+	Previous    RouteRef
+	Home        RouteRef
+	Entries     []RecentRouteEntry
 }
 
 // RouteNavigationAction asks the client to resolve one entry from a specific

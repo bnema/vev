@@ -189,15 +189,23 @@ func (s *session) statusSegments(includeTerminalTitle bool) statusSnapshot {
 }
 
 func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle bool) statusSnapshot {
+	var routeSnapshot ports.RecentRouteSnapshot
+	if ac != nil {
+		routeSnapshot = ac.routeSnapshotCopy()
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	name := s.name
-	if s.ephemeral {
-		name += "*"
+	presentation := recentRoutePresentation{name: s.name, ephemeral: s.ephemeral}
+	active := routeSnapshot.ActiveEntry
+	activeRef := ports.RouteRef{Key: active.Key, Generation: active.Generation}
+	if s.incarnation != (domain.SessionLifecycleID{}) && active.Target.LifecycleID == s.incarnation && routeSnapshot.Active == activeRef {
+		presentation.hostLabel = domain.RemoteDisplayOrigin(active.HostLabel)
+		if active.Kind == ports.RouteKindRemote {
+			presentation.kind = recentRouteRemote
+		}
 	}
-	if ac != nil && ac.remoteOrigin != "" {
-		name += "@" + ac.remoteOrigin
-	}
+	name := formatRecentRouteName(presentation, false)
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	activeIndex := 0
 	if ac != nil {
