@@ -198,7 +198,8 @@ func TestOwnedSynchronousMaxSideEffectCompletesThroughConcurrentPacedWork(t *tes
 	aPC, bPC := newPair()
 	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
-		Clock: clk, ResendAfter: 250 * time.Millisecond, MaxResendAfter: time.Second, Heartbeat: time.Hour,
+		Clock: clk, ResendAfter: 250 * time.Millisecond, MaxResendAfter: time.Second,
+		Heartbeat: time.Hour, DeadAfter: time.Hour,
 	})
 	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
 	defer func() { _ = a.Close() }()
