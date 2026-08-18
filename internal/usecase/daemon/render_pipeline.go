@@ -468,7 +468,6 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		}
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
-	composed.frame = adaptFrameColors(composed.frame, ac.terminalCapabilities.TrueColor())
 	var (
 		preparedANSI *preparedOutput
 		err          error

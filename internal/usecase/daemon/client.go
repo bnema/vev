@@ -684,7 +684,7 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 	if !opts.capabilitiesSet {
 		opts.terminalCapabilities = ports.TerminalCapabilities{ColorMode: ports.TerminalColorTrueColor}
 	}
-	output := newOutputStateStream(opts.maxOutputInFlight)
+	output := newOutputStateStreamForCapabilities(opts.terminalCapabilities, opts.maxOutputInFlight)
 	ac := &attachedClient{
 		tr:                     tr,
 		output:                 output,
