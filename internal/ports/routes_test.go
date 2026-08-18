@@ -2,6 +2,7 @@ package ports
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -193,6 +194,11 @@ func TestRouteAttentionSubscriptionCodecIsStrict(t *testing.T) {
 func TestRecentRouteSnapshotRejectsOversizedFrameBeforeParsing(t *testing.T) {
 	_, err := UnmarshalRecentRouteSnapshot(make([]byte, MaxFrameLen))
 	require.ErrorIs(t, err, ErrInvalidRouteWire)
+}
+
+func TestRouteLabelBoundsMatchRemoteDisplayOrigin(t *testing.T) {
+	require.NoError(t, ValidateRouteLabel(strings.Repeat("a", 256), false))
+	require.Error(t, ValidateRouteLabel(strings.Repeat("a", 257), false))
 }
 
 func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {

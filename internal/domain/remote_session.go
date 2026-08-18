@@ -42,17 +42,24 @@ func (k RemoteSessionKey) ID() SessionID {
 // the login prefix regardless of whether the route came from the CLI or a
 // discovered picker entry.
 func RemoteDisplayOrigin(endpoint string) string {
-	if i := strings.LastIndexByte(endpoint, '@'); i > 0 && i < len(endpoint)-1 {
+	if i := strings.LastIndexByte(endpoint, '@'); i >= 0 && i < len(endpoint)-1 {
 		return endpoint[i+1:]
 	}
 	return endpoint
+}
+
+// RemoteSessionDisplay returns the canonical presentation label for a remote
+// session. endpoint may be a routing target or an already-derived origin; the
+// login prefix is always removed.
+func RemoteSessionDisplay(name, endpoint string) string {
+	return name + "@" + RemoteDisplayOrigin(endpoint)
 }
 
 // Display returns the presentation label for this remote session.
 func (k RemoteSessionKey) Display() string {
 	origin := k.DisplayOrigin
 	if origin == "" {
-		origin = RemoteDisplayOrigin(k.Host)
+		origin = k.Host
 	}
-	return k.Name + "@" + origin
+	return RemoteSessionDisplay(k.Name, origin)
 }

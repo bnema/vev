@@ -262,5 +262,5 @@ const (
 	// of work a receiver performs before returning to its transport loop. The
 	// private client history may use a smaller product cap.
 	RouteSnapshotMaxEntries = 32
-	RouteLabelMaxBytes      = 128
+	RouteLabelMaxBytes      = 256
 )

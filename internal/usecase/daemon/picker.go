@@ -238,7 +238,7 @@ func (d *Daemon) notifyRemotePickerUnavailable(sess *session, target picker.Targ
 	}
 	message := "Remote session unavailable"
 	if target.RemoteTarget != nil {
-		message += ": " + target.RemoteTarget.SessionName + "@" + target.RemoteTarget.DisplayOrigin
+		message += ": " + domain.RemoteSessionDisplay(target.RemoteTarget.SessionName, target.RemoteTarget.DisplayOrigin)
 	} else if target.RemoteHost != "" {
 		message += ": " + target.RemoteHost
 	}
@@ -1169,12 +1169,12 @@ func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*sessi
 	}
 	if active := d.findByNameLocked(target.Name); active != nil {
 		active.mu.Lock()
-		matches := targetMatchesLifecycle(target, active.name, active.createdAt)
+		matches := targetMatchesLifecycle(target, active.name, active.createdAt, active.incarnation)
 		active.mu.Unlock()
 		return active, stoppedSession{}, false, matches
 	}
 	stopped, ok := d.stopped[target.Name]
-	if !ok || stopped.purging || !targetMatchesLifecycle(target, stopped.name, stopped.createdAt) {
+	if !ok || stopped.purging || !targetMatchesLifecycle(target, stopped.name, stopped.createdAt, stopped.incarnation) {
 		return nil, stoppedSession{}, false, false
 	}
 	return nil, stopped, true, true
@@ -1191,7 +1191,7 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 			targetSess.mu.Lock()
 			defer targetSess.mu.Unlock()
 			_, attached := targetSess.attachments[ac]
-			if !attached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
+			if !attached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt, targetSess.incarnation) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
 				return nil, attachmentTransitionResult{}, false
 			}
 			if !targetSess.activateAttachmentViewLocked(ac, target.TabIndex) {
@@ -1212,7 +1212,7 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 
 	unlock := lockAttachmentSessions(from, targetSess)
 	_, sourceAttached := from.attachments[ac]
-	if !sourceAttached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) {
+	if !sourceAttached || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt, targetSess.incarnation) {
 		unlock()
 		return nil, attachmentTransitionResult{}, false
 	}
@@ -1278,7 +1278,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 			expectedSourceTab: guard.expectedSource, copySourceEnvironment: true, ready: true,
 			createTargetLocked: func() (*session, error) {
 				current, ok := d.stopped[target.Name]
-				if !ok || current.purging || current.createdAt != stopped.createdAt || !targetMatchesLifecycle(target, current.name, current.createdAt) {
+				if !ok || current.purging || current.createdAt != stopped.createdAt || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
 					return nil, errAttachmentTransition
 				}
 				from.mu.Lock()
@@ -1331,7 +1331,10 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	return targetSess, transition, true, nil
 }
 
-func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) bool {
+func targetMatchesLifecycle(target picker.Target, name string, createdAt int64, incarnation domain.IncarnationID) bool {
+	if target.Incarnation != (domain.IncarnationID{}) && target.Incarnation != incarnation {
+		return false
+	}
 	return target.ExpectedCreatedAt == nil || (target.Name == name && *target.ExpectedCreatedAt == createdAt)
 }
 
@@ -1356,7 +1359,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		transition attachmentTransitionResult
 		switched   bool
 	)
-	if ok && !stopped.purging && targetMatchesLifecycle(target, stopped.name, stopped.createdAt) {
+	if ok && !stopped.purging && targetMatchesLifecycle(target, stopped.name, stopped.createdAt, stopped.incarnation) {
 		_, transition, switched, _ = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped, nil, sessionHandoffGuard{}, "")
 	}
 	d.mu.Unlock()

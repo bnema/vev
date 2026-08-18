@@ -73,15 +73,18 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		results = append(results, palette.NewCommandResult(cmd))
 	}
 	active := make([]palette.Result, 0, len(sessions))
+	localLifecycles := make(map[domain.SessionLifecycleID]struct{}, len(sessions)+len(stopped))
 	for _, candidate := range sessions {
+		snap := candidate.snapshotView(viewOptions{})
+		if snap.name == "" || snap.ephemeral {
+			continue
+		}
+		localLifecycles[snap.incarnation] = struct{}{}
 		if candidate == current {
 			continue
 		}
-		snap := candidate.snapshotView(viewOptions{})
-		if snap.name != "" && !snap.ephemeral {
-			target := ports.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
-			active = append(active, palette.NewActiveSessionResult(snap.name, time.Unix(0, snap.createdAt), target))
-		}
+		target := ports.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
+		active = append(active, palette.NewActiveSessionResult(snap.name, time.Unix(0, snap.createdAt), target))
 	}
 	sort.Slice(active, func(i, j int) bool {
 		left, _ := active[i].SessionName()
@@ -90,11 +93,6 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	})
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 	results = append(results, active...)
-	localLifecycles := make(map[domain.SessionLifecycleID]struct{}, len(active)+len(stopped))
-	for _, candidate := range active {
-		target, _ := candidate.SessionTarget()
-		localLifecycles[target.LifecycleID] = struct{}{}
-	}
 	for _, candidate := range stopped {
 		target := ports.ExactSessionTarget{LifecycleID: candidate.incarnation, SessionName: candidate.name}
 		results = append(results, palette.NewStoppedSessionResult(candidate.name, time.Unix(0, candidate.createdAt), target))
@@ -274,7 +272,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			} else if action, ok := selected.RouteNavigationAction(); ok {
 				routeTarget = action
 				hasRouteTarget = true
-			} else if _, ok := selected.SessionName(); ok {
+			} else if _, ok := selected.SessionTarget(); ok {
 				sessionTarget = selected
 				hasSessionTarget = true
 			} else {

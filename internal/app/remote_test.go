@@ -272,7 +272,7 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infos := catalogSessionsAsInfo("arch", []ports.RemoteCatalogSession{tt.session})
+			infos := catalogSessionsAsInfo("user@arch", []ports.RemoteCatalogSession{tt.session})
 			require.Len(t, infos, 1)
 			require.Equal(t, "dev@arch", infos[0].Name)
 			require.Equal(t, tt.wantState, infos[0].State)
