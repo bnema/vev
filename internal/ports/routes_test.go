@@ -197,8 +197,24 @@ func TestRecentRouteSnapshotRejectsOversizedFrameBeforeParsing(t *testing.T) {
 }
 
 func TestRouteLabelBoundsMatchRemoteDisplayOrigin(t *testing.T) {
-	require.NoError(t, ValidateRouteLabel(strings.Repeat("a", 256), false))
-	require.Error(t, ValidateRouteLabel(strings.Repeat("a", 257), false))
+	tests := []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "maximum", length: 256},
+		{name: "over maximum", length: 257, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRouteLabel(strings.Repeat("a", tt.length), false)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {

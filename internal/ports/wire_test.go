@@ -173,15 +173,15 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 	base := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
 	withCount := func(count byte) []byte {
 		payload := append([]byte(nil), base...)
-		// The uint32 environment count occupies bytes len-13 through len-10.
-		payload[len(payload)-10] = count
+		// The uint32 environment count occupies bytes len-11 through len-8.
+		payload[len(payload)-8] = count
 		return payload
 	}
 	withEntries := func(count byte, entries ...byte) []byte {
 		payload := withCount(count)
-		// The nine-byte tail follows the environment-count field.
-		tail := append([]byte(nil), payload[len(payload)-9:]...)
-		payload = append(payload[:len(payload)-9], entries...)
+		// The seven-byte tail follows the environment-count field.
+		tail := append([]byte(nil), payload[len(payload)-7:]...)
+		payload = append(payload[:len(payload)-7], entries...)
 		return append(payload, tail...)
 	}
 	tests := []struct {

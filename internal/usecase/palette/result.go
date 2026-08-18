@@ -43,18 +43,18 @@ func NewCommandResult(cmd command.Command) Result {
 }
 
 // NewActiveSessionResult creates an immutable active named-session target.
-func NewActiveSessionResult(name string, createdAt time.Time, target ports.ExactSessionTarget) Result {
+func NewActiveSessionResult(target ports.ExactSessionTarget, createdAt time.Time) Result {
 	return Result{
 		kind:    ResultKindActiveSession,
-		session: sessionPayload{name: name, createdAt: createdAt, target: target},
+		session: sessionPayload{name: target.SessionName, createdAt: createdAt, target: target},
 	}
 }
 
 // NewStoppedSessionResult creates an immutable stopped named-session target.
-func NewStoppedSessionResult(name string, createdAt time.Time, target ports.ExactSessionTarget) Result {
+func NewStoppedSessionResult(target ports.ExactSessionTarget, createdAt time.Time) Result {
 	return Result{
 		kind:    ResultKindStoppedSession,
-		session: sessionPayload{name: name, createdAt: createdAt, target: target},
+		session: sessionPayload{name: target.SessionName, createdAt: createdAt, target: target},
 	}
 }
 

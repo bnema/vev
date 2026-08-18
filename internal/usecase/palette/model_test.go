@@ -463,11 +463,11 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 	workTarget := testExactTarget("work", 1)
 	results := []Result{
 		NewCommandResult(cmd("JRS", "Jump", "Jump to recent session")),
-		NewActiveSessionResult("work", created, workTarget),
-		NewStoppedSessionResult("work", created, testExactTarget("work", 2)),
+		NewActiveSessionResult(workTarget, created),
+		NewStoppedSessionResult(testExactTarget("work", 2), created),
 	}
 	m := New(results)
-	results[1] = NewActiveSessionResult("changed", created, testExactTarget("changed", 3))
+	results[1] = NewActiveSessionResult(testExactTarget("changed", 3), created)
 
 	for _, r := range "switch" {
 		m.Insert(r)
@@ -494,7 +494,7 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 }
 
 func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
-	m := New([]Result{NewStoppedSessionResult("work", time.Unix(0, 1), testExactTarget("work", 1))})
+	m := New([]Result{NewStoppedSessionResult(testExactTarget("work", 1), time.Unix(0, 1))})
 	m.Insert('w')
 	m.Insert('k')
 
@@ -507,7 +507,7 @@ func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
 }
 
 func TestRenderFeedbackUsesSelectedSessionRowWithoutAddingResult(t *testing.T) {
-	m := New([]Result{NewActiveSessionResult("work", time.Unix(0, 1), testExactTarget("work", 1))})
+	m := New([]Result{NewActiveSessionResult(testExactTarget("work", 1), time.Unix(0, 1))})
 	frame := m.Render(domain.Size{Cols: 64, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles(), Feedback: "requested session is unavailable"})
 	require.Len(t, m.Matches(), 1)
 	require.Contains(t, frameRow(frame, 1), "requested session is unavailable")

@@ -19,8 +19,8 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	commandResult := NewCommandResult(command.Command{Code: "NT", Desc: "Create tab"})
 	activeTarget := testExactTarget("work", 1)
 	stoppedTarget := testExactTarget("archive", 2)
-	active := NewActiveSessionResult("work", created, activeTarget)
-	stopped := NewStoppedSessionResult("archive", created, stoppedTarget)
+	active := NewActiveSessionResult(activeTarget, created)
+	stopped := NewStoppedSessionResult(stoppedTarget, created)
 
 	require.Equal(t, ResultKindCommand, commandResult.Kind())
 	require.Equal(t, "NT", commandResult.DisplayText())
@@ -78,10 +78,10 @@ func TestSessionResultsSearchDisplayedActionText(t *testing.T) {
 		query     string
 		positions []int
 	}{
-		{name: "active prefix", result: NewActiveSessionResult("work", created, testExactTarget("work", 1)), query: "switch", positions: []int{0, 1, 2, 3, 4, 5}},
-		{name: "active name", result: NewActiveSessionResult("work", created, testExactTarget("work", 1)), query: "work", positions: []int{1, 8, 20, 21}},
-		{name: "stopped prefix", result: NewStoppedSessionResult("archive", created, testExactTarget("archive", 2)), query: "resume", positions: []int{0, 1, 2, 3, 4, 5}},
-		{name: "stopped name", result: NewStoppedSessionResult("archive", created, testExactTarget("archive", 2)), query: "archive", positions: []int{15, 16, 17, 18, 19, 20, 21}},
+		{name: "active prefix", result: NewActiveSessionResult(testExactTarget("work", 1), created), query: "switch", positions: []int{0, 1, 2, 3, 4, 5}},
+		{name: "active name", result: NewActiveSessionResult(testExactTarget("work", 1), created), query: "work", positions: []int{1, 8, 20, 21}},
+		{name: "stopped prefix", result: NewStoppedSessionResult(testExactTarget("archive", 2), created), query: "resume", positions: []int{0, 1, 2, 3, 4, 5}},
+		{name: "stopped name", result: NewStoppedSessionResult(testExactTarget("archive", 2), created), query: "archive", positions: []int{15, 16, 17, 18, 19, 20, 21}},
 	}
 
 	for _, tt := range tests {

@@ -84,7 +84,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			continue
 		}
 		target := ports.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
-		active = append(active, palette.NewActiveSessionResult(snap.name, time.Unix(0, snap.createdAt), target))
+		active = append(active, palette.NewActiveSessionResult(target, time.Unix(0, snap.createdAt)))
 	}
 	sort.Slice(active, func(i, j int) bool {
 		left, _ := active[i].SessionName()
@@ -95,7 +95,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	results = append(results, active...)
 	for _, candidate := range stopped {
 		target := ports.ExactSessionTarget{LifecycleID: candidate.incarnation, SessionName: candidate.name}
-		results = append(results, palette.NewStoppedSessionResult(candidate.name, time.Unix(0, candidate.createdAt), target))
+		results = append(results, palette.NewStoppedSessionResult(target, time.Unix(0, candidate.createdAt)))
 		localLifecycles[target.LifecycleID] = struct{}{}
 	}
 	formattedRoutes := formatRecentRouteSnapshot(routeSnapshot)

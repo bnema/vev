@@ -92,9 +92,9 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 		{
 			name: "command shortcode precedes sessions and description matches",
 			results: []Result{
-				NewStoppedSessionResult("work", created, testExactTarget("work", 1)),
+				NewStoppedSessionResult(testExactTarget("work", 1), created),
 				NewCommandResult(cmd("WORK", "", "Create a workspace")),
-				NewActiveSessionResult("work", created, testExactTarget("work", 2)),
+				NewActiveSessionResult(testExactTarget("work", 2), created),
 				NewCommandResult(cmd("WQORRK", "", "")),
 				NewCommandResult(cmd("ZZZ", "", "work tools")),
 			},
@@ -106,8 +106,8 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 		{
 			name: "equivalent sessions sort by normalized text",
 			results: []Result{
-				NewStoppedSessionResult("aBravo", time.Time{}, testExactTarget("aBravo", 1)),
-				NewStoppedSessionResult("aAlpha", time.Time{}, testExactTarget("aAlpha", 2)),
+				NewStoppedSessionResult(testExactTarget("aBravo", 1), time.Time{}),
+				NewStoppedSessionResult(testExactTarget("aAlpha", 2), time.Time{}),
 			},
 			query:         "a",
 			wantText:      []string{"Resume session aAlpha", "Resume session aBravo"},
@@ -117,11 +117,11 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 		{
 			name: "display prefix positions sort before later active names",
 			results: []Result{
-				NewStoppedSessionResult("aBravo", time.Time{}, testExactTarget("aBravo", 1)),
-				NewStoppedSessionResult("aAlpha", time.Time{}, testExactTarget("aAlpha", 2)),
-				NewActiveSessionResult("aZulu", time.Time{}, testExactTarget("aZulu", 3)),
-				NewActiveSessionResult("aEcho", time.Time{}, testExactTarget("aEcho", 4)),
-				NewActiveSessionResult("aEcho", time.Time{}, testExactTarget("aEcho", 5)),
+				NewStoppedSessionResult(testExactTarget("aBravo", 1), time.Time{}),
+				NewStoppedSessionResult(testExactTarget("aAlpha", 2), time.Time{}),
+				NewActiveSessionResult(testExactTarget("aZulu", 3), time.Time{}),
+				NewActiveSessionResult(testExactTarget("aEcho", 4), time.Time{}),
+				NewActiveSessionResult(testExactTarget("aEcho", 5), time.Time{}),
 				NewCommandResult(cmd("AX", "", "")),
 			},
 			query:         "a",

@@ -110,30 +110,37 @@ func TestStatusCompositionGolden(t *testing.T) {
 }
 
 func TestStatusSegmentsResolvesActiveLifecyclePresentation(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	_, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-
-	sess.name = "vive"
-	sess.incarnation = domain.SessionLifecycleID{1}
-	ref := ports.RouteRef{Key: 1, Generation: 1}
-	target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-	snapshot := ports.RecentRouteSnapshot{
-		Generation: 1,
-		Active:     ref,
-		ActiveEntry: ports.RecentRouteEntry{
-			Key: ref.Key, Generation: ref.Generation, Target: target,
-			Name: "vive", HostLabel: "user@arch", Kind: ports.RouteKindRemote,
-		},
+	tests := []struct {
+		name             string
+		routeLifecycle   domain.SessionLifecycleID
+		wantPresentation string
+	}{
+		{name: "matching lifecycle", routeLifecycle: domain.SessionLifecycleID{1}, wantPresentation: "vive@arch"},
+		{name: "stale lifecycle", routeLifecycle: domain.SessionLifecycleID{99}, wantPresentation: "vive"},
 	}
-	ac.setRouteSnapshot(snapshot)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, releasePTY := newBlockingPTY(t)
+			_, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			defer releasePTY()
 
-	require.Equal(t, "vive@arch", sess.statusSegmentsFor(ac, true).session)
-	require.Equal(t, "vive", sess.statusSegments(true).session, "route presentation belongs only to the selected attachment")
+			sess.name = "vive"
+			sess.incarnation = domain.SessionLifecycleID{1}
+			ref := ports.RouteRef{Key: 1, Generation: 1}
+			ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+				Generation: 1,
+				Active:     ref,
+				ActiveEntry: ports.RecentRouteEntry{
+					Key: ref.Key, Generation: ref.Generation,
+					Target: ports.ExactSessionTarget{LifecycleID: tt.routeLifecycle, SessionName: sess.name},
+					Name:   "vive", HostLabel: "user@arch", Kind: ports.RouteKindRemote,
+				},
+			})
 
-	snapshot.ActiveEntry.Target.LifecycleID = domain.SessionLifecycleID{99}
-	ac.setRouteSnapshot(snapshot)
-	require.Equal(t, "vive", sess.statusSegmentsFor(ac, true).session, "a stale UUID must not label the active session")
+			require.Equal(t, tt.wantPresentation, sess.statusSegmentsFor(ac, true).session)
+			require.Equal(t, "vive", sess.statusSegments(true).session, "route presentation belongs only to the selected attachment")
+		})
+	}
 }
 
 func TestStatusSegmentsIncludesFocusedPaneTitle(t *testing.T) {
