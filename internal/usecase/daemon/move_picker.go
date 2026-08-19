@@ -128,7 +128,7 @@ func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*sess
 	sess.mu.Lock()
 	d.mu.Unlock()
 	defer sess.mu.Unlock()
-	if sess.incarnation != target.Incarnation || !targetMatchesLifecycle(target, sess.name, sess.createdAt) {
+	if sess.incarnation != target.Incarnation || !targetMatchesLifecycle(target, sess.name, sess.createdAt, sess.incarnation) {
 		return nil, nil
 	}
 	if intent == pickerMoveTab {

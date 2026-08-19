@@ -676,13 +676,14 @@ func TestAttachedRouteSnapshotIsAcceptedAsAnAttachmentValue(t *testing.T) {
 	token.lease = rc.attachmentLease(ac)
 	ac.publishAttachmentCapability(token)
 
+	activeRef := ports.RouteRef{Key: 8, Generation: 4}
+	activeTarget := testRouteTarget(source.name, 8)
 	snapshot := ports.RecentRouteSnapshot{
-		Generation: 4,
-		Active:     ports.RouteRef{Key: 8, Generation: 4},
-		Home:       ports.RouteRef{Key: 8, Generation: 4},
-		Entries: []ports.RecentRouteEntry{{
-			Key: 7, Generation: 3, Name: "previous", Kind: ports.RouteKindLocal,
-		}},
+		Generation:  4,
+		Active:      activeRef,
+		ActiveEntry: ports.RecentRouteEntry{Key: 8, Generation: 4, Target: activeTarget, Name: source.name, Kind: ports.RouteKindLocal},
+		Home:        activeRef,
+		Entries:     []ports.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, ports.RouteKindLocal)},
 	}
 	payload, err := ports.MarshalRecentRouteSnapshot(snapshot)
 	require.NoError(t, err)
@@ -700,10 +701,11 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	d.sessions[target.id] = target
 	d.mu.Unlock()
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
-		Generation: 2,
-		Active:     ports.RouteRef{Key: 2, Generation: 2},
-		Previous:   ports.RouteRef{Key: 1, Generation: 1},
-		Entries:    []ports.RecentRouteEntry{{Key: 1, Generation: 1, Name: "target", Kind: ports.RouteKindLocal}},
+		Generation:  2,
+		Active:      ports.RouteRef{Key: 2, Generation: 2},
+		ActiveEntry: testRouteEntry(2, 2, source.name, 2, ports.RouteKindLocal),
+		Previous:    ports.RouteRef{Key: 1, Generation: 1},
+		Entries:     []ports.RecentRouteEntry{testRouteEntry(1, 1, "target", 1, ports.RouteKindLocal)},
 	})
 
 	transport := &closeTrackingTransport{}

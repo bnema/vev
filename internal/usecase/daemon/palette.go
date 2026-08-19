@@ -42,7 +42,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	// consults its own session history for recent-route commands.
 	routeSnapshot := ac.routeSnapshotCopy()
 	commands := d.paletteCommands()
-	results := d.paletteResults(sess, commands, routeSnapshot, ac.remoteOrigin)
+	results := d.paletteResults(sess, commands, routeSnapshot)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = palette.New(results)
@@ -57,7 +57,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 
 // paletteResults captures eligible named sessions before paletteMu so the
 // palette has an immutable lifecycle target without violating lock ordering.
-func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot ports.RecentRouteSnapshot, currentRemoteOrigin string) []palette.Result {
+func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot ports.RecentRouteSnapshot) []palette.Result {
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
 	stopped := make([]stoppedSession, 0, len(d.stopped))
@@ -73,14 +73,18 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		results = append(results, palette.NewCommandResult(cmd))
 	}
 	active := make([]palette.Result, 0, len(sessions))
+	localLifecycles := make(map[domain.SessionLifecycleID]struct{}, len(sessions)+len(stopped))
 	for _, candidate := range sessions {
+		snap := candidate.snapshotView(viewOptions{})
+		if snap.name == "" || snap.ephemeral {
+			continue
+		}
+		localLifecycles[snap.incarnation] = struct{}{}
 		if candidate == current {
 			continue
 		}
-		snap := candidate.snapshotView(viewOptions{})
-		if snap.name != "" && !snap.ephemeral {
-			active = append(active, palette.NewActiveSessionResult(snap.name, time.Unix(0, snap.createdAt), snap.id))
-		}
+		target := ports.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
+		active = append(active, palette.NewActiveSessionResult(target, time.Unix(0, snap.createdAt)))
 	}
 	sort.Slice(active, func(i, j int) bool {
 		left, _ := active[i].SessionName()
@@ -89,14 +93,10 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	})
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 	results = append(results, active...)
-	localNames := make(map[string]struct{}, len(active)+len(stopped))
-	for _, candidate := range active {
-		name, _ := candidate.SessionName()
-		localNames[name] = struct{}{}
-	}
 	for _, candidate := range stopped {
-		results = append(results, palette.NewStoppedSessionResult(candidate.name, time.Unix(0, candidate.createdAt)))
-		localNames[candidate.name] = struct{}{}
+		target := ports.ExactSessionTarget{LifecycleID: candidate.incarnation, SessionName: candidate.name}
+		results = append(results, palette.NewStoppedSessionResult(target, time.Unix(0, candidate.createdAt)))
+		localLifecycles[target.LifecycleID] = struct{}{}
 	}
 	formattedRoutes := formatRecentRouteSnapshot(routeSnapshot)
 	for i, entry := range routeSnapshot.Entries {
@@ -107,19 +107,8 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		if label == "" {
 			continue
 		}
-		if _, represented := localNames[entry.Name]; represented {
-			sameOrigin := (entry.Kind == ports.RouteKindLocal && currentRemoteOrigin == "") ||
-				(entry.Kind == ports.RouteKindRemote && currentRemoteOrigin != "" && entry.HostLabel == currentRemoteOrigin)
-			if sameOrigin {
-				continue
-			}
-			if entry.Kind == ports.RouteKindLocal && currentRemoteOrigin != "" {
-				label = formatRecentRouteName(recentRoutePresentation{
-					name:      entry.Name,
-					kind:      recentRouteLocal,
-					ephemeral: entry.Ephemeral,
-				}, true)
-			}
+		if _, represented := localLifecycles[entry.Target.LifecycleID]; represented {
+			continue
 		}
 		results = append(results, palette.NewRecentRouteResult(label, ports.RouteNavigationAction{
 			SnapshotGeneration: routeSnapshot.Generation,
@@ -283,7 +272,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			} else if action, ok := selected.RouteNavigationAction(); ok {
 				routeTarget = action
 				hasRouteTarget = true
-			} else if _, ok := selected.SessionName(); ok {
+			} else if _, ok := selected.SessionTarget(); ok {
 				sessionTarget = selected
 				hasSessionTarget = true
 			} else {
@@ -347,11 +336,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		createdAt, _ := sessionTarget.SessionCreatedAt()
 		expectedCreatedAt := createdAt.UnixNano()
 		name, _ := sessionTarget.SessionName()
-		target := picker.Target{Name: name, TabIndex: -1, ExpectedCreatedAt: &expectedCreatedAt}
-		if id, active := sessionTarget.SessionID(); active {
-			target.Session = id
-		} else {
-			target.Stopped = true
+		exactTarget, _ := sessionTarget.SessionTarget()
+		target := picker.Target{
+			Incarnation: exactTarget.LifecycleID, Name: name, TabIndex: -1,
+			ExpectedCreatedAt: &expectedCreatedAt, Stopped: sessionTarget.Kind() == palette.ResultKindStoppedSession,
 		}
 		var err error
 		if effect != nil {

@@ -199,7 +199,7 @@ func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) [
 	out := make([]ports.SessionInfo, 0, len(sessions))
 	for _, session := range sessions {
 		info := ports.SessionInfo{
-			Name:      session.Name + "@" + host,
+			Name:      domain.RemoteSessionDisplay(session.Name, host),
 			Ephemeral: session.Ephemeral,
 			Tabs:      ports.SaturateUint16(ports.CatalogTabCount(session)),
 			Attached:  session.Attached,

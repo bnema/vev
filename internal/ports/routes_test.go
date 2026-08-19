@@ -2,6 +2,7 @@ package ports
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -111,13 +112,16 @@ func TestCommittedRouteIdentityCodec(t *testing.T) {
 }
 
 func testRouteSnapshot() RecentRouteSnapshot {
+	activeTarget := testExactTarget()
+	logsTarget := ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{4, 5, 6}, SessionName: "logs"}
 	return RecentRouteSnapshot{
-		Generation: 9,
-		Active:     RouteRef{Key: 11, Generation: 3},
-		Previous:   RouteRef{Key: 12, Generation: 4},
-		Home:       RouteRef{Key: 11, Generation: 3},
+		Generation:  9,
+		Active:      RouteRef{Key: 11, Generation: 3},
+		ActiveEntry: RecentRouteEntry{Key: 11, Generation: 3, Target: activeTarget, Name: "work", Kind: RouteKindLocal, Reachability: RouteReachabilityUnknown},
+		Previous:    RouteRef{Key: 12, Generation: 4},
+		Home:        RouteRef{Key: 11, Generation: 3},
 		Entries: []RecentRouteEntry{
-			{Key: 12, Generation: 4, Name: "logs", HostLabel: "edge", Kind: RouteKindRemote, Attention: true, Reachability: RouteReachabilityUnknown},
+			{Key: 12, Generation: 4, Target: logsTarget, Name: "logs", HostLabel: "edge", Kind: RouteKindRemote, Attention: true, Reachability: RouteReachabilityUnknown},
 		},
 	}
 }
@@ -131,7 +135,7 @@ func TestRecentRouteSnapshotCodecRoundTripAndBounds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 
-	require.Equal(t, "0000000000000009000000000000000b0000000000000003000000000000000c0000000000000004000000000000000b000000000000000301000000000000000c000000000000000400046c6f677300046564676502000100", hex.EncodeToString(encoded))
+	require.Equal(t, "0000000000000009000000000000000b0000000000000003000000000000000b0000000000000003010203000000000000000000000000000004776f726b0004776f726b000001000000000000000000000c0000000000000004000000000000000b000000000000000301000000000000000c00000000000000040405060000000000000000000000000000046c6f677300046c6f677300046564676502000100", hex.EncodeToString(encoded))
 	assertAllPrefixesFail(t, encoded, UnmarshalRecentRouteSnapshot)
 	_, err = UnmarshalRecentRouteSnapshot(append(append([]byte(nil), encoded...), 0))
 	require.Error(t, err)
@@ -141,14 +145,17 @@ func TestRecentRouteSnapshotCodecRoundTripAndBounds(t *testing.T) {
 		mutate func(*RecentRouteSnapshot)
 	}{
 		{name: "missing previous reference", mutate: func(snapshot *RecentRouteSnapshot) { snapshot.Previous = RouteRef{Key: 99, Generation: 99} }},
+		{name: "missing active presentation", mutate: func(snapshot *RecentRouteSnapshot) { snapshot.ActiveEntry = RecentRouteEntry{} }},
+		{name: "route name differs from lifecycle target", mutate: func(snapshot *RecentRouteSnapshot) { snapshot.Entries[0].Name = "other" }},
 		{name: "entry is active", mutate: func(snapshot *RecentRouteSnapshot) {
-			snapshot.Entries = append(snapshot.Entries, RecentRouteEntry{Key: 11, Generation: 3, Name: "work", Kind: RouteKindLocal})
+			snapshot.Entries = append(snapshot.Entries, snapshot.ActiveEntry)
 		}},
 		{name: "duplicate entry", mutate: func(snapshot *RecentRouteSnapshot) { snapshot.Entries = append(snapshot.Entries, snapshot.Entries[0]) }},
 		{name: "too many entries", mutate: func(snapshot *RecentRouteSnapshot) {
 			snapshot.Entries = make([]RecentRouteEntry, RouteSnapshotMaxEntries+1)
 			for i := range snapshot.Entries {
-				snapshot.Entries[i] = RecentRouteEntry{Key: uint64(i + 1), Generation: uint64(i + 1), Name: "x", Kind: RouteKindLocal}
+				target := ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{byte(i + 1)}, SessionName: "x"}
+				snapshot.Entries[i] = RecentRouteEntry{Key: uint64(i + 1), Generation: uint64(i + 1), Target: target, Name: "x", Kind: RouteKindLocal}
 			}
 		}},
 	}
@@ -189,20 +196,41 @@ func TestRecentRouteSnapshotRejectsOversizedFrameBeforeParsing(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRouteWire)
 }
 
+func TestRouteLabelBoundsMatchRemoteDisplayOrigin(t *testing.T) {
+	tests := []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "maximum", length: 256},
+		{name: "over maximum", length: 257, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRouteLabel(strings.Repeat("a", tt.length), false)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {
 	values := []string{"line\nfeed", "\u2028line-separator", "\u2029paragraph-separator", "\x1b[31mred", "\u202eoverride", string([]byte{0xff, 0xfe})}
 	for _, value := range values {
 		t.Run("name/"+value, func(t *testing.T) {
 			_, err := MarshalRecentRouteSnapshot(RecentRouteSnapshot{
 				Generation: 1,
-				Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Name: value, Kind: RouteKindLocal}},
+				Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Target: ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: value}, Name: value, Kind: RouteKindLocal}},
 			})
 			require.Error(t, err)
 		})
 		t.Run("host/"+value, func(t *testing.T) {
 			_, err := MarshalRecentRouteSnapshot(RecentRouteSnapshot{
 				Generation: 1,
-				Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Name: "work", HostLabel: value, Kind: RouteKindRemote}},
+				Entries:    []RecentRouteEntry{{Key: 1, Generation: 1, Target: testExactTarget(), Name: "work", HostLabel: value, Kind: RouteKindRemote}},
 			})
 			require.Error(t, err)
 		})

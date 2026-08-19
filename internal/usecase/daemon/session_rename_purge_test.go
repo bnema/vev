@@ -46,10 +46,12 @@ func TestRenameDefersCommittedRouteIdentityUntilFirstRouteSnapshot(t *testing.T)
 	require.NoError(t, d.renameSession(sess, "vps-infra"))
 	require.Empty(t, sends, "the route ledger must be published before its identity can be updated")
 
+	activeRef := ports.RouteRef{Key: 1, Generation: 1}
 	snapshot := ports.RecentRouteSnapshot{
-		Generation: 1,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
-		Home:       ports.RouteRef{Key: 1, Generation: 1},
+		Generation:  1,
+		Active:      activeRef,
+		ActiveEntry: ports.RecentRouteEntry{Key: 1, Generation: 1, Target: testRouteTarget("0", 1), Name: "0", Kind: ports.RouteKindLocal},
+		Home:        activeRef,
 	}
 	payload, err := ports.MarshalRecentRouteSnapshot(snapshot)
 	require.NoError(t, err)

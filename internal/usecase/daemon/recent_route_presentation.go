@@ -1,5 +1,7 @@
 package daemon
 
+import "github.com/bnema/vev/internal/domain"
+
 // recentRouteKind identifies the origin represented by a presentation value.
 // It is intentionally daemon-local in this layer; ports route kinds are
 // projected into this render-only value at the daemon boundary.
@@ -72,5 +74,5 @@ func formatRecentRouteName(entry recentRoutePresentation, ambiguous bool) string
 			host = "local"
 		}
 	}
-	return name + "@" + host
+	return domain.RemoteSessionDisplay(name, host)
 }

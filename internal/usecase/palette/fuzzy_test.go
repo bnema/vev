@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/stretchr/testify/require"
 )
@@ -81,20 +81,20 @@ func TestFuzzyEmptyQueryPreservesRegistryOrder(t *testing.T) {
 func TestFuzzyOrdersMixedResults(t *testing.T) {
 	created := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name          string
-		results       []Result
-		query         string
-		wantText      []string
-		wantKinds     []ResultKind
-		wantPositions [][]int
-		wantActiveIDs map[int]domain.SessionID
+		name              string
+		results           []Result
+		query             string
+		wantText          []string
+		wantKinds         []ResultKind
+		wantPositions     [][]int
+		wantActiveTargets map[int]ports.ExactSessionTarget
 	}{
 		{
 			name: "command shortcode precedes sessions and description matches",
 			results: []Result{
-				NewStoppedSessionResult("work", created),
+				NewStoppedSessionResult(testExactTarget("work", 1), created),
 				NewCommandResult(cmd("WORK", "", "Create a workspace")),
-				NewActiveSessionResult("work", created, domain.SessionID("work-id")),
+				NewActiveSessionResult(testExactTarget("work", 2), created),
 				NewCommandResult(cmd("WQORRK", "", "")),
 				NewCommandResult(cmd("ZZZ", "", "work tools")),
 			},
@@ -106,8 +106,8 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 		{
 			name: "equivalent sessions sort by normalized text",
 			results: []Result{
-				NewStoppedSessionResult("aBravo", time.Time{}),
-				NewStoppedSessionResult("aAlpha", time.Time{}),
+				NewStoppedSessionResult(testExactTarget("aBravo", 1), time.Time{}),
+				NewStoppedSessionResult(testExactTarget("aAlpha", 2), time.Time{}),
 			},
 			query:         "a",
 			wantText:      []string{"Resume session aAlpha", "Resume session aBravo"},
@@ -117,18 +117,20 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 		{
 			name: "display prefix positions sort before later active names",
 			results: []Result{
-				NewStoppedSessionResult("aBravo", time.Time{}),
-				NewStoppedSessionResult("aAlpha", time.Time{}),
-				NewActiveSessionResult("aZulu", time.Time{}, "z"),
-				NewActiveSessionResult("aEcho", time.Time{}, "e"),
-				NewActiveSessionResult("aEcho", time.Time{}, "e2"),
+				NewStoppedSessionResult(testExactTarget("aBravo", 1), time.Time{}),
+				NewStoppedSessionResult(testExactTarget("aAlpha", 2), time.Time{}),
+				NewActiveSessionResult(testExactTarget("aZulu", 3), time.Time{}),
+				NewActiveSessionResult(testExactTarget("aEcho", 4), time.Time{}),
+				NewActiveSessionResult(testExactTarget("aEcho", 5), time.Time{}),
 				NewCommandResult(cmd("AX", "", "")),
 			},
 			query:         "a",
 			wantText:      []string{"AX", "Resume session aAlpha", "Resume session aBravo", "Switch to session aEcho", "Switch to session aEcho", "Switch to session aZulu"},
 			wantKinds:     []ResultKind{ResultKindCommand, ResultKindStoppedSession, ResultKindStoppedSession, ResultKindActiveSession, ResultKindActiveSession, ResultKindActiveSession},
 			wantPositions: [][]int{{0}, {15}, {15}, {18}, {18}, {18}},
-			wantActiveIDs: map[int]domain.SessionID{3: "e", 4: "e2", 5: "z"},
+			wantActiveTargets: map[int]ports.ExactSessionTarget{
+				3: testExactTarget("aEcho", 4), 4: testExactTarget("aEcho", 5), 5: testExactTarget("aZulu", 3),
+			},
 		},
 	}
 
@@ -142,10 +144,10 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 				positions[i] = matches[i].Positions
 			}
 			require.Equal(t, tt.wantPositions, positions)
-			for index, wantID := range tt.wantActiveIDs {
-				gotID, ok := matches[index].Result.SessionID()
+			for index, wantTarget := range tt.wantActiveTargets {
+				gotTarget, ok := matches[index].Result.SessionTarget()
 				require.True(t, ok)
-				require.Equal(t, wantID, gotID)
+				require.Equal(t, wantTarget, gotTarget)
 			}
 		})
 	}

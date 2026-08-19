@@ -460,13 +460,14 @@ func TestModelCompleteSelected(t *testing.T) {
 
 func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T) {
 	created := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
+	workTarget := testExactTarget("work", 1)
 	results := []Result{
 		NewCommandResult(cmd("JRS", "Jump", "Jump to recent session")),
-		NewActiveSessionResult("work", created, "work-id"),
-		NewStoppedSessionResult("work", created),
+		NewActiveSessionResult(workTarget, created),
+		NewStoppedSessionResult(testExactTarget("work", 2), created),
 	}
 	m := New(results)
-	results[1] = NewActiveSessionResult("changed", created, "changed-id")
+	results[1] = NewActiveSessionResult(testExactTarget("changed", 3), created)
 
 	for _, r := range "switch" {
 		m.Insert(r)
@@ -480,9 +481,9 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 	selected, ok := m.Selected()
 	require.True(t, ok)
 	require.Equal(t, ResultKindActiveSession, selected.Kind())
-	id, active := selected.SessionID()
+	target, active := selected.SessionTarget()
 	require.True(t, active)
-	require.Equal(t, domain.SessionID("work-id"), id)
+	require.Equal(t, workTarget, target)
 	require.False(t, m.CompleteSelected(), "sessions never participate in tab completion")
 	require.Equal(t, "switch", m.Query())
 	_, argument := m.ArgumentCommand()
@@ -493,7 +494,7 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 }
 
 func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
-	m := New([]Result{NewStoppedSessionResult("work", time.Unix(0, 1))})
+	m := New([]Result{NewStoppedSessionResult(testExactTarget("work", 1), time.Unix(0, 1))})
 	m.Insert('w')
 	m.Insert('k')
 
@@ -506,7 +507,7 @@ func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
 }
 
 func TestRenderFeedbackUsesSelectedSessionRowWithoutAddingResult(t *testing.T) {
-	m := New([]Result{NewActiveSessionResult("work", time.Unix(0, 1), "work")})
+	m := New([]Result{NewActiveSessionResult(testExactTarget("work", 1), time.Unix(0, 1))})
 	frame := m.Render(domain.Size{Cols: 64, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles(), Feedback: "requested session is unavailable"})
 	require.Len(t, m.Matches(), 1)
 	require.Contains(t, frameRow(frame, 1), "requested session is unavailable")

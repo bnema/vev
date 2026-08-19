@@ -13,6 +13,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/picker"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -241,6 +242,68 @@ func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	require.Empty(t, d.sessions)
+}
+
+type blockingResumeCatalogue struct {
+	*durableRecoveryCatalogue
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingResumeCatalogue) Record(name string) (domain.CatalogueRecord, bool, error) {
+	c.once.Do(func() { close(c.entered) })
+	<-c.release
+	return c.durableRecoveryCatalogue.Record(name)
+}
+
+func TestResumeStoppedSessionRejectsReplacementDuringCatalogueRead(t *testing.T) {
+	sourcePTY, releaseSource := newBlockingPTY(t)
+	defer releaseSource()
+	targetPTY, releaseTarget := newBlockingPTY(t)
+	defer releaseTarget()
+	d, from, ac, _ := newManualSessionWithPTYs(t, sourcePTY)
+	d.ptys = newFactorySeq(t, targetPTY)
+
+	record := durableRecoveryRecord(1)
+	record.Name = "stopped"
+	catalogue := &blockingResumeCatalogue{
+		durableRecoveryCatalogue: newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}),
+		entered:                  make(chan struct{}),
+		release:                  make(chan struct{}),
+	}
+	d.catalogue = catalogue
+	d.persistEnabled = true
+	d.recovery = recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil)
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionDown, nil)
+
+	target := picker.Target{
+		Name:              record.Name,
+		Stopped:           true,
+		Incarnation:       record.IncarnationID,
+		ExpectedCreatedAt: &record.CreatedAt,
+	}
+	result := make(chan bool, 1)
+	go func() { result <- d.resumeStoppedAndSwitch(from, ac, target) }()
+
+	<-catalogue.entered
+	replacement := record
+	replacement.IncarnationID = domain.IncarnationID{9}
+	replacement.CreatedAt++
+	replacement.UpdatedAt = replacement.CreatedAt
+	require.NoError(t, catalogue.Replace(replacement.Name, replacement))
+	d.mu.Lock()
+	d.stopped[replacement.Name] = stoppedSessionFromRecord(replacement, ports.SessionDown, nil)
+	d.mu.Unlock()
+	close(catalogue.release)
+
+	require.False(t, <-result)
+	require.Same(t, from, ac.currentSession())
+	require.Empty(t, catalogue.MetadataUpdates())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	require.Nil(t, d.findByNameLocked(record.Name))
+	require.Equal(t, replacement.IncarnationID, d.stopped[record.Name].incarnation)
 }
 
 func TestSnapshotStopContextCancelIsIdempotent(t *testing.T) {

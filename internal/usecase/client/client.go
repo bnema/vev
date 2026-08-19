@@ -181,7 +181,7 @@ type AttachRequest struct {
 	RemoteTarget           *domain.RemoteSessionTarget
 	ExactTarget            *ports.ExactSessionTarget
 	PreferredTabID         domain.TabStableID
-	RemoteOrigin           string
+	HostLabel              string
 	EnvironmentPolicy      ports.EnvironmentPolicy
 	NavigationCapabilities ports.NavigationCapabilities
 	StartupOverlay         ports.StartupOverlay
@@ -1054,7 +1054,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		RemoteTarget:           request.RemoteTarget,
 		ExactTarget:            exactTarget,
 		PreferredTabID:         request.PreferredTabID,
-		RemoteOrigin:           request.RemoteOrigin,
 		EnvironmentPolicy:      request.EnvironmentPolicy,
 		NavigationCapabilities: request.NavigationCapabilities,
 		StartupOverlay:         request.StartupOverlay,

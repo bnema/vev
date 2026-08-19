@@ -186,7 +186,21 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	return d.createSessionLockedWithMode(name, ephemeral, cwd, sz, env, restoredTabNames...)
 }
 
+// createStoppedSessionLocked resumes exactly expectedStopped. It rechecks the
+// stopped lifecycle after catalogue I/O, which intentionally runs without d.mu.
+func (d *Daemon) createStoppedSessionLocked(name string, cwd string, sz domain.Size, env []string, expectedStopped stoppedSession, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndStoppedFence(name, false, cwd, sz, env, &expectedStopped, restoredTabNames...)
+}
+
+func stoppedSessionMatchesLifecycle(current, expected stoppedSession) bool {
+	return current.name == expected.name && current.createdAt == expected.createdAt && current.incarnation == expected.incarnation
+}
+
 func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, sz domain.Size, env []string, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndStoppedFence(name, ephemeral, cwd, sz, env, nil, restoredTabNames...)
+}
+
+func (d *Daemon) createSessionLockedWithModeAndStoppedFence(name string, ephemeral bool, cwd string, sz domain.Size, env []string, expectedStopped *stoppedSession, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
 	if _, reserved := d.creating[name]; reserved {
 		return nil, errSessionNameInUse
@@ -194,6 +208,9 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 	d.creating[name] = struct{}{}
 	defer delete(d.creating, name)
 	stopped, resuming := d.stopped[name]
+	if expectedStopped != nil && (!resuming || !stoppedSessionMatchesLifecycle(stopped, *expectedStopped)) {
+		return nil, errAttachmentTransition
+	}
 	var authoritative domain.CatalogueRecord
 	var authoritativeExists bool
 	if !ephemeral && resuming && d.persistEnabled {
@@ -208,6 +225,9 @@ func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd st
 			return nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 		}
 		stopped, resuming = d.stopped[name]
+		if expectedStopped != nil && (!resuming || !stoppedSessionMatchesLifecycle(stopped, *expectedStopped)) {
+			return nil, errAttachmentTransition
+		}
 	}
 	var createdAt int64
 	var incarnation domain.IncarnationID

@@ -243,6 +243,12 @@ func validateRecentRouteEntry(entry RecentRouteEntry) error {
 	if entry.Key == 0 || entry.Generation == 0 {
 		return fmt.Errorf("%w: route entry identity is zero", ErrInvalidRouteWire)
 	}
+	if err := entry.Target.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid route lifecycle target: %v", ErrInvalidRouteWire, err)
+	}
+	if entry.Name != entry.Target.SessionName {
+		return fmt.Errorf("%w: route name does not match lifecycle target", ErrInvalidRouteWire)
+	}
 	if err := validateRouteString(entry.Name, "route name", false); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRouteWire, err)
 	}
@@ -262,7 +268,7 @@ func validateRecentRouteSnapshot(snapshot RecentRouteSnapshot) error {
 	if len(snapshot.Entries) > RouteSnapshotMaxEntries {
 		return fmt.Errorf("%w: too many route entries", ErrInvalidRouteWire)
 	}
-	if snapshot.Generation == 0 && len(snapshot.Entries) != 0 {
+	if snapshot.Generation == 0 && (len(snapshot.Entries) != 0 || snapshot.ActiveEntry != (RecentRouteEntry{})) {
 		return fmt.Errorf("%w: non-empty snapshot has zero generation", ErrInvalidRouteWire)
 	}
 	if err := validateRouteRef(snapshot.Active); err != nil {
@@ -273,6 +279,18 @@ func validateRecentRouteSnapshot(snapshot RecentRouteSnapshot) error {
 	}
 	if err := validateRouteRef(snapshot.Home); err != nil {
 		return err
+	}
+	if snapshot.Active.empty() {
+		if snapshot.ActiveEntry != (RecentRouteEntry{}) {
+			return fmt.Errorf("%w: active presentation has no active route", ErrInvalidRouteWire)
+		}
+	} else {
+		if err := validateRecentRouteEntry(snapshot.ActiveEntry); err != nil {
+			return err
+		}
+		if snapshot.Active != (RouteRef{Key: snapshot.ActiveEntry.Key, Generation: snapshot.ActiveEntry.Generation}) {
+			return fmt.Errorf("%w: active presentation does not match active route", ErrInvalidRouteWire)
+		}
 	}
 	if !snapshot.Active.empty() && snapshot.Active == snapshot.Previous {
 		return fmt.Errorf("%w: active and previous routes are identical", ErrInvalidRouteWire)
@@ -310,6 +328,55 @@ func validateRecentRouteSnapshot(snapshot RecentRouteSnapshot) error {
 	return nil
 }
 
+func marshalRecentRouteEntry(w *payloadWriter, entry RecentRouteEntry) {
+	w.putUint64(entry.Key)
+	w.putUint64(entry.Generation)
+	marshalExactSessionTarget(w, entry.Target)
+	w.putString(entry.Name)
+	w.putString(entry.HostLabel)
+	w.putUint8(uint8(entry.Kind))
+	w.putBool(entry.Ephemeral)
+	w.putBool(entry.Attention)
+	w.putUint8(uint8(entry.Reachability))
+}
+
+func unmarshalRecentRouteEntry(r *payloadReader) (RecentRouteEntry, error) {
+	var entry RecentRouteEntry
+	var err error
+	if entry.Key, err = r.getUint64(); err != nil {
+		return RecentRouteEntry{}, err
+	}
+	if entry.Generation, err = r.getUint64(); err != nil {
+		return RecentRouteEntry{}, err
+	}
+	if entry.Target, err = unmarshalExactSessionTarget(r); err != nil {
+		return RecentRouteEntry{}, err
+	}
+	if entry.Name, err = r.getString(); err != nil {
+		return RecentRouteEntry{}, err
+	}
+	if entry.HostLabel, err = r.getString(); err != nil {
+		return RecentRouteEntry{}, err
+	}
+	kind, err := r.getUint8()
+	if err != nil {
+		return RecentRouteEntry{}, err
+	}
+	entry.Kind = RouteKind(kind)
+	if entry.Ephemeral, err = r.getBool(); err != nil {
+		return RecentRouteEntry{}, err
+	}
+	if entry.Attention, err = r.getBool(); err != nil {
+		return RecentRouteEntry{}, err
+	}
+	reachability, err := r.getUint8()
+	if err != nil {
+		return RecentRouteEntry{}, err
+	}
+	entry.Reachability = RouteReachability(reachability)
+	return entry, nil
+}
+
 // MarshalRecentRouteSnapshot encodes a complete bounded client route view.
 func MarshalRecentRouteSnapshot(snapshot RecentRouteSnapshot) ([]byte, error) {
 	if err := validateRecentRouteSnapshot(snapshot); err != nil {
@@ -318,18 +385,14 @@ func MarshalRecentRouteSnapshot(snapshot RecentRouteSnapshot) ([]byte, error) {
 	w := payloadWriter{}
 	w.putUint64(snapshot.Generation)
 	marshalRouteRef(&w, snapshot.Active)
+	if !snapshot.Active.empty() {
+		marshalRecentRouteEntry(&w, snapshot.ActiveEntry)
+	}
 	marshalRouteRef(&w, snapshot.Previous)
 	marshalRouteRef(&w, snapshot.Home)
 	w.putUint8(uint8(len(snapshot.Entries)))
 	for _, entry := range snapshot.Entries {
-		w.putUint64(entry.Key)
-		w.putUint64(entry.Generation)
-		w.putString(entry.Name)
-		w.putString(entry.HostLabel)
-		w.putUint8(uint8(entry.Kind))
-		w.putBool(entry.Ephemeral)
-		w.putBool(entry.Attention)
-		w.putUint8(uint8(entry.Reachability))
+		marshalRecentRouteEntry(&w, entry)
 	}
 	// Keep the frame bound defensive even though current entry/label bounds
 	// make this unreachable; it protects the wire contract if those bounds
@@ -422,6 +485,11 @@ func UnmarshalRecentRouteSnapshot(b []byte) (RecentRouteSnapshot, error) {
 	if snapshot.Active, err = unmarshalRouteRef(&r); err != nil {
 		return RecentRouteSnapshot{}, err
 	}
+	if !snapshot.Active.empty() {
+		if snapshot.ActiveEntry, err = unmarshalRecentRouteEntry(&r); err != nil {
+			return RecentRouteSnapshot{}, err
+		}
+	}
 	if snapshot.Previous, err = unmarshalRouteRef(&r); err != nil {
 		return RecentRouteSnapshot{}, err
 	}
@@ -439,35 +507,10 @@ func UnmarshalRecentRouteSnapshot(b []byte) (RecentRouteSnapshot, error) {
 		snapshot.Entries = make([]RecentRouteEntry, 0, int(count))
 	}
 	for range int(count) {
-		var entry RecentRouteEntry
-		if entry.Key, err = r.getUint64(); err != nil {
-			return RecentRouteSnapshot{}, err
-		}
-		if entry.Generation, err = r.getUint64(); err != nil {
-			return RecentRouteSnapshot{}, err
-		}
-		if entry.Name, err = r.getString(); err != nil {
-			return RecentRouteSnapshot{}, err
-		}
-		if entry.HostLabel, err = r.getString(); err != nil {
-			return RecentRouteSnapshot{}, err
-		}
-		kind, err := r.getUint8()
+		entry, err := unmarshalRecentRouteEntry(&r)
 		if err != nil {
 			return RecentRouteSnapshot{}, err
 		}
-		entry.Kind = RouteKind(kind)
-		if entry.Ephemeral, err = r.getBool(); err != nil {
-			return RecentRouteSnapshot{}, err
-		}
-		if entry.Attention, err = r.getBool(); err != nil {
-			return RecentRouteSnapshot{}, err
-		}
-		reachability, err := r.getUint8()
-		if err != nil {
-			return RecentRouteSnapshot{}, err
-		}
-		entry.Reachability = RouteReachability(reachability)
 		snapshot.Entries = append(snapshot.Entries, entry)
 	}
 	if err := r.done(); err != nil {

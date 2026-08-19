@@ -14,17 +14,19 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
+	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 func testRecentRouteSnapshot() ports.RecentRouteSnapshot {
 	return ports.RecentRouteSnapshot{
-		Generation: 1,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Generation:  1,
+		Active:      ports.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: testRouteEntry(1, 1, "current", 1, ports.RouteKindLocal),
 		Entries: []ports.RecentRouteEntry{
-			{Key: 2, Generation: 1, Name: "recent", Kind: ports.RouteKindLocal},
-			{Key: 3, Generation: 1, Name: "older", Kind: ports.RouteKindLocal},
+			testRouteEntry(2, 1, "recent", 2, ports.RouteKindLocal),
+			testRouteEntry(3, 1, "older", 3, ports.RouteKindLocal),
 		},
 	}
 }
@@ -419,42 +421,69 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 	require.True(t, ac.overlays.paletteActive(), "literal JRS must not execute an overridden jump command")
 }
 
-func TestPaletteResultsDeduplicateRoutesLocalToCurrentRemoteDaemon(t *testing.T) {
+func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	current := addControlSession(d, "hi", "tab-1", "pane-1")
-	represented := addControlSession(d, "remote-manual", "tab-2", "pane-2")
-	represented.ephemeral = false
+	current.ephemeral = false
+	current.incarnation = domain.SessionLifecycleID{1}
+	local := addControlSession(d, "vev", "tab-2", "pane-2")
+	local.ephemeral = false
+	local.incarnation = domain.SessionLifecycleID{2}
+	remoteOne := ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{21}, SessionName: "vev"}
+	remoteTwo := ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{22}, SessionName: "vev"}
 	snapshot := ports.RecentRouteSnapshot{
 		Generation: 2,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
-		Entries: []ports.RecentRouteEntry{{
-			Key: 2, Generation: 1, Name: "remote-manual", HostLabel: "remote", Kind: ports.RouteKindRemote,
-		}},
+		Entries: []ports.RecentRouteEntry{
+			{Key: 1, Generation: 1, Target: ports.ExactSessionTarget{LifecycleID: current.incarnation, SessionName: "hi"}, Name: "hi", Kind: ports.RouteKindLocal},
+			{Key: 2, Generation: 1, Target: ports.ExactSessionTarget{LifecycleID: local.incarnation, SessionName: "vev"}, Name: "vev", Kind: ports.RouteKindLocal},
+			{Key: 3, Generation: 1, Target: remoteOne, Name: "vev", HostLabel: "arch", Kind: ports.RouteKindRemote},
+			{Key: 4, Generation: 1, Target: remoteTwo, Name: "vev", HostLabel: "arch", Kind: ports.RouteKindRemote},
+		},
 	}
 
-	for _, test := range []struct {
-		name          string
-		currentOrigin string
-		want          []string
-	}{
-		{name: "remote daemon", currentOrigin: "remote", want: []string{"Switch to session remote-manual"}},
-		{name: "remote daemon keeps distinct local route", currentOrigin: "remote", want: []string{"Switch to session remote-manual", "Switch to session remote-manual@local"}},
-		{name: "home daemon keeps distinct remote", want: []string{"Switch to session remote-manual", "Switch to session remote-manual@remote"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			testSnapshot := snapshot
-			if test.name == "remote daemon keeps distinct local route" {
-				testSnapshot.Entries = append(testSnapshot.Entries, ports.RecentRouteEntry{Key: 3, Generation: 1, Name: "remote-manual", Kind: ports.RouteKindLocal})
-			}
-			results := d.paletteResults(current, nil, testSnapshot, test.currentOrigin)
-			var matching []string
-			for _, result := range results {
-				if result.DisplayText() == "Switch to session remote-manual" || result.DisplayText() == "Switch to session remote-manual@local" || result.DisplayText() == "Switch to session remote-manual@remote" {
-					matching = append(matching, result.DisplayText())
-				}
-			}
-			require.Equal(t, test.want, matching)
-		})
+	results := d.paletteResults(current, nil, snapshot)
+	var sessionTargets []ports.ExactSessionTarget
+	var routeActions []ports.RouteNavigationAction
+	for _, result := range results {
+		if target, ok := result.SessionTarget(); ok {
+			sessionTargets = append(sessionTargets, target)
+		}
+		if action, ok := result.RouteNavigationAction(); ok {
+			routeActions = append(routeActions, action)
+		}
+	}
+	require.Equal(t, []ports.ExactSessionTarget{{LifecycleID: local.incarnation, SessionName: "vev"}}, sessionTargets)
+	require.Equal(t, []ports.RouteNavigationAction{
+		{SnapshotGeneration: 2, Key: 3, Generation: 1},
+		{SnapshotGeneration: 2, Key: 4, Generation: 1},
+	}, routeActions)
+	require.Equal(t, "Switch to session vev@arch", results[len(results)-2].DisplayText())
+	require.Equal(t, "Switch to session vev@arch", results[len(results)-1].DisplayText())
+}
+
+func TestPaletteLifecycleTargetRejectsSameNameReplacement(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	target := d.sessions["recent"]
+	target.incarnation = domain.SessionLifecycleID{2}
+	target.createdAt = 7
+	token := beginRecentRoutePaletteEffect(t, d, current, ac)
+	expectedCreatedAt := target.createdAt
+
+	err := d.switchToTargetForAttachment(token, picker.Target{
+		Name: "recent", Incarnation: domain.SessionLifecycleID{9},
+		ExpectedCreatedAt: &expectedCreatedAt, TabIndex: -1,
+	}, sessionHandoffGuard{}, "palette-session")
+
+	require.ErrorIs(t, err, errAttachmentTransition)
+	require.Same(t, current, ac.currentSession())
+	for {
+		select {
+		case frame := <-sends:
+			require.NotEqual(t, ports.MsgAttachTarget, frame.Type)
+		default:
+			return
+		}
 	}
 }
 
@@ -462,10 +491,11 @@ func TestPaletteFuzzyRemoteRecentRouteSendsExactNavigationAction(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
-		Generation: 9,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		Generation:  9,
+		Active:      ports.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: testRouteEntry(1, 1, current.name, 1, ports.RouteKindLocal),
 		Entries: []ports.RecentRouteEntry{{
-			Key: 8, Generation: 4, Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
+			Key: 8, Generation: 4, Target: testRouteTarget("logs", 8), Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
 		}},
 	})
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
@@ -541,9 +571,10 @@ func TestPaletteJRSDoesNotRevalidateTargetInDaemon(t *testing.T) {
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
-		Generation: 7,
-		Active:     ports.RouteRef{Key: 1, Generation: 1},
-		Entries:    []ports.RecentRouteEntry{{Key: 9, Generation: 4, Name: "captured", Kind: ports.RouteKindLocal}},
+		Generation:  7,
+		Active:      ports.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: testRouteEntry(1, 1, sess.name, 1, ports.RouteKindLocal),
+		Entries:     []ports.RecentRouteEntry{testRouteEntry(9, 4, "captured", 9, ports.RouteKindLocal)},
 	})
 
 	validated := make(chan struct{})

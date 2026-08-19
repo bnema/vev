@@ -794,7 +794,7 @@ func TestPaletteBackSessionSendsClientPreviousRouteAction(t *testing.T) {
 		Generation: 3,
 		Active:     ports.RouteRef{Key: 3, Generation: 3},
 		Previous:   ports.RouteRef{Key: 2, Generation: 2},
-		Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 2, Name: "recent", Kind: ports.RouteKindLocal}},
+		Entries:    []ports.RecentRouteEntry{testRouteEntry(2, 2, "recent", 2, ports.RouteKindLocal)},
 	})
 
 	require.NoError(t, d.backSessionForAttachment(token))

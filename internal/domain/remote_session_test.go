@@ -90,19 +90,21 @@ func TestRemoteSessionKeyValidate(t *testing.T) {
 
 func TestRemoteSessionKeyDisplayIsPresentationOnly(t *testing.T) {
 	tests := []struct {
-		host string
-		want string
+		host          string
+		displayOrigin string
+		want          string
 	}{
 		{host: "arch", want: "hello@arch"},
+		{host: "route", displayOrigin: "user@arch", want: "hello@arch"},
 		{host: "test@arch", want: "hello@arch"},
 		{host: "test@arch:2222", want: "hello@arch:2222"},
 		{host: "test@[2001:db8::1]:2222", want: "hello@[2001:db8::1]:2222"},
 		{host: "test@", want: "hello@test@"},
-		{host: "@arch", want: "hello@@arch"},
+		{host: "@arch", want: "hello@arch"},
 	}
 	for _, test := range tests {
 		t.Run(test.host, func(t *testing.T) {
-			key := RemoteSessionKey{Host: test.host, Name: "hello"}
+			key := RemoteSessionKey{Host: test.host, Name: "hello", DisplayOrigin: test.displayOrigin}
 			if got := key.Display(); got != test.want {
 				t.Fatalf("RemoteSessionKey.Display() = %q, want %q", got, test.want)
 			}

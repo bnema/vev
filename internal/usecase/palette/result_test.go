@@ -10,11 +10,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func testExactTarget(name string, marker byte) ports.ExactSessionTarget {
+	return ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{marker}, SessionName: name}
+}
+
 func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	created := time.Date(2026, time.March, 1, 2, 3, 4, 0, time.UTC)
 	commandResult := NewCommandResult(command.Command{Code: "NT", Desc: "Create tab"})
-	active := NewActiveSessionResult("work", created, domain.SessionID("session-work"))
-	stopped := NewStoppedSessionResult("archive", created)
+	activeTarget := testExactTarget("work", 1)
+	stoppedTarget := testExactTarget("archive", 2)
+	active := NewActiveSessionResult(activeTarget, created)
+	stopped := NewStoppedSessionResult(stoppedTarget, created)
 
 	require.Equal(t, ResultKindCommand, commandResult.Kind())
 	require.Equal(t, "NT", commandResult.DisplayText())
@@ -32,9 +38,9 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	require.Equal(t, created, createdAt)
 	require.Equal(t, "Switch to session work", active.DisplayText())
 	require.Equal(t, "Switch to session work", active.SearchText())
-	id, ok := active.SessionID()
+	target, ok := active.SessionTarget()
 	require.True(t, ok)
-	require.Equal(t, domain.SessionID("session-work"), id)
+	require.Equal(t, activeTarget, target)
 
 	require.Equal(t, ResultKindStoppedSession, stopped.Kind())
 	name, ok = stopped.SessionName()
@@ -45,8 +51,9 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	require.Equal(t, created, createdAt)
 	require.Equal(t, "Resume session archive", stopped.DisplayText())
 	require.Equal(t, "Resume session archive", stopped.SearchText())
-	_, ok = stopped.SessionID()
-	require.False(t, ok)
+	target, ok = stopped.SessionTarget()
+	require.True(t, ok)
+	require.Equal(t, stoppedTarget, target)
 }
 
 func TestRecentRouteResultCarriesExactNavigationAction(t *testing.T) {
@@ -71,10 +78,10 @@ func TestSessionResultsSearchDisplayedActionText(t *testing.T) {
 		query     string
 		positions []int
 	}{
-		{name: "active prefix", result: NewActiveSessionResult("work", created, "work-id"), query: "switch", positions: []int{0, 1, 2, 3, 4, 5}},
-		{name: "active name", result: NewActiveSessionResult("work", created, "work-id"), query: "work", positions: []int{1, 8, 20, 21}},
-		{name: "stopped prefix", result: NewStoppedSessionResult("archive", created), query: "resume", positions: []int{0, 1, 2, 3, 4, 5}},
-		{name: "stopped name", result: NewStoppedSessionResult("archive", created), query: "archive", positions: []int{15, 16, 17, 18, 19, 20, 21}},
+		{name: "active prefix", result: NewActiveSessionResult(testExactTarget("work", 1), created), query: "switch", positions: []int{0, 1, 2, 3, 4, 5}},
+		{name: "active name", result: NewActiveSessionResult(testExactTarget("work", 1), created), query: "work", positions: []int{1, 8, 20, 21}},
+		{name: "stopped prefix", result: NewStoppedSessionResult(testExactTarget("archive", 2), created), query: "resume", positions: []int{0, 1, 2, 3, 4, 5}},
+		{name: "stopped name", result: NewStoppedSessionResult(testExactTarget("archive", 2), created), query: "archive", positions: []int{15, 16, 17, 18, 19, 20, 21}},
 	}
 
 	for _, tt := range tests {
