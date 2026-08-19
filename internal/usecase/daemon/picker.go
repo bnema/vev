@@ -1290,7 +1290,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 				from.mu.Lock()
 				cwd, env := d.dirOrHome(current.cwd), copyEnvironment(from.env)
 				from.mu.Unlock()
-				created, createErr := d.createSessionLocked(target.Name, false, cwd, ac.sizeSnapshot(), env, current.tabNames)
+				created, createErr := d.createStoppedSessionLocked(target.Name, cwd, ac.sizeSnapshot(), env, current, current.tabNames)
 				targetSess = created
 				return created, createErr
 			},
@@ -1316,8 +1316,12 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	}
 	env := copyEnvironment(from.env)
 	from.mu.Unlock()
-	cwd := d.dirOrHome(stopped.cwd)
-	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.sizeSnapshot(), env, stopped.tabNames)
+	current, ok := d.stopped[target.Name]
+	if !ok || current.purging || !stoppedSessionMatchesLifecycle(current, stopped) || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
+		return nil, attachmentTransitionResult{}, false, errAttachmentTransition
+	}
+	cwd := d.dirOrHome(current.cwd)
+	targetSess, err := d.createStoppedSessionLocked(target.Name, cwd, ac.sizeSnapshot(), env, current, current.tabNames)
 	if err != nil {
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
 		return nil, attachmentTransitionResult{}, false, err
