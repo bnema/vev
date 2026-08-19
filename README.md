@@ -9,8 +9,7 @@
 
 <p align="center"><em>Norwegian: to weave</em></p>
 
-<p align="center">A terminal multiplexer for Linux and macOS.<br>
-Like tmux, minus the prefix key. Like mosh, minus mosh. One binary.</p>
+<p align="center">A minimal, remote friendly terminal multiplexer for Linux and macOS.</p>
 
 <p align="center"><img src="docs/assets/demo.gif" alt="vev demo: local and remote sessions, splits, stacked panes, floating window, notifications, detach and re-attach" width="800"></p>
 
