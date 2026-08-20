@@ -155,6 +155,22 @@ func TestGraphicsOutputIDsAreIsolatedAcrossAttachments(t *testing.T) {
 	require.NotEqual(t, leftID, rightID, "terminal-global image IDs must not be reused by another attachment")
 }
 
+func TestUnsupportedGraphicsWarningIsBoundedForLateSceneCreation(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+	ac.terminalCapabilities.KittyGraphics = false
+	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
+	require.NoError(t, err)
+	sess.tabs[0].focusedPane().screen.Write(fixture)
+
+	require.True(t, d.warnUnsupportedGraphics(ac), "late graphics creation should explain suppression")
+	require.False(t, d.warnUnsupportedGraphics(ac), "suppression warning must be bounded per attachment")
+	ac.overlays.noticeMu.Lock()
+	require.Len(t, ac.overlays.noticeToasts, 1)
+	ac.overlays.noticeMu.Unlock()
+}
+
 func TestGraphicsNamespacesAreDeterministicAndCollisionSafe(t *testing.T) {
 	d := &Daemon{}
 	d.mu.Lock()
