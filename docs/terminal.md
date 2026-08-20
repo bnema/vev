@@ -6,6 +6,25 @@ Panes always receive vev's stable compatibility contract: `TERM=xterm-256color`,
 
 Each attachment independently detects its output color support from terminal environment signals. vev preserves RGB pane state and converts it to the xterm 256-color palette only for attachments that do not advertise truecolor. An attachment reporting a 256-color terminal receives a one-time warning before its first paint. Environment signals are advisory—especially through nested multiplexers—and do not advertise Kitty graphics support.
 
+## Kitty graphics
+
+Kitty graphics support is attachment-local and explicitly declared only after a
+bounded Kitty query and DA1 probe run through the client's existing terminal
+input pump. Environment variables never enable graphics by themselves. The
+probe preserves unrelated input, and late probe replies are quarantined rather
+than sent to a pane.
+
+A capable attachment renders the supported static/direct subset: current
+streamed `kitten icat` PNG input, bounded RGB/RGBA/PNG assets, ordinary
+placements, crop, offsets, z-index, and supported deletes. vev allocates
+attachment-owned Kitty IDs, never sends global deletes, clips placements to
+pane and attachment content, and replays authoritative graphics through the
+same ordered output state chain as ANSI text. Unsupported attachments retain
+text output and receive one bounded warning when graphics are suppressed.
+
+File, temporary-file, shared-memory, animation, composition, relative
+placements, Unicode placeholders, and graphics scrollback are unsupported.
+
 ## Environment
 
 On each attach, the attaching environment becomes the session's source of truth for future PTY children. vev preserves it except that it replaces `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `VEV`; `SHELL` selects the command used to start each PTY. Already-running processes keep their original environment.
