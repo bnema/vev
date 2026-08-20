@@ -107,9 +107,15 @@ type Daemon struct {
 	// WaitGroup: notifications are spawned from arbitrary goroutines while
 	// Serve may be waiting, and WaitGroup forbids Add-from-zero concurrent
 	// with Wait.
-	notifies           []chan struct{}
-	parked             map[uint64]*parkedAttachment
-	graphicsNamespaces map[uint64]struct{}
+	notifies []chan struct{}
+	parked   map[uint64]*parkedAttachment
+	// graphicsNamespaces reserves deterministic, attachment/session-scoped Kitty
+	// ID blocks until their outer objects have been retired. Quarantined blocks
+	// remain in this bounded table until an ambiguous cleanup has completed
+	// successfully; failed or unsent cleanup is quarantined permanently.
+	graphicsNamespaces           map[uint64]struct{}
+	graphicsNamespaceFences      map[uint64]uint64
+	graphicsNamespaceQuarantines map[uint64]*graphicsNamespaceQuarantine
 	// parking tracks resume-capable attachments from before detach clears the
 	// live seat until parkAttachment publishes the token into parked.
 	// IntentResume waits on the matching entry instead of treating the live
@@ -622,29 +628,31 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:           make(map[domain.SessionID]*session),
-		inactive:           make(map[string]inactiveSession),
-		creating:           make(map[string]struct{}),
-		parked:             make(map[uint64]*parkedAttachment),
-		graphicsNamespaces: make(map[uint64]struct{}),
-		parking:            make(map[uint64]*parkingAttachment),
-		paneProcessCtx:     paneProcessCtx,
-		paneProcessCancel:  paneProcessCancel,
-		ptys:               ptys,
-		clock:              clock,
-		log:                log,
-		baseEnv:            os.Environ(),
-		shell:              defaultShellCommand,
-		dirOrHome:          dirOrHome,
-		done:               make(chan struct{}),
-		restoreDone:        make(chan struct{}),
-		animWake:           make(chan struct{}, 1),
-		snapshotJobs:       make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted:   make(map[*snapshotCapture]struct{}),
-		snapshotWake:       make(chan struct{}, 1),
-		notices:            newNoticeCenter(),
-		remoteCatalog:      newRemoteCatalogState(),
-		resumeParkGrace:    defaultResumeParkGrace,
+		sessions:                     make(map[domain.SessionID]*session),
+		inactive:                     make(map[string]inactiveSession),
+		creating:                     make(map[string]struct{}),
+		parked:                       make(map[uint64]*parkedAttachment),
+		graphicsNamespaces:           make(map[uint64]struct{}),
+		graphicsNamespaceFences:      make(map[uint64]uint64),
+		graphicsNamespaceQuarantines: make(map[uint64]*graphicsNamespaceQuarantine),
+		parking:                      make(map[uint64]*parkingAttachment),
+		paneProcessCtx:               paneProcessCtx,
+		paneProcessCancel:            paneProcessCancel,
+		ptys:                         ptys,
+		clock:                        clock,
+		log:                          log,
+		baseEnv:                      os.Environ(),
+		shell:                        defaultShellCommand,
+		dirOrHome:                    dirOrHome,
+		done:                         make(chan struct{}),
+		restoreDone:                  make(chan struct{}),
+		animWake:                     make(chan struct{}, 1),
+		snapshotJobs:                 make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted:             make(map[*snapshotCapture]struct{}),
+		snapshotWake:                 make(chan struct{}, 1),
+		notices:                      newNoticeCenter(),
+		remoteCatalog:                newRemoteCatalogState(),
+		resumeParkGrace:              defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
