@@ -316,6 +316,7 @@ type floatingLaunchSpec struct {
 	sessionName  string
 	cwd          string
 	size         domain.Size
+	ptyGeometry  domain.Geometry
 	geometry     floatingGeometry
 	paneStableID string
 	env          []string
@@ -385,6 +386,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		sessionName:  name,
 		cwd:          cwd,
 		size:         size,
+		ptyGeometry:  sess.paneGeometry(size),
 		geometry:     geometry,
 		paneStableID: paneStableID,
 		env:          childEnvFrom(env, name, tabStableID, paneStableID),
@@ -424,7 +426,16 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, err)
 		return
 	}
+	ptyGeometry := spec.ptyGeometry
+	if ptyGeometry.PixelsKnown() {
+		if err := resizePTYGeometry(pty, ptyGeometry); err != nil {
+			d.log.Warn("initial pty geometry failed", "err", err, "session", spec.sessionName, "kind", "floating")
+			ptyGeometry = domain.Geometry{Size: spec.size}
+		}
+	}
 	p := newPaneWithStableIDAndTitle(layout.PaneID("floating"), spec.paneStableID, pty, spec.size, spec.fallback)
+	p.geometry = ptyGeometry
+	setScreenGeometry(p.screen, ptyGeometry)
 	p.rect = spec.geometry.ptyRect()
 	p.popupGeometry = spec.geometry
 	if !lifetime.publish(p) {

@@ -57,6 +57,20 @@ func (s *session) geometryClaimCurrent(source sessionGeometrySource) bool {
 // paneGeometry maps the controlling terminal's optional pixel dimensions to a
 // pane's cell rectangle. Integer division deliberately truncates: the kernel
 // winsize and CSI reports cannot represent fractional pixels.
+// scalePaneGeometry maps a full terminal claim to one pane rectangle. Pixel
+// dimensions are deliberately scaled with integer truncation, matching the
+// mapping used by paneGeometry, but it is also usable while a session is still
+// private and has not published its attachment owner.
+func scalePaneGeometry(full domain.Geometry, size domain.Size) domain.Geometry {
+	geometry := domain.Geometry{Size: size}
+	if !full.Valid() || !size.Valid() || !full.PixelsKnown() {
+		return geometry
+	}
+	geometry.PixelWidth = int(int64(full.PixelWidth) * int64(size.Cols) / int64(full.Cols))
+	geometry.PixelHeight = int(int64(full.PixelHeight) * int64(size.Rows) / int64(full.Rows))
+	return geometry.NormalizePixels()
+}
+
 func (s *session) paneGeometry(size domain.Size) domain.Geometry {
 	geometry := domain.Geometry{Size: size}
 	if s == nil || !size.Valid() {
@@ -66,13 +80,7 @@ func (s *session) paneGeometry(size domain.Size) domain.Geometry {
 	if owner == nil {
 		return geometry
 	}
-	full := owner.geometryClaimSnapshot()
-	if !full.Valid() || !full.PixelsKnown() {
-		return geometry
-	}
-	geometry.PixelWidth = int(int64(full.PixelWidth) * int64(size.Cols) / int64(full.Cols))
-	geometry.PixelHeight = int(int64(full.PixelHeight) * int64(size.Rows) / int64(full.Rows))
-	return geometry.NormalizePixels()
+	return scalePaneGeometry(owner.geometryClaimSnapshot(), size)
 }
 
 // sessionGeometryViewport is called with a non-nil session by the daemon

@@ -1589,7 +1589,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 				env = copyEnvironment(d.baseEnv)
 			}
 			var err error
-			sess, err = d.resumeInactiveSessionLocked(h.Name, cwd, sz, env, stopped, stopped.tabNames)
+			sess, err = d.resumeInactiveSessionWithGeometryLocked(h.Name, cwd, sz, h.Geometry(), env, stopped, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
