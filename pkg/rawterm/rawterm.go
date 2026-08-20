@@ -17,8 +17,9 @@ type State struct {
 	termios syscall.Termios
 }
 
-// winsize mirrors the kernel's struct winsize for TIOCGWINSZ/TIOCSWINSZ.
-type winsize struct {
+// Winsize mirrors the kernel's struct winsize for TIOCGWINSZ/TIOCSWINSZ.
+// Zero pixel dimensions mean the controlling terminal did not report them.
+type Winsize struct {
 	Row    uint16
 	Col    uint16
 	Xpixel uint16
@@ -79,16 +80,29 @@ func Restore(fd int, s *State) error {
 
 // GetSize returns the terminal's current column and row count.
 func GetSize(fd int) (cols, rows int, err error) {
-	var ws winsize
-	if err := ioctl(fd, syscall.TIOCGWINSZ, unsafe.Pointer(&ws)); err != nil {
-		return 0, 0, fmt.Errorf("rawterm: get winsize: %w", err)
+	ws, err := GetWinsize(fd)
+	if err != nil {
+		return 0, 0, err
 	}
 	return int(ws.Col), int(ws.Row), nil
 }
 
+// GetWinsize returns the terminal's cell and optional pixel dimensions.
+func GetWinsize(fd int) (Winsize, error) {
+	var ws Winsize
+	if err := ioctl(fd, syscall.TIOCGWINSZ, unsafe.Pointer(&ws)); err != nil {
+		return Winsize{}, fmt.Errorf("rawterm: get winsize: %w", err)
+	}
+	return ws, nil
+}
+
 // SetWinsize sets the terminal's column and row count.
 func SetWinsize(fd int, cols, rows uint16) error {
-	ws := winsize{Row: rows, Col: cols}
+	return SetWinsizeFull(fd, Winsize{Row: rows, Col: cols})
+}
+
+// SetWinsizeFull sets the terminal's cell and optional pixel dimensions.
+func SetWinsizeFull(fd int, ws Winsize) error {
 	if err := ioctl(fd, syscall.TIOCSWINSZ, unsafe.Pointer(&ws)); err != nil {
 		return fmt.Errorf("rawterm: set winsize: %w", err)
 	}

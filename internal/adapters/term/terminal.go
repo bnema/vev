@@ -206,13 +206,27 @@ func (t *Terminal) restoreRawLocked() error {
 	return err
 }
 
-// Size returns the current terminal dimensions.
+// Size returns the current terminal cell dimensions.
 func (t *Terminal) Size() (domain.Size, error) {
-	cols, rows, err := rawterm.GetSize(t.fd)
+	geometry, err := t.Geometry()
 	if err != nil {
-		return domain.Size{}, fmt.Errorf("term: get size: %w", err)
+		return domain.Size{}, err
 	}
-	return domain.Size{Cols: cols, Rows: rows}, nil
+	return geometry.Size, nil
+}
+
+// Geometry returns the current terminal cell dimensions and optional pixel
+// dimensions reported by the controlling terminal.
+func (t *Terminal) Geometry() (domain.Geometry, error) {
+	ws, err := rawterm.GetWinsize(t.fd)
+	if err != nil {
+		return domain.Geometry{}, fmt.Errorf("term: get size: %w", err)
+	}
+	return domain.Geometry{
+		Size:        domain.Size{Cols: int(ws.Col), Rows: int(ws.Row)},
+		PixelWidth:  int(ws.Xpixel),
+		PixelHeight: int(ws.Ypixel),
+	}, nil
 }
 
 // ResizeEvents returns a channel of coalesced terminal sizes, one per
