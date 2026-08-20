@@ -433,7 +433,7 @@ func TestTerminal_ResizeEvents_ConcurrentWithRestore(t *testing.T) {
 		}
 
 		start := make(chan struct{})
-		chch := make(chan (<-chan domain.Size), 1)
+		chch := make(chan (<-chan domain.Geometry), 1)
 		go func() {
 			<-start
 			chch <- tm.ResizeEvents()

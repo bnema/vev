@@ -98,19 +98,19 @@ func (w *attachPaletteWriter) Write(data []byte) (int, error) {
 type attachPaletteTerminalHarness struct {
 	in     io.Reader
 	out    *attachPaletteWriter
-	resize chan domain.Size
+	resize chan domain.Geometry
 }
 
 func (t *attachPaletteTerminalHarness) EnterRaw() (func() error, error) {
 	return func() error { return nil }, nil
 }
-func (*attachPaletteTerminalHarness) Size() (domain.Size, error) {
-	return domain.Size{Cols: 80, Rows: 24}, nil
+func (*attachPaletteTerminalHarness) Geometry() (domain.Geometry, error) {
+	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
 }
-func (t *attachPaletteTerminalHarness) ResizeEvents() <-chan domain.Size { return t.resize }
-func (t *attachPaletteTerminalHarness) In() io.Reader                    { return t.in }
-func (t *attachPaletteTerminalHarness) Out() io.Writer                   { return t.out }
-func (*attachPaletteTerminalHarness) Flush() error                       { return nil }
+func (t *attachPaletteTerminalHarness) ResizeEvents() <-chan domain.Geometry { return t.resize }
+func (t *attachPaletteTerminalHarness) In() io.Reader                        { return t.in }
+func (t *attachPaletteTerminalHarness) Out() io.Writer                       { return t.out }
+func (*attachPaletteTerminalHarness) Flush() error                           { return nil }
 
 type attachPaletteTransport struct {
 	mu           sync.Mutex
@@ -200,7 +200,7 @@ func startAttachPaletteHarnessWithInputAndWriteError(state *terminalThemeState, 
 	reader := newAttachPaletteReader()
 	writer := newAttachPaletteWriter()
 	writer.err = writeErr
-	term := &attachPaletteTerminalHarness{in: reader, out: writer, resize: make(chan domain.Size)}
+	term := &attachPaletteTerminalHarness{in: reader, out: writer, resize: make(chan domain.Geometry)}
 	ms := &milestones{}
 	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
 	attempt := &attachAttempt{

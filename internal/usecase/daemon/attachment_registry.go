@@ -101,7 +101,7 @@ func (c *sessionCore) registerAttachmentLocked(ac *attachedClient) bool {
 	c.nextAttachmentID++
 	c.attachments[ac] = struct{}{}
 	c.attachmentOrder[ac] = c.nextAttachmentID
-	if c.claimGeometryOwnerLocked(ac, ac.sizeSnapshot()) == 0 {
+	if c.claimGeometryOwnerLocked(ac, ac.geometrySnapshot()) == 0 {
 		c.refreshGeometryOwnerLocked()
 	}
 	return true
@@ -114,7 +114,7 @@ func (c *sessionCore) latestValidGeometryOwnerLocked(exclude *attachedClient) *a
 	var owner *attachedClient
 	var ownerClaim, ownerOrder uint64
 	for candidate := range c.attachments {
-		if candidate == nil || candidate == exclude || !candidate.sizeSnapshot().Valid() || !candidate.geometryClaimSizeSnapshot().Valid() {
+		if candidate == nil || candidate == exclude || !candidate.geometrySnapshot().Valid() || !candidate.geometryClaimSnapshot().Valid() {
 			continue
 		}
 		claim := candidate.geometryClaim.Load()
@@ -136,7 +136,7 @@ func (c *sessionCore) refreshGeometryOwnerLocked() {
 	}
 	owner := c.geometryOwner.Load()
 	if owner != nil {
-		if _, ok := c.attachments[owner]; ok && owner.sizeSnapshot().Valid() && owner.geometryClaimSizeSnapshot().Valid() {
+		if _, ok := c.attachments[owner]; ok && owner.geometrySnapshot().Valid() && owner.geometryClaimSnapshot().Valid() {
 			return
 		}
 	}
@@ -148,15 +148,15 @@ func (c *sessionCore) refreshGeometryOwnerLocked() {
 // claimGeometryOwnerLocked records the latest attachment claim. Caller holds
 // the owning session's mu; the atomic publication lets resize transactions
 // validate the claim while tab locks are held.
-func (c *sessionCore) claimGeometryOwnerLocked(ac *attachedClient, size domain.Size) uint64 {
-	if c == nil || ac == nil || !size.Valid() {
+func (c *sessionCore) claimGeometryOwnerLocked(ac *attachedClient, geometry domain.Geometry) uint64 {
+	if c == nil || ac == nil || !geometry.Valid() {
 		return 0
 	}
 	c.geometryMu.Lock()
 	defer c.geometryMu.Unlock()
 	c.geometryClaimSeq++
 	claim := c.geometryClaimSeq
-	ac.publishGeometryClaim(size, claim)
+	ac.publishGeometryClaim(geometry, claim)
 	c.geometryOwner.Store(ac)
 	return claim
 }
@@ -189,14 +189,20 @@ func (s *session) claimGeometryOwner(ac *attachedClient) (uint64, bool) {
 	if ac == nil {
 		return 0, false
 	}
-	return s.claimGeometryOwnerForSize(ac, ac.sizeSnapshot())
+	return s.claimGeometryOwnerForGeometry(ac, ac.geometrySnapshot())
 }
 
 // claimGeometryOwnerForSize records a requested shared geometry independently
 // of the attachment-local publication. Transactional resize commits use this
 // before the PTY phase so a stale request cannot publish after a newer claim.
 func (s *session) claimGeometryOwnerForSize(ac *attachedClient, size domain.Size) (uint64, bool) {
-	if s == nil || ac == nil || !size.Valid() {
+	return s.claimGeometryOwnerForGeometry(ac, domain.Geometry{Size: size})
+}
+
+// claimGeometryOwnerForGeometry records a requested shared cell and pixel
+// geometry independently of attachment-local publication.
+func (s *session) claimGeometryOwnerForGeometry(ac *attachedClient, geometry domain.Geometry) (uint64, bool) {
+	if s == nil || ac == nil || !geometry.Valid() {
 		return 0, false
 	}
 	s.mu.Lock()
@@ -204,7 +210,7 @@ func (s *session) claimGeometryOwnerForSize(ac *attachedClient, size domain.Size
 	if _, ok := s.attachments[ac]; !ok {
 		return 0, false
 	}
-	return s.claimGeometryOwnerLocked(ac, size), true
+	return s.claimGeometryOwnerLocked(ac, geometry.NormalizePixels()), true
 }
 
 // releaseGeometryClaim drops a claim that never reached the coordinator's

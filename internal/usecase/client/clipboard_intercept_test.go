@@ -26,12 +26,12 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	t.Helper()
 	var out bytes.Buffer
 	var restoreCount int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	input := newOneShotBlockingReader(stdin)
 	defer input.unblock()
 
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Maybe()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Maybe()
 	tm.EXPECT().EnterRaw().Return(func() error { restoreCount++; return nil }, nil).Once()
 	tm.EXPECT().In().Return(input).Maybe()
 	tm.EXPECT().Out().Return(&out).Maybe()
@@ -161,16 +161,16 @@ func (d clipboardToastLifecycleDialer) Dial(context.Context) (ports.Transport, e
 
 func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testing.T) {
 	var out bytes.Buffer
-	resizeEvents := make(chan domain.Size)
+	resizeEvents := make(chan domain.Geometry)
 	input := newOneShotBlockingReader([]byte{0x16})
 	defer input.unblock()
 	term := portsmocks.NewMockTerminal(t)
-	term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Maybe()
+	term.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Maybe()
 	term.EXPECT().EnterRaw().Return(func() error { return nil }, nil).Once()
 	term.EXPECT().In().Return(input).Maybe()
 	term.EXPECT().Out().Return(&out).Maybe()
 	term.EXPECT().Flush().Return(nil).Maybe()
-	term.EXPECT().ResizeEvents().Return((<-chan domain.Size)(resizeEvents)).Maybe()
+	term.EXPECT().ResizeEvents().Return((<-chan domain.Geometry)(resizeEvents)).Maybe()
 
 	clipboard := portsmocks.NewMockClipboardReader(t)
 	clipboard.EXPECT().ReadImage(mock.Anything).Return("", nil, errors.New("read failed")).Once()

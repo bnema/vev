@@ -7,14 +7,14 @@ import (
 )
 
 // resizeLoop watches sig for signal notifications (SIGWINCH in
-// production) and emits the coalesced terminal size on out: a burst of
-// signals collapses to a single emitted size, since any signals still
+// production) and emits the coalesced terminal geometry on out: a burst of
+// signals collapses to a single emitted value, since any signals still
 // queued once the first is observed are drained before querying the
-// size. getSize is called to resolve the size to emit; a getSize error
-// is treated as "no event this round" and the loop continues waiting.
+// geometry. getGeometry is called to resolve the value to emit; an error is
+// treated as "no event this round" and the loop continues waiting.
 //
 // The loop exits and closes out when quit is closed.
-func resizeLoop(sig <-chan os.Signal, out chan<- domain.Size, quit <-chan struct{}, getSize func() (domain.Size, error)) {
+func resizeLoop(sig <-chan os.Signal, out chan<- domain.Geometry, quit <-chan struct{}, getGeometry func() (domain.Geometry, error)) {
 	defer close(out)
 	for {
 		select {
@@ -22,12 +22,12 @@ func resizeLoop(sig <-chan os.Signal, out chan<- domain.Size, quit <-chan struct
 			return
 		case <-sig:
 			drainSignals(sig)
-			sz, err := getSize()
+			geometry, err := getGeometry()
 			if err != nil {
 				continue
 			}
 			select {
-			case out <- sz:
+			case out <- geometry:
 			case <-quit:
 				return
 			}

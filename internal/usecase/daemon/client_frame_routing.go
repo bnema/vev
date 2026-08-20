@@ -97,7 +97,7 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		}
 	case ports.MsgResize:
 		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.attachmentEffectCurrent() {
-			d.resizeAttachmentForLease(token, rz.Size)
+			d.resizeAttachmentGeometryForLease(token, rz.Geometry())
 		}
 	case ports.MsgTheme:
 		if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {

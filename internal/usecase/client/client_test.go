@@ -1615,15 +1615,16 @@ type runTerminal struct {
 	out          bytes.Buffer
 	rawCount     atomic.Int32
 	restoreCount atomic.Int32
-	resizeCh     chan domain.Size
-	sizeMu       sync.Mutex
-	size         domain.Size
+	resizeCh     chan domain.Geometry
+	geometryMu   sync.Mutex
+	geometry     domain.Geometry
 }
 
 func newRunTerminal() *runTerminal {
 	return &runTerminal{
-		in: newBlockingReader(), resizeCh: make(chan domain.Size),
-		size: domain.Size{Cols: 80, Rows: 24},
+		in:       newBlockingReader(),
+		resizeCh: make(chan domain.Geometry),
+		geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
 	}
 }
 
@@ -1631,20 +1632,20 @@ func (t *runTerminal) EnterRaw() (func() error, error) {
 	t.rawCount.Add(1)
 	return func() error { t.restoreCount.Add(1); return nil }, nil
 }
-func (t *runTerminal) Size() (domain.Size, error) {
-	t.sizeMu.Lock()
-	defer t.sizeMu.Unlock()
-	return t.size, nil
+func (t *runTerminal) Geometry() (domain.Geometry, error) {
+	t.geometryMu.Lock()
+	defer t.geometryMu.Unlock()
+	return t.geometry, nil
 }
 func (t *runTerminal) setSize(size domain.Size) {
-	t.sizeMu.Lock()
-	t.size = size
-	t.sizeMu.Unlock()
+	t.geometryMu.Lock()
+	t.geometry.Size = size
+	t.geometryMu.Unlock()
 }
-func (t *runTerminal) ResizeEvents() <-chan domain.Size { return t.resizeCh }
-func (t *runTerminal) In() io.Reader                    { return t.in }
-func (t *runTerminal) Out() io.Writer                   { return &t.out }
-func (t *runTerminal) Flush() error                     { return nil }
+func (t *runTerminal) ResizeEvents() <-chan domain.Geometry { return t.resizeCh }
+func (t *runTerminal) In() io.Reader                        { return t.in }
+func (t *runTerminal) Out() io.Writer                       { return &t.out }
+func (t *runTerminal) Flush() error                         { return nil }
 
 func helloFromSend(t *testing.T, tr *recordingTransport) ports.Hello {
 	t.Helper()

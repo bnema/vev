@@ -73,7 +73,7 @@ type Terminal struct {
 	// (ResizeEvents) and watcher stop (restore) are strictly ordered:
 	// a restore that runs before the first ResizeEvents call must
 	// prevent any watcher (and its signal.Notify) from ever starting.
-	resizeCh   chan domain.Size
+	resizeCh   chan domain.Geometry
 	resizeQuit chan struct{}
 	sigCh      chan os.Signal
 	resizeDone bool // set by stopResizeLocked; no watcher may start afterwards
@@ -222,11 +222,11 @@ func (t *Terminal) Geometry() (domain.Geometry, error) {
 	if err != nil {
 		return domain.Geometry{}, fmt.Errorf("term: get size: %w", err)
 	}
-	return domain.Geometry{
+	return (domain.Geometry{
 		Size:        domain.Size{Cols: int(ws.Col), Rows: int(ws.Row)},
 		PixelWidth:  int(ws.Xpixel),
 		PixelHeight: int(ws.Ypixel),
-	}, nil
+	}).NormalizePixels(), nil
 }
 
 // ResizeEvents returns a channel of coalesced terminal sizes, one per
@@ -235,14 +235,14 @@ func (t *Terminal) Geometry() (domain.Geometry, error) {
 // restore (returned by EnterRaw) runs. If restore has already run when
 // ResizeEvents is first called, no watcher is started and the returned
 // channel is already closed.
-func (t *Terminal) ResizeEvents() <-chan domain.Size {
+func (t *Terminal) ResizeEvents() <-chan domain.Geometry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.resizeCh != nil {
 		return t.resizeCh
 	}
-	t.resizeCh = make(chan domain.Size)
+	t.resizeCh = make(chan domain.Geometry)
 
 	if t.resizeDone {
 		// restore ran before the first ResizeEvents call: never start a
@@ -258,7 +258,7 @@ func (t *Terminal) ResizeEvents() <-chan domain.Size {
 
 	t.resizeWG.Go(func() {
 		defer signal.Stop(t.sigCh)
-		resizeLoop(t.sigCh, t.resizeCh, t.resizeQuit, t.Size)
+		resizeLoop(t.sigCh, t.resizeCh, t.resizeQuit, t.Geometry)
 	})
 
 	return t.resizeCh

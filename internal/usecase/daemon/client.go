@@ -72,9 +72,10 @@ type attachedClient struct {
 	// sizeMu lets shared-geometry snapshots read attachment windows without
 	// waiting behind a blocked transport send.
 	sizeMu                   sync.RWMutex
-	size                     domain.Size
-	geometryClaimSize        domain.Size // protected by sizeMu; shared geometry claim snapshot
-	geometryClaimInitialized bool        // protected by sizeMu; distinguishes legacy fixtures
+	size                     domain.Size     // retained for legacy fixtures; live paths publish geometry
+	geometry                 domain.Geometry // controlling-terminal geometry for this attachment
+	geometryClaimGeometry    domain.Geometry // protected by sizeMu; shared geometry claim snapshot
+	geometryClaimInitialized bool            // protected by sizeMu; distinguishes legacy fixtures
 	// geometryClaim is an attachment-local monotonic claim sequence. The
 	// owning session publishes it whenever this attachment is attached,
 	// resumed, or explicitly resized.
@@ -169,36 +170,57 @@ func (ac *attachedClient) sizeSnapshot() domain.Size {
 }
 
 func (ac *attachedClient) setSize(size domain.Size) {
+	ac.setGeometry(domain.Geometry{Size: size})
+}
+
+func (ac *attachedClient) geometrySnapshot() domain.Geometry {
+	if ac == nil {
+		return domain.Geometry{}
+	}
+	ac.sizeMu.RLock()
+	defer ac.sizeMu.RUnlock()
+	if ac.geometry.Valid() {
+		return ac.geometry
+	}
+	return domain.Geometry{Size: ac.size}
+}
+
+func (ac *attachedClient) setGeometry(geometry domain.Geometry) {
 	if ac == nil {
 		return
 	}
+	geometry = geometry.NormalizePixels()
 	ac.sizeMu.Lock()
-	ac.size = size
+	ac.size = geometry.Size
+	ac.geometry = geometry
 	ac.sizeMu.Unlock()
 }
 
-func (ac *attachedClient) geometryClaimSizeSnapshot() domain.Size {
+func (ac *attachedClient) geometryClaimSnapshot() domain.Geometry {
 	if ac == nil {
-		return domain.Size{}
+		return domain.Geometry{}
 	}
 	ac.sizeMu.RLock()
-	claimSize, localSize := ac.geometryClaimSize, ac.size
+	claimGeometry, localGeometry, localSize := ac.geometryClaimGeometry, ac.geometry, ac.size
 	initialized := ac.geometryClaimInitialized
 	ac.sizeMu.RUnlock()
 	if !initialized {
-		return localSize
+		if localGeometry.Valid() {
+			return localGeometry
+		}
+		return domain.Geometry{Size: localSize}
 	}
-	return claimSize
+	return claimGeometry
 }
 
-// publishGeometryClaim makes the claim size and sequence visible as one
+// publishGeometryClaim makes the claim geometry and sequence visible as one
 // attachment-local publication under sizeMu.
-func (ac *attachedClient) publishGeometryClaim(size domain.Size, claim uint64) {
+func (ac *attachedClient) publishGeometryClaim(geometry domain.Geometry, claim uint64) {
 	if ac == nil {
 		return
 	}
 	ac.sizeMu.Lock()
-	ac.geometryClaimSize = size
+	ac.geometryClaimGeometry = geometry.NormalizePixels()
 	ac.geometryClaimInitialized = true
 	ac.geometryClaim.Store(claim)
 	ac.sizeMu.Unlock()
@@ -209,7 +231,7 @@ func (ac *attachedClient) clearGeometryClaim() {
 		return
 	}
 	ac.sizeMu.Lock()
-	ac.geometryClaimSize = domain.Size{}
+	ac.geometryClaimGeometry = domain.Geometry{}
 	ac.geometryClaimInitialized = true
 	ac.geometryClaim.Store(0)
 	ac.sizeMu.Unlock()
@@ -640,7 +662,7 @@ type attachClientOptions struct {
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
 	d.mu.Lock()
-	ac := d.prepareAttachedClientLocked(tr, sz, opts)
+	ac := d.prepareAttachedClientLocked(tr, domain.Geometry{Size: sz}, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: sess,
@@ -679,7 +701,7 @@ func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts at
 // prepareAttachedClientLocked allocates one detached attachment. Caller holds
 // d.mu only to allocate its resume token; attachment publication happens later after
 // the caller releases every architecture lock.
-func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size, opts attachClientOptions) *attachedClient {
+func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, geometry domain.Geometry, opts attachClientOptions) *attachedClient {
 	resumeToken := uint64(0)
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
@@ -688,11 +710,13 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, sz domain.Size,
 		opts.terminalCapabilities = ports.TerminalCapabilities{ColorMode: ports.TerminalColorTrueColor}
 	}
 	output := newOutputStateStreamForCapabilities(opts.terminalCapabilities, opts.maxOutputInFlight)
+	geometry = geometry.NormalizePixels()
 	ac := &attachedClient{
 		tr:                     tr,
 		output:                 output,
-		size:                   sz,
-		view:                   attachmentView{windowRows: sz.Rows, windowSet: true},
+		size:                   geometry.Size,
+		geometry:               geometry,
+		view:                   attachmentView{windowRows: geometry.Rows, windowSet: true},
 		clientID:               opts.clientID,
 		terminalCapabilities:   opts.terminalCapabilities,
 		navigationCapabilities: opts.navigationCapabilities,
@@ -941,7 +965,12 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 // attachment effect admission; output state is rebased before any redraw so
 // every subsequent frame starts a new epoch.
 func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size domain.Size) bool {
-	if token.ac == nil || !size.Valid() || !token.attachmentEffectCurrent() {
+	return d.resizeAttachmentGeometryForLease(token, domain.Geometry{Size: size})
+}
+
+func (d *Daemon) resizeAttachmentGeometryForLease(token attachmentConnectionToken, geometry domain.Geometry) bool {
+	geometry = geometry.NormalizePixels()
+	if token.ac == nil || !geometry.Valid() || !token.attachmentEffectCurrent() {
 		return false
 	}
 	ac := token.ac
@@ -950,11 +979,15 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 		ac.sendMu.Unlock()
 		return false
 	}
-	sameSize := ac.sizeSnapshot() == size
+	previous := ac.geometrySnapshot()
+	sameSize := previous.Size == geometry.Size
+	sameGeometry := previous == geometry
+	if !sameGeometry {
+		ac.setGeometry(geometry)
+	}
 	if !sameSize {
-		ac.setSize(size)
 		view := ac.viewSnapshot()
-		view.windowRows = size.Rows
+		view.windowRows = geometry.Rows
 		view.windowSet = true
 		view.windowTop = 0
 		view.revision++
@@ -983,7 +1016,7 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	if d.recalculateSessionGeometryAndInvalidate(sess, ac, "client.go") {
 		return true
 	}
-	if sameSize {
+	if sameGeometry {
 		return false
 	}
 	rc := sess.renderCoordinator()
@@ -992,7 +1025,7 @@ func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size 
 	}
 	// Rendering is attachment-scoped. Schedule it through the coordinator so
 	// rapid resize frames coalesce under the attachment lease and deadline.
-	return rc.scheduleResizeForLease(size, ac, token.lease, func(uint64) {
+	return rc.scheduleResizeForLease(geometry.Size, ac, token.lease, func(uint64) {
 		go d.paint(sess, ac, true, token.lease)
 	}) != 0
 }

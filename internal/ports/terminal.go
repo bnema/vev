@@ -10,8 +10,8 @@ import (
 // Terminal is the CLIENT-side controlling terminal.
 type Terminal interface {
 	EnterRaw() (restore func() error, err error)
-	Size() (domain.Size, error)
-	ResizeEvents() <-chan domain.Size
+	Geometry() (domain.Geometry, error)
+	ResizeEvents() <-chan domain.Geometry
 	In() io.Reader
 	Out() io.Writer
 	Flush() error
