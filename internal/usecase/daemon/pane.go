@@ -121,6 +121,11 @@ type pane struct {
 	syncGen         uint64
 	rect            domain.Rect
 	geometry        domain.Geometry
+	// graphicsCoordinateGeometry is the pixel-to-cell unit basis of the current
+	// non-empty placement scene. Resizing the attachment changes screen geometry
+	// but must not reinterpret coordinates retained by that scene.
+	graphicsCoordinateGeometry domain.Geometry
+	graphicsPlacementScene     bool
 	// resizeApplying gates VT parsing across PTY.Resize. The reader continues
 	// draining into resizePending so output is replayed against the target (or
 	// retained old) screen only after apply resolves.

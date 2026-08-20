@@ -419,7 +419,7 @@ func (d *Daemon) replayResizePending(sess *session, tb *tab, p *pane, resized bo
 		p.mu.Unlock()
 		if sess == nil {
 			p.mu.Lock()
-			p.screen.Write(data)
+			writePaneScreenLocked(p, data)
 			p.refreshTerminalTitleLocked()
 			p.mu.Unlock()
 			continue

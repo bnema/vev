@@ -28,6 +28,13 @@ const (
 	maxGraphicsOutputBytes = 8 << 20
 )
 
+// Kitty image IDs are terminal-global and survive the daemon that allocated
+// them. A fresh outer connection therefore starts by deleting all retained
+// images and placements before vev emits ANSI or allocates its new namespace.
+// q=2 suppresses a protocol response; output remains byte-only and uses the
+// existing state-bearing frame acknowledgement rather than a graphics ACK.
+var graphicsTerminalResetRecord = kittyRecord("a=d,d=A", nil)
+
 var (
 	errGraphicsOutputTooLarge = errors.New("kitty graphics output exceeds bound")
 	errGraphicsIDExhausted    = errors.New("kitty graphics output ID exhausted")
