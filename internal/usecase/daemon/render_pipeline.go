@@ -447,7 +447,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	// is raised after an ambiguous send, so the next record deletes this
 	// attachment's owned IDs before replaying the immutable screen scene.
 	graphicsReset := composed.reset || ac.output.forceSnapshot || !ac.output.initialized
-	preparedGraphics, err = graphicsOutputData(state, ac, graphicsReset)
+	preparedGraphics, err = graphicsOutputDataWithDaemon(d, state, ac, graphicsReset)
 	if err == nil {
 		preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
 	}

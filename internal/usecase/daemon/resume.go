@@ -21,10 +21,7 @@ func (d *Daemon) reapplyRemoteGraphicsGate(ac *attachedClient, h ports.Hello) {
 	}
 	// The parked transport has already been retired. Do not emit the old
 	// attachment's cleanup records into the replacement remote connection.
-	state := ac.graphicsOutput
-	state.cleanup()
-	d.releaseGraphicsNamespaceLocked(state.namespaceBase)
-	ac.graphicsOutput = nil
+	d.discardGraphicsOutputLocked(ac)
 }
 
 // resumeTokenSnapshot reads the credential under the same daemon lock used by
@@ -324,6 +321,9 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 // has verified d.parked[token] still points at parked when that matters.
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
 	delete(d.parked, token)
+	if parked != nil {
+		d.discardGraphicsOutputLocked(parked.ac)
+	}
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	if parked.timer != nil {
@@ -426,6 +426,7 @@ type parkedAttachmentRetirement struct {
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
 	delete(d.parked, token)
+	d.discardGraphicsOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	parked.ac.connectionGeneration.Add(1)
