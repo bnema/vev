@@ -830,21 +830,27 @@ func graphicsOutputViewportRect(content domain.Rect, geometry domain.Geometry) (
 	if content.Width <= 0 || content.Height <= 0 || content.X < 0 || content.Y < 0 {
 		return graphics.Viewport{}, false
 	}
-	pixelX, pixelY := int64(content.X), int64(content.Y)
-	pixelWidth, pixelHeight := int64(content.Width), int64(content.Height)
-	if geometry.PixelsKnown() && geometry.Cols > 0 && geometry.Rows > 0 {
-		cellWidth := geometry.PixelWidth / geometry.Cols
-		cellHeight := geometry.PixelHeight / geometry.Rows
-		if cellWidth > 0 && cellHeight > 0 {
-			pixelX *= int64(cellWidth)
-			pixelY *= int64(cellHeight)
-			pixelWidth *= int64(cellWidth)
-			pixelHeight *= int64(cellHeight)
-		}
+	cells := graphics.CellRect{X: int64(content.X), Y: int64(content.Y), Width: int64(content.Width), Height: int64(content.Height)}
+	if !geometry.PixelsKnown() || geometry.Cols <= 0 || geometry.Rows <= 0 {
+		// Cell dimensions are not pixel dimensions. When the controlling
+		// terminal did not report pixels, keep clipping in cell space so a
+		// pixel-space placement without cell metadata is suppressed by the
+		// graphics scene rather than clipped to a made-up pixel rectangle.
+		return graphics.Viewport{Cells: cells}, true
+	}
+	cellWidth := geometry.PixelWidth / geometry.Cols
+	cellHeight := geometry.PixelHeight / geometry.Rows
+	if cellWidth <= 0 || cellHeight <= 0 {
+		return graphics.Viewport{Cells: cells}, true
 	}
 	return graphics.Viewport{
-		Pixels: graphics.PixelRect{X: pixelX, Y: pixelY, Width: pixelWidth, Height: pixelHeight},
-		Cells:  graphics.CellRect{X: int64(content.X), Y: int64(content.Y), Width: int64(content.Width), Height: int64(content.Height)},
+		Pixels: graphics.PixelRect{
+			X:      int64(content.X) * int64(cellWidth),
+			Y:      int64(content.Y) * int64(cellHeight),
+			Width:  int64(content.Width) * int64(cellWidth),
+			Height: int64(content.Height) * int64(cellHeight),
+		},
+		Cells: cells,
 	}, true
 }
 
@@ -973,12 +979,18 @@ func composedGraphicsRecords(state *capturedRenderState) (map[string]graphics.As
 		return assets, placements
 	}
 	coverage := graphicsOpaqueCoverage(state)
+	outerContent, hasOuterContent := graphicsOuterContentRect(state)
 
 	for index, pane := range state.panes {
 		if pane.graphics == nil || pane.placement.Collapsed || pane.placement.Content.Width <= 0 || pane.placement.Content.Height <= 0 {
 			continue
 		}
-		viewports := paneGraphicsViewports(pane.placement.Content, pane.graphicsGeometry, coverage)
+		var viewports []graphics.Viewport
+		if hasOuterContent {
+			viewports = paneGraphicsViewports(pane.placement.Content, pane.graphicsGeometry, coverage, outerContent)
+		} else {
+			viewports = paneGraphicsViewports(pane.placement.Content, pane.graphicsGeometry, coverage)
+		}
 		if len(viewports) == 0 {
 			continue
 		}
@@ -990,11 +1002,16 @@ func composedGraphicsRecords(state *capturedRenderState) (map[string]graphics.As
 
 	if state.floating.visible && state.floating.pane.graphics != nil && state.floating.geometry.Inner.Width > 0 && state.floating.geometry.Inner.Height > 0 {
 		inner := state.floating.geometry.Inner
-		viewport, ok := graphicsOutputViewportRect(domain.Rect{Width: inner.Width, Height: inner.Height}, state.floating.pane.graphicsGeometry)
-		if ok {
+		var viewports []graphics.Viewport
+		if hasOuterContent {
+			viewports = paneGraphicsViewports(inner, state.floating.pane.graphicsGeometry, nil, outerContent)
+		} else {
+			viewports = paneGraphicsViewports(inner, state.floating.pane.graphicsGeometry, nil)
+		}
+		if len(viewports) != 0 {
 			transform := graphicsOutputTransform{originX: inner.X, originY: inner.Y + 1, sourceGeometry: state.floating.pane.graphicsGeometry}
 			source := graphicsSourceKey(state, state.floating.pane.id, state.floating.pane.stableID, true)
-			paneAssets, panePlacements := graphicsSnapshotRecordsForSourceOrdered(state.floating.pane.graphics, source, len(state.panes), viewport)
+			paneAssets, panePlacements := graphicsSnapshotRecordsForSourceOrdered(state.floating.pane.graphics, source, len(state.panes), viewports...)
 			mergeGraphicsRecords(assets, placements, paneAssets, panePlacements, transform)
 		}
 	}
@@ -1070,12 +1087,35 @@ func graphicsOpaqueCoverage(state *capturedRenderState) []domain.Rect {
 	return coverage
 }
 
-func paneGraphicsViewports(content domain.Rect, geometry domain.Geometry, coverage []domain.Rect) []graphics.Viewport {
+func graphicsOuterContentRect(state *capturedRenderState) (domain.Rect, bool) {
+	if state == nil {
+		return domain.Rect{}, false
+	}
+	if state.window.Valid() {
+		content := contentSize(state.window)
+		return domain.Rect{Width: content.Cols, Height: content.Rows}, content.Valid()
+	}
+	if state.layout.area.Width > 0 && state.layout.area.Height > 0 {
+		return domain.Rect{Width: state.layout.area.Width, Height: state.layout.area.Height}, true
+	}
+	return domain.Rect{}, false
+}
+
+func paneGraphicsViewports(content domain.Rect, geometry domain.Geometry, coverage []domain.Rect, outerContent ...domain.Rect) []graphics.Viewport {
 	full := domain.Rect{Width: content.Width, Height: content.Height}
 	if content.Width <= 0 || content.Height <= 0 {
 		return nil
 	}
 	regions := []domain.Rect{full}
+	if len(outerContent) > 0 {
+		visible, ok := intersectGraphicsDomainRect(content, outerContent[0])
+		if !ok {
+			return nil
+		}
+		visible.X -= content.X
+		visible.Y -= content.Y
+		regions[0] = visible
+	}
 	for _, opaque := range coverage {
 		cover, ok := intersectGraphicsDomainRect(content, opaque)
 		if !ok {
