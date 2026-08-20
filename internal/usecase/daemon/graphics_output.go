@@ -53,6 +53,11 @@ type graphicsOutputState struct {
 	nextID         uint64
 	namespaceBase  uint64
 	namespaceFence uint64
+	// mayHaveEmitted is sticky once a Kitty record reaches the transport
+	// boundary. Output side effects are not terminal-ACKed, so neither a
+	// successful socket send nor an empty committed scene can make this
+	// namespace safe for another attachment.
+	mayHaveEmitted bool
 	transform      graphicsOutputTransform
 	transformSet   bool
 }
@@ -212,21 +217,10 @@ func (d *Daemon) releaseGraphicsNamespaceLeaseLocked(state *graphicsOutputState)
 	delete(d.graphicsNamespaceFences, block)
 }
 
-func (d *Daemon) quarantineGraphicsNamespace(state *graphicsOutputState, completion <-chan error) {
-	if d == nil || state == nil || state.namespaceBase == 0 || state.namespaceBase%graphicsIDNamespaceSize != 1 {
-		return
-	}
-	d.mu.Lock()
-	q := d.quarantineGraphicsNamespaceLocked(state)
-	d.mu.Unlock()
-	if q != nil && completion != nil {
-		go d.finishGraphicsNamespaceQuarantine(q, completion)
-	}
-}
-
-// quarantineGraphicsNamespaceLocked fences one exact namespace instance. The
-// caller holds d.mu. A nil result means an existing quarantine already owns the
-// block; the first lifecycle is the only one allowed to retire it.
+// quarantineGraphicsNamespaceLocked fences one exact namespace instance for
+// the daemon lifetime. Output side effects have no terminal ACK, so transport
+// completion must never release a block that may have reached an outer terminal.
+// The caller holds d.mu.
 func (d *Daemon) quarantineGraphicsNamespaceLocked(state *graphicsOutputState) *graphicsNamespaceQuarantine {
 	if d == nil || state == nil || state.namespaceBase == 0 || state.namespaceBase%graphicsIDNamespaceSize != 1 {
 		return nil
@@ -251,29 +245,6 @@ func (d *Daemon) quarantineGraphicsNamespaceLocked(state *graphicsOutputState) *
 	return q
 }
 
-// finishGraphicsNamespaceQuarantine releases a block only after a timed-out
-// cleanup's stale send has returned success. Any failed completion leaves the
-// block fenced for the daemon lifetime because the terminal may still contain
-// objects from the retired instance.
-func (d *Daemon) finishGraphicsNamespaceQuarantine(q *graphicsNamespaceQuarantine, completion <-chan error) {
-	if d == nil || q == nil || completion == nil {
-		return
-	}
-	if err := <-completion; err != nil {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	block := (q.base - 1) / graphicsIDNamespaceSize
-	current := d.graphicsNamespaceQuarantines[block]
-	if current == nil || current.fence != q.fence {
-		return
-	}
-	delete(d.graphicsNamespaceQuarantines, block)
-	delete(d.graphicsNamespaces, block)
-	delete(d.graphicsNamespaceFences, block)
-}
-
 func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
 	out := graphicsOutputState{
 		assets:        make(map[string]graphicsOutputAsset),
@@ -287,6 +258,7 @@ func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
 	}
 	out.nextID, out.namespaceBase = in.nextID, in.namespaceBase
 	out.namespaceFence = in.namespaceFence
+	out.mayHaveEmitted = in.mayHaveEmitted
 	out.transform, out.transformSet = in.transform, in.transformSet
 	for key, asset := range in.assets {
 		out.assets[key] = asset
@@ -463,8 +435,10 @@ func (p *preparedGraphicsOutput) commit() {
 }
 
 func (p *preparedGraphicsOutput) markSendAttempted() {
-	if p != nil && p.valid && len(p.data) > 0 {
+	if p != nil && p.valid && p.owner != nil && len(p.data) > 0 {
 		p.sendAttempted = true
+		p.owner.mayHaveEmitted = true
+		p.state.mayHaveEmitted = true
 	}
 }
 
@@ -763,8 +737,8 @@ func graphicsOutputViewport(content domain.Rect, geometry domain.Geometry) (grap
 	}, true
 }
 
-func graphicsOutputStateNeedsCleanup(state *graphicsOutputState) bool {
-	return state != nil && (len(state.assets) != 0 || len(state.placements) != 0 || len(state.pendingImages) != 0 || len(state.pendingPlaces) != 0)
+func graphicsOutputNamespaceMustQuarantine(state *graphicsOutputState) bool {
+	return state != nil && (state.mayHaveEmitted || len(state.assets) != 0 || len(state.placements) != 0 || len(state.pendingImages) != 0 || len(state.pendingPlaces) != 0)
 }
 
 func (d *Daemon) discardGraphicsOutput(ac *attachedClient) {
@@ -772,88 +746,84 @@ func (d *Daemon) discardGraphicsOutput(ac *attachedClient) {
 		return
 	}
 	d.mu.Lock()
-	state := ac.graphicsOutput
-	d.retireGraphicsOutputLocked(ac, state, graphicsOutputStateNeedsCleanup(state), nil)
+	d.retireGraphicsOutputLocked(ac, ac.graphicsOutput)
 	d.mu.Unlock()
 }
 
-func (d *Daemon) retireGraphicsOutput(ac *attachedClient, state *graphicsOutputState, quarantine bool, completion <-chan error) {
+func (d *Daemon) retireGraphicsOutput(ac *attachedClient, state *graphicsOutputState) {
 	if d == nil || state == nil {
 		return
 	}
 	d.mu.Lock()
-	d.retireGraphicsOutputLocked(ac, state, quarantine, completion)
+	d.retireGraphicsOutputLocked(ac, state)
 	d.mu.Unlock()
 }
 
 // retireGraphicsOutputLocked fences exactly state, not whatever graphics state
-// a later attachment may have installed on the same client object. The caller
-// holds d.mu. A non-nil completion is the only path that can eventually retire
-// an ambiguous quarantine.
-func (d *Daemon) retireGraphicsOutputLocked(ac *attachedClient, state *graphicsOutputState, quarantine bool, completion <-chan error) *graphicsNamespaceQuarantine {
+// a later attachment may have installed on the same client object. Any lease
+// that may have crossed the transport boundary stays quarantined for the daemon
+// lifetime; only a provably unused reservation is released. The caller holds
+// d.mu.
+func (d *Daemon) retireGraphicsOutputLocked(ac *attachedClient, state *graphicsOutputState) *graphicsNamespaceQuarantine {
 	if d == nil || state == nil {
 		return nil
 	}
 	if ac != nil && ac.graphicsOutput == state {
 		ac.graphicsOutput = nil
 	}
+	quarantine := graphicsOutputNamespaceMustQuarantine(state)
 	state.cleanup()
 	if !quarantine {
 		d.releaseGraphicsNamespaceLeaseLocked(state)
 		return nil
 	}
-	q := d.quarantineGraphicsNamespaceLocked(state)
-	if q != nil && completion != nil {
-		go d.finishGraphicsNamespaceQuarantine(q, completion)
-	}
-	return q
+	return d.quarantineGraphicsNamespaceLocked(state)
 }
 
 // discardGraphicsOutputLocked is used by lifecycle publication paths that
-// already hold d.mu. Since those paths cannot emit a delete, a state with
-// outer objects is quarantined instead of releasing its block.
+// already hold d.mu. Since those paths cannot establish terminal receipt, any
+// namespace that may have emitted remains quarantined.
 func (d *Daemon) discardGraphicsOutputLocked(ac *attachedClient) {
 	if d == nil || ac == nil || ac.graphicsOutput == nil {
 		return
 	}
-	state := ac.graphicsOutput
-	d.retireGraphicsOutputLocked(ac, state, graphicsOutputStateNeedsCleanup(state), nil)
+	d.retireGraphicsOutputLocked(ac, ac.graphicsOutput)
 }
 
 // cleanupGraphicsOutput removes the objects owned by a closing attachment
 // before its transport is closed. Parked resumable attachments intentionally do
 // not call this: their state remains attached to the parked link and the next
-// epoch deletes and replays it as needed.
+// epoch deletes and replays it as needed. Even a successful cleanup socket send
+// cannot release an exposed namespace because side-effect Output frames are not
+// terminal-ACKed.
 func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) {
 	if d == nil || ac == nil || ac.graphicsOutput == nil {
 		return
 	}
 	state := ac.graphicsOutput
 	if ac.output == nil {
-		d.retireGraphicsOutput(ac, state, graphicsOutputStateNeedsCleanup(state), nil)
+		d.retireGraphicsOutput(ac, state)
 		return
 	}
 	ac.sendMu.Lock()
 	prepared, err := state.prepare(nil, true)
 	ac.sendMu.Unlock()
 	if err != nil || prepared == nil {
-		d.retireGraphicsOutput(ac, state, graphicsOutputStateNeedsCleanup(state), nil)
+		d.retireGraphicsOutput(ac, state)
 		return
 	}
 	if len(prepared.data) == 0 {
 		prepared.commit()
-		d.retireGraphicsOutput(ac, state, false, nil)
+		d.retireGraphicsOutput(ac, state)
 		return
 	}
 	prepared.markSendAttempted()
-	_, sendErr, completion := d.boundedSendOutputErrLifecycle(ac, prepared.data)
-	if sendErr == nil {
+	if d.boundedSendOutputErr(ac, prepared.data) == nil {
 		prepared.commit()
-		d.retireGraphicsOutput(ac, state, false, nil)
 	} else {
 		prepared.abort()
-		d.retireGraphicsOutput(ac, state, true, completion)
 	}
+	d.retireGraphicsOutput(ac, state)
 }
 
 func (d *Daemon) disableGraphicsOutput(ac *attachedClient) {
@@ -867,7 +837,7 @@ func (d *Daemon) disableGraphicsOutput(ac *attachedClient) {
 		state.cleanup()
 		return
 	}
-	d.retireGraphicsOutput(ac, state, graphicsOutputStateNeedsCleanup(state), nil)
+	d.retireGraphicsOutput(ac, state)
 }
 
 func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
