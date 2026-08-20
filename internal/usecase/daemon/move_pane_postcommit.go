@@ -80,7 +80,7 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
-	d.log.Info("move committed",
+	attrs := []any{
 		"operation", p.operation,
 		"source_session", p.source.name,
 		"source_session_id", p.source.id,
@@ -88,7 +88,14 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 		"destination_session", p.destination.name,
 		"destination_session_id", p.destination.id,
 		"source_retired", p.sourceEmpty,
-	)
+	}
+	if p.operation == "pane" {
+		attrs = append(attrs,
+			"source_pane_id", p.movedPane.stableID,
+			"destination_tab_id", p.destinationTab.stableID,
+		)
+	}
+	d.log.Info("move committed", attrs...)
 
 	// Repair attachment-local stable targets after shared topology publication
 	// and after the move dispatch locks have been released.
