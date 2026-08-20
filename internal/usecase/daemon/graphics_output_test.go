@@ -2,9 +2,13 @@ package daemon
 
 import (
 	"bytes"
+	"io"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
@@ -37,6 +41,35 @@ func kittenGraphicsSnapshot(t *testing.T) *graphics.Snapshot {
 func recordIndex(data []byte, record string) int {
 	return bytes.Index(data, []byte(record))
 }
+
+type lateGraphicsCleanupTransport struct {
+	started     chan struct{}
+	release     chan struct{}
+	finished    chan struct{}
+	sends       chan ports.Frame
+	startedOnce sync.Once
+	finishOnce  sync.Once
+}
+
+func newLateGraphicsCleanupTransport() *lateGraphicsCleanupTransport {
+	return &lateGraphicsCleanupTransport{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		finished: make(chan struct{}),
+		sends:    make(chan ports.Frame, 1),
+	}
+}
+
+func (t *lateGraphicsCleanupTransport) Send(frame ports.Frame) error {
+	t.startedOnce.Do(func() { close(t.started) })
+	<-t.release
+	t.sends <- frame
+	t.finishOnce.Do(func() { close(t.finished) })
+	return nil
+}
+
+func (*lateGraphicsCleanupTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*lateGraphicsCleanupTransport) Close() error               { return nil }
 
 func TestGraphicsOutputReplaysStaticKittenIcatFixture(t *testing.T) {
 	state := newGraphicsOutputState()
@@ -151,7 +184,7 @@ func TestGraphicsOutputExhaustionResetsInsideItsNamespace(t *testing.T) {
 	require.Equal(t, base+2, prepared.state.nextID, "the replay should restart at the reserved block base")
 }
 
-func TestGraphicsNamespaceReleasedOnParkExpiryAndFailedCleanup(t *testing.T) {
+func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	base := graphicsIDNamespaceSize + 1
 	block := (base - 1) / graphicsIDNamespaceSize
@@ -171,7 +204,7 @@ func TestGraphicsNamespaceReleasedOnParkExpiryAndFailedCleanup(t *testing.T) {
 	d.mu.Lock()
 	_, reserved := d.graphicsNamespaces[block]
 	d.mu.Unlock()
-	require.False(t, reserved, "park expiry must release the attachment namespace")
+	require.False(t, reserved, "park expiry with no outer objects may release the attachment namespace")
 
 	failedState := newGraphicsOutputStateWithBase(base)
 	seed, err := failedState.prepare(kittenGraphicsSnapshot(t), true)
@@ -190,7 +223,70 @@ func TestGraphicsNamespaceReleasedOnParkExpiryAndFailedCleanup(t *testing.T) {
 	d.mu.Lock()
 	_, reserved = d.graphicsNamespaces[block]
 	d.mu.Unlock()
-	require.False(t, reserved, "failed terminal cleanup must still release the namespace")
+	require.True(t, reserved, "failed terminal cleanup must quarantine the namespace")
+}
+
+func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clock)
+	key := "session:stale:attachment"
+	d.mu.Lock()
+	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+	d.mu.Unlock()
+	oldState := newGraphicsOutputStateWithLease(oldBase, oldFence)
+	seed, err := oldState.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	seed.commit()
+	var oldID uint64
+	for _, asset := range oldState.assets {
+		oldID = asset.id
+		break
+	}
+	require.NotZero(t, oldID)
+
+	transport := newLateGraphicsCleanupTransport()
+	ac := &attachedClient{tr: transport, output: newOutputStateStream(), graphicsOutput: oldState}
+	cleanupDone := make(chan struct{})
+	go func() {
+		d.cleanupGraphicsOutput(ac)
+		close(cleanupDone)
+	}()
+	awaitTestCompletion(t, transport.started, "timed-out cleanup did not reach the stale transport")
+	timer := awaitTestValue(t, clock.timers, "cleanup watchdog timer was not armed")
+	timer.ch <- time.Time{}
+	awaitTestCompletion(t, cleanupDone, "timed-out cleanup did not retire the attachment")
+
+	d.mu.Lock()
+	newBase, newFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+	_, quarantined := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	d.mu.Unlock()
+	require.True(t, quarantined, "timed-out cleanup must keep its namespace quarantined")
+	require.NotEqual(t, oldBase, newBase, "new allocation must skip the quarantined namespace")
+
+	newState := newGraphicsOutputStateWithLease(newBase, newFence)
+	fresh, err := newState.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	var newID uint64
+	for _, asset := range fresh.state.assets {
+		newID = asset.id
+		break
+	}
+	require.NotZero(t, newID)
+	require.NotEqual(t, oldID, newID, "fresh attachment IDs must not share the quarantined block")
+
+	close(transport.release)
+	staleFrame := awaitTestValue(t, transport.sends, "late stale cleanup did not execute")
+	awaitTestCompletion(t, transport.finished, "late stale cleanup did not return")
+	staleOutput, err := ports.UnmarshalOutput(staleFrame.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
+	require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")
+	require.Eventually(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, retained := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+		return !retained
+	}, time.Second, time.Millisecond)
 }
 
 func TestGraphicsOutputKeysIncludeSourceSceneContent(t *testing.T) {
