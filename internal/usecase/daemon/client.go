@@ -670,7 +670,7 @@ type attachClientOptions struct {
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
 	d.mu.Lock()
-	ac := d.prepareAttachedClientLocked(tr, domain.Geometry{Size: sz}, opts)
+	ac := d.prepareAttachedClientLocked(sess, tr, domain.Geometry{Size: sz}, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: sess,
@@ -680,6 +680,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 		ready:             false,
 	})
 	if err != nil {
+		d.discardGraphicsOutput(ac)
 		if tr != nil {
 			_ = tr.Close()
 		}
@@ -709,7 +710,7 @@ func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts at
 // prepareAttachedClientLocked allocates one detached attachment. Caller holds
 // d.mu only to allocate its resume token; attachment publication happens later after
 // the caller releases every architecture lock.
-func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, geometry domain.Geometry, opts attachClientOptions) *attachedClient {
+func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.Transport, geometry domain.Geometry, opts attachClientOptions) *attachedClient {
 	resumeToken := uint64(0)
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
@@ -721,7 +722,9 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, geometry domain
 	geometry = geometry.NormalizePixels()
 	var graphicsOutput *graphicsOutputState
 	if opts.terminalCapabilities.SupportsKittyGraphics() {
-		graphicsOutput = newGraphicsOutputState()
+		if namespace := d.reserveGraphicsNamespaceLocked(graphicsNamespaceKey(sess, opts.clientID)); namespace != 0 {
+			graphicsOutput = newGraphicsOutputStateWithBase(namespace)
+		}
 	}
 	ac := &attachedClient{
 		tr:                     tr,

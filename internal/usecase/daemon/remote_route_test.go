@@ -25,6 +25,33 @@ func TestDirectRemoteAttachDisablesPhase5GraphicsBackend(t *testing.T) {
 	d.clientGone(sess, ac, tr, false)
 }
 
+func TestResumeRemoteRouteReappliesPhase5GraphicsGate(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	local := ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		ClientID: [16]byte{1, 2, 3, 4}, Env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"},
+	}
+	oldTransport, _ := newCapturingTransport(t)
+	_, ac, err := d.route(local, oldTransport)
+	require.NoError(t, err)
+	require.NotNil(t, ac.graphicsOutput)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+
+	remote := helloResumeCapable(ports.IntentResume, "work", token)
+	remote.Remote = true
+	replacement, _ := newCapturingTransport(t)
+	_, resumed, ok, err := d.resumeParked(remote, replacement, defaultSize)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Same(t, ac, resumed)
+	require.Nil(t, resumed.graphicsOutput, "remote resume must not replay or clean Kitty graphics into the remote transport")
+	require.False(t, resumed.terminalCapabilities.SupportsKittyGraphics())
+	d.clientGone(sess, resumed, replacement, false)
+}
+
 func TestRouteRemoteTargetSelectsExactLiveTab(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
