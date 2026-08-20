@@ -1392,8 +1392,8 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -1402,8 +1402,8 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
-		return got != normalSize && got.Valid()
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool {
+		return got.Size != normalSize && got.Size.Valid()
 	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})
 	d.inactive["old"] = inactiveSession{name: "old", cwd: t.TempDir(), createdAt: 1, state: ports.SessionDown}

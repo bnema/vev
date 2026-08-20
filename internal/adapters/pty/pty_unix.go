@@ -36,9 +36,10 @@ func NewFactory() *Factory { return &Factory{} }
 // Open spawns command with args attached to a freshly allocated pseudo-terminal
 // and returns the master side as a ports.PTY. env is passed to the child
 // verbatim (nil means inherit the current process environment); the caller
-// decides TERM and friends. sz sets the terminal window size before the child
-// starts, so the child observes the correct dimensions on its first query.
-func (Factory) Open(ctx context.Context, command string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+// decides TERM and friends. geometry sets the terminal window geometry before
+// the child starts, so the child observes the correct dimensions on its first
+// query.
+func (Factory) Open(ctx context.Context, command string, args []string, env []string, dir string, geometry domain.Geometry) (ports.PTY, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -63,10 +64,11 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 	// parent always drops the slave once Start has run (or on any error).
 	defer func() { _ = slave.Close() }()
 
-	// Set the initial window size on the master before Start so the child's very
-	// first size query already reflects sz.
-	if sz.Valid() {
-		if err := setWinsize(masterFd, sz); err != nil {
+	// Set the initial window geometry on the master before Start so the child's
+	// very first size query already reflects the authoritative geometry.
+	geometry = geometry.NormalizePixels()
+	if geometry.Valid() {
+		if err := setGeometry(masterFd, geometry); err != nil {
 			return nil, fmt.Errorf("pty: initial TIOCSWINSZ: %w", err)
 		}
 	}

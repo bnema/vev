@@ -347,7 +347,7 @@ func TestSnapshotRestoreUsesDaemonTerminalCapabilities(t *testing.T) {
 			var gotEnv []string
 			factory := portsmocks.NewMockPTYFactory(t)
 			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-				RunAndReturn(func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+				RunAndReturn(func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 					gotEnv = append([]string(nil), env...)
 					return pty, nil
 				}).Once()
