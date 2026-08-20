@@ -1838,6 +1838,10 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	}
 
 	for _, attachment := range attachments {
+		// The transport is still available after membership publication. Remove
+		// only this attachment's Kitty objects before sending Detached, then
+		// release its namespace even if that best-effort delete fails.
+		d.cleanupGraphicsOutput(attachment.ac)
 		d.notifyDetachedSnapshotAsync(attachment, reason)
 	}
 	return errors.Join(purgeErr, terminalSnapshotErr)

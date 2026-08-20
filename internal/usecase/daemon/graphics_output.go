@@ -75,9 +75,11 @@ const (
 	// A namespace is deliberately larger than the maximum bounded scene so an
 	// attachment can replace/delete objects without sharing IDs with another
 	// attachment. The high bits identify the attachment/session namespace and
-	// the low bits are its monotonically allocated object IDs.
+	// the low bits are its monotonically allocated object IDs. IDs start at one,
+	// so reserve only complete blocks and leave the short tail of Kitty's
+	// uint32 ID space unused.
 	graphicsIDNamespaceSize  = uint64(1 << 17)
-	graphicsIDNamespaceCount = (maxKittyGraphicsID-maxGraphicsIDs)/graphicsIDNamespaceSize + 1
+	graphicsIDNamespaceCount = maxKittyGraphicsID / graphicsIDNamespaceSize
 )
 
 var standaloneGraphicsNamespace atomic.Uint64
@@ -88,7 +90,8 @@ func newGraphicsOutputState() *graphicsOutputState {
 }
 
 func newGraphicsOutputStateWithBase(base uint64) *graphicsOutputState {
-	if base == 0 || base > maxKittyGraphicsID-maxGraphicsIDs+1 {
+	maxBase := (graphicsIDNamespaceCount-1)*graphicsIDNamespaceSize + 1
+	if base == 0 || (base-1)%graphicsIDNamespaceSize != 0 || base > maxBase {
 		base = 1
 	}
 	return &graphicsOutputState{
@@ -185,6 +188,17 @@ func (s *graphicsOutputState) prepare(snapshot *graphics.Snapshot, reset bool) (
 }
 
 func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform, viewports ...graphics.Viewport) (*preparedGraphicsOutput, error) {
+	prepared, err := s.prepareWithTransformOnce(snapshot, reset, transform, false, viewports...)
+	if !errors.Is(err, errGraphicsIDExhausted) {
+		return prepared, err
+	}
+	// A bounded attachment can safely recycle its own IDs only after deleting
+	// the objects it owns. Keep this retry attachment-local: it never advances
+	// into the next reserved namespace block.
+	return s.prepareWithTransformOnce(snapshot, true, transform, true, viewports...)
+}
+
+func (s *graphicsOutputState) prepareWithTransformOnce(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform, resetIDs bool, viewports ...graphics.Viewport) (*preparedGraphicsOutput, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -219,6 +233,11 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 		// again in the replay records below.
 		candidate.pendingPlaces = make(map[uint64]struct{})
 		candidate.pendingImages = make(map[uint64]struct{})
+		if resetIDs {
+			candidate.assets = make(map[string]graphicsOutputAsset)
+			candidate.placements = make(map[string]graphicsOutputPlacement)
+			candidate.nextID = candidate.namespaceBase
+		}
 	}
 
 	assets, placements := graphicsSnapshotRecords(snapshot, viewports...)
@@ -250,7 +269,7 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 		id := asset.id
 		if !exists {
 			var ok bool
-			id, ok = takeGraphicsID(&candidate.nextID)
+			id, ok = takeGraphicsIDInNamespace(&candidate.nextID, candidate.namespaceBase)
 			if !ok {
 				return nil, errGraphicsIDExhausted
 			}
@@ -276,7 +295,7 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 			}
 			want.id = got.id
 		} else {
-			id, ok := takeGraphicsID(&candidate.nextID)
+			id, ok := takeGraphicsIDInNamespace(&candidate.nextID, candidate.namespaceBase)
 			if !ok {
 				return nil, errGraphicsIDExhausted
 			}
@@ -294,6 +313,10 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 			return nil, err
 		}
 	}
+	// candidate.nextID and any maps replaced during namespace recovery changed
+	// after out was initialized; publish the complete speculative value before
+	// commit copies it back to the attachment owner.
+	out.state = candidate
 	if len(out.data) == 0 && !reset {
 		out.data = nil
 	}
@@ -465,8 +488,23 @@ func takeGraphicsID(next *uint64) (uint64, bool) {
 	if next == nil || *next == 0 || *next > maxKittyGraphicsID {
 		return 0, false
 	}
+	base := ((*next - 1) / graphicsIDNamespaceSize) * graphicsIDNamespaceSize
+	return takeGraphicsIDInNamespace(next, base+1)
+}
+
+func takeGraphicsIDInNamespace(next *uint64, namespaceBase uint64) (uint64, bool) {
+	if next == nil || namespaceBase == 0 || (namespaceBase-1)%graphicsIDNamespaceSize != 0 {
+		return 0, false
+	}
+	// IDs are derived from the attachment's reserved block, never from the
+	// global Kitty ceiling. Exhaustion marks the cursor unusable; it must never
+	// wrap or consume the first ID reserved for another attachment.
+	limit := namespaceBase + graphicsIDNamespaceSize
+	if limit < namespaceBase || limit > maxKittyGraphicsID+1 || *next < namespaceBase || *next >= limit {
+		return 0, false
+	}
 	id := *next
-	if id == maxKittyGraphicsID {
+	if id+1 >= limit {
 		*next = 0
 	} else {
 		(*next)++
@@ -606,10 +644,22 @@ func (d *Daemon) discardGraphicsOutput(ac *attachedClient) {
 	if d == nil || ac == nil || ac.graphicsOutput == nil {
 		return
 	}
+	d.mu.Lock()
+	d.discardGraphicsOutputLocked(ac)
+	d.mu.Unlock()
+}
+
+// discardGraphicsOutputLocked is used by lifecycle publication paths that
+// already hold d.mu. It only retires this attachment's state and reservation;
+// terminal output cleanup, when possible, is handled before publication.
+func (d *Daemon) discardGraphicsOutputLocked(ac *attachedClient) {
+	if d == nil || ac == nil || ac.graphicsOutput == nil {
+		return
+	}
 	state := ac.graphicsOutput
-	d.releaseGraphicsNamespace(state.namespaceBase)
-	state.cleanup()
 	ac.graphicsOutput = nil
+	state.cleanup()
+	d.releaseGraphicsNamespaceLocked(state.namespaceBase)
 }
 
 // cleanupGraphicsOutput removes the objects owned by a closing attachment
@@ -617,7 +667,11 @@ func (d *Daemon) discardGraphicsOutput(ac *attachedClient) {
 // not call this: their state remains attached to the parked link and the next
 // epoch deletes and replays it as needed.
 func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) {
-	if d == nil || ac == nil || ac.graphicsOutput == nil || ac.output == nil {
+	if d == nil || ac == nil || ac.graphicsOutput == nil {
+		return
+	}
+	if ac.output == nil {
+		d.discardGraphicsOutput(ac)
 		return
 	}
 	state := ac.graphicsOutput
@@ -625,28 +679,44 @@ func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) {
 	prepared, err := state.prepare(nil, true)
 	ac.sendMu.Unlock()
 	if err != nil || prepared == nil {
-		state.cleanup()
+		d.discardGraphicsOutput(ac)
 		return
 	}
 	if len(prepared.data) == 0 {
 		prepared.commit()
-		d.releaseGraphicsNamespace(state.namespaceBase)
-		state.cleanup()
-		ac.graphicsOutput = nil
+		d.discardGraphicsOutput(ac)
 		return
 	}
 	prepared.markSendAttempted()
 	if d.boundedSendOutputErr(ac, prepared.data) == nil {
 		prepared.commit()
-		d.releaseGraphicsNamespace(state.namespaceBase)
 	} else {
 		prepared.abort()
 	}
-	state.cleanup()
-	ac.graphicsOutput = nil
+	// Reservation release is unconditional. A failed delete is not allowed to
+	// retain daemon state or make the next attachment probe through this block.
+	d.discardGraphicsOutput(ac)
+}
+
+func (d *Daemon) disableGraphicsOutput(ac *attachedClient) {
+	if ac == nil || ac.graphicsOutput == nil {
+		return
+	}
+	ac.terminalCapabilities.KittyGraphics = false
+	if d == nil {
+		state := ac.graphicsOutput
+		ac.graphicsOutput = nil
+		state.cleanup()
+		return
+	}
+	d.discardGraphicsOutput(ac)
 }
 
 func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
+	return graphicsOutputDataWithDaemon(nil, state, ac, reset)
+}
+
+func graphicsOutputDataWithDaemon(d *Daemon, state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
 	if ac == nil || ac.graphicsOutput == nil || state == nil || !ac.terminalCapabilities.SupportsKittyGraphics() {
 		return nil, nil
 	}
@@ -671,12 +741,25 @@ func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bo
 	}
 	if hasViewport {
 		prepared, err := ac.graphicsOutput.prepareWithTransform(snapshot, reset, transform, viewport)
+		if errors.Is(err, errGraphicsIDExhausted) {
+			d.disableGraphicsOutput(ac)
+			return nil, nil
+		}
 		if !errors.Is(err, errGraphicsOutputTooLarge) {
 			return prepared, err
 		}
-		return ac.graphicsOutput.prepareWithTransform(nil, reset, transform, viewport)
+		prepared, err = ac.graphicsOutput.prepareWithTransform(nil, reset, transform, viewport)
+		if errors.Is(err, errGraphicsIDExhausted) {
+			d.disableGraphicsOutput(ac)
+			return nil, nil
+		}
+		return prepared, err
 	}
 	prepared, err := ac.graphicsOutput.prepareWithTransform(snapshot, reset, transform)
+	if errors.Is(err, errGraphicsIDExhausted) {
+		d.disableGraphicsOutput(ac)
+		return nil, nil
+	}
 	if !errors.Is(err, errGraphicsOutputTooLarge) {
 		return prepared, err
 	}
@@ -684,7 +767,12 @@ func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bo
 	// budget, suppress it and still return the bounded cleanup for objects that
 	// were already proven to be owned by this attachment. ANSI composition is
 	// prepared and emitted by the caller independently.
-	return ac.graphicsOutput.prepareWithTransform(nil, reset, transform)
+	prepared, err = ac.graphicsOutput.prepareWithTransform(nil, reset, transform)
+	if errors.Is(err, errGraphicsIDExhausted) {
+		d.disableGraphicsOutput(ac)
+		return nil, nil
+	}
+	return prepared, err
 }
 
 func graphicsOutputError(err error) error {

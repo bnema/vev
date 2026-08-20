@@ -131,6 +131,68 @@ func TestGraphicsNamespacesAreDeterministicAndCollisionSafe(t *testing.T) {
 	require.Equal(t, first, reused, "released namespaces should deterministically return to their preferred block")
 }
 
+func TestGraphicsOutputExhaustionResetsInsideItsNamespace(t *testing.T) {
+	base := graphicsIDNamespaceSize + 1
+	state := newGraphicsOutputStateWithBase(base)
+	state.nextID = base + graphicsIDNamespaceSize - 1
+	snapshot := kittenGraphicsSnapshot(t)
+	prepared, err := state.prepare(snapshot, false)
+	require.NoError(t, err, "namespace exhaustion must recover through an attachment-local replay")
+	require.NotNil(t, prepared)
+	limit := base + graphicsIDNamespaceSize - 1
+	for _, asset := range prepared.state.assets {
+		require.GreaterOrEqual(t, asset.id, base)
+		require.LessOrEqual(t, asset.id, limit)
+	}
+	for _, placement := range prepared.state.placements {
+		require.GreaterOrEqual(t, placement.id, base)
+		require.LessOrEqual(t, placement.id, limit)
+	}
+	require.Equal(t, base+2, prepared.state.nextID, "the replay should restart at the reserved block base")
+}
+
+func TestGraphicsNamespaceReleasedOnParkExpiryAndFailedCleanup(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	base := graphicsIDNamespaceSize + 1
+	block := (base - 1) / graphicsIDNamespaceSize
+
+	parkedState := newGraphicsOutputStateWithBase(base)
+	parked := &parkedAttachment{
+		sess: &session{sessionCore: sessionCore{name: "parked"}},
+		ac:   &attachedClient{graphicsOutput: parkedState},
+		done: make(chan struct{}),
+	}
+	d.mu.Lock()
+	d.graphicsNamespaces[block] = struct{}{}
+	d.parked[1] = parked
+	d.mu.Unlock()
+	d.expireParked(1, parked)
+	require.Nil(t, parked.ac.graphicsOutput)
+	d.mu.Lock()
+	_, reserved := d.graphicsNamespaces[block]
+	d.mu.Unlock()
+	require.False(t, reserved, "park expiry must release the attachment namespace")
+
+	failedState := newGraphicsOutputStateWithBase(base)
+	seed, err := failedState.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	seed.commit()
+	failed := &attachedClient{
+		tr:             failingOutputTransport{},
+		output:         newOutputStateStream(),
+		graphicsOutput: failedState,
+	}
+	d.mu.Lock()
+	d.graphicsNamespaces[block] = struct{}{}
+	d.mu.Unlock()
+	d.cleanupGraphicsOutput(failed)
+	require.Nil(t, failed.graphicsOutput)
+	d.mu.Lock()
+	_, reserved = d.graphicsNamespaces[block]
+	d.mu.Unlock()
+	require.False(t, reserved, "failed terminal cleanup must still release the namespace")
+}
+
 func TestGraphicsOutputKeysIncludeSourceSceneContent(t *testing.T) {
 	makeSnapshot := func(data []byte) *graphics.Snapshot {
 		scene := graphics.NewScene(graphics.Limits{})
