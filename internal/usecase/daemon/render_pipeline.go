@@ -508,7 +508,15 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				}
 			}
 			if sendErr == nil {
-				sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
+				sendErr = preparedANSI.send(data, ac.echoAck.Load(), func(frame ports.Frame) error {
+					// Mark graphics only at the actual transport boundary. ANSI
+					// preparation, admission, or framing failures never emitted a
+					// Kitty ID and therefore must not create cleanup records.
+					if preparedGraphics != nil {
+						preparedGraphics.markSendAttempted()
+					}
+					return send(frame)
+				})
 			}
 			if marks.attachmentEffect != nil && interruptible {
 				if sendErr != nil {

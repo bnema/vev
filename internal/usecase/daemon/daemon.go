@@ -1310,7 +1310,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	// Phase 5 is deliberately limited to the local one-pane outer terminal.
 	// A remote target must remain text-only until the remote rendering phases
 	// define an ownership and transport contract for graphics.
-	if h.RemoteTarget != nil {
+	if h.Remote || h.RemoteTarget != nil {
 		terminalCapabilities.KittyGraphics = false
 	}
 	if h.TrueColor && !terminalCapabilities.TrueColor() {

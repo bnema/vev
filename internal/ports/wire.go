@@ -194,6 +194,10 @@ type Hello struct {
 	EnvironmentPolicy      EnvironmentPolicy
 	NavigationCapabilities NavigationCapabilities
 	StartupOverlay         StartupOverlay
+	// Remote identifies a direct remote carriage even when no exact picker
+	// target is present. It is daemon-facing so remote rendering backends can
+	// be disabled consistently for both direct and picker attaches.
+	Remote bool
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -912,6 +916,7 @@ func MarshalHello(h Hello) []byte {
 	w.putString(string(h.PreferredTabID))
 	w.putUint8(uint8(h.NavigationCapabilities))
 	w.putUint8(uint8(h.StartupOverlay))
+	w.putBool(h.Remote)
 	return w.b
 }
 
@@ -986,6 +991,9 @@ func preflightHello(b []byte) error {
 		return err
 	}
 	if _, err := r.getUint8(); err != nil {
+		return err
+	}
+	if _, err := r.getBool(); err != nil {
 		return err
 	}
 	return r.done()
@@ -1091,6 +1099,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	h.StartupOverlay = StartupOverlay(overlay)
+	if h.Remote, err = r.getBool(); err != nil {
+		return Hello{}, err
+	}
 	if err := r.done(); err != nil {
 		return Hello{}, err
 	}

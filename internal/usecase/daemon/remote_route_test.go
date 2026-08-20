@@ -10,6 +10,21 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+func TestDirectRemoteAttachDisablesPhase5GraphicsBackend(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	tr, _ := newCapturingTransport(t)
+	_, ac, err := d.routeWithContext(context.Background(), ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		Env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, Remote: true,
+	}, tr)
+	require.NoError(t, err)
+	require.NotNil(t, ac)
+	require.Nil(t, ac.graphicsOutput, "direct remote attaches have no exact target but remain text-only in Phase 5")
+	d.clientGone(sess, ac, tr, false)
+}
+
 func TestRouteRemoteTargetSelectsExactLiveTab(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "tab-1", "pane-1")

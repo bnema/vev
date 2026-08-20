@@ -1125,6 +1125,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		EnvironmentPolicy:      request.EnvironmentPolicy,
 		NavigationCapabilities: request.NavigationCapabilities,
 		StartupOverlay:         request.StartupOverlay,
+		Remote:                 remote,
 	}
 	if err := sendHandshake(func() error {
 		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
