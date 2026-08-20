@@ -134,6 +134,33 @@ type capturedCursorInputs struct {
 	content                                        domain.Rect
 }
 
+// writePaneScreenLocked is the production VT write boundary. The first
+// placement fixes the current scene's coordinate units before a later resize
+// can change Screen.Geometry; deleting the last placement ends that boundary.
+// Caller holds p.mu.
+func writePaneScreenLocked(p *pane, data []byte) {
+	if p == nil || p.screen == nil {
+		return
+	}
+	before := p.screen.GraphicsSnapshot()
+	beforeHasPlacements := before != nil && before.Usage().Placements != 0
+	p.screen.Write(data)
+	after := p.screen.GraphicsSnapshot()
+	afterHasPlacements := after != nil && after.Usage().Placements != 0
+	if !beforeHasPlacements && afterHasPlacements {
+		geometry := p.screen.Geometry()
+		p.graphicsCoordinateGeometry = domain.Geometry{
+			Size:        domain.Size{Cols: geometry.Cols, Rows: geometry.Rows},
+			PixelWidth:  geometry.PixelWidth,
+			PixelHeight: geometry.PixelHeight,
+		}.NormalizePixels()
+	}
+	p.graphicsPlacementScene = afterHasPlacements
+	if !afterHasPlacements {
+		p.graphicsCoordinateGeometry = domain.Geometry{}
+	}
+}
+
 // capturePaneRenderStateLocked copies only the visible rectangle required by
 // composition. It never copies scrollback/history and never lets the mutable
 // VT frame's Cells or row-offset slices escape pane.mu.
@@ -147,10 +174,25 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out captured
 	// returns an immutable scene reference when Kitty graphics were used.
 	out.graphics = p.screen.CaptureGraphicsSnapshot()
 	geometry := p.screen.Geometry()
-	out.graphicsGeometry = domain.Geometry{
+	currentGraphicsGeometry := domain.Geometry{
 		Size:       domain.Size{Cols: geometry.Cols, Rows: geometry.Rows},
 		PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight,
 	}.NormalizePixels()
+	// The scene retains placement coordinates across SetGeometry. Capture the
+	// unit basis when the first placement appears and keep it until the placement
+	// scene becomes empty; otherwise an attachment resize silently reinterprets
+	// old pixel coordinates using the new cell dimensions.
+	hasPlacements := out.graphics != nil && out.graphics.Usage().Placements != 0
+	if hasPlacements && !p.graphicsPlacementScene {
+		p.graphicsCoordinateGeometry = currentGraphicsGeometry
+	}
+	p.graphicsPlacementScene = hasPlacements
+	if hasPlacements {
+		out.graphicsGeometry = p.graphicsCoordinateGeometry
+	} else {
+		p.graphicsCoordinateGeometry = domain.Geometry{}
+		out.graphicsGeometry = currentGraphicsGeometry
+	}
 	damage := p.screen.CaptureDamage()
 	out.damageGeneration = damage.Generation
 	out.rawDamage = append(out.rawDamage[:0], damage.Damage...)

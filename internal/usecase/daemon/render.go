@@ -160,7 +160,7 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 		effects.renderCoordinator = owner.session.renderCoordinator()
 	}
 	effects.wasSyncing = p.screen.SyncUpdateActive()
-	p.screen.Write(data)
+	writePaneScreenLocked(p, data)
 	p.refreshTerminalTitleLocked()
 	effects.isSyncing = p.screen.SyncUpdateActive()
 	effects.completeSyncRead = !effects.wasSyncing && !effects.isSyncing && completedSynchronizedUpdate(data)

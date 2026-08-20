@@ -21,6 +21,10 @@ func TestOutputApplyStateTransitions(t *testing.T) {
 		{name: "increment", state: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}, output: ports.Output{Epoch: 1, Base: 1, New: 2, ViewRevision: 2}, accepted: true, want: outputApplyState{epoch: 1, state: 2, viewRevision: 2, initialized: true}},
 		{name: "base gap", state: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}, output: ports.Output{Epoch: 1, Base: 0, New: 2, Full: true, ViewRevision: 2}, accepted: false},
 		{name: "revision gap", state: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}, output: ports.Output{Epoch: 1, Base: 1, New: 2, ViewRevision: 3}, accepted: false},
+		{name: "handoff side effect crosses newer epoch replay gate", state: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}, output: ports.Output{Epoch: 2, ViewRevision: 3}, accepted: true, want: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}},
+		{name: "handoff side effect crosses stale epoch replay gate", state: outputApplyState{epoch: 2, state: 4, viewRevision: 5, initialized: true}, output: ports.Output{Epoch: 1, ViewRevision: 2}, accepted: true, want: outputApplyState{epoch: 2, state: 4, viewRevision: 5, initialized: true}},
+		{name: "side effect cannot invent state", state: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}, output: ports.Output{Epoch: 2, Base: 1}, accepted: false},
+		{name: "side effect cannot claim full replay", state: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}, output: ports.Output{Epoch: 2, Full: true}, accepted: false},
 		{name: "new epoch reset", state: outputApplyState{epoch: 1, state: 1, viewRevision: 2, initialized: true}, output: ports.Output{Epoch: 2, Base: 0, New: 1, Full: true, ViewRevision: 3}, accepted: true, want: outputApplyState{epoch: 2, state: 1, viewRevision: 3, initialized: true}},
 	}
 	for _, tt := range tests {

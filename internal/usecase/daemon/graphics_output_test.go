@@ -108,6 +108,7 @@ func TestKittyAttachmentPaintCarriesGraphicsInTheOutputStateRecord(t *testing.T)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	ac.terminalCapabilities.KittyGraphics = true
 	ac.graphicsOutput = newGraphicsOutputState()
+	ac.graphicsTerminalResetPending = true
 	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
 	require.NoError(t, err)
 	pane := sess.tabs[0].focusedPane()
@@ -127,11 +128,69 @@ func TestKittyAttachmentPaintCarriesGraphicsInTheOutputStateRecord(t *testing.T)
 	require.Contains(t, string(output.Data), ",f=100")
 	require.Contains(t, string(output.Data), "\x1b_Ga=p,i=")
 	require.Contains(t, string(output.Data), ",q=2")
+	require.Positive(t, output.New, "terminal reset must ride the ordinary state-bearing output")
+	require.Less(t, bytes.Index(output.Data, graphicsTerminalResetRecord), bytes.Index(output.Data, []byte("\x1b_Ga=t,")), "restart cleanup must precede fresh ID uploads")
 
 	outer := vt.NewScreen(output.Size.Cols, output.Size.Rows)
+	stale := newGraphicsOutputStateWithBase(ac.graphicsOutput.namespaceBase)
+	staleOutput, err := stale.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	outer.Write(staleOutput.data)
+	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
 	outer.Write(output.Data)
 	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Assets)
 	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+}
+
+func TestFreshCapabilityDowngradeClearsTerminalGraphicsInOrdinaryOutput(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	ac.terminalCapabilities.KittyGraphics = true
+	ac.graphicsOutput = newGraphicsOutputState()
+	ac.graphicsTerminalResetPending = false
+	d.mu.Lock()
+	d.reapplyAttachmentGraphicsCapability(sess, ac, ports.Hello{KittyDirectGraphics: false})
+	d.mu.Unlock()
+	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
+	require.Nil(t, ac.graphicsOutput)
+	require.True(t, ac.graphicsTerminalResetPending)
+
+	d.paint(sess, ac, true, nil)
+	frame := awaitFrame(t, sends, ports.MsgOutput)
+	output, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	require.Positive(t, output.New, "global cleanup must use the normal output state and ACK")
+	require.True(t, bytes.HasPrefix(output.Data, graphicsTerminalResetRecord), "cleanup must precede ANSI on a downgraded connection")
+
+	outer := vt.NewScreen(80, 24)
+	stale := newGraphicsOutputState()
+	staleOutput, err := stale.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	outer.Write(staleOutput.data)
+	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+	outer.Write(output.Data)
+	require.Zero(t, outer.GraphicsSnapshot().Usage().Assets, "a restarted daemon must not leave predecessor images unmanaged")
+	require.Zero(t, outer.GraphicsSnapshot().Usage().Placements)
+}
+
+func TestPaneGraphicsCoordinateGeometrySurvivesAttachmentResize(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
+	require.NoError(t, err)
+	p := newPane("pane", nil, domain.Size{Cols: 80, Rows: 24})
+	oldGeometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480}
+	newGeometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 1600, PixelHeight: 960}
+
+	p.mu.Lock()
+	setScreenGeometry(p.screen, oldGeometry)
+	writePaneScreenLocked(p, fixture)
+	first := capturePaneRenderStateLocked(p, domain.Rect{Width: 80, Height: 24})
+	setScreenGeometry(p.screen, newGeometry)
+	second := capturePaneRenderStateLocked(p, domain.Rect{Width: 80, Height: 24})
+	p.mu.Unlock()
+
+	require.Equal(t, oldGeometry, first.graphicsGeometry)
+	require.Equal(t, oldGeometry, second.graphicsGeometry, "retained scene pixels must not be reinterpreted as the resized cell units")
 }
 
 func TestGraphicsOutputIDsAreIsolatedAcrossAttachments(t *testing.T) {

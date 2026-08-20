@@ -504,6 +504,19 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	_, sentAck := tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgAck })
 	require.False(t, sentAck, "discarded output must not be ACKed")
 
+	// Handoff cleanup is an ordered terminal side effect, not a replay state.
+	// It must cross the outstanding reset gate, flush before the control handoff,
+	// and must not manufacture an independent ACK.
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 2,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Data:  []byte("handoff graphics cleanup"),
+	})}}
+	cleanup := requireReconnectToastOutput(t, out.completed)
+	require.Contains(t, cleanup, "handoff graphics cleanup")
+	_, sentAck = tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgAck })
+	require.False(t, sentAck, "state-independent cleanup must not be ACKed")
+
 	beforeResetFlushes := flushes.Load()
 	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
 		Epoch: 2,
