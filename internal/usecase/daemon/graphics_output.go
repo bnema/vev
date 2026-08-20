@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -43,17 +46,21 @@ type graphicsOutputState struct {
 	placements    map[string]graphicsOutputPlacement
 	pendingImages map[uint64]struct{}
 	pendingPlaces map[uint64]struct{}
-	nextImage     uint64
-	nextPlace     uint64
-	transform     graphicsOutputTransform
-	transformSet  bool
+	// nextID is a per-attachment cursor in Kitty's terminal-global 32-bit ID
+	// namespace. It starts at a cryptographically random point and is shared
+	// by image and placement IDs so neither kind can collide within an
+	// attachment. A new attachment gets a fresh cursor.
+	nextID       uint64
+	transform    graphicsOutputTransform
+	transformSet bool
 }
 
 type preparedGraphicsOutput struct {
-	owner *graphicsOutputState
-	state graphicsOutputState
-	data  []byte
-	valid bool
+	owner         *graphicsOutputState
+	state         graphicsOutputState
+	data          []byte
+	valid         bool
+	sendAttempted bool
 }
 
 type graphicsOutputTransform struct {
@@ -61,15 +68,29 @@ type graphicsOutputTransform struct {
 	sourceGeometry   domain.Geometry
 }
 
+const (
+	maxKittyGraphicsID = uint64(^uint32(0))
+	maxGraphicsIDs     = uint64(1024 + 65536)
+)
+
 func newGraphicsOutputState() *graphicsOutputState {
 	return &graphicsOutputState{
 		assets:        make(map[string]graphicsOutputAsset),
 		placements:    make(map[string]graphicsOutputPlacement),
 		pendingImages: make(map[uint64]struct{}),
 		pendingPlaces: make(map[uint64]struct{}),
-		nextImage:     1,
-		nextPlace:     1,
+		nextID:        randomGraphicsIDCursor(),
 	}
+}
+
+func randomGraphicsIDCursor() uint64 {
+	var raw [4]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		panic("crypto/rand failed generating Kitty graphics ID cursor: " + err.Error())
+	}
+	// Leave enough room for the bounded scene to advance without wrapping.
+	maxStart := maxKittyGraphicsID - maxGraphicsIDs
+	return uint64(binary.BigEndian.Uint32(raw[:]))%maxStart + 1
 }
 
 func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
@@ -78,13 +99,12 @@ func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
 		placements:    make(map[string]graphicsOutputPlacement),
 		pendingImages: make(map[uint64]struct{}),
 		pendingPlaces: make(map[uint64]struct{}),
-		nextImage:     1,
-		nextPlace:     1,
+		nextID:        1,
 	}
 	if in == nil {
 		return out
 	}
-	out.nextImage, out.nextPlace = in.nextImage, in.nextPlace
+	out.nextID = in.nextID
 	out.transform, out.transformSet = in.transform, in.transformSet
 	for key, asset := range in.assets {
 		out.assets[key] = asset
@@ -174,7 +194,7 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 		id := asset.id
 		if !exists {
 			var ok bool
-			id, ok = takeGraphicsID(&candidate.nextImage)
+			id, ok = takeGraphicsID(&candidate.nextID)
 			if !ok {
 				return nil, errGraphicsIDExhausted
 			}
@@ -200,7 +220,7 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 			}
 			want.id = got.id
 		} else {
-			id, ok := takeGraphicsID(&candidate.nextPlace)
+			id, ok := takeGraphicsID(&candidate.nextID)
 			if !ok {
 				return nil, errGraphicsIDExhausted
 			}
@@ -240,21 +260,31 @@ func (p *preparedGraphicsOutput) commit() {
 	p.valid = false
 }
 
+func (p *preparedGraphicsOutput) markSendAttempted() {
+	if p != nil && p.valid && len(p.data) > 0 {
+		p.sendAttempted = true
+	}
+}
+
 func (p *preparedGraphicsOutput) abort() {
 	if p == nil || !p.valid || p.owner == nil {
 		return
 	}
-	// Send errors are ambiguous: the outer terminal may have consumed a prefix
-	// of the record. Retain every speculative ID for an explicit delete on the
-	// next reset before replaying the scene.
-	for key, asset := range p.state.assets {
-		if committed, exists := p.owner.assets[key]; !exists || committed.id != asset.id {
-			p.owner.pendingImages[asset.id] = struct{}{}
+	// A preparation can be abandoned before the enclosing Output frame ever
+	// reaches the transport (for example when ANSI preparation fails). Such IDs
+	// were never emitted and must not become cleanup records. Once the transport
+	// was actually called, its result is ambiguous: the terminal may have
+	// consumed a prefix, so retain those speculative IDs for the next reset.
+	if p.sendAttempted {
+		for key, asset := range p.state.assets {
+			if committed, exists := p.owner.assets[key]; !exists || committed.id != asset.id {
+				p.owner.pendingImages[asset.id] = struct{}{}
+			}
 		}
-	}
-	for key, placement := range p.state.placements {
-		if committed, exists := p.owner.placements[key]; !exists || committed.id != placement.id {
-			p.owner.pendingPlaces[placement.id] = struct{}{}
+		for key, placement := range p.state.placements {
+			if committed, exists := p.owner.placements[key]; !exists || committed.id != placement.id {
+				p.owner.pendingPlaces[placement.id] = struct{}{}
+			}
 		}
 	}
 	p.valid = false
@@ -266,13 +296,18 @@ func graphicsSnapshotRecords(snapshot *graphics.Snapshot) (map[string]graphics.A
 	if snapshot == nil {
 		return assets, placements
 	}
+	assetKeys := make(map[string]string)
+	generation := snapshot.Generation()
 	for _, asset := range snapshot.Assets() {
-		assets[asset.ID().String()] = asset
+		key := graphicsAssetKey(generation, asset)
+		assets[key] = asset
+		assetKeys[asset.ID().String()] = key
 	}
 	for _, placement := range snapshot.Placements() {
-		key := placement.ID().String()
+		assetKey := assetKeys[placement.AssetID().String()]
+		key := graphicsPlacementKey(generation, placement, assetKey)
 		placements[key] = graphicsOutputPlacement{
-			asset:  placement.AssetID().String(),
+			asset:  assetKey,
 			source: placement.Source(),
 			dest:   placement.Destination(),
 			cells:  placement.Cells(),
@@ -280,6 +315,16 @@ func graphicsSnapshotRecords(snapshot *graphics.Snapshot) (map[string]graphics.A
 		}
 	}
 	return assets, placements
+}
+
+func graphicsAssetKey(generation uint64, asset graphics.AssetView) string {
+	digest := sha256.Sum256(asset.Encoded())
+	return fmt.Sprintf("g%d:%s:%d:%d:%x", generation, asset.ID().String(), asset.Width(), asset.Height(), digest)
+}
+
+func graphicsPlacementKey(generation uint64, placement graphics.PlacementView, assetKey string) string {
+	source, dest, cells := placement.Source(), placement.Destination(), placement.Cells()
+	return fmt.Sprintf("g%d:%s:%s:%v:%v:%v:%d", generation, placement.ID().String(), assetKey, source, dest, cells, placement.Layer())
 }
 
 func sortedOutputAssets(values map[string]graphicsOutputAsset) []graphicsOutputAsset {
@@ -328,11 +373,11 @@ func sortedUint64Keys(values map[uint64]struct{}) []uint64 {
 }
 
 func takeGraphicsID(next *uint64) (uint64, bool) {
-	if next == nil || *next == 0 {
+	if next == nil || *next == 0 || *next > maxKittyGraphicsID {
 		return 0, false
 	}
 	id := *next
-	if id == ^uint64(0) {
+	if id == maxKittyGraphicsID {
 		*next = 0
 	} else {
 		(*next)++
@@ -345,6 +390,12 @@ func equalGraphicsPlacement(a, b graphicsOutputPlacement) bool {
 }
 
 func kittyRecord(header string, payload []byte) []byte {
+	// q=2 asks Kitty to suppress protocol responses. Outer terminal replies
+	// would otherwise be interpreted as pane input or pollute the attachment's
+	// byte-only transport.
+	if header != "" {
+		header += ",q=2"
+	}
 	out := make([]byte, 0, len(header)+len(payload)+8)
 	out = append(out, "\x1b_G"...)
 	out = append(out, header...)
@@ -463,6 +514,7 @@ func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) {
 		ac.graphicsOutput.cleanup()
 		return
 	}
+	prepared.markSendAttempted()
 	if d.boundedSendOutputErr(ac, prepared.data) == nil {
 		prepared.commit()
 	} else {
@@ -478,18 +530,28 @@ func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bo
 	// Phase 5 composes one pane only. A Kitty attachment still receives the
 	// ordinary text composition for other layouts, but never receives graphics
 	// whose coordinates would need a multipane transform.
-	if len(state.panes) != 1 || state.floating.visible {
-		return ac.graphicsOutput.prepare(nil, reset)
+	transform := graphicsOutputTransform{}
+	snapshot := (*graphics.Snapshot)(nil)
+	if len(state.panes) == 1 && !state.floating.visible {
+		pane := state.panes[0]
+		if !pane.placement.Collapsed && pane.placement.Content.Width > 0 && pane.placement.Content.Height > 0 {
+			snapshot = pane.graphics
+			transform = graphicsOutputTransform{
+				originX:        pane.placement.Content.X,
+				originY:        pane.placement.Content.Y + 1,
+				sourceGeometry: pane.graphicsGeometry,
+			}
+		}
 	}
-	pane := state.panes[0]
-	if pane.placement.Collapsed || pane.placement.Content.Width <= 0 || pane.placement.Content.Height <= 0 {
-		return ac.graphicsOutput.prepare(nil, reset)
+	prepared, err := ac.graphicsOutput.prepareWithTransform(snapshot, reset, transform)
+	if !errors.Is(err, errGraphicsOutputTooLarge) {
+		return prepared, err
 	}
-	return ac.graphicsOutput.prepareWithTransform(pane.graphics, reset, graphicsOutputTransform{
-		originX:        pane.placement.Content.X,
-		originY:        pane.placement.Content.Y + 1,
-		sourceGeometry: pane.graphicsGeometry,
-	})
+	// Graphics are optional decoration. If an upload exceeds the bounded output
+	// budget, suppress it and still return the bounded cleanup for objects that
+	// were already proven to be owned by this attachment. ANSI composition is
+	// prepared and emitted by the caller independently.
+	return ac.graphicsOutput.prepareWithTransform(nil, reset, transform)
 }
 
 func graphicsOutputError(err error) error {
