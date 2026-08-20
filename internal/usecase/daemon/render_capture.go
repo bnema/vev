@@ -42,21 +42,25 @@ type damageReceipt struct {
 }
 
 type capturedRenderState struct {
-	attachment         *attachedClient // identity only; never dereferenced by composition
-	sessionID          domain.SessionID
-	incarnation        domain.IncarnationID
-	lease              *attachmentLease
-	view               attachmentView
-	window             domain.Size
-	reset              bool
-	layout             capturedTabLayout
-	panes              []capturedPaneRenderState
-	floating           capturedFloatingRenderState
-	bars               barState
-	theme              themeui.Theme
-	styles             themeui.Styles
-	styleGeneration    uint64
-	overlays           capturedOverlayRenderState
+	attachment      *attachedClient // identity only; never dereferenced by composition
+	sessionID       domain.SessionID
+	incarnation     domain.IncarnationID
+	lease           *attachmentLease
+	view            attachmentView
+	window          domain.Size
+	reset           bool
+	layout          capturedTabLayout
+	panes           []capturedPaneRenderState
+	floating        capturedFloatingRenderState
+	bars            barState
+	theme           themeui.Theme
+	styles          themeui.Styles
+	styleGeneration uint64
+	overlays        capturedOverlayRenderState
+	// suppressedGraphics records a late Kitty scene observed on an attachment
+	// that cannot emit graphics. Capture keeps the scene out of the output but
+	// lets the daemon issue one bounded user warning after pane locks release.
+	suppressedGraphics bool
 	preview            picker.Preview
 	cursor             capturedCursorInputs
 	tabGeneration      uint64
@@ -327,6 +331,9 @@ func captureLocalRenderState(
 		p.mu.Lock()
 		captured := capturePaneRenderStateLockedInto(p, visible, ac.captureFrames[p])
 		if !ac.terminalCapabilities.SupportsKittyGraphics() {
+			if captured.graphics != nil && captured.graphics.Usage().Placements != 0 {
+				state.suppressedGraphics = true
+			}
 			captured.graphics = nil
 		}
 		state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
@@ -350,6 +357,9 @@ func captureLocalRenderState(
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
 		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, ac.captureFrames[p])
 		if !ac.terminalCapabilities.SupportsKittyGraphics() {
+			if captured.graphics != nil && captured.graphics.Usage().Placements != 0 {
+				state.suppressedGraphics = true
+			}
 			captured.graphics = nil
 		}
 		seen := false

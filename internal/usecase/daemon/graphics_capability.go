@@ -43,15 +43,15 @@ func sessionHasKittyGraphics(sess *session) bool {
 	return false
 }
 
-func (d *Daemon) warnUnsupportedGraphics(ac *attachedClient) {
-	if d == nil || ac == nil || ac.graphicsUnsupportedWarned.Swap(true) {
-		return
+func (d *Daemon) warnUnsupportedGraphics(ac *attachedClient) bool {
+	if d == nil || ac == nil || ac.terminalCapabilities.SupportsKittyGraphics() {
+		return false
 	}
 	sess := ac.currentAttachmentSession()
-	if sess == nil {
-		return
+	if sess == nil || !sessionHasKittyGraphics(sess) || ac.graphicsUnsupportedWarned.Swap(true) {
+		return false
 	}
-	d.publishToast(ac, domain.Notification{
+	return d.publishToast(ac, domain.Notification{
 		Code:      domain.NoticeUser,
 		Severity:  domain.NoticeWarn,
 		Message:   "Kitty graphics are unavailable on this attachment; images are suppressed.",

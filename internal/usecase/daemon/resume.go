@@ -16,6 +16,11 @@ func (d *Daemon) reapplyAttachmentGraphicsCapability(sess *session, ac *attached
 		return
 	}
 	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
+	if h.KittyDirectGraphics {
+		// Capability belongs to the replacement outer terminal, not the parked
+		// link. A later unsupported resume may therefore need its one warning.
+		ac.graphicsUnsupportedWarned.Store(false)
+	}
 	if !h.KittyDirectGraphics {
 		if ac.graphicsOutput != nil {
 			// The parked transport has already been retired. Do not emit the old
@@ -631,6 +636,9 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 		// complete the claiming terminal's geometry before the resumed
 		// attachment is allowed to produce its first frame.
 		d.recalculateSessionGeometry(sess, resumed)
+		// A resumed unsupported attachment bypasses finishAttachedClient. Check
+		// the restored scene at this boundary so suppression is explained once.
+		d.warnUnsupportedGraphics(resumed)
 	}
 	if err != nil && resumed != nil {
 		d.abortResumeClaim(resumed)

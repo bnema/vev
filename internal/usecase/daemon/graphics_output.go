@@ -14,6 +14,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -172,7 +173,13 @@ func (d *Daemon) reserveGraphicsNamespaceLeaseLocked(key string) (uint64, uint64
 	if d.graphicsNamespaceQuarantines == nil {
 		d.graphicsNamespaceQuarantines = make(map[uint64]*graphicsNamespaceQuarantine)
 	}
-	digest := sha256.Sum256([]byte(key))
+	hashInput := []byte(key)
+	if d.graphicsNamespaceSalt != 0 {
+		salt := make([]byte, 8, 8+len(key))
+		binary.BigEndian.PutUint64(salt, d.graphicsNamespaceSalt)
+		hashInput = append(salt, hashInput...)
+	}
+	digest := sha256.Sum256(hashInput)
 	preferred := binary.BigEndian.Uint64(digest[:8]) % graphicsIDNamespaceCount
 	for offset := uint64(0); offset < graphicsIDNamespaceCount; offset++ {
 		block := (preferred + offset) % graphicsIDNamespaceCount
@@ -913,34 +920,71 @@ func (d *Daemon) discardGraphicsOutputLocked(ac *attachedClient) {
 // epoch deletes and replays it as needed. Even a successful cleanup socket send
 // cannot release an exposed namespace because side-effect Output frames are not
 // terminal-ACKed.
-func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) {
-	if d == nil || ac == nil || ac.graphicsOutput == nil {
-		return
+func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) error {
+	if d == nil || ac == nil {
+		return nil
 	}
+	// Keep preparation, the side-effect frame, and retirement under one
+	// attachment send fence. A concurrent paint must not commit a newer scene
+	// between the delete preparation and the handoff control frame.
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
 	state := ac.graphicsOutput
+	if state == nil {
+		return nil
+	}
 	if ac.output == nil {
 		d.retireGraphicsOutput(ac, state)
-		return
+		return nil
 	}
-	ac.sendMu.Lock()
 	prepared, err := state.prepare(nil, true)
-	ac.sendMu.Unlock()
 	if err != nil || prepared == nil {
 		d.retireGraphicsOutput(ac, state)
-		return
+		return err
 	}
 	if len(prepared.data) == 0 {
 		prepared.commit()
 		d.retireGraphicsOutput(ac, state)
-		return
+		return nil
+	}
+	expected := ac.transportSnapshot()
+	if expected.transport == nil {
+		prepared.markSendAttempted()
+		prepared.abort()
+		d.retireGraphicsOutput(ac, state)
+		return errors.New("client transport is nil")
+	}
+	ac.output.lockView()
+	frame, frameErr := ac.output.sideEffectLocked(prepared.data, ac.echoAck.Load())
+	if frameErr != nil {
+		ac.output.unlockView()
+		prepared.abort()
+		d.retireGraphicsOutput(ac, state)
+		return frameErr
 	}
 	prepared.markSendAttempted()
-	if d.boundedSendOutputErr(ac, prepared.data) == nil {
+	var sendErr error
+	if owned, ok := expected.transport.(ports.OwnedSynchronousTransport); ok {
+		sendErr = owned.SendSynchronous(frame)
+	} else {
+		_, sendErr = d.boundedSendWith(expected.transport, func() error {
+			if !ac.transportSnapshotCurrent(expected) {
+				return errTransportReplaced
+			}
+			return expected.transport.Send(frame)
+		})
+		if errors.Is(sendErr, errSendTimedOut) {
+			_ = ac.closeCapturedTransport(expected.transport)
+		}
+	}
+	ac.output.unlockView()
+	if sendErr == nil {
 		prepared.commit()
 	} else {
 		prepared.abort()
 	}
 	d.retireGraphicsOutput(ac, state)
+	return sendErr
 }
 
 func (d *Daemon) disableGraphicsOutput(ac *attachedClient) {

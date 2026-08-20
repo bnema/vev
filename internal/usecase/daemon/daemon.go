@@ -3,6 +3,8 @@ package daemon
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"log/slog"
 	"math"
@@ -117,6 +119,10 @@ type Daemon struct {
 	graphicsNamespaces           map[uint64]struct{}
 	graphicsNamespaceFences      map[uint64]uint64
 	graphicsNamespaceQuarantines map[uint64]*graphicsNamespaceQuarantine
+	// graphicsNamespaceSalt separates daemon lifetimes before attachment keys
+	// are hashed. Kitty IDs are terminal-global, so a restarted or neighboring
+	// daemon must not deterministically reopen the previous daemon's block.
+	graphicsNamespaceSalt uint64
 	// parking tracks resume-capable attachments from before detach clears the
 	// live seat until parkAttachment publishes the token into parked.
 	// IntentResume waits on the matching entry instead of treating the live
@@ -612,6 +618,23 @@ func (d *Daemon) nowUnixNano() int64 {
 type systemClock struct{}
 type systemTimer struct{ *time.Timer }
 
+var graphicsNamespaceFallbackSalt atomic.Uint64
+
+func newGraphicsNamespaceSalt() uint64 {
+	var bytes [8]byte
+	if _, err := cryptorand.Read(bytes[:]); err == nil {
+		if salt := binary.BigEndian.Uint64(bytes[:]); salt != 0 {
+			return salt
+		}
+	}
+	for {
+		salt := graphicsNamespaceFallbackSalt.Add(1)
+		if salt != 0 {
+			return salt
+		}
+	}
+}
+
 func (systemClock) Now() time.Time { return time.Now() }
 func (systemClock) NewTimer(delay time.Duration) ports.Timer {
 	return systemTimer{Timer: time.NewTimer(delay)}
@@ -636,6 +659,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		graphicsNamespaces:           make(map[uint64]struct{}),
 		graphicsNamespaceFences:      make(map[uint64]uint64),
 		graphicsNamespaceQuarantines: make(map[uint64]*graphicsNamespaceQuarantine),
+		graphicsNamespaceSalt:        newGraphicsNamespaceSalt(),
 		parking:                      make(map[uint64]*parkingAttachment),
 		paneProcessCtx:               paneProcessCtx,
 		paneProcessCancel:            paneProcessCancel,
