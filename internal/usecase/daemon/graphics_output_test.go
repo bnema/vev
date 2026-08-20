@@ -110,7 +110,14 @@ func TestKittyAttachmentPaintCarriesGraphicsInTheOutputStateRecord(t *testing.T)
 	ac.graphicsOutput = newGraphicsOutputState()
 	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
 	require.NoError(t, err)
-	sess.tabs[0].focusedPane().screen.Write(fixture)
+	pane := sess.tabs[0].focusedPane()
+	// This fixture contains pixel-space Kitty output without cell metadata;
+	// provide the terminal pixel geometry explicitly so attachment clipping can
+	// map its placement safely.
+	geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 23}, PixelWidth: 800, PixelHeight: 460}
+	pane.geometry = geometry
+	setScreenGeometry(pane.screen, geometry)
+	pane.screen.Write(fixture)
 
 	d.paint(sess, ac, true, nil)
 	frame := awaitFrame(t, sends, ports.MsgOutput)
@@ -436,8 +443,9 @@ func TestGraphicsOutputClipsPlacementToPaneContent(t *testing.T) {
 	_, err = scene.PlaceAsset(asset, graphics.PixelRect{X: -2, Y: -1, Width: 10, Height: 10})
 	require.NoError(t, err)
 	state := &capturedRenderState{panes: []capturedPaneRenderState{{
-		graphics:  scene.Snapshot(),
-		placement: layout.Placement{Content: domain.Rect{X: 3, Y: 4, Width: 4, Height: 3}},
+		graphics:         scene.Snapshot(),
+		graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 4, Rows: 3}, PixelWidth: 4, PixelHeight: 3},
+		placement:        layout.Placement{Content: domain.Rect{X: 3, Y: 4, Width: 4, Height: 3}},
 	}}}
 	ac := &attachedClient{
 		graphicsOutput:       newGraphicsOutputState(),
@@ -449,6 +457,81 @@ func TestGraphicsOutputClipsPlacementToPaneContent(t *testing.T) {
 	require.Contains(t, text, ",x=3,y=5")
 	require.Contains(t, text, ",X=2,Y=1,w=4,h=3")
 	require.NotContains(t, text, ",x=2,y=4", "graphics must not paint the title bar or adjacent area")
+}
+
+func TestGraphicsOutputClipsEachAttachmentToOuterContentFrame(t *testing.T) {
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("attachment-frame"), Width: 80, Height: 24})
+	require.NoError(t, err)
+	_, err = scene.Place(graphics.PlacementSpec{
+		Asset:       asset,
+		Destination: graphics.PixelRect{Width: 800, Height: 480},
+		Cells:       graphics.CellRect{Width: 80, Height: 24},
+	})
+	require.NoError(t, err)
+
+	makeState := func(window domain.Size) *capturedRenderState {
+		return &capturedRenderState{
+			window: window,
+			layout: capturedTabLayout{area: domain.Rect{Width: 80, Height: 24}, valid: true},
+			panes: []capturedPaneRenderState{{
+				id:               "pane",
+				graphics:         scene.Snapshot(),
+				graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480},
+				placement:        layout.Placement{ID: "pane", Content: domain.Rect{Width: 80, Height: 24}},
+			}},
+		}
+	}
+
+	small, err := graphicsOutputData(makeState(domain.Size{Cols: 40, Rows: 10}), graphicsPaneTestClient(), true)
+	require.NoError(t, err)
+	require.Len(t, small.state.placements, 1)
+	for _, placement := range small.state.placements {
+		require.Equal(t, graphics.PixelRect{Width: 400, Height: 160}, placement.dest, "small attachment must clip pixels to its content frame")
+		require.Equal(t, graphics.CellRect{Width: 40, Height: 8}, placement.cells, "status bar row must stay outside the graphics cells")
+	}
+	require.Contains(t, string(small.data), ",c=40,r=8")
+	require.NotContains(t, string(small.data), ",c=80,r=24")
+
+	large, err := graphicsOutputData(makeState(domain.Size{Cols: 100, Rows: 30}), graphicsPaneTestClient(), true)
+	require.NoError(t, err)
+	require.Len(t, large.state.placements, 1)
+	for _, placement := range large.state.placements {
+		require.Equal(t, graphics.PixelRect{Width: 800, Height: 480}, placement.dest, "a larger attachment must retain the pane portion it can display")
+	}
+	require.Contains(t, string(large.data), ",c=80,r=24")
+}
+
+func TestGraphicsOutputCellOnlyViewportPreservesSourceMapping(t *testing.T) {
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("cell-only"), Width: 100, Height: 50})
+	require.NoError(t, err)
+	_, err = scene.Place(graphics.PlacementSpec{
+		Asset:       asset,
+		Destination: graphics.PixelRect{X: 10, Y: 20, Width: 200, Height: 100},
+		Cells:       graphics.CellRect{X: 2, Y: 3, Width: 20, Height: 10},
+	})
+	require.NoError(t, err)
+
+	viewport, ok := graphicsOutputViewportRect(domain.Rect{X: 7, Y: 5, Width: 5, Height: 5}, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+	require.True(t, ok)
+	require.Equal(t, graphics.PixelRect{}, viewport.Pixels, "cell-only geometry must not become a pixel viewport")
+	require.Equal(t, graphics.CellRect{X: 7, Y: 5, Width: 5, Height: 5}, viewport.Cells)
+
+	_, placements := graphicsSnapshotRecords(scene.Snapshot(), viewport)
+	require.Len(t, placements, 1)
+	for _, placement := range placements {
+		require.Equal(t, graphics.PixelRect{X: 25, Y: 10, Width: 25, Height: 25}, placement.source)
+		require.Equal(t, graphics.PixelRect{X: 60, Y: 40, Width: 50, Height: 50}, placement.dest)
+	}
+
+	pixelOnly := graphics.NewScene(graphics.Limits{})
+	pixelAsset, err := pixelOnly.AddAsset(graphics.AssetBlob{Encoded: []byte("pixel-only"), Width: 10, Height: 10})
+	require.NoError(t, err)
+	_, err = pixelOnly.PlaceAsset(pixelAsset, graphics.PixelRect{Width: 10, Height: 10})
+	require.NoError(t, err)
+	_, unsuitable := graphicsSnapshotRecords(pixelOnly.Snapshot(), viewport)
+	require.Empty(t, unsuitable, "pixel-space fragments without cell metadata must be suppressed")
 }
 
 func TestGraphicsOutputComposesPaneOriginAndPixelGeometry(t *testing.T) {
@@ -508,6 +591,17 @@ func graphicsPaneTestScene(t *testing.T, data string, destination graphics.Pixel
 }
 
 func graphicsPaneTestState(tab domain.TabStableID, panes ...capturedPaneRenderState) *capturedRenderState {
+	for i := range panes {
+		if panes[i].graphicsGeometry.PixelsKnown() || panes[i].placement.Content.Width <= 0 || panes[i].placement.Content.Height <= 0 {
+			continue
+		}
+		content := panes[i].placement.Content
+		panes[i].graphicsGeometry = domain.Geometry{
+			Size:        domain.Size{Cols: content.Width, Rows: content.Height},
+			PixelWidth:  content.Width,
+			PixelHeight: content.Height,
+		}
+	}
 	return &capturedRenderState{view: attachmentView{tabID: tab}, panes: panes}
 }
 
@@ -597,8 +691,10 @@ func TestGraphicsOutputFloatingPaneCoversTiledGraphicsAndRetainsItsOwnScene(t *t
 	floating := graphicsPaneTestScene(t, "floating", graphics.PixelRect{Width: 3, Height: 2}, 3)
 	state := graphicsPaneTestState("tab-a", capturedPaneRenderState{id: "tiled", graphics: tiled, placement: layout.Placement{ID: "tiled", Content: domain.Rect{Width: 20, Height: 6}}})
 	state.floating = capturedFloatingRenderState{
-		visible:  true,
-		pane:     capturedPaneRenderState{id: "floating", graphics: floating, graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 3, Rows: 2}}},
+		visible: true,
+		pane: capturedPaneRenderState{id: "floating", graphics: floating, graphicsGeometry: domain.Geometry{
+			Size: domain.Size{Cols: 3, Rows: 2}, PixelWidth: 3, PixelHeight: 2,
+		}},
 		geometry: floatingGeometry{Bounds: domain.Rect{X: 5, Y: 1, Width: 6, Height: 4}, Inner: domain.Rect{X: 6, Y: 2, Width: 3, Height: 2}},
 	}
 	ac := graphicsPaneTestClient()
