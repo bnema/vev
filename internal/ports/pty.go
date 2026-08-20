@@ -15,6 +15,12 @@ type PTY interface {
 	ForegroundPgid() (int, error)
 }
 
+// GeometryPTY is implemented by PTY adapters that can apply optional pixel
+// dimensions in addition to the baseline cell-size contract.
+type GeometryPTY interface {
+	ResizeGeometry(geometry domain.Geometry) error
+}
+
 // PTYFactory creates PTYs by spawning a command attached to a new pseudo-terminal.
 type PTYFactory interface {
 	// Open creates a PTY while honoring ctx cancellation. Implementations must

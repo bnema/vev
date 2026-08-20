@@ -2844,15 +2844,16 @@ func (p *stdinPump) run() {
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
+func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- ports.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
 	defer log.Debug("resize pump exited")
 	for {
 		select {
-		case sz, ok := <-events:
+		case geometry, ok := <-events:
 			if !ok {
 				return
 			}
-			payload, err := ports.MarshalResize(ports.Resize{Size: sz})
+			geometry = geometry.NormalizePixels()
+			payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 			if err != nil {
 				log.Error("encoding terminal resize", "error", err)
 				continue

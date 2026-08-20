@@ -92,9 +92,25 @@ type Geometry struct {
 	PixelWidth, PixelHeight int
 }
 
+// Valid reports whether the cell dimensions can describe a terminal screen.
+func (g Geometry) Valid() bool {
+	return g.Size.Valid()
+}
+
 // PixelsKnown reports whether both pixel dimensions are available.
 func (g Geometry) PixelsKnown() bool {
 	return g.PixelWidth > 0 && g.PixelHeight > 0
+}
+
+// NormalizePixels clears partial or negative pixel dimensions. Pixel geometry
+// is optional as a pair; retaining only one axis would give downstream PTYs and
+// terminal queries a geometry the controlling terminal never reported.
+func (g Geometry) NormalizePixels() Geometry {
+	if !g.PixelsKnown() {
+		g.PixelWidth = 0
+		g.PixelHeight = 0
+	}
+	return g
 }
 
 // Rect is an axis-aligned rectangle in cell coordinates.

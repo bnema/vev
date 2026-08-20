@@ -169,6 +169,8 @@ type Hello struct {
 	ResumeToken uint64
 	Name        string
 	Size        domain.Size
+	PixelWidth  int
+	PixelHeight int
 	TermEnv     string
 	Cwd         string
 	TrueColor   bool
@@ -200,9 +202,23 @@ type Input struct {
 	Data     []byte
 }
 
-// Resize notifies the daemon of a client-side terminal size change.
+// Geometry returns the complete controlling-terminal geometry carried by the
+// handshake. Pixel dimensions are optional as a pair.
+func (h Hello) Geometry() domain.Geometry {
+	return domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}.NormalizePixels()
+}
+
+// Resize notifies the daemon of a client-side terminal geometry change.
 type Resize struct {
-	Size domain.Size
+	Size        domain.Size
+	PixelWidth  int
+	PixelHeight int
+}
+
+// Geometry returns the complete controlling-terminal geometry carried by the
+// resize message. Pixel dimensions are optional as a pair.
+func (m Resize) Geometry() domain.Geometry {
+	return domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}.NormalizePixels()
 }
 
 // Theme reports the client's terminal foreground/background colors, ANSI
@@ -732,8 +748,8 @@ func ValidateHello(h Hello) error {
 	if h.Intent != IntentEphemeral && h.Intent != IntentNew && h.Intent != IntentAttach && h.Intent != IntentResume {
 		return ErrInvalidHello
 	}
-	if err := ValidateSize(h.Size); err != nil {
-		return fmt.Errorf("%w: size", ErrInvalidHello)
+	if err := ValidateGeometry(domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}); err != nil {
+		return fmt.Errorf("%w: geometry", ErrInvalidHello)
 	}
 	if !validEnvironmentPolicy(h.EnvironmentPolicy) {
 		return ErrInvalidHello
@@ -881,6 +897,8 @@ func MarshalHello(h Hello) []byte {
 	w.putString(h.Name)
 	w.putUint16(uint16(h.Size.Cols))
 	w.putUint16(uint16(h.Size.Rows))
+	w.putUint16(uint16(h.PixelWidth))
+	w.putUint16(uint16(h.PixelHeight))
 	w.putString(h.TermEnv)
 	w.putString(h.Cwd)
 	w.putBool(h.TrueColor)
@@ -917,6 +935,12 @@ func preflightHello(b []byte) error {
 		return err
 	}
 	if err := r.skipString(); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
 		return err
 	}
 	if _, err := r.getUint16(); err != nil {
@@ -1004,7 +1028,17 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	if err != nil {
 		return Hello{}, err
 	}
+	pixelWidth, err := r.getUint16()
+	if err != nil {
+		return Hello{}, err
+	}
+	pixelHeight, err := r.getUint16()
+	if err != nil {
+		return Hello{}, err
+	}
 	h.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
+	h.PixelWidth = int(pixelWidth)
+	h.PixelHeight = int(pixelHeight)
 	if h.TermEnv, err = r.getString(); err != nil {
 		return Hello{}, err
 	}
@@ -1134,12 +1168,14 @@ func UnmarshalClientNotice(b []byte) (ClientNotice, error) {
 
 // MarshalResize encodes m into a Resize message payload.
 func MarshalResize(m Resize) ([]byte, error) {
-	if err := ValidateSize(m.Size); err != nil {
+	if err := ValidateGeometry(domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}); err != nil {
 		return nil, err
 	}
 	w := payloadWriter{}
 	w.putUint16(uint16(m.Size.Cols))
 	w.putUint16(uint16(m.Size.Rows))
+	w.putUint16(uint16(m.PixelWidth))
+	w.putUint16(uint16(m.PixelHeight))
 	return w.b, nil
 }
 
@@ -1256,11 +1292,23 @@ func UnmarshalResize(b []byte) (Resize, error) {
 	if err != nil {
 		return Resize{}, err
 	}
+	pixelWidth, err := r.getUint16()
+	if err != nil {
+		return Resize{}, err
+	}
+	pixelHeight, err := r.getUint16()
+	if err != nil {
+		return Resize{}, err
+	}
 	if err := r.done(); err != nil {
 		return Resize{}, err
 	}
-	m := Resize{Size: domain.Size{Cols: int(cols), Rows: int(rows)}}
-	if err := ValidateSize(m.Size); err != nil {
+	m := Resize{
+		Size:        domain.Size{Cols: int(cols), Rows: int(rows)},
+		PixelWidth:  int(pixelWidth),
+		PixelHeight: int(pixelHeight),
+	}
+	if err := ValidateGeometry(domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}); err != nil {
 		return Resize{}, err
 	}
 	return m, nil

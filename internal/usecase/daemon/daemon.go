@@ -1320,7 +1320,11 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		terminalCapabilities:   terminalCapabilities,
 		capabilitiesSet:        true,
 	}
-	ac := d.prepareAttachedClientLocked(tr, sz, opts)
+	geometry := h.Geometry()
+	if geometry.Size != sz {
+		geometry = domain.Geometry{Size: sz}
+	}
+	ac := d.prepareAttachedClientLocked(tr, geometry, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target:            sess,
