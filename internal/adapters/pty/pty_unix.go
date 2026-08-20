@@ -228,5 +228,17 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 
 // setWinsize applies sz to the terminal referenced by fd via TIOCSWINSZ.
 func setWinsize(fd int, sz domain.Size) error {
-	return rawterm.SetWinsize(fd, uint16(sz.Cols), uint16(sz.Rows))
+	return setGeometry(fd, domain.Geometry{Size: sz})
+}
+
+// setGeometry applies cell dimensions and any pixel dimensions reported by the
+// geometry authority. Zero pixel dimensions deliberately preserve the kernel's
+// explicit unknown value instead of fabricating a cell-derived size.
+func setGeometry(fd int, geometry domain.Geometry) error {
+	return rawterm.SetWinsizeFull(fd, rawterm.Winsize{
+		Col:    uint16(geometry.Cols),
+		Row:    uint16(geometry.Rows),
+		Xpixel: uint16(geometry.PixelWidth),
+		Ypixel: uint16(geometry.PixelHeight),
+	})
 }
