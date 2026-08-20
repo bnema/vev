@@ -42,8 +42,26 @@ type moveTabCommit struct {
 }
 
 func (d *Daemon) moveTab(req moveTabRequest) (result error) {
-	defer func() { result = normalizeMoveRejection(result) }()
-	if d == nil || req.Source.ID == "" || req.Destination.ID == "" || req.SourceTabID == "" || req.Source.ID == req.Destination.ID {
+	if d == nil {
+		return errMovePaneInvalid
+	}
+	d.log.Info("tab move requested",
+		"source_session_id", req.Source.ID,
+		"source_tab_id", req.SourceTabID,
+		"destination_session_id", req.Destination.ID,
+	)
+	defer func() {
+		result = normalizeMoveRejection(result)
+		if result != nil {
+			d.log.Warn("tab move rejected",
+				"err", result,
+				"source_session_id", req.Source.ID,
+				"source_tab_id", req.SourceTabID,
+				"destination_session_id", req.Destination.ID,
+			)
+		}
+	}()
+	if req.Source.ID == "" || req.Destination.ID == "" || req.SourceTabID == "" || req.Source.ID == req.Destination.ID {
 		return errMovePaneInvalid
 	}
 	d.mu.Lock()
@@ -134,6 +152,7 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		destinationTab:           admission.tab,
 		movedPane:                firstMovePane(admission.panes),
 		movedPanes:               admission.panes,
+		operation:                "tab",
 		sourceAttachments:        admission.sourceAttachments,
 		syncCleanup:              commit.syncCleanup,
 		frozenEffects:            frozen,

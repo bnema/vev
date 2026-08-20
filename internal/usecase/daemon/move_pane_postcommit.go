@@ -26,6 +26,7 @@ type movePanePostcommitPlan struct {
 	destinationTab    *tab
 	movedPane         *pane
 	movedPanes        []*pane
+	operation         string
 	sourceAttachments []*attachedClient
 	syncCleanup       syncTimerCleanup
 	frozenEffects     frozenAttachmentEffectGates
@@ -79,6 +80,15 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
+	d.log.Info("move committed",
+		"operation", p.operation,
+		"source_session", p.source.name,
+		"source_session_id", p.source.id,
+		"source_tab_id", p.sourceTab.stableID,
+		"destination_session", p.destination.name,
+		"destination_session_id", p.destination.id,
+		"source_retired", p.sourceEmpty,
+	)
 
 	// Repair attachment-local stable targets after shared topology publication
 	// and after the move dispatch locks have been released.
@@ -113,6 +123,15 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 	if p.sourceEmpty {
 		retireEmptySessionAfterMove(d, p.source)
+	}
+	if len(p.retiredAttachments) != 0 {
+		d.log.Info("move detaching source attachments",
+			"operation", p.operation,
+			"source_session", p.source.name,
+			"source_session_id", p.source.id,
+			"reason", "session-killed",
+			"attachments", len(p.retiredAttachments),
+		)
 	}
 	for _, attachment := range p.retiredAttachments {
 		d.unregisterPreview(attachment.ac)

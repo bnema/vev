@@ -32,8 +32,30 @@ type moveTabRequest struct {
 // section starts, the caller holds the ordered architecture locks and only
 // non-failing in-memory writes are permitted.
 func (d *Daemon) movePane(req movePaneRequest) (result error) {
-	defer func() { result = normalizeMoveRejection(result) }()
-	if d == nil || req.Source.ID == "" || req.Destination.ID == "" ||
+	if d == nil {
+		return errMovePaneInvalid
+	}
+	d.log.Info("pane move requested",
+		"source_session_id", req.Source.ID,
+		"source_tab_id", req.SourceTabID,
+		"source_pane_id", req.SourcePaneID,
+		"destination_session_id", req.Destination.ID,
+		"destination_tab_id", req.DestinationTabID,
+	)
+	defer func() {
+		result = normalizeMoveRejection(result)
+		if result != nil {
+			d.log.Warn("pane move rejected",
+				"err", result,
+				"source_session_id", req.Source.ID,
+				"source_tab_id", req.SourceTabID,
+				"source_pane_id", req.SourcePaneID,
+				"destination_session_id", req.Destination.ID,
+				"destination_tab_id", req.DestinationTabID,
+			)
+		}
+	}()
+	if req.Source.ID == "" || req.Destination.ID == "" ||
 		req.SourceTabID == "" || req.SourcePaneID == "" || req.DestinationTabID == "" {
 		return errMovePaneInvalid
 	}
@@ -150,6 +172,7 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 		sourceTab:                sourceTab,
 		destinationTab:           destinationTab,
 		movedPane:                movedPane,
+		operation:                "pane",
 		sourceAttachments:        admission.sourceAttachments,
 		syncCleanup:              commit.syncCleanup,
 		frozenEffects:            frozen,
