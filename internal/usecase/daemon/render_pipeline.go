@@ -436,10 +436,28 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		}
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
-	prepared, err := ac.output.prepareFrame(composed.frame, composed.damage, composed.reset, composed.cursor)
-	var data []byte
-	if prepared != nil {
-		data = prepared.data
+	var (
+		preparedANSI     *preparedOutput
+		preparedGraphics *preparedGraphicsOutput
+		err              error
+		cursor           cursorCandidate
+		data             []byte
+	)
+	// Graphics uses the same speculative boundary as text. A forced snapshot
+	// is raised after an ambiguous send, so the next record deletes this
+	// attachment's owned IDs before replaying the immutable screen scene.
+	graphicsReset := composed.reset || ac.output.forceSnapshot || !ac.output.initialized
+	preparedGraphics, err = graphicsOutputData(state, ac, graphicsReset)
+	if err == nil {
+		preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
+	}
+	if err == nil {
+		cursor = ac.output.prepareCursorTail(composed.cursor, len(preparedANSI.data) > 0)
+		data = append([]byte(nil), preparedANSI.data...)
+		if preparedGraphics != nil {
+			data = append(data, preparedGraphics.data...)
+		}
+		data = append(data, cursor.data...)
 	}
 	endDiff(0, err == nil)
 	if err != nil {
@@ -487,7 +505,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				}
 			}
 			if sendErr == nil {
-				sendErr = prepared.send(ac.echoAck.Load(), send)
+				sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
 			}
 			if marks.attachmentEffect != nil && interruptible {
 				if sendErr != nil {
@@ -496,25 +514,38 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				marks.attachmentEffect.endTransportSend()
 			}
 		}
-		emitted := sendErr == nil && prepared.sent()
+		emitted := sendErr == nil && preparedANSI.sent
 		endEmit(uint64(len(data)), emitted)
 		if sendErr == nil && !emitted {
+			if preparedGraphics != nil {
+				preparedGraphics.abort()
+			}
 			ac.sendMu.Unlock()
 			return true
+		}
+		if sendErr != nil && preparedGraphics != nil {
+			preparedGraphics.abort()
 		}
 	}
 	if sendErr == nil {
 		if len(data) == 0 {
-			prepared.commitNoSend()
-			if !prepared.sent() {
+			preparedANSI.commitNoSend()
+			if !preparedANSI.sent {
+				if preparedGraphics != nil {
+					preparedGraphics.abort()
+				}
 				ac.sendMu.Unlock()
 				return true
 			}
+		}
+		if preparedGraphics != nil {
+			preparedGraphics.commit()
 		}
 		// Publish only after output preparation and transport emission both
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this
 		// completed output transaction.
+		ac.output.lastCursor = cursor.next
 		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
 

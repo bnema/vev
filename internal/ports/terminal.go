@@ -52,9 +52,18 @@ const (
 // attachment. Pane processes must not derive their terminal environment from
 // these capabilities.
 type TerminalCapabilities struct {
-	ColorMode   TerminalColorMode
-	ColorSource TerminalCapabilitySource
-	Application TerminalApplication
+	ColorMode     TerminalColorMode
+	ColorSource   TerminalCapabilitySource
+	Application   TerminalApplication
+	KittyGraphics bool
+}
+
+// SupportsKittyGraphics reports whether this attachment's outer terminal is
+// known to accept the Kitty graphics protocol. The detector only sets this for
+// a direct Kitty terminal identity; inherited Kitty variables behind a
+// multiplexer remain ordinary text attachments.
+func (c TerminalCapabilities) SupportsKittyGraphics() bool {
+	return c.KittyGraphics
 }
 
 // TrueColor reports whether this attachment can receive RGB ANSI output.
@@ -89,6 +98,7 @@ func DetectTerminalCapabilities(env []string) TerminalCapabilities {
 	if term == "xterm-kitty" && caps.Application == TerminalApplicationKitty {
 		caps.ColorMode = TerminalColorTrueColor
 		caps.ColorSource = TerminalCapabilityHeuristic
+		caps.KittyGraphics = true
 		return caps
 	}
 	if strings.Contains(term, "256color") || term == "dumb" {
