@@ -97,6 +97,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 	d.closePicker(ac)
 	d.closePalette(ac)
+	d.cleanupGraphicsOutput(ac)
 
 	d.resetScreenDefaultColors(sess)
 	if explicit && notice {
@@ -187,6 +188,7 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 	d.closePicker(ac)
 	d.closePalette(ac)
+	d.cleanupGraphicsOutput(ac)
 	d.resetScreenDefaultColors(sess)
 	_ = ac.closeCapturedTransport(failed)
 	d.log.Warn("detached client after send error", "session", name)

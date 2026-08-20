@@ -461,6 +461,9 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	endDiff(0, err == nil)
 	if err != nil {
+		if preparedGraphics != nil {
+			preparedGraphics.abort()
+		}
 		ac.sendMu.Unlock()
 		core := entry.core()
 		core.mu.Lock()

@@ -30,6 +30,14 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			wantGraphics: true,
 		},
 		{
+			name:         "kitty graphics survives declared truecolor",
+			env:          []string{"TERM=xterm-kitty", "COLORTERM=truecolor", "KITTY_WINDOW_ID=1"},
+			wantMode:     TerminalColorTrueColor,
+			wantSource:   TerminalCapabilityDeclared,
+			wantApp:      TerminalApplicationKitty,
+			wantGraphics: true,
+		},
+		{
 			name:       "256 color terminal remains a constrained attachment",
 			env:        []string{"TERM=xterm-256color"},
 			wantMode:   TerminalColorIndexed256,

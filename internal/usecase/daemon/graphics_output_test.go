@@ -8,6 +8,7 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +87,21 @@ func TestKittyAttachmentPaintCarriesGraphicsInTheOutputStateRecord(t *testing.T)
 	outer.Write(output.Data)
 	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Assets)
 	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+}
+
+func TestGraphicsOutputComposesPaneOriginAndPixelGeometry(t *testing.T) {
+	placement := graphicsOutputPlacement{
+		id:     1,
+		source: graphics.PixelRect{Width: 20, Height: 10},
+		dest:   graphics.PixelRect{X: 100, Y: 50, Width: 20, Height: 10},
+		cells:  graphics.CellRect{Width: 2, Height: 1},
+	}
+	record := placementRecordWithTransform(1, placement, graphicsOutputTransform{
+		originX:        3,
+		originY:        2,
+		sourceGeometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480},
+	})
+	require.Contains(t, string(record), "a=p,i=1,p=1,x=13,y=4")
 }
 
 func TestGraphicsOutputFailedSendRetainsSpeculativeIDsForCleanup(t *testing.T) {

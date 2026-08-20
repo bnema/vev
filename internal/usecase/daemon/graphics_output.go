@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/bnema/vev-vt/graphics"
+	"github.com/bnema/vev/internal/domain"
 )
 
 // Graphics output is deliberately a small attachment-local backend. It emits
@@ -44,6 +45,8 @@ type graphicsOutputState struct {
 	pendingPlaces map[uint64]struct{}
 	nextImage     uint64
 	nextPlace     uint64
+	transform     graphicsOutputTransform
+	transformSet  bool
 }
 
 type preparedGraphicsOutput struct {
@@ -51,6 +54,11 @@ type preparedGraphicsOutput struct {
 	state graphicsOutputState
 	data  []byte
 	valid bool
+}
+
+type graphicsOutputTransform struct {
+	originX, originY int
+	sourceGeometry   domain.Geometry
 }
 
 func newGraphicsOutputState() *graphicsOutputState {
@@ -77,6 +85,7 @@ func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
 		return out
 	}
 	out.nextImage, out.nextPlace = in.nextImage, in.nextPlace
+	out.transform, out.transformSet = in.transform, in.transformSet
 	for key, asset := range in.assets {
 		out.assets[key] = asset
 	}
@@ -96,12 +105,19 @@ func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
 // terminal match snapshot. The maps are copied and become visible only when
 // commit is called after the enclosing Output record has been sent.
 func (s *graphicsOutputState) prepare(snapshot *graphics.Snapshot, reset bool) (*preparedGraphicsOutput, error) {
+	return s.prepareWithTransform(snapshot, reset, graphicsOutputTransform{})
+}
+
+func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform) (*preparedGraphicsOutput, error) {
 	if s == nil {
 		return nil, nil
 	}
 	candidate := cloneGraphicsOutputState(s)
+	transformChanged := !s.transformSet || s.transform != transform
+	replay := reset || transformChanged
+	candidate.transform, candidate.transformSet = transform, true
 	out := &preparedGraphicsOutput{owner: s, state: candidate, valid: true}
-	if reset {
+	if replay {
 		for _, id := range sortedUint64Keys(s.pendingPlaces) {
 			if err := out.record(deletePlacementRecord(id)); err != nil {
 				return nil, err
@@ -151,7 +167,7 @@ func (s *graphicsOutputState) prepare(snapshot *graphics.Snapshot, reset bool) (
 
 	assetKeys := sortedAssetKeys(assets)
 	for _, key := range assetKeys {
-		if _, ok := candidate.assets[key]; ok && !reset {
+		if _, ok := candidate.assets[key]; ok && !replay {
 			continue
 		}
 		asset, exists := candidate.assets[key]
@@ -173,11 +189,11 @@ func (s *graphicsOutputState) prepare(snapshot *graphics.Snapshot, reset bool) (
 	for _, key := range placementKeys {
 		want := placements[key]
 		got, exists := candidate.placements[key]
-		if exists && equalGraphicsPlacement(got, want) && !reset {
+		if exists && equalGraphicsPlacement(got, want) && !replay {
 			continue
 		}
 		if exists {
-			if !reset {
+			if !replay {
 				if err := out.record(deletePlacementRecord(got.id)); err != nil {
 					return nil, err
 				}
@@ -198,7 +214,7 @@ func (s *graphicsOutputState) prepare(snapshot *graphics.Snapshot, reset bool) (
 			continue
 		}
 		candidate.placements[key] = want
-		if err := out.record(placementRecord(asset.id, want)); err != nil {
+		if err := out.record(placementRecordWithTransform(asset.id, want, transform)); err != nil {
 			return nil, err
 		}
 	}
@@ -363,27 +379,56 @@ func uploadRecord(id uint64, asset graphics.AssetView) []byte {
 }
 
 func placementRecord(assetID uint64, placement graphicsOutputPlacement) []byte {
+	return placementRecordWithTransform(assetID, placement, graphicsOutputTransform{})
+}
+
+func placementRecordWithTransform(assetID uint64, placement graphicsOutputPlacement, transform graphicsOutputTransform) []byte {
+	destinationX, destinationY, cells := transformedGraphicsPlacement(placement, transform)
 	header := "a=p,i=" + strconv.FormatUint(assetID, 10) + ",p=" + strconv.FormatUint(placement.id, 10)
-	if placement.dest.X >= 0 && placement.dest.Y >= 0 {
-		header += ",x=" + strconv.FormatInt(placement.dest.X, 10) + ",y=" + strconv.FormatInt(placement.dest.Y, 10)
+	if destinationX >= 0 && destinationY >= 0 {
+		header += ",x=" + strconv.FormatInt(destinationX, 10) + ",y=" + strconv.FormatInt(destinationY, 10)
 	}
 	if placement.source.X >= 0 && placement.source.Y >= 0 {
 		header += ",X=" + strconv.FormatInt(placement.source.X, 10) + ",Y=" + strconv.FormatInt(placement.source.Y, 10)
 	}
 	header += ",w=" + strconv.FormatInt(placement.source.Width, 10) + ",h=" + strconv.FormatInt(placement.source.Height, 10)
-	if placement.cells.Valid() && !placement.cells.Empty() {
-		header += ",c=" + strconv.FormatInt(placement.cells.Width, 10) + ",r=" + strconv.FormatInt(placement.cells.Height, 10)
-		if placement.cells.X != 0 {
-			header += ",H=" + strconv.FormatInt(placement.cells.X, 10)
+	if cells.Valid() && !cells.Empty() {
+		header += ",c=" + strconv.FormatInt(cells.Width, 10) + ",r=" + strconv.FormatInt(cells.Height, 10)
+		if cells.X != 0 {
+			header += ",H=" + strconv.FormatInt(cells.X, 10)
 		}
-		if placement.cells.Y != 0 {
-			header += ",V=" + strconv.FormatInt(placement.cells.Y, 10)
+		if cells.Y != 0 {
+			header += ",V=" + strconv.FormatInt(cells.Y, 10)
 		}
 	}
 	if placement.layer != 0 {
 		header += ",z=" + strconv.FormatInt(placement.layer, 10)
 	}
 	return kittyRecord(header, nil)
+}
+
+// transformedGraphicsPlacement converts pane-local graphics coordinates into
+// the outer terminal's one-pane content origin. Kitty's x/y controls are cell
+// coordinates; the VT scene stores them in pixels when the pane knows pixel
+// geometry and in cells otherwise.
+func transformedGraphicsPlacement(placement graphicsOutputPlacement, transform graphicsOutputTransform) (int64, int64, graphics.CellRect) {
+	destinationX, destinationY := placement.dest.X, placement.dest.Y
+	cells := placement.cells
+	if transform.sourceGeometry.PixelsKnown() && transform.sourceGeometry.Cols > 0 && transform.sourceGeometry.Rows > 0 {
+		cellWidth := transform.sourceGeometry.PixelWidth / transform.sourceGeometry.Cols
+		cellHeight := transform.sourceGeometry.PixelHeight / transform.sourceGeometry.Rows
+		if cellWidth > 0 && cellHeight > 0 && destinationX >= 0 && destinationY >= 0 {
+			destinationX /= int64(cellWidth)
+			destinationY /= int64(cellHeight)
+		}
+	}
+	if destinationX >= 0 {
+		destinationX += int64(transform.originX)
+	}
+	if destinationY >= 0 {
+		destinationY += int64(transform.originY)
+	}
+	return destinationX, destinationY, cells
 }
 
 func (s *graphicsOutputState) cleanup() {
@@ -394,6 +439,36 @@ func (s *graphicsOutputState) cleanup() {
 	s.placements = make(map[string]graphicsOutputPlacement)
 	s.pendingImages = make(map[uint64]struct{})
 	s.pendingPlaces = make(map[uint64]struct{})
+	s.transform = graphicsOutputTransform{}
+	s.transformSet = false
+}
+
+// cleanupGraphicsOutput removes the objects owned by a closing attachment
+// before its transport is closed. Parked resumable attachments intentionally do
+// not call this: their state remains attached to the parked link and the next
+// epoch deletes and replays it as needed.
+func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) {
+	if d == nil || ac == nil || ac.graphicsOutput == nil || ac.output == nil {
+		return
+	}
+	ac.sendMu.Lock()
+	prepared, err := ac.graphicsOutput.prepare(nil, true)
+	ac.sendMu.Unlock()
+	if err != nil || prepared == nil {
+		ac.graphicsOutput.cleanup()
+		return
+	}
+	if len(prepared.data) == 0 {
+		prepared.commit()
+		ac.graphicsOutput.cleanup()
+		return
+	}
+	if d.boundedSendOutputErr(ac, prepared.data) == nil {
+		prepared.commit()
+	} else {
+		prepared.abort()
+	}
+	ac.graphicsOutput.cleanup()
 }
 
 func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
@@ -406,7 +481,15 @@ func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bo
 	if len(state.panes) != 1 || state.floating.visible {
 		return ac.graphicsOutput.prepare(nil, reset)
 	}
-	return ac.graphicsOutput.prepare(state.panes[0].graphics, reset)
+	pane := state.panes[0]
+	if pane.placement.Collapsed || pane.placement.Content.Width <= 0 || pane.placement.Content.Height <= 0 {
+		return ac.graphicsOutput.prepare(nil, reset)
+	}
+	return ac.graphicsOutput.prepareWithTransform(pane.graphics, reset, graphicsOutputTransform{
+		originX:        pane.placement.Content.X,
+		originY:        pane.placement.Content.Y + 1,
+		sourceGeometry: pane.graphicsGeometry,
+	})
 }
 
 func graphicsOutputError(err error) error {
