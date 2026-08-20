@@ -186,15 +186,27 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	return d.createSessionLockedWithMode(name, ephemeral, cwd, sz, env, restoredTabNames...)
 }
 
+func (d *Daemon) createSessionLockedWithGeometry(name string, ephemeral bool, cwd string, sz domain.Size, geometry domain.Geometry, env []string, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndGeometry(name, ephemeral, cwd, sz, geometry, env, restoredTabNames...)
+}
+
 // resumeInactiveSessionLocked resumes exactly expectedInactive. It rechecks
 // lifecycle and resumability after catalogue I/O, which intentionally runs
 // without d.mu.
 func (d *Daemon) resumeInactiveSessionLocked(name string, cwd string, sz domain.Size, env []string, expectedInactive inactiveSession, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndInactiveFence(name, false, cwd, sz, env, &expectedInactive, nil, restoredTabNames...)
+	return d.createSessionLockedWithModeAndInactiveFence(name, false, cwd, sz, domain.Geometry{Size: sz}, env, &expectedInactive, nil, restoredTabNames...)
+}
+
+func (d *Daemon) resumeInactiveSessionWithGeometryLocked(name string, cwd string, sz domain.Size, geometry domain.Geometry, env []string, expectedInactive inactiveSession, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndInactiveFence(name, false, cwd, sz, geometry, env, &expectedInactive, nil, restoredTabNames...)
 }
 
 func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, sz domain.Size, env []string, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndInactiveFence(name, ephemeral, cwd, sz, env, nil, nil, restoredTabNames...)
+	return d.createSessionLockedWithModeAndInactiveFence(name, ephemeral, cwd, sz, domain.Geometry{Size: sz}, env, nil, nil, restoredTabNames...)
+}
+
+func (d *Daemon) createSessionLockedWithModeAndGeometry(name string, ephemeral bool, cwd string, sz domain.Size, geometry domain.Geometry, env []string, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndInactiveFence(name, ephemeral, cwd, sz, geometry, env, nil, nil, restoredTabNames...)
 }
 
 type inactiveResumeValidator func(inactiveSession, domain.CatalogueRecord, bool) bool
@@ -219,8 +231,12 @@ func inactiveResumeFenceAllows(current inactiveSession, exists bool, expected *i
 	return validate == nil || validate(current, authoritative, authoritativeExists)
 }
 
-func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, ephemeral bool, cwd string, sz domain.Size, env []string, expectedInactive *inactiveSession, validateInactive inactiveResumeValidator, restoredTabNames ...[]string) (*session, error) {
+func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, ephemeral bool, cwd string, sz domain.Size, geometry domain.Geometry, env []string, expectedInactive *inactiveSession, validateInactive inactiveResumeValidator, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
+	geometry = geometry.NormalizePixels()
+	if geometry.Size != sz {
+		geometry = domain.Geometry{Size: sz}
+	}
 	if _, reserved := d.creating[name]; reserved {
 		return nil, errSessionNameInUse
 	}
@@ -285,6 +301,7 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 		return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("daemon: PTY factory is unavailable"))
 	}
 	tbSize := contentSize(sz)
+	initialPaneGeometry := scalePaneGeometry(geometry, tbSize)
 	var names []string
 	var tabRecords []domain.CatalogueTabRecord
 	if resuming && len(stopped.tabRecords) != 0 {
@@ -318,7 +335,18 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", err)
 		}
+		appliedPaneGeometry := initialPaneGeometry
+		if initialPaneGeometry.PixelsKnown() {
+			if err := resizePTYGeometry(pty, initialPaneGeometry); err != nil {
+				d.log.Warn("initial pty geometry failed", "err", err, "session", name, "kind", "session")
+				appliedPaneGeometry = domain.Geometry{Size: tbSize}
+			}
+		}
 		tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
+		if pane := tb.focusedPane(); pane != nil {
+			pane.geometry = appliedPaneGeometry
+			setScreenGeometry(pane.screen, appliedPaneGeometry)
+		}
 		if !lifetime.publish(tb.focusedPane()) {
 			lifetime.abort()
 			_ = pty.Close()

@@ -79,7 +79,7 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 	// trusted for this branch.
 	env := copyEnvironment(d.baseEnv)
 	cwd := d.dirOrHome(inactive.cwd)
-	sess, err := d.resumeRemoteInactiveSessionLocked(target, cwd, h.Size, env, inactive)
+	sess, err := d.resumeRemoteInactiveSessionLocked(target, cwd, h.Size, h.Geometry(), env, inactive)
 	if err != nil {
 		d.mu.Unlock()
 		if errors.Is(err, errAttachmentTransition) || errors.Is(err, errSessionNameInUse) {
@@ -91,7 +91,7 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 	return sess, ac, err
 }
 
-func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTarget, cwd string, size domain.Size, env []string, expected inactiveSession) (*session, error) {
+func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTarget, cwd string, size domain.Size, geometry domain.Geometry, env []string, expected inactiveSession) (*session, error) {
 	validate := func(current inactiveSession, _ domain.CatalogueRecord, authoritativeExists bool) bool {
 		if !target.Stopped || d.persistEnabled && !authoritativeExists {
 			return false
@@ -99,7 +99,7 @@ func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTa
 		_, ok := target.ResolveTab(stoppedTabMetadata(current))
 		return ok
 	}
-	return d.createSessionLockedWithModeAndInactiveFence(target.SessionName, false, cwd, size, env, &expected, validate, expected.tabNames)
+	return d.createSessionLockedWithModeAndInactiveFence(target.SessionName, false, cwd, size, geometry, env, &expected, validate, expected.tabNames)
 }
 
 func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionToken, action ports.NavigationAction) error {

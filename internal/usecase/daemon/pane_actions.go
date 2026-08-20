@@ -81,6 +81,7 @@ func (d *Daemon) spawnPaneOpAt(
 	tabStableID := tb.stableID
 	generation := tb.layoutGeneration
 	tb.mu.Unlock()
+	initialGeometry := sess.paneGeometry(rectSize(newRect))
 
 	paneStableID, err := newStableID("p")
 	if err != nil {
@@ -97,8 +98,16 @@ func (d *Daemon) spawnPaneOpAt(
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		return paneFocusChange{}, domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
 	}
+	if initialGeometry.PixelsKnown() {
+		if err := resizePTYGeometry(pty, initialGeometry); err != nil {
+			d.log.Warn("initial pty geometry failed", "err", err, "session", name, "pane", newID, "kind", "pane")
+			initialGeometry = domain.Geometry{Size: rectSize(newRect)}
+		}
+	}
 
 	p := newPaneWithStableIDAndTitle(newID, paneStableID, pty, rectSize(newRect), launch.title)
+	p.geometry = initialGeometry
+	setScreenGeometry(p.screen, initialGeometry)
 	p.rect = newRect
 
 	tb.mu.Lock()

@@ -196,7 +196,16 @@ func (s *session) claimGeometryOwner(ac *attachedClient) (uint64, bool) {
 // of the attachment-local publication. Transactional resize commits use this
 // before the PTY phase so a stale request cannot publish after a newer claim.
 func (s *session) claimGeometryOwnerForSize(ac *attachedClient, size domain.Size) (uint64, bool) {
-	return s.claimGeometryOwnerForGeometry(ac, domain.Geometry{Size: size})
+	if ac == nil {
+		return 0, false
+	}
+	// Layout and floating transactions carry only their shared cell size. Keep
+	// the claimant's terminal pixels when those operations re-claim authority;
+	// replacing the geometry with a cell-only value would make a later fallback
+	// lose the terminal's pixel dimensions.
+	geometry := ac.geometrySnapshot()
+	geometry.Size = size
+	return s.claimGeometryOwnerForGeometry(ac, geometry)
 }
 
 // claimGeometryOwnerForGeometry records a requested shared cell and pixel

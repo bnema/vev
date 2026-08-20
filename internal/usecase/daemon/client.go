@@ -965,7 +965,15 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 // attachment effect admission; output state is rebased before any redraw so
 // every subsequent frame starts a new epoch.
 func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size domain.Size) bool {
-	return d.resizeAttachmentGeometryForLease(token, domain.Geometry{Size: size})
+	geometry := domain.Geometry{Size: size}
+	if token.ac != nil {
+		// Direct size-only callers do not have a fresh pixel pair. Preserve the
+		// attachment's last complete pair instead of downgrading its claim to
+		// cell-only geometry.
+		geometry = token.ac.geometrySnapshot()
+		geometry.Size = size
+	}
+	return d.resizeAttachmentGeometryForLease(token, geometry)
 }
 
 func (d *Daemon) resizeAttachmentGeometryForLease(token attachmentConnectionToken, geometry domain.Geometry) bool {
