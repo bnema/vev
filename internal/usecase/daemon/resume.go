@@ -11,17 +11,29 @@ import (
 
 var errResumeTokenLifecycleRace = errors.New("resume token lifecycle race")
 
-func (d *Daemon) reapplyRemoteGraphicsGate(ac *attachedClient, h ports.Hello) {
-	if ac == nil || (!h.Remote && h.RemoteTarget == nil) {
+func (d *Daemon) reapplyAttachmentGraphicsCapability(sess *session, ac *attachedClient, h ports.Hello) {
+	if d == nil || ac == nil {
 		return
 	}
+	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
+	if !h.KittyDirectGraphics {
+		if ac.graphicsOutput != nil {
+			// The parked transport has already been retired. Do not emit the old
+			// attachment's cleanup records into a replacement connection that did
+			// not declare direct graphics.
+			d.discardGraphicsOutputLocked(ac)
+		}
+		return
+	}
+	if ac.graphicsOutput != nil {
+		return
+	}
+	if namespace, fence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, ac.clientID)); namespace != 0 {
+		ac.graphicsOutput = newGraphicsOutputStateWithLease(namespace, fence)
+		return
+	}
+	// Namespace exhaustion fails closed. The text renderer remains available.
 	ac.terminalCapabilities.KittyGraphics = false
-	if ac.graphicsOutput == nil {
-		return
-	}
-	// The parked transport has already been retired. Do not emit the old
-	// attachment's cleanup records into the replacement remote connection.
-	d.discardGraphicsOutputLocked(ac)
 }
 
 // resumeTokenSnapshot reads the credential under the same daemon lock used by
@@ -664,10 +676,10 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.output.maxOutstanding = uint64(normalizeOutputWindow(h.MaxOutputInFlight))
 	ac.output.maxOutstandingAtomic.Store(ac.output.maxOutstanding)
 	ac.replaceTransport(tr)
-	// A parked attachment can be resumed through a remote route without going
-	// through finishAttach. Reapply the Phase 5 remote gate before any resumed
-	// capture or first paint can observe the replacement transport.
-	d.reapplyRemoteGraphicsGate(ac, h)
+	// A parked attachment can resume through any route. Reapply the declared
+	// direct-terminal capability before resumed capture or first paint observes
+	// the replacement transport.
+	d.reapplyAttachmentGraphicsCapability(sess, ac, h)
 	geometry := h.Geometry()
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}

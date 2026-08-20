@@ -15,11 +15,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev-vt/protocol/terminalquery"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/theme"
@@ -138,6 +140,8 @@ const preWelcomeTimeout = ports.HandshakeTimeout
 // learner must not block shell prompt return indefinitely.
 const remoteHostLearnerShutdownTimeout = time.Second
 
+const kittyCapabilityProbeTimeout = 150 * time.Millisecond
+
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -211,6 +215,10 @@ type Runner struct {
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
+
+	capabilityMu        sync.Mutex
+	kittyDirectGraphics *bool
+	probeCapabilities   bool
 }
 
 // NewRunner constructs a client runner. A nil logger uses the process default.
@@ -230,6 +238,7 @@ func NewRunner(deps Dependencies) *Runner {
 		attachHandoff:     deps.AttachHandoff,
 		remote:            deps.Remote,
 		origin:            normalizeRouteOrigin(deps.Origin, deps.Remote),
+		probeCapabilities: true,
 		ledger:            newRouteLedger(),
 	}
 }
@@ -247,6 +256,101 @@ func (r *Runner) terminalInput() *terminalInputPump {
 	}
 	r.input.resume()
 	return r.input
+}
+
+func (r *Runner) kittyProbeEnabled() bool {
+	if r == nil || !r.probeCapabilities {
+		return false
+	}
+	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
+	return term == "xterm-kitty"
+}
+
+// probeKittyDirectGraphics performs one bounded probe for the outer terminal.
+// It claims the existing lifecycle input pump instead of creating a second
+// reader, removes only its two responses, and requeues unrelated bytes for the
+// attach scanner in their original order.
+func (r *Runner) probeKittyDirectGraphics(ctx context.Context, input *terminalInputPump) bool {
+	if r == nil || input == nil || !r.kittyProbeEnabled() {
+		return false
+	}
+	r.capabilityMu.Lock()
+	if r.kittyDirectGraphics != nil {
+		value := *r.kittyDirectGraphics
+		r.capabilityMu.Unlock()
+		return value
+	}
+	r.capabilityMu.Unlock()
+
+	consumer := input.claim()
+	defer input.revoke(consumer)
+	probe := &terminalquery.Probe{}
+	var replay []byte
+	query := terminalquery.KittyGraphicsQuery + terminalquery.DeviceAttributesQuery
+	log := r.logger
+	if log == nil {
+		log = slog.Default()
+	}
+	if _, err := r.term.Out().Write([]byte(query)); err != nil {
+		log.Warn("kitty graphics probe write failed", "err", err)
+		return r.rememberKittyDirectGraphics(false)
+	}
+	if err := r.term.Flush(); err != nil {
+		log.Warn("kitty graphics probe flush failed", "err", err)
+		return r.rememberKittyDirectGraphics(false)
+	}
+
+	clock := r.clock
+	if clock == nil {
+		clock = systemClock{}
+	}
+	timer := clock.NewTimer(kittyCapabilityProbeTimeout)
+	defer timer.Stop()
+	for !probe.Ready() {
+		select {
+		case <-ctx.Done():
+			replay = append(replay, probe.Finish()...)
+			goto done
+		case <-timer.C():
+			replay = append(replay, probe.Finish()...)
+			goto done
+		case <-input.ready:
+			result, ok := input.take(ctx, consumer)
+			if !ok {
+				if ctx.Err() != nil {
+					replay = append(replay, probe.Finish()...)
+					goto done
+				}
+				continue
+			}
+			replay = append(replay, probe.Feed(result.data)...)
+			input.ack(consumer)
+			if result.err != nil {
+				replay = append(replay, probe.Finish()...)
+				goto done
+			}
+		}
+	}
+	replay = append(replay, probe.Finish()...)
+
+done:
+	if len(replay) != 0 {
+		// The lease is no longer delivering after ack. Preserve before revoke so
+		// the replacement attach consumes these bytes before another OS read.
+		input.preserveResidual(consumer, replay)
+	}
+	return r.rememberKittyDirectGraphics(probe.Ready())
+}
+
+func (r *Runner) rememberKittyDirectGraphics(value bool) bool {
+	r.capabilityMu.Lock()
+	if r.kittyDirectGraphics == nil {
+		r.kittyDirectGraphics = new(bool)
+		*r.kittyDirectGraphics = value
+	}
+	value = *r.kittyDirectGraphics
+	r.capabilityMu.Unlock()
+	return value
 }
 
 func validateAttachRequest(request AttachRequest) error {
@@ -1083,11 +1187,24 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		return nil
 	}
-	// 1. Handshake: send Hello with our size and TERM.
-	size, err := term.Size()
-	if err != nil {
-		return attachResult{err: fmt.Errorf("vev: reading terminal size: %w", err)}
+	// 1. Handshake: probe the direct outer terminal before Hello when its
+	// environment identifies Kitty. The probe uses the lifecycle input pump;
+	// unsupported and silent terminals fail closed without delaying attach past
+	// the bounded probe deadline.
+	kittyDirectGraphics := false
+	if a.runner != nil && a.runner.kittyProbeEnabled() && a.terminalInput != nil {
+		if err := enterRaw(); err != nil {
+			return attachResult{err: err}
+		}
+		kittyDirectGraphics = a.runner.probeKittyDirectGraphics(handshakeCtx, a.terminalInput())
 	}
+	// 1. Handshake: send Hello with our geometry and TERM.
+	geometry, err := term.Geometry()
+	if err != nil {
+		return attachResult{err: fmt.Errorf("vev: reading terminal geometry: %w", err)}
+	}
+	geometry = geometry.NormalizePixels()
+	size := geometry.Size
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = ""
@@ -1110,9 +1227,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		ResumeToken:            resumeToken,
 		Name:                   name,
 		Size:                   size,
+		PixelWidth:             geometry.PixelWidth,
+		PixelHeight:            geometry.PixelHeight,
 		TermEnv:                termEnv,
 		Cwd:                    cwd,
 		TrueColor:              trueColor,
+		KittyDirectGraphics:    kittyDirectGraphics,
 		MaxOutputInFlight:      requestedOutputWindow(transport),
 		Env:                    os.Environ(),
 		RemoteTarget:           request.RemoteTarget,
