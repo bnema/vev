@@ -46,12 +46,12 @@ func TestOpen_DarwinEchoAndOutputEOF(t *testing.T) {
 	}
 
 	factory := pty.NewFactory()
-	outputPTY, err := factory.Open(context.Background(), "sh", []string{"-c", "printf hello"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	outputPTY, err := factory.Open(context.Background(), "sh", []string{"-c", "printf hello"}, os.Environ(), "", domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = outputPTY.Close() })
 	require.Equal(t, "hello", string(readAllDarwin(t, outputPTY, 5*time.Second)))
 
-	echoPTY, err := factory.Open(context.Background(), "cat", nil, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	echoPTY, err := factory.Open(context.Background(), "cat", nil, os.Environ(), "", domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = echoPTY.Close() })
 	_, err = io.WriteString(echoPTY, "roundtrip\n")
@@ -98,7 +98,7 @@ func TestOpen_DarwinResizeAndForegroundPgid(t *testing.T) {
 	}
 
 	const ready = "__vev_ready__"
-	p, err := pty.NewFactory().Open(context.Background(), "sh", []string{"-c", "stty -echo; printf '__vev_ready__\\n'; IFS= read -r release; stty size"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := pty.NewFactory().Open(context.Background(), "sh", []string{"-c", "stty -echo; printf '__vev_ready__\\n'; IFS= read -r release; stty size"}, os.Environ(), "", domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close() })
 
@@ -119,7 +119,7 @@ func TestOpen_DarwinContextCancellationEndsStream(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p, err := pty.NewFactory().Open(ctx, "sh", []string{"-c", "exec sleep 60"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := pty.NewFactory().Open(ctx, "sh", []string{"-c", "exec sleep 60"}, os.Environ(), "", domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close() })
 

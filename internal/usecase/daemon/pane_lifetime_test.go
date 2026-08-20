@@ -54,7 +54,7 @@ type lifetimePTYFactory struct {
 	contexts []context.Context
 }
 
-func (f *lifetimePTYFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+func (f *lifetimePTYFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 	p := newLifetimePTY()
 	p.ctx = ctx
 	f.mu.Lock()
@@ -199,7 +199,7 @@ type paneErrorFactory struct {
 	onOpen func(context.Context)
 }
 
-func (f *paneErrorFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+func (f *paneErrorFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 	if f.onOpen != nil {
 		f.onOpen(ctx)
 	}

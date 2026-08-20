@@ -143,9 +143,13 @@ func TestSizeOnlyLayoutAndFloatingRetainClaimingPixelGeometry(t *testing.T) {
 	}, floatingPTY.geometry)
 }
 
-type recordingPTYFactory struct{ pty ports.PTY }
+type recordingPTYFactory struct {
+	pty      ports.PTY
+	geometry domain.Geometry
+}
 
-func (f recordingPTYFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+func (f *recordingPTYFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
+	f.geometry = geometry
 	return f.pty, nil
 }
 
@@ -187,7 +191,8 @@ func (*blockingRecordingGeometryPTY) ForegroundPgid() (int, error) { return 1, n
 
 func TestInitialSessionPTYReceivesClaimingPixelGeometry(t *testing.T) {
 	pty := &recordingGeometryPTY{}
-	d := newTestDaemon(t, recordingPTYFactory{pty: pty}, stubClock{})
+	factory := &recordingPTYFactory{pty: pty}
+	d := newTestDaemon(t, factory, stubClock{})
 	geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480}
 
 	d.mu.Lock()
@@ -195,7 +200,7 @@ func TestInitialSessionPTYReceivesClaimingPixelGeometry(t *testing.T) {
 	d.mu.Unlock()
 	require.NoError(t, err)
 	want := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 22}, PixelWidth: 800, PixelHeight: 440}
-	require.Equal(t, want, pty.geometry)
+	require.Equal(t, want, factory.geometry)
 	require.Equal(t, want, sess.tabs[0].focusedPane().geometry)
 	require.Equal(t, vt.Geometry{Cols: 80, Rows: 22, PixelWidth: 800, PixelHeight: 440}, sess.tabs[0].focusedPane().screen.Geometry())
 }
@@ -203,7 +208,7 @@ func TestInitialSessionPTYReceivesClaimingPixelGeometry(t *testing.T) {
 func TestResumeReappliesClaimingPixelGeometryBeforeReturn(t *testing.T) {
 	pty := &blockingRecordingGeometryPTY{done: make(chan struct{})}
 	t.Cleanup(func() { _ = pty.Close() })
-	d := newTestDaemon(t, recordingPTYFactory{pty: pty}, stubClock{})
+	d := newTestDaemon(t, &recordingPTYFactory{pty: pty}, stubClock{})
 	firstHello := helloResumeCapable(ports.IntentNew, "pixels", 0)
 	firstHello.PixelWidth, firstHello.PixelHeight = 800, 480
 	firstTransport := &closeTrackingTransport{}

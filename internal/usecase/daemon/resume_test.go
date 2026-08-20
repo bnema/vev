@@ -1574,8 +1574,8 @@ func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
 	var envs [][]string
 	factory := portsmocks.NewMockPTYFactory(t)
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, command string, _ []string, env []string, _ string, size domain.Size) (ports.PTY, error) {
-			if size != (domain.Size{Cols: 80, Rows: 22}) {
+		func(_ context.Context, command string, _ []string, env []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
+			if geometry.Size != (domain.Size{Cols: 80, Rows: 22}) {
 				return newQuietPTY(), nil
 			}
 			commands = append(commands, command)

@@ -60,7 +60,7 @@ type contextAwareFloatingFactory struct {
 	onOpen func()
 }
 
-func (f *contextAwareFloatingFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+func (f *contextAwareFloatingFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 	if f.pty != nil {
 		f.pty.ctx = ctx
 	}
@@ -214,7 +214,7 @@ func TestFloatingOpenErrorReleasesReturnedPTYBeforePublishingFailure(t *testing.
 			cancelCallbacks := atomic.Int32{}
 			cancelled := make(chan struct{})
 			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-				func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+				func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 					pty.ctx = ctx
 					context.AfterFunc(ctx, func() {
 						cancelCallbacks.Add(1)
@@ -392,7 +392,7 @@ func TestFloatingOpenCancellationBoundsSessionTeardownAndClosesLatePTY(t *testin
 	closed := make(chan struct{})
 	latePTY.EXPECT().Close().RunAndReturn(func() error { close(closed); return nil }).Once()
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			close(opened)
 			<-ctx.Done()
 			return latePTY, nil
@@ -435,7 +435,7 @@ func TestFloatingOpensFromUnrelatedSessionsAreConcurrent(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			entered <- struct{}{}
 			<-release
 			return newQuietPTY(), nil

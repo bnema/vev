@@ -25,8 +25,8 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 func expectFloatingPrewarmOpen(factory *portsmocks.MockPTYFactory, normalSize domain.Size, floating ports.PTY) {
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
-		return got != normalSize && got.Valid()
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool {
+		return got.Size != normalSize && got.Size.Valid()
 	})).Return(floating, nil).Maybe()
 }
 
@@ -213,11 +213,11 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: 80, Rows: 22}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).Return(p1, nil).Once()
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).Return(p1, nil).Once()
 	floating := newQuietPTY()
 	expectFloatingPrewarmOpen(f, normalSize, floating)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			openCtx <- ctx
 			select {
 			case <-ctx.Done():
@@ -494,13 +494,13 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 	var opensAfterShutdown atomic.Int32
 	d := newTestDaemon(t, f, stubClock{})
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, _ []string, _ string, size domain.Size) (ports.PTY, error) {
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
 			select {
 			case <-d.done:
 				opensAfterShutdown.Add(1)
 			default:
 			}
-			if size == normalSize {
+			if geometry.Size == normalSize {
 				return p, nil
 			}
 			select {
@@ -1255,7 +1255,7 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 	var gotEnv []string
 	f := portsmocks.NewMockPTYFactory(t)
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			gotEnv = append([]string(nil), env...)
 			return p, nil
 		},
@@ -1430,8 +1430,8 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -1473,8 +1473,8 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -1518,8 +1518,8 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -1586,8 +1586,8 @@ func TestAttachEnvironmentReplacesFuturePTYInputs(t *testing.T) {
 	var envs [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ context.Context, command string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Geometry) bool { return got.Size == normalSize })).RunAndReturn(
+		func(_ context.Context, command string, _ []string, env []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			commands = append(commands, command)
 			envs = append(envs, append([]string(nil), env...))
 			if len(envs) == 1 {

@@ -89,7 +89,7 @@ func (d *Daemon) spawnPaneOpAt(
 	}
 	launch := d.shellLaunch(env)
 	lifetime := d.newPaneProcessLifetime(tb.ctx)
-	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, rectSize(newRect))
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, initialGeometry)
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
@@ -98,13 +98,6 @@ func (d *Daemon) spawnPaneOpAt(
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		return paneFocusChange{}, domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
 	}
-	if initialGeometry.PixelsKnown() {
-		if err := resizePTYGeometry(pty, initialGeometry); err != nil {
-			d.log.Warn("initial pty geometry failed", "err", err, "session", name, "pane", newID, "kind", "pane")
-			initialGeometry = domain.Geometry{Size: rectSize(newRect)}
-		}
-	}
-
 	p := newPaneWithStableIDAndTitle(newID, paneStableID, pty, rectSize(newRect), launch.title)
 	p.geometry = initialGeometry
 	setScreenGeometry(p.screen, initialGeometry)

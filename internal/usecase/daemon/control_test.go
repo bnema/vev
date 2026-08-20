@@ -1327,7 +1327,7 @@ type controlPTYFactory struct {
 	once    sync.Once
 }
 
-func (f *controlPTYFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+func (f *controlPTYFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 	f.once.Do(func() {
 		if f.entered != nil {
 			close(f.entered)

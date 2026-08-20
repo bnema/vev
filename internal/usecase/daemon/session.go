@@ -325,7 +325,7 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 		}
 		launch := d.shellLaunch(env)
 		lifetime := d.newPaneProcessLifetime(d.serveCtx)
-		pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, tbSize)
+		pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, initialPaneGeometry)
 		if err != nil {
 			lifetime.abort()
 			if pty != nil {
@@ -336,12 +336,6 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", err)
 		}
 		appliedPaneGeometry := initialPaneGeometry
-		if initialPaneGeometry.PixelsKnown() {
-			if err := resizePTYGeometry(pty, initialPaneGeometry); err != nil {
-				d.log.Warn("initial pty geometry failed", "err", err, "session", name, "kind", "session")
-				appliedPaneGeometry = domain.Geometry{Size: tbSize}
-			}
-		}
 		tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
 		if pane := tb.focusedPane(); pane != nil {
 			pane.geometry = appliedPaneGeometry
@@ -676,7 +670,7 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	}
 	launch := d.shellLaunch(env)
 	lifetime := d.newPaneProcessLifetime(sess.ctx)
-	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, tbSize)
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(env, name, tabStableID, paneStableID), cwd, claimGeometry)
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {

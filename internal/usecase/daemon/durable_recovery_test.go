@@ -520,7 +520,7 @@ type recoveryCountingPTYFactory struct {
 	calls atomic.Int32
 }
 
-func (f *recoveryCountingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error) {
+func (f *recoveryCountingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
 	f.calls.Add(1)
 	return nil, errors.New("unexpected PTY open")
 }

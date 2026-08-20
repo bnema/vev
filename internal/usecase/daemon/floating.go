@@ -414,7 +414,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 			lifetime.abort()
 		}
 	}()
-	pty, err := d.ptys.Open(lifetime.ctx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
+	pty, err := d.ptys.Open(lifetime.ctx, spec.command, spec.args, spec.env, spec.cwd, spec.ptyGeometry)
 	if err != nil {
 		// Open retains ownership of a nonnil PTY only on success. Some factory
 		// implementations can return a partially opened PTY with an error, so
@@ -427,12 +427,6 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		return
 	}
 	ptyGeometry := spec.ptyGeometry
-	if ptyGeometry.PixelsKnown() {
-		if err := resizePTYGeometry(pty, ptyGeometry); err != nil {
-			d.log.Warn("initial pty geometry failed", "err", err, "session", spec.sessionName, "kind", "floating")
-			ptyGeometry = domain.Geometry{Size: spec.size}
-		}
-	}
 	p := newPaneWithStableIDAndTitle(layout.PaneID("floating"), spec.paneStableID, pty, spec.size, spec.fallback)
 	p.geometry = ptyGeometry
 	setScreenGeometry(p.screen, ptyGeometry)

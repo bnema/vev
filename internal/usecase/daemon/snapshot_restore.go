@@ -261,7 +261,8 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 	}
 	launch := d.shellLaunch(restoreEnv)
 	lifetime := d.newPaneProcessLifetime(ctx, tabCtx)
-	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
+	ptyGeometry := domain.Geometry{Size: restorePTYSize(contentRect, tabSize)}
+	pty, err := d.ptys.Open(lifetime.ctx, launch.command, launch.args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID), paneSnap.Cwd, ptyGeometry)
 	if err != nil {
 		lifetime.abort()
 		if pty != nil {
@@ -269,7 +270,7 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 		}
 		return nil, err
 	}
-	p := newPaneWithStableIDAndTitle(paneSnap.ID, paneStableID, pty, restorePTYSize(contentRect, tabSize), launch.title)
+	p := newPaneWithStableIDAndTitle(paneSnap.ID, paneStableID, pty, ptyGeometry.Size, launch.title)
 	if !lifetime.publish(p) {
 		_ = pty.Close()
 		return nil, lifetime.ctx.Err()

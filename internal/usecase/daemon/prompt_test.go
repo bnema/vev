@@ -13,7 +13,7 @@ import (
 
 type failingPTYFactory struct{ err error }
 
-func (f failingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error) {
+func (f failingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error) {
 	return nil, f.err
 }
 
