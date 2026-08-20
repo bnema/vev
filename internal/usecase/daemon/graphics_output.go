@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -10,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
@@ -47,12 +47,13 @@ type graphicsOutputState struct {
 	pendingImages map[uint64]struct{}
 	pendingPlaces map[uint64]struct{}
 	// nextID is a per-attachment cursor in Kitty's terminal-global 32-bit ID
-	// namespace. It starts at a cryptographically random point and is shared
-	// by image and placement IDs so neither kind can collide within an
-	// attachment. A new attachment gets a fresh cursor.
-	nextID       uint64
-	transform    graphicsOutputTransform
-	transformSet bool
+	// namespace. Image and placement IDs share the cursor so neither kind can
+	// collide within an attachment. namespaceBase is reserved by the daemon for
+	// the attachment/session until cleanup has retired its outer objects.
+	nextID        uint64
+	namespaceBase uint64
+	transform     graphicsOutputTransform
+	transformSet  bool
 }
 
 type preparedGraphicsOutput struct {
@@ -71,26 +72,81 @@ type graphicsOutputTransform struct {
 const (
 	maxKittyGraphicsID = uint64(^uint32(0))
 	maxGraphicsIDs     = uint64(1024 + 65536)
+	// A namespace is deliberately larger than the maximum bounded scene so an
+	// attachment can replace/delete objects without sharing IDs with another
+	// attachment. The high bits identify the attachment/session namespace and
+	// the low bits are its monotonically allocated object IDs.
+	graphicsIDNamespaceSize  = uint64(1 << 17)
+	graphicsIDNamespaceCount = (maxKittyGraphicsID-maxGraphicsIDs)/graphicsIDNamespaceSize + 1
 )
 
+var standaloneGraphicsNamespace atomic.Uint64
+
 func newGraphicsOutputState() *graphicsOutputState {
+	block := (standaloneGraphicsNamespace.Add(1) - 1) % graphicsIDNamespaceCount
+	return newGraphicsOutputStateWithBase(block*graphicsIDNamespaceSize + 1)
+}
+
+func newGraphicsOutputStateWithBase(base uint64) *graphicsOutputState {
+	if base == 0 || base > maxKittyGraphicsID-maxGraphicsIDs+1 {
+		base = 1
+	}
 	return &graphicsOutputState{
 		assets:        make(map[string]graphicsOutputAsset),
 		placements:    make(map[string]graphicsOutputPlacement),
 		pendingImages: make(map[uint64]struct{}),
 		pendingPlaces: make(map[uint64]struct{}),
-		nextID:        randomGraphicsIDCursor(),
+		nextID:        base,
+		namespaceBase: base,
 	}
 }
 
-func randomGraphicsIDCursor() uint64 {
-	var raw [4]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		panic("crypto/rand failed generating Kitty graphics ID cursor: " + err.Error())
+func graphicsNamespaceKey(sess *session, clientID [16]byte) string {
+	if sess == nil {
+		return fmt.Sprintf("attachment:%x", clientID)
 	}
-	// Leave enough room for the bounded scene to advance without wrapping.
-	maxStart := maxKittyGraphicsID - maxGraphicsIDs
-	return uint64(binary.BigEndian.Uint32(raw[:]))%maxStart + 1
+	return fmt.Sprintf("session:%s:%x:%x", sess.id, sess.incarnation, clientID)
+}
+
+// reserveGraphicsNamespaceLocked chooses a deterministic preferred block and
+// linearly probes the bounded namespace table for a free block. Caller holds
+// d.mu; probing makes equal session/client identities collision-safe too.
+func (d *Daemon) reserveGraphicsNamespaceLocked(key string) uint64 {
+	if d == nil {
+		return 0
+	}
+	if d.graphicsNamespaces == nil {
+		d.graphicsNamespaces = make(map[uint64]struct{})
+	}
+	digest := sha256.Sum256([]byte(key))
+	preferred := binary.BigEndian.Uint64(digest[:8]) % graphicsIDNamespaceCount
+	for offset := uint64(0); offset < graphicsIDNamespaceCount; offset++ {
+		block := (preferred + offset) % graphicsIDNamespaceCount
+		if _, exists := d.graphicsNamespaces[block]; exists {
+			continue
+		}
+		d.graphicsNamespaces[block] = struct{}{}
+		return block*graphicsIDNamespaceSize + 1
+	}
+	return 0
+}
+
+func (d *Daemon) releaseGraphicsNamespace(base uint64) {
+	if d == nil || base == 0 || base%graphicsIDNamespaceSize != 1 {
+		return
+	}
+	d.mu.Lock()
+	d.releaseGraphicsNamespaceLocked(base)
+	d.mu.Unlock()
+}
+
+// releaseGraphicsNamespaceLocked is used by resume publication while d.mu is
+// already held.
+func (d *Daemon) releaseGraphicsNamespaceLocked(base uint64) {
+	if d == nil || base == 0 || base%graphicsIDNamespaceSize != 1 {
+		return
+	}
+	delete(d.graphicsNamespaces, (base-1)/graphicsIDNamespaceSize)
 }
 
 func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
@@ -104,7 +160,7 @@ func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
 	if in == nil {
 		return out
 	}
-	out.nextID = in.nextID
+	out.nextID, out.namespaceBase = in.nextID, in.namespaceBase
 	out.transform, out.transformSet = in.transform, in.transformSet
 	for key, asset := range in.assets {
 		out.assets[key] = asset
@@ -128,7 +184,7 @@ func (s *graphicsOutputState) prepare(snapshot *graphics.Snapshot, reset bool) (
 	return s.prepareWithTransform(snapshot, reset, graphicsOutputTransform{})
 }
 
-func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform) (*preparedGraphicsOutput, error) {
+func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform, viewports ...graphics.Viewport) (*preparedGraphicsOutput, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -165,7 +221,7 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 		candidate.pendingImages = make(map[uint64]struct{})
 	}
 
-	assets, placements := graphicsSnapshotRecords(snapshot)
+	assets, placements := graphicsSnapshotRecords(snapshot, viewports...)
 	for key, placement := range candidate.placements {
 		if _, ok := placements[key]; ok {
 			continue
@@ -290,7 +346,7 @@ func (p *preparedGraphicsOutput) abort() {
 	p.valid = false
 }
 
-func graphicsSnapshotRecords(snapshot *graphics.Snapshot) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
+func graphicsSnapshotRecords(snapshot *graphics.Snapshot, viewports ...graphics.Viewport) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
 	assets := make(map[string]graphics.AssetView)
 	placements := make(map[string]graphicsOutputPlacement)
 	if snapshot == nil {
@@ -303,18 +359,48 @@ func graphicsSnapshotRecords(snapshot *graphics.Snapshot) (map[string]graphics.A
 		assets[key] = asset
 		assetKeys[asset.ID().String()] = key
 	}
-	for _, placement := range snapshot.Placements() {
-		assetKey := assetKeys[placement.AssetID().String()]
-		key := graphicsPlacementKey(generation, placement, assetKey)
-		placements[key] = graphicsOutputPlacement{
-			asset:  assetKey,
-			source: placement.Source(),
-			dest:   placement.Destination(),
-			cells:  placement.Cells(),
-			layer:  placement.Layer(),
+
+	placementViews := snapshot.Placements()
+	if len(viewports) == 0 {
+		for _, placement := range placementViews {
+			addGraphicsOutputPlacement(placements, generation, assetKeys, placement.ID().String(), placement.AssetID().String(), placement.Source(), placement.Destination(), placement.Cells(), placement.Layer())
+		}
+		return assets, placements
+	}
+
+	byPlacementID := make(map[string]graphics.PlacementView, len(placementViews))
+	for _, placement := range placementViews {
+		byPlacementID[placement.ID().String()] = placement
+	}
+	cellFragments := make(map[string]graphics.VisibleFragment)
+	if viewports[0].Cells.Valid() && !viewports[0].Cells.Empty() {
+		for _, fragment := range snapshot.VisibleFragments(viewports[0]) {
+			cellFragments[fragment.PlacementID.String()] = fragment
 		}
 	}
+	for _, fragment := range snapshot.VisiblePixelFragments(viewports[0].Pixels) {
+		placement, ok := byPlacementID[fragment.PlacementID.String()]
+		if !ok {
+			continue
+		}
+		if placement.Cells().Valid() && !placement.Cells().Empty() {
+			fragment, ok = cellFragments[fragment.PlacementID.String()]
+			if !ok {
+				continue
+			}
+		}
+		addGraphicsOutputPlacement(placements, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, fragment.Destination, fragment.Cells, placement.Layer())
+	}
 	return assets, placements
+}
+
+func addGraphicsOutputPlacement(dst map[string]graphicsOutputPlacement, generation uint64, assetKeys map[string]string, placementID, assetID string, source, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
+	assetKey := assetKeys[assetID]
+	if assetKey == "" {
+		return
+	}
+	key := graphicsPlacementKeyParts(generation, placementID, assetKey, source, destination, cells, layer)
+	dst[key] = graphicsOutputPlacement{asset: assetKey, source: source, dest: destination, cells: cells, layer: layer}
 }
 
 func graphicsAssetKey(generation uint64, asset graphics.AssetView) string {
@@ -323,8 +409,11 @@ func graphicsAssetKey(generation uint64, asset graphics.AssetView) string {
 }
 
 func graphicsPlacementKey(generation uint64, placement graphics.PlacementView, assetKey string) string {
-	source, dest, cells := placement.Source(), placement.Destination(), placement.Cells()
-	return fmt.Sprintf("g%d:%s:%s:%v:%v:%v:%d", generation, placement.ID().String(), assetKey, source, dest, cells, placement.Layer())
+	return graphicsPlacementKeyParts(generation, placement.ID().String(), assetKey, placement.Source(), placement.Destination(), placement.Cells(), placement.Layer())
+}
+
+func graphicsPlacementKeyParts(generation uint64, placementID, assetKey string, source, dest graphics.PixelRect, cells graphics.CellRect, layer int64) string {
+	return fmt.Sprintf("g%d:%s:%s:%v:%v:%v:%d", generation, placementID, assetKey, source, dest, cells, layer)
 }
 
 func sortedOutputAssets(values map[string]graphicsOutputAsset) []graphicsOutputAsset {
@@ -494,6 +583,35 @@ func (s *graphicsOutputState) cleanup() {
 	s.transformSet = false
 }
 
+func graphicsOutputViewport(content domain.Rect, geometry domain.Geometry) (graphics.Viewport, bool) {
+	if content.Width <= 0 || content.Height <= 0 {
+		return graphics.Viewport{}, false
+	}
+	width, height := int64(content.Width), int64(content.Height)
+	if geometry.PixelsKnown() && geometry.Cols > 0 && geometry.Rows > 0 {
+		cellWidth := geometry.PixelWidth / geometry.Cols
+		cellHeight := geometry.PixelHeight / geometry.Rows
+		if cellWidth > 0 && cellHeight > 0 {
+			width *= int64(cellWidth)
+			height *= int64(cellHeight)
+		}
+	}
+	return graphics.Viewport{
+		Pixels: graphics.PixelRect{Width: width, Height: height},
+		Cells:  graphics.CellRect{Width: int64(content.Width), Height: int64(content.Height)},
+	}, true
+}
+
+func (d *Daemon) discardGraphicsOutput(ac *attachedClient) {
+	if d == nil || ac == nil || ac.graphicsOutput == nil {
+		return
+	}
+	state := ac.graphicsOutput
+	d.releaseGraphicsNamespace(state.namespaceBase)
+	state.cleanup()
+	ac.graphicsOutput = nil
+}
+
 // cleanupGraphicsOutput removes the objects owned by a closing attachment
 // before its transport is closed. Parked resumable attachments intentionally do
 // not call this: their state remains attached to the parked link and the next
@@ -502,29 +620,34 @@ func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) {
 	if d == nil || ac == nil || ac.graphicsOutput == nil || ac.output == nil {
 		return
 	}
+	state := ac.graphicsOutput
 	ac.sendMu.Lock()
-	prepared, err := ac.graphicsOutput.prepare(nil, true)
+	prepared, err := state.prepare(nil, true)
 	ac.sendMu.Unlock()
 	if err != nil || prepared == nil {
-		ac.graphicsOutput.cleanup()
+		state.cleanup()
 		return
 	}
 	if len(prepared.data) == 0 {
 		prepared.commit()
-		ac.graphicsOutput.cleanup()
+		d.releaseGraphicsNamespace(state.namespaceBase)
+		state.cleanup()
+		ac.graphicsOutput = nil
 		return
 	}
 	prepared.markSendAttempted()
 	if d.boundedSendOutputErr(ac, prepared.data) == nil {
 		prepared.commit()
+		d.releaseGraphicsNamespace(state.namespaceBase)
 	} else {
 		prepared.abort()
 	}
-	ac.graphicsOutput.cleanup()
+	state.cleanup()
+	ac.graphicsOutput = nil
 }
 
 func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
-	if ac == nil || ac.graphicsOutput == nil || state == nil {
+	if ac == nil || ac.graphicsOutput == nil || state == nil || !ac.terminalCapabilities.SupportsKittyGraphics() {
 		return nil, nil
 	}
 	// Phase 5 composes one pane only. A Kitty attachment still receives the
@@ -532,6 +655,8 @@ func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bo
 	// whose coordinates would need a multipane transform.
 	transform := graphicsOutputTransform{}
 	snapshot := (*graphics.Snapshot)(nil)
+	var viewport graphics.Viewport
+	var hasViewport bool
 	if len(state.panes) == 1 && !state.floating.visible {
 		pane := state.panes[0]
 		if !pane.placement.Collapsed && pane.placement.Content.Width > 0 && pane.placement.Content.Height > 0 {
@@ -541,7 +666,15 @@ func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bo
 				originY:        pane.placement.Content.Y + 1,
 				sourceGeometry: pane.graphicsGeometry,
 			}
+			viewport, hasViewport = graphicsOutputViewport(pane.placement.Content, pane.graphicsGeometry)
 		}
+	}
+	if hasViewport {
+		prepared, err := ac.graphicsOutput.prepareWithTransform(snapshot, reset, transform, viewport)
+		if !errors.Is(err, errGraphicsOutputTooLarge) {
+			return prepared, err
+		}
+		return ac.graphicsOutput.prepareWithTransform(nil, reset, transform, viewport)
 	}
 	prepared, err := ac.graphicsOutput.prepareWithTransform(snapshot, reset, transform)
 	if !errors.Is(err, errGraphicsOutputTooLarge) {

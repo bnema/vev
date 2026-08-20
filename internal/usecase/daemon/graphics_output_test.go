@@ -115,6 +115,22 @@ func TestGraphicsOutputIDsAreIsolatedAcrossAttachments(t *testing.T) {
 	require.NotEqual(t, leftID, rightID, "terminal-global image IDs must not be reused by another attachment")
 }
 
+func TestGraphicsNamespacesAreDeterministicAndCollisionSafe(t *testing.T) {
+	d := &Daemon{}
+	d.mu.Lock()
+	first := d.reserveGraphicsNamespaceLocked("session:work:attachment")
+	second := d.reserveGraphicsNamespaceLocked("session:work:attachment")
+	d.mu.Unlock()
+	require.NotZero(t, first)
+	require.NotZero(t, second)
+	require.NotEqual(t, first, second, "equal attachment/session keys still need a collision-safe namespace")
+	d.releaseGraphicsNamespace(first)
+	d.mu.Lock()
+	reused := d.reserveGraphicsNamespaceLocked("session:work:attachment")
+	d.mu.Unlock()
+	require.Equal(t, first, reused, "released namespaces should deterministically return to their preferred block")
+}
+
 func TestGraphicsOutputKeysIncludeSourceSceneContent(t *testing.T) {
 	makeSnapshot := func(data []byte) *graphics.Snapshot {
 		scene := graphics.NewScene(graphics.Limits{})
@@ -154,10 +170,35 @@ func TestGraphicsOutputOversizeSuppressesGraphicsWithoutCompositionError(t *test
 		graphics:  scene.Snapshot(),
 		placement: layout.Placement{Content: domain.Rect{Width: 1, Height: 1}},
 	}}}
-	ac := &attachedClient{graphicsOutput: newGraphicsOutputState()}
+	ac := &attachedClient{
+		graphicsOutput:       newGraphicsOutputState(),
+		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+	}
 	prepared, err := graphicsOutputData(state, ac, true)
 	require.NoError(t, err, "ANSI composition must continue when optional graphics exceed the bound")
 	require.Empty(t, prepared.data, "oversized graphics are suppressed")
+}
+
+func TestGraphicsOutputClipsPlacementToPaneContent(t *testing.T) {
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("asset"), Width: 10, Height: 10})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(asset, graphics.PixelRect{X: -2, Y: -1, Width: 10, Height: 10})
+	require.NoError(t, err)
+	state := &capturedRenderState{panes: []capturedPaneRenderState{{
+		graphics:  scene.Snapshot(),
+		placement: layout.Placement{Content: domain.Rect{X: 3, Y: 4, Width: 4, Height: 3}},
+	}}}
+	ac := &attachedClient{
+		graphicsOutput:       newGraphicsOutputState(),
+		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+	}
+	prepared, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	text := string(prepared.data)
+	require.Contains(t, text, ",x=3,y=5")
+	require.Contains(t, text, ",X=2,Y=1,w=4,h=3")
+	require.NotContains(t, text, ",x=2,y=4", "graphics must not paint the title bar or adjacent area")
 }
 
 func TestGraphicsOutputComposesPaneOriginAndPixelGeometry(t *testing.T) {

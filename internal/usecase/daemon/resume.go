@@ -11,6 +11,22 @@ import (
 
 var errResumeTokenLifecycleRace = errors.New("resume token lifecycle race")
 
+func (d *Daemon) reapplyRemoteGraphicsGate(ac *attachedClient, h ports.Hello) {
+	if ac == nil || (!h.Remote && h.RemoteTarget == nil) {
+		return
+	}
+	ac.terminalCapabilities.KittyGraphics = false
+	if ac.graphicsOutput == nil {
+		return
+	}
+	// The parked transport has already been retired. Do not emit the old
+	// attachment's cleanup records into the replacement remote connection.
+	state := ac.graphicsOutput
+	state.cleanup()
+	d.releaseGraphicsNamespaceLocked(state.namespaceBase)
+	ac.graphicsOutput = nil
+}
+
 // resumeTokenSnapshot reads the credential under the same daemon lock used by
 // its lifecycle writers. Callers must not hold d.mu.
 func (d *Daemon) resumeTokenSnapshot(ac *attachedClient) uint64 {
@@ -646,6 +662,10 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.rebaseOutput()
 	ac.output.setWindow(h.MaxOutputInFlight)
 	ac.replaceTransport(tr)
+	// A parked attachment can be resumed through a remote route without going
+	// through finishAttach. Reapply the Phase 5 remote gate before any resumed
+	// capture or first paint can observe the replacement transport.
+	d.reapplyRemoteGraphicsGate(ac, h)
 	geometry := h.Geometry()
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}
