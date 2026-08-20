@@ -28,6 +28,7 @@ func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
 	want := append([]byte{0, 35, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	want = append(want, 0, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Hello bytes = %x, want %x", got, want)
@@ -41,6 +42,21 @@ func TestFinalHelloGoldenStrict(t *testing.T) {
 	}
 	assertAllPrefixesFail(t, got, UnmarshalHello)
 	assertTrailingGarbageFails(t, got, UnmarshalHello)
+}
+
+func TestHelloDeclaresKittyDirectGraphicsAtWireTail(t *testing.T) {
+	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, KittyDirectGraphics: true}
+	payload := MarshalHello(msg)
+	if len(payload) == 0 || payload[len(payload)-1] != 1 {
+		t.Fatalf("Hello capability tail = %x, want trailing true declaration", payload)
+	}
+	decoded, err := UnmarshalHello(payload)
+	if err != nil {
+		t.Fatalf("UnmarshalHello() error = %v", err)
+	}
+	if !decoded.KittyDirectGraphics {
+		t.Fatal("decoded KittyDirectGraphics = false, want true")
+	}
 }
 
 func TestFinalHelloSemanticValidation(t *testing.T) {

@@ -1318,12 +1318,10 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	}
 	sess.mu.Unlock()
 	terminalCapabilities := ports.DetectTerminalCapabilities(h.Env)
-	// Phase 5 is deliberately limited to the local one-pane outer terminal.
-	// A remote target must remain text-only until the remote rendering phases
-	// define an ownership and transport contract for graphics.
-	if h.Remote || h.RemoteTarget != nil {
-		terminalCapabilities.KittyGraphics = false
-	}
+	// Kitty graphics are enabled only by the explicit direct-terminal
+	// declaration in Hello. Environment values remain useful for color and
+	// diagnostics, but cannot authorize terminal-global graphics side effects.
+	terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
 	if h.TrueColor && !terminalCapabilities.TrueColor() {
 		terminalCapabilities.ColorMode = ports.TerminalColorTrueColor
 		terminalCapabilities.ColorSource = ports.TerminalCapabilityDeclared

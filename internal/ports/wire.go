@@ -174,6 +174,10 @@ type Hello struct {
 	TermEnv     string
 	Cwd         string
 	TrueColor   bool
+	// KittyDirectGraphics is an explicit declaration that the client has
+	// probed its direct outer terminal and it accepts Kitty graphics output.
+	// Environment values are never sufficient to set this capability.
+	KittyDirectGraphics bool
 	// MaxOutputInFlight is the requested maximum number of unacknowledged
 	// state-bearing output frames.
 	MaxOutputInFlight uint8
@@ -917,6 +921,7 @@ func MarshalHello(h Hello) []byte {
 	w.putUint8(uint8(h.NavigationCapabilities))
 	w.putUint8(uint8(h.StartupOverlay))
 	w.putBool(h.Remote)
+	w.putBool(h.KittyDirectGraphics)
 	return w.b
 }
 
@@ -991,6 +996,9 @@ func preflightHello(b []byte) error {
 		return err
 	}
 	if _, err := r.getUint8(); err != nil {
+		return err
+	}
+	if _, err := r.getBool(); err != nil {
 		return err
 	}
 	if _, err := r.getBool(); err != nil {
@@ -1100,6 +1108,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	}
 	h.StartupOverlay = StartupOverlay(overlay)
 	if h.Remote, err = r.getBool(); err != nil {
+		return Hello{}, err
+	}
+	if h.KittyDirectGraphics, err = r.getBool(); err != nil {
 		return Hello{}, err
 	}
 	if err := r.done(); err != nil {

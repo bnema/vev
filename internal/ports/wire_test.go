@@ -56,7 +56,7 @@ func assertTrailingGarbageFails[T any](t *testing.T, full []byte, unmarshal func
 func appendNoNavigationTail(payload []byte) []byte {
 	// exact-target absent, preferred-tab absent, navigation capabilities none,
 	// startup overlay none, local carriage.
-	return append(payload, 0, 0, 0, 0, 0, 0)
+	return append(payload, 0, 0, 0, 0, 0, 0, 0)
 }
 
 func TestHelloGoldenAndRoundTrip(t *testing.T) {
@@ -178,15 +178,15 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 	base := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
 	withCount := func(count byte) []byte {
 		payload := append([]byte(nil), base...)
-		// The uint32 environment count occupies bytes len-12 through len-9.
-		payload[len(payload)-9] = count
+		// The uint32 environment count occupies bytes len-13 through len-10.
+		payload[len(payload)-10] = count
 		return payload
 	}
 	withEntries := func(count byte, entries ...byte) []byte {
 		payload := withCount(count)
-		// The eight-byte tail follows the environment-count field.
-		tail := append([]byte(nil), payload[len(payload)-8:]...)
-		payload = append(payload[:len(payload)-8], entries...)
+		// The nine-byte tail follows the environment-count field.
+		tail := append([]byte(nil), payload[len(payload)-9:]...)
+		payload = append(payload[:len(payload)-9], entries...)
 		return append(payload, tail...)
 	}
 	tests := []struct {
