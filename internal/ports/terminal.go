@@ -84,21 +84,25 @@ func DetectTerminalCapabilities(env []string) TerminalCapabilities {
 		caps.Application = TerminalApplicationKitty
 	}
 
+	kittyIdentity := term == "xterm-kitty" && caps.Application == TerminalApplicationKitty
 	switch colorTerm {
 	case "truecolor", "24bit":
 		caps.ColorMode = TerminalColorTrueColor
 		caps.ColorSource = TerminalCapabilityDeclared
-		return caps
 	}
 	if term == "xterm-direct" || strings.HasSuffix(term, "-direct") {
 		caps.ColorMode = TerminalColorTrueColor
 		caps.ColorSource = TerminalCapabilityDeclared
+	}
+	if kittyIdentity {
+		if caps.ColorSource == TerminalCapabilityUnknown {
+			caps.ColorSource = TerminalCapabilityHeuristic
+		}
+		caps.ColorMode = TerminalColorTrueColor
+		caps.KittyGraphics = true
 		return caps
 	}
-	if term == "xterm-kitty" && caps.Application == TerminalApplicationKitty {
-		caps.ColorMode = TerminalColorTrueColor
-		caps.ColorSource = TerminalCapabilityHeuristic
-		caps.KittyGraphics = true
+	if caps.ColorSource == TerminalCapabilityDeclared {
 		return caps
 	}
 	if strings.Contains(term, "256color") || term == "dumb" {

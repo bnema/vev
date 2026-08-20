@@ -78,11 +78,12 @@ type capturedPaneRenderState struct {
 	damageGeneration uint64
 	// graphics is an immutable copy-on-write reference owned by the VT screen.
 	// It is nil for ordinary text panes, preserving the fast text path.
-	graphics        *vevgraphics.Snapshot
-	title           string
-	titleGeneration uint64
-	placement       layout.Placement
-	focused         bool
+	graphics         *vevgraphics.Snapshot
+	graphicsGeometry domain.Geometry
+	title            string
+	titleGeneration  uint64
+	placement        layout.Placement
+	focused          bool
 }
 
 type capturedFloatingRenderState struct {
@@ -137,6 +138,11 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out captured
 	// GraphicsSnapshot never allocates graphics state for a text-only screen and
 	// returns an immutable scene reference when Kitty graphics were used.
 	out.graphics = p.screen.CaptureGraphicsSnapshot()
+	geometry := p.screen.Geometry()
+	out.graphicsGeometry = domain.Geometry{
+		Size:       domain.Size{Cols: geometry.Cols, Rows: geometry.Rows},
+		PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight,
+	}.NormalizePixels()
 	damage := p.screen.CaptureDamage()
 	out.damageGeneration = damage.Generation
 	out.rawDamage = append(out.rawDamage[:0], damage.Damage...)
