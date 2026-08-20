@@ -469,15 +469,26 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
 	var (
-		preparedANSI *preparedOutput
-		err          error
-		cursor       cursorCandidate
-		data         []byte
+		preparedANSI     *preparedOutput
+		preparedGraphics *preparedGraphicsOutput
+		err              error
+		cursor           cursorCandidate
+		data             []byte
 	)
-	preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
+	// Graphics uses the same speculative boundary as text. A forced snapshot
+	// is raised after an ambiguous send, so the next record deletes this
+	// attachment's owned IDs before replaying the immutable screen scene.
+	graphicsReset := composed.reset || ac.output.forceSnapshot || !ac.output.initialized
+	preparedGraphics, err = graphicsOutputData(state, ac, graphicsReset)
+	if err == nil {
+		preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
+	}
 	if err == nil {
 		cursor = ac.prepareCursorTail(composed.cursor, len(preparedANSI.data) > 0)
 		data = append([]byte(nil), preparedANSI.data...)
+		if preparedGraphics != nil {
+			data = append(data, preparedGraphics.data...)
+		}
 		data = append(data, cursor.data...)
 	}
 	endDiff(0, err == nil)
@@ -538,17 +549,29 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		emitted := sendErr == nil && preparedANSI.sent
 		endEmit(uint64(len(data)), emitted)
 		if sendErr == nil && !emitted {
+			if preparedGraphics != nil {
+				preparedGraphics.abort()
+			}
 			ac.sendMu.Unlock()
 			return true
+		}
+		if sendErr != nil && preparedGraphics != nil {
+			preparedGraphics.abort()
 		}
 	}
 	if sendErr == nil {
 		if len(data) == 0 {
 			preparedANSI.commitNoSend()
 			if !preparedANSI.sent {
+				if preparedGraphics != nil {
+					preparedGraphics.abort()
+				}
 				ac.sendMu.Unlock()
 				return true
 			}
+		}
+		if preparedGraphics != nil {
+			preparedGraphics.commit()
 		}
 		// Publish only after output preparation and transport emission both
 		// succeed. A cross-session transition may publish concurrently, but its

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	renderer "github.com/bnema/vev-vt"
+	vevgraphics "github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -75,10 +76,13 @@ type capturedPaneRenderState struct {
 	rawDamage        []renderer.Damage
 	damage           []renderer.Damage
 	damageGeneration uint64
-	title            string
-	titleGeneration  uint64
-	placement        layout.Placement
-	focused          bool
+	// graphics is an immutable copy-on-write reference owned by the VT screen.
+	// It is nil for ordinary text panes, preserving the fast text path.
+	graphics        *vevgraphics.Snapshot
+	title           string
+	titleGeneration uint64
+	placement       layout.Placement
+	focused         bool
 }
 
 type capturedFloatingRenderState struct {
@@ -130,6 +134,9 @@ func capturePaneRenderStateLocked(p *pane, visible domain.Rect) capturedPaneRend
 
 func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out capturedPaneRenderState) capturedPaneRenderState {
 	out.id, out.title, out.titleGeneration = p.id, p.displayTitleLocked(), p.title.generation
+	// GraphicsSnapshot never allocates graphics state for a text-only screen and
+	// returns an immutable scene reference when Kitty graphics were used.
+	out.graphics = p.screen.CaptureGraphicsSnapshot()
 	damage := p.screen.CaptureDamage()
 	out.damageGeneration = damage.Generation
 	out.rawDamage = append(out.rawDamage[:0], damage.Damage...)
@@ -302,6 +309,9 @@ func captureLocalRenderState(
 		}
 		p.mu.Lock()
 		captured := capturePaneRenderStateLockedInto(p, visible, ac.captureFrames[p])
+		if !ac.terminalCapabilities.SupportsKittyGraphics() {
+			captured.graphics = nil
+		}
 		state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		captured.placement, captured.focused = placement, placement.ID == layoutSnap.focus
 		if captured.focused {
@@ -322,6 +332,9 @@ func captureLocalRenderState(
 		p.mu.Lock()
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
 		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, ac.captureFrames[p])
+		if !ac.terminalCapabilities.SupportsKittyGraphics() {
+			captured.graphics = nil
+		}
 		seen := false
 		for _, receipt := range state.receipts {
 			if receipt.pane == p {

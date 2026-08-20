@@ -8,11 +8,12 @@ import (
 
 func TestDetectTerminalCapabilities(t *testing.T) {
 	tests := []struct {
-		name       string
-		env        []string
-		wantMode   TerminalColorMode
-		wantSource TerminalCapabilitySource
-		wantApp    TerminalApplication
+		name         string
+		env          []string
+		wantMode     TerminalColorMode
+		wantSource   TerminalCapabilitySource
+		wantApp      TerminalApplication
+		wantGraphics bool
 	}{
 		{
 			name:       "declared truecolor",
@@ -21,11 +22,12 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			wantSource: TerminalCapabilityDeclared,
 		},
 		{
-			name:       "kitty signals infer truecolor",
-			env:        []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"},
-			wantMode:   TerminalColorTrueColor,
-			wantSource: TerminalCapabilityHeuristic,
-			wantApp:    TerminalApplicationKitty,
+			name:         "kitty signals infer truecolor",
+			env:          []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"},
+			wantMode:     TerminalColorTrueColor,
+			wantSource:   TerminalCapabilityHeuristic,
+			wantApp:      TerminalApplicationKitty,
+			wantGraphics: true,
 		},
 		{
 			name:       "256 color terminal remains a constrained attachment",
@@ -54,6 +56,7 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			require.Equal(t, tt.wantMode, got.ColorMode)
 			require.Equal(t, tt.wantSource, got.ColorSource)
 			require.Equal(t, tt.wantApp, got.Application)
+			require.Equal(t, tt.wantGraphics, got.SupportsKittyGraphics())
 		})
 	}
 }

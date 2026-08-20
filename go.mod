@@ -3,7 +3,7 @@ module github.com/bnema/vev
 go 1.26
 
 require (
-	github.com/bnema/vev-vt v0.3.1-0.20260820135858-b222670d256f
+	github.com/bnema/vev-vt v0.3.1-0.20260820171119-a67ed127d9df
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -13,3 +13,5 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/bnema/vev-vt => ../../../vev-vt/.worktrees/phase0-vt-baseline
