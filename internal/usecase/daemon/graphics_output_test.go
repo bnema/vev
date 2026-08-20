@@ -496,3 +496,201 @@ func TestGraphicsOutputCleanupRemovesPlacementsBeforeImages(t *testing.T) {
 	require.Empty(t, state.assets)
 	require.Empty(t, state.placements)
 }
+
+func graphicsPaneTestScene(t *testing.T, data string, destination graphics.PixelRect, layer int64) *graphics.Snapshot {
+	t.Helper()
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte(data), Width: 20, Height: 10})
+	require.NoError(t, err)
+	_, err = scene.Place(graphics.PlacementSpec{Asset: asset, Destination: destination, Layer: layer, HasLayer: true})
+	require.NoError(t, err)
+	return scene.Snapshot()
+}
+
+func graphicsPaneTestState(tab domain.TabStableID, panes ...capturedPaneRenderState) *capturedRenderState {
+	return &capturedRenderState{view: attachmentView{tabID: tab}, panes: panes}
+}
+
+func graphicsPaneTestClient() *attachedClient {
+	return &attachedClient{
+		graphicsOutput:       newGraphicsOutputState(),
+		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+	}
+}
+
+func TestGraphicsOutputComposesSplitPanesWithStableOrderAndChildIDIsolation(t *testing.T) {
+	left := graphicsPaneTestScene(t, "left", graphics.PixelRect{X: -2, Y: 0, Width: 8, Height: 4}, 2)
+	right := graphicsPaneTestScene(t, "right", graphics.PixelRect{X: 1, Y: 0, Width: 8, Height: 4}, -1)
+	state := graphicsPaneTestState("tab-a",
+		capturedPaneRenderState{id: "left", graphics: left, placement: layout.Placement{ID: "left", Content: domain.Rect{X: 0, Width: 20, Height: 4}}},
+		capturedPaneRenderState{id: "right", graphics: right, placement: layout.Placement{ID: "right", Content: domain.Rect{X: 21, Width: 20, Height: 4}}},
+	)
+	ac := graphicsPaneTestClient()
+	prepared, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	require.Len(t, prepared.state.assets, 2, "raw a1 IDs from separate child scenes must not alias")
+	require.Len(t, prepared.state.placements, 2)
+	text := string(prepared.data)
+	require.Less(t, strings.Index(text, ",x=0,y=1"), strings.Index(text, ",x=22,y=1"), "pane traversal order must be deterministic")
+	var ids []uint64
+	for _, asset := range prepared.state.assets {
+		ids = append(ids, asset.id)
+	}
+	require.NotEqual(t, ids[0], ids[1])
+}
+
+func TestGraphicsOutputSplitResizeReplacesTranslatedPlacementWithoutSceneMutation(t *testing.T) {
+	snapshot := graphicsPaneTestScene(t, "resize", graphics.PixelRect{Width: 8, Height: 4}, 0)
+	ac := graphicsPaneTestClient()
+	firstState := graphicsPaneTestState("tab-a", capturedPaneRenderState{id: "left", graphics: snapshot, placement: layout.Placement{ID: "left", Content: domain.Rect{Width: 20, Height: 4}}})
+	first, err := graphicsOutputData(firstState, ac, true)
+	require.NoError(t, err)
+	first.commit()
+
+	resized := graphicsPaneTestState("tab-a", capturedPaneRenderState{id: "left", graphics: snapshot, placement: layout.Placement{ID: "left", Content: domain.Rect{X: 7, Width: 20, Height: 4}}})
+	second, err := graphicsOutputData(resized, ac, false)
+	require.NoError(t, err)
+	require.Contains(t, string(second.data), "a=d,d=p,p=")
+	require.Contains(t, string(second.data), "a=p,i=")
+	require.NotContains(t, string(second.data), "a=t,i=", "layout-only recomputation must retain the immutable asset")
+}
+
+func TestGraphicsOutputPaneReorderRetainsAssetsButReplaysPlacementsInLayoutOrder(t *testing.T) {
+	left := graphicsPaneTestScene(t, "left-reorder", graphics.PixelRect{Width: 8, Height: 4}, 0)
+	right := graphicsPaneTestScene(t, "right-reorder", graphics.PixelRect{Width: 8, Height: 4}, 0)
+	ac := graphicsPaneTestClient()
+	firstState := graphicsPaneTestState("tab-a",
+		capturedPaneRenderState{id: "left", graphics: left, placement: layout.Placement{ID: "left", Content: domain.Rect{Width: 20, Height: 4}}},
+		capturedPaneRenderState{id: "right", graphics: right, placement: layout.Placement{ID: "right", Content: domain.Rect{X: 21, Width: 20, Height: 4}}},
+	)
+	first, err := graphicsOutputData(firstState, ac, true)
+	require.NoError(t, err)
+	first.commit()
+
+	reordered := graphicsPaneTestState("tab-a",
+		capturedPaneRenderState{id: "right", graphics: right, placement: layout.Placement{ID: "right", Content: domain.Rect{Width: 20, Height: 4}}},
+		capturedPaneRenderState{id: "left", graphics: left, placement: layout.Placement{ID: "left", Content: domain.Rect{X: 21, Width: 20, Height: 4}}},
+	)
+	second, err := graphicsOutputData(reordered, ac, false)
+	require.NoError(t, err)
+	require.NotContains(t, string(second.data), "a=t,i=", "moving panes must not re-upload immutable assets")
+	require.Contains(t, string(second.data), "a=d,d=p,p=")
+	require.Contains(t, string(second.data), "a=p,i=")
+	require.Less(t, strings.Index(string(second.data), ",x=0,y=1"), strings.Index(string(second.data), ",x=21,y=1"))
+}
+
+func TestGraphicsOutputTabSwitchReplaysSameRawChildIDsInNewSourceNamespace(t *testing.T) {
+	snapshot := graphicsPaneTestScene(t, "tab", graphics.PixelRect{Width: 8, Height: 4}, 0)
+	ac := graphicsPaneTestClient()
+	first, err := graphicsOutputData(graphicsPaneTestState("tab-a", capturedPaneRenderState{id: "pane", graphics: snapshot, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 20, Height: 4}}}), ac, true)
+	require.NoError(t, err)
+	first.commit()
+	second, err := graphicsOutputData(graphicsPaneTestState("tab-b", capturedPaneRenderState{id: "pane", graphics: snapshot, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 20, Height: 4}}}), ac, false)
+	require.NoError(t, err)
+	require.Contains(t, string(second.data), "a=d,d=p,p=")
+	require.Contains(t, string(second.data), "a=d,d=i,i=")
+	require.Contains(t, string(second.data), "a=t,i=")
+}
+
+func TestGraphicsOutputFloatingPaneCoversTiledGraphicsAndRetainsItsOwnScene(t *testing.T) {
+	tiled := graphicsPaneTestScene(t, "tiled", graphics.PixelRect{Width: 20, Height: 6}, 0)
+	floating := graphicsPaneTestScene(t, "floating", graphics.PixelRect{Width: 3, Height: 2}, 3)
+	state := graphicsPaneTestState("tab-a", capturedPaneRenderState{id: "tiled", graphics: tiled, placement: layout.Placement{ID: "tiled", Content: domain.Rect{Width: 20, Height: 6}}})
+	state.floating = capturedFloatingRenderState{
+		visible:  true,
+		pane:     capturedPaneRenderState{id: "floating", graphics: floating, graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 3, Rows: 2}}},
+		geometry: floatingGeometry{Bounds: domain.Rect{X: 5, Y: 1, Width: 6, Height: 4}, Inner: domain.Rect{X: 6, Y: 2, Width: 3, Height: 2}},
+	}
+	ac := graphicsPaneTestClient()
+	prepared, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	require.Len(t, prepared.state.assets, 2)
+	require.GreaterOrEqual(t, len(prepared.state.placements), 2, "floating and uncovered tiled fragments both remain visible")
+	for _, placement := range prepared.state.placements {
+		if strings.Contains(placement.asset, "floating") {
+			continue
+		}
+		cover := graphics.PixelRect{X: 5, Y: 1, Width: 6, Height: 4}
+		_, overlaps := placement.dest.Intersect(cover)
+		require.False(t, overlaps, "tiled placement must not survive under floating coverage")
+	}
+}
+
+func TestGraphicsOutputOverlayDismissalHidesAndRestoresImmutableSnapshots(t *testing.T) {
+	snapshot := graphicsPaneTestScene(t, "overlay", graphics.PixelRect{Width: 8, Height: 4}, 0)
+	ac := graphicsPaneTestClient()
+	state := graphicsPaneTestState("tab-a", capturedPaneRenderState{id: "pane", graphics: snapshot, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 20, Height: 4}}})
+	first, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	first.commit()
+
+	state.overlays.copyActive = true
+	hidden, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	require.Contains(t, string(hidden.data), "a=d,d=p,p=")
+	hidden.commit()
+	state.overlays.copyActive = false
+	restored, err := graphicsOutputData(state, ac, false)
+	require.NoError(t, err)
+	require.Contains(t, string(restored.data), "a=t,i=")
+	require.Equal(t, uint64(1), snapshot.Usage().Assets, "composition must not mutate the child scene")
+}
+
+func TestGraphicsOutputMixedTextAndGraphicsKeepsANSIBeforeGraphics(t *testing.T) {
+	snapshot := graphicsPaneTestScene(t, "mixed", graphics.PixelRect{Width: 8, Height: 4}, 0)
+	ac := graphicsPaneTestClient()
+	state := graphicsPaneTestState("tab-a", capturedPaneRenderState{id: "pane", graphics: snapshot, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 20, Height: 4}}})
+	prepared, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	ansi := []byte("text-before-graphics")
+	combined := append(append([]byte(nil), ansi...), prepared.data...)
+	require.Less(t, bytes.Index(combined, ansi), bytes.Index(combined, []byte("\x1b_Ga=t,")))
+}
+
+func TestGraphicsOutputCollapsedAndHiddenPanesDoNotUploadRetainedAssets(t *testing.T) {
+	snapshot := graphicsPaneTestScene(t, "collapsed", graphics.PixelRect{Width: 8, Height: 4}, 0)
+	ac := graphicsPaneTestClient()
+	state := graphicsPaneTestState("tab-a", capturedPaneRenderState{
+		id:        "pane",
+		graphics:  snapshot,
+		placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 20, Height: 4}},
+	})
+	first, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	first.commit()
+
+	state.panes[0].placement.Collapsed = true
+	collapsed, err := graphicsOutputData(state, ac, false)
+	require.NoError(t, err)
+	require.Empty(t, collapsed.state.assets)
+	require.Empty(t, collapsed.state.placements)
+	require.Contains(t, string(collapsed.data), "a=d,d=p,p=")
+	collapsed.commit()
+
+	state.panes = nil
+	hidden, err := graphicsOutputData(state, ac, false)
+	require.NoError(t, err)
+	require.Empty(t, hidden.data, "a collapsed scene was already retired")
+	hidden.commit()
+}
+
+func TestGraphicsOutputViewportProjectionDropsUnplacedAssets(t *testing.T) {
+	scene := graphics.NewScene(graphics.Limits{})
+	placed, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("placed"), Width: 4, Height: 2})
+	require.NoError(t, err)
+	_, err = scene.AddAsset(graphics.AssetBlob{Encoded: []byte("retained"), Width: 4, Height: 2})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(placed, graphics.PixelRect{Width: 4, Height: 2})
+	require.NoError(t, err)
+
+	state := graphicsPaneTestState("tab-a", capturedPaneRenderState{
+		id:        "pane",
+		graphics:  scene.Snapshot(),
+		placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 8, Height: 4}},
+	})
+	ac := graphicsPaneTestClient()
+	prepared, err := graphicsOutputData(state, ac, true)
+	require.NoError(t, err)
+	require.Len(t, prepared.state.assets, 1, "viewport projection must not upload an unplaced retained image")
+	require.Len(t, prepared.state.placements, 1)
+}

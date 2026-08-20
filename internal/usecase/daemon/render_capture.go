@@ -23,6 +23,7 @@ type renderCaptureScratch struct {
 	placements        []layout.Placement
 	dividers          []layout.Divider
 	layoutTab         *tab
+	layoutRoot        *layout.Node
 	layoutGeneration  uint64
 	layoutArea        domain.Rect
 	layoutFocus       layout.PaneID
@@ -42,6 +43,8 @@ type damageReceipt struct {
 
 type capturedRenderState struct {
 	attachment         *attachedClient // identity only; never dereferenced by composition
+	sessionID          domain.SessionID
+	incarnation        domain.IncarnationID
 	lease              *attachmentLease
 	view               attachmentView
 	window             domain.Size
@@ -72,6 +75,7 @@ type capturedTabLayout struct {
 
 type capturedPaneRenderState struct {
 	id               layout.PaneID
+	stableID         domain.PaneStableID
 	frame            renderer.Frame
 	rawDamage        []renderer.Damage
 	damage           []renderer.Damage
@@ -134,7 +138,7 @@ func capturePaneRenderStateLocked(p *pane, visible domain.Rect) capturedPaneRend
 }
 
 func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out capturedPaneRenderState) capturedPaneRenderState {
-	out.id, out.title, out.titleGeneration = p.id, p.displayTitleLocked(), p.title.generation
+	out.id, out.stableID, out.title, out.titleGeneration = p.id, domain.PaneStableID(p.stableID), p.displayTitleLocked(), p.title.generation
 	// GraphicsSnapshot never allocates graphics state for a text-only screen and
 	// returns an immutable scene reference when Kitty graphics were used.
 	out.graphics = p.screen.CaptureGraphicsSnapshot()
@@ -225,6 +229,8 @@ func captureLocalRenderState(
 	}
 	sess.mu.Lock()
 	_, owned := sess.attachments[ac]
+	sessionID := sess.id
+	incarnation := sess.incarnation
 	sess.mu.Unlock()
 	if !owned {
 		return nil, false
@@ -270,12 +276,17 @@ func captureLocalRenderState(
 		area: area, focus: focus, placements: scratch.placements,
 		dividers: scratch.dividers, fingerprint: scratch.layoutFingerprint, ok: scratch.layoutValid,
 	}
-	if scratch.layoutTab != tb || scratch.layoutGeneration != tb.layoutGeneration || scratch.layoutArea != area || scratch.layoutFocus != focus {
+	var layoutRoot *layout.Node
+	if tb.tree != nil {
+		layoutRoot = tb.tree.Root
+	}
+	if scratch.layoutTab != tb || scratch.layoutRoot != layoutRoot || scratch.layoutGeneration != tb.layoutGeneration || scratch.layoutArea != area || scratch.layoutFocus != focus {
 		layoutSnap = solveTabLayoutLocked(tb)
 		layoutSnap.focus = focus
 		scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
 		scratch.dividers = append(scratch.dividers[:0], layoutSnap.dividers...)
 		scratch.layoutTab = tb
+		scratch.layoutRoot = layoutRoot
 		scratch.layoutGeneration = tb.layoutGeneration
 		scratch.layoutArea = area
 		scratch.layoutFocus = focus
@@ -291,7 +302,7 @@ func captureLocalRenderState(
 		window = ac.sizeSnapshot()
 	}
 	*state = capturedRenderState{
-		attachment: ac, lease: lease, view: view, window: window,
+		attachment: ac, sessionID: sessionID, incarnation: incarnation, lease: lease, view: view, window: window,
 		reset: reset, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,

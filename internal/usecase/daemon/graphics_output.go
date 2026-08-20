@@ -11,13 +11,17 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/layout"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
 // Graphics output is deliberately a small attachment-local backend. It emits
-// only direct uploads and ordinary placements; Kitty frame/compose actions,
-// multipane coordinate transforms, and remote graphics are outside this phase.
+// direct uploads and ordinary placements from immutable pane snapshots. The
+// attachment-local state is also the ownership boundary for Kitty IDs: raw
+// scene IDs are never sent to the outer terminal.
 const (
 	maxGraphicsRecordBytes = 8 << 20
 	maxGraphicsOutputBytes = 8 << 20
@@ -39,6 +43,11 @@ type graphicsOutputPlacement struct {
 	dest   graphics.PixelRect
 	cells  graphics.CellRect
 	layer  int64
+	// transform is set for composed multi-pane placements. Keeping it on the
+	// placement (rather than on graphicsOutputState) lets panes with distinct
+	// pixel geometries share one attachment-local output state.
+	transform    graphicsOutputTransform
+	transformSet bool
 }
 
 type graphicsOutputState struct {
@@ -283,17 +292,30 @@ func (s *graphicsOutputState) prepare(snapshot *graphics.Snapshot, reset bool) (
 }
 
 func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform, viewports ...graphics.Viewport) (*preparedGraphicsOutput, error) {
-	prepared, err := s.prepareWithTransformOnce(snapshot, reset, transform, false, viewports...)
+	assets, placements := graphicsSnapshotRecords(snapshot, viewports...)
+	return s.prepareWithRecords(assets, placements, reset, transform)
+}
+
+// prepareWithRecords is the same speculative state transition as the Phase 5
+// single-scene path, but accepts a composed set of immutable pane records. It
+// intentionally does not write to any graphics.Scene.
+func (s *graphicsOutputState) prepareWithRecords(assets map[string]graphics.AssetView, placements map[string]graphicsOutputPlacement, reset bool, transform graphicsOutputTransform) (*preparedGraphicsOutput, error) {
+	prepared, err := s.prepareWithRecordsOnce(assets, placements, reset, transform, false)
 	if !errors.Is(err, errGraphicsIDExhausted) {
 		return prepared, err
 	}
 	// A bounded attachment can safely recycle its own IDs only after deleting
 	// the objects it owns. Keep this retry attachment-local: it never advances
 	// into the next reserved namespace block.
-	return s.prepareWithTransformOnce(snapshot, true, transform, true, viewports...)
+	return s.prepareWithRecordsOnce(assets, placements, true, transform, true)
 }
 
 func (s *graphicsOutputState) prepareWithTransformOnce(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform, resetIDs bool, viewports ...graphics.Viewport) (*preparedGraphicsOutput, error) {
+	assets, placements := graphicsSnapshotRecords(snapshot, viewports...)
+	return s.prepareWithRecordsOnce(assets, placements, reset, transform, resetIDs)
+}
+
+func (s *graphicsOutputState) prepareWithRecordsOnce(assets map[string]graphics.AssetView, placements map[string]graphicsOutputPlacement, reset bool, transform graphicsOutputTransform, resetIDs bool) (*preparedGraphicsOutput, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -335,7 +357,6 @@ func (s *graphicsOutputState) prepareWithTransformOnce(snapshot *graphics.Snapsh
 		}
 	}
 
-	assets, placements := graphicsSnapshotRecords(snapshot, viewports...)
 	for key, placement := range candidate.placements {
 		if _, ok := placements[key]; ok {
 			continue
@@ -404,7 +425,11 @@ func (s *graphicsOutputState) prepareWithTransformOnce(snapshot *graphics.Snapsh
 			continue
 		}
 		candidate.placements[key] = want
-		if err := out.record(placementRecordWithTransform(asset.id, want, transform)); err != nil {
+		placementTransform := transform
+		if want.transformSet {
+			placementTransform = want.transform
+		}
+		if err := out.record(placementRecordWithTransform(asset.id, want, placementTransform)); err != nil {
 			return nil, err
 		}
 	}
@@ -467,6 +492,19 @@ func (p *preparedGraphicsOutput) abort() {
 }
 
 func graphicsSnapshotRecords(snapshot *graphics.Snapshot, viewports ...graphics.Viewport) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
+	return graphicsSnapshotRecordsForSource(snapshot, "", viewports...)
+}
+
+// graphicsSnapshotRecordsForSource projects one immutable pane scene into
+// attachment-local records. source is part of every key because a child VT
+// scene is allowed to issue the same raw a1/p1 IDs as every other pane.
+// viewports are a deterministic union of visible regions; this is used to
+// subtract a floating pane from tiled content without mutating the scene.
+func graphicsSnapshotRecordsForSource(snapshot *graphics.Snapshot, source string, viewports ...graphics.Viewport) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
+	return graphicsSnapshotRecordsForSourceOrdered(snapshot, source, 0, viewports...)
+}
+
+func graphicsSnapshotRecordsForSourceOrdered(snapshot *graphics.Snapshot, source string, paneOrder int, viewports ...graphics.Viewport) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
 	assets := make(map[string]graphics.AssetView)
 	placements := make(map[string]graphicsOutputPlacement)
 	if snapshot == nil {
@@ -475,57 +513,107 @@ func graphicsSnapshotRecords(snapshot *graphics.Snapshot, viewports ...graphics.
 	assetKeys := make(map[string]string)
 	generation := snapshot.Generation()
 	for _, asset := range snapshot.Assets() {
-		key := graphicsAssetKey(generation, asset)
+		key := graphicsAssetKeyForSource(source, generation, asset)
 		assets[key] = asset
 		assetKeys[asset.ID().String()] = key
 	}
 
 	placementViews := snapshot.Placements()
 	if len(viewports) == 0 {
-		for _, placement := range placementViews {
-			addGraphicsOutputPlacement(placements, generation, assetKeys, placement.ID().String(), placement.AssetID().String(), placement.Source(), placement.Destination(), placement.Cells(), placement.Layer())
+		for order, placement := range placementViews {
+			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, placement.ID().String(), placement.AssetID().String(), placement.Source(), placement.Destination(), placement.Cells(), placement.Layer())
 		}
 		return assets, placements
 	}
 
 	byPlacementID := make(map[string]graphics.PlacementView, len(placementViews))
-	for _, placement := range placementViews {
-		byPlacementID[placement.ID().String()] = placement
+	placementOrders := make(map[string]int, len(placementViews))
+	for order, placement := range placementViews {
+		id := placement.ID().String()
+		byPlacementID[id] = placement
+		placementOrders[id] = order
 	}
-	cellFragments := make(map[string]graphics.VisibleFragment)
-	if viewports[0].Cells.Valid() && !viewports[0].Cells.Empty() {
-		for _, fragment := range snapshot.VisibleFragments(viewports[0]) {
-			cellFragments[fragment.PlacementID.String()] = fragment
+	for _, viewport := range viewports {
+		cellFragments := make(map[string]graphics.VisibleFragment)
+		if viewport.Cells.Valid() && !viewport.Cells.Empty() {
+			for _, fragment := range snapshot.VisibleFragments(viewport) {
+				cellFragments[fragment.PlacementID.String()] = fragment
+			}
 		}
-	}
-	for _, fragment := range snapshot.VisiblePixelFragments(viewports[0].Pixels) {
-		placement, ok := byPlacementID[fragment.PlacementID.String()]
-		if !ok {
+		if viewport.Pixels.Valid() && !viewport.Pixels.Empty() {
+			for _, fragment := range snapshot.VisiblePixelFragments(viewport.Pixels) {
+				placement, ok := byPlacementID[fragment.PlacementID.String()]
+				if !ok {
+					continue
+				}
+				if placement.Cells().Valid() && !placement.Cells().Empty() {
+					fragment, ok = cellFragments[fragment.PlacementID.String()]
+					if !ok {
+						continue
+					}
+				}
+				order := placementOrders[fragment.PlacementID.String()]
+				addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, fragment.Destination, fragment.Cells, placement.Layer())
+			}
 			continue
 		}
-		if placement.Cells().Valid() && !placement.Cells().Empty() {
-			fragment, ok = cellFragments[fragment.PlacementID.String()]
+		// A cell-only viewport is useful to callers that do not know pixel
+		// geometry. Cell-aware placements already carry enough information for
+		// the graphics package to map the clipped destination back to pixels.
+		for _, fragment := range cellFragments {
+			placement, ok := byPlacementID[fragment.PlacementID.String()]
 			if !ok {
 				continue
 			}
+			order := placementOrders[fragment.PlacementID.String()]
+			addGraphicsOutputPlacementForSourceOrdered(placements, source, paneOrder, order, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, fragment.Destination, fragment.Cells, placement.Layer())
 		}
-		addGraphicsOutputPlacement(placements, generation, assetKeys, fragment.PlacementID.String(), fragment.AssetID.String(), fragment.Source, fragment.Destination, fragment.Cells, placement.Layer())
+	}
+	// A viewport is an attachment-local visibility boundary. Do not upload
+	// assets that have no visible placement in that boundary: a pane can retain
+	// decoded Kitty images after its last placement was erased, but those image
+	// records must not leak through a covered or collapsed projection.
+	if len(viewports) != 0 {
+		usedAssets := make(map[string]struct{}, len(placements))
+		for _, placement := range placements {
+			usedAssets[placement.asset] = struct{}{}
+		}
+		for key := range assets {
+			if _, ok := usedAssets[key]; !ok {
+				delete(assets, key)
+			}
+		}
 	}
 	return assets, placements
 }
 
 func addGraphicsOutputPlacement(dst map[string]graphicsOutputPlacement, generation uint64, assetKeys map[string]string, placementID, assetID string, source, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
+	addGraphicsOutputPlacementForSource(dst, "", 0, generation, assetKeys, placementID, assetID, source, destination, cells, layer)
+}
+
+func addGraphicsOutputPlacementForSource(dst map[string]graphicsOutputPlacement, source string, order int, generation uint64, assetKeys map[string]string, placementID, assetID string, sourceRect, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
+	addGraphicsOutputPlacementForSourceOrdered(dst, source, 0, order, generation, assetKeys, placementID, assetID, sourceRect, destination, cells, layer)
+}
+
+func addGraphicsOutputPlacementForSourceOrdered(dst map[string]graphicsOutputPlacement, source string, paneOrder, order int, generation uint64, assetKeys map[string]string, placementID, assetID string, sourceRect, destination graphics.PixelRect, cells graphics.CellRect, layer int64) {
 	assetKey := assetKeys[assetID]
 	if assetKey == "" {
 		return
 	}
-	key := graphicsPlacementKeyParts(generation, placementID, assetKey, source, destination, cells, layer)
-	dst[key] = graphicsOutputPlacement{asset: assetKey, source: source, dest: destination, cells: cells, layer: layer}
+	key := graphicsPlacementKeyPartsForSourceOrdered(source, paneOrder, order, generation, placementID, assetKey, sourceRect, destination, cells, layer)
+	dst[key] = graphicsOutputPlacement{asset: assetKey, source: sourceRect, dest: destination, cells: cells, layer: layer}
 }
 
 func graphicsAssetKey(generation uint64, asset graphics.AssetView) string {
+	return graphicsAssetKeyForSource("", generation, asset)
+}
+
+func graphicsAssetKeyForSource(source string, generation uint64, asset graphics.AssetView) string {
 	digest := sha256.Sum256(asset.Encoded())
-	return fmt.Sprintf("g%d:%s:%d:%d:%x", generation, asset.ID().String(), asset.Width(), asset.Height(), digest)
+	if source == "" {
+		return fmt.Sprintf("g%d:%s:%d:%d:%x", generation, asset.ID().String(), asset.Width(), asset.Height(), digest)
+	}
+	return fmt.Sprintf("s:%s:g%d:%s:%d:%d:%x", source, generation, asset.ID().String(), asset.Width(), asset.Height(), digest)
 }
 
 func graphicsPlacementKey(generation uint64, placement graphics.PlacementView, assetKey string) string {
@@ -533,7 +621,23 @@ func graphicsPlacementKey(generation uint64, placement graphics.PlacementView, a
 }
 
 func graphicsPlacementKeyParts(generation uint64, placementID, assetKey string, source, dest graphics.PixelRect, cells graphics.CellRect, layer int64) string {
-	return fmt.Sprintf("g%d:%s:%s:%v:%v:%v:%d", generation, placementID, assetKey, source, dest, cells, layer)
+	return graphicsPlacementKeyPartsForSource("", 0, generation, placementID, assetKey, source, dest, cells, layer)
+}
+
+func graphicsPlacementKeyPartsForSource(source string, order int, generation uint64, placementID, assetKey string, sourceRect, dest graphics.PixelRect, cells graphics.CellRect, layer int64) string {
+	return graphicsPlacementKeyPartsForSourceOrdered(source, 0, order, generation, placementID, assetKey, sourceRect, dest, cells, layer)
+}
+
+func graphicsPlacementKeyPartsForSourceOrdered(source string, paneOrder, order int, generation uint64, placementID, assetKey string, sourceRect, dest graphics.PixelRect, cells graphics.CellRect, layer int64) string {
+	if source == "" {
+		return fmt.Sprintf("g%d:%s:%s:%v:%v:%v:%d", generation, placementID, assetKey, sourceRect, dest, cells, layer)
+	}
+	// Put the fixed-width pane/scene order first so map iteration is irrelevant:
+	// placements are replayed in layout/scene order, while the remaining fields
+	// still distinguish clipped fragments and scene generations. The source
+	// identity itself deliberately excludes order so moving a pane can retain
+	// its attachment-local uploaded asset and only replace its placement.
+	return fmt.Sprintf("o%08d:%08d:s:%s:g%d:%s:%s:%v:%v:%v:%d", paneOrder, order, source, generation, placementID, assetKey, sourceRect, dest, cells, layer)
 }
 
 func sortedOutputAssets(values map[string]graphicsOutputAsset) []graphicsOutputAsset {
@@ -610,7 +714,7 @@ func takeGraphicsIDInNamespace(next *uint64, namespaceBase uint64) (uint64, bool
 }
 
 func equalGraphicsPlacement(a, b graphicsOutputPlacement) bool {
-	return a.asset == b.asset && a.source == b.source && a.dest == b.dest && a.cells == b.cells && a.layer == b.layer
+	return a.asset == b.asset && a.source == b.source && a.dest == b.dest && a.cells == b.cells && a.layer == b.layer && a.transformSet == b.transformSet && (!a.transformSet || a.transform == b.transform)
 }
 
 func kittyRecord(header string, payload []byte) []byte {
@@ -719,21 +823,28 @@ func (s *graphicsOutputState) cleanup() {
 }
 
 func graphicsOutputViewport(content domain.Rect, geometry domain.Geometry) (graphics.Viewport, bool) {
-	if content.Width <= 0 || content.Height <= 0 {
+	return graphicsOutputViewportRect(domain.Rect{Width: content.Width, Height: content.Height}, geometry)
+}
+
+func graphicsOutputViewportRect(content domain.Rect, geometry domain.Geometry) (graphics.Viewport, bool) {
+	if content.Width <= 0 || content.Height <= 0 || content.X < 0 || content.Y < 0 {
 		return graphics.Viewport{}, false
 	}
-	width, height := int64(content.Width), int64(content.Height)
+	pixelX, pixelY := int64(content.X), int64(content.Y)
+	pixelWidth, pixelHeight := int64(content.Width), int64(content.Height)
 	if geometry.PixelsKnown() && geometry.Cols > 0 && geometry.Rows > 0 {
 		cellWidth := geometry.PixelWidth / geometry.Cols
 		cellHeight := geometry.PixelHeight / geometry.Rows
 		if cellWidth > 0 && cellHeight > 0 {
-			width *= int64(cellWidth)
-			height *= int64(cellHeight)
+			pixelX *= int64(cellWidth)
+			pixelY *= int64(cellHeight)
+			pixelWidth *= int64(cellWidth)
+			pixelHeight *= int64(cellHeight)
 		}
 	}
 	return graphics.Viewport{
-		Pixels: graphics.PixelRect{Width: width, Height: height},
-		Cells:  graphics.CellRect{Width: int64(content.Width), Height: int64(content.Height)},
+		Pixels: graphics.PixelRect{X: pixelX, Y: pixelY, Width: pixelWidth, Height: pixelHeight},
+		Cells:  graphics.CellRect{X: int64(content.X), Y: int64(content.Y), Width: int64(content.Width), Height: int64(content.Height)},
 	}, true
 }
 
@@ -844,46 +955,197 @@ func graphicsOutputData(state *capturedRenderState, ac *attachedClient, reset bo
 	return graphicsOutputDataWithDaemon(nil, state, ac, reset)
 }
 
+// composedGraphicsRecords is the pane-layout projection boundary. It reads
+// only immutable captured snapshots and produces attachment-local keys and
+// placements. In particular, it never joins or mutates the generic VT scenes.
+func composedGraphicsRecords(state *capturedRenderState) (map[string]graphics.AssetView, map[string]graphicsOutputPlacement) {
+	assets := make(map[string]graphics.AssetView)
+	placements := make(map[string]graphicsOutputPlacement)
+	if state == nil {
+		return assets, placements
+	}
+	// Kitty placements are emitted after the ANSI frame. Any opaque overlay
+	// would therefore be painted over by an old image unless its covered
+	// fragments are temporarily removed. Modal overlays suppress the complete
+	// scene; compact notices and floating panes contribute exact coverage
+	// rectangles without mutating their source panes.
+	if state.overlays.active() {
+		return assets, placements
+	}
+	coverage := graphicsOpaqueCoverage(state)
+
+	for index, pane := range state.panes {
+		if pane.graphics == nil || pane.placement.Collapsed || pane.placement.Content.Width <= 0 || pane.placement.Content.Height <= 0 {
+			continue
+		}
+		viewports := paneGraphicsViewports(pane.placement.Content, pane.graphicsGeometry, coverage)
+		if len(viewports) == 0 {
+			continue
+		}
+		transform := graphicsOutputTransform{originX: pane.placement.Content.X, originY: pane.placement.Content.Y + 1, sourceGeometry: pane.graphicsGeometry}
+		source := graphicsSourceKey(state, pane.id, pane.stableID, false)
+		paneAssets, panePlacements := graphicsSnapshotRecordsForSourceOrdered(pane.graphics, source, index, viewports...)
+		mergeGraphicsRecords(assets, placements, paneAssets, panePlacements, transform)
+	}
+
+	if state.floating.visible && state.floating.pane.graphics != nil && state.floating.geometry.Inner.Width > 0 && state.floating.geometry.Inner.Height > 0 {
+		inner := state.floating.geometry.Inner
+		viewport, ok := graphicsOutputViewportRect(domain.Rect{Width: inner.Width, Height: inner.Height}, state.floating.pane.graphicsGeometry)
+		if ok {
+			transform := graphicsOutputTransform{originX: inner.X, originY: inner.Y + 1, sourceGeometry: state.floating.pane.graphicsGeometry}
+			source := graphicsSourceKey(state, state.floating.pane.id, state.floating.pane.stableID, true)
+			paneAssets, panePlacements := graphicsSnapshotRecordsForSourceOrdered(state.floating.pane.graphics, source, len(state.panes), viewport)
+			mergeGraphicsRecords(assets, placements, paneAssets, panePlacements, transform)
+		}
+	}
+	return assets, placements
+}
+
+func graphicsSourceKey(state *capturedRenderState, paneID layout.PaneID, stableID domain.PaneStableID, floating bool) string {
+	kind := "pane"
+	if floating {
+		kind = "floating"
+	}
+	if stableID == "" {
+		stableID = domain.PaneStableID(paneID)
+	}
+	return fmt.Sprintf("%s:%q:%x:%q:%q:%q", kind, string(state.sessionID), state.incarnation, string(state.view.tabID), string(stableID), string(paneID))
+}
+
+func mergeGraphicsRecords(dstAssets map[string]graphics.AssetView, dstPlacements map[string]graphicsOutputPlacement, assets map[string]graphics.AssetView, placements map[string]graphicsOutputPlacement, transform graphicsOutputTransform) {
+	for key, asset := range assets {
+		dstAssets[key] = asset
+	}
+	for key, placement := range placements {
+		placement.transform = transform
+		placement.transformSet = true
+		dstPlacements[key] = placement
+	}
+}
+
+// paneGraphicsViewports returns pane content minus each opaque coverage
+// rectangle. Each subtraction is ordered top, bottom, left, right, so a union
+// of clipped fragments remains deterministic.
+func graphicsOpaqueCoverage(state *capturedRenderState) []domain.Rect {
+	if state == nil {
+		return nil
+	}
+	coverage := make([]domain.Rect, 0, 1+len(state.overlays.notices))
+	if state.floating.visible && state.floating.geometry.Bounds.Width > 0 && state.floating.geometry.Bounds.Height > 0 {
+		coverage = append(coverage, state.floating.geometry.Bounds)
+	}
+	if len(state.overlays.notices) == 0 && state.overlays.noticeOverflow == 0 {
+		return coverage
+	}
+	width, rows := state.layout.area.Width, state.layout.area.Height
+	if state.window.Valid() {
+		window := contentSize(state.window)
+		width, rows = window.Cols, window.Rows
+	}
+	height := rows + tabChromeRows
+	if width <= 0 || height <= 0 {
+		for _, pane := range state.panes {
+			if pane.placement.Content.X+pane.placement.Content.Width > width {
+				width = pane.placement.Content.X + pane.placement.Content.Width
+			}
+			if pane.placement.Content.Y+pane.placement.Content.Height+tabChromeRows > height {
+				height = pane.placement.Content.Y + pane.placement.Content.Height + tabChromeRows
+			}
+		}
+	}
+	if width <= 0 || height <= 0 {
+		return coverage
+	}
+	styles := state.styles
+	if styles == (themeui.Styles{}) {
+		styles = fallbackChromeStyles
+	}
+	frame := renderer.NewFrame(width, height)
+	for _, footprint := range composeCapturedNotices(state.overlays, frame, styles) {
+		// Notices are laid out in complete-frame coordinates. The graphics
+		// content origin is one row below that frame's top bar.
+		footprint.Y--
+		coverage = append(coverage, footprint)
+	}
+	return coverage
+}
+
+func paneGraphicsViewports(content domain.Rect, geometry domain.Geometry, coverage []domain.Rect) []graphics.Viewport {
+	full := domain.Rect{Width: content.Width, Height: content.Height}
+	if content.Width <= 0 || content.Height <= 0 {
+		return nil
+	}
+	regions := []domain.Rect{full}
+	for _, opaque := range coverage {
+		cover, ok := intersectGraphicsDomainRect(content, opaque)
+		if !ok {
+			continue
+		}
+		cover.X -= content.X
+		cover.Y -= content.Y
+		next := make([]domain.Rect, 0, len(regions)*4)
+		for _, region := range regions {
+			localCover, intersects := intersectGraphicsDomainRect(region, cover)
+			if !intersects {
+				next = append(next, region)
+				continue
+			}
+			next = append(next, subtractGraphicsDomainRect(region, localCover)...)
+		}
+		regions = next
+		if len(regions) == 0 {
+			break
+		}
+	}
+	viewports := make([]graphics.Viewport, 0, len(regions))
+	for _, region := range regions {
+		if region.Width <= 0 || region.Height <= 0 {
+			continue
+		}
+		viewport, valid := graphicsOutputViewportRect(region, geometry)
+		if valid {
+			viewports = append(viewports, viewport)
+		}
+	}
+	return viewports
+}
+
+func subtractGraphicsDomainRect(region, cover domain.Rect) []domain.Rect {
+	return []domain.Rect{
+		{X: region.X, Y: region.Y, Width: region.Width, Height: cover.Y - region.Y},
+		{X: region.X, Y: cover.Y + cover.Height, Width: region.Width, Height: region.Y + region.Height - (cover.Y + cover.Height)},
+		{X: region.X, Y: cover.Y, Width: cover.X - region.X, Height: cover.Height},
+		{X: cover.X + cover.Width, Y: cover.Y, Width: region.X + region.Width - (cover.X + cover.Width), Height: cover.Height},
+	}
+}
+
+func intersectGraphicsDomainRect(a, b domain.Rect) (domain.Rect, bool) {
+	left, top := a.X, a.Y
+	if b.X > left {
+		left = b.X
+	}
+	if b.Y > top {
+		top = b.Y
+	}
+	right, bottom := a.X+a.Width, a.Y+a.Height
+	if b.X+b.Width < right {
+		right = b.X + b.Width
+	}
+	if b.Y+b.Height < bottom {
+		bottom = b.Y + b.Height
+	}
+	if right <= left || bottom <= top {
+		return domain.Rect{}, false
+	}
+	return domain.Rect{X: left, Y: top, Width: right - left, Height: bottom - top}, true
+}
+
 func graphicsOutputDataWithDaemon(d *Daemon, state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
 	if ac == nil || ac.graphicsOutput == nil || state == nil || !ac.terminalCapabilities.SupportsKittyGraphics() {
 		return nil, nil
 	}
-	// Phase 5 composes one pane only. A Kitty attachment still receives the
-	// ordinary text composition for other layouts, but never receives graphics
-	// whose coordinates would need a multipane transform.
-	transform := graphicsOutputTransform{}
-	snapshot := (*graphics.Snapshot)(nil)
-	var viewport graphics.Viewport
-	var hasViewport bool
-	if len(state.panes) == 1 && !state.floating.visible {
-		pane := state.panes[0]
-		if !pane.placement.Collapsed && pane.placement.Content.Width > 0 && pane.placement.Content.Height > 0 {
-			snapshot = pane.graphics
-			transform = graphicsOutputTransform{
-				originX:        pane.placement.Content.X,
-				originY:        pane.placement.Content.Y + 1,
-				sourceGeometry: pane.graphicsGeometry,
-			}
-			viewport, hasViewport = graphicsOutputViewport(pane.placement.Content, pane.graphicsGeometry)
-		}
-	}
-	if hasViewport {
-		prepared, err := ac.graphicsOutput.prepareWithTransform(snapshot, reset, transform, viewport)
-		if errors.Is(err, errGraphicsIDExhausted) {
-			d.disableGraphicsOutput(ac)
-			return nil, nil
-		}
-		if !errors.Is(err, errGraphicsOutputTooLarge) {
-			return prepared, err
-		}
-		prepared, err = ac.graphicsOutput.prepareWithTransform(nil, reset, transform, viewport)
-		if errors.Is(err, errGraphicsIDExhausted) {
-			d.disableGraphicsOutput(ac)
-			return nil, nil
-		}
-		return prepared, err
-	}
-	prepared, err := ac.graphicsOutput.prepareWithTransform(snapshot, reset, transform)
+	assets, placements := composedGraphicsRecords(state)
+	prepared, err := ac.graphicsOutput.prepareWithRecords(assets, placements, reset, graphicsOutputTransform{})
 	if errors.Is(err, errGraphicsIDExhausted) {
 		d.disableGraphicsOutput(ac)
 		return nil, nil
@@ -895,7 +1157,7 @@ func graphicsOutputDataWithDaemon(d *Daemon, state *capturedRenderState, ac *att
 	// budget, suppress it and still return the bounded cleanup for objects that
 	// were already proven to be owned by this attachment. ANSI composition is
 	// prepared and emitted by the caller independently.
-	prepared, err = ac.graphicsOutput.prepareWithTransform(nil, reset, transform)
+	prepared, err = ac.graphicsOutput.prepareWithRecords(nil, nil, reset, graphicsOutputTransform{})
 	if errors.Is(err, errGraphicsIDExhausted) {
 		d.disableGraphicsOutput(ac)
 		return nil, nil
