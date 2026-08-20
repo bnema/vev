@@ -528,24 +528,15 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 }
 
 func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
-	tr, err, _ := d.boundedSendOutputErrLifecycle(ac, b)
-	return tr, err
-}
-
-// boundedSendOutputErrLifecycle is the cleanup-specific output send boundary.
-// A timeout returns the transport and a completion channel for the still-live
-// send goroutine. Callers that retire externally visible IDs must keep their
-// namespace fenced until that channel reports success or failure.
-func (d *Daemon) boundedSendOutputErrLifecycle(ac *attachedClient, b []byte) (ports.Transport, error, <-chan error) {
 	expected := ac.transportSnapshot()
 	if expected.transport == nil {
-		return nil, errors.New("client transport is nil"), nil
+		return nil, errors.New("client transport is nil")
 	}
 	if owned, ok := expected.transport.(ports.OwnedSynchronousTransport); ok {
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
 		if !ac.transportSnapshotCurrent(expected) {
-			return expected.transport, errTransportReplaced, nil
+			return expected.transport, errTransportReplaced
 		}
 		if ac.parkedRouteOutput.Load() || ac.parkedRouteFullPending.Load() {
 			return expected.transport, nil
@@ -556,9 +547,9 @@ func (d *Daemon) boundedSendOutputErrLifecycle(ac *attachedClient, b []byte) (po
 		if err == nil {
 			err = owned.SendSynchronous(frame)
 		}
-		return expected.transport, err, nil
+		return expected.transport, err
 	}
-	return d.boundedSendWithCompletion(detachNotifyTimeout, expected.transport, func() error {
+	return d.boundedSendWith(expected.transport, func() error {
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
 		if !ac.transportSnapshotCurrent(expected) {
@@ -584,11 +575,6 @@ func (d *Daemon) boundedSendWith(tr ports.Transport, send func() error) (ports.T
 }
 
 func (d *Daemon) boundedSendWithTimeout(timeout time.Duration, tr ports.Transport, send func() error) (ports.Transport, error) {
-	used, err, _ := d.boundedSendWithCompletion(timeout, tr, send)
-	return used, err
-}
-
-func (d *Daemon) boundedSendWithCompletion(timeout time.Duration, tr ports.Transport, send func() error) (ports.Transport, error, <-chan error) {
 	timer := d.clock.NewTimer(timeout)
 	result := make(chan error, 1)
 	go func() {
@@ -597,15 +583,15 @@ func (d *Daemon) boundedSendWithCompletion(timeout time.Duration, tr ports.Trans
 	select {
 	case err := <-result:
 		timer.Stop()
-		return tr, err, nil
+		return tr, err
 	case <-timer.C():
 		select {
 		case err := <-result:
-			return tr, err, nil
+			return tr, err
 		default:
 		}
 		d.log.Warn("bounded send timed out; force closing client transport")
-		return tr, errSendTimedOut, result
+		return tr, errSendTimedOut
 	}
 }
 
@@ -733,6 +719,11 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.Transport, 
 	if opts.terminalCapabilities.SupportsKittyGraphics() {
 		if namespace, fence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, opts.clientID)); namespace != 0 {
 			graphicsOutput = newGraphicsOutputStateWithLease(namespace, fence)
+		} else {
+			// Namespace leases that may have emitted are never reused without a
+			// terminal ACK. The bounded pool therefore fails closed to the normal
+			// text renderer instead of risking another attachment's objects.
+			opts.terminalCapabilities.KittyGraphics = false
 		}
 	}
 	ac := &attachedClient{

@@ -226,6 +226,100 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	require.True(t, reserved, "failed terminal cleanup must quarantine the namespace")
 }
 
+func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalFlush(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	key := "session:unflushed:attachment"
+	d.mu.Lock()
+	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+	d.mu.Unlock()
+
+	state := newGraphicsOutputStateWithLease(oldBase, oldFence)
+	seed, err := state.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	seed.markSendAttempted()
+	seed.commit()
+
+	// This transport models only successful delivery to the client socket. It
+	// deliberately provides no evidence that the client flushed the side effect
+	// to its outer terminal before being lost.
+	transport := &closeTrackingTransport{}
+	ac := &attachedClient{tr: transport, output: newOutputStateStream(), graphicsOutput: state}
+	d.cleanupGraphicsOutput(ac)
+	require.Nil(t, ac.graphicsOutput)
+	sends := transport.Sends()
+	require.Len(t, sends, 1)
+	cleanup, err := ports.UnmarshalOutput(sends[0].Payload)
+	require.NoError(t, err)
+	require.Zero(t, cleanup.New, "graphics cleanup is an unacknowledged side-effect frame")
+
+	d.mu.Lock()
+	_, quarantined := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
+	d.mu.Unlock()
+	require.True(t, quarantined, "socket-send success cannot prove terminal cleanup")
+	require.NotEqual(t, oldBase, newBase, "an unflushed cleanup must not expose the old IDs to another attachment")
+}
+
+func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	key := "session:empty-park:attachment"
+	d.mu.Lock()
+	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(key)
+	d.mu.Unlock()
+
+	state := newGraphicsOutputStateWithLease(oldBase, oldFence)
+	seed, err := state.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	seed.markSendAttempted()
+	seed.commit()
+	finalDelete, err := state.prepare(nil, false)
+	require.NoError(t, err)
+	require.NotEmpty(t, finalDelete.data)
+	finalDelete.markSendAttempted()
+	finalDelete.commit()
+	require.Empty(t, state.assets)
+	require.Empty(t, state.placements)
+
+	parked := &parkedAttachment{
+		sess: &session{sessionCore: sessionCore{name: "parked"}},
+		ac:   &attachedClient{graphicsOutput: state},
+		done: make(chan struct{}),
+	}
+	d.mu.Lock()
+	d.parked[1] = parked
+	d.mu.Unlock()
+	d.expireParked(1, parked)
+
+	d.mu.Lock()
+	_, quarantined := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	newBase, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
+	d.mu.Unlock()
+	require.True(t, quarantined, "an apparently empty parked state still has unacknowledged terminal history")
+	require.NotEqual(t, oldBase, newBase, "park expiry must not recycle IDs after the final delete")
+}
+
+func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.mu.Lock()
+	for block := uint64(0); block < graphicsIDNamespaceCount; block++ {
+		d.graphicsNamespaces[block] = struct{}{}
+	}
+	ac := d.prepareAttachedClientLocked(
+		&session{sessionCore: sessionCore{id: "work"}},
+		&closeTrackingTransport{},
+		domain.Geometry{Size: defaultSize},
+		attachClientOptions{
+			capabilitiesSet:      true,
+			terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true, ColorMode: ports.TerminalColorTrueColor},
+		},
+	)
+	d.mu.Unlock()
+
+	require.Nil(t, ac.graphicsOutput)
+	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
+	require.NotNil(t, ac.output, "namespace exhaustion must preserve the ordinary text renderer")
+}
+
 func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, nil, clock)
@@ -281,12 +375,10 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
 	require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")
-	require.Eventually(t, func() bool {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		_, retained := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
-		return !retained
-	}, time.Second, time.Millisecond)
+	d.mu.Lock()
+	_, retained := d.graphicsNamespaceQuarantines[(oldBase-1)/graphicsIDNamespaceSize]
+	d.mu.Unlock()
+	require.True(t, retained, "late transport success is not a terminal ACK and must not release the namespace")
 }
 
 func TestGraphicsOutputKeysIncludeSourceSceneContent(t *testing.T) {

@@ -110,9 +110,10 @@ type Daemon struct {
 	notifies []chan struct{}
 	parked   map[uint64]*parkedAttachment
 	// graphicsNamespaces reserves deterministic, attachment/session-scoped Kitty
-	// ID blocks until their outer objects have been retired. Quarantined blocks
-	// remain in this bounded table until an ambiguous cleanup has completed
-	// successfully; failed or unsent cleanup is quarantined permanently.
+	// ID blocks. Once a block may have reached an outer terminal it remains in
+	// this bounded table for the daemon lifetime: side-effect Output frames have
+	// no terminal ACK. Pool exhaustion disables graphics for new attachments and
+	// leaves their ordinary text output intact.
 	graphicsNamespaces           map[uint64]struct{}
 	graphicsNamespaceFences      map[uint64]uint64
 	graphicsNamespaceQuarantines map[uint64]*graphicsNamespaceQuarantine
