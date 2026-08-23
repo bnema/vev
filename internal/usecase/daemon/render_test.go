@@ -463,6 +463,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 
 		steps <- channelPTYStep{err: io.EOF}
 		d.sessWg.Wait()
+		d.waitNotifies()
 	})
 
 	t.Run("headless pane without a preview stays quiet on completion", func(t *testing.T) {
