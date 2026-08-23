@@ -170,6 +170,7 @@ func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentConnectionTok
 }
 
 func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed ports.Transport) {
+	ac.clearSamePeerOffer()
 	name := sess.nameSnapshot()
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)

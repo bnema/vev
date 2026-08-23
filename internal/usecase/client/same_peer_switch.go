@@ -14,6 +14,8 @@ type samePeerInputGate struct {
 	mu      sync.Mutex
 	paused  bool
 	changed chan struct{}
+	// afterInputHeld is a deterministic test synchronization seam.
+	afterInputHeld func()
 }
 
 type samePeerSwitchPending struct {
@@ -38,14 +40,18 @@ func (g *samePeerInputGate) setPaused(paused bool) {
 	g.mu.Unlock()
 }
 
-func (g *samePeerInputGate) wait(ctx context.Context) bool {
+func (g *samePeerInputGate) snapshot() (bool, <-chan struct{}) {
 	if g == nil {
-		return true
+		return false, nil
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.paused, g.changed
+}
+
+func (g *samePeerInputGate) wait(ctx context.Context) bool {
 	for {
-		g.mu.Lock()
-		paused, changed := g.paused, g.changed
-		g.mu.Unlock()
+		paused, changed := g.snapshot()
 		if !paused {
 			return true
 		}

@@ -15,36 +15,59 @@ func samePeerSwitchTarget() ExactSessionTarget {
 
 func TestSamePeerSwitchWireStrict(t *testing.T) {
 	request := SamePeerSwitchRequest{RequestID: 7, Target: samePeerSwitchTarget(), PreferredTabID: "tab-2"}
-	payload, err := MarshalSamePeerSwitchRequest(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := append([]byte{0, 0, 0, 0, 0, 0, 0, 7, 9}, make([]byte, 15)...)
-	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 0, 5, 't', 'a', 'b', '-', '2')
-	if !bytes.Equal(payload, want) {
-		t.Fatalf("request payload = %x, want %x", payload, want)
-	}
-	decoded, err := UnmarshalSamePeerSwitchRequest(payload)
-	if err != nil || decoded != request {
-		t.Fatalf("request = %+v, error = %v, want %+v", decoded, err, request)
-	}
-	assertAllPrefixesFail(t, payload, UnmarshalSamePeerSwitchRequest)
-	assertTrailingGarbageFails(t, payload, UnmarshalSamePeerSwitchRequest)
-
+	requestWire := append([]byte{0, 0, 0, 0, 0, 0, 0, 7, 9}, make([]byte, 15)...)
+	requestWire = append(requestWire, 0, 4, 'w', 'o', 'r', 'k', 0, 5, 't', 'a', 'b', '-', '2')
 	failure := SamePeerSwitchFailure{RequestID: 7, Code: SamePeerSwitchStaleTarget}
-	failurePayload, err := MarshalSamePeerSwitchFailure(failure)
-	if err != nil {
-		t.Fatal(err)
+
+	for _, tt := range []struct {
+		name    string
+		want    []byte
+		marshal func() ([]byte, error)
+		decode  func([]byte) (any, error)
+		assert  func(*testing.T, any)
+	}{
+		{
+			name:    "request",
+			want:    requestWire,
+			marshal: func() ([]byte, error) { return MarshalSamePeerSwitchRequest(request) },
+			decode:  func(payload []byte) (any, error) { return UnmarshalSamePeerSwitchRequest(payload) },
+			assert: func(t *testing.T, decoded any) {
+				t.Helper()
+				if got := decoded.(SamePeerSwitchRequest); got != request {
+					t.Fatalf("request = %+v, want %+v", got, request)
+				}
+			},
+		},
+		{
+			name:    "failure",
+			want:    []byte{0, 0, 0, 0, 0, 0, 0, 7, 1},
+			marshal: func() ([]byte, error) { return MarshalSamePeerSwitchFailure(failure) },
+			decode:  func(payload []byte) (any, error) { return UnmarshalSamePeerSwitchFailure(payload) },
+			assert: func(t *testing.T, decoded any) {
+				t.Helper()
+				if got := decoded.(SamePeerSwitchFailure); got != failure {
+					t.Fatalf("failure = %+v, want %+v", got, failure)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(payload, tt.want) {
+				t.Fatalf("payload = %x, want %x", payload, tt.want)
+			}
+			decoded, err := tt.decode(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.assert(t, decoded)
+			assertAllPrefixesFail(t, payload, tt.decode)
+			assertTrailingGarbageFails(t, payload, tt.decode)
+		})
 	}
-	if want := []byte{0, 0, 0, 0, 0, 0, 0, 7, 1}; !bytes.Equal(failurePayload, want) {
-		t.Fatalf("failure payload = %x, want %x", failurePayload, want)
-	}
-	decodedFailure, err := UnmarshalSamePeerSwitchFailure(failurePayload)
-	if err != nil || decodedFailure != failure {
-		t.Fatalf("failure = %+v, error = %v, want %+v", decodedFailure, err, failure)
-	}
-	assertAllPrefixesFail(t, failurePayload, UnmarshalSamePeerSwitchFailure)
-	assertTrailingGarbageFails(t, failurePayload, UnmarshalSamePeerSwitchFailure)
 }
 
 func TestSamePeerSwitchWireRejectsInvalidValues(t *testing.T) {

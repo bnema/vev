@@ -53,6 +53,18 @@ func TestSamePeerSwitchTransitionsExactTargetAndPreferredTab(t *testing.T) {
 	require.Equal(t, ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, identity.Target)
 }
 
+func TestFinishSendErrorDetachClearsSamePeerOffer(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 1)
+	defer releaseAll(releases)
+	ac.offerSamePeerTarget(ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "target"})
+
+	d.finishSendErrorDetach(sess, ac, ac.transport())
+
+	ac.samePeerOfferMu.Lock()
+	defer ac.samePeerOfferMu.Unlock()
+	require.Nil(t, ac.samePeerOffer)
+}
+
 func TestSamePeerSwitchRejectsStaleTargetWithoutMutation(t *testing.T) {
 	d, source, ac, sends, releases := newManualTabSession(t, 1)
 	defer releaseAll(releases)
