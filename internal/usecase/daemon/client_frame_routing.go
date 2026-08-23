@@ -126,6 +126,13 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		if _, derr := ports.UnmarshalOutputResetRequest(f.Payload); derr == nil {
 			d.resetOutput(token)
 		}
+	case ports.MsgSamePeerSwitchRequest:
+		request, derr := ports.UnmarshalSamePeerSwitchRequest(f.Payload)
+		if derr != nil {
+			d.log.Warn("malformed same-peer switch request", "err", derr)
+			break
+		}
+		d.switchSamePeerForAttachment(token, request)
 	case ports.MsgRecentRouteSnapshot:
 		snapshot, derr := ports.UnmarshalRecentRouteSnapshot(f.Payload)
 		if derr != nil {

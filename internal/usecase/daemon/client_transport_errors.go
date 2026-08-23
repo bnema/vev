@@ -65,6 +65,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	if sess == nil || ac == nil {
 		return
 	}
+	ac.clearSamePeerOffer()
 	if d.afterClientGoneDetach != nil {
 		d.afterClientGoneDetach()
 	}

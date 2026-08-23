@@ -7,10 +7,14 @@
 package ports
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"sync"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
@@ -29,9 +33,25 @@ var errInvalidBoolean = errors.New("ports: invalid boolean flag")
 var errInvalidEnum = errors.New("ports: invalid enum value")
 
 const (
-	outputHeaderLen       = 5*8 + 2*2 + 1
-	outputPayloadOverhead = outputHeaderLen + 4
+	outputHeaderLen            = 5*8 + 2*2 + 1
+	outputCompressionHeaderLen = 1 + 4
+	outputPayloadOverhead      = outputHeaderLen + outputCompressionHeaderLen + 4
+	// outputCompressionThreshold keeps small snapshots on the canonical path.
+	outputCompressionThreshold = 1024
 )
+
+const (
+	outputCompressionNone byte = iota
+	outputCompressionZlib
+)
+
+var outputCompressorPool = sync.Pool{New: func() any {
+	writer, err := zlib.NewWriterLevel(io.Discard, zlib.BestSpeed)
+	if err != nil {
+		panic(err)
+	}
+	return writer
+}}
 
 // ErrInvalidSize reports a terminal size that cannot be represented by the
 // protocol or would exceed the bounded screen area.
@@ -1402,9 +1422,14 @@ func UnmarshalErrorMsg(b []byte) (ErrorMsg, error) {
 }
 
 // MarshalOutput encodes m into the epoch/base/new/echo/viewRevision/
-// size/full/data message layout.
+// size/full/compression/decoded-length/data message layout. Compression is
+// limited to large, full snapshots and is retained only when it saves bytes.
 func MarshalOutput(m Output) ([]byte, error) {
 	if err := ValidateOutput(m); err != nil {
+		return nil, err
+	}
+	kind, data, err := compressOutputData(m)
+	if err != nil {
 		return nil, err
 	}
 	w := payloadWriter{}
@@ -1416,12 +1441,37 @@ func MarshalOutput(m Output) ([]byte, error) {
 	w.putUint16(uint16(m.Size.Cols))
 	w.putUint16(uint16(m.Size.Rows))
 	w.putBool(m.Full)
-	w.putLongBytes(m.Data)
+	w.putUint8(kind)
+	w.putUint32(uint32(len(m.Data)))
+	w.putLongBytes(data)
 	return w.b, nil
 }
 
+func compressOutputData(m Output) (byte, []byte, error) {
+	if !m.Full || len(m.Data) < outputCompressionThreshold {
+		return outputCompressionNone, m.Data, nil
+	}
+	var compressed bytes.Buffer
+	writer := outputCompressorPool.Get().(*zlib.Writer)
+	writer.Reset(&compressed)
+	defer func() {
+		writer.Reset(io.Discard)
+		outputCompressorPool.Put(writer)
+	}()
+	if _, err := writer.Write(m.Data); err != nil {
+		return 0, nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return 0, nil, err
+	}
+	if compressed.Len()+outputCompressionHeaderLen >= len(m.Data) {
+		return outputCompressionNone, m.Data, nil
+	}
+	return outputCompressionZlib, compressed.Bytes(), nil
+}
+
 // UnmarshalOutput strictly decodes one final Output payload. Header semantics
-// are validated before the length-prefixed data is copied.
+// are validated before its bounded decoded data allocation.
 func UnmarshalOutput(b []byte) (Output, error) {
 	if len(b) > MaxFrameLen-1 {
 		return Output{}, ErrInvalidOutput
@@ -1462,15 +1512,16 @@ func UnmarshalOutput(b []byte) (Output, error) {
 	if err := ValidateOutput(m); err != nil {
 		return Output{}, err
 	}
-	if len(r.b) < 4 {
-		return Output{}, errShortPayload
+	kind, err := r.getUint8()
+	if err != nil {
+		return Output{}, err
 	}
-	dataLen := binary.BigEndian.Uint32(r.b)
-	if uint64(dataLen) > uint64(len(r.b)-4) {
-		return Output{}, errShortPayload
+	decodedLen, err := r.getUint32()
+	if err != nil {
+		return Output{}, err
 	}
-	if uint64(dataLen) < uint64(len(r.b)-4) {
-		return Output{}, errTrailingBytes
+	if int64(decodedLen) > int64(MaxFrameLen-1-outputPayloadOverhead) {
+		return Output{}, ErrInvalidOutput
 	}
 	data, err := r.getLongBytes()
 	if err != nil {
@@ -1479,8 +1530,55 @@ func UnmarshalOutput(b []byte) (Output, error) {
 	if err := r.done(); err != nil {
 		return Output{}, err
 	}
-	m.Data = data
+	switch kind {
+	case outputCompressionNone:
+		if uint32(len(data)) != decodedLen {
+			return Output{}, ErrInvalidOutput
+		}
+		m.Data = data
+	case outputCompressionZlib:
+		if !m.Full {
+			return Output{}, ErrInvalidOutput
+		}
+		m.Data, err = decompressOutputData(data, int(decodedLen))
+		if err != nil {
+			return Output{}, ErrInvalidOutput
+		}
+	default:
+		return Output{}, errInvalidEnum
+	}
+	if err := ValidateOutput(m); err != nil {
+		return Output{}, err
+	}
 	return m, nil
+}
+
+func decompressOutputData(data []byte, decodedLen int) ([]byte, error) {
+	source := bytes.NewReader(data)
+	reader, err := zlib.NewReader(source)
+	if err != nil {
+		return nil, err
+	}
+	decoded := make([]byte, decodedLen)
+	if _, err := io.ReadFull(reader, decoded); err != nil {
+		_ = reader.Close()
+		return nil, err
+	}
+	var extra [1]byte
+	if n, err := reader.Read(extra[:]); n != 0 || err != io.EOF {
+		_ = reader.Close()
+		if err == nil {
+			return nil, errors.New("ports: compressed output exceeds declared length")
+		}
+		return nil, err
+	}
+	if err := reader.Close(); err != nil {
+		return nil, err
+	}
+	if source.Len() != 0 {
+		return nil, errors.New("ports: compressed output has trailing bytes")
+	}
+	return decoded, nil
 }
 
 // MarshalAttachTarget encodes a strict server attach-target payload.

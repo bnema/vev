@@ -87,6 +87,25 @@ For a bounded local check, add `--scenario 1x4-idle-local`. The harness still
 validates the complete manifest before selecting that scenario. Do not commit
 result directories; raw traces and run manifests are the measurement evidence.
 
+## Output snapshot encoding
+
+Full state-bearing output snapshots larger than 1 KiB are encoded with
+standard-library zlib only when the compressed representation is smaller.
+Incremental output, small snapshots, and incompressible snapshots remain
+uncompressed. The wire carries a closed compression kind and exact decoded
+length; decoding rejects unknown kinds, truncation, trailing bytes, integrity
+failures, and output beyond the frame bound.
+
+Measure the representative snapshot encoder with:
+
+```sh
+go test ./internal/ports -run '^$' -bench '^BenchmarkMarshalOutput$' -benchmem
+```
+
+The benchmark reports source throughput, encoded bytes, allocations, and time
+for empty and styled `120×40` snapshots plus a styled `200×60` snapshot. It is
+an encoder benchmark, not a mobile-link latency measurement.
+
 ## In-process checks
 
 These commands measure local daemon or VT work only, not end-to-end transport

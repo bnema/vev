@@ -41,6 +41,16 @@ client republishes its snapshot. These navigation actions use the strict,
 exact-match protocol version. Attach handshakes may carry an exact target, and
 successful Welcomes can return the daemon's committed identity.
 
+Selecting an ordinary active session row on the daemon already serving the
+attachment uses an in-band switch. The daemon first offers an endpoint-empty,
+exact lifecycle target; the client confirms it with its remembered stable tab
+cursor while holding raw input. The daemon either commits the fenced attachment
+transition and publishes the committed identity before the rebased full paint,
+or sends a typed pre-commit rejection and leaves the source attachment usable.
+No hostname, label, DNS result, or SSH alias authorizes reuse. Stopped,
+explicit-tab, cross-origin, and remote-to-remote selections retain direct
+close-and-dial handoff.
+
 ## Durable record compatibility
 
 Catalogue record format version 5 stores the protocol version alongside stable
@@ -84,6 +94,11 @@ picker selection changes.
 - The UDP carriage authenticates and retransmits protocol frames, preserves
   frame order, and reports bounded link-health state without logging payloads,
   addresses, keys, or identities.
+- Large full output snapshots use bounded zlib compression when it reduces the
+  wire payload. Incremental output and non-beneficial snapshots retain their
+  canonical encoding. The protocol validates the compression kind, declared
+  decoded length, stream integrity, and trailing bytes before terminal output
+  is applied.
 - The attachment reconnects with its resume token after a path change. The
   remote session and its PTYs remain in place while the attachment is offline.
 

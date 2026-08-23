@@ -17,7 +17,7 @@ func remoteLifecycleForTest() domain.SessionLifecycleID {
 	return id
 }
 
-func TestLocalPickerHandoffCarriesExactLifecycle(t *testing.T) {
+func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "source")
 	target, _, _ := addRemoteRefreshPickerOwner(t, d, "target")
@@ -35,7 +35,7 @@ func TestLocalPickerHandoffCarriesExactLifecycle(t *testing.T) {
 	require.Empty(t, got.Endpoint)
 	require.Equal(t, ports.IntentAttach, got.Intent)
 	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: target.name}, got.ExactTarget)
-	require.Nil(t, ac.currentAttachmentSession())
+	require.Same(t, source, ac.currentAttachmentSession(), "the source remains attached until the client confirms the switch")
 }
 
 func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {

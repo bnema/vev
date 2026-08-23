@@ -3,8 +3,8 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 32 {
-		t.Fatalf("ProtocolVersion = %d, want 32", ProtocolVersion)
+	if ProtocolVersion != 33 {
+		t.Fatalf("ProtocolVersion = %d, want 33", ProtocolVersion)
 	}
 }
 

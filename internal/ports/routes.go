@@ -230,6 +230,56 @@ type RouteNavigationAction struct {
 	Generation         uint64
 }
 
+// SamePeerSwitchRequest confirms a daemon-offered endpoint-empty target. It
+// carries only the exact lifecycle identity and the client-owned tab cursor;
+// transport origin remains proven by the existing authenticated connection.
+type SamePeerSwitchRequest struct {
+	RequestID      uint64
+	Target         ExactSessionTarget
+	PreferredTabID domain.TabStableID
+}
+
+func (r SamePeerSwitchRequest) Validate() error {
+	if r.RequestID == 0 {
+		return ErrInvalidRouteWire
+	}
+	if err := r.Target.Validate(); err != nil {
+		return ErrInvalidRouteWire
+	}
+	if r.PreferredTabID != "" {
+		if err := domain.ValidateTabStableID(r.PreferredTabID); err != nil {
+			return ErrInvalidRouteWire
+		}
+	}
+	return nil
+}
+
+// SamePeerSwitchFailureCode is a closed pre-commit rejection taxonomy.
+type SamePeerSwitchFailureCode uint8
+
+const (
+	SamePeerSwitchStaleTarget SamePeerSwitchFailureCode = iota + 1
+	SamePeerSwitchUnavailable
+)
+
+func (c SamePeerSwitchFailureCode) valid() bool {
+	return c == SamePeerSwitchStaleTarget || c == SamePeerSwitchUnavailable
+}
+
+// SamePeerSwitchFailure leaves the source attachment unchanged. RequestID
+// rejects a delayed failure after a later user selection.
+type SamePeerSwitchFailure struct {
+	RequestID uint64
+	Code      SamePeerSwitchFailureCode
+}
+
+func (f SamePeerSwitchFailure) Validate() error {
+	if f.RequestID == 0 || !f.Code.valid() {
+		return ErrInvalidRouteWire
+	}
+	return nil
+}
+
 // RouteNavigationFailure is a bounded taxonomy for a rejected or stale route
 // action. User-facing text remains local to the receiving client.
 type RouteNavigationFailure struct {

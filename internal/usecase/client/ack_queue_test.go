@@ -31,7 +31,7 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 	defer cancel()
 	tr := &ackRecordingTransport{sent: make(chan ports.Frame, sendQueueDepth+1)}
 	errCh := make(chan error, 1)
-	go runSender(ctx, cancel, tr, normal, acks, errCh, slog.Default())
+	go runSender(ctx, cancel, tr, normal, nil, acks, errCh, slog.Default())
 
 	first := <-tr.sent
 	require.Equal(t, ports.MsgAck, first.Type)

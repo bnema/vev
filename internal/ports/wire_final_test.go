@@ -11,8 +11,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 32 {
-		t.Fatalf("ProtocolVersion = %d, want 32", ProtocolVersion)
+	if ProtocolVersion != 33 {
+		t.Fatalf("ProtocolVersion = %d, want 33", ProtocolVersion)
 	}
 	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -26,7 +26,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 32, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 33, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
@@ -99,6 +99,7 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 		0, 0, 0, 0, 0, 0, 0, 8,
 		0, 0, 0, 0, 0, 0, 0, 9,
 		0, 80, 0, 24, 1,
+		0, 0, 0, 0, 2,
 		0, 0, 0, 2, 'o', 'k',
 	}
 	got, err := MarshalOutput(msg)
@@ -140,7 +141,7 @@ func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
 		{name: "size zero", mutate: func(b []byte) { binary.BigEndian.PutUint16(b[40:42], 0) }},
 		{name: "full flag false for reset", mutate: func(b []byte) { b[44] = 0 }},
 		{name: "invalid bool", mutate: func(b []byte) { b[44] = 2 }},
-		{name: "impossible data length", mutate: func(b []byte) { binary.BigEndian.PutUint32(b[45:49], ^uint32(0)) }},
+		{name: "impossible data length", mutate: func(b []byte) { binary.BigEndian.PutUint32(b[50:54], ^uint32(0)) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bad := append([]byte(nil), payload...)
