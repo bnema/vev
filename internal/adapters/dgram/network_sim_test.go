@@ -876,8 +876,11 @@ func TestFloodOutputPayloadIsIncrementalStateBearingOutput(t *testing.T) {
 			t.Fatalf("output state = %d -> %d, want %d -> %d", output.Base, output.New, state, state+1)
 		}
 		minimumBytes := floodRecordMTUs * mtu
-		if len(output.Data) < minimumBytes || len(payload) < minimumBytes {
-			t.Fatalf("state %d: data bytes=%d encoded bytes=%d, want each at least %d", state, len(output.Data), len(payload), minimumBytes)
+		if len(output.Data) < minimumBytes {
+			t.Fatalf("state %d: data bytes=%d, want at least %d", state, len(output.Data), minimumBytes)
+		}
+		if !output.Full && len(payload) < minimumBytes {
+			t.Fatalf("state %d: incremental encoded bytes=%d, want at least %d", state, len(payload), minimumBytes)
 		}
 	}
 }

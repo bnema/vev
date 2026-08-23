@@ -484,12 +484,10 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 			Session: "second", Intent: ports.IntentAttach, ExactTarget: &secondTarget,
 			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 		}))},
-	}}
-	second := &recordingTransport{recvs: []recvItem{
-		{f: welcome("second", secondLifecycle)},
+		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(ports.CommittedRouteIdentity{Target: secondTarget}))},
 		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
 	}}
-	dialer := &sequenceDialer{trs: []ports.Transport{first, second}}
+	dialer := &sequenceDialer{trs: []ports.Transport{first}}
 
 	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
 		Intent: ports.IntentAttach, SessionName: "first",
@@ -498,10 +496,7 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	hello := helloFromSend(t, second)
-	require.Equal(t, "second", hello.Name)
-	require.Equal(t, ports.EnvironmentPolicyClientOwned, hello.EnvironmentPolicy)
-	require.Nil(t, hello.RemoteTarget)
+	require.Equal(t, int32(1), dialer.calls.Load(), "same-peer switching must not dial a replacement transport")
 }
 
 func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {

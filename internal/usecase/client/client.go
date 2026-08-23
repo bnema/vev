@@ -1197,6 +1197,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	defer revokeInputClaim()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
+	controlCh := make(chan ports.Frame, 1)
+	inputGate := newSamePeerInputGate()
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 	senderStarted := false
@@ -1307,6 +1309,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	awaitingReconnectReset := false
 	outputState := outputApplyState{}
 	outputResetRequested := false
+	var samePeerSwitch *samePeerSwitchPending
+	var nextSamePeerRequestID uint64
 	if reconnect.showing {
 		if reconnect.remote {
 			// Before the asynchronous sender starts, preserve transport ordering by
@@ -1335,7 +1339,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// or unchanged screen may legitimately produce no initial Output frame.
 	endHandshake()
 	senderStarted = true
-	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
+	go runSender(loopCtx, cancel, transport, controlCh, sendCh, inputGate, ackQueue, sendErrCh, log)
 	stdinDone := make(chan struct{})
 	go func() {
 		defer close(stdinDone)
@@ -1569,6 +1573,29 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding attach target: %w", derr))
 				}
+				if target.Endpoint == "" && target.RemoteTarget == nil && target.ExactTarget != nil && a.runner.ledger != nil {
+					if samePeerSwitch != nil {
+						return welcomedResult(errors.New("vev: concurrent same-peer switch offer"))
+					}
+					nextSamePeerRequestID++
+					request := a.runner.ledger.samePeerHandoff(request, target)
+					payload, err := ports.MarshalSamePeerSwitchRequest(ports.SamePeerSwitchRequest{
+						RequestID:      nextSamePeerRequestID,
+						Target:         *target.ExactTarget,
+						PreferredTabID: request.PreferredTabID,
+					})
+					if err != nil {
+						return welcomedResult(fmt.Errorf("vev: encoding same-peer switch: %w", err))
+					}
+					samePeerSwitch = &samePeerSwitchPending{requestID: nextSamePeerRequestID, target: *target.ExactTarget}
+					inputGate.setPaused(true)
+					select {
+					case controlCh <- ports.Frame{Type: ports.MsgSamePeerSwitchRequest, Payload: payload}:
+						continue
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				}
 				handoff := welcomedResult(nil)
 				handoff.target = &target
 				return handoff
@@ -1609,6 +1636,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding committed route identity: %w", derr))
 				}
+				if samePeerSwitch != nil && identity.Target != samePeerSwitch.target {
+					return welcomedResult(errors.New("vev: same-peer switch committed an unexpected target"))
+				}
 				name = identity.Target.SessionName
 				committedIdentity = cloneCommittedIdentity(&identity)
 				if a.runner.ledger == nil {
@@ -1619,6 +1649,19 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				if derr := publishRouteSnapshot(); derr != nil {
 					return welcomedResult(fmt.Errorf("vev: publishing daemon-local route snapshot: %w", derr))
+				}
+				if samePeerSwitch != nil {
+					samePeerSwitch = nil
+					inputGate.setPaused(false)
+				}
+			case ports.MsgSamePeerSwitchFailure:
+				failure, derr := ports.UnmarshalSamePeerSwitchFailure(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding same-peer switch failure: %w", derr))
+				}
+				if samePeerSwitch != nil && failure.RequestID == samePeerSwitch.requestID {
+					samePeerSwitch = nil
+					inputGate.setPaused(false)
 				}
 			case ports.MsgRoutePosition:
 				position, derr := ports.UnmarshalRoutePosition(r.frame.Payload)
@@ -1721,7 +1764,9 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 	return epoch, state
 }
 
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
+// runSender preserves normal-frame order while allowing switch control and
+// output ACKs to make progress when raw input is held for a same-peer switch.
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
 	send := func(f ports.Frame) bool {
 		if err := transport.Send(f); err != nil {
@@ -1750,10 +1795,40 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 		}
 		return send(ports.Frame{Type: ports.MsgAck, Payload: payload})
 	}
+	var heldInput *ports.Frame
 	for {
+		if heldInput != nil {
+			paused, changed := inputGate.snapshot()
+			if !paused {
+				if !send(*heldInput) {
+					return
+				}
+				heldInput = nil
+				continue
+			}
+			select {
+			case <-acks.wake:
+				if !sendAck() {
+					return
+				}
+			case frame := <-control:
+				if !send(frame) {
+					return
+				}
+			case <-changed:
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
 		select {
 		case <-acks.wake:
 			if !sendAck() {
+				return
+			}
+			continue
+		case frame := <-control:
+			if !send(frame) {
 				return
 			}
 			continue
@@ -1764,13 +1839,27 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 			if !sendAck() {
 				return
 			}
-		case f := <-in:
+		case frame := <-control:
+			if !send(frame) {
+				return
+			}
+		case frame := <-in:
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
-			if !send(f) {
+			if frame.Type == ports.MsgInput || frame.Type == ports.MsgImagePush {
+				if paused, _ := inputGate.snapshot(); paused {
+					held := frame
+					heldInput = &held
+					if inputGate != nil && inputGate.afterInputHeld != nil {
+						inputGate.afterInputHeld()
+					}
+					continue
+				}
+			}
+			if !send(frame) {
 				return
 			}
 		case <-ctx.Done():

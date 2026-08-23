@@ -187,6 +187,7 @@ func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool
 func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	req := publication.req
 	if publication.source != req.target {
+		req.next.clearSamePeerOffer()
 		unregisterAttachmentSessionLocked(publication.source, req.next)
 	}
 	registered := registerAttachmentSessionLocked(req.target, req.next)

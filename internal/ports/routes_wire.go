@@ -98,6 +98,77 @@ func UnmarshalExactSessionTarget(b []byte) (ExactSessionTarget, error) {
 	return target, nil
 }
 
+// MarshalSamePeerSwitchRequest encodes the strict in-band session switch
+// confirmation. The target is non-optional and carries no display origin.
+func MarshalSamePeerSwitchRequest(request SamePeerSwitchRequest) ([]byte, error) {
+	if err := request.Validate(); err != nil {
+		return nil, err
+	}
+	w := payloadWriter{}
+	w.putUint64(request.RequestID)
+	marshalExactSessionTarget(&w, request.Target)
+	w.putString(string(request.PreferredTabID))
+	return w.b, nil
+}
+
+// UnmarshalSamePeerSwitchRequest decodes one complete in-band switch request.
+func UnmarshalSamePeerSwitchRequest(b []byte) (SamePeerSwitchRequest, error) {
+	r := payloadReader{b: b}
+	var request SamePeerSwitchRequest
+	var err error
+	if request.RequestID, err = r.getUint64(); err != nil {
+		return SamePeerSwitchRequest{}, err
+	}
+	if request.Target, err = unmarshalExactSessionTarget(&r); err != nil {
+		return SamePeerSwitchRequest{}, err
+	}
+	preferred, err := r.getString()
+	if err != nil {
+		return SamePeerSwitchRequest{}, err
+	}
+	request.PreferredTabID = domain.TabStableID(preferred)
+	if err := r.done(); err != nil {
+		return SamePeerSwitchRequest{}, err
+	}
+	if err := request.Validate(); err != nil {
+		return SamePeerSwitchRequest{}, err
+	}
+	return request, nil
+}
+
+// MarshalSamePeerSwitchFailure encodes a bounded pre-commit rejection.
+func MarshalSamePeerSwitchFailure(failure SamePeerSwitchFailure) ([]byte, error) {
+	if err := failure.Validate(); err != nil {
+		return nil, err
+	}
+	w := payloadWriter{}
+	w.putUint64(failure.RequestID)
+	w.putUint8(uint8(failure.Code))
+	return w.b, nil
+}
+
+// UnmarshalSamePeerSwitchFailure decodes a complete bounded rejection.
+func UnmarshalSamePeerSwitchFailure(b []byte) (SamePeerSwitchFailure, error) {
+	r := payloadReader{b: b}
+	var failure SamePeerSwitchFailure
+	var err error
+	if failure.RequestID, err = r.getUint64(); err != nil {
+		return SamePeerSwitchFailure{}, err
+	}
+	code, err := r.getUint8()
+	if err != nil {
+		return SamePeerSwitchFailure{}, err
+	}
+	failure.Code = SamePeerSwitchFailureCode(code)
+	if err := r.done(); err != nil {
+		return SamePeerSwitchFailure{}, err
+	}
+	if err := failure.Validate(); err != nil {
+		return SamePeerSwitchFailure{}, err
+	}
+	return failure, nil
+}
+
 func validateCommittedRouteIdentity(identity CommittedRouteIdentity) error {
 	if err := identity.Validate(); err != nil {
 		return fmt.Errorf("%w: committed identity: %v", ErrInvalidRouteWire, err)

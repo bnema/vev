@@ -98,6 +98,8 @@ type attachedClient struct {
 	routeMu                    sync.RWMutex
 	routeSnapshot              ports.RecentRouteSnapshot
 	pendingRouteIdentity       bool
+	samePeerOfferMu            sync.Mutex
+	samePeerOffer              *ports.ExactSessionTarget
 	routeAttentionSubscription ports.RouteAttentionSubscription
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty

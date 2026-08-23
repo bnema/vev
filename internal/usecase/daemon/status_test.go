@@ -1477,4 +1477,5 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	releasePTY2()
 	hg.Wait()
 	d.sessWg.Wait()
+	d.waitNotifies()
 }

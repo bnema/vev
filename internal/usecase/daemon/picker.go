@@ -899,9 +899,10 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	return d.sendLocalAttachTargetForAttachment(token, target, guard, action)
 }
 
-// sendLocalAttachTargetForAttachment makes local picker navigation follow the
-// same client-owned handoff path as remote navigation. The client reconnects
-// to this daemon and restores its per-route tab from the route ledger.
+// sendLocalAttachTargetForAttachment offers an endpoint-empty, exact local
+// target on the current authenticated connection. A current client confirms it
+// with MsgSamePeerSwitchRequest; an interrupted or older client retains the
+// existing close-and-redial fallback without any daemon-origin inference.
 func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
 	d.mu.Lock()
 	var targetSess *session
@@ -930,9 +931,9 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	if !matches || !token.attachmentCurrent() {
 		return errAttachmentTransition
 	}
-	if target.TabID != "" {
+	if targetSess != nil && target.TabID != "" {
 		// An explicit tab row is a direct user choice, not route memory; retain
-		// the daemon-side transition so it opens exactly that tab.
+		// the established daemon-side transition so it opens exactly that tab.
 		return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)
 	}
 
@@ -942,16 +943,27 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 		ExactTarget:       exactTarget,
 		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	})
-	if payload == nil {
+	if payload == nil || exactTarget == nil {
 		return errAttachmentTransition
 	}
+	samePeerEligible := action == "picker-select" && targetSess != nil && target.TabIndex == 0
+	if samePeerEligible {
+		token.ac.offerSamePeerTarget(*exactTarget)
+	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
-		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to local session", err)
+		if samePeerEligible {
+			token.ac.clearSamePeerOffer()
+		}
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't offer local session switch", err)
 	}
-	if guard.closePicker {
-		d.closePicker(token.ac)
+	if !samePeerEligible {
+		// Only ordinary active picker session rows are eligible. Stopped,
+		// index-only, and non-picker navigation retain close-and-dial handoff.
+		if guard.closePicker {
+			d.closePicker(token.ac)
+		}
+		d.clientGoneForAttachment(token, false)
 	}
-	d.clientGoneForAttachment(token, false)
 	return nil
 }
 
