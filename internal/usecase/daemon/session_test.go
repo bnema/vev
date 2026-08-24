@@ -772,7 +772,7 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(t, store))
 	d.mu.Lock()
-	stopped := d.stopped["work"]
+	stopped := d.inactive["work"]
 	d.mu.Unlock()
 	require.Equal(t, "work", stopped.name)
 	require.Equal(t, "/tmp/work", stopped.cwd)
@@ -795,7 +795,7 @@ func TestDaemonNewWithoutPersistenceLogsNoLoadWarning(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logBuf, nil)))
 	require.NotNil(t, d)
 	require.False(t, d.persistEnabled)
-	require.Empty(t, d.stopped)
+	require.Empty(t, d.inactive)
 	require.NotContains(t, logBuf.String(), "loading persisted sessions failed")
 }
 
@@ -868,7 +868,7 @@ func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(t, store)(d)
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
+	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
 	d.mruSeq.Store(42)
 
 	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
@@ -1015,7 +1015,10 @@ func TestAttachRestoresPersistedTabNames(t *testing.T) {
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	WithStore(t, store)(d)
 	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}}))
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
+	record, ok, err := d.catalogueRecord("work")
+	require.NoError(t, err)
+	require.True(t, ok)
+	d.inactive["work"] = inactiveSessionFromRecord(record, ports.SessionDown, nil)
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
@@ -1035,7 +1038,7 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(t, store)(d)
-	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
+	d.inactive["taken"] = inactiveSession{name: "taken", cwd: "/tmp", createdAt: 1}
 
 	sess, err := createSessionForTest(d, "0", true, "/tmp/e", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
@@ -1189,7 +1192,7 @@ func TestAttachResumesStoppedSessionFromStoredCwd(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(t, store)(d)
 	cwd := t.TempDir()
-	d.stopped["work"] = stoppedSession{name: "work", cwd: cwd, createdAt: 1}
+	d.inactive["work"] = inactiveSession{name: "work", cwd: cwd, createdAt: 1, state: ports.SessionDown}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
@@ -1200,7 +1203,7 @@ func TestAttachResumesStoppedSessionFromStoredCwd(t *testing.T) {
 	require.Equal(t, "work", sess.name)
 	require.Equal(t, cwd, sess.cwd)
 	d.mu.Lock()
-	_, stillStopped := d.stopped["work"]
+	_, stillStopped := d.inactive["work"]
 	d.mu.Unlock()
 	require.False(t, stillStopped)
 }
@@ -1212,7 +1215,7 @@ func TestAttachStoppedMissingCwdFallsBackToHome(t *testing.T) {
 	store, _ := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(t, store)(d)
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/definitely/missing/vev", createdAt: 1}
+	d.inactive["work"] = inactiveSession{name: "work", cwd: "/definitely/missing/vev", createdAt: 1, state: ports.SessionDown}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
@@ -1227,11 +1230,11 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithStore(t, store)(d)
 	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
-	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp", createdAt: 1}
+	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp", createdAt: 1}
 	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
 	require.False(t, state.has("old"))
 	d.mu.Lock()
-	_, ok := d.stopped["old"]
+	_, ok := d.inactive["old"]
 	d.mu.Unlock()
 	require.False(t, ok)
 }
@@ -1293,7 +1296,7 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 
 func TestIntentNewStoppedNameRejected(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
+	d.inactive["taken"] = inactiveSession{name: "taken", cwd: "/tmp", createdAt: 1}
 	tr := portsmocks.NewMockTransport(t)
 	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "taken", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
 	require.ErrorContains(t, err, "name already in use")
@@ -1363,7 +1366,7 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	_ = d.killSession(natural, ports.ReasonSessionKilled, false)
 	require.True(t, state.has("natural"))
 	d.mu.Lock()
-	stopped := d.stopped["natural"]
+	stopped := d.inactive["natural"]
 	d.mu.Unlock()
 	require.Equal(t, "/tmp/latest", stopped.cwd)
 
@@ -1688,7 +1691,7 @@ func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) 
 	d := newTestDaemon(t, nil, stubClock{})
 	d.lastAllocatedCreatedAt = math.MaxInt64
 	d.nextID = 17
-	d.stopped["retained"] = stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}
+	d.inactive["retained"] = inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}
 
 	sess, err := createSessionForTest(d, "new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
 
@@ -1697,13 +1700,13 @@ func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) 
 	require.Empty(t, d.sessions)
 	require.Equal(t, uint64(17), d.nextID)
 	require.Equal(t, int64(math.MaxInt64), d.lastAllocatedCreatedAt)
-	require.Equal(t, stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.stopped["retained"])
+	require.Equal(t, inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.inactive["retained"])
 
 	_, _, err = d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "routed", Size: domain.Size{Cols: 80, Rows: 24}}, nil)
 	require.ErrorContains(t, err, "lifecycle identities exhausted")
 	require.Empty(t, d.sessions)
 	require.Equal(t, uint64(17), d.nextID)
-	require.Equal(t, stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.stopped["retained"])
+	require.Equal(t, inactiveSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.inactive["retained"])
 }
 
 func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
@@ -1716,7 +1719,7 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(persist.New(nil), records))
 
-	alpha := d.stopped["alpha"]
+	alpha := d.inactive["alpha"]
 	require.Equal(t, records[0], alpha.record)
 	require.Equal(t, ports.SessionDown, alpha.state)
 	require.NotNil(t, alpha.restoreDone)
@@ -1725,7 +1728,7 @@ func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
 		t.Fatal("healthy catalogue record must begin in restoring state")
 	default:
 	}
-	work := d.stopped["work"]
+	work := d.inactive["work"]
 	require.Equal(t, records[1], work.record)
 	require.Equal(t, ports.SessionBroken, work.state)
 	require.NotNil(t, work.restoreDone)
@@ -1765,7 +1768,7 @@ func TestResumingStoppedSessionPreservesLifecycleIdentityInPersistence(t *testin
 	store, state := newMockStore(t)
 	WithStore(t, store)(d)
 	d.ptys = newFactory(t, targetPTY)
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 77}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 77, state: ports.SessionDown}
 
 	require.True(t, d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "stopped", Stopped: true}))
 	resumed := ac.currentSession()
@@ -1793,7 +1796,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
 		d.ptys = newFactory(t, targetPTY)
 		expected := int64(31)
-		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: expected}
+		d.inactive["target"] = inactiveSession{name: "target", cwd: "/tmp", createdAt: expected, state: ports.SessionDown}
 
 		require.NoError(t, d.switchToTarget(from, ac, picker.Target{Session: "old-active-id", Name: "target", TabIndex: 0, ExpectedCreatedAt: &expected}))
 		require.Equal(t, "target", ac.currentSession().name)
@@ -1815,7 +1818,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		fromPTY, releaseFrom := newBlockingPTY(t)
 		defer releaseFrom()
 		d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
-		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: 52}
+		d.inactive["target"] = inactiveSession{name: "target", cwd: "/tmp", createdAt: 52, state: ports.SessionDown}
 		expected := int64(51)
 
 		require.Error(t, d.switchToTarget(from, ac, picker.Target{Name: "target", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))

@@ -51,14 +51,14 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffectTicket) error {
 				d.mu.Lock()
 				delete(d.sessions, target.id)
-				d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 9, incarnation: domain.IncarnationID{2}, state: ports.SessionDown}
+				d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 9, incarnation: domain.IncarnationID{2}, state: ports.SessionDown}
 				d.mu.Unlock()
 				expectedCreatedAt := int64(9)
 				return d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "stopped-session")
 			},
 			check: func(t *testing.T, d *Daemon, _, _ *session) {
 				d.mu.Lock()
-				_, stopped := d.stopped["stopped"]
+				_, stopped := d.inactive["stopped"]
 				resumed := d.findByNameLocked("stopped")
 				d.mu.Unlock()
 				require.True(t, stopped)
@@ -149,7 +149,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.T) {
 	d, source, old, _ := newManualSessionWithPTYs(t, nil)
 	d.mu.Lock()
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 7, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 7, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
 	d.mu.Unlock()
 
 	rc := d.attachCoordinator(source, nil, old, true)
@@ -189,7 +189,7 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 	require.NoError(t, <-done)
 
 	d.mu.Lock()
-	_, stillStopped := d.stopped["stopped"]
+	_, stillStopped := d.inactive["stopped"]
 	resumed := d.findByNameLocked("stopped")
 	d.mu.Unlock()
 	require.True(t, stillStopped)

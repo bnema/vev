@@ -174,7 +174,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 
 	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
 	d.mu.Lock()
-	stopped, retained := d.stopped[sess.name]
+	stopped, retained := d.inactive[sess.name]
 	d.mu.Unlock()
 	require.True(t, retained, "non-purged named session must remain stopped")
 	require.False(t, stopped.purging)

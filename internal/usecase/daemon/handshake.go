@@ -153,13 +153,6 @@ func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr p
 		_ = tr.Close()
 	}
 	if ac.routeCreatedSession {
-		sess.mu.Lock()
-		empty := len(sess.attachments) == 0
-		sess.mu.Unlock()
-		if empty {
-			// killSession revalidates the attachment set under its publication
-			// locks before removing the session.
-			_ = d.killSession(sess, ports.ReasonSessionKilled, ac.routeSessionPurge)
-		}
+		_ = d.killSessionIfEmpty(sess, ports.ReasonSessionKilled, ac.routeSessionPurge)
 	}
 }

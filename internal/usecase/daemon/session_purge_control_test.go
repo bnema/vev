@@ -23,7 +23,7 @@ func TestStoppedPurgeMetadataFailureFencesCatalogue(t *testing.T) {
 	state.mu.Lock()
 	state.deleteErr = func(string) error { return metadataErr }
 	state.mu.Unlock()
-	d.stopped["work"] = stoppedSession{name: "work", incarnation: record.IncarnationID, record: record}
+	d.inactive["work"] = inactiveSession{name: "work", incarnation: record.IncarnationID, record: record}
 
 	require.ErrorIs(t, d.retryStoppedPurge("work"), metadataErr)
 	require.Empty(t, repository.calls, "snapshot deletion must wait for catalogue removal")

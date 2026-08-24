@@ -110,7 +110,9 @@ func (s TabSelector) Resolve(tabs []TabSelectorTab) (int, bool) {
 
 // RemoteSessionTarget is the structured identity used by picker-based remote
 // access. Endpoint and DisplayOrigin are intentionally separate values: the
-// latter is presentation-only and is never parsed back into a route.
+// latter is presentation-only and is never parsed back into a route. Stopped
+// records the selected down-row resume intent; it remains set while that exact
+// lifecycle is created and attached as a live runtime.
 type RemoteSessionTarget struct {
 	Endpoint      string
 	DisplayOrigin string
@@ -137,8 +139,11 @@ func (t RemoteSessionTarget) Validate() error {
 		return err
 	}
 	if t.Stopped {
-		if t.LiveTabID != "" || t.StoppedTab.Validate() != nil {
-			return errors.New("down remote target requires an ordinal or stable tab selector")
+		if t.LiveTabID != "" {
+			return errors.New("down remote target cannot carry a live tab selector")
+		}
+		if t.StoppedTab != (TabSelector{}) && t.StoppedTab.Validate() != nil {
+			return errors.New("down remote target has an invalid tab selector")
 		}
 		return nil
 	}
@@ -149,6 +154,23 @@ func (t RemoteSessionTarget) Validate() error {
 		return errors.New("up remote target cannot carry a down selector")
 	}
 	return nil
+}
+
+// ResolveTab resolves the selected tab against authoritative metadata. A down
+// record without retained tab metadata carries no selector and may choose only
+// an unambiguous default tab: the empty durable record before creation or its
+// sole fresh tab immediately afterward. It never guesses among multiple tabs.
+func (t RemoteSessionTarget) ResolveTab(tabs []TabSelectorTab) (int, bool) {
+	if t.Validate() != nil {
+		return 0, false
+	}
+	if t.Stopped {
+		if t.StoppedTab == (TabSelector{}) {
+			return 0, len(tabs) <= 1
+		}
+		return t.StoppedTab.Resolve(tabs)
+	}
+	return NewStableTabSelector(t.LiveTabID).Resolve(tabs)
 }
 
 // ValidateRemoteDisplayOrigin validates presentation data without imposing

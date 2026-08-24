@@ -205,11 +205,11 @@ func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) [
 			Attached:  session.Attached,
 		}
 		switch session.State {
-		case "up":
+		case ports.RemoteCatalogSessionUp:
 			info.State = ports.SessionUp
-		case "down":
+		case ports.RemoteCatalogSessionDown:
 			info.State = ports.SessionDown
-		case "broken":
+		case ports.RemoteCatalogSessionBroken:
 			info.State = ports.SessionBroken
 		default:
 			slog.Debug("remote catalog session has unknown state", "host", host, "session", session.Name, "state", session.State)

@@ -136,8 +136,8 @@ func TestPickerViewsOrdersByMRUWithEphemeralInterleaved(t *testing.T) {
 	d.sessions[old.id] = old
 	d.sessions[eph.id] = eph
 	d.sessions[recent.id] = recent
-	d.stopped["halted-old"] = stoppedSession{name: "halted-old", createdAt: 10, lastUsedSeq: 1}
-	d.stopped["halted-new"] = stoppedSession{name: "halted-new", createdAt: 11, lastUsedSeq: 2}
+	d.inactive["halted-old"] = inactiveSession{name: "halted-old", createdAt: 10, lastUsedSeq: 1}
+	d.inactive["halted-new"] = inactiveSession{name: "halted-new", createdAt: 11, lastUsedSeq: 2}
 
 	views, _ := d.pickerViews(recent, nil)
 
@@ -177,7 +177,7 @@ func TestPickerViewsGroupedModePutsNamedBeforeEphemeral(t *testing.T) {
 	d.sessions[eph.id] = eph
 	d.sessions[named.id] = named
 	d.sessions[named2.id] = named2
-	d.stopped["halted"] = stoppedSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
+	d.inactive["halted"] = inactiveSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
 
 	views, _ := d.pickerViews(named, nil)
 
@@ -217,7 +217,7 @@ func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
 			eph.mruAt.Store(5)
 			d.mu.Lock()
 			d.sessions[eph.id] = eph
-			d.stopped["halted"] = stoppedSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
+			d.inactive["halted"] = inactiveSession{name: "halted", createdAt: 9, lastUsedSeq: 9}
 			d.mu.Unlock()
 
 			d.enterPicker(sess, ac)
@@ -288,7 +288,7 @@ func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	defer cancel()
 	active := &session{sessionCore: sessionCore{id: "active", name: "active", createdAt: 23}, ctx: ctx, cancel: cancel, tabs: []*tab{{}}}
 	d.sessions[active.id] = active
-	d.stopped["stopped"] = stoppedSession{name: "stopped", createdAt: 24}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", createdAt: 24}
 
 	views, _ := d.pickerViews(active, nil)
 
@@ -310,7 +310,7 @@ func TestPickerCanonicalViewsLeaveMoveFilteringToModel(t *testing.T) {
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination", incarnation: domain.IncarnationID{2}, ephemeral: true}, tabs: []*tab{{stableID: "destination-tab", panes: map[layout.PaneID]*pane{}}}}
 	d.sessions[source.id] = source
 	d.sessions[destination.id] = destination
-	d.stopped["stopped"] = stoppedSession{name: "stopped", createdAt: 9, incarnation: domain.IncarnationID{9}}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", createdAt: 9, incarnation: domain.IncarnationID{9}}
 	sourceLocator := moveSourceLocator{
 		Session: moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name},
 		TabID:   "source-tab",
@@ -664,7 +664,7 @@ func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	record.Name = "restoring"
 	state, done := initialSessionState(record)
-	d.stopped[record.Name] = stoppedSession{
+	d.inactive[record.Name] = inactiveSession{
 		name:        record.Name,
 		createdAt:   record.CreatedAt,
 		incarnation: record.IncarnationID,
@@ -692,7 +692,7 @@ func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
 	defer cancel()
 	target := &session{sessionCore: sessionCore{id: "restored", name: record.Name, createdAt: record.CreatedAt}, ctx: ctx, cancel: cancel, tabs: []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})}}
 	d.mu.Lock()
-	delete(d.stopped, record.Name)
+	delete(d.inactive, record.Name)
 	d.sessions[target.id] = target
 	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
@@ -731,7 +731,7 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 	<-restored
 	require.Same(t, from, ac.currentSession())
 	d.mu.Lock()
-	entry := d.stopped[record.Name]
+	entry := d.inactive[record.Name]
 	d.mu.Unlock()
 	require.Equal(t, ports.SessionBroken, entry.state)
 	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
@@ -765,7 +765,7 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 			}
 			catalogue := persist.New(store)
 			WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
-			d.stopped[record.Name] = stoppedSession{
+			d.inactive[record.Name] = inactiveSession{
 				name:        record.Name,
 				createdAt:   record.CreatedAt,
 				incarnation: record.IncarnationID,
@@ -791,7 +791,7 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 			storeState.mu.Unlock()
 			require.Zero(t, sets, "unsafe target must not mutate the catalogue")
 			d.mu.Lock()
-			entry := d.stopped[record.Name]
+			entry := d.inactive[record.Name]
 			d.mu.Unlock()
 			require.Equal(t, record, entry.record)
 			require.Equal(t, tt.runtimeState, entry.state)
@@ -808,7 +808,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	defer release3()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactorySeq(t, p2, p3)
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: ports.SessionDown}
+	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: ports.SessionDown}
 
 	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1406,7 +1406,7 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})
-	d.stopped["old"] = stoppedSession{name: "old", cwd: t.TempDir(), createdAt: 1}
+	d.inactive["old"] = inactiveSession{name: "old", cwd: t.TempDir(), createdAt: 1, state: ports.SessionDown}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
@@ -1448,7 +1448,7 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p)
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, state: ports.SessionDown}
 	cause := errors.New("open failed")
 	ptys := portsmocks.NewMockPTYFactory(t)
 	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Once()
@@ -1659,7 +1659,7 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	state.mu.Lock()
 	state.deleteErr = func(string) error { return cause }
 	state.mu.Unlock()
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, incarnation: record.IncarnationID, record: record}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, incarnation: record.IncarnationID, record: record}
 
 	d.enterPicker(from, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1677,7 +1677,7 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	require.Equal(t, domain.NoticePersistDelete, toasts[0].Code)
 
 	d.mu.Lock()
-	stopped, retained := d.stopped["stopped"]
+	stopped, retained := d.inactive["stopped"]
 	d.mu.Unlock()
 	require.True(t, retained, "failed deletion must retain the reserved name")
 	require.True(t, stopped.purging, "an uncertain deletion stays fenced from restore")

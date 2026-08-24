@@ -930,11 +930,11 @@ func targetEndpoint(endpoint string) string {
 	return endpoint
 }
 
-func waitForSession(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name, state string) (ports.RemoteCatalogSession, error) {
+func waitForSession(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name string, state ports.RemoteCatalogSessionState) (ports.RemoteCatalogSession, error) {
 	return waitForSessionWithTabCount(ctx, catalog, endpoint, name, state, 0)
 }
 
-func waitForSessionWithTabCount(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name, state string, tabs int) (ports.RemoteCatalogSession, error) {
+func waitForSessionWithTabCount(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name string, state ports.RemoteCatalogSessionState, tabs int) (ports.RemoteCatalogSession, error) {
 	deadline, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	for {

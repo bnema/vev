@@ -228,8 +228,15 @@ func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	d, current, ac, _ := newManualSessionWithPTYs(t, p)
 	d.sessions["active"] = &session{sessionCore: sessionCore{id: "active", name: "active", createdAt: 10}}
 	d.sessions["ephemeral"] = &session{sessionCore: sessionCore{id: "ephemeral", name: "ephemeral", ephemeral: true, createdAt: 11}}
-	d.stopped["stopped"] = stoppedSession{name: "stopped", createdAt: 12}
-	d.stopped["purging"] = stoppedSession{name: "purging", createdAt: 13, purging: true}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", createdAt: 12, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
+	d.inactive["purging"] = inactiveSession{name: "purging", createdAt: 13, incarnation: domain.IncarnationID{4}, state: ports.SessionDown, purging: true}
+	d.inactive["broken"] = inactiveSession{name: "broken", createdAt: 14, incarnation: domain.IncarnationID{5}, state: ports.SessionBroken}
+	d.inactive["degraded"] = inactiveSession{name: "degraded", createdAt: 15, incarnation: domain.IncarnationID{6}, state: ports.SessionDown, record: domain.CatalogueRecord{DegradedReason: "checkpoint unavailable"}}
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1, Entries: []ports.RecentRouteEntry{
+		testRouteEntry(1, 1, "purging", 4, ports.RouteKindLocal),
+		testRouteEntry(2, 1, "broken", 5, ports.RouteKindLocal),
+		testRouteEntry(3, 1, "degraded", 6, ports.RouteKindLocal),
+	}})
 
 	d.enterPalette(current, ac)
 	ac.overlays.paletteMu.Lock()
@@ -314,8 +321,8 @@ func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *te
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, sends := newManualSessionWithPTYs(t, p)
-	stopped := stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 42, lastUsedSeq: 7, tabNames: []string{"shell", "logs"}}
-	d.stopped[stopped.name] = stopped
+	stopped := inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 42, lastUsedSeq: 7, tabNames: []string{"shell", "logs"}, state: ports.SessionDown}
+	d.inactive[stopped.name] = stopped
 	ptys := portsmocks.NewMockPTYFactory(t)
 	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed")).Once()
 	d.ptys = ptys
@@ -332,7 +339,7 @@ func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *te
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, "requested session is unavailable", ac.overlays.paletteFeedback)
 	ac.overlays.paletteMu.Unlock()
-	require.Equal(t, stopped, d.stopped[stopped.name], "failed resume must retain stopped lifecycle metadata")
+	require.Equal(t, stopped, d.inactive[stopped.name], "failed resume must retain stopped lifecycle metadata")
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -343,7 +350,7 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 	defer release2()
 	d, current, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactory(t, p2)
-	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 42}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 42, state: ports.SessionDown}
 
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)

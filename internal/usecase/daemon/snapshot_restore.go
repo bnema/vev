@@ -16,7 +16,7 @@ import (
 
 func (d *Daemon) closeRestoreDone() {
 	d.mu.Lock()
-	for name, entry := range d.stopped {
+	for name, entry := range d.inactive {
 		if entry.restoreDone == nil {
 			continue
 		}
@@ -29,7 +29,7 @@ func (d *Daemon) closeRestoreDone() {
 		if entry.record.DegradedReason == "" {
 			entry.record.DegradedReason = "restore unavailable"
 		}
-		d.stopped[name] = entry
+		d.inactive[name] = entry
 		closeRuntimeRestoreDoneLocked(entry.restoreDone)
 	}
 	d.mu.Unlock()
@@ -201,7 +201,7 @@ func closeRestoredTabs(tabs []*tab) {
 func (d *Daemon) restoredSessionTabNames(name string) []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return append([]string(nil), d.stopped[name].tabNames...)
+	return append([]string(nil), d.inactive[name].tabNames...)
 }
 
 func (d *Daemon) restoreSnapshotTab(ctx, sctx context.Context, sessionName, tabName string, tabSnap snapcodec.Tab, restoreEnv []string, allowlist map[string]struct{}) (*tab, error) {
@@ -303,7 +303,7 @@ func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd
 	}
 	d.mu.Lock()
-	if stopped, ok := d.stopped[snap.Name]; ok {
+	if stopped, ok := d.inactive[snap.Name]; ok {
 		sess.mruAt.Store(stopped.lastUsedSeq)
 	}
 	d.mu.Unlock()
@@ -315,7 +315,7 @@ func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context
 func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *session) (bool, error) {
 	if sess.incarnation == (domain.IncarnationID{}) {
 		d.mu.Lock()
-		stopped := d.stopped[sess.name]
+		stopped := d.inactive[sess.name]
 		d.mu.Unlock()
 		sess.incarnation = stopped.incarnation
 		if sess.incarnation == (domain.IncarnationID{}) {
@@ -347,7 +347,7 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	}
 	sess.id = domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
-	stopped := d.stopped[sess.name]
+	stopped := d.inactive[sess.name]
 	sess.mu.Lock()
 	sess.restoreDone = stopped.restoreDone
 	sess.mu.Unlock()
@@ -357,7 +357,7 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	// The stopped entry is the durable authority and restore barrier until the
 	// runtime identity has actually been published. A registry rejection must
 	// leave that exact entry available for attach/recovery retries.
-	delete(d.stopped, sess.name)
+	delete(d.inactive, sess.name)
 	sess.snapDirty.Store(false)
 	return true, nil
 }

@@ -240,7 +240,7 @@ func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
 	d := newTestDaemon(t, nil, clock)
 	restoreDone := make(chan struct{})
 	d.mu.Lock()
-	d.stopped["restoring"] = stoppedSession{name: "restoring", restoreDone: restoreDone}
+	d.inactive["restoring"] = inactiveSession{name: "restoring", restoreDone: restoreDone}
 	d.mu.Unlock()
 
 	tr := newHandshakeBlockingTransport(false)
@@ -266,7 +266,7 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	d.mu.Lock()
-	d.stopped["restored"] = stoppedSession{name: "restored", cwd: "/tmp"}
+	d.inactive["restored"] = inactiveSession{name: "restored", cwd: "/tmp", state: ports.SessionDown}
 	d.mu.Unlock()
 
 	clock := &signalClock{timers: make(chan *signalTimer, 4)}
@@ -286,7 +286,7 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	requireClosedHandshakeTransport(t, tr)
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
-	_, retained := d.stopped["restored"]
+	_, retained := d.inactive["restored"]
 	d.mu.Unlock()
 	require.True(t, retained, "failed attach must retain the stopped session authority")
 }

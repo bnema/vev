@@ -2,6 +2,7 @@
 *.test
 .superpowers/
 docs/superpowers/
+.agent-reviews/
 .worktrees/
 scripts/demo/out/
 /.worktrees/

@@ -71,7 +71,7 @@ var defaultSize = domain.Size{Cols: 80, Rows: 24}
 type Daemon struct {
 	mu       sync.Mutex
 	sessions map[domain.SessionID]*session
-	stopped  map[string]stoppedSession
+	inactive map[string]inactiveSession
 	// creating reserves names while durable creation I/O runs without mu.
 	creating map[string]struct{}
 	nextID   uint64
@@ -348,9 +348,11 @@ func (p *parkingAttachment) closeDone() {
 	p.doneOnce.Do(func() { close(p.done) })
 }
 
-// session is a single multiplexed session. It owns one or more full-screen
-
-type stoppedSession struct {
+// inactiveSession is the durable authority for a named session without a live
+// runtime. It remains present while healthy-down, restoring, broken, degraded,
+// or purge-fenced; callers must use its predicates instead of inferring those
+// states from map membership.
+type inactiveSession struct {
 	name        string
 	cwd         string
 	createdAt   int64
@@ -362,6 +364,34 @@ type stoppedSession struct {
 	record      domain.CatalogueRecord
 	state       ports.SessionState
 	restoreDone chan struct{}
+}
+
+func (s inactiveSession) restorePending() bool {
+	if s.restoreDone == nil {
+		return false
+	}
+	select {
+	case <-s.restoreDone:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s inactiveSession) broken() bool {
+	return s.state == ports.SessionBroken || s.record.DegradedReason != ""
+}
+
+func (s inactiveSession) visible() bool {
+	return !s.purging
+}
+
+func (s inactiveSession) canResume() bool {
+	return s.visible() && s.state == ports.SessionDown && !s.broken()
+}
+
+func (s inactiveSession) sameLifecycle(other inactiveSession) bool {
+	return s.name == other.name && s.createdAt == other.createdAt && s.incarnation == other.incarnation
 }
 
 type Option func(*Daemon)
@@ -591,7 +621,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
 		sessions:          make(map[domain.SessionID]*session),
-		stopped:           make(map[string]stoppedSession),
+		inactive:          make(map[string]inactiveSession),
 		creating:          make(map[string]struct{}),
 		parked:            make(map[uint64]*parkedAttachment),
 		parking:           make(map[uint64]*parkingAttachment),
@@ -652,9 +682,9 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	for _, r := range records {
 		if d.catalogueRecordsProvided {
 			state, done := initialSessionState(r)
-			d.stopped[r.Name] = stoppedSessionFromRecord(r, state, done)
+			d.inactive[r.Name] = inactiveSessionFromRecord(r, state, done)
 		} else {
-			d.stopped[r.Name] = stoppedSessionFromRecord(r, ports.SessionDown, nil)
+			d.inactive[r.Name] = inactiveSessionFromRecord(r, ports.SessionDown, nil)
 		}
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 			maxCreatedAt = r.CreatedAt
@@ -1009,7 +1039,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	defer func() { _ = tr.Close() }()
 
 	d.mu.Lock()
-	infos := make([]ports.SessionInfo, 0, len(d.sessions)+len(d.stopped))
+	infos := make([]ports.SessionInfo, 0, len(d.sessions)+len(d.inactive))
 	liveNames := make(map[string]struct{}, len(d.sessions))
 	for _, s := range d.sessions {
 		if s == nil {
@@ -1028,14 +1058,12 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		s.mu.Unlock()
 		infos = append(infos, info)
 	}
-	for name, stopped := range d.stopped {
-		if _, live := liveNames[name]; live {
+	for name, inactive := range d.inactive {
+		if _, live := liveNames[name]; live || !inactive.visible() {
 			continue
 		}
 		state := ports.SessionDown
-		if stopped.purging || stopped.state == ports.SessionBroken {
-			// Purge is the dominant externally visible state: restoration must
-			// never make a deletion-reserved record appear attachable.
+		if inactive.broken() {
 			state = ports.SessionBroken
 		}
 		infos = append(infos, ports.SessionInfo{Name: name, State: state})
@@ -1065,7 +1093,7 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	d.mu.Lock()
 	target := d.findByNameLocked(k.Name)
 	if target == nil {
-		if _, ok := d.stopped[k.Name]; ok {
+		if _, ok := d.inactive[k.Name]; ok {
 			d.mu.Unlock()
 			// Stopped sessions use the same catalogue-first, incarnation-second
 			// deletion order as live and offline purges.
@@ -1330,7 +1358,7 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 	d.mu.Lock()
 	var (
 		done    chan struct{}
-		stopped stoppedSession
+		stopped inactiveSession
 		ok      bool
 	)
 	if sess := d.findByNameLocked(name); sess != nil {
@@ -1338,12 +1366,14 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 		done = sess.restoreDone
 		sess.mu.Unlock()
 	} else {
-		stopped, ok = d.stopped[name]
-		if !ok || stopped.purging {
+		stopped, ok = d.inactive[name]
+		if !ok || !stopped.visible() {
 			d.mu.Unlock()
 			return nil
 		}
-		done = stopped.restoreDone
+		if stopped.restorePending() {
+			done = stopped.restoreDone
+		}
 	}
 	d.mu.Unlock()
 
@@ -1360,11 +1390,11 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 	if d.findByNameLocked(name) != nil {
 		return nil
 	}
-	stopped, ok = d.stopped[name]
+	stopped, ok = d.inactive[name]
 	if !ok || stopped.record.Name == "" {
 		return nil
 	}
-	if stopped.state == ports.SessionBroken {
+	if stopped.broken() {
 		return &protoErr{ports.ErrInternal, "session durable state is broken: " + name}
 	}
 	if stopped.record.Committed == nil {
@@ -1383,8 +1413,8 @@ func (d *Daemon) validateExactSessionTargetLocked(target ports.ExactSessionTarge
 		}
 		return nil
 	}
-	stopped, ok := d.stopped[target.SessionName]
-	if !ok || stopped.purging || stopped.incarnation != target.LifecycleID {
+	stopped, ok := d.inactive[target.SessionName]
+	if !ok || !stopped.visible() || stopped.incarnation != target.LifecycleID {
 		return &protoErr{ports.ErrNoSuchSession, "no such session lifecycle: " + target.SessionName}
 	}
 	return nil
@@ -1537,10 +1567,10 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 		sess := d.findByNameLocked(h.Name)
 		created := false
 		if sess == nil {
-			stopped, ok := d.stopped[h.Name]
-			if !ok || stopped.purging {
+			stopped, ok := d.inactive[h.Name]
+			if !ok || !stopped.canResume() {
 				d.mu.Unlock()
-				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
+				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such resumable session: " + h.Name}
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			env := h.Env
@@ -1548,7 +1578,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 				env = copyEnvironment(d.baseEnv)
 			}
 			var err error
-			sess, err = d.createSessionLockedWithMode(h.Name, false, cwd, sz, env, stopped.tabNames)
+			sess, err = d.resumeInactiveSessionLocked(h.Name, cwd, sz, env, stopped, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

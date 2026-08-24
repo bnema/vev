@@ -30,7 +30,6 @@ var (
 	errCatalogDecode   = errors.New("remote catalog: invalid JSON")
 	errCatalogTrailing = errors.New("remote catalog: trailing bytes after JSON")
 	errCatalogRequired = errors.New("remote catalog: missing required fields")
-	errCatalogSession  = errors.New("remote catalog: invalid session")
 	errCatalogSSH      = errors.New("remote catalog: ssh command failed")
 	errCatalogTooLarge = errors.New("remote catalog: output exceeds size limit")
 )
@@ -112,63 +111,116 @@ func (c *CatalogClient) List(ctx context.Context, target string) (ports.RemoteCa
 	return catalog, nil
 }
 
+type catalogVersionEnvelope struct {
+	ProtocolVersion *uint16         `json:"protocol_version"`
+	SchemaVersion   *uint16         `json:"schema_version"`
+	Sessions        json.RawMessage `json:"sessions"`
+}
+
 type catalogEnvelope struct {
-	ProtocolVersion *uint16                       `json:"protocol_version"`
-	SchemaVersion   *uint16                       `json:"schema_version"`
-	Sessions        *[]ports.RemoteCatalogSession `json:"sessions"`
+	ProtocolVersion *uint16                   `json:"protocol_version"`
+	SchemaVersion   *uint16                   `json:"schema_version"`
+	Sessions        *[]catalogSessionEnvelope `json:"sessions"`
+}
+
+type catalogSessionEnvelope struct {
+	LifecycleID *domain.SessionLifecycleID       `json:"lifecycle_id"`
+	Name        *string                          `json:"name"`
+	State       *ports.RemoteCatalogSessionState `json:"state"`
+	Ephemeral   *bool                            `json:"ephemeral"`
+	Tabs        *[]catalogTabEnvelope            `json:"tabs"`
+	Attached    *bool                            `json:"attached"`
+	LastUsedSeq uint64                           `json:"last_used_seq,omitempty"`
+	ActiveTabID string                           `json:"active_tab_id,omitempty"`
+	Reason      string                           `json:"reason,omitempty"`
+}
+
+type catalogTabEnvelope struct {
+	ID        *string `json:"id"`
+	Index     *uint16 `json:"index"`
+	Name      *string `json:"name"`
+	Detail    string  `json:"detail,omitempty"`
+	Attention bool    `json:"attention,omitempty"`
 }
 
 func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	var envelope catalogEnvelope
-	if err := dec.Decode(&envelope); err != nil {
-		return ports.RemoteCatalog{}, fmt.Errorf("%w: %w", errCatalogDecode, err)
-	}
-	if envelope.ProtocolVersion == nil || envelope.Sessions == nil {
-		return ports.RemoteCatalog{}, errCatalogRequired
-	}
-	if err := rejectTrailingJSON(dec); err != nil {
+	var version catalogVersionEnvelope
+	if err := decodeCatalogEnvelope(raw, false, &version); err != nil {
 		return ports.RemoteCatalog{}, err
 	}
-
-	schemaVersion := uint16(0)
-	if envelope.SchemaVersion != nil {
-		schemaVersion = *envelope.SchemaVersion
+	if version.ProtocolVersion == nil {
+		return ports.RemoteCatalog{}, errCatalogRequired
 	}
-	if *envelope.ProtocolVersion != ports.ProtocolVersion {
+	if version.SchemaVersion == nil {
 		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
-			Got:  *envelope.ProtocolVersion,
+			Got:  0,
+			Want: ports.RemoteCatalogSchemaVersion,
+			Kind: "catalog",
+		}
+	}
+	if *version.ProtocolVersion != ports.ProtocolVersion {
+		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
+			Got:  *version.ProtocolVersion,
 			Want: ports.ProtocolVersion,
 			Kind: "protocol",
 		}
 	}
-	if schemaVersion != 0 && schemaVersion != ports.RemoteCatalogSchemaVersion {
+	if *version.SchemaVersion != ports.RemoteCatalogSchemaVersion {
 		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
-			Got:  schemaVersion,
+			Got:  *version.SchemaVersion,
 			Want: ports.RemoteCatalogSchemaVersion,
 			Kind: "catalog",
 		}
 	}
 
-	sessions := *envelope.Sessions
-	if sessions == nil {
-		sessions = []ports.RemoteCatalogSession{}
+	var envelope catalogEnvelope
+	if err := decodeCatalogEnvelope(raw, true, &envelope); err != nil {
+		return ports.RemoteCatalog{}, err
+	}
+	if envelope.ProtocolVersion == nil || envelope.SchemaVersion == nil || envelope.Sessions == nil {
+		return ports.RemoteCatalog{}, errCatalogRequired
+	}
+	sessions := make([]ports.RemoteCatalogSession, 0, len(*envelope.Sessions))
+	for _, session := range *envelope.Sessions {
+		if session.LifecycleID == nil || session.Name == nil || session.State == nil || session.Ephemeral == nil || session.Tabs == nil || session.Attached == nil {
+			return ports.RemoteCatalog{}, errCatalogRequired
+		}
+		tabs := make([]ports.RemoteCatalogTab, 0, len(*session.Tabs))
+		for _, tab := range *session.Tabs {
+			if tab.ID == nil || tab.Index == nil || tab.Name == nil {
+				return ports.RemoteCatalog{}, errCatalogRequired
+			}
+			tabs = append(tabs, ports.RemoteCatalogTab{
+				ID: *tab.ID, Index: *tab.Index, Name: *tab.Name,
+				Detail: tab.Detail, Attention: tab.Attention,
+			})
+		}
+		sessions = append(sessions, ports.RemoteCatalogSession{
+			LifecycleID: *session.LifecycleID, Name: *session.Name, State: *session.State,
+			Ephemeral: *session.Ephemeral, Tabs: tabs, Attached: *session.Attached,
+			LastUsedSeq: session.LastUsedSeq, ActiveTabID: session.ActiveTabID, Reason: session.Reason,
+		})
 	}
 	catalog := ports.RemoteCatalog{
 		ProtocolVersion: *envelope.ProtocolVersion,
-		SchemaVersion:   schemaVersion,
+		SchemaVersion:   *envelope.SchemaVersion,
 		Sessions:        sessions,
 	}
 	if err := ports.ValidateRemoteCatalog(catalog); err != nil {
-		if schemaVersion == 0 {
-			// Keep the old adapter error taxonomy for pre-parity peers and
-			// direct CLI compatibility. Current-schema payloads retain the
-			// typed validation error for callers that need to classify it.
-			return ports.RemoteCatalog{}, fmt.Errorf("%w: %w", errCatalogSession, err)
-		}
 		return ports.RemoteCatalog{}, err
 	}
 	return catalog, nil
+}
+
+func decodeCatalogEnvelope(raw []byte, strict bool, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if strict {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("%w: %w", errCatalogDecode, err)
+	}
+	return rejectTrailingJSON(dec)
 }
 
 func rejectTrailingJSON(dec *json.Decoder) error {
@@ -181,15 +233,6 @@ func rejectTrailingJSON(dec *json.Decoder) error {
 		return errCatalogTrailing
 	}
 	return fmt.Errorf("%w: %w", errCatalogTrailing, err)
-}
-
-func validCatalogState(state string) bool {
-	switch state {
-	case "up", "down", "broken":
-		return true
-	default:
-		return false
-	}
 }
 
 // sanitizeCatalogDiagnostic strips terminal escapes and control bytes while
