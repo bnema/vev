@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -821,10 +822,11 @@ func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	sess.mu.Lock()
-	base := sess.tabs[0]
 	sess.tabs = make([]*tab, ports.RemoteCatalogMaxTabsPerSess+1)
 	for i := range sess.tabs {
-		sess.tabs[i] = base
+		sess.tabs[i] = newTabWithStableID(
+			fmt.Sprintf("tab-%d", i), fmt.Sprintf("pane-%d", i), newQuietPTY(), domain.Size{Cols: 80, Rows: 22},
+		)
 	}
 	sess.mu.Unlock()
 

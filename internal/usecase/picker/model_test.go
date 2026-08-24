@@ -777,14 +777,26 @@ func TestStructuredRemoteTargetOwnsStoppedState(t *testing.T) {
 	}
 }
 
-func TestRemoteStoppedOrdinalSelectorRejectsUnrepresentableTabCount(t *testing.T) {
-	selector, ok := remoteStoppedOrdinalSelector(math.MaxUint16-1, "last", math.MaxUint16)
-	require.True(t, ok)
-	require.Equal(t, domain.NewOrdinalTabSelector(math.MaxUint16-1, "last", math.MaxUint16), selector)
-
-	selector, ok = remoteStoppedOrdinalSelector(math.MaxUint16, "wrapped", math.MaxUint16+1)
-	require.False(t, ok)
-	require.Equal(t, domain.TabSelector{}, selector)
+func TestRemoteStoppedOrdinalSelectorBounds(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		index    int
+		tabCount int
+		want     domain.TabSelector
+		ok       bool
+	}{
+		{name: "largest representable", index: math.MaxUint16 - 1, tabCount: math.MaxUint16, want: domain.NewOrdinalTabSelector(math.MaxUint16-1, "tab", math.MaxUint16), ok: true},
+		{name: "unrepresentable count", index: math.MaxUint16, tabCount: math.MaxUint16 + 1},
+		{name: "negative index", index: -1, tabCount: 1},
+		{name: "index equals count", index: 1, tabCount: 1},
+		{name: "empty count", index: 0, tabCount: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selector, ok := remoteStoppedOrdinalSelector(test.index, "tab", test.tabCount)
+			require.Equal(t, test.ok, ok)
+			require.Equal(t, test.want, selector)
+		})
+	}
 }
 
 func TestRemoteRowsCannotAcceptMovesInEitherMoveMode(t *testing.T) {

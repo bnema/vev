@@ -364,7 +364,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 }
 
 func remoteStoppedOrdinalSelector(index int, rawName string, tabCount int) (domain.TabSelector, bool) {
-	if tabCount > math.MaxUint16 {
+	if tabCount > math.MaxUint16 || index < 0 || index >= tabCount {
 		return domain.TabSelector{}, false
 	}
 	return domain.NewOrdinalTabSelector(uint16(index), rawName, uint16(tabCount)), true

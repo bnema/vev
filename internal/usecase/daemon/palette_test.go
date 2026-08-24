@@ -228,8 +228,15 @@ func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	d, current, ac, _ := newManualSessionWithPTYs(t, p)
 	d.sessions["active"] = &session{sessionCore: sessionCore{id: "active", name: "active", createdAt: 10}}
 	d.sessions["ephemeral"] = &session{sessionCore: sessionCore{id: "ephemeral", name: "ephemeral", ephemeral: true, createdAt: 11}}
-	d.inactive["stopped"] = inactiveSession{name: "stopped", createdAt: 12}
-	d.inactive["purging"] = inactiveSession{name: "purging", createdAt: 13, purging: true}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", createdAt: 12, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
+	d.inactive["purging"] = inactiveSession{name: "purging", createdAt: 13, incarnation: domain.IncarnationID{4}, state: ports.SessionDown, purging: true}
+	d.inactive["broken"] = inactiveSession{name: "broken", createdAt: 14, incarnation: domain.IncarnationID{5}, state: ports.SessionBroken}
+	d.inactive["degraded"] = inactiveSession{name: "degraded", createdAt: 15, incarnation: domain.IncarnationID{6}, state: ports.SessionDown, record: domain.CatalogueRecord{DegradedReason: "checkpoint unavailable"}}
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1, Entries: []ports.RecentRouteEntry{
+		testRouteEntry(1, 1, "purging", 4, ports.RouteKindLocal),
+		testRouteEntry(2, 1, "broken", 5, ports.RouteKindLocal),
+		testRouteEntry(3, 1, "degraded", 6, ports.RouteKindLocal),
+	}})
 
 	d.enterPalette(current, ac)
 	ac.overlays.paletteMu.Lock()

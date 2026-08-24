@@ -61,8 +61,10 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
 	stopped := make([]inactiveSession, 0, len(d.inactive))
+	localLifecycles := make(map[domain.SessionLifecycleID]struct{}, len(sessions)+len(d.inactive))
 	for _, entry := range d.inactive {
-		if entry.visible() {
+		localLifecycles[entry.incarnation] = struct{}{}
+		if entry.canResume() {
 			stopped = append(stopped, entry)
 		}
 	}
@@ -73,7 +75,6 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		results = append(results, palette.NewCommandResult(cmd))
 	}
 	active := make([]palette.Result, 0, len(sessions))
-	localLifecycles := make(map[domain.SessionLifecycleID]struct{}, len(sessions)+len(stopped))
 	for _, candidate := range sessions {
 		snap := candidate.snapshotView(viewOptions{})
 		if snap.name == "" || snap.ephemeral {
