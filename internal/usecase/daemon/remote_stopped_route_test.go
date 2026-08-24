@@ -92,6 +92,57 @@ func TestRouteRemoteTargetRejectsLiveIntentForInactiveSession(t *testing.T) {
 	require.Contains(t, d.inactive, "work")
 }
 
+func TestRouteRemoteTargetMapsUnavailableInactiveStatesToNoSuchTarget(t *testing.T) {
+	lifecycle := remoteLifecycleForTest()
+	for _, test := range []struct {
+		name  string
+		entry inactiveSession
+	}{
+		{name: "broken", entry: inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionBroken}},
+		{name: "degraded", entry: inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionDown, record: domain.CatalogueRecord{Name: "work", DegradedReason: "checkpoint unavailable"}}},
+		{name: "purging", entry: inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionDown, purging: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			d.inactive["work"] = test.entry
+			target := domain.RemoteSessionTarget{
+				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
+				SessionName: "work", Stopped: true,
+			}
+			_, _, err := d.routeWithContext(context.Background(), ports.Hello{
+				Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+				Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
+				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			}, &closeTrackingTransport{})
+
+			var protocol *protoErr
+			require.ErrorAs(t, err, &protocol)
+			require.Equal(t, uint16(ports.ErrNoSuchTarget), protocol.code)
+		})
+	}
+}
+
+func TestRouteRemoteTargetMapsConcurrentInactiveResumeToNoSuchTarget(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	lifecycle := remoteLifecycleForTest()
+	d.inactive["work"] = inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionDown}
+	d.creating["work"] = struct{}{}
+	target := domain.RemoteSessionTarget{
+		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
+		SessionName: "work", Stopped: true,
+	}
+
+	_, _, err := d.routeWithContext(context.Background(), ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
+		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}, &closeTrackingTransport{})
+
+	var protocol *protoErr
+	require.ErrorAs(t, err, &protocol)
+	require.Equal(t, uint16(ports.ErrNoSuchTarget), protocol.code)
+}
+
 func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
 	newTarget := func(record domain.CatalogueRecord) domain.RemoteSessionTarget {
 		return domain.RemoteSessionTarget{

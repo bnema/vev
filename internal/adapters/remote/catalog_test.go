@@ -119,8 +119,31 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 				if !errors.As(err, &mismatch) {
 					t.Fatalf("error = %v, want RemoteCatalogVersionMismatchError", err)
 				}
-				if mismatch.Got != ports.ProtocolVersion+1 || mismatch.Want != ports.ProtocolVersion {
+				if mismatch.Kind != "protocol" || mismatch.Got != ports.ProtocolVersion+1 || mismatch.Want != ports.ProtocolVersion {
 					t.Fatalf("mismatch = %#v", mismatch)
+				}
+			},
+		},
+		{
+			name: "obsolete count-only schema is classified before session decoding",
+			stdout: fmt.Sprintf(`{"protocol_version":%d,"schema_version":2,"sessions":[{"tabs":1}]}`,
+				ports.ProtocolVersion),
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var mismatch *ports.RemoteCatalogVersionMismatchError
+				if !errors.As(err, &mismatch) || mismatch.Kind != "catalog" || mismatch.Got != 2 || mismatch.Want != ports.RemoteCatalogSchemaVersion {
+					t.Fatalf("error = %v, want obsolete catalogue version mismatch", err)
+				}
+			},
+		},
+		{
+			name:   "unknown catalogue schema",
+			stdout: fmt.Sprintf(`{"protocol_version":%d,"schema_version":4,"sessions":[]}`, ports.ProtocolVersion),
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var mismatch *ports.RemoteCatalogVersionMismatchError
+				if !errors.As(err, &mismatch) || mismatch.Kind != "catalog" || mismatch.Got != 4 || mismatch.Want != ports.RemoteCatalogSchemaVersion {
+					t.Fatalf("error = %v, want unknown catalogue version mismatch", err)
 				}
 			},
 		},
@@ -139,6 +162,18 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 			stdout: fmt.Sprintf(`{"protocol_version":%d,"schema_version":%d,"sessions":[{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","ephemeral":false,"tabs":1,"attached":false}]}`,
 				ports.ProtocolVersion, ports.RemoteCatalogSchemaVersion),
 			wantErr: errCatalogDecode,
+		},
+		{
+			name: "unknown fields rejected",
+			stdout: fmt.Sprintf(`{"protocol_version":%d,"schema_version":%d,"sessions":[],"future":true}`,
+				ports.ProtocolVersion, ports.RemoteCatalogSchemaVersion),
+			wantErr: errCatalogDecode,
+		},
+		{
+			name: "missing required session field",
+			stdout: fmt.Sprintf(`{"protocol_version":%d,"schema_version":%d,"sessions":[{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","tabs":[],"attached":false}]}`,
+				ports.ProtocolVersion, ports.RemoteCatalogSchemaVersion),
+			wantErr: errCatalogRequired,
 		},
 		{
 			name:    "trailing non-whitespace",
@@ -221,6 +256,9 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 			}
 			if got.ProtocolVersion != tt.want.ProtocolVersion {
 				t.Fatalf("ProtocolVersion = %d, want %d", got.ProtocolVersion, tt.want.ProtocolVersion)
+			}
+			if got.SchemaVersion != tt.want.SchemaVersion {
+				t.Fatalf("SchemaVersion = %d, want %d", got.SchemaVersion, tt.want.SchemaVersion)
 			}
 			if len(got.Sessions) != len(tt.want.Sessions) {
 				t.Fatalf("Sessions len = %d, want %d", len(got.Sessions), len(tt.want.Sessions))

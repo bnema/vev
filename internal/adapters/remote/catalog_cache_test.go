@@ -31,7 +31,10 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 			Host:      "zebra",
 			FetchedAt: fetchedAt,
 			Sessions: []ports.RemoteCatalogSession{
-				{LifecycleID: [16]byte{1}, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
+				{
+					LifecycleID: [16]byte{1}, Name: "work", State: "up", LastUsedSeq: 42, ActiveTabID: "work-2",
+					Tabs: []ports.RemoteCatalogTab{{ID: "work-1", Detail: "dynamic", Attention: true}, {ID: "work-2", Index: 1}},
+				},
 				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
 			},
 		},
@@ -59,6 +62,12 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 	if alpha < 0 || work < 0 || alpha >= work {
 		t.Fatalf("stored sessions are not ordered: %s", raw)
 	}
+	if !strings.Contains(string(raw), `"version":3`) || !strings.Contains(string(raw), `"tabs":[{"id":"work-1"`) {
+		t.Fatalf("stored cache does not pin the v3 typed-tab contract: %s", raw)
+	}
+	if strings.Contains(string(raw), `"detail"`) || strings.Contains(string(raw), `"attention"`) {
+		t.Fatalf("stored cache contains dynamic tab fields: %s", raw)
+	}
 	got, err := cache.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -74,7 +83,7 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 			FetchedAt: fetchedAt,
 			Sessions: []ports.RemoteCatalogSession{
 				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
-				{LifecycleID: [16]byte{1}, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
+				{LifecycleID: [16]byte{1}, Name: "work", State: "up", LastUsedSeq: 42, ActiveTabID: "work-2", Tabs: []ports.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
 			},
 		},
 	}
@@ -125,6 +134,8 @@ func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 		{name: "negative fetched at", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":-1,"sessions":[]}]}`)},
 		{name: "duplicate hosts", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[]},{"target":"arch","fetched_at_unix_nano":2,"sessions":[]}]}`)},
 		{name: "missing exact session fields", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"name":"work","state":"up","ephemeral":false,"tabs":[],"attached":false}]}]}`)},
+		{name: "count-only tabs", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","ephemeral":false,"tabs":1,"attached":false}]}]}`)},
+		{name: "unknown field", raw: []byte(`{"version":3,"hosts":[],"future":true}`)},
 		{name: "invalid utf8", raw: []byte("{\"version\":3,\"hosts\":[{\"target\":\"\xff\",\"fetched_at_unix_nano\":1,\"sessions\":[]}]}")},
 	}
 	for _, tc := range cases {

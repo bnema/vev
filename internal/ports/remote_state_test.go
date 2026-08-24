@@ -39,3 +39,16 @@ func TestRemoteCatalogStateContract(t *testing.T) {
 	require.Equal(t, "catalog", mismatch.Kind)
 	require.Equal(t, RemoteCatalogSchemaVersion, mismatch.Want)
 }
+
+func TestValidateRemoteCatalogRejectsDuplicateSessionNames(t *testing.T) {
+	err := ValidateRemoteCatalog(RemoteCatalog{
+		ProtocolVersion: ProtocolVersion,
+		SchemaVersion:   RemoteCatalogSchemaVersion,
+		Sessions: []RemoteCatalogSession{
+			{LifecycleID: [16]byte{1}, Name: "work", State: RemoteCatalogSessionUp, Tabs: []RemoteCatalogTab{}},
+			{LifecycleID: [16]byte{2}, Name: "work", State: RemoteCatalogSessionDown, Tabs: []RemoteCatalogTab{}},
+		},
+	})
+	require.ErrorIs(t, err, ErrInvalidRemoteCatalog)
+	require.ErrorContains(t, err, "duplicate session name")
+}

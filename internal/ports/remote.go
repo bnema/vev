@@ -201,7 +201,8 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 	if len(c.Sessions) > RemoteCatalogMaxSessions {
 		return fmt.Errorf("%w: too many sessions", ErrRemoteCatalogTooLarge)
 	}
-	seen := make(map[domain.SessionLifecycleID]string, len(c.Sessions))
+	seenLifecycles := make(map[domain.SessionLifecycleID]string, len(c.Sessions))
+	seenNames := make(map[string]struct{}, len(c.Sessions))
 	bytes := 0
 	for _, session := range c.Sessions {
 		if !validRemoteCatalogText(session.Name) || !validRemoteCatalogText(string(session.State)) || !validRemoteCatalogText(session.Reason) {
@@ -227,10 +228,14 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 		if session.LifecycleID == (domain.SessionLifecycleID{}) {
 			return fmt.Errorf("%w: zero lifecycle ID", ErrInvalidRemoteCatalog)
 		}
-		if prior, exists := seen[session.LifecycleID]; exists {
+		if _, exists := seenNames[session.Name]; exists {
+			return fmt.Errorf("%w: duplicate session name %q", ErrInvalidRemoteCatalog, session.Name)
+		}
+		seenNames[session.Name] = struct{}{}
+		if prior, exists := seenLifecycles[session.LifecycleID]; exists {
 			return fmt.Errorf("%w: lifecycle ID reused by %q and %q", ErrInvalidRemoteCatalog, prior, session.Name)
 		}
-		seen[session.LifecycleID] = session.Name
+		seenLifecycles[session.LifecycleID] = session.Name
 		if session.Tabs == nil {
 			return fmt.Errorf("%w: missing tab list", ErrInvalidRemoteCatalog)
 		}

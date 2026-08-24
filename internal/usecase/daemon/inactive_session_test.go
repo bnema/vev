@@ -42,9 +42,22 @@ func TestInactiveSessionPredicates(t *testing.T) {
 
 func TestInactiveSessionLifecycleMatch(t *testing.T) {
 	entry := inactiveSession{name: "work", createdAt: 7, incarnation: domain.IncarnationID{1}}
-	require.True(t, entry.sameLifecycle(entry))
-
-	replacement := entry
-	replacement.incarnation[0]++
-	require.False(t, entry.sameLifecycle(replacement))
+	for _, test := range []struct {
+		name   string
+		mutate func(*inactiveSession)
+		want   bool
+	}{
+		{name: "same lifecycle", want: true},
+		{name: "different name", mutate: func(candidate *inactiveSession) { candidate.name = "other" }},
+		{name: "different creation time", mutate: func(candidate *inactiveSession) { candidate.createdAt++ }},
+		{name: "different incarnation", mutate: func(candidate *inactiveSession) { candidate.incarnation[0]++ }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := entry
+			if test.mutate != nil {
+				test.mutate(&candidate)
+			}
+			require.Equal(t, test.want, entry.sameLifecycle(candidate))
+		})
+	}
 }

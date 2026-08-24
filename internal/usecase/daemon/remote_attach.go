@@ -27,6 +27,10 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote target requires attach or resume"}
 	}
 	if err := d.waitForTargetRestore(ctx, target.SessionName); err != nil {
+		var protocol *protoErr
+		if errors.As(err, &protocol) && protocol.code == ports.ErrInternal {
+			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session is unavailable"}
+		}
 		return nil, nil, remoteTargetError(err)
 	}
 
@@ -78,7 +82,7 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 	sess, err := d.resumeRemoteInactiveSessionLocked(target, cwd, h.Size, env, inactive)
 	if err != nil {
 		d.mu.Unlock()
-		if errors.Is(err, errAttachmentTransition) {
+		if errors.Is(err, errAttachmentTransition) || errors.Is(err, errSessionNameInUse) {
 			return nil, nil, remoteTargetError(err)
 		}
 		return nil, nil, err
