@@ -715,6 +715,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 	e.d.mu.Unlock()
 
 	rows := make([]ports.RemoteCatalogSession, 0, len(sessions)+len(stopped))
+	liveNames := make(map[string]struct{}, len(sessions))
 	for _, sess := range sessions {
 		e.d.refreshSessionFocusedTitles(sess)
 		snap := sess.snapshotView(viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: false})
@@ -735,8 +736,12 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 			row.ActiveTabID = tabs[min(snap.defaultTab, len(tabs)-1)].ID
 		}
 		rows = append(rows, row)
+		liveNames[row.Name] = struct{}{}
 	}
 	for _, entry := range stopped {
+		if _, live := liveNames[entry.name]; live {
+			continue
+		}
 		tabs, err := remoteCatalogStoppedTabs(entry)
 		if err != nil {
 			return "", err

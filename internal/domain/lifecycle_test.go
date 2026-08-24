@@ -34,7 +34,10 @@ func TestRemoteSessionTargetResolveTab(t *testing.T) {
 		{name: "down fresh default tab", target: RemoteSessionTarget{Endpoint: base.Endpoint, DisplayOrigin: base.DisplayOrigin, LifecycleID: base.LifecycleID, SessionName: base.SessionName, Stopped: true}, tabs: []TabSelectorTab{{ID: "fresh"}}, ok: true},
 		{name: "down without selector rejects ambiguity", target: RemoteSessionTarget{Endpoint: base.Endpoint, DisplayOrigin: base.DisplayOrigin, LifecycleID: base.LifecycleID, SessionName: base.SessionName, Stopped: true}, tabs: []TabSelectorTab{{ID: "one"}, {ID: "two"}}},
 		{name: "down stable selector", target: RemoteSessionTarget{Endpoint: base.Endpoint, DisplayOrigin: base.DisplayOrigin, LifecycleID: base.LifecycleID, SessionName: base.SessionName, Stopped: true, StoppedTab: NewStableTabSelector("two")}, tabs: []TabSelectorTab{{ID: "one"}, {ID: "two"}}, want: 1, ok: true},
+		{name: "down invalid selector", target: RemoteSessionTarget{Endpoint: base.Endpoint, DisplayOrigin: base.DisplayOrigin, LifecycleID: base.LifecycleID, SessionName: base.SessionName, Stopped: true, StoppedTab: TabSelector{Kind: TabSelectorByStableID, Ordinal: 1}}, tabs: []TabSelectorTab{{ID: "one"}}},
 		{name: "live stable tab", target: RemoteSessionTarget{Endpoint: base.Endpoint, DisplayOrigin: base.DisplayOrigin, LifecycleID: base.LifecycleID, SessionName: base.SessionName, LiveTabID: "two"}, tabs: []TabSelectorTab{{ID: "one"}, {ID: "two"}}, want: 1, ok: true},
+		{name: "live missing tab", target: RemoteSessionTarget{Endpoint: base.Endpoint, DisplayOrigin: base.DisplayOrigin, LifecycleID: base.LifecycleID, SessionName: base.SessionName, LiveTabID: "missing"}, tabs: []TabSelectorTab{{ID: "one"}, {ID: "two"}}, want: -1},
+		{name: "live duplicate tab rejected", target: RemoteSessionTarget{Endpoint: base.Endpoint, DisplayOrigin: base.DisplayOrigin, LifecycleID: base.LifecycleID, SessionName: base.SessionName, LiveTabID: "two"}, tabs: []TabSelectorTab{{ID: "two"}, {ID: "two"}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

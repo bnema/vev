@@ -1,6 +1,7 @@
 package picker
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -774,6 +775,16 @@ func TestStructuredRemoteTargetOwnsStoppedState(t *testing.T) {
 			require.Equal(t, test.targetStopped, selected.RemoteTarget.Stopped)
 		})
 	}
+}
+
+func TestRemoteStoppedOrdinalSelectorRejectsUnrepresentableTabCount(t *testing.T) {
+	selector, ok := remoteStoppedOrdinalSelector(math.MaxUint16-1, "last", math.MaxUint16)
+	require.True(t, ok)
+	require.Equal(t, domain.NewOrdinalTabSelector(math.MaxUint16-1, "last", math.MaxUint16), selector)
+
+	selector, ok = remoteStoppedOrdinalSelector(math.MaxUint16, "wrapped", math.MaxUint16+1)
+	require.False(t, ok)
+	require.Equal(t, domain.TabSelector{}, selector)
 }
 
 func TestRemoteRowsCannotAcceptMovesInEitherMoveMode(t *testing.T) {

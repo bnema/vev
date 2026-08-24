@@ -736,6 +736,8 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 
 	d.mu.Lock()
 	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp/old", createdAt: 1, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
+	// Live runtime authority wins if both registries contain the same name.
+	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 1, incarnation: domain.IncarnationID{4}, state: ports.SessionDown}
 	d.mu.Unlock()
 
 	listBefore := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})

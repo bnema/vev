@@ -317,6 +317,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 			continue
 		}
 		tabRow := common
+		remoteTargetResolvable := true
 		tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
 		tabRow.tabID, tabRow.tabIndex = tab.TabID, i
 		tabRow.selectable = tabRow.kind.selectable(config.Mode)
@@ -330,8 +331,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 					if tab.TabID != "" {
 						remoteTarget.StoppedTab = domain.NewStableTabSelector(tab.TabID)
 					} else if remoteTarget.StoppedTab != (domain.TabSelector{}) {
-						tabCount := min(len(session.Tabs), math.MaxUint16)
-						remoteTarget.StoppedTab = domain.NewOrdinalTabSelector(uint16(i), tab.RawName, uint16(tabCount))
+						remoteTarget.StoppedTab, remoteTargetResolvable = remoteStoppedOrdinalSelector(i, tab.RawName, len(session.Tabs))
 					}
 				} else {
 					remoteTarget.StoppedTab = domain.TabSelector{}
@@ -348,7 +348,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 				tabRow.selectable = false
 			} else {
 				tabRow.focusable = true
-				tabRow.selectable = tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteActivatable(session)
+				tabRow.selectable = remoteTargetResolvable && tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteActivatable(session)
 			}
 			tabRow.dim = session.RemoteActivation == RemoteUnavailable
 		}
@@ -361,6 +361,13 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 		return nil
 	}
 	return rows
+}
+
+func remoteStoppedOrdinalSelector(index int, rawName string, tabCount int) (domain.TabSelector, bool) {
+	if tabCount > math.MaxUint16 {
+		return domain.TabSelector{}, false
+	}
+	return domain.NewOrdinalTabSelector(uint16(index), rawName, uint16(tabCount)), true
 }
 
 func remoteActivatable(session SessionView) bool {

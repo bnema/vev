@@ -85,7 +85,7 @@ func TestRouteRemoteTargetRejectsLiveIntentForInactiveSession(t *testing.T) {
 
 	var protocol *protoErr
 	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, uint16(ports.ErrNoSuchTarget), protocol.code)
+	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	require.Empty(t, d.sessions)
@@ -117,7 +117,7 @@ func TestRouteRemoteTargetMapsUnavailableInactiveStatesToNoSuchTarget(t *testing
 
 			var protocol *protoErr
 			require.ErrorAs(t, err, &protocol)
-			require.Equal(t, uint16(ports.ErrNoSuchTarget), protocol.code)
+			require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
 		})
 	}
 }
@@ -140,7 +140,7 @@ func TestRouteRemoteTargetMapsConcurrentInactiveResumeToNoSuchTarget(t *testing.
 
 	var protocol *protoErr
 	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, uint16(ports.ErrNoSuchTarget), protocol.code)
+	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
 }
 
 func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {

@@ -170,17 +170,7 @@ func (t RemoteSessionTarget) ResolveTab(tabs []TabSelectorTab) (int, bool) {
 		}
 		return t.StoppedTab.Resolve(tabs)
 	}
-	found := -1
-	for i, tab := range tabs {
-		if tab.ID != t.LiveTabID {
-			continue
-		}
-		if found >= 0 {
-			return 0, false
-		}
-		found = i
-	}
-	return found, found >= 0
+	return NewStableTabSelector(t.LiveTabID).Resolve(tabs)
 }
 
 // ValidateRemoteDisplayOrigin validates presentation data without imposing
