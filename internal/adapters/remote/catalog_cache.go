@@ -17,7 +17,7 @@ import (
 
 const (
 	catalogCacheFileName    = "remote-catalog-cache.json"
-	catalogCacheFileVersion = 2
+	catalogCacheFileVersion = 3
 )
 
 // CatalogCachePath returns the canonical location of the remote catalog cache in stateDir.
@@ -35,15 +35,14 @@ type catalogCacheHost struct {
 }
 
 type catalogCacheSession struct {
-	LifecycleID *domain.SessionLifecycleID `json:"lifecycle_id,omitempty"`
-	Name        *string                    `json:"name"`
-	State       *string                    `json:"state"`
-	Ephemeral   *bool                      `json:"ephemeral"`
-	LastUsedSeq *uint64                    `json:"last_used_seq,omitempty"`
-	Tabs        *uint16                    `json:"tabs,omitempty"`
-	TabList     *[]ports.RemoteCatalogTab  `json:"tab_list,omitempty"`
-	ActiveTabID *string                    `json:"active_tab_id,omitempty"`
-	Attached    *bool                      `json:"attached"`
+	LifecycleID *domain.SessionLifecycleID       `json:"lifecycle_id"`
+	Name        *string                          `json:"name"`
+	State       *ports.RemoteCatalogSessionState `json:"state"`
+	Ephemeral   *bool                            `json:"ephemeral"`
+	LastUsedSeq *uint64                          `json:"last_used_seq,omitempty"`
+	Tabs        *[]ports.RemoteCatalogTab        `json:"tabs"`
+	ActiveTabID *string                          `json:"active_tab_id,omitempty"`
+	Attached    *bool                            `json:"attached"`
 }
 
 type fileCatalogCache struct {
@@ -107,31 +106,27 @@ func (c *fileCatalogCache) Load() ([]ports.RemoteCatalogCacheEntry, error) {
 			Sessions:  make([]ports.RemoteCatalogSession, 0, len(*host.Sessions)),
 		}
 		for _, session := range *host.Sessions {
-			if session.Name == nil || session.State == nil || session.Ephemeral == nil || session.Attached == nil || session.Tabs == nil && session.TabList == nil {
+			if session.LifecycleID == nil || session.Name == nil || session.State == nil || session.Ephemeral == nil || session.Attached == nil || session.Tabs == nil {
 				return nil, fmt.Errorf("remote catalog cache: malformed cache file: missing session fields")
 			}
-			if !utf8.ValidString(*session.Name) || !utf8.ValidString(*session.State) {
+			if !utf8.ValidString(*session.Name) || !utf8.ValidString(string(*session.State)) {
 				return nil, fmt.Errorf("remote catalog cache: malformed cache file: invalid UTF-8")
 			}
+			tabs := make([]ports.RemoteCatalogTab, len(*session.Tabs))
+			copy(tabs, *session.Tabs)
 			decoded := ports.RemoteCatalogSession{
-				Name:      *session.Name,
-				State:     *session.State,
-				Ephemeral: *session.Ephemeral,
-				Attached:  *session.Attached,
+				LifecycleID: *session.LifecycleID,
+				Name:        *session.Name,
+				State:       *session.State,
+				Ephemeral:   *session.Ephemeral,
+				Tabs:        tabs,
+				Attached:    *session.Attached,
 			}
 			if session.LastUsedSeq != nil {
 				decoded.LastUsedSeq = *session.LastUsedSeq
 			}
-			if session.LifecycleID != nil {
-				decoded.LifecycleID = *session.LifecycleID
-			}
 			if session.ActiveTabID != nil {
 				decoded.ActiveTabID = *session.ActiveTabID
-			}
-			if session.TabList != nil {
-				decoded.Tabs = append([]ports.RemoteCatalogTab(nil), (*session.TabList)...)
-			} else {
-				decoded.Tabs = int(*session.Tabs)
 			}
 			entry.Sessions = append(entry.Sessions, decoded)
 		}
@@ -160,25 +155,17 @@ func (c *fileCatalogCache) Store(entries []ports.RemoteCatalogCacheEntry) error 
 			state := session.State
 			ephemeral := session.Ephemeral
 			attached := session.Attached
-			row := catalogCacheSession{Name: &name, State: &state, Ephemeral: &ephemeral, Attached: &attached}
+			id := session.LifecycleID
+			tabs := make([]ports.RemoteCatalogTab, len(session.Tabs))
+			copy(tabs, session.Tabs)
+			row := catalogCacheSession{LifecycleID: &id, Name: &name, State: &state, Ephemeral: &ephemeral, Tabs: &tabs, Attached: &attached}
 			if session.LastUsedSeq != 0 {
 				lastUsed := session.LastUsedSeq
 				row.LastUsedSeq = &lastUsed
 			}
-			if session.LifecycleID != (domain.SessionLifecycleID{}) {
-				id := session.LifecycleID
-				row.LifecycleID = &id
-			}
 			if session.ActiveTabID != "" {
 				active := session.ActiveTabID
 				row.ActiveTabID = &active
-			}
-			if tabs := ports.CatalogTabs(session); tabs != nil {
-				copyTabs := append([]ports.RemoteCatalogTab(nil), tabs...)
-				row.TabList = &copyTabs
-			} else {
-				count := ports.SaturateUint16(ports.CatalogTabCount(session))
-				row.Tabs = &count
 			}
 			sessions = append(sessions, row)
 		}
@@ -221,13 +208,13 @@ func normalizeCatalogCacheEntries(entries []ports.RemoteCatalogCacheEntry) ([]po
 		}
 		sessions := make(map[string]struct{}, len(entry.Sessions))
 		for _, session := range entry.Sessions {
-			if !utf8.ValidString(session.Name) || !utf8.ValidString(session.State) {
+			if !utf8.ValidString(session.Name) || !utf8.ValidString(string(session.State)) {
 				return nil, fmt.Errorf("remote catalog cache: session is not valid UTF-8")
 			}
 			if err := domain.ValidateSessionName(session.Name); err != nil {
 				return nil, fmt.Errorf("remote catalog cache: invalid session %q: %w", session.Name, err)
 			}
-			if !validCatalogState(session.State) {
+			if !session.State.Valid() {
 				return nil, fmt.Errorf("remote catalog cache: invalid session state %q", session.State)
 			}
 			if _, duplicate := sessions[session.Name]; duplicate {
@@ -235,12 +222,9 @@ func normalizeCatalogCacheEntries(entries []ports.RemoteCatalogCacheEntry) ([]po
 			}
 			sessions[session.Name] = struct{}{}
 			copySession := session
-			if tabs := ports.CatalogTabs(session); tabs != nil {
-				copyTabs := make([]ports.RemoteCatalogTab, len(tabs))
-				for i, tab := range tabs {
-					copyTabs[i] = ports.RemoteCatalogTab{ID: tab.ID, Index: tab.Index, Name: tab.Name}
-				}
-				copySession.Tabs = copyTabs
+			copySession.Tabs = make([]ports.RemoteCatalogTab, len(session.Tabs))
+			for i, tab := range session.Tabs {
+				copySession.Tabs[i] = ports.RemoteCatalogTab{ID: tab.ID, Index: tab.Index, Name: tab.Name}
 			}
 			copyEntry.Sessions = append(copyEntry.Sessions, copySession)
 		}

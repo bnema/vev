@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,7 @@ func TestRemoteCatalogClientCommandConstruction(t *testing.T) {
 					gotArgs = append([]string(nil), args...)
 					return stdoutCmd(ctx, mustCatalogJSON(t, ports.RemoteCatalog{
 						ProtocolVersion: ports.ProtocolVersion,
+						SchemaVersion:   ports.RemoteCatalogSchemaVersion,
 						Sessions:        []ports.RemoteCatalogSession{},
 					}))
 				},
@@ -82,8 +84,9 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 
 	valid := ports.RemoteCatalog{
 		ProtocolVersion: ports.ProtocolVersion,
+		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
 		Sessions: []ports.RemoteCatalogSession{
-			{Name: "work", State: "up", Ephemeral: false, Tabs: 2, Attached: true},
+			{LifecycleID: [16]byte{1}, Name: "work", State: "up", Ephemeral: false, Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}, {ID: "tab-2", Index: 1}}, Attached: true},
 		},
 	}
 	validJSON := mustCatalogJSON(t, valid)
@@ -109,7 +112,7 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 		},
 		{
 			name:   "mismatching protocol version",
-			stdout: mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion + 1, Sessions: []ports.RemoteCatalogSession{}}),
+			stdout: mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion + 1, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{}}),
 			check: func(t *testing.T, err error) {
 				t.Helper()
 				var mismatch *ports.RemoteCatalogVersionMismatchError
@@ -132,6 +135,12 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 			wantErr: errCatalogDecode,
 		},
 		{
+			name: "count-only tabs rejected",
+			stdout: fmt.Sprintf(`{"protocol_version":%d,"schema_version":%d,"sessions":[{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","ephemeral":false,"tabs":1,"attached":false}]}`,
+				ports.ProtocolVersion, ports.RemoteCatalogSchemaVersion),
+			wantErr: errCatalogDecode,
+		},
+		{
 			name:    "trailing non-whitespace",
 			stdout:  strings.TrimSpace(validJSON) + `{"extra":true}`,
 			wantErr: errCatalogTrailing,
@@ -142,19 +151,34 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 			wantErr: errCatalogRequired,
 		},
 		{
+			name:   "missing catalogue schema",
+			stdout: fmt.Sprintf(`{"protocol_version":%d,"sessions":[]}`+"\n", ports.ProtocolVersion),
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var mismatch *ports.RemoteCatalogVersionMismatchError
+				if !errors.As(err, &mismatch) || mismatch.Kind != "catalog" || mismatch.Got != 0 || mismatch.Want != ports.RemoteCatalogSchemaVersion {
+					t.Fatalf("error = %v, want missing catalogue version mismatch", err)
+				}
+			},
+		},
+		{
 			name:    "missing sessions",
-			stdout:  fmt.Sprintf(`{"protocol_version":%d}`+"\n", ports.ProtocolVersion),
+			stdout:  fmt.Sprintf(`{"protocol_version":%d,"schema_version":%d}`+"\n", ports.ProtocolVersion, ports.RemoteCatalogSchemaVersion),
 			wantErr: errCatalogRequired,
 		},
 		{
-			name:    "invalid session name",
-			stdout:  mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "bad name", State: "up"}}}),
-			wantErr: errCatalogSession,
+			name: "invalid session name",
+			stdout: mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{{
+				LifecycleID: [16]byte{1}, Name: "bad name", State: "up", Tabs: []ports.RemoteCatalogTab{},
+			}}}),
+			wantErr: ports.ErrInvalidRemoteCatalog,
 		},
 		{
-			name:    "invalid session state",
-			stdout:  mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "weird"}}}),
-			wantErr: errCatalogSession,
+			name: "invalid session state",
+			stdout: mustCatalogJSON(t, ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{{
+				LifecycleID: [16]byte{1}, Name: "work", State: "weird", Tabs: []ports.RemoteCatalogTab{},
+			}}}),
+			wantErr: ports.ErrRemoteCatalogUnknownState,
 		},
 		{
 			name:    "remote exit with stderr",
@@ -202,7 +226,7 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 				t.Fatalf("Sessions len = %d, want %d", len(got.Sessions), len(tt.want.Sessions))
 			}
 			for i := range tt.want.Sessions {
-				if got.Sessions[i] != tt.want.Sessions[i] {
+				if !reflect.DeepEqual(got.Sessions[i], tt.want.Sessions[i]) {
 					t.Fatalf("Sessions[%d] = %#v, want %#v", i, got.Sessions[i], tt.want.Sessions[i])
 				}
 			}
@@ -231,6 +255,7 @@ func TestRemoteCatalogClientAppliesLifetimeAndWaitDelay(t *testing.T) {
 			commandCtx = ctx
 			cmd = stdoutCmd(ctx, mustCatalogJSON(t, ports.RemoteCatalog{
 				ProtocolVersion: ports.ProtocolVersion,
+				SchemaVersion:   ports.RemoteCatalogSchemaVersion,
 				Sessions:        []ports.RemoteCatalogSession{},
 			}))
 			return cmd

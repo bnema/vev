@@ -119,7 +119,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	d.sessions[echo.id] = echo
 	d.sessions[alpha.id] = alpha
 	d.sessions[charlie.id] = charlie
-	d.stopped["bravo"] = stoppedSession{name: "bravo", cwd: "/tmp/bravo"}
+	d.inactive["bravo"] = inactiveSession{name: "bravo", cwd: "/tmp/bravo"}
 	d.mu.Unlock()
 	d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
 	handler := daemonKeyHandler{d: d, ac: ac}
@@ -150,7 +150,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 		target.tabs[1].mu.Unlock()
 	}
 	d.mu.Lock()
-	_, stopped := d.stopped["bravo"]
+	_, stopped := d.inactive["bravo"]
 	var bravoLive bool
 	for _, candidate := range d.sessions {
 		if candidate == nil {

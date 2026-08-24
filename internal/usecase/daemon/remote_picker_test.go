@@ -59,30 +59,19 @@ func newRemotePickerDaemon(store ports.RemoteHostStore) *Daemon {
 }
 
 func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) {
-	for _, state := range []string{"down", "stopped"} {
-		t.Run(state, func(t *testing.T) {
-			lifecycle := remoteLifecycleForTest()
-			key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle}
-			session := ports.RemoteCatalogSession{
-				LifecycleID: lifecycle, Name: "work", State: state,
-				Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
-			}
-			view := remotePickerView(key, session, remoteHostFresh, time.Unix(100, 0))
-			require.True(t, view.Stopped)
-			require.NotNil(t, view.RemoteTarget)
-			require.True(t, view.RemoteTarget.Stopped)
-			require.Equal(t, picker.RemoteRestart, view.RemoteActivation, "structured stopped rows have an explicit safe restore target")
-			require.Equal(t, "stopped — Enter to restart", view.RemoteDetail)
-
-			legacy := session
-			legacy.LifecycleID = domain.SessionLifecycleID{}
-			legacyView := remotePickerView(domain.RemoteSessionKey{Host: "arch", Name: "work"}, legacy, remoteHostFresh, time.Unix(100, 0))
-			require.True(t, legacyView.Stopped)
-			require.True(t, legacyView.ConnectOnly)
-			require.Equal(t, picker.RemoteUnavailable, legacyView.RemoteActivation, "legacy stopped rows cannot be selected without lifecycle identity")
-			require.Equal(t, "stopped — exact identity required", legacyView.RemoteDetail)
-		})
+	lifecycle := remoteLifecycleForTest()
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle}
+	session := ports.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: ports.RemoteCatalogSessionDown,
+		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 	}
+	view := remotePickerView(key, session, remoteHostFresh, time.Unix(100, 0))
+	require.True(t, view.Stopped)
+	require.NotNil(t, view.RemoteTarget)
+	require.True(t, view.RemoteTarget.Stopped)
+	require.Equal(t, picker.RemoteRestart, view.RemoteActivation, "structured stopped rows have an explicit safe restore target")
+	require.Equal(t, "stopped — Enter to restart", view.RemoteDetail)
+
 }
 
 func TestRemotePickerClampsStoppedOrdinalTabCount(t *testing.T) {
@@ -106,7 +95,7 @@ func TestRemotePickerUsesCompactUpDetailRegardlessOfAttachment(t *testing.T) {
 	}
 }
 
-func TestRemotePickerDeduplicatesSameLifecycleReachedThroughHostAliases(t *testing.T) {
+func TestRemotePickerScopesSameLifecycleBytesToEachEndpoint(t *testing.T) {
 	store := &remoteRefreshHostStore{hosts: []string{"remote", "vev@remote"}}
 	d := newRemotePickerDaemon(store)
 	lifecycle := remoteLifecycleForTest()
@@ -130,8 +119,9 @@ func TestRemotePickerDeduplicatesSameLifecycleReachedThroughHostAliases(t *testi
 			targets = append(targets, view.RemoteTarget)
 		}
 	}
-	require.Len(t, targets, 1)
-	require.Equal(t, "remote", targets[0].Endpoint, "first pinned alias must remain the attach endpoint")
+	require.Len(t, targets, 2)
+	require.Equal(t, "remote", targets[0].Endpoint)
+	require.Equal(t, "vev@remote", targets[1].Endpoint)
 }
 
 func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
@@ -465,6 +455,14 @@ func requireNoRemoteLockViolations(t *testing.T, catalog *channelRemoteCatalog, 
 	}
 }
 
+func remoteCatalogForTest(sessions ...ports.RemoteCatalogSession) ports.RemoteCatalog {
+	return ports.RemoteCatalog{
+		ProtocolVersion: ports.ProtocolVersion,
+		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
+		Sessions:        append([]ports.RemoteCatalogSession{}, sessions...),
+	}
+}
+
 func newRemoteRefreshDaemon(t *testing.T, hosts *remoteRefreshHostStore, now time.Time) (*Daemon, *channelRemoteCatalog, *recordingRemoteCache) {
 	t.Helper()
 	catalog := &channelRemoteCatalog{requests: make(chan remoteRefreshRequest, 8)}
@@ -523,7 +521,7 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	}
 	for range 2 {
 		request := receiveRemotePicker(t, catalog.requests, "catalog request")
-		request.result <- remoteRefreshResult{catalog: ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion}}
+		request.result <- remoteRefreshResult{catalog: remoteCatalogForTest()}
 	}
 	for range 2 {
 		receiveRemotePicker(t, cache.stores, "remote cache store")
@@ -553,7 +551,7 @@ func TestRemoteRefreshLockProbesSerialized(t *testing.T) {
 
 	d.startRemotePickerRefresh(instance)
 	request := receiveRemotePicker(t, catalog.requests, "catalog request")
-	request.result <- remoteRefreshResult{catalog: ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion}}
+	request.result <- remoteRefreshResult{catalog: remoteCatalogForTest()}
 	receiveRemotePicker(t, cache.stores, "remote cache store")
 	requireNoRemoteLockViolations(t, catalog, cache)
 }
@@ -596,7 +594,7 @@ func TestRemoteRefreshResultPreservesFailuresAndEvictsSuccessfulOmissions(t *tes
 	require.Equal(t, remoteHostUnreachable, d.remoteCatalog.status["mule"])
 	d.remoteCatalog.mu.Unlock()
 
-	require.True(t, d.applyRemoteRefreshResult(7, "arch", ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion}, nil))
+	require.True(t, d.applyRemoteRefreshResult(7, "arch", remoteCatalogForTest(), nil))
 	stored := receiveRemotePicker(t, cache.stores, "remote cache store")
 	require.Equal(t, []ports.RemoteCatalogCacheEntry{
 		{Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{}},
@@ -619,9 +617,15 @@ func TestRemoteRefreshRejectsRemovedHostAndLateGeneration(t *testing.T) {
 	d.remoteCatalog.refresh = 9
 	d.remoteCatalog.mu.Unlock()
 
-	require.False(t, d.applyRemoteRefreshResult(8, "arch", ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "late", State: "up"}}}, nil))
+	require.False(t, d.applyRemoteRefreshResult(8, "arch", remoteCatalogForTest(ports.RemoteCatalogSession{
+		LifecycleID: remoteLifecycleForTest(), Name: "late", State: ports.RemoteCatalogSessionUp,
+		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	}), nil))
 	hosts.set()
-	require.True(t, d.applyRemoteRefreshResult(9, "arch", ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, Sessions: []ports.RemoteCatalogSession{{Name: "removed", State: "up"}}}, nil))
+	require.True(t, d.applyRemoteRefreshResult(9, "arch", remoteCatalogForTest(ports.RemoteCatalogSession{
+		LifecycleID: remoteLifecycleForTest(), Name: "removed", State: ports.RemoteCatalogSessionUp,
+		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	}), nil))
 	require.Empty(t, receiveRemotePicker(t, cache.stores, "remote cache store"))
 	requireNoRemoteLockViolations(t, nil, cache)
 	d.remoteCatalog.mu.Lock()
@@ -669,9 +673,14 @@ func TestRemoteRefreshVersionMismatchPreservesStaleRows(t *testing.T) {
 }
 
 func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
+	lifecycle := remoteLifecycleForTest()
+	remoteSession := ports.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: ports.RemoteCatalogSessionUp,
+		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	}
 	d := newRemotePickerDaemon(nil)
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}},
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{remoteSession},
 	}})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.status["arch"] = remoteHostFresh
@@ -681,15 +690,16 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	token.effect = effect
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
-	target := picker.Target{Session: key.ID(), RemoteKey: &key}
-	require.NoError(t, d.sendRemoteAttachTargetForAttachment(token, target, key, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
+	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
+	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
+	require.NoError(t, d.sendRemoteAttachTargetForAttachment(token, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "attach target")
 	require.Equal(t, ports.MsgAttachTarget, frame.Type)
 	got, err := ports.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.AttachTarget{Endpoint: "arch", Session: "work", Intent: ports.IntentAttach, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, got)
+	require.Equal(t, ports.AttachTarget{Endpoint: "arch", Session: "work", Intent: ports.IntentAttach, RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, got)
 	require.Nil(t, ac.currentAttachmentSession())
 	d.mu.Lock()
 	require.NotContains(t, d.sessions, key.ID(), "remote picker handoff must not create a local session shadow")
@@ -736,7 +746,7 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	effect, admitted := localAttachment.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	token.effect = effect
-	require.NoError(t, local.sendRemoteAttachTargetForAttachment(token, selected, key, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, local.sendRemoteAttachTargetForAttachment(token, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "stopped remote target")
 	handoff, err := ports.UnmarshalAttachTarget(frame.Payload)
@@ -749,8 +759,8 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 
 	remote := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	remote.mu.Lock()
-	remote.stopped["work"] = stoppedSession{
-		name: "work", cwd: "/remote/work", incarnation: lifecycle,
+	remote.inactive["work"] = inactiveSession{
+		name: "work", cwd: "/remote/work", incarnation: lifecycle, state: ports.SessionDown,
 		tabNames:   []string{"alpha", "beta"},
 		tabRecords: []domain.CatalogueTabRecord{{StableID: "tab-a", Name: "alpha"}, {StableID: "tab-b", Name: "beta"}},
 	}
@@ -765,6 +775,71 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	t.Cleanup(func() { remote.clientGone(restored, attachment, transport, false) })
 	require.Equal(t, lifecycle, restored.incarnation)
 	require.Equal(t, domain.TabStableID("tab-b"), attachment.viewSnapshot().tabID)
+}
+
+func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing.T) {
+	lifecycle := remoteLifecycleForTest()
+	remoteSession := ports.RemoteCatalogSession{
+		LifecycleID: lifecycle,
+		Name:        "work",
+		State:       "down",
+		Tabs:        []ports.RemoteCatalogTab{},
+	}
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
+	remoteView := remotePickerView(key, remoteSession, remoteHostFresh, time.Unix(10, 0))
+	require.Equal(t, picker.RemoteRestart, remoteView.RemoteActivation)
+
+	model := picker.New([]picker.SessionView{
+		{ID: "local", Name: "local", Tabs: []picker.TabEntry{{TabID: "local-tab", Name: "local"}}},
+		remoteView,
+	}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
+	var selected picker.Target
+	for range 3 {
+		model.Down()
+		candidate, ok := model.Selected()
+		if ok && candidate.RemoteTarget != nil {
+			selected = candidate
+			break
+		}
+	}
+	require.NotNil(t, selected.RemoteTarget)
+	require.True(t, selected.RemoteTarget.Stopped)
+	require.Equal(t, domain.TabSelector{}, selected.RemoteTarget.StoppedTab)
+
+	local := newRemotePickerDaemon(nil)
+	local.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{remoteSession},
+	}})
+	local.remoteCatalog.mu.Lock()
+	local.remoteCatalog.status["arch"] = remoteHostFresh
+	local.remoteCatalog.mu.Unlock()
+	localSession, localAttachment, sends := addRemoteRefreshPickerOwner(t, local, "local")
+	token := localSession.attachmentToken(localAttachment, localAttachment.transport())
+	effect, admitted := localAttachment.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	token.effect = effect
+	require.NoError(t, local.sendRemoteAttachTargetForAttachment(token, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
+
+	frame := receiveRemotePicker(t, sends, "stopped remote target without tab metadata")
+	handoff, err := ports.UnmarshalAttachTarget(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, selected.RemoteTarget, handoff.RemoteTarget)
+
+	remote := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
+	remote.mu.Lock()
+	remote.inactive["work"] = inactiveSession{name: "work", cwd: "/remote/work", incarnation: lifecycle, state: ports.SessionDown}
+	remote.mu.Unlock()
+	transport, _ := newCapturingTransport(t)
+	restored, attachment, err := remote.routeWithContext(context.Background(), ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: handoff.Session,
+		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: handoff.RemoteTarget,
+		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}, transport)
+	require.NoError(t, err)
+	t.Cleanup(func() { remote.clientGone(restored, attachment, transport, false) })
+	require.Equal(t, lifecycle, restored.incarnation)
+	require.Len(t, restored.tabs, 1)
+	require.Equal(t, restored.tabs[0].stableID, string(attachment.viewSnapshot().tabID))
 }
 
 func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
@@ -795,9 +870,14 @@ func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 }
 
 func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
+	lifecycle := remoteLifecycleForTest()
+	remoteSession := ports.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: ports.RemoteCatalogSessionUp,
+		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	}
 	d := newRemotePickerDaemon(nil)
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}},
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{remoteSession},
 	}})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.status["arch"] = remoteHostFresh
@@ -818,9 +898,10 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	require.True(t, admitted)
 	token.effect = effect
 	defer effect.End()
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
-	target := picker.Target{Session: key.ID(), RemoteKey: &key}
-	err := d.sendRemoteAttachTargetForAttachment(token, target, key, sessionHandoffGuard{closePicker: true}, "picker-select")
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
+	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
+	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
+	err := d.sendRemoteAttachTargetForAttachment(token, target, sessionHandoffGuard{closePicker: true}, "picker-select")
 	var userErr *domain.UserError
 	require.ErrorAs(t, err, &userErr)
 	require.Equal(t, "couldn't attach to remote session", userErr.Msg)
@@ -877,7 +958,11 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 
 	require.True(t, d.applyRemoteRefreshResult(4, "arch", ports.RemoteCatalog{
 		ProtocolVersion: ports.ProtocolVersion,
-		Sessions:        []ports.RemoteCatalogSession{{Name: "work", State: "up", Tabs: 2}},
+		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
+		Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: remoteLifecycleForTest(), Name: "work", State: "up",
+			Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}, {ID: "tab-2", Index: 1}},
+		}},
 	}, nil))
 	receiveRemotePicker(t, cache.stores, "remote cache store")
 	requireNoRemoteLockViolations(t, catalog, cache)
@@ -1185,28 +1270,4 @@ func TestRemotePickerStaleRefreshCannotOverwriteReopenedModel(t *testing.T) {
 	ac.overlays.pickerMu.Lock()
 	require.Same(t, reopened, ac.overlays.picker, "a rebuild for the old picker must not publish into its replacement")
 	ac.overlays.pickerMu.Unlock()
-}
-
-func TestLegacyRemoteRowsAreSelectableOnlyWhenFresh(t *testing.T) {
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
-	for _, tt := range []struct {
-		status     remoteHostStatus
-		activation picker.RemoteActivation
-	}{
-		{status: remoteHostCached, activation: picker.RemoteUnavailable},
-		{status: remoteHostRefreshing, activation: picker.RemoteUnavailable},
-		{status: remoteHostStale, activation: picker.RemoteUnavailable},
-		{status: remoteHostMalformed, activation: picker.RemoteUnavailable},
-		{status: remoteHostFresh, activation: picker.RemoteAttach},
-		{status: remoteHostUnreachable, activation: picker.RemoteUnavailable},
-	} {
-		view := remotePickerView(key, ports.RemoteCatalogSession{Name: key.Name, State: "up"}, tt.status, time.Unix(1, 0))
-		require.Equal(t, tt.activation, view.RemoteActivation, "status %d activation", tt.status)
-		_, selectable := picker.New([]picker.SessionView{view}, picker.SelectionConfig{Mode: picker.SelectNavigationTab}).Selected()
-		require.Equal(t, tt.activation == picker.RemoteAttach, selectable, "status %d selection", tt.status)
-	}
-	mismatch := remotePickerView(key, ports.RemoteCatalogSession{Name: key.Name, State: "up"}, remoteHostVersionMismatch, time.Time{})
-	require.Equal(t, picker.RemoteUnavailable, mismatch.RemoteActivation)
-	_, selectable := picker.New([]picker.SessionView{mismatch}, picker.SelectionConfig{Mode: picker.SelectNavigationTab}).Selected()
-	require.False(t, selectable)
 }

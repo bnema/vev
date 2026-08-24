@@ -57,7 +57,6 @@ type SessionView struct {
 	RemoteDetail       string
 	RemoteReason       string
 	RemoteActivation   RemoteActivation
-	ConnectOnly        bool
 	// CannotAcceptMoves reports whether this session cannot receive a moved tab
 	// or pane. False for ordinary local (and stopped) sessions; true for
 	// restricted remote rows.
@@ -248,7 +247,11 @@ func New(sessions []SessionView, config SelectionConfig) *Model {
 // rowsForSession is the sole owner of mode-specific destination eligibility.
 // The daemon supplies canonical lifecycle/tab snapshots without prefiltering.
 func rowsForSession(session SessionView, config SelectionConfig) []row {
-	if config.Mode != SelectNavigationTab && session.Stopped {
+	stopped := session.Stopped
+	if session.RemoteTarget != nil {
+		stopped = session.RemoteTarget.Stopped
+	}
+	if config.Mode != SelectNavigationTab && stopped {
 		return nil
 	}
 	if config.Mode == SelectMoveTabSession && sourceMatchesSession(config.Source, session) {
@@ -259,7 +262,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	}
 
 	targetName := session.TargetName
-	if config.Mode == SelectNavigationTab && !session.Stopped && session.ExpectedCreatedAt == nil {
+	if config.Mode == SelectNavigationTab && !stopped && session.ExpectedCreatedAt == nil {
 		targetName = ""
 	} else if targetName == "" {
 		targetName = session.Name
@@ -267,7 +270,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	expectedCreatedAt, hasExpectedCreatedAt := int64Value(session.ExpectedCreatedAt)
 	common := row{
 		session: session.ID, incarnation: session.Incarnation, targetName: targetName,
-		stopped: session.Stopped, expectedCreatedAt: expectedCreatedAt,
+		stopped: stopped, expectedCreatedAt: expectedCreatedAt,
 		hasExpectedCreatedAt: hasExpectedCreatedAt,
 	}
 	if session.RemoteKey != nil {
@@ -299,11 +302,8 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 			header.selectable = false
 			header.focusable = config.Mode == SelectNavigationTab && len(session.Tabs) == 0
 		} else {
-			header.selectable = common.hasRemoteKey && config.Mode == SelectNavigationTab && session.ConnectOnly && remoteActivatable(session)
-			header.focusable = header.selectable
-			if !common.hasRemoteKey && !common.hasRemoteTarget {
-				header.focusable = config.Mode == SelectNavigationTab
-			}
+			header.selectable = false
+			header.focusable = config.Mode == SelectNavigationTab && session.RemoteHost != ""
 		}
 		header.unavailableReason = session.RemoteReason
 		header.dim = session.RemoteActivation == RemoteUnavailable
@@ -312,53 +312,50 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 		header.selectable, header.focusable, header.dim = false, false, true
 	}
 	rows := []row{header}
-	if !session.ConnectOnly || common.hasRemoteTarget {
-		for i, tab := range session.Tabs {
-			if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
-				continue
-			}
-			tabRow := common
-			tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
-			tabRow.tabID, tabRow.tabIndex = tab.TabID, i
-			tabRow.selectable = tabRow.kind.selectable(config.Mode)
-			tabRow.focusable = tabRow.selectable
-			if common.remote {
-				tabRow.unavailableReason = session.RemoteReason
-				if common.hasRemoteTarget {
-					remoteTarget := common.remoteTarget
-					if session.Stopped {
-						remoteTarget.LiveTabID = ""
-						if tab.TabID != "" {
-							remoteTarget.StoppedTab = domain.NewStableTabSelector(tab.TabID)
-						} else {
-							tabCount := min(len(session.Tabs), math.MaxUint16)
-							remoteTarget.StoppedTab = domain.NewOrdinalTabSelector(uint16(i), tab.RawName, uint16(tabCount))
-						}
-					} else {
-						remoteTarget.StoppedTab = domain.TabSelector{}
-						remoteTarget.LiveTabID = tab.TabID
-					}
-					// Keep the selected tab's structured identity even when it is
-					// invalid. Focus remains possible for diagnostics, while both
-					// the readiness gate and daemon wire validation reject it.
-					tabRow.remoteTarget = remoteTarget
-					tabRow.hasRemoteTarget = true
-				}
-				if !tabRow.hasRemoteTarget {
-					legacyRemote := common.hasRemoteKey && config.Mode == SelectNavigationTab && remoteActivatable(session)
-					tabRow.focusable = legacyRemote
-					tabRow.selectable = legacyRemote
-				} else {
-					tabRow.focusable = true
-					tabRow.selectable = tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteActivatable(session)
-				}
-				tabRow.dim = session.RemoteActivation == RemoteUnavailable
-			}
-			if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
-				tabRow.selectable, tabRow.focusable, tabRow.dim = false, false, true
-			}
-			rows = append(rows, tabRow)
+	for i, tab := range session.Tabs {
+		if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
+			continue
 		}
+		tabRow := common
+		tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
+		tabRow.tabID, tabRow.tabIndex = tab.TabID, i
+		tabRow.selectable = tabRow.kind.selectable(config.Mode)
+		tabRow.focusable = tabRow.selectable
+		if common.remote {
+			tabRow.unavailableReason = session.RemoteReason
+			if common.hasRemoteTarget {
+				remoteTarget := common.remoteTarget
+				if remoteTarget.Stopped {
+					remoteTarget.LiveTabID = ""
+					if tab.TabID != "" {
+						remoteTarget.StoppedTab = domain.NewStableTabSelector(tab.TabID)
+					} else if remoteTarget.StoppedTab != (domain.TabSelector{}) {
+						tabCount := min(len(session.Tabs), math.MaxUint16)
+						remoteTarget.StoppedTab = domain.NewOrdinalTabSelector(uint16(i), tab.RawName, uint16(tabCount))
+					}
+				} else {
+					remoteTarget.StoppedTab = domain.TabSelector{}
+					remoteTarget.LiveTabID = tab.TabID
+				}
+				// Keep the selected tab's structured identity even when it is
+				// invalid. Focus remains possible for diagnostics, while both
+				// the readiness gate and daemon wire validation reject it.
+				tabRow.remoteTarget = remoteTarget
+				tabRow.hasRemoteTarget = true
+			}
+			if !tabRow.hasRemoteTarget {
+				tabRow.focusable = false
+				tabRow.selectable = false
+			} else {
+				tabRow.focusable = true
+				tabRow.selectable = tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteActivatable(session)
+			}
+			tabRow.dim = session.RemoteActivation == RemoteUnavailable
+		}
+		if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
+			tabRow.selectable, tabRow.focusable, tabRow.dim = false, false, true
+		}
+		rows = append(rows, tabRow)
 	}
 	if config.Mode == SelectMovePaneTab && len(rows) == 1 && !session.CannotAcceptMoves {
 		return nil

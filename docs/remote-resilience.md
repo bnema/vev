@@ -61,10 +61,10 @@ version 5 records restore normally. Older binaries reject version 5 records, so
 a downgrade also resets sessions when the older binary can read the catalogue,
 or fails closed when it cannot. Back up the vev state before a rollback.
 
-Remote catalogues are bounded and versioned. Complete catalogues contain ordered
-tab IDs, names, state, active tab, attachment state, and MRU sequence. Stopped
-tab metadata is retained across daemon restart; legacy count-only catalogues are
-read-only compatibility rows and cannot provide exact tab identity.
+Remote catalogues are bounded and versioned. The current schema is mandatory
+and contains lifecycle IDs, ordered typed tab records, state, active tab,
+attachment state, and MRU sequence. Peers without the exact schema are rejected
+as version-incompatible rather than exposed as partial picker rows.
 
 Remote picker previews are bounded styled-cell snapshots fetched without
 attachment or PTY mutation. They are held in a short-lived in-memory cache only;

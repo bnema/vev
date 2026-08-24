@@ -26,10 +26,10 @@ func (d *Daemon) logStartupRecoveryCounts(restoring int) {
 		records, err = d.catalogue.Records()
 		if err != nil {
 			d.log.Error("daemon_startup_catalogue_read_failed", "err", err)
-			records = d.stoppedRecords()
+			records = d.inactiveRecords()
 		}
 	} else {
-		records = d.stoppedRecords()
+		records = d.inactiveRecords()
 	}
 	healthy, fresh, broken := 0, 0, 0
 	for _, record := range records {
@@ -50,11 +50,11 @@ func (d *Daemon) logStartupRecoveryCounts(restoring int) {
 	)
 }
 
-func (d *Daemon) stoppedRecords() []domain.CatalogueRecord {
+func (d *Daemon) inactiveRecords() []domain.CatalogueRecord {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	records := make([]domain.CatalogueRecord, 0, len(d.stopped))
-	for _, entry := range d.stopped {
+	records := make([]domain.CatalogueRecord, 0, len(d.inactive))
+	for _, entry := range d.inactive {
 		records = append(records, entry.record)
 	}
 	return records

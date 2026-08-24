@@ -57,7 +57,7 @@ func TestStartupRecoveryCountsFallsBackWhenCatalogueReadFails(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewJSONHandler(&buffer, nil)))
 	d.persistEnabled = true
 	d.catalogue = failingRecordsCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil), err: errors.New("read failed")}
-	d.stopped[record.Name] = stoppedSession{record: record}
+	d.inactive[record.Name] = inactiveSession{record: record}
 
 	d.logStartupRecoveryCounts(0)
 

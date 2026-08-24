@@ -740,105 +740,40 @@ func TestPickerRowsKeepTerminalBackgroundAcrossAccentFallbacks(t *testing.T) {
 	}
 }
 
-func TestRemoteRowsCarryStructuredIdentityAndRemainNonSelectable(t *testing.T) {
-	key := domain.RemoteSessionKey{Host: "build@mule", Name: "work"}
-	availability := []RemoteAvailability{RemoteCached, RemoteFresh, RemoteStale, RemoteVersionMismatch}
-	sessions := make([]SessionView, 0, len(availability))
-	for _, state := range availability {
-		sessions = append(sessions, SessionView{
-			ID:                 key.ID(),
-			Name:               "presentation text is not routing data",
-			Tabs:               []TabEntry{{Name: "relayed metadata is not a picker target"}},
-			RemoteKey:          &key,
-			RemoteAvailability: state,
-			RemoteDetail:       "remote state detail",
-			RemoteActivation:   RemoteUnavailable,
-			ConnectOnly:        true,
+func TestStructuredRemoteTargetOwnsStoppedState(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		viewStopped   bool
+		targetStopped bool
+	}{
+		{name: "down target overrides live presentation flag", targetStopped: true},
+		{name: "live target overrides stopped presentation flag", viewStopped: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: domain.SessionLifecycleID{1}, DisplayOrigin: "arch"}
+			remoteTarget := domain.RemoteSessionTarget{
+				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: key.LifecycleID,
+				SessionName: "work", LiveTabID: "tab-1", Stopped: test.targetStopped,
+			}
+			activation := RemoteAttach
+			if test.targetStopped {
+				remoteTarget.LiveTabID = ""
+				remoteTarget.StoppedTab = domain.NewStableTabSelector("tab-1")
+				activation = RemoteRestart
+			}
+			model := New([]SessionView{{
+				ID: key.ID(), Name: key.Display(), Tabs: []TabEntry{{TabID: "tab-1", Name: "main"}},
+				RemoteKey: &key, RemoteTarget: &remoteTarget, RemoteActivation: activation,
+				Stopped: test.viewStopped,
+			}}, SelectionConfig{Mode: SelectNavigationTab})
+
+			selected, ok := model.Selected()
+			require.True(t, ok)
+			require.Equal(t, test.targetStopped, selected.Stopped)
+			require.NotNil(t, selected.RemoteTarget)
+			require.Equal(t, test.targetStopped, selected.RemoteTarget.Stopped)
 		})
 	}
-
-	model := New(sessions, SelectionConfig{Mode: SelectNavigationTab})
-	require.Len(t, model.rows, len(availability), "connect-only remote rows do not synthesize tab destinations")
-	for i, pickerRow := range model.rows {
-		require.Equal(t, rowSession, pickerRow.kind)
-		require.Equal(t, key, pickerRow.remoteKey)
-		require.True(t, pickerRow.hasRemoteKey)
-		require.False(t, pickerRow.selectable, "remote state %d must remain gated in phase 5", availability[i])
-		require.True(t, pickerRow.dim, "remote state %d is visibly unavailable", availability[i])
-		require.Equal(t, "@mule (remote state detail)", pickerRow.detail)
-	}
-	_, ok := model.Selected()
-	require.False(t, ok)
-	frame := model.Render(domain.Size{Cols: 80, Rows: len(availability)}, Preview{})
-	for y := range availability {
-		require.NotZero(t, frame.At(0, y).Style.Attrs&renderer.AttrDim)
-	}
-}
-
-func TestRemoteCursorIdentitySurvivesCacheToLiveUpgradeWithoutActivation(t *testing.T) {
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
-	cached := New([]SessionView{{
-		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteAvailability: RemoteCached,
-		RemoteActivation: RemoteUnavailable, ConnectOnly: true,
-	}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: key.ID()}})
-
-	cursor, ok := cached.Cursor()
-	require.True(t, ok)
-	require.Equal(t, key.ID(), cursor.Session)
-	require.Equal(t, &key, cursor.RemoteKey)
-	_, selectable := cached.Selected()
-	require.False(t, selectable, "cursor identity must not bypass the phase 5 activation gate")
-
-	live := New([]SessionView{{
-		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteAvailability: RemoteFresh,
-		RemoteActivation: RemoteUnavailable, ConnectOnly: true,
-	}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{
-		Session: cursor.Session, Incarnation: cursor.Incarnation, TabID: cursor.TabID, RemoteKey: cursor.RemoteKey,
-	}})
-
-	upgraded, ok := live.Cursor()
-	require.True(t, ok)
-	require.Equal(t, cursor, upgraded)
-	_, selectable = live.Selected()
-	require.False(t, selectable, "cache-to-live cursor preservation must not enable attach")
-}
-
-func TestRemoteTabsRemainNonSelectableWhileAttachmentIsGated(t *testing.T) {
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
-	model := New([]SessionView{{
-		ID:                 key.ID(),
-		Name:               key.Display(),
-		Tabs:               []TabEntry{{TabID: "remote-tab", Name: "metadata"}},
-		RemoteKey:          &key,
-		RemoteAvailability: RemoteFresh,
-		RemoteActivation:   RemoteUnavailable,
-	}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	require.Len(t, model.rows, 2)
-	for _, pickerRow := range model.rows {
-		require.False(t, pickerRow.selectable)
-		require.True(t, pickerRow.dim)
-	}
-}
-
-func TestRemoteConnectOnlyTargetUsesStructuredKey(t *testing.T) {
-	key := domain.RemoteSessionKey{Host: "user@build.example", Name: "work"}
-	model := New([]SessionView{{
-		ID:                 key.ID(),
-		Name:               "not a parseable remote display label",
-		RemoteKey:          &key,
-		RemoteAvailability: RemoteFresh,
-		RemoteActivation:   RemoteAttach,
-		ConnectOnly:        true,
-	}}, SelectionConfig{Mode: SelectNavigationTab})
-	wantKey := key
-	key.Host = "mutated-after-model-construction"
-
-	got, ok := model.Selected()
-	require.True(t, ok)
-	require.Equal(t, wantKey.ID(), got.Session)
-	require.Equal(t, &wantKey, got.RemoteKey)
-	require.Equal(t, "", got.Name, "connect-only remote routing never derives a name from display text")
 }
 
 func TestRemoteRowsCannotAcceptMovesInEitherMoveMode(t *testing.T) {

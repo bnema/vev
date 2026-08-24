@@ -52,16 +52,20 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 		return live, ac, err
 	}
 
-	stopped, ok := d.stopped[target.SessionName]
-	if !ok || stopped.purging || stopped.incarnation != target.LifecycleID {
+	if !target.Stopped {
+		d.mu.Unlock()
+		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "live remote target has no active runtime"}
+	}
+	inactive, ok := d.inactive[target.SessionName]
+	if !ok || inactive.incarnation != target.LifecycleID {
 		d.mu.Unlock()
 		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session lifecycle no longer exists"}
 	}
-	if stopped.state == ports.SessionBroken || stopped.record.DegradedReason != "" {
+	if !inactive.canResume() {
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session is broken"}
+		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session is unavailable"}
 	}
-	if _, ok := remoteTargetTabIndexStopped(stopped, target); !ok {
+	if _, ok := remoteTargetTabIndexInactive(inactive, target); !ok {
 		d.mu.Unlock()
 		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote stopped tab no longer exists"}
 	}
@@ -70,14 +74,28 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 	// client's Env/Cwd fields remain present for wire compatibility but are not
 	// trusted for this branch.
 	env := copyEnvironment(d.baseEnv)
-	cwd := d.dirOrHome(stopped.cwd)
-	sess, err := d.createSessionLockedWithMode(target.SessionName, false, cwd, h.Size, env, stopped.tabNames)
+	cwd := d.dirOrHome(inactive.cwd)
+	sess, err := d.resumeRemoteInactiveSessionLocked(target, cwd, h.Size, env, inactive)
 	if err != nil {
 		d.mu.Unlock()
+		if errors.Is(err, errAttachmentTransition) {
+			return nil, nil, remoteTargetError(err)
+		}
 		return nil, nil, err
 	}
 	ac, err := d.finishRouteAttach(sess, tr, h.Size, h, true, false)
 	return sess, ac, err
+}
+
+func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTarget, cwd string, size domain.Size, env []string, expected inactiveSession) (*session, error) {
+	validate := func(current inactiveSession, _ domain.CatalogueRecord, authoritativeExists bool) bool {
+		if !target.Stopped || d.persistEnabled && !authoritativeExists {
+			return false
+		}
+		_, ok := target.ResolveTab(stoppedTabMetadata(current))
+		return ok
+	}
+	return d.createSessionLockedWithModeAndInactiveFence(target.SessionName, false, cwd, size, env, &expected, validate, expected.tabNames)
 }
 
 func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionToken, action ports.NavigationAction) error {
@@ -156,7 +174,7 @@ func remoteTargetError(err error) error {
 	return &protoErr{ports.ErrNoSuchTarget, "remote target is unavailable"}
 }
 
-func stoppedTabMetadata(stopped stoppedSession) []domain.TabSelectorTab {
+func stoppedTabMetadata(stopped inactiveSession) []domain.TabSelectorTab {
 	records := stopped.tabRecords
 	if len(records) == 0 {
 		records = make([]domain.CatalogueTabRecord, len(stopped.tabNames))
@@ -171,8 +189,8 @@ func stoppedTabMetadata(stopped stoppedSession) []domain.TabSelectorTab {
 	return metadata
 }
 
-func remoteTargetTabIndexStopped(stopped stoppedSession, target domain.RemoteSessionTarget) (int, bool) {
-	return target.StoppedTab.Resolve(stoppedTabMetadata(stopped))
+func remoteTargetTabIndexInactive(inactive inactiveSession, target domain.RemoteSessionTarget) (int, bool) {
+	return target.ResolveTab(stoppedTabMetadata(inactive))
 }
 
 // remoteTargetTabIndexLocked resolves the selector against the live session's
@@ -194,21 +212,5 @@ func remoteTargetTabIndexLocked(sess *session, target domain.RemoteSessionTarget
 		metadata = append(metadata, domain.TabSelectorTab{ID: domain.TabStableID(tab.stableID), Name: tab.name})
 		tab.mu.Unlock()
 	}
-	if target.Stopped {
-		return target.StoppedTab.Resolve(metadata)
-	}
-	if target.LiveTabID == "" {
-		return 0, false
-	}
-	found := -1
-	for i, tab := range metadata {
-		if tab.ID != target.LiveTabID {
-			continue
-		}
-		if found >= 0 {
-			return 0, false
-		}
-		found = i
-	}
-	return found, found >= 0
+	return target.ResolveTab(metadata)
 }

@@ -719,6 +719,7 @@ func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
 func TestRemoteCatalogJSONOutput(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	work := addControlSession(d, "work", "t_work", "p_work")
+	work.incarnation[0] = 1
 	work.ephemeral = false
 	work.registerAttachment(&attachedClient{})
 	work.mruAt.Store(2)
@@ -729,11 +730,12 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	work.mu.Unlock()
 
 	build := addControlSession(d, "build", "t_build", "p_build")
+	build.incarnation[0] = 2
 	build.ephemeral = true
 	build.mruAt.Store(1)
 
 	d.mu.Lock()
-	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp/old", createdAt: 1, state: ports.SessionDown}
+	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp/old", createdAt: 1, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
 	d.mu.Unlock()
 
 	listBefore := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
@@ -757,20 +759,19 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 
 	raw := map[string]json.RawMessage{}
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &raw))
-	require.Len(t, raw, 2)
+	require.Len(t, raw, 3)
 	_, hasProtocol := raw["protocol_version"]
+	_, hasSchema := raw["schema_version"]
 	_, hasSessions := raw["sessions"]
-	require.True(t, hasProtocol && hasSessions)
+	require.True(t, hasProtocol && hasSchema && hasSessions)
 
 	require.Equal(t, []ports.RemoteCatalogSession{
-		{Name: "build", State: "up", Ephemeral: true, Tabs: 1, Attached: false},
-		{Name: "work", State: "up", Ephemeral: false, Tabs: 2, Attached: true},
+		{LifecycleID: build.incarnation, Name: "build", State: "up", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "t_build", Name: "1", Detail: " (sh)"}}, ActiveTabID: "t_build", LastUsedSeq: 1},
+		{LifecycleID: domain.IncarnationID{3}, Name: "old", State: "down", Tabs: []ports.RemoteCatalogTab{}},
+		{LifecycleID: work.incarnation, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "t_work", Name: "1", Detail: " (sh)"}, {ID: "t_work_2", Index: 1, Name: "2", Detail: " (sh)"}}, Attached: true, ActiveTabID: "t_work", LastUsedSeq: 2},
 	}, catalog.Sessions)
 
-	for _, session := range catalog.Sessions {
-		require.Equal(t, "up", session.State)
-		require.NotEqual(t, "old", session.Name)
-	}
+	require.Equal(t, ports.RemoteCatalogSessionDown, catalog.Sessions[1].State)
 
 	listAfter := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
 	require.True(t, listAfter.OK, listAfter.Text)
@@ -814,24 +815,20 @@ func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
 	}}, catalog.Sessions)
 }
 
-func TestRemoteCatalogTabCountSaturates(t *testing.T) {
+func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	sess.mu.Lock()
 	base := sess.tabs[0]
-	sess.tabs = make([]*tab, int(^uint16(0))+1)
+	sess.tabs = make([]*tab, ports.RemoteCatalogMaxTabsPerSess+1)
 	for i := range sess.tabs {
 		sess.tabs[i] = base
 	}
 	sess.mu.Unlock()
 
 	result := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", JSON: true})
-	require.True(t, result.OK, result.Text)
-	var catalog ports.RemoteCatalog
-	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
-	require.Equal(t, []ports.RemoteCatalogSession{{
-		Name: "work", State: "up", Ephemeral: true, Tabs: int(^uint16(0)), Attached: false,
-	}}, catalog.Sessions)
+	require.False(t, result.OK)
+	require.Contains(t, result.Text, "too many tabs")
 }
 
 func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {

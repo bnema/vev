@@ -186,29 +186,48 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	return d.createSessionLockedWithMode(name, ephemeral, cwd, sz, env, restoredTabNames...)
 }
 
-// createStoppedSessionLocked resumes exactly expectedStopped. It rechecks the
-// stopped lifecycle after catalogue I/O, which intentionally runs without d.mu.
-func (d *Daemon) createStoppedSessionLocked(name string, cwd string, sz domain.Size, env []string, expectedStopped stoppedSession, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndStoppedFence(name, false, cwd, sz, env, &expectedStopped, restoredTabNames...)
-}
-
-func stoppedSessionMatchesLifecycle(current, expected stoppedSession) bool {
-	return current.name == expected.name && current.createdAt == expected.createdAt && current.incarnation == expected.incarnation
+// resumeInactiveSessionLocked resumes exactly expectedInactive. It rechecks
+// lifecycle and resumability after catalogue I/O, which intentionally runs
+// without d.mu.
+func (d *Daemon) resumeInactiveSessionLocked(name string, cwd string, sz domain.Size, env []string, expectedInactive inactiveSession, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndInactiveFence(name, false, cwd, sz, env, &expectedInactive, nil, restoredTabNames...)
 }
 
 func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, sz domain.Size, env []string, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndStoppedFence(name, ephemeral, cwd, sz, env, nil, restoredTabNames...)
+	return d.createSessionLockedWithModeAndInactiveFence(name, ephemeral, cwd, sz, env, nil, nil, restoredTabNames...)
 }
 
-func (d *Daemon) createSessionLockedWithModeAndStoppedFence(name string, ephemeral bool, cwd string, sz domain.Size, env []string, expectedStopped *stoppedSession, restoredTabNames ...[]string) (*session, error) {
+type inactiveResumeValidator func(inactiveSession, domain.CatalogueRecord, bool) bool
+
+func (s inactiveSession) matchesRecord(record domain.CatalogueRecord) bool {
+	canonical := inactiveSessionFromRecord(record, s.state, s.restoreDone)
+	return s.sameLifecycle(canonical) && s.cwd == canonical.cwd &&
+		slices.Equal(s.tabNames, canonical.tabNames) && slices.Equal(s.tabRecords, canonical.tabRecords) &&
+		s.record.DegradedReason == canonical.record.DegradedReason
+}
+
+func inactiveResumeFenceAllows(current inactiveSession, exists bool, expected *inactiveSession, authoritative domain.CatalogueRecord, authoritativeExists bool, validate inactiveResumeValidator) bool {
+	if expected == nil {
+		return true
+	}
+	if !exists || !current.sameLifecycle(*expected) || !current.canResume() {
+		return false
+	}
+	if authoritativeExists && !current.matchesRecord(authoritative) {
+		return false
+	}
+	return validate == nil || validate(current, authoritative, authoritativeExists)
+}
+
+func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, ephemeral bool, cwd string, sz domain.Size, env []string, expectedInactive *inactiveSession, validateInactive inactiveResumeValidator, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
 	if _, reserved := d.creating[name]; reserved {
 		return nil, errSessionNameInUse
 	}
 	d.creating[name] = struct{}{}
 	defer delete(d.creating, name)
-	stopped, resuming := d.stopped[name]
-	if expectedStopped != nil && (!resuming || !stoppedSessionMatchesLifecycle(stopped, *expectedStopped)) {
+	stopped, resuming := d.inactive[name]
+	if !inactiveResumeFenceAllows(stopped, resuming, expectedInactive, domain.CatalogueRecord{}, false, nil) {
 		return nil, errAttachmentTransition
 	}
 	var authoritative domain.CatalogueRecord
@@ -224,10 +243,12 @@ func (d *Daemon) createSessionLockedWithModeAndStoppedFence(name string, ephemer
 		if d.closing {
 			return nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 		}
-		stopped, resuming = d.stopped[name]
-		if expectedStopped != nil && (!resuming || !stoppedSessionMatchesLifecycle(stopped, *expectedStopped)) {
+		stopped, resuming = d.inactive[name]
+		if !inactiveResumeFenceAllows(stopped, resuming, expectedInactive, authoritative, authoritativeExists, validateInactive) {
 			return nil, errAttachmentTransition
 		}
+	} else if validateInactive != nil && !validateInactive(stopped, domain.CatalogueRecord{}, false) {
+		return nil, errAttachmentTransition
 	}
 	var createdAt int64
 	var incarnation domain.IncarnationID
@@ -409,7 +430,7 @@ func (d *Daemon) createSessionLockedWithModeAndStoppedFence(name string, ephemer
 	if !ephemeral {
 		// Keep stopped lifecycle authority intact until runtime publication and
 		// its durable side effects have both succeeded.
-		delete(d.stopped, name)
+		delete(d.inactive, name)
 	}
 	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
 	for i, tb := range tabs {
@@ -934,7 +955,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		return errSessionNameInUse
 	}
 	sess.mu.Lock()
-	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
+	if stopped, ok := d.inactive[name]; ok && stopped.name != sess.name {
 		sess.mu.Unlock()
 		d.mu.Unlock()
 		return errSessionNameInUse
@@ -992,8 +1013,8 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		}
 	}
 
-	delete(d.stopped, oldName)
-	delete(d.stopped, name)
+	delete(d.inactive, oldName)
+	delete(d.inactive, name)
 	sess.name = name
 	sess.createdAt = createdAt
 	sess.incarnation = record.IncarnationID
@@ -1238,13 +1259,13 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 
 func (d *Daemon) retryStoppedPurgeContext(ctx context.Context, name string) error {
 	d.mu.Lock()
-	stopped, ok := d.stopped[name]
+	stopped, ok := d.inactive[name]
 	if !ok {
 		d.mu.Unlock()
 		return nil
 	}
 	stopped.purging = true
-	d.stopped[name] = stopped
+	d.inactive[name] = stopped
 
 	if err := d.beginSnapshotPurge(name, stopped.incarnation); err != nil {
 		d.mu.Unlock()
@@ -1254,8 +1275,8 @@ func (d *Daemon) retryStoppedPurgeContext(ctx context.Context, name string) erro
 		d.mu.Unlock()
 		return err
 	}
-	if current, ok := d.stopped[name]; ok && current.purging {
-		delete(d.stopped, name)
+	if current, ok := d.inactive[name]; ok && current.purging {
+		delete(d.inactive, name)
 	}
 	d.mu.Unlock()
 	return nil
@@ -1693,18 +1714,15 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	}
 	clear(sess.attachments)
 	stoppedName := sess.name
-	stoppedCwd := sess.cwd
-	createdAt := sess.createdAt
 	stoppedRecord := sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
-	tabNames := stoppedRecord.TabNames
-	tabRecords := stoppedRecord.TabRecords
 	ephemeral := sess.ephemeral
 	unlockCoordinators()
 	unlockSessions()
 	d.notices.routingMu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, incarnation: incarnation, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, tabRecords: tabRecords, record: stoppedRecord, state: ports.SessionDown, purging: purge}
-		d.stopped[stoppedName] = stopped
+		stopped := inactiveSessionFromRecord(stoppedRecord, ports.SessionDown, nil)
+		stopped.purging = purge
+		d.inactive[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0
 	if empty {
@@ -1763,8 +1781,8 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		if err != nil {
 			purgeErr = errors.Join(purgeErr, err)
 			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
-		} else if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
-			delete(d.stopped, stoppedName)
+		} else if stopped, ok := d.inactive[stoppedName]; ok && stopped.purging {
+			delete(d.inactive, stoppedName)
 		}
 		d.mu.Unlock()
 	}
@@ -1783,13 +1801,13 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 // allocEphemeralNameLocked returns the lowest free decimal name. Caller holds
 // d.mu.
 func (d *Daemon) allocEphemeralNameLocked() string {
-	used := make(map[string]struct{}, len(d.sessions)+len(d.stopped))
+	used := make(map[string]struct{}, len(d.sessions)+len(d.inactive))
 	for _, s := range d.sessions {
 		if s != nil {
 			used[s.name] = struct{}{}
 		}
 	}
-	for name := range d.stopped {
+	for name := range d.inactive {
 		used[name] = struct{}{}
 	}
 	for i := 0; ; i++ {
@@ -1813,7 +1831,7 @@ func (d *Daemon) nameLiveOrStoppedLocked(name string) bool {
 	if d.findByNameLocked(name) != nil {
 		return true
 	}
-	if _, ok := d.stopped[name]; ok {
+	if _, ok := d.inactive[name]; ok {
 		return true
 	}
 	_, reserved := d.creating[name]

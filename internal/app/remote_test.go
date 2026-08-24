@@ -265,10 +265,10 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 		wantState ports.SessionState
 		wantTabs  uint16
 	}{
-		{name: "up", session: ports.RemoteCatalogSession{Name: "dev", State: "up", Tabs: 2}, wantState: ports.SessionUp, wantTabs: 2},
-		{name: "down", session: ports.RemoteCatalogSession{Name: "dev", State: "down", Tabs: 2}, wantState: ports.SessionDown, wantTabs: 2},
-		{name: "broken", session: ports.RemoteCatalogSession{Name: "dev", State: "broken", Tabs: 2}, wantState: ports.SessionBroken, wantTabs: 2},
-		{name: "unknown fails closed", session: ports.RemoteCatalogSession{Name: "dev", State: "unknown", Tabs: 2}, wantState: ports.SessionBroken, wantTabs: 2},
+		{name: "up", session: ports.RemoteCatalogSession{Name: "dev", State: "up", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionUp, wantTabs: 2},
+		{name: "down", session: ports.RemoteCatalogSession{Name: "dev", State: "down", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionDown, wantTabs: 2},
+		{name: "broken", session: ports.RemoteCatalogSession{Name: "dev", State: "broken", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionBroken, wantTabs: 2},
+		{name: "unknown fails closed", session: ports.RemoteCatalogSession{Name: "dev", State: "unknown", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionBroken, wantTabs: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

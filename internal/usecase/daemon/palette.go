@@ -60,9 +60,9 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot ports.RecentRouteSnapshot) []palette.Result {
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
-	stopped := make([]stoppedSession, 0, len(d.stopped))
-	for _, entry := range d.stopped {
-		if !entry.purging {
+	stopped := make([]inactiveSession, 0, len(d.inactive))
+	for _, entry := range d.inactive {
+		if entry.visible() {
 			stopped = append(stopped, entry)
 		}
 	}

@@ -124,8 +124,8 @@ func remotePickerStatusDetail(status remoteHostStatus, fetchedAt time.Time) stri
 	}
 }
 
-func remoteSessionStateStopped(state string) bool {
-	return state == "down" || state == "stopped"
+func remoteSessionStateStopped(state ports.RemoteCatalogSessionState) bool {
+	return state == ports.RemoteCatalogSessionDown
 }
 
 func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
@@ -133,7 +133,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	key.DisplayOrigin = domain.RemoteDisplayOrigin(key.Host)
 	availability := remotePickerAvailability(status)
 	stopped := remoteSessionStateStopped(session.State)
-	broken := session.State == "broken"
+	broken := session.State == ports.RemoteCatalogSessionBroken
 	tabs := ports.CatalogTabs(session)
 	viewTabs := make([]picker.TabEntry, 0, len(tabs))
 	active := 0
@@ -153,7 +153,6 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 			Attention: tab.Attention,
 		})
 	}
-	legacy := session.LifecycleID == (domain.SessionLifecycleID{})
 	target := domain.RemoteSessionTarget{
 		Endpoint:      key.Host,
 		DisplayOrigin: key.DisplayOrigin,
@@ -178,23 +177,22 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 	// malformed or a broken session cannot be activated. Cursor navigation
 	// must remain possible, while sendRemoteAttachTargetForAttachment will
 	// fail closed on the invalid target.
-	var remoteTarget *domain.RemoteSessionTarget
-	if !legacy {
-		remoteTarget = &target
+	remoteTarget := &target
+	if stopped && len(viewTabs) == 0 {
+		// A healthy durable record may intentionally have no retained tabs,
+		// for example after a protocol reset. Mirror local stopped rows with
+		// one default picker target; the owning daemon creates that sole tab.
+		viewTabs = append(viewTabs, picker.TabEntry{})
 	}
 	reason := remoteReasonForStatus(status)
-	targetValid := remoteTarget != nil && remoteTarget.Validate() == nil
+	targetValid := remoteTarget.Validate() == nil
 	activation := picker.RemoteUnavailable
 	if broken {
 		reason = "session_broken"
-	} else if !legacy && !targetValid {
+	} else if !targetValid {
 		reason = "identity_changed"
 	} else if status == remoteHostFresh {
-		if legacy {
-			if !stopped {
-				activation = picker.RemoteAttach
-			}
-		} else if stopped {
+		if stopped {
 			activation = picker.RemoteRestart
 		} else {
 			activation = picker.RemoteAttach
@@ -206,18 +204,16 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 		switch {
 		case broken:
 			detail = "session broken"
-		case !legacy && !targetValid:
+		case !targetValid:
 			detail = "identity changed"
-		case legacy && stopped:
-			detail = "stopped — exact identity required"
 		case activation == picker.RemoteRestart:
 			detail = "stopped — Enter to restart"
-		case session.State == "up":
+		case session.State == ports.RemoteCatalogSessionUp:
 			detail = "up"
 		case stopped:
 			detail = "stopped"
 		default:
-			detail = session.State
+			detail = string(session.State)
 		}
 	}
 	return picker.SessionView{
@@ -233,7 +229,6 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 		Tabs:               viewTabs,
 		Active:             active,
 		Stopped:            stopped,
-		ConnectOnly:        legacy,
 		CannotAcceptMoves:  true,
 	}
 }
@@ -266,7 +261,6 @@ func remotePickerHostView(host string, status remoteHostStatus) picker.SessionVi
 		RemoteAvailability: remotePickerAvailability(status),
 		RemoteDetail:       remotePickerStatusDetail(status, time.Time{}),
 		RemoteActivation:   picker.RemoteUnavailable,
-		ConnectOnly:        true,
 		CannotAcceptMoves:  true,
 	}
 }

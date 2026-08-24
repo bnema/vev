@@ -3,6 +3,7 @@ package remote
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -30,8 +31,8 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 			Host:      "zebra",
 			FetchedAt: fetchedAt,
 			Sessions: []ports.RemoteCatalogSession{
-				{Name: "work", State: "up", Tabs: 2},
-				{Name: "alpha", State: "down", Ephemeral: true, Tabs: 1, Attached: true},
+				{LifecycleID: [16]byte{1}, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
+				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
 			},
 		},
 		{
@@ -72,8 +73,8 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 			Host:      "zebra",
 			FetchedAt: fetchedAt,
 			Sessions: []ports.RemoteCatalogSession{
-				{Name: "alpha", State: "down", Ephemeral: true, Tabs: 1, Attached: true},
-				{Name: "work", State: "up", Tabs: 2},
+				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
+				{LifecycleID: [16]byte{1}, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
 			},
 		},
 	}
@@ -113,17 +114,18 @@ func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 		name string
 		raw  []byte
 	}{
-		{name: "truncated", raw: []byte(`{"version":1,"hosts":[`)},
-		{name: "trailing JSON", raw: []byte(`{"version":1,"hosts":[]} {}`)},
-		{name: "unknown version", raw: []byte(`{"version":3,"hosts":[]}`)},
-		{name: "missing hosts", raw: []byte(`{"version":1}`)},
-		{name: "null hosts", raw: []byte(`{"version":1,"hosts":null}`)},
-		{name: "null sessions", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":null}]}`)},
-		{name: "zero fetched at", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":0,"sessions":[]}]}`)},
-		{name: "negative fetched at", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":-1,"sessions":[]}]}`)},
-		{name: "duplicate hosts", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[]},{"target":"arch","fetched_at_unix_nano":2,"sessions":[]}]}`)},
-		{name: "duplicate sessions", raw: []byte(`{"version":1,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"name":"work","state":"up","ephemeral":false,"tabs":1,"attached":false},{"name":"work","state":"up","ephemeral":false,"tabs":1,"attached":false}]}]}`)},
-		{name: "invalid utf8", raw: []byte("{\"version\":1,\"hosts\":[{\"target\":\"\xff\",\"fetched_at_unix_nano\":1,\"sessions\":[]}]}")},
+		{name: "truncated", raw: []byte(`{"version":3,"hosts":[`)},
+		{name: "trailing JSON", raw: []byte(`{"version":3,"hosts":[]} {}`)},
+		{name: "obsolete count-only version", raw: []byte(`{"version":2,"hosts":[]}`)},
+		{name: "unknown version", raw: []byte(`{"version":4,"hosts":[]}`)},
+		{name: "missing hosts", raw: []byte(`{"version":3}`)},
+		{name: "null hosts", raw: []byte(`{"version":3,"hosts":null}`)},
+		{name: "null sessions", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":null}]}`)},
+		{name: "zero fetched at", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":0,"sessions":[]}]}`)},
+		{name: "negative fetched at", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":-1,"sessions":[]}]}`)},
+		{name: "duplicate hosts", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[]},{"target":"arch","fetched_at_unix_nano":2,"sessions":[]}]}`)},
+		{name: "missing exact session fields", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"name":"work","state":"up","ephemeral":false,"tabs":[],"attached":false}]}]}`)},
+		{name: "invalid utf8", raw: []byte("{\"version\":3,\"hosts\":[{\"target\":\"\xff\",\"fetched_at_unix_nano\":1,\"sessions\":[]}]}")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,5 +270,5 @@ func TestCatalogCacheStoreRenameFailureCleansTemporaryFile(t *testing.T) {
 }
 
 func equalRemoteCatalogCacheEntry(a, b ports.RemoteCatalogCacheEntry) bool {
-	return a.Host == b.Host && a.FetchedAt.Equal(b.FetchedAt) && slices.Equal(a.Sessions, b.Sessions)
+	return a.Host == b.Host && a.FetchedAt.Equal(b.FetchedAt) && reflect.DeepEqual(a.Sessions, b.Sessions)
 }

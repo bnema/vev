@@ -100,9 +100,9 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 		}
 		sessions = append(sessions, entry)
 	}
-	stopped := make([]stoppedSession, 0, len(d.stopped))
-	for _, s := range d.stopped {
-		if !s.purging {
+	stopped := make([]inactiveSession, 0, len(d.inactive))
+	for _, s := range d.inactive {
+		if s.visible() {
 			stopped = append(stopped, s)
 		}
 	}
@@ -179,15 +179,8 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 	for _, item := range live {
 		views = append(views, item.view.pickerView())
 	}
-	seenRemoteLifecycles := make(map[domain.SessionLifecycleID]struct{}, catalogRows)
 	for _, host := range catalog {
 		for _, session := range host.entry.Sessions {
-			if session.LifecycleID != (domain.SessionLifecycleID{}) {
-				if _, duplicate := seenRemoteLifecycles[session.LifecycleID]; duplicate {
-					continue
-				}
-				seenRemoteLifecycles[session.LifecycleID] = struct{}{}
-			}
 			key := domain.RemoteSessionKey{Host: host.entry.Host, Name: session.Name}
 			if key.Validate() != nil {
 				continue
@@ -886,15 +879,8 @@ func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, ta
 	if token.sess == nil || token.ac == nil || token.effect == nil {
 		return nil
 	}
-	if target.RemoteTarget != nil {
-		var key domain.RemoteSessionKey
-		if target.RemoteKey != nil {
-			key = *target.RemoteKey
-		}
-		return d.sendRemoteAttachTargetForAttachment(token, target, key, guard, action)
-	}
-	if target.RemoteKey != nil {
-		return d.sendRemoteAttachTargetForAttachment(token, target, *target.RemoteKey, guard, action)
+	if target.RemoteTarget != nil || target.RemoteKey != nil {
+		return d.sendRemoteAttachTargetForAttachment(token, target, guard, action)
 	}
 	return d.sendLocalAttachTargetForAttachment(token, target, guard, action)
 }
@@ -910,7 +896,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	var exactTarget *ports.ExactSessionTarget
 	var matches bool
 	if target.Name != "" {
-		var stopped stoppedSession
+		var stopped inactiveSession
 		var stoppedTarget bool
 		targetSess, stopped, stoppedTarget, matches = d.resolveNamedLifecycleTargetLocked(target)
 		if stoppedTarget && matches {
@@ -971,36 +957,27 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 // endpoint to the thin client. The daemon owns no remote session shadow: after
 // the target is sent, the local attachment is detached and the client opens a
 // fresh connection to the owning daemon.
-func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, key domain.RemoteSessionKey, guard sessionHandoffGuard, _ string) error {
+func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, _ string) error {
 	failUnavailable := func() error {
 		if token.attachmentCurrent() {
 			d.notifyRemotePickerUnavailable(token.sess, target)
 		}
 		return errAttachmentTransition
 	}
-	var handoff ports.AttachTarget
-	if target.RemoteTarget != nil {
-		remoteTarget := *target.RemoteTarget
-		if err := remoteTarget.Validate(); err != nil || target.Stopped != remoteTarget.Stopped || !d.remotePickerTargetReadyTarget(remoteTarget) {
-			return failUnavailable()
-		}
-		if target.RemoteKey != nil {
-			if target.Session != target.RemoteKey.ID() || target.RemoteKey.Host != remoteTarget.Endpoint || target.RemoteKey.Name != remoteTarget.SessionName || target.RemoteKey.LifecycleID != remoteTarget.LifecycleID {
-				return failUnavailable()
-			}
-		}
-		handoff = ports.AttachTarget{
-			Endpoint:          remoteTarget.Endpoint,
-			Session:           remoteTarget.SessionName,
-			Intent:            ports.IntentAttach,
-			RemoteTarget:      &remoteTarget,
-			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-		}
-	} else {
-		if key.Validate() != nil || target.Session != key.ID() || target.Stopped || target.Name != "" || !d.remotePickerTargetReady(key) {
-			return failUnavailable()
-		}
-		handoff = ports.AttachTarget{Endpoint: key.Host, Session: key.Name, Intent: ports.IntentAttach, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}
+	if target.RemoteTarget == nil || target.RemoteKey == nil {
+		return failUnavailable()
+	}
+	remoteTarget := *target.RemoteTarget
+	key := *target.RemoteKey
+	if err := remoteTarget.Validate(); err != nil || key.Validate() != nil || target.Session != key.ID() || key.Host != remoteTarget.Endpoint || key.Name != remoteTarget.SessionName || key.LifecycleID != remoteTarget.LifecycleID || !d.remotePickerTargetReadyTarget(remoteTarget) {
+		return failUnavailable()
+	}
+	handoff := ports.AttachTarget{
+		Endpoint:          remoteTarget.Endpoint,
+		Session:           remoteTarget.SessionName,
+		Intent:            ports.IntentAttach,
+		RemoteTarget:      &remoteTarget,
+		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}
 	payload := ports.MarshalAttachTarget(handoff)
 	if payload == nil {
@@ -1028,24 +1005,6 @@ func (d *Daemon) remoteCatalogEntryLocked(host string) (ports.RemoteCatalogCache
 	return entry, true
 }
 
-func (d *Daemon) remotePickerTargetReady(key domain.RemoteSessionKey) bool {
-	if d == nil {
-		return false
-	}
-	d.remoteCatalog.mu.Lock()
-	defer d.remoteCatalog.mu.Unlock()
-	entry, ok := d.remoteCatalogEntryLocked(key.Host)
-	if !ok {
-		return false
-	}
-	for _, session := range entry.Sessions {
-		if session.Name == key.Name {
-			return session.State == "up"
-		}
-	}
-	return false
-}
-
 func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget) bool {
 	if d == nil || target.Validate() != nil {
 		return false
@@ -1060,7 +1019,7 @@ func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget
 		if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
 			continue
 		}
-		if target.Stopped != remoteSessionStateStopped(session.State) || session.State == "broken" {
+		if target.Stopped != remoteSessionStateStopped(session.State) || session.State == ports.RemoteCatalogSessionBroken {
 			return false
 		}
 		tabs := ports.CatalogTabs(session)
@@ -1068,21 +1027,8 @@ func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget
 		for _, tab := range tabs {
 			metadata = append(metadata, domain.TabSelectorTab{ID: domain.TabStableID(tab.ID), Name: tab.Name})
 		}
-		if target.Stopped {
-			_, ok := target.StoppedTab.Resolve(metadata)
-			return ok
-		}
-		found := false
-		for _, tab := range tabs {
-			if tab.ID != string(target.LiveTabID) {
-				continue
-			}
-			if found {
-				return false
-			}
-			found = true
-		}
-		return found
+		_, ok := target.ResolveTab(metadata)
+		return ok
 	}
 	return false
 }
@@ -1175,19 +1121,19 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 // resolveNamedLifecycleTargetLocked chooses exactly one current representation
 // of a named lifecycle. Caller holds d.mu. Matching the name and lifecycle
 // identity here closes the lookup-to-handoff window for palette targets.
-func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*session, stoppedSession, bool, bool) {
+func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*session, inactiveSession, bool, bool) {
 	if target.Name == "" {
-		return nil, stoppedSession{}, false, false
+		return nil, inactiveSession{}, false, false
 	}
 	if active := d.findByNameLocked(target.Name); active != nil {
 		active.mu.Lock()
 		matches := targetMatchesLifecycle(target, active.name, active.createdAt, active.incarnation)
 		active.mu.Unlock()
-		return active, stoppedSession{}, false, matches
+		return active, inactiveSession{}, false, matches
 	}
-	stopped, ok := d.stopped[target.Name]
-	if !ok || stopped.purging || !targetMatchesLifecycle(target, stopped.name, stopped.createdAt, stopped.incarnation) {
-		return nil, stoppedSession{}, false, false
+	stopped, ok := d.inactive[target.Name]
+	if !ok || !stopped.canResume() || !targetMatchesLifecycle(target, stopped.name, stopped.createdAt, stopped.incarnation) {
+		return nil, inactiveSession{}, false, false
 	}
 	return nil, stopped, true, true
 }
@@ -1282,9 +1228,12 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // resumeStoppedAndSwitchLocked creates the stopped representation and commits
 // the handoff while d.mu is held. Creation failure leaves the source client
 // and stopped record untouched.
-func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession, sourceToken *attachmentConnectionToken, guard sessionHandoffGuard, action string) (*session, attachmentTransitionResult, bool, error) {
-	if stopped.record.Name != "" && stopped.state == ports.SessionBroken {
+func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped inactiveSession, sourceToken *attachmentConnectionToken, guard sessionHandoffGuard, action string) (*session, attachmentTransitionResult, bool, error) {
+	if stopped.broken() {
 		return nil, attachmentTransitionResult{}, false, &protoErr{ports.ErrInternal, "session durable state is broken: " + target.Name}
+	}
+	if !stopped.canResume() {
+		return nil, attachmentTransitionResult{}, false, errAttachmentTransition
 	}
 
 	if sourceToken != nil {
@@ -1295,14 +1244,14 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 			expectedTransport: sourceToken.transport, sourceToken: sourceToken, action: action,
 			expectedSourceTab: guard.expectedSource, copySourceEnvironment: true, ready: true,
 			createTargetLocked: func() (*session, error) {
-				current, ok := d.stopped[target.Name]
-				if !ok || current.purging || current.createdAt != stopped.createdAt || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
+				current, ok := d.inactive[target.Name]
+				if !ok || !current.canResume() || !current.sameLifecycle(stopped) || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
 					return nil, errAttachmentTransition
 				}
 				from.mu.Lock()
 				cwd, env := d.dirOrHome(current.cwd), copyEnvironment(from.env)
 				from.mu.Unlock()
-				created, createErr := d.createStoppedSessionLocked(target.Name, cwd, ac.sizeSnapshot(), env, current, current.tabNames)
+				created, createErr := d.resumeInactiveSessionLocked(target.Name, cwd, ac.sizeSnapshot(), env, current, current.tabNames)
 				targetSess = created
 				return created, createErr
 			},
@@ -1328,12 +1277,12 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	}
 	env := copyEnvironment(from.env)
 	from.mu.Unlock()
-	current, ok := d.stopped[target.Name]
-	if !ok || current.purging || !stoppedSessionMatchesLifecycle(current, stopped) || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
+	current, ok := d.inactive[target.Name]
+	if !ok || !current.canResume() || !current.sameLifecycle(stopped) || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
 		return nil, attachmentTransitionResult{}, false, errAttachmentTransition
 	}
 	cwd := d.dirOrHome(current.cwd)
-	targetSess, err := d.createStoppedSessionLocked(target.Name, cwd, ac.sizeSnapshot(), env, current, current.tabNames)
+	targetSess, err := d.resumeInactiveSessionLocked(target.Name, cwd, ac.sizeSnapshot(), env, current, current.tabNames)
 	if err != nil {
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
 		return nil, attachmentTransitionResult{}, false, err
@@ -1376,12 +1325,12 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 // its stopped target and commits creation under one d.mu critical section.
 func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, target picker.Target) bool {
 	d.mu.Lock()
-	stopped, ok := d.stopped[target.Name]
+	stopped, ok := d.inactive[target.Name]
 	var (
 		transition attachmentTransitionResult
 		switched   bool
 	)
-	if ok && !stopped.purging && targetMatchesLifecycle(target, stopped.name, stopped.createdAt, stopped.incarnation) {
+	if ok && stopped.canResume() && targetMatchesLifecycle(target, stopped.name, stopped.createdAt, stopped.incarnation) {
 		_, transition, switched, _ = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped, nil, sessionHandoffGuard{}, "")
 	}
 	d.mu.Unlock()

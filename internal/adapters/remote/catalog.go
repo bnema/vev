@@ -30,7 +30,6 @@ var (
 	errCatalogDecode   = errors.New("remote catalog: invalid JSON")
 	errCatalogTrailing = errors.New("remote catalog: trailing bytes after JSON")
 	errCatalogRequired = errors.New("remote catalog: missing required fields")
-	errCatalogSession  = errors.New("remote catalog: invalid session")
 	errCatalogSSH      = errors.New("remote catalog: ssh command failed")
 	errCatalogTooLarge = errors.New("remote catalog: output exceeds size limit")
 )
@@ -127,14 +126,18 @@ func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
 	if envelope.ProtocolVersion == nil || envelope.Sessions == nil {
 		return ports.RemoteCatalog{}, errCatalogRequired
 	}
+	if envelope.SchemaVersion == nil {
+		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
+			Got:  0,
+			Want: ports.RemoteCatalogSchemaVersion,
+			Kind: "catalog",
+		}
+	}
 	if err := rejectTrailingJSON(dec); err != nil {
 		return ports.RemoteCatalog{}, err
 	}
 
-	schemaVersion := uint16(0)
-	if envelope.SchemaVersion != nil {
-		schemaVersion = *envelope.SchemaVersion
-	}
+	schemaVersion := *envelope.SchemaVersion
 	if *envelope.ProtocolVersion != ports.ProtocolVersion {
 		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
 			Got:  *envelope.ProtocolVersion,
@@ -142,7 +145,7 @@ func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
 			Kind: "protocol",
 		}
 	}
-	if schemaVersion != 0 && schemaVersion != ports.RemoteCatalogSchemaVersion {
+	if schemaVersion != ports.RemoteCatalogSchemaVersion {
 		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
 			Got:  schemaVersion,
 			Want: ports.RemoteCatalogSchemaVersion,
@@ -160,12 +163,6 @@ func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
 		Sessions:        sessions,
 	}
 	if err := ports.ValidateRemoteCatalog(catalog); err != nil {
-		if schemaVersion == 0 {
-			// Keep the old adapter error taxonomy for pre-parity peers and
-			// direct CLI compatibility. Current-schema payloads retain the
-			// typed validation error for callers that need to classify it.
-			return ports.RemoteCatalog{}, fmt.Errorf("%w: %w", errCatalogSession, err)
-		}
 		return ports.RemoteCatalog{}, err
 	}
 	return catalog, nil
@@ -181,15 +178,6 @@ func rejectTrailingJSON(dec *json.Decoder) error {
 		return errCatalogTrailing
 	}
 	return fmt.Errorf("%w: %w", errCatalogTrailing, err)
-}
-
-func validCatalogState(state string) bool {
-	switch state {
-	case "up", "down", "broken":
-		return true
-	default:
-		return false
-	}
 }
 
 // sanitizeCatalogDiagnostic strips terminal escapes and control bytes while

@@ -2,7 +2,6 @@ package ports
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -64,7 +63,7 @@ type RemotePreviewClient interface {
 const (
 	// RemoteCatalogSchemaVersion is independent from the IPC protocol. A
 	// catalogue can be rejected without changing the attachment wire layout.
-	RemoteCatalogSchemaVersion uint16 = 2
+	RemoteCatalogSchemaVersion uint16 = 3
 
 	RemoteCatalogMaxHosts        = 64
 	RemoteCatalogMaxSessions     = 256
@@ -75,10 +74,9 @@ const (
 	RemoteCatalogMaxCatalogBytes = 1 << 20
 )
 
-// RemoteCatalogCacheEntry is one immutable host catalog snapshot persisted for
-// immediate remote discovery at daemon startup. The legacy-shaped Sessions
-// field is retained as a source-compatible container, but cache writers strip
-// dynamic Detail and Attention fields before persistence.
+// RemoteCatalogCacheEntry is one immutable exact-schema host snapshot persisted
+// for immediate remote discovery at daemon startup. Cache writers strip dynamic
+// Detail and Attention fields before persistence.
 type RemoteCatalogCacheEntry struct {
 	Host      string
 	FetchedAt time.Time
@@ -102,112 +100,53 @@ type RemoteCatalogTab struct {
 	Attention bool   `json:"attention,omitempty"`
 }
 
-// RemoteCatalogSession is one session in the remote discovery catalog. State
-// is an explicit string contract (up|down|broken), not SessionState.
-//
-// Tabs is interface-typed only to keep old v0.x callers that supplied a count
-// source-compatible while the versioned schema carries []RemoteCatalogTab.
-// New code must use CatalogTabs and never infer routing identity from a count.
+// RemoteCatalogSessionState is the JSON catalogue lifecycle contract. It is
+// deliberately independent from SessionState, whose numeric values are part of
+// the binary client/daemon protocol.
+type RemoteCatalogSessionState string
+
+const (
+	RemoteCatalogSessionUp     RemoteCatalogSessionState = "up"
+	RemoteCatalogSessionDown   RemoteCatalogSessionState = "down"
+	RemoteCatalogSessionBroken RemoteCatalogSessionState = "broken"
+)
+
+// Valid reports whether the state is one of the bounded catalogue values.
+func (s RemoteCatalogSessionState) Valid() bool {
+	switch s {
+	case RemoteCatalogSessionUp, RemoteCatalogSessionDown, RemoteCatalogSessionBroken:
+		return true
+	default:
+		return false
+	}
+}
+
+// RemoteCatalogSession is one exact-identity session in the remote discovery
+// catalogue. Tabs is always an ordered typed snapshot; older count-only peers
+// are rejected at the schema seam.
 type RemoteCatalogSession struct {
-	LifecycleID domain.SessionLifecycleID `json:"lifecycle_id,omitempty"`
+	LifecycleID domain.SessionLifecycleID `json:"lifecycle_id"`
 	Name        string                    `json:"name"`
-	State       string                    `json:"state"`
+	State       RemoteCatalogSessionState `json:"state"`
 	Ephemeral   bool                      `json:"ephemeral"`
-	Tabs        any                       `json:"tabs"`
+	Tabs        []RemoteCatalogTab        `json:"tabs"`
 	Attached    bool                      `json:"attached"`
 	LastUsedSeq uint64                    `json:"last_used_seq,omitempty"`
 	ActiveTabID string                    `json:"active_tab_id,omitempty"`
 	Reason      string                    `json:"reason,omitempty"`
 }
 
-// MarshalJSON omits a zero lifecycle ID for legacy count-only catalogues.
-// Encoding/json does not apply omitempty to a zero array that implements
-// encoding.TextMarshaler, so the pointer is made explicit here.
-func (s RemoteCatalogSession) MarshalJSON() ([]byte, error) {
-	type envelope struct {
-		LifecycleID *domain.SessionLifecycleID `json:"lifecycle_id,omitempty"`
-		Name        string                     `json:"name"`
-		State       string                     `json:"state"`
-		Ephemeral   bool                       `json:"ephemeral"`
-		Tabs        any                        `json:"tabs"`
-		Attached    bool                       `json:"attached"`
-		LastUsedSeq uint64                     `json:"last_used_seq,omitempty"`
-		ActiveTabID string                     `json:"active_tab_id,omitempty"`
-		Reason      string                     `json:"reason,omitempty"`
-	}
-	var lifecycle *domain.SessionLifecycleID
-	if s.LifecycleID != (domain.SessionLifecycleID{}) {
-		id := s.LifecycleID
-		lifecycle = &id
-	}
-	return json.Marshal(envelope{LifecycleID: lifecycle, Name: s.Name, State: s.State, Ephemeral: s.Ephemeral, Tabs: s.Tabs, Attached: s.Attached, LastUsedSeq: s.LastUsedSeq, ActiveTabID: s.ActiveTabID, Reason: s.Reason})
-}
-
-// UnmarshalJSON preserves the legacy numeric tab-count representation while
-// decoding the current array representation into concrete tab values.
-func (s *RemoteCatalogSession) UnmarshalJSON(data []byte) error {
-	type envelope struct {
-		LifecycleID domain.SessionLifecycleID `json:"lifecycle_id"`
-		Name        string                    `json:"name"`
-		State       string                    `json:"state"`
-		Ephemeral   bool                      `json:"ephemeral"`
-		Tabs        json.RawMessage           `json:"tabs"`
-		Attached    bool                      `json:"attached"`
-		LastUsedSeq uint64                    `json:"last_used_seq"`
-		ActiveTabID string                    `json:"active_tab_id"`
-		Reason      string                    `json:"reason"`
-	}
-	var raw envelope
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*s = RemoteCatalogSession{LifecycleID: raw.LifecycleID, Name: raw.Name, State: raw.State, Ephemeral: raw.Ephemeral, Attached: raw.Attached, LastUsedSeq: raw.LastUsedSeq, ActiveTabID: raw.ActiveTabID, Reason: raw.Reason}
-	if len(raw.Tabs) == 0 || string(raw.Tabs) == "null" {
-		s.Tabs = 0
-		return nil
-	}
-	var tabs []RemoteCatalogTab
-	if err := json.Unmarshal(raw.Tabs, &tabs); err == nil {
-		s.Tabs = tabs
-		return nil
-	}
-	var count uint16
-	if err := json.Unmarshal(raw.Tabs, &count); err != nil {
-		return err
-	}
-	s.Tabs = int(count)
-	return nil
-}
-
-// CatalogTabs returns a copied typed tab list. Legacy count-only entries have
-// no stable tab identity and therefore return nil.
+// CatalogTabs returns an independent copy of the ordered tab snapshot.
 func CatalogTabs(session RemoteCatalogSession) []RemoteCatalogTab {
-	tabs, ok := session.Tabs.([]RemoteCatalogTab)
-	if !ok {
-		return nil
-	}
-	return slices.Clone(tabs)
+	return slices.Clone(session.Tabs)
 }
 
-// CatalogTabCount returns the count represented by either schema form.
+// CatalogTabCount returns the typed tab count.
 func CatalogTabCount(session RemoteCatalogSession) int {
-	switch tabs := session.Tabs.(type) {
-	case []RemoteCatalogTab:
-		return len(tabs)
-	case uint16:
-		return int(tabs)
-	case uint32:
-		return int(tabs)
-	case int:
-		return tabs
-	case float64:
-		return int(tabs)
-	default:
-		return 0
-	}
+	return len(session.Tabs)
 }
 
-// SaturateUint16 clamps n to the uint16 range for legacy command output only.
+// SaturateUint16 clamps a catalogue tab count to the list protocol range.
 func SaturateUint16(n int) uint16 {
 	if n <= 0 {
 		return 0
@@ -219,11 +158,11 @@ func SaturateUint16(n int) uint16 {
 }
 
 // RemoteCatalog is the independently versioned JSON envelope returned by
-// remote-catalog --json. ProtocolVersion remains for legacy peers; new peers
-// must also provide SchemaVersion.
+// remote-catalog --json. Both protocol and catalogue schema versions are
+// mandatory and must match exactly.
 type RemoteCatalog struct {
 	ProtocolVersion uint16                 `json:"protocol_version"`
-	SchemaVersion   uint16                 `json:"schema_version,omitempty"`
+	SchemaVersion   uint16                 `json:"schema_version"`
 	Sessions        []RemoteCatalogSession `json:"sessions"`
 }
 
@@ -250,14 +189,13 @@ var (
 	ErrRemoteCatalogInvalidReason = errors.New("ports: remote catalog has unknown reason")
 )
 
-// ValidateRemoteCatalog applies all limits before a catalogue is cached or
-// rendered. It is deliberately strict for the current schema; zero schema is
-// the read-only compatibility form used by pre-parity v0.x peers.
+// ValidateRemoteCatalog applies the exact current schema and all bounds before
+// a catalogue is cached or rendered.
 func ValidateRemoteCatalog(c RemoteCatalog) error {
 	if c.ProtocolVersion != ProtocolVersion {
 		return &RemoteCatalogVersionMismatchError{Got: c.ProtocolVersion, Want: ProtocolVersion, Kind: "protocol"}
 	}
-	if c.SchemaVersion != 0 && c.SchemaVersion != RemoteCatalogSchemaVersion {
+	if c.SchemaVersion != RemoteCatalogSchemaVersion {
 		return &RemoteCatalogVersionMismatchError{Got: c.SchemaVersion, Want: RemoteCatalogSchemaVersion, Kind: "catalog"}
 	}
 	if len(c.Sessions) > RemoteCatalogMaxSessions {
@@ -266,7 +204,7 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 	seen := make(map[domain.SessionLifecycleID]string, len(c.Sessions))
 	bytes := 0
 	for _, session := range c.Sessions {
-		if !validRemoteCatalogText(session.Name) || !validRemoteCatalogText(session.State) || !validRemoteCatalogText(session.Reason) {
+		if !validRemoteCatalogText(session.Name) || !validRemoteCatalogText(string(session.State)) || !validRemoteCatalogText(session.Reason) {
 			return fmt.Errorf("%w: invalid session text", ErrInvalidRemoteCatalog)
 		}
 		if len(session.Name) > RemoteCatalogMaxNameBytes || len(session.Reason) > RemoteCatalogMaxDetailBytes {
@@ -275,7 +213,7 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 		if err := domain.ValidateSessionName(session.Name); err != nil {
 			return fmt.Errorf("%w: session name: %v", ErrInvalidRemoteCatalog, err)
 		}
-		if !validRemoteCatalogState(session.State) {
+		if !session.State.Valid() {
 			return fmt.Errorf("%w: %q", ErrRemoteCatalogUnknownState, session.State)
 		}
 		if session.ActiveTabID != "" {
@@ -286,24 +224,20 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 		if session.Reason != "" && !validRemoteCatalogReason(session.Reason) {
 			return fmt.Errorf("%w: %q", ErrRemoteCatalogInvalidReason, session.Reason)
 		}
-		if c.SchemaVersion != 0 {
-			if session.LifecycleID == (domain.SessionLifecycleID{}) {
-				return fmt.Errorf("%w: zero lifecycle ID", ErrInvalidRemoteCatalog)
-			}
-			if prior, exists := seen[session.LifecycleID]; exists {
-				return fmt.Errorf("%w: lifecycle ID reused by %q and %q", ErrInvalidRemoteCatalog, prior, session.Name)
-			}
-			seen[session.LifecycleID] = session.Name
+		if session.LifecycleID == (domain.SessionLifecycleID{}) {
+			return fmt.Errorf("%w: zero lifecycle ID", ErrInvalidRemoteCatalog)
+		}
+		if prior, exists := seen[session.LifecycleID]; exists {
+			return fmt.Errorf("%w: lifecycle ID reused by %q and %q", ErrInvalidRemoteCatalog, prior, session.Name)
+		}
+		seen[session.LifecycleID] = session.Name
+		if session.Tabs == nil {
+			return fmt.Errorf("%w: missing tab list", ErrInvalidRemoteCatalog)
 		}
 		tabs := CatalogTabs(session)
 		if len(tabs) == 0 {
-			if c.SchemaVersion != 0 {
-				if session.ActiveTabID != "" {
-					return fmt.Errorf("%w: active tab is absent", ErrInvalidRemoteCatalog)
-				}
-				if session.State == "up" && session.Tabs == nil {
-					return fmt.Errorf("%w: missing tab list", ErrInvalidRemoteCatalog)
-				}
+			if session.ActiveTabID != "" {
+				return fmt.Errorf("%w: active tab is absent", ErrInvalidRemoteCatalog)
 			}
 		} else {
 			if len(tabs) > RemoteCatalogMaxTabsPerSess {
@@ -320,7 +254,7 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 				if tab.Index != uint16(i) {
 					return fmt.Errorf("%w: tab indexes are not ordered", ErrInvalidRemoteCatalog)
 				}
-				if session.State == "up" && tab.ID == "" {
+				if session.State == RemoteCatalogSessionUp && tab.ID == "" {
 					return fmt.Errorf("%w: up tab has zero ID", ErrInvalidRemoteCatalog)
 				}
 				if tab.ID != "" {
@@ -335,7 +269,7 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 				bytes += len(tab.ID) + len(tab.Name) + len(tab.Detail)
 			}
 			if session.ActiveTabID != "" {
-				if session.State != "up" {
+				if session.State != RemoteCatalogSessionUp {
 					return fmt.Errorf("%w: down or broken session has an active tab", ErrInvalidRemoteCatalog)
 				}
 				if _, ok := tabIDs[session.ActiveTabID]; !ok {
@@ -351,10 +285,8 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 	return nil
 }
 
-// ValidateRemoteCatalogCacheEntries validates the bounded cache DTO before it
-// is loaded into picker state or written to disk. A cache may contain legacy
-// count-only sessions, but any complete typed snapshot must carry lifecycle
-// identity and the same tab invariants as a live catalog.
+// ValidateRemoteCatalogCacheEntries validates the bounded exact-schema cache
+// DTO before it is loaded into picker state or written to disk.
 func ValidateRemoteCatalogCacheEntries(entries []RemoteCatalogCacheEntry) error {
 	if len(entries) > RemoteCatalogMaxHosts {
 		return fmt.Errorf("%w: too many hosts", ErrRemoteCatalogTooLarge)
@@ -371,18 +303,7 @@ func ValidateRemoteCatalogCacheEntries(entries []RemoteCatalogCacheEntry) error 
 			return fmt.Errorf("%w: duplicate host", ErrInvalidRemoteCatalog)
 		}
 		seenHosts[entry.Host] = struct{}{}
-		complete := false
-		for _, session := range entry.Sessions {
-			if session.LifecycleID != (domain.SessionLifecycleID{}) || CatalogTabs(session) != nil {
-				complete = true
-				break
-			}
-		}
-		schema := uint16(0)
-		if complete {
-			schema = RemoteCatalogSchemaVersion
-		}
-		catalog := RemoteCatalog{ProtocolVersion: ProtocolVersion, SchemaVersion: schema, Sessions: entry.Sessions}
+		catalog := RemoteCatalog{ProtocolVersion: ProtocolVersion, SchemaVersion: RemoteCatalogSchemaVersion, Sessions: entry.Sessions}
 		if err := ValidateRemoteCatalog(catalog); err != nil {
 			return fmt.Errorf("%w: host %q: %v", ErrInvalidRemoteCatalog, entry.Host, err)
 		}
@@ -400,15 +321,6 @@ func validRemoteCatalogText(value string) bool {
 		}
 	}
 	return true
-}
-
-func validRemoteCatalogState(state string) bool {
-	switch state {
-	case "up", "down", "broken":
-		return true
-	default:
-		return false
-	}
 }
 
 func validRemoteCatalogReason(reason string) bool {

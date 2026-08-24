@@ -10,7 +10,7 @@ import (
 
 func TestRemoteStoppedSelectorsResolveOnlyAgainstExactTabMetadata(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
-	stopped := stoppedSession{
+	stopped := inactiveSession{
 		name: "work", incarnation: lifecycle,
 		tabNames: []string{"alpha", "beta"},
 		tabRecords: []domain.CatalogueTabRecord{
@@ -24,13 +24,13 @@ func TestRemoteStoppedSelectorsResolveOnlyAgainstExactTabMetadata(t *testing.T) 
 		SessionName: "work", Stopped: true,
 		StoppedTab: domain.NewStableTabSelector("tab-b"),
 	}
-	index, ok := remoteTargetTabIndexStopped(stopped, stable)
+	index, ok := remoteTargetTabIndexInactive(stopped, stable)
 	require.True(t, ok)
 	require.Equal(t, 1, index)
 
 	ordinal := stable
 	ordinal.StoppedTab = domain.NewOrdinalTabSelector(1, "beta", 2)
-	index, ok = remoteTargetTabIndexStopped(stopped, ordinal)
+	index, ok = remoteTargetTabIndexInactive(stopped, ordinal)
 	require.True(t, ok)
 	require.Equal(t, 1, index)
 
@@ -51,7 +51,7 @@ func TestRemoteStoppedSelectorsResolveOnlyAgainstExactTabMetadata(t *testing.T) 
 			return candidate
 		}(),
 	} {
-		_, ok := remoteTargetTabIndexStopped(stopped, invalid)
+		_, ok := remoteTargetTabIndexInactive(stopped, invalid)
 		require.False(t, ok)
 	}
 
@@ -60,7 +60,7 @@ func TestRemoteStoppedSelectorsResolveOnlyAgainstExactTabMetadata(t *testing.T) 
 		{StableID: "tab-b", Name: "beta"},
 		{StableID: "tab-a", Name: "alpha"},
 	}
-	index, ok = remoteTargetTabIndexStopped(reordered, stable)
+	index, ok = remoteTargetTabIndexInactive(reordered, stable)
 	require.True(t, ok)
 	require.Equal(t, 0, index, "stable selectors follow identity, not the old ordinal")
 }

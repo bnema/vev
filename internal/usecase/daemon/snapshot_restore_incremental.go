@@ -68,7 +68,7 @@ func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.Catalogu
 	wg.Wait()
 }
 
-func stoppedSessionFromRecord(record domain.CatalogueRecord, state ports.SessionState, done chan struct{}) stoppedSession {
+func inactiveSessionFromRecord(record domain.CatalogueRecord, state ports.SessionState, done chan struct{}) inactiveSession {
 	tabRecords := append([]domain.CatalogueTabRecord(nil), record.TabRecords...)
 	tabNames := append([]string(nil), record.TabNames...)
 	if len(tabRecords) != 0 {
@@ -85,7 +85,7 @@ func stoppedSessionFromRecord(record domain.CatalogueRecord, state ports.Session
 			tabRecords[i] = domain.CatalogueTabRecord{Name: name}
 		}
 	}
-	return stoppedSession{
+	return inactiveSession{
 		name:        record.Name,
 		cwd:         record.Cwd,
 		createdAt:   record.CreatedAt,
@@ -102,11 +102,11 @@ func stoppedSessionFromRecord(record domain.CatalogueRecord, state ports.Session
 func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) chan struct{} {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if entry, ok := d.stopped[record.Name]; ok {
+	if entry, ok := d.inactive[record.Name]; ok {
 		return entry.restoreDone
 	}
 	state, done := initialSessionState(record)
-	d.stopped[record.Name] = stoppedSessionFromRecord(record, state, done)
+	d.inactive[record.Name] = inactiveSessionFromRecord(record, state, done)
 	return done
 }
 
@@ -126,11 +126,11 @@ func closeRuntimeRestoreDoneLocked(done chan struct{}) {
 func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state ports.SessionState) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	entry, ok := d.stopped[record.Name]
+	entry, ok := d.inactive[record.Name]
 	if !ok {
 		return
 	}
-	d.stopped[record.Name] = stoppedSessionFromRecord(record, state, entry.restoreDone)
+	d.inactive[record.Name] = inactiveSessionFromRecord(record, state, entry.restoreDone)
 }
 
 func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
@@ -155,8 +155,8 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 	}
 
 	d.mu.Lock()
-	if entry, ok := d.stopped[record.Name]; ok && degraded {
-		d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionBroken, entry.restoreDone)
+	if entry, ok := d.inactive[record.Name]; ok && degraded {
+		d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionBroken, entry.restoreDone)
 	}
 	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
@@ -251,8 +251,8 @@ func (d *Daemon) resetIncompatibleCheckpoint(ctx context.Context, record domain.
 	}
 
 	d.mu.Lock()
-	if entry, ok := d.stopped[record.Name]; ok {
-		d.stopped[record.Name] = stoppedSessionFromRecord(fresh, ports.SessionDown, entry.restoreDone)
+	if entry, ok := d.inactive[record.Name]; ok {
+		d.inactive[record.Name] = inactiveSessionFromRecord(fresh, ports.SessionDown, entry.restoreDone)
 	}
 	d.mu.Unlock()
 
