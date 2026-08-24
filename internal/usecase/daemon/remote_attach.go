@@ -138,7 +138,7 @@ func (d *Daemon) sendCommittedRouteIdentityForAttachment(token attachmentConnect
 func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, h ports.Hello, routeCreated, purge bool) (*attachedClient, error) {
 	ac, err := d.finishAttach(sess, tr, sz, h)
 	if err != nil && routeCreated {
-		if cleanupErr := d.killSession(sess, ports.ReasonSessionKilled, purge); cleanupErr != nil {
+		if cleanupErr := d.killSessionIfEmpty(sess, ports.ReasonSessionKilled, purge); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
 		return nil, err

@@ -1309,7 +1309,7 @@ func (d *Daemon) killSessionForAttachment(sess *session, reason uint8, purge boo
 // architecture locks, but releases every lock before any attachment gate is frozen or
 // drained. The initiator is part of the same deduplicated global gate set even
 // when it belongs to a different source session.
-func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *sessionKillAdmission) (sessionKillParticipants, bool) {
+func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *sessionKillAdmission, requireEmpty bool) (sessionKillParticipants, bool) {
 	snapshot := sessionKillParticipants{target: target}
 	if admission != nil {
 		token := admission.token
@@ -1334,6 +1334,12 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		source = target
 	}
 	unlockSessions := lockAttachmentSessions(source, target)
+	if requireEmpty && len(target.attachments) != 0 {
+		unlockSessions()
+		d.notices.routingMu.Unlock()
+		d.mu.Unlock()
+		return sessionKillParticipants{}, false
+	}
 	snapshot.attachments = make(map[*attachedClient]struct{}, len(target.attachments))
 	snapshot.transports = make(map[*attachedClient]transportSnapshot, len(target.attachments))
 	for ac := range target.attachments {
@@ -1524,13 +1530,24 @@ func (s *session) finishTeardown() {
 // only immutable capture state; it never observes closed worker channels or
 // session-owned cache that teardown has released.
 func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline, admission *sessionKillAdmission) error {
+	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, deadline, admission, false)
+}
+
+// killSessionIfEmpty tears down sess only while its exact registry entry has no
+// attachments. Membership is captured under the normal architecture locks and
+// fenced again at publication, so an attachment winning either side survives.
+func (d *Daemon) killSessionIfEmpty(sess *session, reason uint8, purge bool) error {
+	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, nil, nil, true)
+}
+
+func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline, admission *sessionKillAdmission, requireEmpty bool) error {
 	if sess == nil {
 		return nil
 	}
 	// Discover every attachment whose membership can be invalidated before freezing
 	// any one of them. The common gate helper deduplicates and freezes the whole
 	// immutable identity set in the same global order used by transitions.
-	participants, ok := d.snapshotSessionKillParticipants(sess, admission)
+	participants, ok := d.snapshotSessionKillParticipants(sess, admission, requireEmpty)
 	if !ok {
 		return nil
 	}

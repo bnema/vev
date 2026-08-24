@@ -50,6 +50,81 @@ func TestFinishRouteAttachRollsBackCreatedSession(t *testing.T) {
 	require.False(t, retained, "failed route attach must remove its newly created session")
 }
 
+func TestFinishRouteAttachPreservesConcurrentAttachment(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", defaultSize, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	winner, winnerTransport := attachWhenRouteCleanupSnapshots(t, d, sess)
+
+	missing := domain.RemoteSessionTarget{LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: "missing-tab"}
+	d.mu.Lock()
+	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		RemoteTarget: &missing, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}, true, true)
+
+	var protocol *protoErr
+	require.ErrorAs(t, err, &protocol)
+	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	require.Same(t, sess, winner().currentAttachmentSession())
+	d.mu.Lock()
+	require.Same(t, sess, d.sessions[sess.id])
+	d.mu.Unlock()
+	d.clientGone(sess, winner(), winnerTransport, false)
+}
+
+func TestFailedHandshakeCleanupPreservesConcurrentAttachment(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", defaultSize, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	initialTransport, _ := newCapturingTransport(t)
+	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: domain.TabStableID(sess.tabs[0].stableID)}
+	_, initial, err := d.routeWithContext(context.Background(), ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}, initialTransport)
+	require.NoError(t, err)
+	initial.routeCreatedSession = true
+	initial.routeSessionPurge = true
+	winner, winnerTransport := attachWhenRouteCleanupSnapshots(t, d, sess)
+
+	d.failHandshakeAttachment(sess, initial, initialTransport, false)
+
+	require.Same(t, sess, winner().currentAttachmentSession())
+	d.mu.Lock()
+	require.Same(t, sess, d.sessions[sess.id])
+	d.mu.Unlock()
+	d.clientGone(sess, winner(), winnerTransport, false)
+}
+
+func attachWhenRouteCleanupSnapshots(t *testing.T, d *Daemon, sess *session) (func() *attachedClient, ports.Transport) {
+	t.Helper()
+	winnerTransport, _ := newCapturingTransport(t)
+	var winner *attachedClient
+	d.afterAttachmentEffectParticipantsSnapshotted = func(string, []*attachedClient) {
+		d.afterAttachmentEffectParticipantsSnapshotted = nil
+		target := domain.RemoteSessionTarget{
+			Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
+			SessionName: sess.name, LiveTabID: domain.TabStableID(sess.tabs[0].stableID),
+		}
+		var err error
+		_, winner, err = d.routeWithContext(context.Background(), ports.Hello{
+			Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: sess.name, Size: defaultSize,
+			RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}, winnerTransport)
+		require.NoError(t, err)
+	}
+	return func() *attachedClient {
+		t.Helper()
+		require.NotNil(t, winner)
+		return winner
+	}, winnerTransport
+}
+
 func TestRouteRemoteTargetRejectsSameNameReplacement(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "tab-new", "pane-new")
