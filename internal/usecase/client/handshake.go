@@ -61,7 +61,8 @@ func newHandshakeContext(parent context.Context, clock ports.Clock) (context.Con
 }
 
 // watchHandshakeTransport closes a transport when the handshake context ends.
-// Transport.Close is required to interrupt blocked Send and Recv operations.
+// watchHandshakeTransport closes the transport when the context is canceled.
+// It returns an idempotent cleanup function that stops and waits for the watcher.
 func watchHandshakeTransport(ctx context.Context, transport ports.Transport) func() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -82,10 +83,16 @@ func watchHandshakeTransport(ctx context.Context, transport ports.Transport) fun
 	}
 }
 
+// boundedHandshakeOperation runs a transport operation until it completes or the context ends.
+// It returns the operation error, or the relevant context or transition error when the operation is interrupted.
 func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, operation func() error) error {
 	return boundedHandshakeOperationWithTransition(ctx, transport, operation, nil)
 }
 
+// boundedHandshakeOperationWithTransition runs a handshake operation while monitoring
+// context cancellation and UI transition updates. It closes the transport when the
+// context ends or a transition update fails, and returns the operation, context, or
+// transition error.
 func boundedHandshakeOperationWithTransition(ctx context.Context, transport ports.Transport, operation func() error, transition *transitionUI) error {
 	if err := ctx.Err(); err != nil {
 		_ = transport.Close()
@@ -115,10 +122,16 @@ func boundedHandshakeOperationWithTransition(ctx context.Context, transport port
 	}
 }
 
+// boundedDial dials a transport within the context's lifetime.
 func boundedDial(ctx context.Context, dialer ports.Dialer) (ports.Transport, error) {
 	return boundedDialWithTransition(ctx, dialer, nil)
 }
 
+// boundedDialWithTransition dials a transport while advancing the optional transition UI.
+// It abandons and closes transports when the context or transition ends before dialing completes.
+// A successful transport remains usable after the dialing context is canceled.
+//
+// The returned error reports dialing, context, or transition failure.
 func boundedDialWithTransition(ctx context.Context, dialer ports.Dialer, transition *transitionUI) (ports.Transport, error) {
 	// The dial context only bounds startup. A successful carriage outlives the
 	// handshake context; canceling that context after Welcome must not kill SSH.

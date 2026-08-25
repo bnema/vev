@@ -1995,6 +1995,9 @@ func MarshalRemotePreview(preview RemotePreview) []byte {
 	return w.b
 }
 
+// UnmarshalRemotePreview decodes and validates a remote preview from its wire representation.
+// It returns the preview and an error if the payload is oversized, malformed, contains unsupported
+// values, or fails semantic validation.
 func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 	if len(data) > RemotePreviewMaxBytes {
 		return RemotePreview{}, ErrRemotePreviewTooLarge
@@ -2066,7 +2069,8 @@ func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 	return p, nil
 }
 
-// MarshalNavigationDirective encodes one bounded navigation directive.
+// MarshalNavigationDirective encodes a supported navigation directive and its lease identifier.
+// It returns nil when the action or lease identifier does not satisfy the directive's requirements.
 func MarshalNavigationDirective(directive NavigationDirective) []byte {
 	if directive.Action != NavigationOpenHomePicker && directive.Action != NavigationBack {
 		return nil
@@ -2080,7 +2084,8 @@ func MarshalNavigationDirective(directive NavigationDirective) []byte {
 	return w.b
 }
 
-// UnmarshalNavigationDirective decodes one strict navigation directive.
+// UnmarshalNavigationDirective decodes a navigation directive from its wire representation.
+// It returns an error if the payload is malformed or contains an invalid action or lease ID.
 func UnmarshalNavigationDirective(b []byte) (NavigationDirective, error) {
 	r := payloadReader{b: b}
 	value, err := r.getUint8()
@@ -2103,7 +2108,8 @@ func UnmarshalNavigationDirective(b []byte) (NavigationDirective, error) {
 }
 
 // ValidateParkedRouteRequest enforces the closed action/target shape before a
-// request reaches either side's route state machine.
+// ValidateParkedRouteRequest validates request identifiers, actions, and action-specific targets.
+// It returns ErrInvalidNavigation when the request is invalid.
 func ValidateParkedRouteRequest(request ParkedRouteRequest) error {
 	if request.RequestID == 0 || request.LeaseID.IsZero() {
 		return ErrInvalidNavigation
@@ -2123,7 +2129,8 @@ func ValidateParkedRouteRequest(request ParkedRouteRequest) error {
 	return nil
 }
 
-// MarshalParkedRouteRequest encodes one retained-route operation.
+// MarshalParkedRouteRequest encodes a retained-route operation.
+// It returns nil when the request is invalid.
 func MarshalParkedRouteRequest(request ParkedRouteRequest) []byte {
 	if ValidateParkedRouteRequest(request) != nil {
 		return nil
@@ -2136,7 +2143,8 @@ func MarshalParkedRouteRequest(request ParkedRouteRequest) []byte {
 	return w.b
 }
 
-// UnmarshalParkedRouteRequest decodes one strict retained-route operation.
+// UnmarshalParkedRouteRequest decodes and validates a daemon-owned retained-route request.
+// It returns ErrInvalidNavigation for malformed, unsupported, or trailing payload data.
 func UnmarshalParkedRouteRequest(b []byte) (ParkedRouteRequest, error) {
 	r := payloadReader{b: b}
 	requestID, err := r.getUint64()
@@ -2174,7 +2182,7 @@ func MarshalParkedRouteResponse(response ParkedRouteResponse) []byte {
 	return w.b
 }
 
-// UnmarshalParkedRouteResponse decodes one strict retained-route outcome.
+// UnmarshalParkedRouteResponse decodes a retained-route response and validates its status and payload shape.
 func UnmarshalParkedRouteResponse(b []byte) (ParkedRouteResponse, error) {
 	r := payloadReader{b: b}
 	requestID, err := r.getUint64()

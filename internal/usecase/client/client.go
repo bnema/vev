@@ -2047,7 +2047,8 @@ type recvResult struct {
 }
 
 // runRecv reads frames until an error, forwarding each to the main loop.
-// It exits on the first error or when the loop context is cancelled.
+// runRecv forwards received transport frames and errors until the transport fails or
+// the context is canceled. It closes failed when the transport reports an error.
 func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResult, failed chan<- struct{}, log *slog.Logger) {
 	defer log.Debug("receive pump exited")
 	for {
@@ -2104,7 +2105,8 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 }
 
 // runSender preserves normal-frame order while allowing switch control and
-// output ACKs to make progress when raw input is held for a same-peer switch.
+// runSender serializes transport writes for control frames, input frames, image frames, barriers, and cumulative output acknowledgements.
+// It prioritizes control frames and acknowledgements, holds input during same-peer switching, and cancels the operation when sending or acknowledgement encoding fails.
 func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
 	send := func(f ports.Frame) bool {
@@ -2572,6 +2574,7 @@ type foregroundSendLease struct {
 	active bool
 }
 
+// newForegroundSendLease creates an active lease for foreground terminal sends.
 func newForegroundSendLease() *foregroundSendLease {
 	return &foregroundSendLease{active: true}
 }
@@ -2843,7 +2846,8 @@ func (p *stdinPump) run() {
 
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
-// hands back when restore ran before ResizeEvents was first called).
+// runResize forwards terminal resize events as protocol frames while the send lease is active.
+// It logs encoding failures and stops when the event stream closes or the context is canceled.
 func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
 	defer log.Debug("resize pump exited")
 	for {

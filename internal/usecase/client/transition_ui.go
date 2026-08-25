@@ -16,6 +16,7 @@ const (
 
 var transitionSpinnerFrames = [...]rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
 
+// transitionMessage formats the status message for an attach target, using “Starting” for stopped remote targets and “Switching to” otherwise.
 func transitionMessage(target ports.AttachTarget) string {
 	origin := target.Endpoint
 	if target.RemoteTarget != nil && target.RemoteTarget.DisplayOrigin != "" {
@@ -32,6 +33,7 @@ func transitionMessage(target ports.AttachTarget) string {
 	return verb + label + "…"
 }
 
+// drawTransitionToast draws a transition message with the selected spinner frame and returns its bounds.
 func drawTransitionToast(out io.Writer, size domain.Size, frame int, message string) (domain.Rect, error) {
 	spinner := transitionSpinnerFrames[frame%len(transitionSpinnerFrames)]
 	return drawClientToast(out, size, fmt.Sprintf("%c %s", spinner, message))
@@ -51,6 +53,7 @@ type transitionUI struct {
 	message    string
 }
 
+// newTransitionUI creates a transition UI using the provided terminal, clock, and raw-input state.
 func newTransitionUI(term ports.Terminal, clock ports.Clock, rawEntered *bool) *transitionUI {
 	return &transitionUI{term: term, clock: clock, rawEntered: rawEntered}
 }

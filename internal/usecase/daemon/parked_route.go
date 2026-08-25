@@ -24,6 +24,7 @@ type parkedRouteLease struct {
 	expired    bool
 }
 
+// newParkedRouteLeaseID generates a cryptographically random parked-route lease ID.
 func newParkedRouteLeaseID() (ports.ParkedRouteLeaseID, error) {
 	var id ports.ParkedRouteLeaseID
 	if _, err := io.ReadFull(rand.Reader, id[:]); err != nil {
@@ -32,6 +33,7 @@ func newParkedRouteLeaseID() (ports.ParkedRouteLeaseID, error) {
 	return id, nil
 }
 
+// stopParkedRouteLeaseLocked stops the lease's expiry monitoring and clears its timer and cancellation channel.
 func stopParkedRouteLeaseLocked(lease *parkedRouteLease) {
 	if lease == nil {
 		return
@@ -227,6 +229,8 @@ func (ac *attachedClient) consumePublishedParkedRoute(previous, published attach
 	return 0
 }
 
+// parkedRouteResponseFrame creates a frame containing the parked-route response.
+// It returns an attachment transition error when the response cannot be serialized.
 func parkedRouteResponseFrame(response ports.ParkedRouteResponse) (ports.Frame, error) {
 	payload := ports.MarshalParkedRouteResponse(response)
 	if payload == nil {
