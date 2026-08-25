@@ -83,53 +83,87 @@ func watchHandshakeTransport(ctx context.Context, transport ports.Transport) fun
 }
 
 func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, operation func() error) error {
+	return boundedHandshakeOperationWithTransition(ctx, transport, operation, nil)
+}
+
+func boundedHandshakeOperationWithTransition(ctx context.Context, transport ports.Transport, operation func() error, transition *transitionUI) error {
 	if err := ctx.Err(); err != nil {
 		_ = transport.Close()
 		return err
 	}
 	completed := make(chan error, 1)
 	go func() { completed <- operation() }()
-	select {
-	case err := <-completed:
-		if ctxErr := ctx.Err(); ctxErr != nil {
+	for {
+		select {
+		case err := <-completed:
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				_ = transport.Close()
+				return ctxErr
+			}
+			return err
+		case <-transition.tickC():
+			if err := transition.advance(); err != nil {
+				_ = transport.Close()
+				return err
+			}
+		case <-ctx.Done():
 			_ = transport.Close()
-			return ctxErr
+			// The result channel is buffered, so the operation can publish its
+			// completion after Close without keeping this cancellation path stuck.
+			return ctx.Err()
 		}
-		return err
-	case <-ctx.Done():
-		_ = transport.Close()
-		// The result channel is buffered, so the operation can publish its
-		// completion after Close without keeping this cancellation path stuck.
-		return ctx.Err()
 	}
 }
 
 func boundedDial(ctx context.Context, dialer ports.Dialer) (ports.Transport, error) {
+	return boundedDialWithTransition(ctx, dialer, nil)
+}
+
+func boundedDialWithTransition(ctx context.Context, dialer ports.Dialer, transition *transitionUI) (ports.Transport, error) {
 	// The dial context only bounds startup. A successful carriage outlives the
 	// handshake context; canceling that context after Welcome must not kill SSH.
 	dialCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	result := make(chan struct {
+	type dialResult struct {
 		transport ports.Transport
 		err       error
-	}, 1)
+	}
+	result := make(chan dialResult, 1)
 	go func() {
 		transport, err := dialer.Dial(dialCtx)
-		if err != nil {
-			cancel()
-		} else if ctx.Err() != nil && transport != nil {
-			_ = transport.Close()
-		}
-		result <- struct {
-			transport ports.Transport
-			err       error
-		}{transport: transport, err: err}
+		result <- dialResult{transport: transport, err: err}
 	}()
-	select {
-	case result := <-result:
-		return result.transport, result.err
-	case <-ctx.Done():
+	abandon := func() {
 		cancel()
-		return nil, ctx.Err()
+		go func() {
+			late := <-result
+			if late.transport != nil {
+				_ = late.transport.Close()
+			}
+		}()
+	}
+	for {
+		select {
+		case result := <-result:
+			if err := ctx.Err(); err != nil {
+				cancel()
+				if result.transport != nil {
+					_ = result.transport.Close()
+				}
+				return nil, err
+			}
+			if result.err != nil {
+				cancel()
+			}
+			return result.transport, result.err
+		case <-transition.tickC():
+			if err := transition.advance(); err != nil {
+				abandon()
+				return nil, err
+			}
+		case <-ctx.Done():
+			abandon()
+			return nil, ctx.Err()
+		}
 	}
 }
 
