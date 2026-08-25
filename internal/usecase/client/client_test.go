@@ -845,7 +845,6 @@ func TestHybridPickerPrepareResponseTimeoutClosesRetainedTransport(t *testing.T)
 	remote.onSend = hybridParkedRequestHandler(nil, nil, map[ports.ParkedRouteAction]chan struct{}{
 		ports.ParkedRoutePrepare: prepareSent,
 	})
-	remote.onClose = func() { closeOnce.Do(func() { close(remoteClosed) }) }
 
 	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
