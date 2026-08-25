@@ -57,12 +57,17 @@ func (c *reconnectTestClock) NewTimer(d time.Duration) ports.Timer {
 
 func (c *reconnectTestClock) fireReconnect(t *testing.T) {
 	t.Helper()
+	c.fireDuration(t, 100*time.Millisecond)
+}
+
+func (c *reconnectTestClock) fireDuration(t *testing.T, duration time.Duration) {
+	t.Helper()
 	require.Eventually(t, func() bool {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		for _, timer := range c.timers {
 			timer.mu.Lock()
-			if timer.duration != 100*time.Millisecond {
+			if timer.duration != duration {
 				timer.mu.Unlock()
 				continue
 			}
@@ -111,8 +116,9 @@ func (t *reconnectTestTimer) Stop() bool {
 
 // recvItem is one scripted Recv result.
 type recvItem struct {
-	f   ports.Frame
-	err error
+	f    ports.Frame
+	err  error
+	wait <-chan struct{}
 }
 
 type markedDatagramTransport struct{ ports.Transport }
@@ -131,6 +137,13 @@ func scriptRecv(tr *portsmocks.MockTransport, items ...recvItem) func() {
 	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
 		select {
 		case it := <-ch:
+			if it.wait != nil {
+				select {
+				case <-it.wait:
+				case <-done:
+					return ports.Frame{}, io.EOF
+				}
+			}
 			return it.f, it.err
 		case <-done:
 			return ports.Frame{}, io.EOF
@@ -552,7 +565,7 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 	}}
 	remote := &recordingTransport{recvs: []recvItem{
 		{f: welcome("work", remoteLifecycle)},
-		{f: frameOf(ports.MsgNavigationAction, ports.MarshalNavigationAction(ports.NavigationOpenHomePicker))},
+		{f: navigationDirectiveFrame(ports.NavigationOpenHomePicker)},
 	}}
 	local2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("local", localLifecycle)},
@@ -576,6 +589,485 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 		Intent: ports.IntentAttach, SessionName: "local", Origin: ports.RouteOriginLocal, OriginKey: "local",
 	}))
 	require.Equal(t, ports.StartupOverlaySessionPicker, helloFromSend(t, local2).StartupOverlay)
+}
+
+func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	remoteSourceLifecycle := domain.SessionLifecycleID{2}
+	remoteTargetLifecycle := domain.SessionLifecycleID{3}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
+		}))
+	}
+	sourceTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: remoteSourceLifecycle,
+		SessionName: "source", LiveTabID: "source-tab",
+	}
+	targetTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: remoteTargetLifecycle,
+		SessionName: "target", LiveTabID: "target-tab",
+	}
+	localInitial := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: "remote", Session: "source", Intent: ports.IntentAttach,
+			RemoteTarget: &sourceTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	parkSent := make(chan struct{})
+	switchSent := make(chan struct{})
+	parkedRequests := make(chan ports.ParkedRouteRequest, 2)
+	parkedRequestErrors := make(chan error, 2)
+	var parkOnce, switchOnce sync.Once
+	remote := &recordingTransport{recvs: []recvItem{
+		{f: welcome("source", remoteSourceLifecycle)},
+		{f: navigationDirectiveFrame(ports.NavigationOpenHomePicker)},
+		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(ports.ParkedRouteResponse{RequestID: 1, Status: ports.ParkedRouteReady})), wait: parkSent},
+		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(ports.CommittedRouteIdentity{Target: ports.ExactSessionTarget{LifecycleID: remoteTargetLifecycle, SessionName: "target"}})), wait: switchSent},
+		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(ports.ParkedRouteResponse{RequestID: 2, Status: ports.ParkedRouteSwitched}))},
+		{f: frameOf(ports.MsgOutput, mustMarshalOutput(ports.Output{Epoch: 2, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("target frame")}))},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+	remote.onSend = func(frame ports.Frame) {
+		if frame.Type != ports.MsgParkedRouteRequest {
+			return
+		}
+		request, err := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		if err != nil {
+			parkedRequestErrors <- err
+			return
+		}
+		parkedRequests <- request
+		switch request.Action {
+		case ports.ParkedRoutePrepare:
+			parkOnce.Do(func() { close(parkSent) })
+		case ports.ParkedRouteSwitch:
+			switchOnce.Do(func() { close(switchSent) })
+		}
+	}
+	localPicker := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: "remote", Session: "target", Intent: ports.IntentAttach,
+			RemoteTarget: &targetTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	var resizeOnce sync.Once
+	localPicker.onSend = func(frame ports.Frame) {
+		if frame.Type == ports.MsgHello {
+			resizeOnce.Do(func() { term.setSize(domain.Size{Cols: 100, Rows: 40}) })
+		}
+	}
+	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.AttachHandoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+		selection := *target.RemoteTarget
+		return remoteDialer, client.AttachRequest{
+			Intent: ports.IntentAttach, SessionName: target.Session, Remote: true,
+			Origin: ports.RouteOriginDiscovery, OriginKey: target.Endpoint,
+			RemoteTarget: &selection, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}, nil
+	}
+
+	err := runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "local", Origin: ports.RouteOriginLocal, OriginKey: "local",
+	})
+
+	require.NoError(t, err)
+	select {
+	case requestErr := <-parkedRequestErrors:
+		require.NoError(t, requestErr)
+	default:
+	}
+	prepareRequest := <-parkedRequests
+	switchRequest := <-parkedRequests
+	require.Equal(t, ports.ParkedRoutePrepare, prepareRequest.Action)
+	require.Equal(t, ports.ParkedRouteSwitch, switchRequest.Action)
+	require.NotNil(t, switchRequest.Target)
+	require.Equal(t, targetTarget, *switchRequest.Target)
+	frames := remote.Sends()
+	switchIndex := -1
+	for i, frame := range frames {
+		if frame.Type != ports.MsgParkedRouteRequest {
+			continue
+		}
+		request, requestErr := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		require.NoError(t, requestErr)
+		if request.Action == ports.ParkedRouteSwitch {
+			switchIndex = i
+			break
+		}
+	}
+	require.Positive(t, switchIndex)
+	require.Equal(t, ports.MsgResize, frames[switchIndex-1].Type, "current size must precede the parked switch")
+	resize, resizeErr := ports.UnmarshalResize(frames[switchIndex-1].Payload)
+	require.NoError(t, resizeErr)
+	require.Equal(t, domain.Size{Cols: 100, Rows: 40}, resize.Size)
+	require.Equal(t, int32(1), remoteDialer.calls.Load(), "same-host picker switch must retain the authenticated remote transport")
+}
+
+func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	sourceLifecycle := domain.SessionLifecycleID{2}
+	targetLifecycle := domain.SessionLifecycleID{3}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
+		}))
+	}
+	sourceTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: sourceLifecycle,
+		SessionName: "source", LiveTabID: "source-tab",
+	}
+	targetTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: targetLifecycle,
+		SessionName: "target", LiveTabID: "target-tab",
+	}
+	localInitial := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: "remote", Session: "source", Intent: ports.IntentAttach,
+			RemoteTarget: &sourceTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	prepareSent := make(chan struct{})
+	switchSent := make(chan struct{})
+	var prepareOnce, switchOnce sync.Once
+	sourceRemote := &recordingTransport{recvs: []recvItem{
+		{f: welcome("source", sourceLifecycle)},
+		{f: navigationDirectiveFrame(ports.NavigationOpenHomePicker)},
+		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(ports.ParkedRouteResponse{RequestID: 1, Status: ports.ParkedRouteReady})), wait: prepareSent},
+		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(ports.ParkedRouteResponse{RequestID: 2, Status: ports.ParkedRouteExpired})), wait: switchSent},
+	}}
+	sourceRemote.onSend = func(frame ports.Frame) {
+		if frame.Type != ports.MsgParkedRouteRequest {
+			return
+		}
+		request, err := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		if err != nil {
+			return
+		}
+		switch request.Action {
+		case ports.ParkedRoutePrepare:
+			prepareOnce.Do(func() { close(prepareSent) })
+		case ports.ParkedRouteSwitch:
+			switchOnce.Do(func() { close(switchSent) })
+		}
+	}
+	localPicker := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: "remote", Session: "target", Intent: ports.IntentAttach,
+			RemoteTarget: &targetTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	targetRemote := &recordingTransport{recvs: []recvItem{
+		{f: welcome("target", targetLifecycle)},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []ports.Transport{
+		markedDatagramTransport{Transport: sourceRemote}, targetRemote,
+	}}
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.AttachHandoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+		selection := *target.RemoteTarget
+		return remoteDialer, client.AttachRequest{
+			Intent: ports.IntentAttach, SessionName: target.Session, Remote: true,
+			Origin: ports.RouteOriginDiscovery, OriginKey: target.Endpoint,
+			RemoteTarget: &selection, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}, nil
+	}
+
+	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "local", Origin: ports.RouteOriginLocal, OriginKey: "local",
+	}))
+	require.Equal(t, int32(2), remoteDialer.calls.Load(), "an expired parked lease must use the traditional dial path")
+}
+
+func TestHybridPickerPrepareResponseTimeoutClosesRetainedTransport(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	clock := portsmocks.NewMockClock(t)
+	deadlineReady := make(chan chan time.Time, 1)
+	var timerCount atomic.Int32
+	clock.EXPECT().Now().Return(time.Time{}).Maybe()
+	clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(duration time.Duration) ports.Timer {
+		timer := portsmocks.NewMockTimer(t)
+		ch := make(chan time.Time, 1)
+		timer.EXPECT().C().Return(ch).Maybe()
+		timer.EXPECT().Reset(mock.Anything).Return(true).Maybe()
+		timer.EXPECT().Stop().Return(true).Maybe()
+		if duration == ports.HandshakeTimeout && timerCount.Add(1) == 3 {
+			deadlineReady <- ch
+		}
+		return timer
+	}).Maybe()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	remoteLifecycle := domain.SessionLifecycleID{2}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
+		}))
+	}
+	remoteTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: remoteLifecycle,
+		SessionName: "work", LiveTabID: "tab-1",
+	}
+	localInitial := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: "remote", Session: "work", Intent: ports.IntentAttach,
+			RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	prepareSent := make(chan struct{})
+	remoteClosed := make(chan struct{})
+	var prepareOnce, closeOnce sync.Once
+	remote := &recordingTransport{
+		recvs: []recvItem{
+			{f: welcome("work", remoteLifecycle)},
+			{f: navigationDirectiveFrame(ports.NavigationOpenHomePicker)},
+		},
+		stall: remoteClosed,
+	}
+	remote.onSend = func(frame ports.Frame) {
+		if frame.Type != ports.MsgParkedRouteRequest {
+			return
+		}
+		request, err := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		if err == nil && request.Action == ports.ParkedRoutePrepare {
+			prepareOnce.Do(func() { close(prepareSent) })
+		}
+	}
+	remote.onClose = func() { closeOnce.Do(func() { close(remoteClosed) }) }
+
+	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial}}
+	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
+	deps := testDependencies(localDialer, term, clock, nil, nil)
+	deps.AttachHandoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+		selection := *target.RemoteTarget
+		return remoteDialer, client.AttachRequest{
+			Intent: ports.IntentAttach, SessionName: target.Session, Remote: true,
+			Origin: ports.RouteOriginDiscovery, OriginKey: target.Endpoint,
+			RemoteTarget: &selection, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	remote.onClose = func() {
+		closeOnce.Do(func() { close(remoteClosed) })
+		cancel()
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- runTestClient(ctx, deps, client.AttachRequest{
+			Intent: ports.IntentAttach, SessionName: "local", Origin: ports.RouteOriginLocal, OriginKey: "local",
+		})
+	}()
+	select {
+	case <-prepareSent:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for parked Prepare request")
+	}
+	var deadline chan time.Time
+	select {
+	case deadline = <-deadlineReady:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for parked response deadline")
+	}
+	deadline <- time.Time{}
+	select {
+	case err := <-result:
+		require.ErrorContains(t, err, "timed out waiting for parked-route response")
+	case <-time.After(time.Second):
+		t.Fatal("client did not leave the parked request after its deadline")
+	}
+	require.Positive(t, remote.closed.Load())
+}
+
+func TestHybridPickerBackResumesRetainedRemoteTransport(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	remoteLifecycle := domain.SessionLifecycleID{2}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
+		}))
+	}
+	remoteTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: remoteLifecycle,
+		SessionName: "work", LiveTabID: "tab-1",
+	}
+	localInitial := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: "remote", Session: "work", Intent: ports.IntentAttach,
+			RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	parkSent := make(chan struct{})
+	resumeSent := make(chan struct{})
+	parkedRequestErrors := make(chan error, 2)
+	var parkOnce, resumeOnce sync.Once
+	remote := &recordingTransport{recvs: []recvItem{
+		{f: welcome("work", remoteLifecycle)},
+		{f: navigationDirectiveFrame(ports.NavigationOpenHomePicker)},
+		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(ports.ParkedRouteResponse{RequestID: 1, Status: ports.ParkedRouteReady})), wait: parkSent},
+		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(ports.ParkedRouteResponse{RequestID: 2, Status: ports.ParkedRouteResumed})), wait: resumeSent},
+		{f: frameOf(ports.MsgOutput, mustMarshalOutput(ports.Output{Epoch: 1, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("source frame")}))},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+	remote.onSend = func(frame ports.Frame) {
+		if frame.Type != ports.MsgParkedRouteRequest {
+			return
+		}
+		request, err := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		if err != nil {
+			parkedRequestErrors <- err
+			return
+		}
+		switch request.Action {
+		case ports.ParkedRoutePrepare:
+			parkOnce.Do(func() { close(parkSent) })
+		case ports.ParkedRouteResume:
+			resumeOnce.Do(func() { close(resumeSent) })
+		}
+	}
+	localPicker := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: navigationDirectiveFrame(ports.NavigationBack)},
+	}}
+	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.AttachHandoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+		selection := *target.RemoteTarget
+		return remoteDialer, client.AttachRequest{
+			Intent: ports.IntentAttach, SessionName: target.Session, Remote: true,
+			Origin: ports.RouteOriginDiscovery, OriginKey: target.Endpoint,
+			RemoteTarget: &selection, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}, nil
+	}
+
+	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "local", Origin: ports.RouteOriginLocal, OriginKey: "local",
+	}))
+	select {
+	case requestErr := <-parkedRequestErrors:
+		require.NoError(t, requestErr)
+	default:
+	}
+	require.Equal(t, int32(1), remoteDialer.calls.Load())
+}
+
+func TestHybridPickerDifferentHostFallsBackToNewRemoteDial(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	sourceLifecycle := domain.SessionLifecycleID{2}
+	targetLifecycle := domain.SessionLifecycleID{3}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
+		}))
+	}
+	sourceTarget := domain.RemoteSessionTarget{
+		Endpoint: "source-host", DisplayOrigin: "source-host", LifecycleID: sourceLifecycle,
+		SessionName: "source", LiveTabID: "source-tab",
+	}
+	targetTarget := domain.RemoteSessionTarget{
+		Endpoint: "target-host", DisplayOrigin: "target-host", LifecycleID: targetLifecycle,
+		SessionName: "target", LiveTabID: "target-tab",
+	}
+	localInitial := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: sourceTarget.Endpoint, Session: sourceTarget.SessionName, Intent: ports.IntentAttach,
+			RemoteTarget: &sourceTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	parkSent := make(chan struct{})
+	keepSourceOpen := make(chan struct{})
+	parkedRequestErrors := make(chan error, 1)
+	defer close(keepSourceOpen)
+	var parkOnce sync.Once
+	sourceRemote := &recordingTransport{recvs: []recvItem{
+		{f: welcome("source", sourceLifecycle)},
+		{f: navigationDirectiveFrame(ports.NavigationOpenHomePicker)},
+		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(ports.ParkedRouteResponse{RequestID: 1, Status: ports.ParkedRouteReady})), wait: parkSent},
+		{err: io.EOF, wait: keepSourceOpen},
+	}}
+	sourceRemote.onSend = func(frame ports.Frame) {
+		if frame.Type != ports.MsgParkedRouteRequest {
+			return
+		}
+		request, err := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		if err != nil {
+			parkedRequestErrors <- err
+			return
+		}
+		if request.Action == ports.ParkedRoutePrepare {
+			parkOnce.Do(func() { close(parkSent) })
+		}
+	}
+	localPicker := &recordingTransport{recvs: []recvItem{
+		{f: welcome("local", localLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Endpoint: targetTarget.Endpoint, Session: targetTarget.SessionName, Intent: ports.IntentAttach,
+			RemoteTarget: &targetTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	targetRemote := &recordingTransport{recvs: []recvItem{
+		{f: welcome("target", targetLifecycle)},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
+	sourceDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: sourceRemote}}}
+	targetDialer := &sequenceDialer{trs: []ports.Transport{targetRemote}}
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.AttachHandoff = func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+		selection := *target.RemoteTarget
+		next := sourceDialer
+		if target.Endpoint == targetTarget.Endpoint {
+			next = targetDialer
+		}
+		return next, client.AttachRequest{
+			Intent: ports.IntentAttach, SessionName: target.Session, Remote: true,
+			Origin: ports.RouteOriginDiscovery, OriginKey: target.Endpoint,
+			RemoteTarget: &selection, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}, nil
+	}
+
+	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "local", Origin: ports.RouteOriginLocal, OriginKey: "local",
+	}))
+	select {
+	case requestErr := <-parkedRequestErrors:
+		require.NoError(t, requestErr)
+	default:
+	}
+	require.Equal(t, int32(1), sourceDialer.calls.Load())
+	require.Equal(t, int32(1), targetDialer.calls.Load())
+	require.Positive(t, sourceRemote.closed.Load())
 }
 
 func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T) {
@@ -622,7 +1114,7 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	}}
 	local3 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("test", localLifecycle, 11)},
-		{f: frameOf(ports.MsgNavigationAction, ports.MarshalNavigationAction(ports.NavigationBack))},
+		{f: navigationDirectiveFrame(ports.NavigationBack)},
 	}}
 	remote1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("remote-manual", remoteLifecycle, 22)},
@@ -636,7 +1128,7 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 		{f: frameOf(ports.MsgRoutePosition, mustMarshalRoutePosition(ports.RoutePosition{
 			Target: ports.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"}, ActiveTabID: "tab-2",
 		}))},
-		{f: frameOf(ports.MsgNavigationAction, ports.MarshalNavigationAction(ports.NavigationOpenHomePicker))},
+		{f: navigationDirectiveFrame(ports.NavigationOpenHomePicker)},
 	}}
 	remote3 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("remote-new", remoteNewLifecycle, 22)},
@@ -665,6 +1157,14 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	remoteNewHello := helloFromSend(t, remote3)
 	require.Equal(t, "remote-new", remoteNewHello.Name)
 	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"}, remoteNewHello.ExactTarget)
+}
+
+func navigationDirectiveFrame(action ports.NavigationAction) ports.Frame {
+	directive := ports.NavigationDirective{Action: action}
+	if action == ports.NavigationOpenHomePicker {
+		directive.LeaseID = ports.ParkedRouteLeaseID{1}
+	}
+	return frameOf(ports.MsgNavigationAction, ports.MarshalNavigationDirective(directive))
 }
 
 func mustMarshalCommittedIdentity(identity ports.CommittedRouteIdentity) []byte {
@@ -1132,16 +1632,23 @@ func (d *sequenceDialer) Dial(context.Context) (ports.Transport, error) {
 }
 
 type recordingTransport struct {
-	mu     sync.Mutex
-	recvs  []recvItem
-	sends  []ports.Frame
-	closed atomic.Int32
+	mu      sync.Mutex
+	recvs   []recvItem
+	sends   []ports.Frame
+	closed  atomic.Int32
+	stall   <-chan struct{}
+	onSend  func(ports.Frame)
+	onClose func()
 }
 
 func (t *recordingTransport) Send(f ports.Frame) error {
 	t.mu.Lock()
 	t.sends = append(t.sends, f)
+	onSend := t.onSend
 	t.mu.Unlock()
+	if onSend != nil {
+		onSend(f)
+	}
 	return nil
 }
 
@@ -1153,15 +1660,24 @@ func (t *recordingTransport) Sends() []ports.Frame {
 
 func (t *recordingTransport) Recv() (ports.Frame, error) {
 	if len(t.recvs) == 0 {
+		if t.stall != nil {
+			<-t.stall
+		}
 		return ports.Frame{}, io.EOF
 	}
 	it := t.recvs[0]
 	t.recvs = t.recvs[1:]
+	if it.wait != nil {
+		<-it.wait
+	}
 	return it.f, it.err
 }
 
 func (t *recordingTransport) Close() error {
 	t.closed.Add(1)
+	if t.onClose != nil {
+		t.onClose()
+	}
 	return nil
 }
 
@@ -1171,17 +1687,31 @@ type runTerminal struct {
 	rawCount     atomic.Int32
 	restoreCount atomic.Int32
 	resizeCh     chan domain.Size
+	sizeMu       sync.Mutex
+	size         domain.Size
 }
 
 func newRunTerminal() *runTerminal {
-	return &runTerminal{in: newBlockingReader(), resizeCh: make(chan domain.Size)}
+	return &runTerminal{
+		in: newBlockingReader(), resizeCh: make(chan domain.Size),
+		size: domain.Size{Cols: 80, Rows: 24},
+	}
 }
 
 func (t *runTerminal) EnterRaw() (func() error, error) {
 	t.rawCount.Add(1)
 	return func() error { t.restoreCount.Add(1); return nil }, nil
 }
-func (t *runTerminal) Size() (domain.Size, error)       { return domain.Size{Cols: 80, Rows: 24}, nil }
+func (t *runTerminal) Size() (domain.Size, error) {
+	t.sizeMu.Lock()
+	defer t.sizeMu.Unlock()
+	return t.size, nil
+}
+func (t *runTerminal) setSize(size domain.Size) {
+	t.sizeMu.Lock()
+	t.size = size
+	t.sizeMu.Unlock()
+}
 func (t *runTerminal) ResizeEvents() <-chan domain.Size { return t.resizeCh }
 func (t *runTerminal) In() io.Reader                    { return t.in }
 func (t *runTerminal) Out() io.Writer                   { return &t.out }

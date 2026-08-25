@@ -398,6 +398,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		rawEntered: &rawEntered,
 		stage:      reconnectStageOfflineRetrying,
 	}
+	transition := newTransitionUI(r.term, r.clock, &rawEntered)
+	defer transition.stop()
 	restoreReturnRoute := func(route attachRoute) {
 		returnNavigationPending = true
 		dialer = route.dialer
@@ -444,12 +446,58 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		return nil
 	}
 
+	runTransientHomePicker := func(attemptCtx context.Context) attachResult {
+		if homeRoute == nil {
+			return attachResult{err: errors.New("vev: home route unavailable")}
+		}
+		request := cloneAttachRequest(homeRoute.request)
+		request.Intent = ports.IntentAttach
+		request.NavigationCapabilities = ports.NavigationCapabilityBack
+		request.StartupOverlay = ports.StartupOverlaySessionPicker
+		request.RemoteTarget = nil
+		request.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
+		request.Remote = false
+		if err := validateAttachRequest(request); err != nil {
+			return attachResult{err: err}
+		}
+		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(attemptCtx, r.clock)
+		transport, err := boundedDial(handshakeCtx, homeRoute.dialer)
+		if err != nil {
+			err = handshakeContextError(attemptCtx, timedOut, err)
+			finishHandshake()
+			return attachResult{err: err}
+		}
+		connection, err := NewSessionConnection(transport, SessionTarget{Intent: request.Intent, SessionName: request.SessionName})
+		if err != nil {
+			finishHandshake()
+			_ = transport.Close()
+			return attachResult{err: err}
+		}
+		stopHandshakeTransport := watchHandshakeTransport(handshakeCtx, transport)
+		localReconnect := &reconnectUI{term: r.term, rawEntered: &rawEntered}
+		result := (&attachAttempt{
+			runner: r, dialer: homeRoute.dialer, connection: connection,
+			handshakeCtx: handshakeCtx, handshakeTimedOut: timedOut,
+			finishHandshake: finishHandshake, stopHandshakeTransport: stopHandshakeTransport,
+			request: request, clientID: processClientID, milestones: &ms,
+			themeState: themeState, enterRaw: enterRaw, reconnect: localReconnect,
+			terminalInput:   func() *terminalInputPump { return input },
+			transientPicker: true, returnAttachTargets: true,
+		}).run(attemptCtx)
+		stopHandshakeTransport()
+		finishHandshake()
+		if !result.transportClosed {
+			_ = connection.Close()
+		}
+		return result
+	}
+
 	for {
 		if err := validateAttachRequest(attemptRequest); err != nil {
 			return err
 		}
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
-		transport, err := boundedDial(handshakeCtx, dialer)
+		transport, err := boundedDialWithTransition(handshakeCtx, dialer, transition)
 		if err != nil {
 			err = handshakeContextError(ctx, timedOut, err)
 			finishHandshake()
@@ -515,11 +563,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			themeState:               themeState,
 			enterRaw:                 enterRaw,
 			reconnect:                reconnect,
+			transition:               transition,
 			linkEvents:               linkEvents,
 			rememberRemoteHost:       rememberRemoteHost,
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
+			openHomePicker: runTransientHomePicker,
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
@@ -655,8 +705,16 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				if r.ledger == nil {
 					return errors.New("vev: route ledger unavailable")
 				}
+				baseRequest := attemptRequest
 				nextDialer = dialer
-				nextRequest = r.ledger.samePeerHandoff(attemptRequest, *result.target)
+				if result.homePickerTarget {
+					if homeRoute == nil {
+						return errors.New("vev: home route unavailable for picker target")
+					}
+					nextDialer = homeRoute.dialer
+					baseRequest = homeRoute.request
+				}
+				nextRequest = r.ledger.samePeerHandoff(baseRequest, *result.target)
 			} else {
 				if r.attachHandoff == nil {
 					return &AttachTargetError{Target: *result.target}
@@ -910,9 +968,13 @@ type attachAttempt struct {
 	themeState               *terminalThemeState
 	enterRaw                 func() error
 	reconnect                *reconnectUI
+	transition               *transitionUI
 	linkEvents               <-chan ports.LinkEvent
 	rememberRemoteHost       func()
 	terminalInput            func() *terminalInputPump
+	openHomePicker           func(context.Context) attachResult
+	transientPicker          bool
+	returnAttachTargets      bool
 }
 
 type attachResult struct {
@@ -924,6 +986,7 @@ type attachResult struct {
 	transportClosed   bool
 	target            *ports.AttachTarget
 	action            ports.NavigationAction
+	homePickerTarget  bool
 	routeAction       *ports.RouteNavigationAction
 	err               error
 }
@@ -979,6 +1042,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	themeState := a.themeState
 	enterRaw := a.enterRaw
 	reconnect := a.reconnect
+	transition := a.transition
 	linkEvents := a.linkEvents
 	remote := a.remote || a.request.Remote
 	clipboard := a.runner.clipboard
@@ -1013,7 +1077,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return attachResult{transportClosed: handshakeCtx.Err() != nil, err: fmt.Errorf("vev: %s: %w", stage, err)}
 	}
 	sendHandshake := func(operation func() error) error {
-		err := boundedHandshakeOperation(handshakeCtx, transport, operation)
+		err := boundedHandshakeOperationWithTransition(handshakeCtx, transport, operation, transition)
 		if err != nil {
 			return handshakeContextError(ctx, handshakeTimedOut, err)
 		}
@@ -1067,11 +1131,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 
 	// 2. Await Welcome or a typed rejection.
 	var reply ports.Frame
-	if err := boundedHandshakeOperation(handshakeCtx, transport, func() error {
+	if err := boundedHandshakeOperationWithTransition(handshakeCtx, transport, func() error {
 		var recvErr error
 		reply, recvErr = transport.Recv()
 		return recvErr
-	}); err != nil {
+	}, transition); err != nil {
 		return handshakeFailure("awaiting welcome", err)
 	}
 	var committedIdentity *ports.CommittedRouteIdentity
@@ -1122,16 +1186,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
 			return welcomedResult(errRouteTargetChanged)
 		}
-		candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
-		var commitErr error
-		if a.routeNavigationSelection != nil {
-			selection := *a.routeNavigationSelection
-			commitErr = a.runner.ledger.commitTransition(selection.selected.identity, selection.snapshotGeneration, selection.active, candidate)
-		} else {
-			_, commitErr = a.runner.ledger.commitAttach(candidate)
-		}
-		if commitErr != nil {
-			return welcomedResult(fmt.Errorf("vev: committing route identity: %w", commitErr))
+		if !a.transientPicker {
+			candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
+			var commitErr error
+			if a.routeNavigationSelection != nil {
+				selection := *a.routeNavigationSelection
+				commitErr = a.runner.ledger.commitTransition(selection.selected.identity, selection.snapshotGeneration, selection.active, candidate)
+			} else {
+				_, commitErr = a.runner.ledger.commitAttach(candidate)
+			}
+			if commitErr != nil {
+				return welcomedResult(fmt.Errorf("vev: committing route identity: %w", commitErr))
+			}
 		}
 		snapshotPayload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
 		if err != nil {
@@ -1183,21 +1249,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		input.start()
 		defer input.stop()
 	}
-	inputConsumer := input.claim()
-	claimActive := true
-	revokeInputClaim := func() {
-		if claimActive {
-			input.revoke(inputConsumer)
-			claimActive = false
-		}
-	}
-	// Register revocation before any palette publication or terminal I/O: both
-	// can fail before the stdin scanner is started, and a reconnect must still
-	// be able to claim this lifecycle-owned reader.
-	defer revokeInputClaim()
-
 	sendCh := make(chan ports.Frame, sendQueueDepth)
 	controlCh := make(chan ports.Frame, 1)
+	barrierCh := make(chan chan struct{})
 	inputGate := newSamePeerInputGate()
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
@@ -1309,8 +1363,21 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	awaitingReconnectReset := false
 	outputState := outputApplyState{}
 	outputResetRequested := false
+	transitionWaitingFull := false
 	var samePeerSwitch *samePeerSwitchPending
 	var nextSamePeerRequestID uint64
+	type parkedRoutePending struct {
+		requestID      uint64
+		action         ports.ParkedRouteAction
+		leaseID        ports.ParkedRouteLeaseID
+		fallbackTarget *ports.AttachTarget
+		timer          ports.Timer
+	}
+	var parkedPending *parkedRoutePending
+	var nextParkedRequestID uint64
+	parkedWaitingFull := false
+	var parkedFullTimer ports.Timer
+	transportFailed := make(chan struct{})
 	if reconnect.showing {
 		if reconnect.remote {
 			// Before the asynchronous sender starts, preserve transport ordering by
@@ -1339,27 +1406,195 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// or unchanged screen may legitimately produce no initial Output frame.
 	endHandshake()
 	senderStarted = true
-	go runSender(loopCtx, cancel, transport, controlCh, sendCh, inputGate, ackQueue, sendErrCh, log)
-	stdinDone := make(chan struct{})
-	go func() {
-		defer close(stdinDone)
-		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, consumer: inputConsumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
-	}()
-	// Scanner cancellation can leave an undecided marker suffix (including a
-	// standalone Escape) that it must hand back to the lifecycle-owned reader.
-	// Wait for that handoff before revoking the claim: otherwise a replacement
-	// scanner could claim the reader between revocation and preservation and
-	// lose the suffix.
-	defer func() {
-		cancel()
-		<-stdinDone
-		revokeInputClaim()
-	}()
-	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
+	go runSender(loopCtx, cancel, transport, controlCh, barrierCh, sendCh, inputGate, ackQueue, sendErrCh, log)
+
+	type foregroundRuntime struct {
+		cancel                context.CancelFunc
+		consumer              uint64
+		sendLease             *foregroundSendLease
+		stdinDone, resizeDone chan struct{}
+	}
+	var foreground *foregroundRuntime
+	startForeground := func() {
+		if foreground != nil {
+			return
+		}
+		foregroundCtx, foregroundCancel := context.WithCancel(loopCtx)
+		consumer := input.claim()
+		stdinDone := make(chan struct{})
+		resizeDone := make(chan struct{})
+		sendLease := newForegroundSendLease()
+		foreground = &foregroundRuntime{cancel: foregroundCancel, consumer: consumer, sendLease: sendLease, stdinDone: stdinDone, resizeDone: resizeDone}
+		go func() {
+			defer close(stdinDone)
+			cancelAll := func() {
+				foregroundCancel()
+				cancel()
+			}
+			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
+		}()
+		go func() {
+			defer close(resizeDone)
+			runResize(foregroundCtx, term.ResizeEvents(), sendCh, sendLease, log)
+		}()
+	}
+	stopForeground := func() {
+		if foreground == nil {
+			return
+		}
+		current := foreground
+		foreground = nil
+		current.cancel()
+		current.sendLease.stop()
+		<-current.stdinDone
+		<-current.resizeDone
+		input.revoke(current.consumer)
+		for id := range drainTimers {
+			cancelTimer(drainTimers, id)
+		}
+		for id := range completionTimers {
+			cancelTimer(completionTimers, id)
+		}
+	}
+	flushSender := func() error {
+		done := make(chan struct{})
+		select {
+		case barrierCh <- done:
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+		select {
+		case <-done:
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
+	clearParkedFull := func() {
+		parkedWaitingFull = false
+		if parkedFullTimer != nil {
+			parkedFullTimer.Stop()
+			parkedFullTimer = nil
+		}
+	}
+	awaitParkedFull := func() {
+		clearParkedFull()
+		parkedWaitingFull = true
+		parkedFullTimer = clk.NewTimer(ports.HandshakeTimeout)
+	}
+	parkedFullC := func() <-chan time.Time {
+		if parkedFullTimer == nil {
+			return nil
+		}
+		return parkedFullTimer.C()
+	}
+	defer clearParkedFull()
+	clearParkedPending := func() {
+		if parkedPending != nil && parkedPending.timer != nil {
+			parkedPending.timer.Stop()
+		}
+		parkedPending = nil
+	}
+	parkedResponseC := func() <-chan time.Time {
+		if parkedPending == nil || parkedPending.timer == nil {
+			return nil
+		}
+		return parkedPending.timer.C()
+	}
+	defer clearParkedPending()
+
+	sendParkedRouteSize := func() error {
+		current, err := term.Size()
+		if err != nil {
+			return fmt.Errorf("reading terminal size for parked route: %w", err)
+		}
+		payload, err := ports.MarshalResize(ports.Resize{Size: current})
+		if err != nil {
+			return fmt.Errorf("encoding terminal size for parked route: %w", err)
+		}
+		select {
+		case controlCh <- ports.Frame{Type: ports.MsgResize, Payload: payload}:
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
+	sendParkedRouteRequest := func(action ports.ParkedRouteAction, leaseID ports.ParkedRouteLeaseID, target *domain.RemoteSessionTarget) error {
+		if parkedPending != nil {
+			return errors.New("vev: parked-route request already pending")
+		}
+		nextParkedRequestID++
+		request := ports.ParkedRouteRequest{RequestID: nextParkedRequestID, LeaseID: leaseID, Action: action, Target: target}
+		payload := ports.MarshalParkedRouteRequest(request)
+		if payload == nil {
+			return errors.New("vev: invalid parked-route request")
+		}
+		select {
+		case controlCh <- ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: payload}:
+			parkedPending = &parkedRoutePending{
+				requestID: request.RequestID, action: action, leaseID: leaseID,
+				timer: clk.NewTimer(ports.HandshakeTimeout),
+			}
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
+	handleParkedPicker := func(leaseID ports.ParkedRouteLeaseID) (attachResult, bool) {
+		pickerCtx, cancelPicker := context.WithCancel(ctx)
+		pickerDone := make(chan struct{})
+		go func() {
+			select {
+			case <-transportFailed:
+				cancelPicker()
+			case <-pickerDone:
+			}
+		}()
+		selection := a.openHomePicker(pickerCtx)
+		close(pickerDone)
+		cancelPicker()
+		select {
+		case <-transportFailed:
+			return welcomedResult(errLinkOffline), true
+		default:
+		}
+		if selection.target != nil && transition != nil {
+			transitionWaitingFull = false
+			transition.start(*selection.target)
+		}
+		if selection.target != nil && request.Remote && request.OriginKey != "" && selection.target.Endpoint == request.OriginKey && selection.target.RemoteTarget != nil {
+			target := *selection.target.RemoteTarget
+			if err := sendParkedRouteSize(); err != nil {
+				return welcomedResult(err), true
+			}
+			if err := sendParkedRouteRequest(ports.ParkedRouteSwitch, leaseID, &target); err != nil {
+				return welcomedResult(fmt.Errorf("vev: switching parked route: %w", err)), true
+			}
+			fallback := *selection.target
+			parkedPending.fallbackTarget = &fallback
+			return attachResult{}, false
+		}
+		if selection.target != nil {
+			selection.homePickerTarget = true
+			return selection, true
+		}
+		if selection.err != nil {
+			log.Warn("transient home picker failed; resuming parked route", "err", selection.err)
+		}
+		if err := sendParkedRouteSize(); err != nil {
+			return welcomedResult(err), true
+		}
+		if err := sendParkedRouteRequest(ports.ParkedRouteResume, leaseID, nil); err != nil {
+			return welcomedResult(fmt.Errorf("vev: resuming parked route: %w", err)), true
+		}
+		return attachResult{}, false
+	}
+	startForeground()
+	defer stopForeground()
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
 	recvCh := make(chan recvResult, 1)
-	go runRecv(loopCtx, transport, recvCh, log)
+	go runRecv(loopCtx, transport, recvCh, transportFailed, log)
 
 	requestReconnectReset := func() error {
 		if awaitingReconnectReset {
@@ -1447,6 +1682,16 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		select {
 		case <-loopCtx.Done():
 			return loopCanceledResult()
+		case <-transition.tickC():
+			if err := transition.advance(); err != nil {
+				return welcomedResult(err)
+			}
+		case <-parkedResponseC():
+			clearParkedPending()
+			return welcomedResult(errors.New("vev: timed out waiting for parked-route response"))
+		case <-parkedFullC():
+			clearParkedFull()
+			return welcomedResult(errors.New("vev: timed out waiting for parked-route full output"))
 		case ev, ok := <-linkEvents:
 			if !ok {
 				linkEvents = nil
@@ -1537,6 +1782,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
+				if parkedWaitingFull && !o.Full {
+					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
+				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
 					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
@@ -1555,6 +1803,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
 				}
 				outputState = nextState
+				if transition != nil && transition.active && (!transitionWaitingFull || o.Full) {
+					transitionWaitingFull = false
+					transition.stop()
+				}
+				if parkedWaitingFull {
+					clearParkedFull()
+					startForeground()
+				}
 				if o.New != 0 {
 					ackQueue.offer(o.Epoch, o.New)
 					outputResetRequested = false
@@ -1572,6 +1828,15 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				target, derr := ports.UnmarshalAttachTarget(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding attach target: %w", derr))
+				}
+				if a.returnAttachTargets {
+					handoff := welcomedResult(nil)
+					handoff.target = &target
+					return handoff
+				}
+				if transition != nil {
+					transitionWaitingFull = false
+					transition.start(target)
 				}
 				if target.Endpoint == "" && target.RemoteTarget == nil && target.ExactTarget != nil && a.runner.ledger != nil {
 					if samePeerSwitch != nil {
@@ -1599,13 +1864,71 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				handoff := welcomedResult(nil)
 				handoff.target = &target
 				return handoff
+			case ports.MsgParkedRouteResponse:
+				response, derr := ports.UnmarshalParkedRouteResponse(r.frame.Payload)
+				if derr != nil {
+					return welcomedResult(fmt.Errorf("vev: decoding parked-route response: %w", derr))
+				}
+				if parkedPending == nil || response.RequestID != parkedPending.requestID {
+					return welcomedResult(errors.New("vev: unexpected parked-route response"))
+				}
+				pending := *parkedPending
+				clearParkedPending()
+				switch pending.action {
+				case ports.ParkedRoutePrepare:
+					if response.Status != ports.ParkedRouteReady {
+						fallback := welcomedResult(nil)
+						fallback.action = ports.NavigationOpenHomePicker
+						return fallback
+					}
+					if selection, done := handleParkedPicker(pending.leaseID); done {
+						return selection
+					}
+				case ports.ParkedRouteResume:
+					if response.Status != ports.ParkedRouteResumed {
+						return welcomedResult(errors.New("vev: parked route could not resume"))
+					}
+					awaitParkedFull()
+				case ports.ParkedRouteSwitch:
+					switch response.Status {
+					case ports.ParkedRouteSwitched:
+						awaitParkedFull()
+						continue
+					case ports.ParkedRouteStaleTarget:
+						if transition != nil {
+							transition.stop()
+						}
+						if selection, done := handleParkedPicker(pending.leaseID); done {
+							return selection
+						}
+					default:
+						if pending.fallbackTarget == nil {
+							return welcomedResult(errors.New("vev: parked route switch failed"))
+						}
+						fallback := welcomedResult(nil)
+						fallback.target = pending.fallbackTarget
+						fallback.homePickerTarget = true
+						return fallback
+					}
+				}
 			case ports.MsgNavigationAction:
-				action, derr := ports.UnmarshalNavigationAction(r.frame.Payload)
+				directive, derr := ports.UnmarshalNavigationDirective(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding navigation action: %w", derr))
 				}
+				_, datagramRoute := transport.(ports.DatagramTransport)
+				if directive.Action == ports.NavigationOpenHomePicker && a.openHomePicker != nil && datagramRoute {
+					stopForeground()
+					if err := flushSender(); err != nil {
+						return welcomedResult(fmt.Errorf("vev: parking remote foreground: %w", err))
+					}
+					if err := sendParkedRouteRequest(ports.ParkedRoutePrepare, directive.LeaseID, nil); err != nil {
+						return welcomedResult(fmt.Errorf("vev: preparing parked route: %w", err))
+					}
+					continue
+				}
 				navigation := welcomedResult(nil)
-				navigation.action = action
+				navigation.action = directive.Action
 				return navigation
 			case ports.MsgNavigateRecentRoute:
 				action, derr := ports.UnmarshalRouteNavigationAction(r.frame.Payload)
@@ -1662,6 +1985,19 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if samePeerSwitch != nil && failure.RequestID == samePeerSwitch.requestID {
 					samePeerSwitch = nil
 					inputGate.setPaused(false)
+					if transition != nil && transition.showing {
+						transitionWaitingFull = true
+						if !outputResetRequested {
+							select {
+							case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}:
+								outputResetRequested = true
+							case <-loopCtx.Done():
+								return loopCanceledResult()
+							}
+						}
+					} else if transition != nil {
+						transition.stop()
+					}
 				}
 			case ports.MsgRoutePosition:
 				position, derr := ports.UnmarshalRoutePosition(r.frame.Payload)
@@ -1712,10 +2048,13 @@ type recvResult struct {
 
 // runRecv reads frames until an error, forwarding each to the main loop.
 // It exits on the first error or when the loop context is cancelled.
-func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResult, log *slog.Logger) {
+func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResult, failed chan<- struct{}, log *slog.Logger) {
 	defer log.Debug("receive pump exited")
 	for {
 		f, err := transport.Recv()
+		if err != nil && failed != nil {
+			close(failed)
+		}
 		select {
 		case out <- recvResult{frame: f, err: err}:
 		case <-ctx.Done():
@@ -1766,7 +2105,7 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 
 // runSender preserves normal-frame order while allowing switch control and
 // output ACKs to make progress when raw input is held for a same-peer switch.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
 	send := func(f ports.Frame) bool {
 		if err := transport.Send(f); err != nil {
@@ -1795,6 +2134,36 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 		}
 		return send(ports.Frame{Type: ports.MsgAck, Payload: payload})
 	}
+	flushPending := func() bool {
+		for {
+			select {
+			case <-acks.wake:
+				if !sendAck() {
+					return false
+				}
+				continue
+			default:
+			}
+			if paused, _ := inputGate.snapshot(); paused {
+				return sendAck()
+			}
+			select {
+			case frame := <-in:
+				if !send(frame) {
+					return false
+				}
+			default:
+				return sendAck()
+			}
+		}
+	}
+	completeBarrier := func(done chan struct{}) bool {
+		if !flushPending() {
+			return false
+		}
+		close(done)
+		return true
+	}
 	var heldInput *ports.Frame
 	for {
 		if heldInput != nil {
@@ -1815,6 +2184,10 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 				if !send(frame) {
 					return
 				}
+			case done := <-barriers:
+				if !completeBarrier(done) {
+					return
+				}
 			case <-changed:
 			case <-ctx.Done():
 				return
@@ -1832,6 +2205,11 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 				return
 			}
 			continue
+		case done := <-barriers:
+			if !completeBarrier(done) {
+				return
+			}
+			continue
 		default:
 		}
 		select {
@@ -1841,6 +2219,10 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 			}
 		case frame := <-control:
 			if !send(frame) {
+				return
+			}
+		case done := <-barriers:
+			if !completeBarrier(done) {
 				return
 			}
 		case frame := <-in:
@@ -2185,6 +2567,36 @@ func (p *terminalInputPump) stop() {
 // preserving all ordinary terminal input byte-for-byte. It never reads the
 // terminal directly, publishes a Theme, or writes terminal output;
 // attachAttempt owns those operations.
+type foregroundSendLease struct {
+	mu     sync.Mutex
+	active bool
+}
+
+func newForegroundSendLease() *foregroundSendLease {
+	return &foregroundSendLease{active: true}
+}
+
+func (l *foregroundSendLease) send(send func() bool) bool {
+	if l == nil {
+		return send()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.active {
+		return false
+	}
+	return send()
+}
+
+func (l *foregroundSendLease) stop() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.active = false
+	l.mu.Unlock()
+}
+
 type stdinPump struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -2200,6 +2612,7 @@ type stdinPump struct {
 	afterPaletteEvent   func(paletteGenerationEvent) // test synchronization hook
 	afterInputTake      func()                       // test synchronization hook
 	afterInputDelivered func()                       // test synchronization hook
+	sendLease           *foregroundSendLease
 }
 
 func (p *stdinPump) run() {
@@ -2215,31 +2628,35 @@ func (p *stdinPump) run() {
 		if !sendOK.Load() {
 			return false
 		}
-		select {
-		case p.out <- frame:
-			if p.afterInputDelivered != nil {
-				p.afterInputDelivered()
+		return p.sendLease.send(func() bool {
+			select {
+			case p.out <- frame:
+				if p.afterInputDelivered != nil {
+					p.afterInputDelivered()
+				}
+				return true
+			case <-p.ctx.Done():
+				sendOK.Store(false)
+				return false
 			}
-			return true
-		case <-p.ctx.Done():
-			sendOK.Store(false)
-			return false
-		}
+		})
 	}
 	sendEvent := func(event paletteGenerationEvent) bool {
 		if !sendOK.Load() {
 			return false
 		}
-		select {
-		case p.paletteEvents <- event:
-			if p.afterPaletteEvent != nil {
-				p.afterPaletteEvent(event)
+		return p.sendLease.send(func() bool {
+			select {
+			case p.paletteEvents <- event:
+				if p.afterPaletteEvent != nil {
+					p.afterPaletteEvent(event)
+				}
+				return true
+			case <-p.ctx.Done():
+				sendOK.Store(false)
+				return false
 			}
-			return true
-		case <-p.ctx.Done():
-			sendOK.Store(false)
-			return false
-		}
+		})
 	}
 	coalescer := newPasteCoalescer(p.clock, func(data []byte) {
 		if len(data) == 0 {
@@ -2427,7 +2844,7 @@ func (p *stdinPump) run() {
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame, log *slog.Logger) {
+func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
 	defer log.Debug("resize pump exited")
 	for {
 		select {
@@ -2441,9 +2858,14 @@ func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.
 				continue
 			}
 			frame := ports.Frame{Type: ports.MsgResize, Payload: payload}
-			select {
-			case out <- frame:
-			case <-ctx.Done():
+			if !sendLease.send(func() bool {
+				select {
+				case out <- frame:
+					return true
+				case <-ctx.Done():
+					return false
+				}
+			}) {
 				return
 			}
 		case <-ctx.Done():
