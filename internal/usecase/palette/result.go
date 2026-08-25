@@ -84,6 +84,24 @@ func NewRecentRouteResult(label string, action ports.RouteNavigationAction) Resu
 
 func (r Result) Kind() ResultKind { return r.kind }
 
+func (r Result) sameTarget(other Result) bool {
+	if r.kind != other.kind {
+		return false
+	}
+	switch r.kind {
+	case ResultKindCommand:
+		return r.command.Slug == other.command.Slug
+	case ResultKindActiveSession, ResultKindStoppedSession:
+		return r.session.target == other.session.target
+	case ResultKindRemoteSession:
+		return r.remoteSession.key == other.remoteSession.key && r.remoteSession.target == other.remoteSession.target
+	case ResultKindRecentRoute:
+		return r.route.action == other.route.action
+	default:
+		return false
+	}
+}
+
 func (r Result) DisplayText() string {
 	if r.kind == ResultKindCommand {
 		return r.command.Code
