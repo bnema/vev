@@ -438,7 +438,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			RemoteKey: &remoteKey, RemoteTarget: &remoteTarget, RemoteHost: remoteKey.Host,
 			UnavailableReason: remoteUnavailableReason, TabIndex: -1,
 		}
-		if err := d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{}, "palette-remote-session"); err != nil && !errors.Is(err, errAttachmentTransition) {
+		err := d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{}, "palette-remote-session")
+		if err == nil {
+			d.closeExecutedPalette(ac, generation, rawQuery)
+			return
+		}
+		if !errors.Is(err, errAttachmentTransition) {
 			ac.paletteFailure(generation, rawQuery, "requested remote session is unavailable")
 			d.invalidateRender(entry, ac, true, "palette.go")
 		}

@@ -20,7 +20,7 @@ const (
 )
 
 // Result is an immutable palette target. Its kind is the sole discriminator
-// for its private command or session payload.
+// for its private command, local-session, remote-session, or route payload.
 type Result struct {
 	kind          ResultKind
 	command       command.Command

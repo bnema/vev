@@ -500,6 +500,7 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, sends := newManualSessionWithPTYs(t, p)
+	ac.resumeCapable = true
 	now := time.Unix(1_000, 0)
 	d.clock = fixedRemoteRefreshClock{now: now}
 	remoteLifecycle := domain.SessionLifecycleID{31}
@@ -530,6 +531,10 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 		Endpoint: "user@arch", Session: "work", Intent: ports.IntentAttach,
 		RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}, target)
+	require.False(t, ac.overlays.paletteActive())
+	d.remoteCatalog.mu.Lock()
+	require.Zero(t, d.remoteCatalog.consumers[ac]&remoteDiscoveryPalette)
+	d.remoteCatalog.mu.Unlock()
 }
 
 func TestPaletteCachedRemoteSelectionFailsClosed(t *testing.T) {
