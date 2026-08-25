@@ -24,6 +24,10 @@ type parkedRouteLease struct {
 	expired    bool
 }
 
+func (lease *parkedRouteLease) matches(id ports.ParkedRouteLeaseID, generation uint64, transport transportSnapshot) bool {
+	return lease != nil && lease.id == id && lease.generation == generation && lease.transport == transport
+}
+
 func newParkedRouteLeaseID() (ports.ParkedRouteLeaseID, error) {
 	var id ports.ParkedRouteLeaseID
 	if _, err := io.ReadFull(rand.Reader, id[:]); err != nil {
@@ -96,9 +100,7 @@ func (d *Daemon) expireParkedRoute(ac *attachedClient, lease *parkedRouteLease) 
 		return
 	}
 	ac.parkedRoute = nil
-	if !lease.suspended {
-		ac.parkedRouteOutput.Store(false)
-	}
+	ac.parkedRouteOutput.Store(false)
 	ac.parkedRouteFullPending.Store(false)
 	ac.parkedRouteMu.Unlock()
 	if ac.connectionGeneration.Load() == lease.generation && ac.transportSnapshotCurrent(lease.transport) {
@@ -125,7 +127,7 @@ func (ac *attachedClient) parkedRouteStatus(token attachmentConnectionToken, id 
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
-	if lease == nil || lease.id != id || lease.generation != token.generation || lease.transport != token.transport {
+	if !lease.matches(id, token.generation, token.transport) {
 		return ports.ParkedRouteRejected
 	}
 	if !now.Before(lease.expiresAt) {
@@ -148,7 +150,7 @@ func (ac *attachedClient) prepareParkedRoute(token attachmentConnectionToken, id
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
-	if lease == nil || lease.id != id || lease.generation != token.generation || lease.transport != token.transport || lease.suspended {
+	if !lease.matches(id, token.generation, token.transport) || lease.suspended {
 		return ports.ParkedRouteRejected
 	}
 	lease.suspended = true
@@ -163,7 +165,7 @@ func (ac *attachedClient) consumeParkedRoute(token attachmentConnectionToken, id
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
-	if lease == nil || lease.id != id || lease.generation != token.generation || lease.transport != token.transport || !lease.suspended {
+	if !lease.matches(id, token.generation, token.transport) || !lease.suspended || lease.inFlight {
 		return ports.ParkedRouteRejected
 	}
 	stopParkedRouteLeaseLocked(lease)
@@ -178,12 +180,14 @@ func (ac *attachedClient) beginParkedRouteSwitch(token attachmentConnectionToken
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
-	if lease == nil || lease.id != id || lease.generation != token.generation || lease.transport != token.transport || !lease.suspended || lease.inFlight {
+	if !lease.matches(id, token.generation, token.transport) || !lease.suspended || lease.inFlight {
 		return ports.ParkedRouteRejected
 	}
 	if lease.expired || !now.Before(lease.expiresAt) {
 		stopParkedRouteLeaseLocked(lease)
 		ac.parkedRoute = nil
+		ac.parkedRouteOutput.Store(false)
+		ac.parkedRouteFullPending.Store(false)
 		return ports.ParkedRouteExpired
 	}
 	lease.inFlight = true
@@ -197,13 +201,15 @@ func (ac *attachedClient) rejectParkedRouteSwitch(token attachmentConnectionToke
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
-	if lease == nil || lease.id != id || lease.generation != token.generation || lease.transport != token.transport || !lease.inFlight {
+	if !lease.matches(id, token.generation, token.transport) || !lease.inFlight {
 		return ports.ParkedRouteRejected
 	}
 	lease.inFlight = false
 	if lease.expired || !now.Before(lease.expiresAt) {
 		stopParkedRouteLeaseLocked(lease)
 		ac.parkedRoute = nil
+		ac.parkedRouteOutput.Store(false)
+		ac.parkedRouteFullPending.Store(false)
 		return ports.ParkedRouteExpired
 	}
 	return 0
@@ -216,7 +222,7 @@ func (ac *attachedClient) consumePublishedParkedRoute(previous, published attach
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
-	if lease == nil || lease.id != id || lease.generation != previous.generation || lease.transport != previous.transport || !lease.suspended || !lease.inFlight {
+	if !lease.matches(id, previous.generation, previous.transport) || !lease.suspended || !lease.inFlight {
 		return ports.ParkedRouteRejected
 	}
 	// Expiry is checked when the request is admitted. Once publication starts,

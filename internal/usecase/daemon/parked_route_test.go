@@ -279,6 +279,24 @@ func TestParkedRouteExpiredLeaseFailsClosed(t *testing.T) {
 	require.False(t, ac.parkedRouteOutput.Load())
 }
 
+func TestParkedRouteResumeRejectsSwitchInFlight(t *testing.T) {
+	d, source, ac, sends, releases := newManualTabSession(t, 1)
+	defer releaseAll(releases)
+	ac.navigationCapabilities = ports.NavigationCapabilityHomePicker
+	leaseID := armAndPrepareParkedRoute(t, d, source, ac, sends)
+
+	ac.parkedRouteMu.Lock()
+	ac.parkedRoute.inFlight = true
+	ac.parkedRouteMu.Unlock()
+	status := ac.consumeParkedRoute(source.attachmentToken(ac, ac.transport()), leaseID, d.clock.Now())
+
+	require.Equal(t, ports.ParkedRouteRejected, status)
+	ac.parkedRouteMu.Lock()
+	require.NotNil(t, ac.parkedRoute)
+	ac.parkedRouteMu.Unlock()
+	require.True(t, ac.parkedRouteOutput.Load())
+}
+
 func TestParkedRouteLeaseExpiryClosesExactRetainedTransport(t *testing.T) {
 	d, source, ac, _, releases := newManualTabSession(t, 1)
 	defer releaseAll(releases)
@@ -301,6 +319,11 @@ func TestParkedRouteLeaseExpiryClosesExactRetainedTransport(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("parked transport remained open after its lease expired")
 	}
+	ac.parkedRouteMu.Lock()
+	require.Nil(t, ac.parkedRoute)
+	ac.parkedRouteMu.Unlock()
+	require.False(t, ac.parkedRouteOutput.Load())
+	require.False(t, ac.parkedRouteFullPending.Load())
 }
 
 func TestParkedRouteMalformedSwitchRequestsFailClosed(t *testing.T) {
