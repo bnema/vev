@@ -329,9 +329,12 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	entry.core().mu.Lock()
 	_, owned := entry.core().attachments[ac]
 	entry.core().mu.Unlock()
-	if !owned || ac.currentAttachmentSession() != entry {
+	if !owned || ac.currentAttachmentSession() != entry || ac.parkedRouteOutput.Load() {
 		ac.sendMu.Unlock()
 		return paintRejected
+	}
+	if ac.parkedRouteFullPending.Load() {
+		reset = true
 	}
 	if lease != nil {
 		rc := attachmentRenderCoordinator(entry)
@@ -455,7 +458,10 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()
 	}
-	d.emitFrame(entry, ac, state, composed, &marks)
+	full := state.reset
+	if d.emitFrame(entry, ac, state, composed, &marks) && full {
+		ac.parkedRouteFullPending.Store(false)
+	}
 	return paintEmitted
 }
 

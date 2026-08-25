@@ -133,6 +133,13 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 			break
 		}
 		d.switchSamePeerForAttachment(token, request)
+	case ports.MsgParkedRouteRequest:
+		request, derr := ports.UnmarshalParkedRouteRequest(f.Payload)
+		if derr != nil {
+			d.log.Warn("malformed parked-route request", "err", derr)
+			break
+		}
+		d.handleParkedRouteRequest(token, request)
 	case ports.MsgRecentRouteSnapshot:
 		snapshot, derr := ports.UnmarshalRecentRouteSnapshot(f.Payload)
 		if derr != nil {

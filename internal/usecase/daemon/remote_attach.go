@@ -103,11 +103,31 @@ func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTa
 }
 
 func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionToken, action ports.NavigationAction) error {
-	payload := ports.MarshalNavigationAction(action)
+	directive := ports.NavigationDirective{Action: action}
+	armed := false
+	if action == ports.NavigationOpenHomePicker {
+		leaseID, err := d.armParkedRoute(token)
+		if err != nil {
+			return err
+		}
+		directive.LeaseID = leaseID
+		armed = true
+	}
+	rollback := func() {
+		if armed {
+			token.ac.clearParkedRoute()
+		}
+	}
+	payload := ports.MarshalNavigationDirective(directive)
 	if payload == nil {
+		rollback()
 		return errAttachmentTransition
 	}
-	return token.sendControl(ports.Frame{Type: ports.MsgNavigationAction, Payload: payload})
+	if err := token.sendControl(ports.Frame{Type: ports.MsgNavigationAction, Payload: payload}); err != nil {
+		rollback()
+		return err
+	}
+	return nil
 }
 
 func (d *Daemon) sendRecentRouteNavigationActionForAttachment(token attachmentConnectionToken, action ports.RouteNavigationAction) error {

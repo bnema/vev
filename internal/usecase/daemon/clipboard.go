@@ -268,6 +268,9 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *atta
 		if ticket.ended.Load() || !ac.transportSnapshotCurrent(expected) {
 			return errAttachmentTransition
 		}
+		if ac.parkedRouteOutput.Load() || ac.parkedRouteFullPending.Load() {
+			return nil
+		}
 		if !beginClipboardOwnerSend(item.owner, ticket, expected) {
 			return errAttachmentTransition
 		}

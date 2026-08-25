@@ -855,6 +855,9 @@ func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newRemotePickerDaemon(nil)
 			sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+			if tt.action == ports.NavigationOpenHomePicker {
+				ac.navigationCapabilities = ports.NavigationCapabilityHomePicker
+			}
 			token := sess.attachmentToken(ac, ac.transport())
 			effect, admitted := ac.beginAttachmentEffect(token)
 			require.True(t, admitted)
@@ -862,9 +865,14 @@ func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 			require.NoError(t, d.sendNavigationActionForAttachment(token, tt.action))
 			frame := receiveRemotePicker(t, sends, "navigation action")
 			require.Equal(t, ports.MsgNavigationAction, frame.Type)
-			got, err := ports.UnmarshalNavigationAction(frame.Payload)
+			directive, err := ports.UnmarshalNavigationDirective(frame.Payload)
 			require.NoError(t, err)
-			require.Equal(t, tt.action, got)
+			require.Equal(t, tt.action, directive.Action)
+			if tt.action == ports.NavigationOpenHomePicker {
+				require.False(t, directive.LeaseID.IsZero())
+			} else {
+				require.True(t, directive.LeaseID.IsZero())
+			}
 		})
 	}
 }

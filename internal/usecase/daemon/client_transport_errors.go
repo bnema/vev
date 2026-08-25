@@ -66,6 +66,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		return
 	}
 	ac.clearSamePeerOffer()
+	ac.clearParkedRoute()
 	if d.afterClientGoneDetach != nil {
 		d.afterClientGoneDetach()
 	}
@@ -171,6 +172,7 @@ func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentConnectionTok
 
 func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed ports.Transport) {
 	ac.clearSamePeerOffer()
+	ac.clearParkedRoute()
 	name := sess.nameSnapshot()
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
