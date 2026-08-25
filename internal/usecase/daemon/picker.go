@@ -86,7 +86,7 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	if rt.beforeRemotePickerRegistration != nil {
 		rt.beforeRemotePickerRegistration()
 	}
-	d.remotePickerOpened(instance)
+	d.remoteDiscoveryOpened(instance.discoveryInstance())
 }
 
 // pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
@@ -165,8 +165,8 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 		})
 	}
 
-	catalog := d.remotePickerCatalogSnapshot()
-	sortRemotePickerCatalog(catalog, d.remotePickerHostRanks())
+	catalog := d.remoteCatalogSnapshot()
+	sortRemoteCatalog(catalog, d.remoteHostRanks())
 
 	catalogRows := 0
 	for _, host := range catalog {
@@ -283,7 +283,7 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		},
 		afterClose: func() {
 			d.clearPreviewGeneration(ac, previewGeneration)
-			d.remotePickerClosed(instance)
+			d.remoteDiscoveryClosed(instance.discoveryInstance())
 			if sess := ac.currentAttachmentSession(); sess != nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
@@ -742,7 +742,7 @@ func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, g
 	ac.overlays.pickerMu.Unlock()
 	d.clearPreviewGeneration(ac, previewGeneration)
 	if instance.model != nil {
-		d.remotePickerClosed(instance)
+		d.remoteDiscoveryClosed(instance.discoveryInstance())
 	}
 	return true
 }
@@ -969,7 +969,7 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionT
 	}
 	remoteTarget := *target.RemoteTarget
 	key := *target.RemoteKey
-	if err := remoteTarget.Validate(); err != nil || key.Validate() != nil || target.Session != key.ID() || key.Host != remoteTarget.Endpoint || key.Name != remoteTarget.SessionName || key.LifecycleID != remoteTarget.LifecycleID || !d.remotePickerTargetReadyTarget(remoteTarget) {
+	if err := remoteTarget.Validate(); err != nil || key.Validate() != nil || target.Session != key.ID() || key.Host != remoteTarget.Endpoint || key.Name != remoteTarget.SessionName || key.LifecycleID != remoteTarget.LifecycleID || !d.remoteCatalogTargetReady(remoteTarget) {
 		return failUnavailable()
 	}
 	handoff := ports.AttachTarget{
@@ -1005,7 +1005,7 @@ func (d *Daemon) remoteCatalogEntryLocked(host string) (ports.RemoteCatalogCache
 	return entry, true
 }
 
-func (d *Daemon) remotePickerTargetReadyTarget(target domain.RemoteSessionTarget) bool {
+func (d *Daemon) remoteCatalogTargetReady(target domain.RemoteSessionTarget) bool {
 	if d == nil || target.Validate() != nil {
 		return false
 	}

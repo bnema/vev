@@ -221,11 +221,14 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	// cannot leave closed panes retained through its capture cache. This must
 	// remain outside d.mu: sendMu is ordered before the daemon lock.
 	ac.clearCaptureFrames()
-	var pickerGeneration uint64
+	var pickerGeneration, paletteGeneration uint64
 	if ac.overlays != nil {
 		ac.overlays.pickerMu.Lock()
 		pickerGeneration = ac.overlays.pickerGeneration
 		ac.overlays.pickerMu.Unlock()
+		ac.overlays.paletteMu.Lock()
+		paletteGeneration = ac.overlays.paletteGeneration
+		ac.overlays.paletteMu.Unlock()
 	}
 	d.mu.Lock()
 	if d.closing || d.sessions[sess.id] != sess {
@@ -248,7 +251,10 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	}
 	grace := d.resumeParkGrace
 	timer := d.clock.NewTimer(grace)
-	parked := &parkedAttachment{sess: sess, ac: ac, pickerGeneration: pickerGeneration, timer: timer, done: make(chan struct{})}
+	parked := &parkedAttachment{
+		sess: sess, ac: ac, pickerGeneration: pickerGeneration, paletteGeneration: paletteGeneration,
+		timer: timer, done: make(chan struct{}),
+	}
 	ac.parked = true
 	d.parked[token] = parked
 	d.clearParkingInFlightLocked(token, ac)
@@ -291,6 +297,7 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 		d.removeParkedLocked(token, parked)
 		d.mu.Unlock()
 		d.closePickerIfCurrent(parked.ac, nil, parked.pickerGeneration)
+		d.closePaletteIfCurrent(parked.ac, parked.paletteGeneration)
 		d.log.Warn("parked client expired", "session", parked.sess.nameSnapshot())
 		return
 	}
@@ -373,11 +380,12 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	}
 	parked.closeDone()
 	rearmed := &parkedAttachment{
-		sess:             parked.sess,
-		ac:               ac,
-		pickerGeneration: parked.pickerGeneration,
-		timer:            d.clock.NewTimer(d.resumeParkGrace),
-		done:             make(chan struct{}),
+		sess:              parked.sess,
+		ac:                ac,
+		pickerGeneration:  parked.pickerGeneration,
+		paletteGeneration: parked.paletteGeneration,
+		timer:             d.clock.NewTimer(d.resumeParkGrace),
+		done:              make(chan struct{}),
 	}
 	d.parked[token] = rearmed
 	captured := ac.transportSnapshot().transport
@@ -394,9 +402,10 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 }
 
 type parkedAttachmentRetirement struct {
-	parked           *parkedAttachment
-	pickerGeneration uint64
-	transport        transportSnapshot
+	parked            *parkedAttachment
+	pickerGeneration  uint64
+	paletteGeneration uint64
+	transport         transportSnapshot
 }
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
@@ -406,9 +415,10 @@ func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttach
 	parked.ac.connectionGeneration.Add(1)
 	parked.ac.setSession(nil)
 	return parkedAttachmentRetirement{
-		parked:           parked,
-		pickerGeneration: parked.pickerGeneration,
-		transport:        parked.ac.transportSnapshot(),
+		parked:            parked,
+		pickerGeneration:  parked.pickerGeneration,
+		paletteGeneration: parked.paletteGeneration,
+		transport:         parked.ac.transportSnapshot(),
 	}
 }
 
@@ -433,8 +443,8 @@ func (d *Daemon) purgeAllParkedLocked() []parkedAttachmentRetirement {
 	return retirements
 }
 
-// finishParkedAttachmentRetirements stops timers and retires picker ownership
-// and transports without holding daemon, session, coordinator, or pane locks.
+// finishParkedAttachmentRetirements stops timers and retires discovery-overlay
+// ownership and transports without holding daemon, session, coordinator, or pane locks.
 func (d *Daemon) finishParkedAttachmentRetirements(retirements []parkedAttachmentRetirement) {
 	for _, retirement := range retirements {
 		if retirement.parked.timer != nil {
@@ -443,6 +453,7 @@ func (d *Daemon) finishParkedAttachmentRetirements(retirements []parkedAttachmen
 		retirement.parked.closeDone()
 		ac := retirement.parked.ac
 		d.closePickerIfCurrent(ac, nil, retirement.pickerGeneration)
+		d.closePaletteIfCurrent(ac, retirement.paletteGeneration)
 		_ = ac.closeCapturedTransport(ac.revokeTransport(retirement.transport.transport))
 	}
 }

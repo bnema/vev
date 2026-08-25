@@ -130,7 +130,7 @@ func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
 	d := newTestDaemon(t, nil, clock)
 	lifecycle := remoteLifecycleForTest()
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: now.Add(-remotePickerAttachTTL), Sessions: []ports.RemoteCatalogSession{{
+		Host: "arch", FetchedAt: now.Add(-remoteCatalogAttachTTL), Sessions: []ports.RemoteCatalogSession{{
 			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 		}},
 	}})
@@ -138,11 +138,11 @@ func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
 	d.remoteCatalog.status["arch"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
 
-	entries := d.remotePickerCatalogSnapshot()
+	entries := d.remoteCatalogSnapshot()
 	require.Len(t, entries, 1)
 	require.Equal(t, remoteHostStale, entries[0].status)
 	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
-	require.False(t, d.remotePickerTargetReadyTarget(target), "attachment must reject a catalogue exactly at the TTL boundary")
+	require.False(t, d.remoteCatalogTargetReady(target), "attachment must reject a catalogue exactly at the TTL boundary")
 }
 
 func TestRemotePickerTargetReadyExpiresAfterPickerBuildWithoutSnapshot(t *testing.T) {
@@ -163,10 +163,10 @@ func TestRemotePickerTargetReadyExpiresAfterPickerBuildWithoutSnapshot(t *testin
 	target, ok := model.Selected()
 	require.True(t, ok)
 	require.NotNil(t, target.RemoteTarget)
-	require.True(t, d.remotePickerTargetReadyTarget(*target.RemoteTarget), "fresh picker target must be ready before the attach TTL")
+	require.True(t, d.remoteCatalogTargetReady(*target.RemoteTarget), "fresh picker target must be ready before the attach TTL")
 
-	clock.Advance(remotePickerAttachTTL)
-	require.False(t, d.remotePickerTargetReadyTarget(*target.RemoteTarget), "handoff must reject a picker target whose catalog reached the attach TTL")
+	clock.Advance(remoteCatalogAttachTTL)
+	require.False(t, d.remoteCatalogTargetReady(*target.RemoteTarget), "handoff must reject a picker target whose catalog reached the attach TTL")
 	d.remoteCatalog.mu.Lock()
 	require.Equal(t, remoteHostStale, d.remoteCatalog.status["arch"])
 	d.remoteCatalog.mu.Unlock()
@@ -483,7 +483,7 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	ac.overlays.pickerGeneration++
 	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: model}
 	ac.overlays.pickerMu.Unlock()
-	require.True(t, d.registerRemotePicker(instance))
+	require.True(t, d.registerRemoteDiscoveryConsumer(instance.discoveryInstance()))
 	lifecycle := remoteLifecycleForTest()
 	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
 		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
@@ -492,7 +492,7 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 		}},
 	}})
 
-	firstGeneration := d.startRemotePickerRefresh(instance)
+	firstGeneration := d.startRemoteDiscoveryRefresh(instance.discoveryInstance())
 	first := map[string]remoteRefreshRequest{}
 	for range 2 {
 		request := receiveRemotePicker(t, catalog.requests, "catalog request")
@@ -514,7 +514,7 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	_, selectable := refreshedModel.Selected()
 	require.False(t, selectable, "refreshing status must gate picker activation")
 
-	secondGeneration := d.startRemotePickerRefresh(instance)
+	secondGeneration := d.startRemoteDiscoveryRefresh(instance.discoveryInstance())
 	require.Greater(t, secondGeneration, firstGeneration)
 	for _, request := range first {
 		receiveRemotePickerClose(t, request.ctx.Done(), "catalog request cancellation")
@@ -547,9 +547,9 @@ func TestRemoteRefreshLockProbesSerialized(t *testing.T) {
 	ac.overlays.pickerGeneration++
 	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: model}
 	ac.overlays.pickerMu.Unlock()
-	require.True(t, d.registerRemotePicker(instance))
+	require.True(t, d.registerRemoteDiscoveryConsumer(instance.discoveryInstance()))
 
-	d.startRemotePickerRefresh(instance)
+	d.startRemoteDiscoveryRefresh(instance.discoveryInstance())
 	request := receiveRemotePicker(t, catalog.requests, "catalog request")
 	request.result <- remoteRefreshResult{catalog: remoteCatalogForTest()}
 	receiveRemotePicker(t, cache.stores, "remote cache store")
@@ -567,9 +567,9 @@ func TestRemoteRefreshWithoutCatalogClientDoesNotMarkHostsRefreshing(t *testing.
 	ac.overlays.pickerGeneration++
 	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: model}
 	ac.overlays.pickerMu.Unlock()
-	require.True(t, d.registerRemotePicker(instance))
+	require.True(t, d.registerRemoteDiscoveryConsumer(instance.discoveryInstance()))
 
-	require.NotZero(t, d.startRemotePickerRefresh(instance))
+	require.NotZero(t, d.startRemoteDiscoveryRefresh(instance.discoveryInstance()))
 	d.remoteCatalog.mu.Lock()
 	require.NotEqual(t, remoteHostRefreshing, d.remoteCatalog.status["arch"])
 	d.remoteCatalog.mu.Unlock()
@@ -950,7 +950,7 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 		instance := remotePickerInstance{ac: owner, generation: owner.overlays.pickerGeneration, model: owner.overlays.picker}
 		before[owner] = owner.overlays.picker
 		owner.overlays.pickerMu.Unlock()
-		require.True(t, d.registerRemotePicker(instance))
+		require.True(t, d.registerRemoteDiscoveryConsumer(instance.discoveryInstance()))
 	}
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.refresh = 4
@@ -1002,7 +1002,7 @@ func TestRemotePickerTeardownLifecycle(t *testing.T) {
 			test.teardown(d, sess, ac)
 
 			d.remoteCatalog.mu.Lock()
-			_, registered := d.remoteCatalog.pickers[ac]
+			_, registered := d.remoteCatalog.consumers[ac]
 			d.remoteCatalog.mu.Unlock()
 			ac.overlays.pickerMu.Lock()
 			current, currentGeneration := ac.overlays.picker, ac.overlays.pickerGeneration
@@ -1025,7 +1025,7 @@ func TestRemotePickerTeardownLifecycle(t *testing.T) {
 	}
 }
 
-func TestParkedPickerExpiryClosesCapturedGenerationAndCancelsRefresh(t *testing.T) {
+func TestParkedOverlayExpiryClosesCapturedDiscoveryGenerations(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
 	d, catalog, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(475, 0))
@@ -1033,7 +1033,10 @@ func TestParkedPickerExpiryClosesCapturedGenerationAndCancelsRefresh(t *testing.
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 	ac.resumeCapable = true
 	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	request := receiveRemotePicker(t, catalog.requests, "catalog request")
+	request := receiveRemotePicker(t, catalog.requests, "picker catalog request")
+	d.enterPalette(sess, ac)
+	receiveRemotePickerClose(t, request.ctx.Done(), "superseded picker catalog request")
+	request = receiveRemotePicker(t, catalog.requests, "shared catalog request")
 
 	require.True(t, d.parkAttachment(sess, ac))
 	timer := receiveRemotePicker(t, clock.timers, "park expiry timer")
@@ -1043,8 +1046,11 @@ func TestParkedPickerExpiryClosesCapturedGenerationAndCancelsRefresh(t *testing.
 	ac.overlays.pickerMu.Lock()
 	require.Nil(t, ac.overlays.picker)
 	ac.overlays.pickerMu.Unlock()
+	ac.overlays.paletteMu.Lock()
+	require.Nil(t, ac.overlays.palette)
+	ac.overlays.paletteMu.Unlock()
 	d.remoteCatalog.mu.Lock()
-	require.NotContains(t, d.remoteCatalog.pickers, ac)
+	require.NotContains(t, d.remoteCatalog.consumers, ac)
 	d.remoteCatalog.mu.Unlock()
 }
 
@@ -1155,12 +1161,12 @@ func TestRemoteRefreshCancellationWhenLastPickerCloses(t *testing.T) {
 		instance.ac.overlays.pickerMu.Lock()
 		instance.ac.overlays.picker = nil
 		instance.ac.overlays.pickerMu.Unlock()
-		d.remotePickerClosed(instance)
+		d.remoteDiscoveryClosed(instance.discoveryInstance())
 	}
 	first, second := newInstance(), newInstance()
-	d.remotePickerOpened(first)
+	d.remoteDiscoveryOpened(first.discoveryInstance())
 	request := receiveRemotePicker(t, catalog.requests, "catalog request")
-	d.remotePickerOpened(second)
+	d.remoteDiscoveryOpened(second.discoveryInstance())
 	receiveRemotePickerClose(t, request.ctx.Done(), "catalog request cancellation")
 	request = receiveRemotePicker(t, catalog.requests, "catalog request")
 
@@ -1174,7 +1180,7 @@ func TestRemoteRefreshCancellationWhenLastPickerCloses(t *testing.T) {
 	receiveRemotePickerClose(t, request.ctx.Done(), "catalog request cancellation")
 
 	d.remoteCatalog.mu.Lock()
-	require.Empty(t, d.remoteCatalog.pickers)
+	require.Empty(t, d.remoteCatalog.consumers)
 	require.Nil(t, d.remoteCatalog.cancel)
 	d.remoteCatalog.mu.Unlock()
 }
@@ -1193,19 +1199,19 @@ func TestRemoteRefreshCannotStartAfterLastPickerCloseWins(t *testing.T) {
 
 	// Stop at the production seam after exact picker ownership registration but
 	// before refresh startup, then let the last-picker close linearize first.
-	require.True(t, d.registerRemotePicker(instance))
+	require.True(t, d.registerRemoteDiscoveryConsumer(instance.discoveryInstance()))
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = nil
 	ac.overlays.pickerMu.Unlock()
-	d.remotePickerClosed(instance)
+	d.remoteDiscoveryClosed(instance.discoveryInstance())
 
 	d.remoteCatalog.mu.Lock()
 	refreshBefore := d.remoteCatalog.refresh
 	d.remoteCatalog.mu.Unlock()
-	require.Zero(t, d.startRemotePickerRefresh(instance))
+	require.Zero(t, d.startRemoteDiscoveryRefresh(instance.discoveryInstance()))
 
 	d.remoteCatalog.mu.Lock()
-	require.Empty(t, d.remoteCatalog.pickers, "the closing picker must remain unregistered")
+	require.Empty(t, d.remoteCatalog.consumers, "the closing picker must remain unregistered")
 	require.Equal(t, refreshBefore, d.remoteCatalog.refresh, "a close that wins before startup must prevent a later refresh generation")
 	require.Nil(t, d.remoteCatalog.cancel, "a close that wins before startup must prevent a later cancel installation")
 	d.remoteCatalog.mu.Unlock()
@@ -1232,7 +1238,7 @@ func TestRemotePickerStaleAfterCloseCannotRemoveReopenedPicker(t *testing.T) {
 	staleClose.afterClose()
 
 	d.remoteCatalog.mu.Lock()
-	_, registered := d.remoteCatalog.pickers[ac]
+	_, registered := d.remoteCatalog.consumers[ac]
 	d.remoteCatalog.mu.Unlock()
 	require.True(t, registered, "stale close cleanup must retain the reopened picker registration")
 	ac.overlays.pickerMu.Lock()
@@ -1255,7 +1261,7 @@ func TestRemotePickerStaleRefreshCannotOverwriteReopenedModel(t *testing.T) {
 	}
 	refreshed := make(chan struct{})
 	go func() {
-		d.refreshRemoteOpenPickers()
+		d.refreshRemoteDiscoveryConsumers()
 		close(refreshed)
 	}()
 	receiveRemotePickerClose(t, rebuildReached, "picker rebuild")

@@ -24,23 +24,30 @@ const (
 
 // remoteCatalogState owns the cache-derived discovery state. Its mutex never
 // covers cache or transport I/O; writeMu only serializes complete cache writes.
+type remoteDiscoveryConsumerKind uint8
+
+const (
+	remoteDiscoveryPicker remoteDiscoveryConsumerKind = 1 << iota
+	remoteDiscoveryPalette
+)
+
 type remoteCatalogState struct {
-	mu      sync.Mutex
-	cache   map[string]ports.RemoteCatalogCacheEntry
-	status  map[string]remoteHostStatus
-	failure map[string]time.Time
-	refresh uint64
-	cancel  context.CancelFunc
-	pickers map[*attachedClient]struct{}
-	writeMu sync.Mutex
+	mu        sync.Mutex
+	cache     map[string]ports.RemoteCatalogCacheEntry
+	status    map[string]remoteHostStatus
+	failure   map[string]time.Time
+	refresh   uint64
+	cancel    context.CancelFunc
+	consumers map[*attachedClient]remoteDiscoveryConsumerKind
+	writeMu   sync.Mutex
 }
 
 func newRemoteCatalogState() remoteCatalogState {
 	return remoteCatalogState{
-		cache:   make(map[string]ports.RemoteCatalogCacheEntry),
-		status:  make(map[string]remoteHostStatus),
-		failure: make(map[string]time.Time),
-		pickers: make(map[*attachedClient]struct{}),
+		cache:     make(map[string]ports.RemoteCatalogCacheEntry),
+		status:    make(map[string]remoteHostStatus),
+		failure:   make(map[string]time.Time),
+		consumers: make(map[*attachedClient]remoteDiscoveryConsumerKind),
 	}
 }
 

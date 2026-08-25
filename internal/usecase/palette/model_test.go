@@ -12,6 +12,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestReplaceResultsPreservesExactRemoteSelection(t *testing.T) {
+	result := func(endpoint string, lifecycle byte) Result {
+		key := domain.RemoteSessionKey{
+			Host: endpoint, Name: "vev", LifecycleID: domain.SessionLifecycleID{lifecycle}, DisplayOrigin: "arch",
+		}
+		target := domain.RemoteSessionTarget{
+			Endpoint: endpoint, DisplayOrigin: "arch", LifecycleID: key.LifecycleID,
+			SessionName: "vev", LiveTabID: "tab-vev",
+		}
+		return NewRemoteSessionResult(key, target, "")
+	}
+	first := result("user@arch", 1)
+	selected := result("admin@arch", 2)
+	m := New([]Result{first, selected})
+	m.Down()
+
+	m.ReplaceResults([]Result{selected, first})
+
+	got, ok := m.Selected()
+	require.True(t, ok)
+	target, ok := got.RemoteSessionTarget()
+	require.True(t, ok)
+	require.Equal(t, "admin@arch", target.Endpoint)
+}
+
 func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {
 	m := New(CommandResults([]command.Command{
 		cmd("ABC", "Alpha", "first"),

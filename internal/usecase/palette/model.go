@@ -57,6 +57,28 @@ func New(results []Result) *Model {
 
 func NewRegistry() *Model { return New(CommandResults(command.PaletteRegistry())) }
 
+// ReplaceResults replaces the model's immutable result source while preserving
+// the current query and exact selected target when it remains available.
+func (m *Model) ReplaceResults(results []Result) {
+	if m == nil {
+		return
+	}
+	selected, hadSelection := m.Selected()
+	m.results = append([]Result(nil), results...)
+	m.argumentResults = requiredArgumentResults(m.results)
+	m.refresh()
+	if !hadSelection {
+		return
+	}
+	for i, match := range m.matches {
+		if match.Result.sameTarget(selected) {
+			m.selected = i
+			m.clamp()
+			return
+		}
+	}
+}
+
 func DefaultRenderStyles() RenderStyles {
 	selection := renderer.DefaultStyle()
 	selection.Inverse = true

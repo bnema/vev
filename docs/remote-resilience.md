@@ -27,12 +27,20 @@ directory; direct CLI remote attaches retain their client-request semantics.
 
 Remote attachments remain direct: the selected remote daemon owns the session,
 PTYs, rendering, input, resize, effects, and teardown. The client does not
-proxy remote content through the local daemon. A single client process keeps a
-bounded, in-memory route history across local, direct remote, and picker-
-discovered attachments. The daemon renders the latest attachment snapshot;
-active routes are metadata-only, while `JRS` and `BCK` send typed key/generation
-actions back to the client. History is process-local and is not persisted or
-shared between clients.
+proxy remote content through the local daemon. The session picker and command
+palette read remote session inventory from the daemon's durable catalog cache
+and refresh it asynchronously while either overlay is open. Cached names appear
+immediately, but selection still requires a fresh exact lifecycle and tab
+identity.
+
+A single client process separately keeps a bounded, in-memory route history
+across local, direct remote, and picker-discovered attachments. Catalog targets
+retain exact endpoints, while route snapshots keep endpoints private; rows from
+those sources therefore remain separate when their authority cannot be compared
+exactly. The daemon renders the latest attachment snapshot; active routes are
+metadata-only, while `JRS` and `BCK` send typed
+key/generation actions back to the client. Route history is process-local and
+is not persisted or shared between clients.
 
 A picker-selected remote target is a direct handoff with one input pump. Exact
 lifecycle/name identities are carried separately from display labels, and a

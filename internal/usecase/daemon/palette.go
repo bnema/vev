@@ -43,16 +43,42 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	routeSnapshot := ac.routeSnapshotCopy()
 	commands := d.paletteCommands()
 	results := d.paletteResults(sess, commands, routeSnapshot)
+	model := palette.New(results)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.paletteGeneration++
-	ac.overlays.palette = palette.New(results)
+	ac.overlays.palette = model
 	ac.overlays.paletteRouteSnapshot = routeSnapshot
 	ac.overlays.paletteHints = palette.ContextualHints{}
 	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
+	generation := ac.overlays.paletteGeneration
 	ac.overlays.paletteMu.Unlock()
 	d.invalidateRender(sess, ac, true, "palette.go")
+	d.remoteDiscoveryOpened(remoteDiscoveryInstance{
+		ac: ac, kind: remoteDiscoveryPalette, generation: generation, palette: model,
+	})
+}
+
+type paletteSessionIdentity struct {
+	kind      ports.RouteKind
+	endpoint  string
+	lifecycle domain.SessionLifecycleID
+}
+
+func localPaletteSessionIdentity(lifecycle domain.SessionLifecycleID) paletteSessionIdentity {
+	return paletteSessionIdentity{kind: ports.RouteKindLocal, endpoint: "local", lifecycle: lifecycle}
+}
+
+func remotePaletteSessionIdentity(endpoint string, lifecycle domain.SessionLifecycleID) paletteSessionIdentity {
+	return paletteSessionIdentity{kind: ports.RouteKindRemote, endpoint: endpoint, lifecycle: lifecycle}
+}
+
+func remotePaletteUnavailableReason(status remoteHostStatus, session ports.RemoteCatalogSession) string {
+	if session.State == ports.RemoteCatalogSessionBroken {
+		return "session_broken"
+	}
+	return remoteReasonForStatus(status)
 }
 
 // paletteResults captures eligible named sessions before paletteMu so the
@@ -61,16 +87,23 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
 	stopped := make([]inactiveSession, 0, len(d.inactive))
-	localLifecycles := make(map[domain.SessionLifecycleID]struct{}, len(sessions)+len(d.inactive))
+	represented := make(map[paletteSessionIdentity]struct{}, len(sessions)+len(d.inactive)+len(routeSnapshot.Entries))
 	for _, entry := range d.inactive {
-		localLifecycles[entry.incarnation] = struct{}{}
+		represented[localPaletteSessionIdentity(entry.incarnation)] = struct{}{}
 		if entry.canResume() {
 			stopped = append(stopped, entry)
 		}
 	}
 	d.mu.Unlock()
 
-	results := make([]palette.Result, 0, len(commands)+len(sessions)+len(stopped)+len(routeSnapshot.Entries))
+	remoteCatalog := d.remoteCatalogSnapshot()
+	sortRemoteCatalog(remoteCatalog, d.remoteHostRanks())
+	remoteSessionCount := 0
+	for _, host := range remoteCatalog {
+		remoteSessionCount += len(host.entry.Sessions)
+	}
+
+	results := make([]palette.Result, 0, len(commands)+len(sessions)+len(stopped)+remoteSessionCount+len(routeSnapshot.Entries))
 	for _, cmd := range commands {
 		results = append(results, palette.NewCommandResult(cmd))
 	}
@@ -80,7 +113,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		if snap.name == "" || snap.ephemeral {
 			continue
 		}
-		localLifecycles[snap.incarnation] = struct{}{}
+		represented[localPaletteSessionIdentity(snap.incarnation)] = struct{}{}
 		if candidate == current {
 			continue
 		}
@@ -97,7 +130,29 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	for _, candidate := range stopped {
 		target := ports.ExactSessionTarget{LifecycleID: candidate.incarnation, SessionName: candidate.name}
 		results = append(results, palette.NewStoppedSessionResult(target, time.Unix(0, candidate.createdAt)))
-		localLifecycles[target.LifecycleID] = struct{}{}
+		represented[localPaletteSessionIdentity(target.LifecycleID)] = struct{}{}
+	}
+	type discoveredRemote struct {
+		identity paletteSessionIdentity
+		result   palette.Result
+	}
+	discovered := make([]discoveredRemote, 0, remoteSessionCount)
+	for _, host := range remoteCatalog {
+		for _, session := range host.entry.Sessions {
+			if session.Ephemeral {
+				continue
+			}
+			key, target := remoteCatalogSessionTarget(domain.RemoteSessionKey{
+				Host: host.entry.Host, Name: session.Name,
+			}, session)
+			if key.Validate() != nil || target.Validate() != nil {
+				continue
+			}
+			discovered = append(discovered, discoveredRemote{
+				identity: remotePaletteSessionIdentity(key.Host, session.LifecycleID),
+				result:   palette.NewRemoteSessionResult(key, target, remotePaletteUnavailableReason(host.status, session)),
+			})
+		}
 	}
 	formattedRoutes := formatRecentRouteSnapshot(routeSnapshot)
 	for i, entry := range routeSnapshot.Entries {
@@ -108,7 +163,8 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		if label == "" {
 			continue
 		}
-		if _, represented := localLifecycles[entry.Target.LifecycleID]; represented {
+		identity := localPaletteSessionIdentity(entry.Target.LifecycleID)
+		if _, exists := represented[identity]; entry.Kind == ports.RouteKindLocal && exists {
 			continue
 		}
 		results = append(results, palette.NewRecentRouteResult(label, ports.RouteNavigationAction{
@@ -116,8 +172,46 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			Key:                entry.Key,
 			Generation:         entry.Generation,
 		}))
+		if entry.Kind == ports.RouteKindLocal {
+			represented[identity] = struct{}{}
+		}
+	}
+	for _, remote := range discovered {
+		if _, exists := represented[remote.identity]; exists {
+			continue
+		}
+		results = append(results, remote.result)
+		represented[remote.identity] = struct{}{}
 	}
 	return results
+}
+
+func (d *Daemon) refreshPalette(ac *attachedClient) {
+	if d == nil || ac == nil || ac.overlays == nil {
+		return
+	}
+	sess := ac.currentAttachmentSession()
+	if sess == nil {
+		return
+	}
+	rt := ac.overlays
+	rt.paletteMu.Lock()
+	model := rt.palette
+	generation := rt.paletteGeneration
+	routeSnapshot := rt.paletteRouteSnapshot
+	routeSnapshot.Entries = append([]ports.RecentRouteEntry(nil), routeSnapshot.Entries...)
+	rt.paletteMu.Unlock()
+	if model == nil {
+		return
+	}
+
+	results := d.paletteResults(sess, d.paletteCommands(), routeSnapshot)
+	rt.paletteMu.Lock()
+	defer rt.paletteMu.Unlock()
+	if rt.paletteGeneration != generation || rt.palette != model {
+		return
+	}
+	model.ReplaceResults(results)
 }
 
 func recentRouteHints(snapshot ports.RecentRouteSnapshot, args []string) palette.ContextualHints {
@@ -192,6 +286,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var cmd command.Command
 	var sessionTarget palette.Result
 	var hasSessionTarget bool
+	var remoteTarget domain.RemoteSessionTarget
+	var remoteKey domain.RemoteSessionKey
+	var remoteUnavailableReason string
+	var hasRemoteTarget bool
 	var routeTarget ports.RouteNavigationAction
 	var hasRouteTarget bool
 	var args []string
@@ -199,6 +297,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var generation uint64
 	var rawQuery string
 	changed, cancel, execute := false, false, false
+	var closedDiscovery remoteDiscoveryInstance
 	var effect *attachmentEffectTicket
 	if len(effects) != 0 {
 		effect = effects[0]
@@ -270,6 +369,16 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 					routeSnapshot = ac.overlays.paletteRouteSnapshot
 					routeSnapshot.Entries = append([]ports.RecentRouteEntry(nil), routeSnapshot.Entries...)
 				}
+			} else if target, ok := selected.RemoteSessionTarget(); ok {
+				key, keyOK := selected.RemoteSessionKey()
+				if !keyOK {
+					changed = true
+					return
+				}
+				remoteTarget = target
+				remoteKey = key
+				remoteUnavailableReason, _ = selected.RemoteSessionUnavailableReason()
+				hasRemoteTarget = true
 			} else if action, ok := selected.RouteNavigationAction(); ok {
 				routeTarget = action
 				hasRouteTarget = true
@@ -303,15 +412,39 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 	}
 	if cancel {
-		ac.clearPaletteLocked()
+		closedDiscovery = ac.clearPaletteLocked()
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
+		d.remoteDiscoveryClosed(closedDiscovery)
 		d.invalidateRender(entry, ac, true, "palette.go")
 		return
 	}
 	if !execute {
 		if changed {
+			d.invalidateRender(entry, ac, true, "palette.go")
+		}
+		return
+	}
+
+	if hasRemoteTarget {
+		if effect == nil {
+			ac.paletteFailure(generation, rawQuery, "requested remote session is unavailable")
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
+		target := picker.Target{
+			Session: remoteKey.ID(), Incarnation: remoteKey.LifecycleID, Name: remoteKey.Display(),
+			RemoteKey: &remoteKey, RemoteTarget: &remoteTarget, RemoteHost: remoteKey.Host,
+			UnavailableReason: remoteUnavailableReason, TabIndex: -1,
+		}
+		err := d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{}, "palette-remote-session")
+		if err == nil {
+			d.closeExecutedPalette(ac, generation, rawQuery)
+			return
+		}
+		if !errors.Is(err, errAttachmentTransition) {
+			ac.paletteFailure(generation, rawQuery, "requested remote session is unavailable")
 			d.invalidateRender(entry, ac, true, "palette.go")
 		}
 		return
@@ -327,7 +460,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		if ac.closeExecutedPalette(generation, rawQuery) {
+		if d.closeExecutedPalette(ac, generation, rawQuery) {
 			d.invalidateRender(entry, ac, true, "palette.go")
 		}
 		return
@@ -356,7 +489,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		if ac.closeExecutedPalette(generation, rawQuery) {
+		if d.closeExecutedPalette(ac, generation, rawQuery) {
 			if current := ac.currentAttachmentSession(); current != nil {
 				d.invalidateRender(current, ac, true, "palette.go")
 			}
@@ -380,7 +513,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		if ac.closeExecutedPalette(generation, rawQuery) {
+		if d.closeExecutedPalette(ac, generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
 			if current := ac.currentAttachmentSession(); current != nil {
 				d.invalidateRender(current, ac, true, "palette.go")
@@ -389,7 +522,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		return
 	}
 	attachmentHandoff := cmd.Slug == "back-session" || cmd.Slug == "detach"
-	if !attachmentHandoff && !ac.closeExecutedPalette(generation, rawQuery) {
+	if !attachmentHandoff && !d.closeExecutedPalette(ac, generation, rawQuery) {
 		return
 	}
 	sess.dispatchMu.Lock()
@@ -399,14 +532,14 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		if current := ac.currentSession(); current != nil {
 			currentToken := current.attachmentToken(ac, ac.transport())
 			fresh, admitted := ac.beginAttachmentEffect(currentToken)
-			if ac.closeExecutedPalette(generation, rawQuery) {
+			if d.closeExecutedPalette(ac, generation, rawQuery) {
 				d.invalidateRender(current, ac, true, "palette.go")
 			}
 			if admitted {
 				fresh.End()
 			}
 		} else {
-			ac.closeExecutedPalette(generation, rawQuery)
+			d.closeExecutedPalette(ac, generation, rawQuery)
 		}
 	}
 	if errors.Is(err, errAttachmentTransition) {
@@ -435,7 +568,8 @@ func paletteArgs(query string, cmd command.Command) []string {
 	return action.Args
 }
 
-func (ac *attachedClient) clearPaletteLocked() {
+func (ac *attachedClient) clearPaletteLocked() remoteDiscoveryInstance {
+	model := ac.overlays.palette
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = nil
 	ac.overlays.paletteRouteSnapshot = ports.RecentRouteSnapshot{}
@@ -443,6 +577,9 @@ func (ac *attachedClient) clearPaletteLocked() {
 	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
+	return remoteDiscoveryInstance{
+		ac: ac, kind: remoteDiscoveryPalette, generation: ac.overlays.paletteGeneration, palette: model,
+	}
 }
 
 func (ac *attachedClient) paletteFailure(generation uint64, rawQuery, feedback string) {
@@ -454,13 +591,34 @@ func (ac *attachedClient) paletteFailure(generation uint64, rawQuery, feedback s
 	ac.overlays.paletteFeedback = feedback
 }
 
-func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery string) bool {
+func (d *Daemon) closeExecutedPalette(ac *attachedClient, generation uint64, rawQuery string) bool {
 	ac.overlays.paletteMu.Lock()
-	defer ac.overlays.paletteMu.Unlock()
 	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
+		ac.overlays.paletteMu.Unlock()
 		return false
 	}
-	ac.clearPaletteLocked()
+	instance := ac.clearPaletteLocked()
+	ac.overlays.paletteMu.Unlock()
+	d.remoteDiscoveryClosed(instance)
+	return true
+}
+
+func (d *Daemon) closePalette(ac *attachedClient) {
+	d.closePaletteIfCurrent(ac, 0)
+}
+
+func (d *Daemon) closePaletteIfCurrent(ac *attachedClient, generation uint64) bool {
+	if d == nil || ac == nil || ac.overlays == nil {
+		return false
+	}
+	ac.overlays.paletteMu.Lock()
+	if ac.overlays.palette == nil || generation != 0 && ac.overlays.paletteGeneration != generation {
+		ac.overlays.paletteMu.Unlock()
+		return false
+	}
+	instance := ac.clearPaletteLocked()
+	ac.overlays.paletteMu.Unlock()
+	d.remoteDiscoveryClosed(instance)
 	return true
 }
 
