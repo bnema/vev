@@ -11,10 +11,11 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
-type remotePickerCatalogEntry struct {
+type remoteCatalogPresentationEntry struct {
 	entry  ports.RemoteCatalogCacheEntry
 	status remoteHostStatus
 }
@@ -28,12 +29,25 @@ type remotePickerInstance struct {
 	model      *picker.Model
 }
 
-// remotePickerCatalogSnapshot copies the cache-derived state needed for a
-// picker before any row sorting begins. No remote-state lock survives this
-// snapshot.
-const remotePickerAttachTTL = 30 * time.Second
+func (i remotePickerInstance) discoveryInstance() remoteDiscoveryInstance {
+	return remoteDiscoveryInstance{
+		ac: i.ac, kind: remoteDiscoveryPicker, generation: i.generation, picker: i.model,
+	}
+}
 
-func (d *Daemon) remotePickerCatalogSnapshot() []remotePickerCatalogEntry {
+type remoteDiscoveryInstance struct {
+	ac         *attachedClient
+	kind       remoteDiscoveryConsumerKind
+	generation uint64
+	picker     *picker.Model
+	palette    *palette.Model
+}
+
+// remoteCatalogSnapshot copies the cache-derived discovery state before any
+// overlay sorting begins. No remote-state lock survives this snapshot.
+const remoteCatalogAttachTTL = 30 * time.Second
+
+func (d *Daemon) remoteCatalogSnapshot() []remoteCatalogPresentationEntry {
 	if d == nil {
 		return nil
 	}
@@ -44,10 +58,10 @@ func (d *Daemon) remotePickerCatalogSnapshot() []remotePickerCatalogEntry {
 			d.remoteCatalog.status[host] = remoteHostStale
 		}
 	}
-	entries := make([]remotePickerCatalogEntry, 0, len(d.remoteCatalog.cache)+len(d.remoteCatalog.status))
+	entries := make([]remoteCatalogPresentationEntry, 0, len(d.remoteCatalog.cache)+len(d.remoteCatalog.status))
 	seen := make(map[string]struct{}, len(d.remoteCatalog.cache))
 	for host, entry := range d.remoteCatalog.cache {
-		entries = append(entries, remotePickerCatalogEntry{
+		entries = append(entries, remoteCatalogPresentationEntry{
 			entry:  cloneRemoteCatalogEntry(entry),
 			status: d.remoteCatalog.status[host],
 		})
@@ -57,7 +71,7 @@ func (d *Daemon) remotePickerCatalogSnapshot() []remotePickerCatalogEntry {
 		if _, exists := seen[host]; exists || (status != remoteHostUnreachable && status != remoteHostVersionMismatch && status != remoteHostMalformed) {
 			continue
 		}
-		entries = append(entries, remotePickerCatalogEntry{
+		entries = append(entries, remoteCatalogPresentationEntry{
 			entry:  ports.RemoteCatalogCacheEntry{Host: host},
 			status: status,
 		})
@@ -66,14 +80,14 @@ func (d *Daemon) remotePickerCatalogSnapshot() []remotePickerCatalogEntry {
 	return entries
 }
 
-func (d *Daemon) remotePickerHostRanks() map[string]int {
+func (d *Daemon) remoteHostRanks() map[string]int {
 	ranks := make(map[string]int)
 	if d == nil || d.remoteHostStore == nil {
 		return ranks
 	}
 	pinned, learned, err := d.remoteHostStore.Hosts()
 	if err != nil {
-		d.log.Warn("listing remote hosts for picker failed", "err", err)
+		d.log.Warn("listing remote hosts for discovery failed", "err", err)
 		return ranks
 	}
 	for _, host := range append(pinned, learned...) {
@@ -85,7 +99,7 @@ func (d *Daemon) remotePickerHostRanks() map[string]int {
 }
 
 func remoteCatalogExpired(fetchedAt, now time.Time) bool {
-	return fetchedAt.IsZero() || (!now.Before(fetchedAt) && now.Sub(fetchedAt) >= remotePickerAttachTTL)
+	return fetchedAt.IsZero() || (!now.Before(fetchedAt) && now.Sub(fetchedAt) >= remoteCatalogAttachTTL)
 }
 
 func remotePickerAvailability(status remoteHostStatus) picker.RemoteAvailability {
@@ -128,9 +142,43 @@ func remoteSessionStateStopped(state ports.RemoteCatalogSessionState) bool {
 	return state == ports.RemoteCatalogSessionDown
 }
 
-func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
+func remoteCatalogSessionTarget(key domain.RemoteSessionKey, session ports.RemoteCatalogSession) (domain.RemoteSessionKey, domain.RemoteSessionTarget) {
 	key.LifecycleID = session.LifecycleID
 	key.DisplayOrigin = domain.RemoteDisplayOrigin(key.Host)
+	target := domain.RemoteSessionTarget{
+		Endpoint:      key.Host,
+		DisplayOrigin: key.DisplayOrigin,
+		LifecycleID:   session.LifecycleID,
+		SessionName:   session.Name,
+		Stopped:       remoteSessionStateStopped(session.State),
+	}
+	tabs := ports.CatalogTabs(session)
+	if len(tabs) == 0 {
+		return key, target
+	}
+	if target.Stopped {
+		first := tabs[0]
+		if first.ID != "" {
+			target.StoppedTab = domain.NewStableTabSelector(domain.TabStableID(first.ID))
+		} else {
+			tabCount := min(len(tabs), math.MaxUint16)
+			target.StoppedTab = domain.NewOrdinalTabSelector(0, first.Name, uint16(tabCount))
+		}
+		return key, target
+	}
+	active := 0
+	for i, tab := range tabs {
+		if session.ActiveTabID != "" && tab.ID == session.ActiveTabID {
+			active = i
+			break
+		}
+	}
+	target.LiveTabID = domain.TabStableID(tabs[active].ID)
+	return key, target
+}
+
+func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
+	key, target := remoteCatalogSessionTarget(key, session)
 	availability := remotePickerAvailability(status)
 	stopped := remoteSessionStateStopped(session.State)
 	broken := session.State == ports.RemoteCatalogSessionBroken
@@ -152,26 +200,6 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 			Detail:    tab.Detail,
 			Attention: tab.Attention,
 		})
-	}
-	target := domain.RemoteSessionTarget{
-		Endpoint:      key.Host,
-		DisplayOrigin: key.DisplayOrigin,
-		LifecycleID:   session.LifecycleID,
-		SessionName:   session.Name,
-		Stopped:       stopped,
-	}
-	if len(tabs) != 0 {
-		first := tabs[0]
-		if stopped {
-			if first.ID != "" {
-				target.StoppedTab = domain.NewStableTabSelector(domain.TabStableID(first.ID))
-			} else {
-				tabCount := min(len(tabs), math.MaxUint16)
-				target.StoppedTab = domain.NewOrdinalTabSelector(0, first.Name, uint16(tabCount))
-			}
-		} else {
-			target.LiveTabID = domain.TabStableID(tabs[active].ID)
-		}
 	}
 	// Keep the structured session identity on rows even when one tab ID is
 	// malformed or a broken session cannot be activated. Cursor navigation
@@ -265,7 +293,7 @@ func remotePickerHostView(host string, status remoteHostStatus) picker.SessionVi
 	}
 }
 
-func sortRemotePickerCatalog(entries []remotePickerCatalogEntry, ranks map[string]int) {
+func sortRemoteCatalog(entries []remoteCatalogPresentationEntry, ranks map[string]int) {
 	for i := range entries {
 		sort.Slice(entries[i].entry.Sessions, func(left, right int) bool {
 			l, r := entries[i].entry.Sessions[left], entries[i].entry.Sessions[right]
@@ -289,63 +317,106 @@ func sortRemotePickerCatalog(entries []remotePickerCatalogEntry, ranks map[strin
 	})
 }
 
-func (d *Daemon) remotePickerOpened(instance remotePickerInstance) {
-	if d.registerRemotePicker(instance) {
-		d.startRemotePickerRefresh(instance)
+func (d *Daemon) remoteDiscoveryOpened(instance remoteDiscoveryInstance) {
+	if d.registerRemoteDiscoveryConsumer(instance) {
+		d.startRemoteDiscoveryRefresh(instance)
 	}
 }
 
-// registerRemotePicker installs one exact picker generation as a refresh owner.
-// Keeping this step separate gives refresh startup a second atomic validation
-// point: a close can win between registration and startup without being undone
-// by a delayed opener.
-func (d *Daemon) registerRemotePicker(instance remotePickerInstance) bool {
-	if d == nil || instance.ac == nil || instance.ac.overlays == nil || instance.model == nil {
+// registerRemoteDiscoveryConsumer installs one exact overlay generation as a
+// refresh owner. Overlay ownership always nests its model lock before the
+// catalog lock; no path may acquire an overlay lock while retaining catalog.mu.
+func (d *Daemon) registerRemoteDiscoveryConsumer(instance remoteDiscoveryInstance) bool {
+	if d == nil || instance.ac == nil || instance.ac.overlays == nil {
 		return false
 	}
 	rt := instance.ac.overlays
-	// Picker ownership always nests pickerMu -> remoteCatalog.mu. No path may
-	// acquire pickerMu while retaining the catalog lock.
-	rt.pickerMu.Lock()
-	defer rt.pickerMu.Unlock()
-	if rt.pickerGeneration != instance.generation || rt.picker != instance.model {
+	switch instance.kind {
+	case remoteDiscoveryPicker:
+		if instance.picker == nil {
+			return false
+		}
+		rt.pickerMu.Lock()
+		defer rt.pickerMu.Unlock()
+		if rt.pickerGeneration != instance.generation || rt.picker != instance.picker {
+			return false
+		}
+	case remoteDiscoveryPalette:
+		if instance.palette == nil {
+			return false
+		}
+		rt.paletteMu.Lock()
+		defer rt.paletteMu.Unlock()
+		if rt.paletteGeneration != instance.generation || rt.palette != instance.palette {
+			return false
+		}
+	default:
 		return false
 	}
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.pickers[instance.ac] = struct{}{}
+	d.remoteCatalog.consumers[instance.ac] |= instance.kind
 	d.remoteCatalog.mu.Unlock()
 	return true
 }
 
-func (d *Daemon) remotePickerClosed(instance remotePickerInstance) {
-	if d == nil || instance.ac == nil || instance.ac.overlays == nil || instance.model == nil {
+func (d *Daemon) remoteDiscoveryClosed(instance remoteDiscoveryInstance) {
+	if d == nil || instance.ac == nil || instance.ac.overlays == nil {
 		return
 	}
 	rt := instance.ac.overlays
-	rt.pickerMu.Lock()
-	current := rt.pickerGeneration == instance.generation && rt.picker == nil
+	var current bool
+	var unlock func()
+	switch instance.kind {
+	case remoteDiscoveryPicker:
+		if instance.picker == nil {
+			return
+		}
+		rt.pickerMu.Lock()
+		unlock = rt.pickerMu.Unlock
+		current = rt.pickerGeneration == instance.generation && rt.picker == nil
+	case remoteDiscoveryPalette:
+		if instance.palette == nil {
+			return
+		}
+		rt.paletteMu.Lock()
+		unlock = rt.paletteMu.Unlock
+		current = rt.paletteGeneration == instance.generation && rt.palette == nil
+	default:
+		return
+	}
 	if !current {
-		rt.pickerMu.Unlock()
+		unlock()
 		return
 	}
 	d.remoteCatalog.mu.Lock()
-	delete(d.remoteCatalog.pickers, instance.ac)
-	if len(d.remoteCatalog.pickers) != 0 {
+	owners := d.remoteCatalog.consumers[instance.ac]
+	if owners&instance.kind == 0 {
 		d.remoteCatalog.mu.Unlock()
-		rt.pickerMu.Unlock()
+		unlock()
+		return
+	}
+	owners &^= instance.kind
+	if owners == 0 {
+		delete(d.remoteCatalog.consumers, instance.ac)
+	} else {
+		d.remoteCatalog.consumers[instance.ac] = owners
+	}
+	if len(d.remoteCatalog.consumers) != 0 {
+		d.remoteCatalog.mu.Unlock()
+		unlock()
 		return
 	}
 	d.remoteCatalog.refresh++
 	cancel := d.remoteCatalog.cancel
 	d.remoteCatalog.cancel = nil
 	d.remoteCatalog.mu.Unlock()
-	rt.pickerMu.Unlock()
+	unlock()
 	if cancel != nil {
 		cancel()
 	}
 }
 
-func (d *Daemon) cancelRemotePickerRefresh() {
+func (d *Daemon) cancelRemoteDiscoveryRefresh() {
 	if d == nil {
 		return
 	}
@@ -359,7 +430,7 @@ func (d *Daemon) cancelRemotePickerRefresh() {
 	}
 }
 
-func (d *Daemon) remotePickerHosts() ([]string, error) {
+func (d *Daemon) remoteDiscoveryHosts() ([]string, error) {
 	if d == nil || d.remoteHostStore == nil {
 		return nil, nil
 	}
@@ -383,12 +454,12 @@ func (d *Daemon) remotePickerHosts() ([]string, error) {
 	return hosts, nil
 }
 
-// startRemotePickerRefresh replaces the current refresh generation and launches
-// one bounded catalog call per known host. Installing the generation is gated
-// by the exact picker generation that registered ownership. Host-store and
-// remote I/O happen after every architecture lock has been released.
-func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 {
-	if d == nil || instance.ac == nil || instance.ac.overlays == nil || instance.model == nil {
+// startRemoteDiscoveryRefresh replaces the current refresh generation and
+// launches one bounded catalog call per known host. Installing the generation
+// is gated by the exact overlay generation that registered ownership. Host
+// store and remote I/O happen after every architecture lock is released.
+func (d *Daemon) startRemoteDiscoveryRefresh(instance remoteDiscoveryInstance) uint64 {
+	if d == nil || instance.ac == nil || instance.ac.overlays == nil {
 		return 0
 	}
 	root := context.Background()
@@ -398,22 +469,47 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 	ctx, cancel := context.WithCancel(root)
 
 	rt := instance.ac.overlays
-	rt.pickerMu.Lock()
-	d.remoteCatalog.mu.Lock()
-	_, owner := d.remoteCatalog.pickers[instance.ac]
-	current := rt.pickerGeneration == instance.generation && rt.picker == instance.model
-	if !current || !owner || len(d.remoteCatalog.pickers) == 0 {
-		d.remoteCatalog.mu.Unlock()
+	install := func(current bool) (context.CancelFunc, uint64, bool) {
+		d.remoteCatalog.mu.Lock()
+		defer d.remoteCatalog.mu.Unlock()
+		owner := d.remoteCatalog.consumers[instance.ac]&instance.kind != 0
+		if !current || !owner || len(d.remoteCatalog.consumers) == 0 {
+			return nil, 0, false
+		}
+		previous := d.remoteCatalog.cancel
+		d.remoteCatalog.refresh++
+		generation := d.remoteCatalog.refresh
+		d.remoteCatalog.cancel = cancel
+		return previous, generation, true
+	}
+	var previous context.CancelFunc
+	var generation uint64
+	var installed bool
+	switch instance.kind {
+	case remoteDiscoveryPicker:
+		if instance.picker == nil {
+			cancel()
+			return 0
+		}
+		rt.pickerMu.Lock()
+		previous, generation, installed = install(rt.pickerGeneration == instance.generation && rt.picker == instance.picker)
 		rt.pickerMu.Unlock()
+	case remoteDiscoveryPalette:
+		if instance.palette == nil {
+			cancel()
+			return 0
+		}
+		rt.paletteMu.Lock()
+		previous, generation, installed = install(rt.paletteGeneration == instance.generation && rt.palette == instance.palette)
+		rt.paletteMu.Unlock()
+	default:
 		cancel()
 		return 0
 	}
-	previous := d.remoteCatalog.cancel
-	d.remoteCatalog.refresh++
-	generation := d.remoteCatalog.refresh
-	d.remoteCatalog.cancel = cancel
-	d.remoteCatalog.mu.Unlock()
-	rt.pickerMu.Unlock()
+	if !installed {
+		cancel()
+		return 0
+	}
 	if previous != nil {
 		previous()
 	}
@@ -421,7 +517,7 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 		return generation
 	}
 
-	hosts, err := d.remotePickerHosts()
+	hosts, err := d.remoteDiscoveryHosts()
 	if err != nil {
 		d.log.Warn("listing remote hosts for refresh failed", "err", err)
 		return generation
@@ -454,7 +550,7 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 	if cacheChanged {
 		d.persistRemoteCatalogCache()
 	}
-	d.refreshRemoteOpenPickers()
+	d.refreshRemoteDiscoveryConsumers()
 
 	for _, host := range hosts {
 		d.sessWg.Go(func() {
@@ -465,7 +561,7 @@ func (d *Daemon) startRemotePickerRefresh(instance remotePickerInstance) uint64 
 	return generation
 }
 
-func containsRemotePickerHost(hosts []string, target string) bool {
+func containsRemoteDiscoveryHost(hosts []string, target string) bool {
 	for _, host := range hosts {
 		if host == target {
 			return true
@@ -488,12 +584,12 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 		return false
 	}
 
-	hosts, hostsErr := d.remotePickerHosts()
+	hosts, hostsErr := d.remoteDiscoveryHosts()
 	if hostsErr != nil {
 		d.log.Warn("revalidating remote host refresh failed", "host", host, "err", hostsErr)
 		return false
 	}
-	stillKnown := containsRemotePickerHost(hosts, host)
+	stillKnown := containsRemoteDiscoveryHost(hosts, host)
 	now := d.clock.Now()
 	if listErr == nil {
 		if err := ports.ValidateRemoteCatalog(catalog); err != nil {
@@ -514,7 +610,7 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 		d.remoteCatalog.mu.Unlock()
 		if cacheChanged {
 			d.persistRemoteCatalogCache()
-			d.refreshRemoteOpenPickers()
+			d.refreshRemoteDiscoveryConsumers()
 		}
 		return cacheChanged
 	}
@@ -532,7 +628,7 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 		d.remoteCatalog.status[host] = status
 		d.remoteCatalog.failure[host] = now
 		d.remoteCatalog.mu.Unlock()
-		d.refreshRemoteOpenPickers()
+		d.refreshRemoteDiscoveryConsumers()
 		return false
 	}
 	d.remoteCatalog.cache[host] = cloneRemoteCatalogEntry(ports.RemoteCatalogCacheEntry{
@@ -545,26 +641,42 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 	d.remoteCatalog.mu.Unlock()
 
 	d.persistRemoteCatalogCache()
-	d.refreshRemoteOpenPickers()
+	d.refreshRemoteDiscoveryConsumers()
 	return true
 }
 
-func (d *Daemon) refreshRemoteOpenPickers() {
+func (d *Daemon) refreshRemoteDiscoveryConsumers() {
 	if d == nil {
 		return
 	}
+	type consumer struct {
+		ac   *attachedClient
+		kind remoteDiscoveryConsumerKind
+	}
 	d.remoteCatalog.mu.Lock()
-	clients := make([]*attachedClient, 0, len(d.remoteCatalog.pickers))
-	for ac := range d.remoteCatalog.pickers {
-		clients = append(clients, ac)
+	consumers := make([]consumer, 0, len(d.remoteCatalog.consumers))
+	for ac, kind := range d.remoteCatalog.consumers {
+		consumers = append(consumers, consumer{ac: ac, kind: kind})
 	}
 	d.remoteCatalog.mu.Unlock()
 
-	for _, ac := range clients {
+	for _, consumer := range consumers {
+		ac := consumer.ac
 		if ac == nil || ac.overlays == nil {
 			continue
 		}
-		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		refreshed := false
+		if consumer.kind&remoteDiscoveryPicker != 0 {
+			d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+			refreshed = true
+		}
+		if consumer.kind&remoteDiscoveryPalette != 0 {
+			d.refreshPalette(ac)
+			refreshed = true
+		}
+		if !refreshed {
+			continue
+		}
 		if entry := ac.currentAttachmentSession(); entry != nil {
 			d.invalidateRender(entry, ac, true, "remote_picker.go")
 		}

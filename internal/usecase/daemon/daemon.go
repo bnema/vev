@@ -322,13 +322,14 @@ type Daemon struct {
 }
 
 type parkedAttachment struct {
-	sess             *session
-	ac               *attachedClient
-	pickerGeneration uint64
-	timer            ports.Timer
-	claimed          bool
-	done             chan struct{}
-	doneOnce         sync.Once
+	sess              *session
+	ac                *attachedClient
+	pickerGeneration  uint64
+	paletteGeneration uint64
+	timer             ports.Timer
+	claimed           bool
+	done              chan struct{}
+	doneOnce          sync.Once
 }
 
 // parkingAttachment is the observable detach→park lifecycle for one resume
@@ -816,7 +817,7 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 }
 
 func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
-	d.cancelRemotePickerRefresh()
+	d.cancelRemoteDiscoveryRefresh()
 	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true

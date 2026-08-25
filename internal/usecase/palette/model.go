@@ -57,6 +57,17 @@ func New(results []Result) *Model {
 
 func NewRegistry() *Model { return New(CommandResults(command.PaletteRegistry())) }
 
+// ReplaceResults atomically replaces the model's immutable result source while
+// preserving the current query, selection index, and scroll position.
+func (m *Model) ReplaceResults(results []Result) {
+	if m == nil {
+		return
+	}
+	m.results = append([]Result(nil), results...)
+	m.argumentResults = requiredArgumentResults(m.results)
+	m.refresh()
+}
+
 func DefaultRenderStyles() RenderStyles {
 	selection := renderer.DefaultStyle()
 	selection.Inverse = true

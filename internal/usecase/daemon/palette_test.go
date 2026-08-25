@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -426,6 +427,253 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 	require.Same(t, current, ac.currentSession())
 	d.handleInputForAttachment(token, []byte("\r"))
 	require.True(t, ac.overlays.paletteActive(), "literal JRS must not execute an overridden jump command")
+}
+
+func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
+	current := addControlSession(d, "current", "tab-1", "pane-1")
+	current.ephemeral = false
+	local := addControlSession(d, "vev", "tab-2", "pane-2")
+	local.ephemeral = false
+	remoteLifecycle := domain.SessionLifecycleID{21}
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.cache["user@arch"] = ports.RemoteCatalogCacheEntry{
+		Host: "user@arch", FetchedAt: now,
+		Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: remoteLifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
+			Tabs: []ports.RemoteCatalogTab{{ID: "tab-remote", Index: 0, Name: "shell"}}, ActiveTabID: "tab-remote",
+		}},
+	}
+	d.remoteCatalog.status["user@arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{})
+	var matching []palette.Result
+	for _, result := range results {
+		if result.DisplayText() == "Switch to session vev" || result.DisplayText() == "Switch to session vev@arch" {
+			matching = append(matching, result)
+		}
+	}
+	require.Len(t, matching, 2)
+	remoteTarget, ok := matching[1].RemoteSessionTarget()
+	require.True(t, ok)
+	require.Equal(t, domain.RemoteSessionTarget{
+		Endpoint: "user@arch", DisplayOrigin: "arch", LifecycleID: remoteLifecycle,
+		SessionName: "vev", LiveTabID: "tab-remote",
+	}, remoteTarget)
+}
+
+func TestPaletteKeepsExactCatalogEndpointsWithEqualDisplayAndLifecycle(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
+	current := addControlSession(d, "current", "tab-1", "pane-1")
+	current.ephemeral = false
+	lifecycle := domain.SessionLifecycleID{22}
+	d.remoteCatalog.mu.Lock()
+	for _, endpoint := range []string{"user@arch", "admin@arch"} {
+		d.remoteCatalog.cache[endpoint] = ports.RemoteCatalogCacheEntry{
+			Host: endpoint, FetchedAt: now,
+			Sessions: []ports.RemoteCatalogSession{{
+				LifecycleID: lifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
+				Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
+			}},
+		}
+		d.remoteCatalog.status[endpoint] = remoteHostFresh
+	}
+	d.remoteCatalog.mu.Unlock()
+
+	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{})
+	var endpoints []string
+	for _, result := range results {
+		if result.DisplayText() != "Switch to session vev@arch" {
+			continue
+		}
+		target, ok := result.RemoteSessionTarget()
+		require.True(t, ok)
+		endpoints = append(endpoints, target.Endpoint)
+	}
+	require.ElementsMatch(t, []string{"user@arch", "admin@arch"}, endpoints)
+}
+
+func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, current, ac, sends := newManualSessionWithPTYs(t, p)
+	now := time.Unix(1_000, 0)
+	d.clock = fixedRemoteRefreshClock{now: now}
+	remoteLifecycle := domain.SessionLifecycleID{31}
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.cache["user@arch"] = ports.RemoteCatalogCacheEntry{
+		Host: "user@arch", FetchedAt: now,
+		Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: remoteLifecycle, Name: "work", State: ports.RemoteCatalogSessionUp,
+			Tabs: []ports.RemoteCatalogTab{{ID: "tab-work", Index: 0, Name: "shell"}}, ActiveTabID: "tab-work",
+		}},
+	}
+	d.remoteCatalog.status["user@arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+	token := beginRecentRoutePaletteEffect(t, d, current, ac)
+
+	d.handleInputForAttachment(token, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInputForAttachment(token, []byte("work@arch\r"))
+
+	frame := awaitFrame(t, sends, ports.MsgAttachTarget)
+	target, err := ports.UnmarshalAttachTarget(frame.Payload)
+	require.NoError(t, err)
+	remoteTarget := domain.RemoteSessionTarget{
+		Endpoint: "user@arch", DisplayOrigin: "arch", LifecycleID: remoteLifecycle,
+		SessionName: "work", LiveTabID: "tab-work",
+	}
+	require.Equal(t, ports.AttachTarget{
+		Endpoint: "user@arch", Session: "work", Intent: ports.IntentAttach,
+		RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}, target)
+}
+
+func TestPaletteCachedRemoteSelectionFailsClosed(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, current, ac, sends := newManualSessionWithPTYs(t, p)
+	now := time.Unix(1_000, 0)
+	d.clock = fixedRemoteRefreshClock{now: now}
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{
+		Host: "arch", FetchedAt: now,
+		Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: domain.SessionLifecycleID{32}, Name: "cached", State: ports.RemoteCatalogSessionUp,
+			Tabs: []ports.RemoteCatalogTab{{ID: "tab-cached", Index: 0}}, ActiveTabID: "tab-cached",
+		}},
+	}
+	d.remoteCatalog.status["arch"] = remoteHostCached
+	d.remoteCatalog.mu.Unlock()
+	token := beginRecentRoutePaletteEffect(t, d, current, ac)
+
+	d.handleInputForAttachment(token, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInputForAttachment(token, []byte("cached@arch\r"))
+
+	require.Same(t, current, ac.currentAttachmentSession())
+	require.True(t, ac.overlays.paletteActive())
+	history := d.notices.history()
+	require.NotEmpty(t, history)
+	require.Contains(t, history[len(history)-1].Message, "refreshing")
+	require.NotContains(t, history[len(history)-1].Message, "identity changed")
+	for {
+		select {
+		case frame := <-sends:
+			require.NotEqual(t, ports.MsgAttachTarget, frame.Type)
+		default:
+			return
+		}
+	}
+}
+
+func TestRemoteRefreshUpdatesOpenPaletteAndPreservesQuery(t *testing.T) {
+	hosts := &remoteRefreshHostStore{hosts: []string{"user@arch"}}
+	d, catalog, cache := newRemoteRefreshDaemon(t, hosts, time.Unix(1_000, 0))
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "current")
+
+	d.enterPalette(sess, ac)
+	request := receiveRemotePicker(t, catalog.requests, "palette catalog request")
+	ac.overlays.paletteMu.Lock()
+	model := ac.overlays.palette
+	for _, r := range "vev" {
+		model.Insert(r)
+	}
+	ac.overlays.paletteMu.Unlock()
+	request.result <- remoteRefreshResult{catalog: remoteCatalogForTest(ports.RemoteCatalogSession{
+		LifecycleID: domain.SessionLifecycleID{41}, Name: "vev", State: ports.RemoteCatalogSessionUp,
+		Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
+	})}
+	receiveRemotePicker(t, cache.stores, "palette catalog cache store")
+	d.sessWg.Wait()
+
+	ac.overlays.paletteMu.Lock()
+	require.Same(t, model, ac.overlays.palette)
+	require.Equal(t, "vev", model.Query())
+	matches := model.Matches()
+	ac.overlays.paletteMu.Unlock()
+	displayTexts := make([]string, len(matches))
+	for i, match := range matches {
+		displayTexts[i] = match.Result.DisplayText()
+	}
+	require.Contains(t, displayTexts, "Switch to session vev@arch")
+
+	d.closePalette(ac)
+	d.remoteCatalog.mu.Lock()
+	require.NotContains(t, d.remoteCatalog.consumers, ac)
+	require.Nil(t, d.remoteCatalog.cancel)
+	d.remoteCatalog.mu.Unlock()
+}
+
+func TestRemoteRefreshTracksPickerAndPaletteOnSameAttachment(t *testing.T) {
+	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
+	d, catalog, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(1_100, 0))
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+
+	d.publishPicker(sess, ac, d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	request := receiveRemotePicker(t, catalog.requests, "picker catalog request")
+	d.enterPalette(sess, ac)
+	receiveRemotePickerClose(t, request.ctx.Done(), "superseded picker catalog request")
+	request = receiveRemotePicker(t, catalog.requests, "shared catalog request")
+
+	d.closePalette(ac)
+	select {
+	case <-request.ctx.Done():
+		t.Fatal("refresh canceled while the picker remained open")
+	default:
+	}
+	d.remoteCatalog.mu.Lock()
+	require.Equal(t, remoteDiscoveryPicker, d.remoteCatalog.consumers[ac])
+	d.remoteCatalog.mu.Unlock()
+
+	d.closePicker(ac)
+	receiveRemotePickerClose(t, request.ctx.Done(), "last discovery consumer cancellation")
+	d.remoteCatalog.mu.Lock()
+	require.Empty(t, d.remoteCatalog.consumers)
+	require.Nil(t, d.remoteCatalog.cancel)
+	d.remoteCatalog.mu.Unlock()
+}
+
+func TestPaletteKeepsCatalogTargetWhenRecentRouteHasOnlyDisplayOrigin(t *testing.T) {
+	now := time.Unix(1_200, 0)
+	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
+	current := addControlSession(d, "current", "tab-1", "pane-1")
+	current.ephemeral = false
+	lifecycle := domain.SessionLifecycleID{51}
+	d.remoteCatalog.mu.Lock()
+	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{
+		Host: "arch", FetchedAt: now,
+		Sessions: []ports.RemoteCatalogSession{{
+			LifecycleID: lifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
+			Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
+		}},
+	}
+	d.remoteCatalog.status["arch"] = remoteHostFresh
+	d.remoteCatalog.mu.Unlock()
+
+	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{
+		Generation: 2,
+		Entries: []ports.RecentRouteEntry{{
+			Key: 3, Generation: 1,
+			Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "vev"},
+			Name:   "vev", HostLabel: "arch", Kind: ports.RouteKindRemote,
+		}},
+	})
+	var matching []palette.Result
+	for _, result := range results {
+		if result.DisplayText() == "Switch to session vev@arch" {
+			matching = append(matching, result)
+		}
+	}
+	require.Len(t, matching, 2, "presentation-only route origin cannot deduplicate an exact catalog endpoint")
+	action, routeOK := matching[0].RouteNavigationAction()
+	_, catalogOK := matching[1].RemoteSessionTarget()
+	require.True(t, routeOK)
+	require.True(t, catalogOK)
+	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 2, Key: 3, Generation: 1}, action)
 }
 
 func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
