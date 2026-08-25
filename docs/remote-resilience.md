@@ -47,9 +47,26 @@ exact lifecycle target; the client confirms it with its remembered stable tab
 cursor while holding raw input. The daemon either commits the fenced attachment
 transition and publishes the committed identity before the rebased full paint,
 or sends a typed pre-commit rejection and leaves the source attachment usable.
-No hostname, label, DNS result, or SSH alias authorizes reuse. Stopped,
-explicit-tab, cross-origin, and remote-to-remote selections retain direct
-close-and-dial handoff.
+No hostname, label, DNS result, or SSH alias authorizes reuse. Stopped and
+cross-origin targets outside the hybrid UDP flow retain direct close-and-dial
+handoff.
+
+A UDP attachment opening the hybrid home picker keeps its authenticated remote
+transport parked while a transient local connection renders the picker. The
+remote daemon suspends that attachment's rendered output only after a
+lease-bound prepare handshake, so the picker has sole terminal ownership and
+the client does not acknowledge screen updates it did not display. Terminal-
+external one-shot effects generated while parked, such as OSC 52 clipboard
+writes, are intentionally suppressed and are not replayed after Back or a
+switch; applying them later could affect a different terminal owner. Back
+resumes the parked attachment's current VT state with a full paint. Selecting a
+live or stopped session from the exact same configured endpoint sends the
+structured lifecycle/tab target over the parked transport; the serving daemon
+revalidates it and switches or restores with its persisted working directory
+and daemon-owned environment. Different endpoints and SSH stdio routes close
+and dial normally. While any switch takes longer than the short display
+threshold, the client overlays an animated switching or starting toast until
+the destination's authoritative output is flushed.
 
 ## Durable record compatibility
 
@@ -82,6 +99,9 @@ picker selection changes.
 - Each command request has a 10-second deadline for its result. A timeout
   abandons only that request; it does not complete a later request with a stale
   result.
+- Each parked-route control response and its required full paint have separate
+  15-second client deadlines. A parked lease expires after 15 minutes and
+  closes only its exact retained transport generation.
 - Shared PTY content geometry follows the latest valid, non-superseded attach,
   resume, or resize claim. A later attachment can therefore replace the current
   shared geometry; if the winning attachment detaches, the most recently
