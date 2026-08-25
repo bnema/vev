@@ -2066,27 +2066,128 @@ func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 	return p, nil
 }
 
-// MarshalNavigationAction encodes one bounded navigation action.
-func MarshalNavigationAction(action NavigationAction) []byte {
-	if action != NavigationOpenHomePicker && action != NavigationBack {
+// MarshalNavigationDirective encodes one bounded navigation directive.
+func MarshalNavigationDirective(directive NavigationDirective) []byte {
+	if directive.Action != NavigationOpenHomePicker && directive.Action != NavigationBack {
 		return nil
 	}
-	return []byte{byte(action)}
+	if directive.Action == NavigationOpenHomePicker && directive.LeaseID.IsZero() || directive.Action == NavigationBack && !directive.LeaseID.IsZero() {
+		return nil
+	}
+	w := payloadWriter{}
+	w.putUint8(uint8(directive.Action))
+	w.putBytes(directive.LeaseID[:])
+	return w.b
 }
 
-// UnmarshalNavigationAction decodes one strict navigation action payload.
-func UnmarshalNavigationAction(b []byte) (NavigationAction, error) {
+// UnmarshalNavigationDirective decodes one strict navigation directive.
+func UnmarshalNavigationDirective(b []byte) (NavigationDirective, error) {
 	r := payloadReader{b: b}
 	value, err := r.getUint8()
 	if err != nil {
-		return 0, ErrInvalidNavigation
+		return NavigationDirective{}, ErrInvalidNavigation
+	}
+	lease, err := r.getBytes(len(ParkedRouteLeaseID{}))
+	if err != nil {
+		return NavigationDirective{}, ErrInvalidNavigation
 	}
 	if err := r.done(); err != nil {
-		return 0, ErrInvalidNavigation
+		return NavigationDirective{}, ErrInvalidNavigation
 	}
-	action := NavigationAction(value)
-	if action != NavigationOpenHomePicker && action != NavigationBack {
-		return 0, ErrInvalidNavigation
+	directive := NavigationDirective{Action: NavigationAction(value)}
+	copy(directive.LeaseID[:], lease)
+	if MarshalNavigationDirective(directive) == nil {
+		return NavigationDirective{}, ErrInvalidNavigation
 	}
-	return action, nil
+	return directive, nil
+}
+
+// ValidateParkedRouteRequest enforces the closed action/target shape before a
+// request reaches either side's route state machine.
+func ValidateParkedRouteRequest(request ParkedRouteRequest) error {
+	if request.RequestID == 0 || request.LeaseID.IsZero() {
+		return ErrInvalidNavigation
+	}
+	switch request.Action {
+	case ParkedRoutePrepare, ParkedRouteResume:
+		if request.Target != nil {
+			return ErrInvalidNavigation
+		}
+	case ParkedRouteSwitch:
+		if request.Target == nil || validateWireRemoteTarget(*request.Target) != nil {
+			return ErrInvalidNavigation
+		}
+	default:
+		return ErrInvalidNavigation
+	}
+	return nil
+}
+
+// MarshalParkedRouteRequest encodes one retained-route operation.
+func MarshalParkedRouteRequest(request ParkedRouteRequest) []byte {
+	if ValidateParkedRouteRequest(request) != nil {
+		return nil
+	}
+	w := payloadWriter{}
+	w.putUint64(request.RequestID)
+	w.putBytes(request.LeaseID[:])
+	w.putUint8(uint8(request.Action))
+	marshalRemoteTargetSection(&w, request.Target, EnvironmentPolicyDaemonOwned)
+	return w.b
+}
+
+// UnmarshalParkedRouteRequest decodes one strict retained-route operation.
+func UnmarshalParkedRouteRequest(b []byte) (ParkedRouteRequest, error) {
+	r := payloadReader{b: b}
+	requestID, err := r.getUint64()
+	if err != nil {
+		return ParkedRouteRequest{}, ErrInvalidNavigation
+	}
+	lease, err := r.getBytes(len(ParkedRouteLeaseID{}))
+	if err != nil {
+		return ParkedRouteRequest{}, ErrInvalidNavigation
+	}
+	action, err := r.getUint8()
+	if err != nil {
+		return ParkedRouteRequest{}, ErrInvalidNavigation
+	}
+	target, policy, err := unmarshalRemoteTargetSection(&r)
+	if err != nil || policy != EnvironmentPolicyDaemonOwned || r.done() != nil {
+		return ParkedRouteRequest{}, ErrInvalidNavigation
+	}
+	request := ParkedRouteRequest{RequestID: requestID, Action: ParkedRouteAction(action), Target: target}
+	copy(request.LeaseID[:], lease)
+	if ValidateParkedRouteRequest(request) != nil {
+		return ParkedRouteRequest{}, ErrInvalidNavigation
+	}
+	return request, nil
+}
+
+// MarshalParkedRouteResponse encodes one correlated retained-route outcome.
+func MarshalParkedRouteResponse(response ParkedRouteResponse) []byte {
+	if response.RequestID == 0 || response.Status < ParkedRouteReady || response.Status > ParkedRouteStaleTarget {
+		return nil
+	}
+	w := payloadWriter{}
+	w.putUint64(response.RequestID)
+	w.putUint8(uint8(response.Status))
+	return w.b
+}
+
+// UnmarshalParkedRouteResponse decodes one strict retained-route outcome.
+func UnmarshalParkedRouteResponse(b []byte) (ParkedRouteResponse, error) {
+	r := payloadReader{b: b}
+	requestID, err := r.getUint64()
+	if err != nil {
+		return ParkedRouteResponse{}, ErrInvalidNavigation
+	}
+	status, err := r.getUint8()
+	if err != nil || r.done() != nil {
+		return ParkedRouteResponse{}, ErrInvalidNavigation
+	}
+	response := ParkedRouteResponse{RequestID: requestID, Status: ParkedRouteStatus(status)}
+	if MarshalParkedRouteResponse(response) == nil {
+		return ParkedRouteResponse{}, ErrInvalidNavigation
+	}
+	return response, nil
 }
