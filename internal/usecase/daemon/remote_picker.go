@@ -43,10 +43,10 @@ type remoteDiscoveryInstance struct {
 	palette    *palette.Model
 }
 
-// remoteCatalogSnapshot copies the cache-derived discovery state before any
-// overlay sorting begins. No remote-state lock survives this snapshot.
 const remoteCatalogAttachTTL = 30 * time.Second
 
+// remoteCatalogSnapshot copies the cache-derived discovery state before any
+// overlay sorting begins. No remote-state lock survives this snapshot.
 func (d *Daemon) remoteCatalogSnapshot() []remoteCatalogPresentationEntry {
 	if d == nil {
 		return nil
