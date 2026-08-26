@@ -676,6 +676,36 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	require.Equal(t, ports.ErrNameTaken, taken.Code)
 }
 
+func TestHandleCommandNewSessionPreservesSourceGeometry(t *testing.T) {
+	factory := &controlPTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	source := addControlSession(d, "work", "t_work", "p_work")
+	client := &attachedClient{}
+	client.setGeometry(domain.Geometry{
+		Size: domain.Size{Cols: 120, Rows: 40}, PixelWidth: 1200, PixelHeight: 800,
+	})
+	require.True(t, source.registerAttachment(client))
+
+	result := sendCommand(t, d, ports.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
+
+	require.True(t, result.OK, result.Text)
+	d.mu.Lock()
+	created := d.findByNameLocked("scripted")
+	d.mu.Unlock()
+	require.NotNil(t, created)
+	created.mu.Lock()
+	tb := created.tabs[0]
+	created.mu.Unlock()
+	tb.mu.Lock()
+	pane := tb.focusedPane()
+	require.NotNil(t, pane)
+	require.Equal(t, domain.Geometry{
+		Size: domain.Size{Cols: 120, Rows: 38}, PixelWidth: 1200, PixelHeight: 760,
+	}, pane.geometry)
+	tb.mu.Unlock()
+}
+
 func TestHandleCommandValidatesToastAndQueuesForDetachedSession(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_work", "p_work")

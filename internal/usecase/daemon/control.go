@@ -482,7 +482,10 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	e.sess.mu.Lock()
 	cwd, env := e.sess.cwd, copyEnvironment(e.sess.env)
 	e.sess.mu.Unlock()
-	size := e.sess.fullViewportSize()
+	geometry := domain.Geometry{Size: e.sess.fullViewportSize()}
+	if source, ok := e.sess.geometrySourceSnapshot(); ok {
+		geometry = source.geometry
+	}
 	e.d.mu.Lock()
 	defer e.d.mu.Unlock()
 	if e.d.closing {
@@ -491,7 +494,7 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	if e.d.nameLiveOrStoppedLocked(name) {
 		return errSessionNameInUse
 	}
-	_, err := e.d.createSessionLocked(name, false, cwd, domain.Geometry{Size: size}, env)
+	_, err := e.d.createSessionLocked(name, false, cwd, geometry, env)
 	return err
 }
 func (e controlExec) CloseTab() error {
