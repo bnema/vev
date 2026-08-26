@@ -286,6 +286,32 @@ func TestGraphicsOutputRelaysLargeKittenIcatRGBWithinWireBudget(t *testing.T) {
 	require.NoError(t, err, "the relayed graphics stream must fit the real Output wire budget")
 }
 
+func TestGraphicsOutputDefersCleanupThatDoesNotFitFrameBudget(t *testing.T) {
+	graphicsState := newGraphicsOutputState()
+	seed, err := graphicsState.prepare(kittenGraphicsSnapshot(t), true)
+	require.NoError(t, err)
+	seed.commit()
+	ac := &attachedClient{
+		output:               attachmentOutputWithGraphics(graphicsState),
+		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+	}
+
+	deferred, err := graphicsOutputDataWithDaemonLimit(nil, &capturedRenderState{}, ac, false, 0)
+	require.NoError(t, err, "graphics cleanup must not abort an ANSI frame when no graphics budget remains")
+	require.Nil(t, deferred)
+	require.NotEmpty(t, graphicsState.assets, "required image deletes must remain pending for a later frame")
+	require.NotEmpty(t, graphicsState.placements, "required placement deletes must remain pending for a later frame")
+
+	cleanup, err := graphicsOutputDataWithDaemonLimit(nil, &capturedRenderState{}, ac, false, maxGraphicsOutputBytes)
+	require.NoError(t, err)
+	require.NotNil(t, cleanup)
+	require.Contains(t, string(cleanup.data), "a=d,d=p,p=")
+	require.Contains(t, string(cleanup.data), "a=d,d=i,i=")
+	cleanup.commit()
+	require.Empty(t, graphicsState.assets)
+	require.Empty(t, graphicsState.placements)
+}
+
 func TestGraphicsOutputIDsAreIsolatedAcrossAttachments(t *testing.T) {
 	snapshot := kittenGraphicsSnapshot(t)
 	left, right := newGraphicsOutputState(), newGraphicsOutputState()

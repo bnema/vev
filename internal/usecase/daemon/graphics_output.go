@@ -1302,6 +1302,12 @@ func graphicsOutputDataWithDaemonLimit(d *Daemon, state *capturedRenderState, ac
 		d.disableGraphicsOutput(ac)
 		return nil, nil
 	}
+	if errors.Is(err, errGraphicsOutputTooLarge) {
+		// Preparation is speculative, so the attachment still owns every object
+		// that needs deletion. Leave that state intact for a later frame with more
+		// graphics budget instead of withholding the already-prepared ANSI frame.
+		return nil, nil
+	}
 	return prepared, err
 }
 
