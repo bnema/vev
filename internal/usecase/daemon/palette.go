@@ -66,6 +66,12 @@ type paletteSessionIdentity struct {
 	lifecycle domain.SessionLifecycleID
 }
 
+type remotePalettePresentationIdentity struct {
+	origin    string
+	name      string
+	lifecycle domain.SessionLifecycleID
+}
+
 func localPaletteSessionIdentity(lifecycle domain.SessionLifecycleID) paletteSessionIdentity {
 	return paletteSessionIdentity{kind: ports.RouteKindLocal, endpoint: "local", lifecycle: lifecycle}
 }
@@ -137,6 +143,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		result   palette.Result
 	}
 	discovered := make([]discoveredRemote, 0, remoteSessionCount)
+	discoveredByPresentation := make(map[remotePalettePresentationIdentity][]paletteSessionIdentity, remoteSessionCount)
 	for _, host := range remoteCatalog {
 		for _, session := range host.entry.Sessions {
 			if session.Ephemeral {
@@ -148,10 +155,15 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			if key.Validate() != nil || target.Validate() != nil {
 				continue
 			}
+			identity := remotePaletteSessionIdentity(key.Host, session.LifecycleID)
+			presentation := remotePalettePresentationIdentity{
+				origin: key.DisplayOrigin, name: session.Name, lifecycle: session.LifecycleID,
+			}
 			discovered = append(discovered, discoveredRemote{
-				identity: remotePaletteSessionIdentity(key.Host, session.LifecycleID),
+				identity: identity,
 				result:   palette.NewRemoteSessionResult(key, target, remotePaletteUnavailableReason(host.status, session)),
 			})
+			discoveredByPresentation[presentation] = append(discoveredByPresentation[presentation], identity)
 		}
 	}
 	formattedRoutes := formatRecentRouteSnapshot(routeSnapshot)
@@ -174,6 +186,15 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		}))
 		if entry.Kind == ports.RouteKindLocal {
 			represented[identity] = struct{}{}
+			continue
+		}
+		presentation := remotePalettePresentationIdentity{
+			origin:    domain.RemoteDisplayOrigin(entry.HostLabel),
+			name:      entry.Target.SessionName,
+			lifecycle: entry.Target.LifecycleID,
+		}
+		if matches := discoveredByPresentation[presentation]; len(matches) == 1 {
+			represented[matches[0]] = struct{}{}
 		}
 	}
 	for _, remote := range discovered {

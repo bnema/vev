@@ -464,7 +464,7 @@ func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *te
 	}, remoteTarget)
 }
 
-func TestPaletteKeepsExactCatalogEndpointsWithEqualDisplayAndLifecycle(t *testing.T) {
+func TestPaletteKeepsExactCatalogEndpointsWhenRecentRouteIsAmbiguous(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
 	current := addControlSession(d, "current", "tab-1", "pane-1")
@@ -483,16 +483,29 @@ func TestPaletteKeepsExactCatalogEndpointsWithEqualDisplayAndLifecycle(t *testin
 	}
 	d.remoteCatalog.mu.Unlock()
 
-	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{})
+	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{
+		Generation: 2,
+		Entries: []ports.RecentRouteEntry{{
+			Key: 3, Generation: 1,
+			Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "vev"},
+			Name:   "vev", HostLabel: "arch", Kind: ports.RouteKindRemote,
+		}},
+	})
 	var endpoints []string
+	routeCount := 0
 	for _, result := range results {
 		if result.DisplayText() != "Switch to session vev@arch" {
+			continue
+		}
+		if _, ok := result.RouteNavigationAction(); ok {
+			routeCount++
 			continue
 		}
 		target, ok := result.RemoteSessionTarget()
 		require.True(t, ok)
 		endpoints = append(endpoints, target.Endpoint)
 	}
+	require.Equal(t, 1, routeCount)
 	require.ElementsMatch(t, []string{"user@arch", "admin@arch"}, endpoints)
 }
 
@@ -642,7 +655,7 @@ func TestRemoteRefreshTracksPickerAndPaletteOnSameAttachment(t *testing.T) {
 	d.remoteCatalog.mu.Unlock()
 }
 
-func TestPaletteKeepsCatalogTargetWhenRecentRouteHasOnlyDisplayOrigin(t *testing.T) {
+func TestPaletteDeduplicatesCatalogTargetRepresentedByRecentRoute(t *testing.T) {
 	now := time.Unix(1_200, 0)
 	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
 	current := addControlSession(d, "current", "tab-1", "pane-1")
@@ -673,11 +686,11 @@ func TestPaletteKeepsCatalogTargetWhenRecentRouteHasOnlyDisplayOrigin(t *testing
 			matching = append(matching, result)
 		}
 	}
-	require.Len(t, matching, 2, "presentation-only route origin cannot deduplicate an exact catalog endpoint")
+	require.Len(t, matching, 1)
 	action, routeOK := matching[0].RouteNavigationAction()
-	_, catalogOK := matching[1].RemoteSessionTarget()
+	_, catalogOK := matching[0].RemoteSessionTarget()
 	require.True(t, routeOK)
-	require.True(t, catalogOK)
+	require.False(t, catalogOK)
 	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 2, Key: 3, Generation: 1}, action)
 }
 
