@@ -15,15 +15,17 @@ probe preserves unrelated input, and late probe replies are quarantined rather
 than sent to a pane.
 
 A capable attachment renders the supported static/direct subset: current
-streamed `kitten icat` PNG input, bounded RGB/RGBA/PNG assets, ordinary
-placements, crop, offsets, z-index, and supported deletes. vev allocates
-attachment-owned Kitty IDs, never sends global deletes, clips placements to
-pane and attachment content, and replays authoritative graphics through the
-same ordered output state chain as ANSI text. Unsupported attachments retain
-text output and receive one bounded warning when graphics are suppressed.
+streamed `kitten icat` PNG input, JPEG input after `kitten icat` converts it to
+RGB/RGBA, bounded RGB/RGBA/PNG assets, ordinary placements, crop, offsets,
+z-index, and supported deletes. vev allocates attachment-owned Kitty IDs, never
+sends global deletes, clips placements to pane and attachment content, and
+replays authoritative graphics through the same ordered output state chain as
+ANSI text. Unsupported attachments retain text output and receive one bounded
+warning when graphics are suppressed.
 
-File, temporary-file, shared-memory, animation, composition, relative
-placements, Unicode placeholders, and graphics scrollback are unsupported.
+File, temporary-file, shared-memory, composition, relative placements, Unicode
+placeholders, and graphics scrollback are unsupported. Animated images retain
+their first frame as a static fallback.
 
 ## Environment
 

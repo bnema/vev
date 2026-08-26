@@ -46,16 +46,14 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 		return
 	}
 	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
-	if h.KittyDirectGraphics {
-		ac.output.graphicsUnsupportedWarned.Store(false)
-	}
+	ac.output.graphicsUnsupportedWarned.Store(false)
+	// A replacement connection is a different outer terminal. Retire the old
+	// attachment-local state without writing cleanup to the new terminal, then
+	// allocate a fresh namespace for any replay it accepts.
+	d.discardAttachmentOutputLocked(ac)
 	if !h.KittyDirectGraphics {
 		// The parked transport has already been retired. Do not emit cleanup into
 		// a replacement connection that did not declare graphics support.
-		d.discardAttachmentOutputLocked(ac)
-		return
-	}
-	if ac.output.graphicsOutput != nil {
 		return
 	}
 	if namespace, fence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, ac.clientID)); namespace != 0 {
@@ -135,19 +133,17 @@ type preparedAttachmentOutput struct {
 }
 
 func (o *attachmentOutput) prepareFrame(d *Daemon, state *capturedRenderState, frame renderer.Frame, damage []renderer.Damage, reset bool, desired cursorOut) (*preparedAttachmentOutput, error) {
-	graphicsReset := reset || o.forceSnapshot || !o.initialized
-	preparedGraphics, err := graphicsOutputDataWithDaemon(d, state, o.attachment, graphicsReset)
-	if err != nil {
-		return nil, err
-	}
 	ansi, err := o.prepare(frame, damage, reset)
 	if err != nil {
-		if preparedGraphics != nil {
-			preparedGraphics.abort()
-		}
 		return nil, err
 	}
 	cursor := o.prepareCursorTail(desired, len(ansi.data) > 0)
+	graphicsReset := reset || o.forceSnapshot || !o.initialized
+	graphicsBudget := max(ports.MaxOutputDataLen-len(ansi.data)-len(cursor.data), 0)
+	preparedGraphics, err := graphicsOutputDataWithDaemonLimit(d, state, o.attachment, graphicsReset, graphicsBudget)
+	if err != nil {
+		return nil, err
+	}
 	data := append([]byte(nil), ansi.data...)
 	if preparedGraphics != nil {
 		data = append(data, preparedGraphics.data...)

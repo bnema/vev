@@ -3,32 +3,15 @@ package client
 import (
 	"bytes"
 	"context"
-	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bnema/vev-vt/protocol/terminalquery"
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 )
-
-type kittyProbeTerminal struct {
-	in  io.Reader
-	out bytes.Buffer
-}
-
-func (t *kittyProbeTerminal) EnterRaw() (func() error, error) {
-	return func() error { return nil }, nil
-}
-func (t *kittyProbeTerminal) Geometry() (domain.Geometry, error) {
-	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
-}
-func (*kittyProbeTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
-func (t *kittyProbeTerminal) In() io.Reader                      { return t.in }
-func (t *kittyProbeTerminal) Out() io.Writer                     { return &t.out }
-func (*kittyProbeTerminal) Flush() error                         { return nil }
 
 type kittyProbeTimer struct{ *time.Timer }
 
@@ -54,14 +37,18 @@ func TestKittyProbeEnabledIsTerminalAgnostic(t *testing.T) {
 }
 
 func TestKittyProbeUsesOneInputPumpAndReplaysUnrelatedInput(t *testing.T) {
-	input := newTerminalInputPump(strings.NewReader("typed\x1b_Gi=31;OK\x1b\\\x1b[?1;2c"))
+	term := portsmocks.NewMockTerminal(t)
+	term.EXPECT().In().Return(strings.NewReader("typed\x1b_Gi=31;OK\x1b\\\x1b[?1;2c")).Once()
+	input := newTerminalInputPump(term.In())
 	input.start()
 	defer input.stop()
-	term := &kittyProbeTerminal{in: input.in}
+	var out bytes.Buffer
+	term.EXPECT().Out().Return(&out).Once()
+	term.EXPECT().Flush().Return(nil).Once()
 	runner := &Runner{term: term, clock: kittyProbeClock{}, probeCapabilities: true}
 
 	require.True(t, runner.probeKittyDirectGraphics(context.Background(), input))
-	require.Equal(t, terminalquery.KittyGraphicsQuery+terminalquery.DeviceAttributesQuery, term.out.String())
+	require.Equal(t, terminalquery.KittyGraphicsQuery+terminalquery.DeviceAttributesQuery, out.String())
 
 	consumer := input.claim()
 	defer input.revoke(consumer)

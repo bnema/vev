@@ -267,6 +267,24 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 			decode: func(b []byte) error { _, err := UnmarshalHello(b); return err },
 		},
 		{
+			name: "hello remote boolean",
+			payload: func() []byte {
+				b := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
+				b[len(b)-2] = 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalHello(b); return err },
+		},
+		{
+			name: "hello Kitty graphics boolean",
+			payload: func() []byte {
+				b := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
+				b[len(b)-1] = 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalHello(b); return err },
+		},
+		{
 			name: "welcome boolean",
 			payload: func() []byte {
 				b := MarshalWelcome(Welcome{SessionID: "id"})

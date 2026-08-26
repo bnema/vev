@@ -1034,6 +1034,47 @@ func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
 	}
 }
 
+func TestPTYKittyAnimationFallbackKeepsProtocolErrorsOutOfShell(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	p := portsmocks.NewMockPTY(t)
+	const imageNumber = "622840581"
+	chunks := [][]byte{[]byte(
+		"\x1b_Ga=T,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
+			"\x1b_Ga=f,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
+			"\x1b_Ga=a,q=1,s=3,I=" + imageNumber + ";\x1b\\",
+	)}
+	writes := make(chan []byte, 1)
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if len(chunks) == 0 {
+			return 0, io.EOF
+		}
+		n := copy(buf, chunks[0])
+		chunks = chunks[1:]
+		return n, nil
+	})
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		writes <- append([]byte(nil), b...)
+		return len(b), nil
+	}).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	sctx, cancel := context.WithCancel(context.Background())
+	win := newTestTabWithContext(p, sctx, cancel)
+	sess := &session{sessionCore: sessionCore{id: "animation", name: "animation"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	publishTiledPaneOwners(sess, win)
+	d.sessWg.Add(1)
+	d.ptyReader(sess, win, win.focusedPane())
+
+	select {
+	case got := <-writes:
+		t.Fatalf("unsupported animation response leaked into shell input: %q", got)
+	default:
+	}
+	snapshot := win.focusedPane().screen.GraphicsSnapshot()
+	require.NotNil(t, snapshot)
+	require.Equal(t, uint64(1), snapshot.Usage().Placements, "the supported first frame remains as a static fallback")
+}
+
 func TestCaptureCursorInputsHidesFocusedCursorForNoticesOverlay(t *testing.T) {
 	_, sess, _, _ := newManualSessionWithPTYs(t, nil)
 	p := sess.tabs[0].focusedPane()

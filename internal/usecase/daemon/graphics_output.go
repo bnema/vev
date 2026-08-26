@@ -25,8 +25,8 @@ import (
 // attachment-local state is also the ownership boundary for Kitty IDs: raw
 // scene IDs are never sent to the outer terminal.
 const (
-	maxGraphicsRecordBytes   = 8 << 20
-	maxGraphicsOutputBytes   = 8 << 20
+	maxGraphicsRecordBytes   = ports.MaxOutputDataLen
+	maxGraphicsOutputBytes   = ports.MaxOutputDataLen
 	graphicsUploadChunkBytes = 128 << 10
 )
 
@@ -78,6 +78,7 @@ type preparedGraphicsOutput struct {
 	owner         *graphicsOutputState
 	state         graphicsOutputState
 	data          []byte
+	maxBytes      int
 	valid         bool
 	sendAttempted bool
 }
@@ -309,22 +310,22 @@ func (s *graphicsOutputState) prepareWithTransform(snapshot *graphics.Snapshot, 
 // single-scene path, but accepts a composed set of immutable pane records. It
 // intentionally does not write to any graphics.Scene.
 func (s *graphicsOutputState) prepareWithRecords(assets map[string]graphics.AssetView, placements map[string]graphicsOutputPlacement, reset bool, transform graphicsOutputTransform) (*preparedGraphicsOutput, error) {
-	prepared, err := s.prepareWithRecordsOnce(assets, placements, reset, transform, false)
+	return s.prepareWithRecordsLimit(assets, placements, reset, transform, maxGraphicsOutputBytes)
+}
+
+func (s *graphicsOutputState) prepareWithRecordsLimit(assets map[string]graphics.AssetView, placements map[string]graphicsOutputPlacement, reset bool, transform graphicsOutputTransform, maxBytes int) (*preparedGraphicsOutput, error) {
+	maxBytes = max(maxBytes, 0)
+	prepared, err := s.prepareWithRecordsOnce(assets, placements, reset, transform, false, maxBytes)
 	if !errors.Is(err, errGraphicsIDExhausted) {
 		return prepared, err
 	}
 	// A bounded attachment can safely recycle its own IDs only after deleting
 	// the objects it owns. Keep this retry attachment-local: it never advances
 	// into the next reserved namespace block.
-	return s.prepareWithRecordsOnce(assets, placements, true, transform, true)
+	return s.prepareWithRecordsOnce(assets, placements, true, transform, true, maxBytes)
 }
 
-func (s *graphicsOutputState) prepareWithTransformOnce(snapshot *graphics.Snapshot, reset bool, transform graphicsOutputTransform, resetIDs bool, viewports ...graphics.Viewport) (*preparedGraphicsOutput, error) {
-	assets, placements := graphicsSnapshotRecords(snapshot, viewports...)
-	return s.prepareWithRecordsOnce(assets, placements, reset, transform, resetIDs)
-}
-
-func (s *graphicsOutputState) prepareWithRecordsOnce(assets map[string]graphics.AssetView, placements map[string]graphicsOutputPlacement, reset bool, transform graphicsOutputTransform, resetIDs bool) (*preparedGraphicsOutput, error) {
+func (s *graphicsOutputState) prepareWithRecordsOnce(assets map[string]graphics.AssetView, placements map[string]graphicsOutputPlacement, reset bool, transform graphicsOutputTransform, resetIDs bool, maxBytes int) (*preparedGraphicsOutput, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -332,7 +333,7 @@ func (s *graphicsOutputState) prepareWithRecordsOnce(assets map[string]graphics.
 	transformChanged := !s.transformSet || s.transform != transform
 	replay := reset || transformChanged
 	candidate.transform, candidate.transformSet = transform, true
-	out := &preparedGraphicsOutput{owner: s, state: candidate, valid: true}
+	out := &preparedGraphicsOutput{owner: s, state: candidate, maxBytes: maxBytes, valid: true}
 	if replay {
 		for _, id := range sortedUint64Keys(s.pendingPlaces) {
 			if err := out.record(deletePlacementRecord(id)); err != nil {
@@ -453,7 +454,7 @@ func (s *graphicsOutputState) prepareWithRecordsOnce(assets map[string]graphics.
 }
 
 func (p *preparedGraphicsOutput) record(record []byte) error {
-	if len(record) > maxGraphicsRecordBytes || len(p.data) > maxGraphicsOutputBytes-len(record) {
+	if len(record) > maxGraphicsRecordBytes || len(record) > p.maxBytes || len(p.data) > p.maxBytes-len(record) {
 		return errGraphicsOutputTooLarge
 	}
 	p.data = append(p.data, record...)
@@ -988,10 +989,6 @@ func (d *Daemon) cleanupAttachmentOutput(ac *attachedClient) error {
 	if state == nil {
 		return nil
 	}
-	if ac.output == nil {
-		d.retireGraphicsOutput(ac, state)
-		return nil
-	}
 	prepared, err := state.prepare(nil, true)
 	if err != nil || prepared == nil {
 		d.retireGraphicsOutput(ac, state)
@@ -1280,11 +1277,15 @@ func intersectGraphicsDomainRect(a, b domain.Rect) (domain.Rect, bool) {
 }
 
 func graphicsOutputDataWithDaemon(d *Daemon, state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
+	return graphicsOutputDataWithDaemonLimit(d, state, ac, reset, maxGraphicsOutputBytes)
+}
+
+func graphicsOutputDataWithDaemonLimit(d *Daemon, state *capturedRenderState, ac *attachedClient, reset bool, maxBytes int) (*preparedGraphicsOutput, error) {
 	if ac == nil || ac.output == nil || ac.output.graphicsOutput == nil || state == nil || !ac.terminalCapabilities.SupportsKittyGraphics() {
 		return nil, nil
 	}
 	assets, placements := composedGraphicsRecords(state)
-	prepared, err := ac.output.graphicsOutput.prepareWithRecords(assets, placements, reset, graphicsOutputTransform{})
+	prepared, err := ac.output.graphicsOutput.prepareWithRecordsLimit(assets, placements, reset, graphicsOutputTransform{}, maxBytes)
 	if errors.Is(err, errGraphicsIDExhausted) {
 		d.disableGraphicsOutput(ac)
 		return nil, nil
@@ -1296,7 +1297,7 @@ func graphicsOutputDataWithDaemon(d *Daemon, state *capturedRenderState, ac *att
 	// budget, suppress it and still return the bounded cleanup for objects that
 	// were already proven to be owned by this attachment. ANSI composition is
 	// prepared and emitted by the caller independently.
-	prepared, err = ac.output.graphicsOutput.prepareWithRecords(nil, nil, reset, graphicsOutputTransform{})
+	prepared, err = ac.output.graphicsOutput.prepareWithRecordsLimit(nil, nil, reset, graphicsOutputTransform{}, maxBytes)
 	if errors.Is(err, errGraphicsIDExhausted) {
 		d.disableGraphicsOutput(ac)
 		return nil, nil

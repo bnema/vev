@@ -18,6 +18,10 @@ const ProtocolVersion uint16 = 36
 // and excluding the four-byte length prefix.
 const MaxFrameLen = 16 << 20
 
+// MaxOutputDataLen is the largest decoded terminal byte stream that fits in
+// one Output frame after its type byte and wire metadata.
+const MaxOutputDataLen = MaxFrameLen - 1 - outputPayloadOverhead
+
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8
 

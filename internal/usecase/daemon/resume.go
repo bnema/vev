@@ -304,13 +304,11 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 	d.mu.Unlock()
 }
 
-// removeParkedLocked invalidates one parked attachment. Caller holds d.mu and
-// has verified d.parked[token] still points at parked when that matters.
+// removeParkedLocked invalidates one non-nil parked attachment. Caller holds
+// d.mu and has verified d.parked[token] still points at parked when that matters.
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
 	delete(d.parked, token)
-	if parked != nil {
-		d.discardAttachmentOutputLocked(parked.ac)
-	}
+	d.discardAttachmentOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	if parked.timer != nil {

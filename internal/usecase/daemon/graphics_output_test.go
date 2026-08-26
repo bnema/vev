@@ -147,11 +147,13 @@ func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) 
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	ac.terminalCapabilities.KittyGraphics = true
 	ac.output.graphicsOutput = newGraphicsOutputState()
+	ac.output.graphicsUnsupportedWarned.Store(true)
 	d.mu.Lock()
 	d.reconfigureAttachmentOutput(sess, ac, ports.Hello{KittyDirectGraphics: false})
 	d.mu.Unlock()
 	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
 	require.Nil(t, ac.output.graphicsOutput)
+	require.False(t, ac.output.graphicsUnsupportedWarned.Load(), "replacement terminal must receive its own unsupported-graphics warning")
 
 	d.paint(sess, ac, true, nil)
 	frame := awaitFrame(t, sends, ports.MsgOutput)
@@ -169,6 +171,27 @@ func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) 
 	outer.Write(output.Data)
 	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Assets)
 	require.Equal(t, uint64(1), outer.GraphicsSnapshot().Usage().Placements)
+}
+
+func TestReplacementKittyTerminalGetsFreshGraphicsState(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := &session{sessionCore: sessionCore{id: "work"}}
+	ac := &attachedClient{clientID: [16]byte{1}, output: newOutputStateStream()}
+
+	d.mu.Lock()
+	oldBase, oldFence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, ac.clientID))
+	oldState := newGraphicsOutputStateWithLease(oldBase, oldFence)
+	oldState.mayHaveEmitted = true
+	ac.output.graphicsOutput = oldState
+	ac.output.graphicsUnsupportedWarned.Store(true)
+	d.reconfigureAttachmentOutput(sess, ac, ports.Hello{KittyDirectGraphics: true})
+	d.mu.Unlock()
+
+	require.True(t, ac.terminalCapabilities.SupportsKittyGraphics())
+	require.NotNil(t, ac.output.graphicsOutput)
+	require.NotSame(t, oldState, ac.output.graphicsOutput)
+	require.NotEqual(t, oldBase, ac.output.graphicsOutput.namespaceBase, "replacement terminal must not reuse terminal-global Kitty IDs")
+	require.False(t, ac.output.graphicsUnsupportedWarned.Load())
 }
 
 func TestPaneGraphicsCoordinateGeometrySurvivesAttachmentResize(t *testing.T) {
@@ -240,6 +263,27 @@ func TestGraphicsOutputCompressesLargeRGBUpload(t *testing.T) {
 	prepared, err := newGraphicsOutputState().prepare(scene.Snapshot(), true)
 	require.NoError(t, err)
 	require.Contains(t, string(prepared.data), ",f=24,s=100,v=100,o=z")
+}
+
+func TestGraphicsOutputRelaysLargeKittenIcatRGBWithinWireBudget(t *testing.T) {
+	const width, height = 2048, 1200
+	raw := make([]byte, width*height*3)
+	state := uint32(1)
+	for i := range raw {
+		state = state*1664525 + 1013904223
+		raw[i] = byte(state >> 24)
+	}
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: raw, Format: graphics.AssetFormatRGB, Width: width, Height: height})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(asset, graphics.PixelRect{Width: width, Height: height})
+	require.NoError(t, err)
+
+	prepared, err := newGraphicsOutputState().prepare(scene.Snapshot(), true)
+	require.NoError(t, err)
+	require.Greater(t, len(prepared.data), 8<<20, "valid icat RGB replay must not be suppressed by the old graphics-only cap")
+	_, err = marshalOutputState(prepared.data, 1, 0, 1, 0, 0, domain.Size{Cols: 80, Rows: 24}, true)
+	require.NoError(t, err, "the relayed graphics stream must fit the real Output wire budget")
 }
 
 func TestGraphicsOutputIDsAreIsolatedAcrossAttachments(t *testing.T) {
@@ -374,7 +418,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 	// to its outer terminal before being lost.
 	transport := &closeTrackingTransport{}
 	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(state)}
-	d.cleanupAttachmentOutput(ac)
+	require.NoError(t, d.cleanupAttachmentOutput(ac))
 	require.Nil(t, ac.output.graphicsOutput)
 	sends := transport.Sends()
 	require.Len(t, sends, 1)
@@ -472,7 +516,7 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(oldState)}
 	cleanupDone := make(chan struct{})
 	go func() {
-		d.cleanupAttachmentOutput(ac)
+		_ = d.cleanupAttachmentOutput(ac)
 		close(cleanupDone)
 	}()
 	awaitTestCompletion(t, transport.started, "timed-out cleanup did not reach the stale transport")

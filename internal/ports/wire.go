@@ -831,7 +831,7 @@ func ValidateOutput(m Output) error {
 	if err := ValidateSize(m.Size); err != nil {
 		return fmt.Errorf("%w: size", ErrInvalidOutput)
 	}
-	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxFrameLen-1-outputPayloadOverhead {
+	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxOutputDataLen {
 		return ErrInvalidOutput
 	}
 	return nil
@@ -1590,7 +1590,7 @@ func UnmarshalOutput(b []byte) (Output, error) {
 	if err != nil {
 		return Output{}, err
 	}
-	if int64(decodedLen) > int64(MaxFrameLen-1-outputPayloadOverhead) {
+	if int64(decodedLen) > int64(MaxOutputDataLen) {
 		return Output{}, ErrInvalidOutput
 	}
 	data, err := r.getLongBytes()
