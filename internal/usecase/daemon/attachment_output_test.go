@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
+func TestAttachmentOutputBuildsPipelinedDependencyChain(t *testing.T) {
 	stream := newOutputStateStream()
 	firstFrame := renderer.NewFrame(3, 1)
 	fillOutputStateRows(firstFrame, []string{"abc"})
@@ -37,7 +37,7 @@ func TestOutputStateStreamBuildsPipelinedDependencyChain(t *testing.T) {
 	require.Equal(t, uint64(2), stream.outstanding())
 }
 
-func TestOutputStateStreamUsesTerminalColorProfile(t *testing.T) {
+func TestAttachmentOutputUsesTerminalColorProfile(t *testing.T) {
 	frame := renderer.NewFrame(1, 1)
 	frame.Set(0, 0, renderer.Cell{Rune: 'X', Style: renderer.Style{
 		Foreground:           -1,
@@ -77,7 +77,7 @@ func TestOutputStateStreamUsesTerminalColorProfile(t *testing.T) {
 	}
 }
 
-func TestOutputStateStreamCapacityProbeDoesNotRaceWithSend(t *testing.T) {
+func TestAttachmentOutputCapacityProbeDoesNotRaceWithSend(t *testing.T) {
 	stream := newOutputStateStream(1)
 	frame := renderer.NewFrame(3, 1)
 	fillOutputStateRows(frame, []string{"abc"})
@@ -115,10 +115,10 @@ func TestOutputStateStreamCapacityProbeDoesNotRaceWithSend(t *testing.T) {
 	require.False(t, stream.atCapacity())
 }
 
-func TestOutputStateStreamEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *testing.T) {
+func TestAttachmentOutputEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *testing.T) {
 	frame := renderer.NewFrame(3, 1)
 	fillOutputStateRows(frame, []string{"abc"})
-	newAttachment := func() *outputStateStream {
+	newAttachment := func() *attachmentOutput {
 		stream := newOutputStateStream()
 		ac := &attachedClient{output: stream, size: domain.Size{Cols: 3, Rows: 1}}
 		stream.attachment = ac
@@ -251,7 +251,7 @@ func TestOutputStateSideEffectsDoNotAdvanceEpochStateOrACK(t *testing.T) {
 	require.Equal(t, beforeAck, stream.acked)
 }
 
-func TestOutputStateStreamFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T) {
+func TestAttachmentOutputFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T) {
 	stream := newOutputStateStream()
 	initial := renderer.NewFrame(3, 1)
 	fillOutputStateRows(initial, []string{"abc"})
@@ -298,7 +298,7 @@ func TestOutputStateStreamFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T
 	require.Empty(t, probe.Bytes(), "successful retry commits the candidate shadow")
 }
 
-func TestOutputStateStreamNoByteCommitAdvancesShadowWithoutState(t *testing.T) {
+func TestAttachmentOutputNoByteCommitAdvancesShadowWithoutState(t *testing.T) {
 	stream := newOutputStateStream()
 	frame := renderer.NewFrame(3, 1)
 	fillOutputStateRows(frame, []string{"abc"})
@@ -318,7 +318,7 @@ func TestOutputStateStreamNoByteCommitAdvancesShadowWithoutState(t *testing.T) {
 	require.Empty(t, probe.Bytes(), "no-byte commit retains the prepared visual candidate")
 }
 
-func TestOutputStateStreamRepeatedUnackedScrollRemainsClientCorrect(t *testing.T) {
+func TestAttachmentOutputRepeatedUnackedScrollRemainsClientCorrect(t *testing.T) {
 	stream := newOutputStateStream()
 	client := vt.NewScreen(4, 3)
 	initial := renderer.NewFrame(4, 3)
@@ -352,7 +352,7 @@ func TestOutputStateStreamRepeatedUnackedScrollRemainsClientCorrect(t *testing.T
 	}
 }
 
-func (s *outputStateStream) render(frame renderer.Frame, damage []renderer.Damage, reset bool) ([]byte, error) {
+func (s *attachmentOutput) render(frame renderer.Frame, damage []renderer.Damage, reset bool) ([]byte, error) {
 	prepared, err := s.prepare(frame, damage, reset)
 	if err != nil {
 		return nil, err
@@ -368,7 +368,7 @@ func (s *outputStateStream) render(frame renderer.Frame, damage []renderer.Damag
 	return prepared.data, nil
 }
 
-func outputStateFrame(stream *outputStateStream, data []byte, reset bool, echoAck uint64) ports.Frame {
+func outputStateFrame(stream *attachmentOutput, data []byte, reset bool, echoAck uint64) ports.Frame {
 	stream.next++
 	base := stream.next - 1
 	if reset {
@@ -381,7 +381,7 @@ func outputStateFrame(stream *outputStateStream, data []byte, reset bool, echoAc
 	return frame
 }
 
-func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Frame, damage []renderer.Damage, reset bool, echoAck uint64) (ports.Frame, bool, error) {
+func drawOutputState(t *testing.T, stream *attachmentOutput, frame renderer.Frame, damage []renderer.Damage, reset bool, echoAck uint64) (ports.Frame, bool, error) {
 	t.Helper()
 	prepared, err := stream.prepare(frame, damage, reset)
 	if err != nil || len(prepared.data) == 0 {
@@ -403,7 +403,7 @@ func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Fra
 
 // A resize is a state reset, but it must not turn subsequent idle or damaged
 // renders into full frames.
-func TestOutputStateStreamResizeFrameThenNoopAndDamageAreDifferential(t *testing.T) {
+func TestAttachmentOutputResizeFrameThenNoopAndDamageAreDifferential(t *testing.T) {
 	screen := vt.NewScreen(4, 2)
 	screen.Write([]byte("abcd"))
 	screen.ClearDamage()
@@ -431,11 +431,43 @@ func TestOutputStateStreamResizeFrameThenNoopAndDamageAreDifferential(t *testing
 	require.Equal(t, resizeOutput.New, damageOutput.Base, "later damage must remain incremental")
 }
 
-func TestOutputStateStreamDefaultsAndNormalizesWindow(t *testing.T) {
-	require.Equal(t, uint64(8), newOutputStateStream().maxOutstanding)
-	require.Equal(t, uint64(8), newOutputStateStream(0).maxOutstanding)
-	require.Equal(t, uint64(8), newOutputStateStream(9).maxOutstanding)
-	require.Equal(t, uint64(1), newOutputStateStream(1).maxOutstanding)
+func TestAttachmentOutputRebaseRetiresAttachmentState(t *testing.T) {
+	output := newOutputStateStream()
+	output.next = 3
+	output.acked = 2
+	output.lastCursor = cursorOut{valid: true, row: 2, col: 3}
+	output.lastRoutePosition = ports.RoutePosition{ActiveTabID: "tab"}
+
+	output.rebaseAttachment()
+
+	require.Equal(t, uint64(2), output.epoch)
+	require.Zero(t, output.next)
+	require.Zero(t, output.acked)
+	require.True(t, output.forceSnapshot)
+	require.Equal(t, cursorOut{valid: true, row: 2, col: 3}, output.lastCursor, "the forced frame will reassert cursor state")
+	require.Equal(t, ports.RoutePosition{}, output.lastRoutePosition)
+}
+
+func TestAttachmentOutputDefaultsAndNormalizesWindow(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		window []uint8
+		want   uint64
+	}{
+		{name: "omitted", want: 8},
+		{name: "zero", window: []uint8{0}, want: 8},
+		{name: "oversized", window: []uint8{9}, want: 8},
+		{name: "exact window", window: []uint8{1}, want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, newOutputStateStream(tt.window...).maxOutstanding)
+		})
+	}
+
+	output := newOutputStateStream()
+	output.setWindow(2)
+	require.Equal(t, uint64(2), output.maxOutstanding)
+	require.Equal(t, uint64(2), output.maxOutstandingAtomic.Load())
 }
 
 func TestNormalizeOutputWindow(t *testing.T) {

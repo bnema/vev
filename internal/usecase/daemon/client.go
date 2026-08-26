@@ -35,7 +35,7 @@ type appliedTheme struct {
 type attachedClient struct {
 	tr                     ports.Transport
 	transportIncarnation   uint64
-	output                 *outputStateStream
+	output                 *attachmentOutput
 	overlays               *overlayRuntime
 	overlayOnce            sync.Once
 	clientID               [16]byte
@@ -90,8 +90,6 @@ type attachedClient struct {
 	themeMu                    sync.Mutex
 	clientTheme                themeui.Theme
 	appliedTheme               appliedTheme
-	lastCursor                 cursorOut
-	lastRoutePosition          ports.RoutePosition
 	renderStages               renderStageHooks // optional render and handoff observability hooks
 	linkMu                     sync.Mutex
 	sendMu                     sync.Mutex
@@ -421,13 +419,10 @@ func (ac *attachedClient) ackOutputState(epoch, state uint64) {
 // rebaseOutput resets only this attachment's output representations. Callers
 // hold sendMu (or the activation barrier).
 func (ac *attachedClient) rebaseOutput() {
-	if ac == nil {
+	if ac == nil || ac.output == nil {
 		return
 	}
-	if ac.output != nil {
-		ac.output.rebase()
-	}
-	ac.lastRoutePosition = ports.RoutePosition{}
+	ac.output.rebaseAttachment()
 }
 
 var errTransportReplaced = errors.New("client transport was replaced")
@@ -791,7 +786,7 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry *session) *ren
 			}
 		},
 		ackReadyFor: func(attached *attachedClient) bool {
-			// outputStateStream publishes capacity atomically. Do not take
+			// attachmentOutput publishes capacity atomically. Do not take
 			// attached.sendMu here: a slow transport may be holding it for an
 			// in-flight Send, and that peer must not gate healthy attachments.
 			return attached == nil ||

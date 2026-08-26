@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"errors"
-	"strconv"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
@@ -379,37 +378,6 @@ func noticeStylesFrom(styles themeui.Styles) ui.NoticeStyles {
 	}
 }
 
-type cursorCandidate struct {
-	data []byte
-	next cursorOut
-}
-
-func (ac *attachedClient) prepareCursorTail(desired cursorOut, force bool) cursorCandidate {
-	candidate := cursorCandidate{next: desired}
-	candidate.next.valid = true
-	prev := ac.lastCursor
-	changed := force || !prev.valid || prev.hidden != desired.hidden || prev.row != desired.row || prev.col != desired.col || prev.style != desired.style || prev.hasStyle != desired.hasStyle
-	if !changed {
-		return candidate
-	}
-	if desired.hidden {
-		candidate.data = []byte("\x1b[?25l")
-		return candidate
-	}
-	candidate.data = append(candidate.data, "\x1b["...)
-	candidate.data = strconv.AppendInt(candidate.data, int64(desired.row+1), 10)
-	candidate.data = append(candidate.data, ';')
-	candidate.data = strconv.AppendInt(candidate.data, int64(desired.col+1), 10)
-	candidate.data = append(candidate.data, 'H')
-	if !prev.valid || prev.hidden || prev.style != desired.style || prev.hasStyle != desired.hasStyle {
-		candidate.data = append(candidate.data, "\x1b["...)
-		candidate.data = strconv.AppendInt(candidate.data, int64(desired.style), 10)
-		candidate.data = append(candidate.data, " q"...)
-	}
-	candidate.data = append(candidate.data, "\x1b[?25h"...)
-	return candidate
-}
-
 // commitDamageReceipts acknowledges only snapshots that reached the client.
 // sendMu serializes attachment transactions; panes are locked individually so
 // no pane lock is held while another is acquired. A stale generation is
@@ -468,17 +436,10 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		}
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
-	var (
-		preparedANSI *preparedOutput
-		err          error
-		cursor       cursorCandidate
-		data         []byte
-	)
-	preparedANSI, err = ac.output.prepare(composed.frame, composed.damage, composed.reset)
-	if err == nil {
-		cursor = ac.prepareCursorTail(composed.cursor, len(preparedANSI.data) > 0)
-		data = append([]byte(nil), preparedANSI.data...)
-		data = append(data, cursor.data...)
+	prepared, err := ac.output.prepareFrame(composed.frame, composed.damage, composed.reset, composed.cursor)
+	var data []byte
+	if prepared != nil {
+		data = prepared.data
 	}
 	endDiff(0, err == nil)
 	if err != nil {
@@ -526,7 +487,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				}
 			}
 			if sendErr == nil {
-				sendErr = preparedANSI.send(data, ac.echoAck.Load(), send)
+				sendErr = prepared.send(ac.echoAck.Load(), send)
 			}
 			if marks.attachmentEffect != nil && interruptible {
 				if sendErr != nil {
@@ -535,7 +496,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				marks.attachmentEffect.endTransportSend()
 			}
 		}
-		emitted := sendErr == nil && preparedANSI.sent
+		emitted := sendErr == nil && prepared.sent()
 		endEmit(uint64(len(data)), emitted)
 		if sendErr == nil && !emitted {
 			ac.sendMu.Unlock()
@@ -544,8 +505,8 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	if sendErr == nil {
 		if len(data) == 0 {
-			preparedANSI.commitNoSend()
-			if !preparedANSI.sent {
+			prepared.commitNoSend()
+			if !prepared.sent() {
 				ac.sendMu.Unlock()
 				return true
 			}
@@ -554,7 +515,6 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this
 		// completed output transaction.
-		ac.lastCursor = cursor.next
 		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
 
@@ -566,7 +526,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 			ac.renderStages.emit()
 		}
 
-		if position.ActiveTabID != "" && position != ac.lastRoutePosition {
+		if position.ActiveTabID != "" && position != ac.output.lastRoutePosition {
 			payload, positionMarshalErr := ports.MarshalRoutePosition(position)
 			if positionMarshalErr != nil {
 				d.log.Error("marshal route position", "err", positionMarshalErr)
@@ -598,7 +558,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 					marks.attachmentEffect.endTransportSend()
 				}
 				if sendErr == nil {
-					ac.lastRoutePosition = position
+					ac.output.lastRoutePosition = position
 				}
 			}
 		}

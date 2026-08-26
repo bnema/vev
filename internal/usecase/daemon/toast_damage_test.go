@@ -124,7 +124,7 @@ func toastDamageState(notices []domain.Notification, damage []renderer.Damage, r
 	}
 }
 
-func replayToastFrame(t *testing.T, stream *outputStateStream, terminal *vt.Screen, composed composedRenderFrame) {
+func replayToastFrame(t *testing.T, stream *attachmentOutput, terminal *vt.Screen, composed composedRenderFrame) {
 	t.Helper()
 	data, err := stream.render(composed.frame, composed.damage, composed.reset)
 	require.NoError(t, err)
