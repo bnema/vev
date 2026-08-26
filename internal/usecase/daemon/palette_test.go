@@ -464,36 +464,71 @@ func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *te
 	}, remoteTarget)
 }
 
-func TestPaletteKeepsExactCatalogEndpointsWithEqualDisplayAndLifecycle(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
-	current := addControlSession(d, "current", "tab-1", "pane-1")
-	current.ephemeral = false
-	lifecycle := domain.SessionLifecycleID{22}
-	d.remoteCatalog.mu.Lock()
-	for _, endpoint := range []string{"user@arch", "admin@arch"} {
-		d.remoteCatalog.cache[endpoint] = ports.RemoteCatalogCacheEntry{
-			Host: endpoint, FetchedAt: now,
-			Sessions: []ports.RemoteCatalogSession{{
-				LifecycleID: lifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
-				Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
-			}},
-		}
-		d.remoteCatalog.status[endpoint] = remoteHostFresh
+func TestPaletteMatchesRecentRemoteRouteToCatalog(t *testing.T) {
+	tests := []struct {
+		name                 string
+		catalogEndpoints     []string
+		wantCatalogEndpoints []string
+	}{
+		{
+			name:             "unique catalog match is deduplicated",
+			catalogEndpoints: []string{"arch"},
+		},
+		{
+			name:                 "ambiguous catalog matches remain selectable",
+			catalogEndpoints:     []string{"user@arch", "admin@arch"},
+			wantCatalogEndpoints: []string{"user@arch", "admin@arch"},
+		},
 	}
-	d.remoteCatalog.mu.Unlock()
 
-	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{})
-	var endpoints []string
-	for _, result := range results {
-		if result.DisplayText() != "Switch to session vev@arch" {
-			continue
-		}
-		target, ok := result.RemoteSessionTarget()
-		require.True(t, ok)
-		endpoints = append(endpoints, target.Endpoint)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_000, 0)
+			d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
+			current := addControlSession(d, "current", "tab-1", "pane-1")
+			current.ephemeral = false
+			lifecycle := domain.SessionLifecycleID{22}
+			d.remoteCatalog.mu.Lock()
+			for _, endpoint := range test.catalogEndpoints {
+				d.remoteCatalog.cache[endpoint] = ports.RemoteCatalogCacheEntry{
+					Host: endpoint, FetchedAt: now,
+					Sessions: []ports.RemoteCatalogSession{{
+						LifecycleID: lifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
+						Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
+					}},
+				}
+				d.remoteCatalog.status[endpoint] = remoteHostFresh
+			}
+			d.remoteCatalog.mu.Unlock()
+
+			results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{
+				Generation: 2,
+				Entries: []ports.RecentRouteEntry{{
+					Key: 3, Generation: 1,
+					Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "vev"},
+					Name:   "vev", HostLabel: "arch", Kind: ports.RouteKindRemote,
+				}},
+			})
+			var actions []ports.RouteNavigationAction
+			var catalogEndpoints []string
+			for _, result := range results {
+				if result.DisplayText() != "Switch to session vev@arch" {
+					continue
+				}
+				if action, ok := result.RouteNavigationAction(); ok {
+					actions = append(actions, action)
+					continue
+				}
+				target, ok := result.RemoteSessionTarget()
+				require.True(t, ok)
+				catalogEndpoints = append(catalogEndpoints, target.Endpoint)
+			}
+			require.Equal(t, []ports.RouteNavigationAction{{
+				SnapshotGeneration: 2, Key: 3, Generation: 1,
+			}}, actions)
+			require.ElementsMatch(t, test.wantCatalogEndpoints, catalogEndpoints)
+		})
 	}
-	require.ElementsMatch(t, []string{"user@arch", "admin@arch"}, endpoints)
 }
 
 func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
@@ -640,45 +675,6 @@ func TestRemoteRefreshTracksPickerAndPaletteOnSameAttachment(t *testing.T) {
 	require.Empty(t, d.remoteCatalog.consumers)
 	require.Nil(t, d.remoteCatalog.cancel)
 	d.remoteCatalog.mu.Unlock()
-}
-
-func TestPaletteKeepsCatalogTargetWhenRecentRouteHasOnlyDisplayOrigin(t *testing.T) {
-	now := time.Unix(1_200, 0)
-	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
-	current := addControlSession(d, "current", "tab-1", "pane-1")
-	current.ephemeral = false
-	lifecycle := domain.SessionLifecycleID{51}
-	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{
-		Host: "arch", FetchedAt: now,
-		Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: lifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
-			Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
-		}},
-	}
-	d.remoteCatalog.status["arch"] = remoteHostFresh
-	d.remoteCatalog.mu.Unlock()
-
-	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{
-		Generation: 2,
-		Entries: []ports.RecentRouteEntry{{
-			Key: 3, Generation: 1,
-			Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "vev"},
-			Name:   "vev", HostLabel: "arch", Kind: ports.RouteKindRemote,
-		}},
-	})
-	var matching []palette.Result
-	for _, result := range results {
-		if result.DisplayText() == "Switch to session vev@arch" {
-			matching = append(matching, result)
-		}
-	}
-	require.Len(t, matching, 2, "presentation-only route origin cannot deduplicate an exact catalog endpoint")
-	action, routeOK := matching[0].RouteNavigationAction()
-	_, catalogOK := matching[1].RemoteSessionTarget()
-	require.True(t, routeOK)
-	require.True(t, catalogOK)
-	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 2, Key: 3, Generation: 1}, action)
 }
 
 func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
