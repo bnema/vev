@@ -160,7 +160,7 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 		effects.renderCoordinator = owner.session.renderCoordinator()
 	}
 	effects.wasSyncing = p.screen.SyncUpdateActive()
-	p.screen.Write(data)
+	writePaneScreenLocked(p, data)
 	p.refreshTerminalTitleLocked()
 	effects.isSyncing = p.screen.SyncUpdateActive()
 	effects.completeSyncRead = !effects.wasSyncing && !effects.isSyncing && completedSynchronizedUpdate(data)
@@ -187,12 +187,46 @@ func (d *Daemon) processPanePTYData(p *pane, data []byte, bufferDuringApply bool
 	effects.attention = p.ptyAttention
 	p.ptyAttention = false
 	effects.responses = append([]byte(nil), p.ptyResponses...)
+	effects.responses = filterUnsupportedKittyAnimationResponses(effects.responses)
 	p.ptyResponses = p.ptyResponses[:0]
 	effects.clipboards = append([]string(nil), p.ptyClipboards...)
 	p.ptyClipboards = p.ptyClipboards[:0]
 	p.mu.Unlock()
 	effects.syncCleanup.finish()
 	d.applyPanePTYEffects(p, effects)
+}
+
+// filterUnsupportedKittyAnimationResponses keeps older icat releases from
+// leaving vev's static-animation fallback replies in the shared PTY input
+// queue. Current Kitty sends animation controls with q=2, but older releases
+// requested error replies and then exited without consuming them. Transfer
+// capability probes use ordinary image IDs and retain their ENOTSUP replies.
+func filterUnsupportedKittyAnimationResponses(data []byte) []byte {
+	if !bytes.Contains(data, []byte("i=0,I=")) || !bytes.Contains(data, []byte(";ENOTSUP")) {
+		return data
+	}
+	out := make([]byte, 0, len(data))
+	for len(data) != 0 {
+		start := bytes.Index(data, []byte("\x1b_G"))
+		if start < 0 {
+			out = append(out, data...)
+			break
+		}
+		out = append(out, data[:start]...)
+		endOffset := bytes.Index(data[start+3:], []byte("\x1b\\"))
+		if endOffset < 0 {
+			out = append(out, data[start:]...)
+			break
+		}
+		end := start + 3 + endOffset + 2
+		record := data[start:end]
+		body := record[3 : len(record)-2]
+		if !bytes.Contains(body, []byte("i=0,I=")) || !bytes.HasSuffix(body, []byte(";ENOTSUP")) {
+			out = append(out, record...)
+		}
+		data = data[end:]
+	}
+	return out
 }
 
 // applyPanePTYEffects emits only effects still bound to the owner generation

@@ -330,7 +330,7 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 	require.True(t, composed.cursor.hidden, "overlay owns cursor visibility")
 
 	stream := newOutputStateStream()
-	prepared, err := stream.prepareFrame(composed.frame, composed.damage, composed.reset, composed.cursor)
+	prepared, err := stream.prepareFrame(nil, &state, composed.frame, composed.damage, composed.reset, composed.cursor)
 	require.NoError(t, err)
 	var outputFrame ports.Frame
 	require.NoError(t, prepared.send(0, func(frame ports.Frame) error {

@@ -991,10 +991,10 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	d.waitNotifies()
 }
 
-func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
+func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	p := portsmocks.NewMockPTY(t)
-	chunks := [][]byte{[]byte("\x1b[6n")}
+	chunks := [][]byte{[]byte("\x1b_Ga=q,f=24,s=1,v=1,S=3,i=1;MTIz\x1b\\\x1b_Ga=q,f=24,t=t,s=1,v=1,S=47,i=2;L2Rldi9zaG0va2l0dHktdHR5LWdyYXBoaWNzLXByb3RvY29sLTMzMTU3NTkxNjc\x1b\\\x1b_Ga=q,f=24,t=s,s=1,v=1,S=18,i=3;aWNhdC1aQlJCWFdNQ0lIQ0ZD\x1b\\\x1b[c")}
 	writes := make(chan []byte, 1)
 	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
 		if len(chunks) == 0 {
@@ -1023,7 +1023,7 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 
 	select {
 	case got := <-writes:
-		require.Equal(t, []byte("\x1b[1;1R"), got)
+		require.Equal(t, []byte("\x1b_Gi=1;OK\x1b\\\x1b_Gi=2;ENOTSUP\x1b\\\x1b_Gi=3;ENOTSUP\x1b\\\x1b[?62;22c"), got)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for PTY response write")
 	}
@@ -1032,6 +1032,47 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 		require.NotEqual(t, ports.MsgOutput, f.Type)
 	default:
 	}
+}
+
+func TestPTYKittyAnimationFallbackKeepsProtocolErrorsOutOfShell(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	p := portsmocks.NewMockPTY(t)
+	const imageNumber = "622840581"
+	chunks := [][]byte{[]byte(
+		"\x1b_Ga=T,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
+			"\x1b_Ga=f,q=1,f=24,s=1,v=1,I=" + imageNumber + ";AAAA\x1b\\" +
+			"\x1b_Ga=a,q=1,s=3,I=" + imageNumber + ";\x1b\\",
+	)}
+	writes := make(chan []byte, 1)
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if len(chunks) == 0 {
+			return 0, io.EOF
+		}
+		n := copy(buf, chunks[0])
+		chunks = chunks[1:]
+		return n, nil
+	})
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		writes <- append([]byte(nil), b...)
+		return len(b), nil
+	}).Maybe()
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	sctx, cancel := context.WithCancel(context.Background())
+	win := newTestTabWithContext(p, sctx, cancel)
+	sess := &session{sessionCore: sessionCore{id: "animation", name: "animation"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	publishTiledPaneOwners(sess, win)
+	d.sessWg.Add(1)
+	d.ptyReader(sess, win, win.focusedPane())
+
+	select {
+	case got := <-writes:
+		t.Fatalf("unsupported animation response leaked into shell input: %q", got)
+	default:
+	}
+	snapshot := win.focusedPane().screen.GraphicsSnapshot()
+	require.NotNil(t, snapshot)
+	require.Equal(t, uint64(1), snapshot.Usage().Placements, "the supported first frame remains as a static fallback")
 }
 
 func TestCaptureCursorInputsHidesFocusedCursorForNoticesOverlay(t *testing.T) {

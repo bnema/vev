@@ -504,6 +504,19 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	_, sentAck := tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgAck })
 	require.False(t, sentAck, "discarded output must not be ACKed")
 
+	// Handoff cleanup is an ordered terminal side effect, not a replay state.
+	// It must cross the outstanding reset gate, flush before the control handoff,
+	// and must not manufacture an independent ACK.
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+		Epoch: 2,
+		Size:  domain.Size{Cols: 1, Rows: 1},
+		Data:  []byte("handoff graphics cleanup"),
+	})}}
+	cleanup := requireReconnectToastOutput(t, out.completed)
+	require.Contains(t, cleanup, "handoff graphics cleanup")
+	_, sentAck = tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgAck })
+	require.False(t, sentAck, "state-independent cleanup must not be ACKed")
+
 	beforeResetFlushes := flushes.Load()
 	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
 		Epoch: 2,
@@ -1362,7 +1375,7 @@ func TestReconnectRetryFailuresPreserveAttachError(t *testing.T) {
 			)
 			dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 			require.ErrorIs(t, err, attachErr)
 			require.ErrorIs(t, err, retryErr)
 		})
@@ -1419,7 +1432,7 @@ func TestReconnectRetrySleepFailuresPreserveDialError(t *testing.T) {
 			dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 			dialer.EXPECT().Dial(mock.Anything).Run(func(context.Context) { armed.Store(true) }).Return(nil, dialErr).Once()
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 			require.ErrorIs(t, err, dialErr)
 			require.ErrorIs(t, err, retryErr)
 		})
@@ -1449,7 +1462,7 @@ func TestRemoteReconnectToastFailedDrawDoesNotBlankBounds(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
 
-	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 	require.ErrorContains(t, err, "reconnect toast write failed")
 	require.True(t, out.failed)
 	require.NotContains(t, out.String(), strings.Repeat(" ", reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageSSH)).Width))
@@ -1526,7 +1539,7 @@ func TestReconnectCancellationPreservesContextWhenStatusClearFails(t *testing.T)
 			dialer := portsmocks.NewMockDialer(t)
 			tt.configure(dialer, tr)
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main"})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main"})
 			require.ErrorIs(t, err, context.Canceled)
 			require.ErrorIs(t, err, clearErr)
 		})
@@ -1562,7 +1575,7 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 	require.NoError(t, err)
 	require.True(t, tr1.wasClosed())
 	require.True(t, tr2.wasClosed())
@@ -1606,7 +1619,7 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentEphemeral, SessionName: "", Remote: true})
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentEphemeral, SessionName: "", Remote: true})
 	require.NoError(t, err)
 	require.Equal(t, 2, dialer.calls)
 
@@ -1690,7 +1703,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			dialer := portsmocks.NewMockDialer(t)
 			transports := tt.configure(t, dialer)
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 			tt.wantErr(t, err)
 			for _, transport := range transports {
 				assertReconnectToastAttemptPublishesOnlyClearedTheme(t, transport)

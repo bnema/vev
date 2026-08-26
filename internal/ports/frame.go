@@ -12,11 +12,15 @@ import (
 const HandshakeTimeout = 15 * time.Second
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 35
+const ProtocolVersion uint16 = 36
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.
 const MaxFrameLen = 16 << 20
+
+// MaxOutputDataLen is the largest decoded terminal byte stream that fits in
+// one Output frame after its type byte and wire metadata.
+const MaxOutputDataLen = MaxFrameLen - 1 - outputPayloadOverhead
 
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8

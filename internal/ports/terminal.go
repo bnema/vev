@@ -52,9 +52,16 @@ const (
 // attachment. Pane processes must not derive their terminal environment from
 // these capabilities.
 type TerminalCapabilities struct {
-	ColorMode   TerminalColorMode
-	ColorSource TerminalCapabilitySource
-	Application TerminalApplication
+	ColorMode     TerminalColorMode
+	ColorSource   TerminalCapabilitySource
+	Application   TerminalApplication
+	KittyGraphics bool
+}
+
+// SupportsKittyGraphics reports whether this attachment's active outer-terminal
+// probe accepted the Kitty graphics protocol. Environment detection never sets it.
+func (c TerminalCapabilities) SupportsKittyGraphics() bool {
+	return c.KittyGraphics
 }
 
 // TrueColor reports whether this attachment can receive RGB ANSI output.
@@ -75,20 +82,24 @@ func DetectTerminalCapabilities(env []string) TerminalCapabilities {
 		caps.Application = TerminalApplicationKitty
 	}
 
+	kittyIdentity := term == "xterm-kitty" && caps.Application == TerminalApplicationKitty
 	switch colorTerm {
 	case "truecolor", "24bit":
 		caps.ColorMode = TerminalColorTrueColor
 		caps.ColorSource = TerminalCapabilityDeclared
-		return caps
 	}
 	if term == "xterm-direct" || strings.HasSuffix(term, "-direct") {
 		caps.ColorMode = TerminalColorTrueColor
 		caps.ColorSource = TerminalCapabilityDeclared
+	}
+	if kittyIdentity {
+		if caps.ColorSource == TerminalCapabilityUnknown {
+			caps.ColorSource = TerminalCapabilityHeuristic
+		}
+		caps.ColorMode = TerminalColorTrueColor
 		return caps
 	}
-	if term == "xterm-kitty" && caps.Application == TerminalApplicationKitty {
-		caps.ColorMode = TerminalColorTrueColor
-		caps.ColorSource = TerminalCapabilityHeuristic
+	if caps.ColorSource == TerminalCapabilityDeclared {
 		return caps
 	}
 	if strings.Contains(term, "256color") || term == "dumb" {

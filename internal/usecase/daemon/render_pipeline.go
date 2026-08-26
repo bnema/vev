@@ -436,7 +436,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		}
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
-	prepared, err := ac.output.prepareFrame(composed.frame, composed.damage, composed.reset, composed.cursor)
+	prepared, err := ac.output.prepareFrame(d, state, composed.frame, composed.damage, composed.reset, composed.cursor)
 	var data []byte
 	if prepared != nil {
 		data = prepared.data
@@ -468,6 +468,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	var sendTr ports.Transport
 	var sendErr error
+	suppressedGraphics := state.suppressedGraphics && !ac.terminalCapabilities.SupportsKittyGraphics()
 	if len(data) > 0 {
 		sendTransport := ac.transportSnapshot()
 		sendTr = sendTransport.transport
@@ -501,6 +502,9 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		if sendErr == nil && !emitted {
 			ac.sendMu.Unlock()
 			return true
+		}
+		if sendErr != nil {
+			prepared.abort()
 		}
 	}
 	if sendErr == nil {
@@ -564,6 +568,9 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		}
 	}
 	ac.sendMu.Unlock()
+	if suppressedGraphics && d.warnUnsupportedGraphics(ac) {
+		d.repaintForNotice(ac)
+	}
 	if sendErr != nil {
 		// A transport failure may invalidate the role gate. Release this render's
 		// admission first. Detachment freezes the gate and therefore cannot mutate

@@ -941,6 +941,14 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	if samePeerEligible {
 		token.ac.offerSamePeerTarget(*exactTarget)
 	}
+	// A close-and-dial handoff leaves this daemon's Kitty namespace. A
+	// same-peer transition keeps the attachment and its namespace; the target
+	// scene diff deletes and replaces the source session's placements.
+	if !samePeerEligible {
+		if err := d.cleanupAttachmentOutput(token.ac); err != nil {
+			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up attachment output before local handoff", err)
+		}
+	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
 		if samePeerEligible {
 			token.ac.clearSamePeerOffer()

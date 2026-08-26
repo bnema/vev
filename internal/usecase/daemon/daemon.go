@@ -3,6 +3,8 @@ package daemon
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"log/slog"
 	"math"
@@ -109,6 +111,18 @@ type Daemon struct {
 	// with Wait.
 	notifies []chan struct{}
 	parked   map[uint64]*parkedAttachment
+	// graphicsNamespaces reserves deterministic, attachment/session-scoped Kitty
+	// ID blocks. Once a block may have reached an outer terminal it remains in
+	// this bounded table for the daemon lifetime: side-effect Output frames have
+	// no terminal ACK. Pool exhaustion disables graphics for new attachments and
+	// leaves their ordinary text output intact.
+	graphicsNamespaces           map[uint64]struct{}
+	graphicsNamespaceFences      map[uint64]uint64
+	graphicsNamespaceQuarantines map[uint64]*graphicsNamespaceQuarantine
+	// graphicsNamespaceSalt separates daemon lifetimes before attachment keys
+	// are hashed. Kitty IDs are terminal-global, so a restarted or neighboring
+	// daemon must not deterministically reopen the previous daemon's block.
+	graphicsNamespaceSalt uint64
 	// parking tracks resume-capable attachments from before detach clears the
 	// live seat until parkAttachment publishes the token into parked.
 	// IntentResume waits on the matching entry instead of treating the live
@@ -604,6 +618,23 @@ func (d *Daemon) nowUnixNano() int64 {
 type systemClock struct{}
 type systemTimer struct{ *time.Timer }
 
+var graphicsNamespaceFallbackSalt atomic.Uint64
+
+func newGraphicsNamespaceSalt() uint64 {
+	var bytes [8]byte
+	if _, err := cryptorand.Read(bytes[:]); err == nil {
+		if salt := binary.BigEndian.Uint64(bytes[:]); salt != 0 {
+			return salt
+		}
+	}
+	for {
+		salt := graphicsNamespaceFallbackSalt.Add(1)
+		if salt != 0 {
+			return salt
+		}
+	}
+}
+
 func (systemClock) Now() time.Time { return time.Now() }
 func (systemClock) NewTimer(delay time.Duration) ports.Timer {
 	return systemTimer{Timer: time.NewTimer(delay)}
@@ -621,28 +652,32 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:          make(map[domain.SessionID]*session),
-		inactive:          make(map[string]inactiveSession),
-		creating:          make(map[string]struct{}),
-		parked:            make(map[uint64]*parkedAttachment),
-		parking:           make(map[uint64]*parkingAttachment),
-		paneProcessCtx:    paneProcessCtx,
-		paneProcessCancel: paneProcessCancel,
-		ptys:              ptys,
-		clock:             clock,
-		log:               log,
-		baseEnv:           os.Environ(),
-		shell:             defaultShellCommand,
-		dirOrHome:         dirOrHome,
-		done:              make(chan struct{}),
-		restoreDone:       make(chan struct{}),
-		animWake:          make(chan struct{}, 1),
-		snapshotJobs:      make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted:  make(map[*snapshotCapture]struct{}),
-		snapshotWake:      make(chan struct{}, 1),
-		notices:           newNoticeCenter(),
-		remoteCatalog:     newRemoteCatalogState(),
-		resumeParkGrace:   defaultResumeParkGrace,
+		sessions:                     make(map[domain.SessionID]*session),
+		inactive:                     make(map[string]inactiveSession),
+		creating:                     make(map[string]struct{}),
+		parked:                       make(map[uint64]*parkedAttachment),
+		graphicsNamespaces:           make(map[uint64]struct{}),
+		graphicsNamespaceFences:      make(map[uint64]uint64),
+		graphicsNamespaceQuarantines: make(map[uint64]*graphicsNamespaceQuarantine),
+		graphicsNamespaceSalt:        newGraphicsNamespaceSalt(),
+		parking:                      make(map[uint64]*parkingAttachment),
+		paneProcessCtx:               paneProcessCtx,
+		paneProcessCancel:            paneProcessCancel,
+		ptys:                         ptys,
+		clock:                        clock,
+		log:                          log,
+		baseEnv:                      os.Environ(),
+		shell:                        defaultShellCommand,
+		dirOrHome:                    dirOrHome,
+		done:                         make(chan struct{}),
+		restoreDone:                  make(chan struct{}),
+		animWake:                     make(chan struct{}, 1),
+		snapshotJobs:                 make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted:             make(map[*snapshotCapture]struct{}),
+		snapshotWake:                 make(chan struct{}, 1),
+		notices:                      newNoticeCenter(),
+		remoteCatalog:                newRemoteCatalogState(),
+		resumeParkGrace:              defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -1307,6 +1342,10 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	}
 	sess.mu.Unlock()
 	terminalCapabilities := ports.DetectTerminalCapabilities(h.Env)
+	// Kitty graphics are enabled only by the explicit direct-terminal
+	// declaration in Hello. Environment values remain useful for color and
+	// diagnostics, but cannot authorize terminal-global graphics side effects.
+	terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
 	if h.TrueColor && !terminalCapabilities.TrueColor() {
 		terminalCapabilities.ColorMode = ports.TerminalColorTrueColor
 		terminalCapabilities.ColorSource = ports.TerminalCapabilityDeclared
@@ -1324,7 +1363,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}
 	}
-	ac := d.prepareAttachedClientLocked(tr, geometry, opts)
+	ac := d.prepareAttachedClientLocked(sess, tr, geometry, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target:            sess,
@@ -1335,6 +1374,9 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		ready:             false,
 	})
 	if err != nil {
+		if ac.output != nil && ac.output.graphicsOutput != nil {
+			d.retireGraphicsOutput(ac, ac.output.graphicsOutput)
+		}
 		if tr != nil {
 			_ = tr.Close()
 		}

@@ -174,6 +174,10 @@ type Hello struct {
 	TermEnv     string
 	Cwd         string
 	TrueColor   bool
+	// KittyDirectGraphics is an explicit declaration that the client has
+	// probed its direct outer terminal and it accepts Kitty graphics output.
+	// Environment values are never sufficient to set this capability.
+	KittyDirectGraphics bool
 	// MaxOutputInFlight is the requested maximum number of unacknowledged
 	// state-bearing output frames.
 	MaxOutputInFlight uint8
@@ -194,6 +198,10 @@ type Hello struct {
 	EnvironmentPolicy      EnvironmentPolicy
 	NavigationCapabilities NavigationCapabilities
 	StartupOverlay         StartupOverlay
+	// Remote identifies a direct remote carriage even when no exact picker
+	// target is present. It is daemon-facing so remote rendering backends can
+	// be disabled consistently for both direct and picker attaches.
+	Remote bool
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -823,7 +831,7 @@ func ValidateOutput(m Output) error {
 	if err := ValidateSize(m.Size); err != nil {
 		return fmt.Errorf("%w: size", ErrInvalidOutput)
 	}
-	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxFrameLen-1-outputPayloadOverhead {
+	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxOutputDataLen {
 		return ErrInvalidOutput
 	}
 	return nil
@@ -912,6 +920,8 @@ func MarshalHello(h Hello) []byte {
 	w.putString(string(h.PreferredTabID))
 	w.putUint8(uint8(h.NavigationCapabilities))
 	w.putUint8(uint8(h.StartupOverlay))
+	w.putBool(h.Remote)
+	w.putBool(h.KittyDirectGraphics)
 	return w.b
 }
 
@@ -986,6 +996,12 @@ func preflightHello(b []byte) error {
 		return err
 	}
 	if _, err := r.getUint8(); err != nil {
+		return err
+	}
+	if _, err := r.getBool(); err != nil {
+		return err
+	}
+	if _, err := r.getBool(); err != nil {
 		return err
 	}
 	return r.done()
@@ -1091,6 +1107,12 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	h.StartupOverlay = StartupOverlay(overlay)
+	if h.Remote, err = r.getBool(); err != nil {
+		return Hello{}, err
+	}
+	if h.KittyDirectGraphics, err = r.getBool(); err != nil {
+		return Hello{}, err
+	}
 	if err := r.done(); err != nil {
 		return Hello{}, err
 	}
@@ -1568,7 +1590,7 @@ func UnmarshalOutput(b []byte) (Output, error) {
 	if err != nil {
 		return Output{}, err
 	}
-	if int64(decodedLen) > int64(MaxFrameLen-1-outputPayloadOverhead) {
+	if int64(decodedLen) > int64(MaxOutputDataLen) {
 		return Output{}, ErrInvalidOutput
 	}
 	data, err := r.getLongBytes()

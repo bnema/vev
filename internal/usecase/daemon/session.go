@@ -1828,6 +1828,9 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	}
 
 	for _, attachment := range attachments {
+		// The transport is still available after membership publication. Retire
+		// attachment-owned terminal output before sending Detached.
+		d.cleanupAttachmentOutput(attachment.ac)
 		d.notifyDetachedSnapshotAsync(attachment, reason)
 	}
 	return errors.Join(purgeErr, terminalSnapshotErr)

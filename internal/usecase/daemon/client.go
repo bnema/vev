@@ -170,7 +170,14 @@ func (ac *attachedClient) sizeSnapshot() domain.Size {
 }
 
 func (ac *attachedClient) setSize(size domain.Size) {
-	ac.setGeometry(domain.Geometry{Size: size})
+	if ac == nil {
+		return
+	}
+	ac.sizeMu.Lock()
+	ac.size = size
+	ac.geometry.Size = size
+	ac.geometry = ac.geometry.NormalizePixels()
+	ac.sizeMu.Unlock()
 }
 
 func (ac *attachedClient) geometrySnapshot() domain.Geometry {
@@ -662,7 +669,7 @@ type attachClientOptions struct {
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
 	d.mu.Lock()
-	ac := d.prepareAttachedClientLocked(tr, domain.Geometry{Size: sz}, opts)
+	ac := d.prepareAttachedClientLocked(sess, tr, domain.Geometry{Size: sz}, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: sess,
@@ -672,6 +679,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 		ready:             false,
 	})
 	if err != nil {
+		d.discardAttachmentOutput(ac)
 		if tr != nil {
 			_ = tr.Close()
 		}
@@ -696,12 +704,15 @@ func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts at
 		})
 	}
 	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
+	if !ac.terminalCapabilities.SupportsKittyGraphics() && sessionHasKittyGraphics(sess) {
+		d.warnUnsupportedGraphics(ac)
+	}
 }
 
 // prepareAttachedClientLocked allocates one detached attachment. Caller holds
 // d.mu only to allocate its resume token; attachment publication happens later after
 // the caller releases every architecture lock.
-func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, geometry domain.Geometry, opts attachClientOptions) *attachedClient {
+func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.Transport, geometry domain.Geometry, opts attachClientOptions) *attachedClient {
 	resumeToken := uint64(0)
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
@@ -711,6 +722,18 @@ func (d *Daemon) prepareAttachedClientLocked(tr ports.Transport, geometry domain
 	}
 	output := newOutputStateStreamForCapabilities(opts.terminalCapabilities, opts.maxOutputInFlight)
 	geometry = geometry.NormalizePixels()
+	var graphicsOutput *graphicsOutputState
+	if opts.terminalCapabilities.SupportsKittyGraphics() {
+		if namespace, fence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, opts.clientID)); namespace != 0 {
+			graphicsOutput = newGraphicsOutputStateWithLease(namespace, fence)
+		} else {
+			// Namespace leases that may have emitted are never reused without a
+			// terminal ACK. The bounded pool therefore fails closed to the normal
+			// text renderer instead of risking another attachment's objects.
+			opts.terminalCapabilities.KittyGraphics = false
+		}
+	}
+	output.graphicsOutput = graphicsOutput
 	ac := &attachedClient{
 		tr:                     tr,
 		output:                 output,

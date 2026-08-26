@@ -16,10 +16,18 @@ func (s outputApplyState) next(output ports.Output) (outputApplyState, bool) {
 	if output.Epoch == 0 {
 		return outputApplyState{}, false
 	}
-	if !s.initialized {
-		if output.New == 0 {
-			return s, true
+	// State-independent terminal side effects are ordered on the same transport
+	// as ordinary output but deliberately do not advance or acknowledge the
+	// replay chain. They must still reach the terminal while a reset request is
+	// gating state-bearing frames; handoff cleanup is the final such frame on
+	// the old attachment and no later replay can make it up.
+	if output.New == 0 {
+		if output.Base != 0 || output.Full {
+			return outputApplyState{}, false
 		}
+		return s, true
+	}
+	if !s.initialized {
 		if output.Base != 0 || !output.Full {
 			return outputApplyState{}, false
 		}
@@ -31,12 +39,6 @@ func (s outputApplyState) next(output ports.Output) (outputApplyState, bool) {
 	if output.Epoch == s.epoch {
 		if output.ViewRevision != s.viewRevision {
 			return outputApplyState{}, false
-		}
-		if output.New == 0 {
-			if output.Base != 0 || output.Full {
-				return outputApplyState{}, false
-			}
-			return s, true
 		}
 		if output.Full || output.Base != s.state || output.New != output.Base+1 {
 			return outputApplyState{}, false

@@ -55,8 +55,8 @@ func assertTrailingGarbageFails[T any](t *testing.T, full []byte, unmarshal func
 
 func appendNoNavigationTail(payload []byte) []byte {
 	// exact-target absent, preferred-tab absent, navigation capabilities none,
-	// startup overlay none.
-	return append(payload, 0, 0, 0, 0, 0)
+	// startup overlay none, local carriage.
+	return append(payload, 0, 0, 0, 0, 0, 0, 0)
 }
 
 func TestHelloGoldenAndRoundTrip(t *testing.T) {
@@ -135,13 +135,13 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 		}
 		got := MarshalHello(msg)
 		want := []byte{
-			0x00, 0x23, 0x00, // version, intent, first client ID byte
+			0x00, 0x24, 0x00, // version, intent, first client ID byte
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
 			0x00, 0x00, // name
 			0x00, 0x01, 0x00, 0x01, // size
-			0x00, 0x00, 0x00, 0x00, // optional pixel size
+			0x00, 0x00, 0x00, 0x00, // pixel width and height
 			0x00, 0x00, // TERM
 			0x00, 0x00, // cwd
 			0x00, 0x00, // true color, max output in flight
@@ -178,15 +178,15 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 	base := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
 	withCount := func(count byte) []byte {
 		payload := append([]byte(nil), base...)
-		// The uint32 environment count occupies bytes len-11 through len-8.
-		payload[len(payload)-8] = count
+		// The uint32 environment count occupies bytes len-13 through len-10.
+		payload[len(payload)-10] = count
 		return payload
 	}
 	withEntries := func(count byte, entries ...byte) []byte {
 		payload := withCount(count)
-		// The seven-byte tail follows the environment-count field.
-		tail := append([]byte(nil), payload[len(payload)-7:]...)
-		payload = append(payload[:len(payload)-7], entries...)
+		// The nine-byte tail follows the environment-count field.
+		tail := append([]byte(nil), payload[len(payload)-9:]...)
+		payload = append(payload[:len(payload)-9], entries...)
 		return append(payload, tail...)
 	}
 	tests := []struct {
@@ -366,7 +366,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(35), ProtocolVersion)
+	require.Equal(t, uint16(36), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -527,7 +527,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "minimal",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
 			want: []byte{
-				0x00, 0x23,
+				0x00, 0x24,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x00, // self
@@ -550,7 +550,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 				JSON:          true,
 			},
 			want: []byte{
-				0x00, 0x23,
+				0x00, 0x24,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x01, // self
@@ -947,7 +947,7 @@ func TestHelloOutputWindowByteExactValues(t *testing.T) {
 	for _, window := range []uint8{0, 1, 8} {
 		t.Run(fmt.Sprintf("window_%d", window), func(t *testing.T) {
 			hello := Hello{Version: 14, Size: domain.Size{Cols: 1, Rows: 1}, MaxOutputInFlight: window}
-			// The empty Hello has a fixed 1x1 size before the negotiated output window.
+			// The empty Hello has a fixed 1x1 size and zero pixel geometry before the negotiated output window.
 			want := append(make([]byte, 42), window, 0, 0, 0, 0, 0, 0)
 			want = appendNoNavigationTail(want)
 			want[1] = 14
@@ -979,7 +979,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "attached",
 			msg:  CommandRequest{Version: ProtocolVersion, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
 			want: []byte{
-				0x00, 0x23, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
+				0x00, 0x24, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, '-', '-', 'v', 'e', 'r', 't', 'i', 'c', 'a', 'l',
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -989,7 +989,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "control",
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "ls"},
 			want: []byte{
-				0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x02, 'l', 's', 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			},

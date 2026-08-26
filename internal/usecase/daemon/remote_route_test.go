@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -9,6 +10,86 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
+
+func TestMixedAttachmentCapabilitiesKeepGraphicsAttachmentLocal(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	kittyTransport, _ := newCapturingTransport(t)
+	_, kitty, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		ClientID: [16]byte{1}, KittyDirectGraphics: true,
+	}, kittyTransport)
+	require.NoError(t, err)
+	require.NotNil(t, kitty.output.graphicsOutput)
+
+	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
+	require.NoError(t, err)
+	pane := sess.tabs[0].focusedPane()
+	pane.mu.Lock()
+	pane.screen.Write(fixture)
+	pane.mu.Unlock()
+
+	textTransport, _ := newCapturingTransport(t)
+	_, text, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		ClientID: [16]byte{2},
+	}, textTransport)
+	require.NoError(t, err)
+	require.Nil(t, text.output.graphicsOutput)
+	text.overlays.noticeMu.Lock()
+	var warning string
+	for _, toast := range text.overlays.noticeToasts {
+		warning = toast.n.Message
+	}
+	text.overlays.noticeMu.Unlock()
+	require.Contains(t, warning, "Kitty graphics are unavailable")
+	d.clientGone(sess, kitty, kittyTransport, false)
+	d.clientGone(sess, text, textTransport, false)
+}
+
+func TestDirectRemoteAttachSuppressesUndeclaredGraphicsBackend(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	tr, _ := newCapturingTransport(t)
+	_, ac, err := d.routeWithContext(context.Background(), ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		Env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, Remote: true,
+	}, tr)
+	require.NoError(t, err)
+	require.NotNil(t, ac)
+	require.Nil(t, ac.output.graphicsOutput, "environment heuristics do not declare direct graphics")
+	d.clientGone(sess, ac, tr, false)
+}
+
+func TestResumeRemoteRoutePreservesDeclaredGraphicsCapability(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	local := ports.Hello{
+		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+		ClientID: [16]byte{1, 2, 3, 4}, Env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, KittyDirectGraphics: true,
+	}
+	oldTransport, _ := newCapturingTransport(t)
+	_, ac, err := d.route(local, oldTransport)
+	require.NoError(t, err)
+	require.NotNil(t, ac.output.graphicsOutput)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+
+	remote := helloResumeCapable(ports.IntentResume, "work", token)
+	remote.Remote = true
+	remote.KittyDirectGraphics = true
+	replacement, _ := newCapturingTransport(t)
+	_, resumed, ok, err := d.resumeParked(remote, replacement, defaultSize)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Same(t, ac, resumed)
+	require.NotNil(t, resumed.output.graphicsOutput, "remote resume must retain the declared direct graphics backend")
+	require.True(t, resumed.terminalCapabilities.SupportsKittyGraphics())
+	d.clientGone(sess, resumed, replacement, false)
+}
 
 func TestRouteRemoteTargetSelectsExactLiveTab(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})

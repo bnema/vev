@@ -2,6 +2,7 @@ package daemon
 
 import (
 	renderer "github.com/bnema/vev-vt"
+	vevgraphics "github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -22,6 +23,7 @@ type renderCaptureScratch struct {
 	placements        []layout.Placement
 	dividers          []layout.Divider
 	layoutTab         *tab
+	layoutRoot        *layout.Node
 	layoutGeneration  uint64
 	layoutArea        domain.Rect
 	layoutFocus       layout.PaneID
@@ -40,19 +42,25 @@ type damageReceipt struct {
 }
 
 type capturedRenderState struct {
-	attachment         *attachedClient // identity only; never dereferenced by composition
-	lease              *attachmentLease
-	view               attachmentView
-	window             domain.Size
-	reset              bool
-	layout             capturedTabLayout
-	panes              []capturedPaneRenderState
-	floating           capturedFloatingRenderState
-	bars               barState
-	theme              themeui.Theme
-	styles             themeui.Styles
-	styleGeneration    uint64
-	overlays           capturedOverlayRenderState
+	attachment      *attachedClient // identity only; never dereferenced by composition
+	sessionID       domain.SessionID
+	incarnation     domain.IncarnationID
+	lease           *attachmentLease
+	view            attachmentView
+	window          domain.Size
+	reset           bool
+	layout          capturedTabLayout
+	panes           []capturedPaneRenderState
+	floating        capturedFloatingRenderState
+	bars            barState
+	theme           themeui.Theme
+	styles          themeui.Styles
+	styleGeneration uint64
+	overlays        capturedOverlayRenderState
+	// suppressedGraphics records a late Kitty scene observed on an attachment
+	// that cannot emit graphics. Capture keeps the scene out of the output but
+	// lets the daemon issue one bounded user warning after pane locks release.
+	suppressedGraphics bool
 	preview            picker.Preview
 	cursor             capturedCursorInputs
 	tabGeneration      uint64
@@ -71,10 +79,15 @@ type capturedTabLayout struct {
 
 type capturedPaneRenderState struct {
 	id               layout.PaneID
+	stableID         domain.PaneStableID
 	frame            renderer.Frame
 	rawDamage        []renderer.Damage
 	damage           []renderer.Damage
 	damageGeneration uint64
+	// graphics is an immutable copy-on-write reference owned by the VT screen.
+	// It is nil for ordinary text panes, preserving the fast text path.
+	graphics         *vevgraphics.Snapshot
+	graphicsGeometry domain.Geometry
 	title            string
 	titleGeneration  uint64
 	placement        layout.Placement
@@ -121,6 +134,33 @@ type capturedCursorInputs struct {
 	content                                        domain.Rect
 }
 
+// writePaneScreenLocked is the production VT write boundary. The first
+// placement fixes the current scene's coordinate units before a later resize
+// can change Screen.Geometry; deleting the last placement ends that boundary.
+// Caller holds p.mu.
+func writePaneScreenLocked(p *pane, data []byte) {
+	if p == nil || p.screen == nil {
+		return
+	}
+	before := p.screen.GraphicsSnapshot()
+	beforeHasPlacements := before != nil && before.Usage().Placements != 0
+	p.screen.Write(data)
+	after := p.screen.GraphicsSnapshot()
+	afterHasPlacements := after != nil && after.Usage().Placements != 0
+	if !beforeHasPlacements && afterHasPlacements {
+		geometry := p.screen.Geometry()
+		p.graphicsCoordinateGeometry = domain.Geometry{
+			Size:        domain.Size{Cols: geometry.Cols, Rows: geometry.Rows},
+			PixelWidth:  geometry.PixelWidth,
+			PixelHeight: geometry.PixelHeight,
+		}.NormalizePixels()
+	}
+	p.graphicsPlacementScene = afterHasPlacements
+	if !afterHasPlacements {
+		p.graphicsCoordinateGeometry = domain.Geometry{}
+	}
+}
+
 // capturePaneRenderStateLocked copies only the visible rectangle required by
 // composition. It never copies scrollback/history and never lets the mutable
 // VT frame's Cells or row-offset slices escape pane.mu.
@@ -129,7 +169,30 @@ func capturePaneRenderStateLocked(p *pane, visible domain.Rect) capturedPaneRend
 }
 
 func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out capturedPaneRenderState) capturedPaneRenderState {
-	out.id, out.title, out.titleGeneration = p.id, p.displayTitleLocked(), p.title.generation
+	out.id, out.stableID, out.title, out.titleGeneration = p.id, domain.PaneStableID(p.stableID), p.displayTitleLocked(), p.title.generation
+	// GraphicsSnapshot never allocates graphics state for a text-only screen and
+	// returns an immutable scene reference when Kitty graphics were used.
+	out.graphics = p.screen.GraphicsSnapshot()
+	geometry := p.screen.Geometry()
+	currentGraphicsGeometry := domain.Geometry{
+		Size:       domain.Size{Cols: geometry.Cols, Rows: geometry.Rows},
+		PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight,
+	}.NormalizePixels()
+	// The scene retains placement coordinates across SetGeometry. Capture the
+	// unit basis when the first placement appears and keep it until the placement
+	// scene becomes empty; otherwise an attachment resize silently reinterprets
+	// old pixel coordinates using the new cell dimensions.
+	hasPlacements := out.graphics != nil && out.graphics.Usage().Placements != 0
+	if hasPlacements && !p.graphicsPlacementScene {
+		p.graphicsCoordinateGeometry = currentGraphicsGeometry
+	}
+	p.graphicsPlacementScene = hasPlacements
+	if hasPlacements {
+		out.graphicsGeometry = p.graphicsCoordinateGeometry
+	} else {
+		p.graphicsCoordinateGeometry = domain.Geometry{}
+		out.graphicsGeometry = currentGraphicsGeometry
+	}
 	damage := p.screen.CaptureDamage()
 	out.damageGeneration = damage.Generation
 	out.rawDamage = append(out.rawDamage[:0], damage.Damage...)
@@ -212,6 +275,8 @@ func captureLocalRenderState(
 	}
 	sess.mu.Lock()
 	_, owned := sess.attachments[ac]
+	sessionID := sess.id
+	incarnation := sess.incarnation
 	sess.mu.Unlock()
 	if !owned {
 		return nil, false
@@ -257,12 +322,17 @@ func captureLocalRenderState(
 		area: area, focus: focus, placements: scratch.placements,
 		dividers: scratch.dividers, fingerprint: scratch.layoutFingerprint, ok: scratch.layoutValid,
 	}
-	if scratch.layoutTab != tb || scratch.layoutGeneration != tb.layoutGeneration || scratch.layoutArea != area || scratch.layoutFocus != focus {
+	var layoutRoot *layout.Node
+	if tb.tree != nil {
+		layoutRoot = tb.tree.Root
+	}
+	if scratch.layoutTab != tb || scratch.layoutRoot != layoutRoot || scratch.layoutGeneration != tb.layoutGeneration || scratch.layoutArea != area || scratch.layoutFocus != focus {
 		layoutSnap = solveTabLayoutLocked(tb)
 		layoutSnap.focus = focus
 		scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
 		scratch.dividers = append(scratch.dividers[:0], layoutSnap.dividers...)
 		scratch.layoutTab = tb
+		scratch.layoutRoot = layoutRoot
 		scratch.layoutGeneration = tb.layoutGeneration
 		scratch.layoutArea = area
 		scratch.layoutFocus = focus
@@ -278,7 +348,7 @@ func captureLocalRenderState(
 		window = ac.sizeSnapshot()
 	}
 	*state = capturedRenderState{
-		attachment: ac, lease: lease, view: view, window: window,
+		attachment: ac, sessionID: sessionID, incarnation: incarnation, lease: lease, view: view, window: window,
 		reset: reset, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
@@ -302,6 +372,12 @@ func captureLocalRenderState(
 		}
 		p.mu.Lock()
 		captured := capturePaneRenderStateLockedInto(p, visible, ac.captureFrames[p])
+		if !ac.terminalCapabilities.SupportsKittyGraphics() {
+			if captured.graphics != nil && captured.graphics.Usage().Placements != 0 {
+				state.suppressedGraphics = true
+			}
+			captured.graphics = nil
+		}
 		state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		captured.placement, captured.focused = placement, placement.ID == layoutSnap.focus
 		if captured.focused {
@@ -322,6 +398,12 @@ func captureLocalRenderState(
 		p.mu.Lock()
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
 		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, ac.captureFrames[p])
+		if !ac.terminalCapabilities.SupportsKittyGraphics() {
+			if captured.graphics != nil && captured.graphics.Usage().Placements != 0 {
+				state.suppressedGraphics = true
+			}
+			captured.graphics = nil
+		}
 		seen := false
 		for _, receipt := range state.receipts {
 			if receipt.pane == p {

@@ -8,11 +8,12 @@ import (
 
 func TestDetectTerminalCapabilities(t *testing.T) {
 	tests := []struct {
-		name       string
-		env        []string
-		wantMode   TerminalColorMode
-		wantSource TerminalCapabilitySource
-		wantApp    TerminalApplication
+		name         string
+		env          []string
+		wantMode     TerminalColorMode
+		wantSource   TerminalCapabilitySource
+		wantApp      TerminalApplication
+		wantGraphics bool
 	}{
 		{
 			name:       "declared truecolor",
@@ -25,6 +26,13 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			env:        []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"},
 			wantMode:   TerminalColorTrueColor,
 			wantSource: TerminalCapabilityHeuristic,
+			wantApp:    TerminalApplicationKitty,
+		},
+		{
+			name:       "kitty environment with declared truecolor remains color-only",
+			env:        []string{"TERM=xterm-kitty", "COLORTERM=truecolor", "KITTY_WINDOW_ID=1"},
+			wantMode:   TerminalColorTrueColor,
+			wantSource: TerminalCapabilityDeclared,
 			wantApp:    TerminalApplicationKitty,
 		},
 		{
@@ -54,6 +62,7 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			require.Equal(t, tt.wantMode, got.ColorMode)
 			require.Equal(t, tt.wantSource, got.ColorSource)
 			require.Equal(t, tt.wantApp, got.Application)
+			require.Equal(t, tt.wantGraphics, got.SupportsKittyGraphics())
 		})
 	}
 }

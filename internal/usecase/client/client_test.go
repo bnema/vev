@@ -250,12 +250,13 @@ func runTestClient(ctx context.Context, deps client.Dependencies, request client
 
 func testDependencies(dialer ports.Dialer, terminal ports.Terminal, clock ports.Clock, clipboard ports.ClipboardReader, observer ports.SerializedRuntimeObserver) client.Dependencies {
 	return client.Dependencies{
-		Dialer:          dialer,
-		Terminal:        terminal,
-		Clock:           clock,
-		Clipboard:       clipboard,
-		Logger:          slog.New(slog.DiscardHandler),
-		RuntimeObserver: observer,
+		Dialer:                 dialer,
+		Terminal:               terminal,
+		Clock:                  clock,
+		DisableCapabilityProbe: true,
+		Clipboard:              clipboard,
+		Logger:                 slog.New(slog.DiscardHandler),
+		RuntimeObserver:        observer,
 	}
 }
 

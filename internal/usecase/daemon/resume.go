@@ -304,10 +304,11 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 	d.mu.Unlock()
 }
 
-// removeParkedLocked invalidates one parked attachment. Caller holds d.mu and
-// has verified d.parked[token] still points at parked when that matters.
+// removeParkedLocked invalidates one non-nil parked attachment. Caller holds
+// d.mu and has verified d.parked[token] still points at parked when that matters.
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
 	delete(d.parked, token)
+	d.discardAttachmentOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	if parked.timer != nil {
@@ -410,6 +411,7 @@ type parkedAttachmentRetirement struct {
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
 	delete(d.parked, token)
+	d.discardAttachmentOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	parked.ac.connectionGeneration.Add(1)
@@ -602,6 +604,9 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 		// complete the claiming terminal's geometry before the resumed
 		// attachment is allowed to produce its first frame.
 		d.recalculateSessionGeometry(sess, resumed)
+		// A resumed unsupported attachment bypasses finishAttachedClient. Check
+		// the restored scene at this boundary so suppression is explained once.
+		d.warnUnsupportedGraphics(resumed)
 	}
 	if err != nil && resumed != nil {
 		d.abortResumeClaim(resumed)
@@ -646,6 +651,10 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.rebaseOutput()
 	ac.output.setWindow(h.MaxOutputInFlight)
 	ac.replaceTransport(tr)
+	// A parked attachment can resume through any route. Reapply the declared
+	// direct-terminal capability before resumed capture or first paint observes
+	// the replacement transport.
+	d.reconfigureAttachmentOutput(sess, ac, h)
 	geometry := h.Geometry()
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}
