@@ -82,7 +82,7 @@ func TestFinalHelloSemanticValidation(t *testing.T) {
 
 func TestFinalResizeGoldenStrict(t *testing.T) {
 	msg := Resize{Size: domain.Size{Cols: 80, Rows: 24}}
-	want := []byte{0, 80, 0, 24}
+	want := []byte{0, 80, 0, 24, 0, 0, 0, 0}
 	got, err := MarshalResize(msg)
 	if err != nil {
 		t.Fatalf("MarshalResize() error = %v", err)

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"testing"
 
 	renderer "github.com/bnema/vev-vt/ansi"
@@ -66,9 +65,14 @@ func TestOutputStateStreamReplaysInterruptedKittyUpload(t *testing.T) {
 }
 
 func TestKittyOutputRecordReassemblesAfterDatagramReordering(t *testing.T) {
-	// 48 KiB accommodates the observed 39,091-byte Kitty direct-stream APC
+	// 128 KiB matches the current Kitty upload chunk and forces fragmentation
 	// while remaining far below the 1,024-fragment reassembly ceiling.
-	data := bytes.Repeat([]byte("x"), 48<<10)
+	data := make([]byte, 128<<10)
+	state := uint32(1)
+	for i := range data {
+		state = state*1664525 + 1013904223
+		data[i] = byte(state >> 24)
+	}
 	payload, err := ports.MarshalOutput(ports.Output{
 		Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: data,
 	})

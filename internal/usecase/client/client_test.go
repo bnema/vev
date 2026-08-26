@@ -218,9 +218,9 @@ func (r *chunkedBlockingReader) Read(p []byte) (int, error) {
 
 func (r *chunkedBlockingReader) unblock() { close(r.done) }
 
-func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Size) (*portsmocks.MockTerminal, *blockingReader) {
+func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Geometry) (*portsmocks.MockTerminal, *blockingReader) {
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	tm.EXPECT().EnterRaw().Return(func() error {
 		restoreCount.Add(1)
 		return nil
@@ -250,12 +250,13 @@ func runTestClient(ctx context.Context, deps client.Dependencies, request client
 
 func testDependencies(dialer ports.Dialer, terminal ports.Terminal, clock ports.Clock, clipboard ports.ClipboardReader, observer ports.SerializedRuntimeObserver) client.Dependencies {
 	return client.Dependencies{
-		Dialer:          dialer,
-		Terminal:        terminal,
-		Clock:           clock,
-		Clipboard:       clipboard,
-		Logger:          slog.New(slog.DiscardHandler),
-		RuntimeObserver: observer,
+		Dialer:                 dialer,
+		Terminal:               terminal,
+		Clock:                  clock,
+		DisableCapabilityProbe: true,
+		Clipboard:              clipboard,
+		Logger:                 slog.New(slog.DiscardHandler),
+		RuntimeObserver:        observer,
 	}
 }
 
@@ -320,7 +321,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			clk, createdTimers := newHandshakeClock(t, 1)
 
 			term := portsmocks.NewMockTerminal(t)
-			term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+			term.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 			// No EnterRaw expectation: it must not run before Welcome.
 
 			started := make(chan struct{})
@@ -393,7 +394,7 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1123,7 +1124,7 @@ func mustMarshalRoutePosition(position ports.RoutePosition) []byte {
 func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1150,7 +1151,7 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1180,7 +1181,7 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1206,7 +1207,7 @@ func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {
 func TestAttachHappyPath(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1230,7 +1231,7 @@ func TestAttachHappyPath(t *testing.T) {
 
 func TestAttachVersionMismatch(t *testing.T) {
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	// EnterRaw must NOT be called on the error-before-welcome path.
 
 	tr := portsmocks.NewMockTransport(t)
@@ -1252,7 +1253,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1276,7 +1277,7 @@ func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1300,12 +1301,12 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	input := newOneShotBlockingReader([]byte("\x1b[<0;1;1M"))
 	defer input.unblock()
 
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
 	tm.EXPECT().In().Return(input).Maybe()
 	tm.EXPECT().Out().Return(&out).Maybe()
@@ -1361,13 +1362,13 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	paste := []byte("\x1b[200~hello\nworld\x1b[201~")
 	input := newChunkedBlockingReader([]byte("\x1b[200~hello\n"), []byte("world\x1b[201~"))
 	defer input.unblock()
 
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
 	tm.EXPECT().In().Return(input).Maybe()
 	tm.EXPECT().Out().Return(&out).Maybe()
@@ -1423,7 +1424,7 @@ func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
 func TestAttachForwardsResize(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1472,7 +1473,7 @@ func TestAttachForwardsResize(t *testing.T) {
 	// Push a resize event once attach begins receiving daemon frames.
 	go func() {
 		<-firstRecv
-		resizeCh <- domain.Size{Cols: 120, Rows: 40}
+		resizeCh <- domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}}
 	}()
 
 	err := runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral, SessionName: ""})
@@ -1488,7 +1489,7 @@ func TestAttachForwardsResize(t *testing.T) {
 func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
@@ -1513,7 +1514,7 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 
 func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
 
 	tr := portsmocks.NewMockTransport(t)
@@ -1872,12 +1873,12 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 			var unblockIn func()
 			if tt.preWelcomeReject {
 				tm = portsmocks.NewMockTerminal(t)
-				tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+				tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 				// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
 			} else {
 				var out bytes.Buffer
 				var restoreCount atomic.Int32
-				resizeCh := make(chan domain.Size)
+				resizeCh := make(chan domain.Geometry)
 				var in *blockingReader
 				tm, in = newHappyTerminal(t, &out, &restoreCount, resizeCh)
 				unblockIn = in.unblock
@@ -1972,9 +1973,9 @@ func TestRunRememberRemoteHostAtMostOnceAcrossReconnects(t *testing.T) {
 func TestAttachRememberRemoteHostDoesNotBlockAfterWelcome(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	enteredRaw := make(chan struct{})
 	tm.EXPECT().EnterRaw().Run(func() { close(enteredRaw) }).Return(func() error {
 		restoreCount.Add(1)
@@ -2053,9 +2054,9 @@ func TestRunRestoresTerminalBeforeWaitingForLearner(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
 	restored := make(chan struct{})
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	tm.EXPECT().EnterRaw().Return(func() error {
 		restoreCount.Add(1)
 		close(restored)
@@ -2135,9 +2136,9 @@ func TestRunReturnsWhenRemoteHostLearnerStalls(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
 	restored := make(chan struct{})
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	tm.EXPECT().EnterRaw().Return(func() error {
 		restoreCount.Add(1)
 		close(restored)

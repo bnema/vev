@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev-vt/protocol/terminalquery"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
@@ -43,9 +44,17 @@ func (kittyProbeClock) NewTimer(d time.Duration) ports.Timer {
 	return kittyProbeTimer{Timer: time.NewTimer(d)}
 }
 
+func TestKittyProbeEnabledIsTerminalAgnostic(t *testing.T) {
+	for _, term := range []string{"", "arbitrary", "unknown-terminal"} {
+		t.Run(term, func(t *testing.T) {
+			t.Setenv("TERM", term)
+			runner := &Runner{probeCapabilities: true}
+			require.True(t, runner.kittyProbeEnabled())
+		})
+	}
+}
+
 func TestKittyProbeUsesOneInputPumpAndReplaysUnrelatedInput(t *testing.T) {
-	t.Setenv("TERM", "xterm-kitty")
-	t.Setenv("KITTY_WINDOW_ID", "1")
 	input := newTerminalInputPump(strings.NewReader("typed\x1b[?1;2c\x1b_Gi=31;OK\x1b\\"))
 	input.start()
 	defer input.stop()
@@ -53,7 +62,7 @@ func TestKittyProbeUsesOneInputPumpAndReplaysUnrelatedInput(t *testing.T) {
 	runner := &Runner{term: term, clock: kittyProbeClock{}, probeCapabilities: true}
 
 	require.True(t, runner.probeKittyDirectGraphics(context.Background(), input))
-	require.Equal(t, "\x1b_Gi=31,s=1,v=1,a=q;\x1b\\\x1b[c", term.out.String())
+	require.Equal(t, terminalquery.KittyGraphicsQuery+terminalquery.DeviceAttributesQuery, term.out.String())
 
 	consumer := input.claim()
 	defer input.revoke(consumer)

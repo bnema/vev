@@ -15,7 +15,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -154,13 +153,16 @@ const (
 type AttachHandoffFunc func(ports.AttachTarget) (ports.Dialer, AttachRequest, error)
 
 type Dependencies struct {
-	Dialer            ports.Dialer
-	Terminal          ports.Terminal
-	Clock             ports.Clock
-	Clipboard         ports.ClipboardReader
-	Logger            *slog.Logger
-	RuntimeObserver   ports.SerializedRuntimeObserver
-	RemoteHostLearner ports.RemoteHostLearner
+	Dialer   ports.Dialer
+	Terminal ports.Terminal
+	Clock    ports.Clock
+	// DisableCapabilityProbe skips active outer-terminal discovery for headless
+	// embedders and deterministic tests. Interactive clients leave it false.
+	DisableCapabilityProbe bool
+	Clipboard              ports.ClipboardReader
+	Logger                 *slog.Logger
+	RuntimeObserver        ports.SerializedRuntimeObserver
+	RemoteHostLearner      ports.RemoteHostLearner
 	// AttachHandoff keeps one Runner and one terminal/input ownership across a
 	// local daemon's structured remote handoff. It is nil for direct CLI attach.
 	AttachHandoff AttachHandoffFunc
@@ -238,7 +240,7 @@ func NewRunner(deps Dependencies) *Runner {
 		attachHandoff:     deps.AttachHandoff,
 		remote:            deps.Remote,
 		origin:            normalizeRouteOrigin(deps.Origin, deps.Remote),
-		probeCapabilities: true,
+		probeCapabilities: !deps.DisableCapabilityProbe,
 		ledger:            newRouteLedger(),
 	}
 }
@@ -259,11 +261,7 @@ func (r *Runner) terminalInput() *terminalInputPump {
 }
 
 func (r *Runner) kittyProbeEnabled() bool {
-	if r == nil || !r.probeCapabilities {
-		return false
-	}
-	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
-	return term == "xterm-kitty"
+	return r != nil && r.probeCapabilities
 }
 
 // probeKittyDirectGraphics performs one bounded probe for the outer terminal.
@@ -967,11 +965,11 @@ func (u *reconnectUI) redraw(size domain.Size) error {
 func (u *reconnectUI) drawStage(stage reconnectStage) error {
 	u.stage = stage
 	if u.showing && u.remote {
-		size, err := u.term.Size()
+		geometry, err := u.term.Geometry()
 		if err != nil {
-			return fmt.Errorf("reading terminal size for reconnect toast: %w", err)
+			return fmt.Errorf("reading terminal geometry for reconnect toast: %w", err)
 		}
-		return u.redraw(size)
+		return u.redraw(geometry.Size)
 	}
 	return u.draw()
 }
@@ -981,11 +979,11 @@ func (u *reconnectUI) draw() error {
 		return nil
 	}
 	if u.remote {
-		size, err := u.term.Size()
+		geometry, err := u.term.Geometry()
 		if err != nil {
-			return fmt.Errorf("reading terminal size for reconnect toast: %w", err)
+			return fmt.Errorf("reading terminal geometry for reconnect toast: %w", err)
 		}
-		return u.redraw(size)
+		return u.redraw(geometry.Size)
 	}
 	if _, err := u.term.Out().Write([]byte(statusReconnect)); err != nil {
 		return fmt.Errorf("writing reconnect status: %w", err)
@@ -1031,7 +1029,7 @@ func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool 
 	}
 }
 
-func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size) error) (bool, error) {
+func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Geometry, onResize func(domain.Size) error) (bool, error) {
 	t := clk.NewTimer(d)
 	defer t.Stop()
 	for {
@@ -1040,13 +1038,13 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 			return true, nil
 		case <-ctx.Done():
 			return false, nil
-		case size, ok := <-resizeEvents:
+		case geometry, ok := <-resizeEvents:
 			if !ok {
 				resizeEvents = nil
 				continue
 			}
 			if onResize != nil {
-				if err := onResize(size); err != nil {
+				if err := onResize(geometry.Size); err != nil {
 					return false, err
 				}
 			}
@@ -1625,11 +1623,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	defer clearParkedPending()
 
 	sendParkedRouteSize := func() error {
-		current, err := term.Size()
+		geometry, err := term.Geometry()
 		if err != nil {
-			return fmt.Errorf("reading terminal size for parked route: %w", err)
+			return fmt.Errorf("reading terminal geometry for parked route: %w", err)
 		}
-		payload, err := ports.MarshalResize(ports.Resize{Size: current})
+		geometry = geometry.NormalizePixels()
+		payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for parked route: %w", err)
 		}
@@ -1721,11 +1720,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if awaitingReconnectReset {
 			return nil
 		}
-		size, serr := term.Size()
+		geometry, serr := term.Geometry()
 		if serr != nil {
-			return fmt.Errorf("reading terminal size for reconnect reconciliation: %w", serr)
+			return fmt.Errorf("reading terminal geometry for reconnect reconciliation: %w", serr)
 		}
-		payload, err := ports.MarshalResize(ports.Resize{Size: size})
+		geometry = geometry.NormalizePixels()
+		payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for reconnect reconciliation: %w", err)
 		}
@@ -1913,11 +1913,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					awaitingReconnectReset = false
 				}
 				if reconnect.showing && reconnect.remote {
-					size, serr := term.Size()
+					geometry, serr := term.Geometry()
 					if serr != nil {
-						return welcomedResult(fmt.Errorf("vev: reading terminal size for reconnect redraw: %w", serr))
+						return welcomedResult(fmt.Errorf("vev: reading terminal geometry for reconnect redraw: %w", serr))
 					}
-					if rerr := reconnect.redraw(size); rerr != nil {
+					if rerr := reconnect.redraw(geometry.Size); rerr != nil {
 						return welcomedResult(fmt.Errorf("vev: redrawing reconnect toast: %w", rerr))
 					}
 				} else if ferr := term.Flush(); ferr != nil {
@@ -2226,8 +2226,12 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 
 // runSender preserves normal-frame order while allowing switch control and
 // output ACKs to make progress when raw input is held for a same-peer switch.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger, replay ...*inputReplayLedger) {
 	defer log.Debug("sender pump exited")
+	var inputReplay *inputReplayLedger
+	if len(replay) != 0 {
+		inputReplay = replay[0]
+	}
 	send := func(f ports.Frame) bool {
 		if err := transport.Send(f); err != nil {
 			select {
@@ -2236,6 +2240,11 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 			}
 			cancel()
 			return false
+		}
+		if inputReplay != nil && f.Type == ports.MsgInput {
+			if input, err := ports.UnmarshalInput(f.Payload); err == nil {
+				inputReplay.markSent(input.InputSeq)
+			}
 		}
 		return true
 	}

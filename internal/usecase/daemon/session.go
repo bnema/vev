@@ -664,6 +664,12 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
 	tbSize := contentSize(sess.fullViewportSize())
+	claimGeometry := domain.Geometry{Size: tbSize}
+	if source, ok := sess.geometrySourceSnapshot(); ok {
+		claimGeometry = scalePaneGeometry(source.geometry, tbSize)
+	} else if ac != nil {
+		claimGeometry = scalePaneGeometry(ac.geometrySnapshot(), tbSize)
+	}
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err
@@ -680,6 +686,10 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
 	tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
+	if pane := tb.focusedPane(); pane != nil {
+		pane.geometry = claimGeometry
+		setScreenGeometry(pane.screen, claimGeometry)
+	}
 	themeClient := ac
 	if themeClient == nil && len(attachments) != 0 {
 		themeClient = attachments[0]

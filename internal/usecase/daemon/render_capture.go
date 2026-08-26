@@ -172,7 +172,7 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out captured
 	out.id, out.stableID, out.title, out.titleGeneration = p.id, domain.PaneStableID(p.stableID), p.displayTitleLocked(), p.title.generation
 	// GraphicsSnapshot never allocates graphics state for a text-only screen and
 	// returns an immutable scene reference when Kitty graphics were used.
-	out.graphics = p.screen.CaptureGraphicsSnapshot()
+	out.graphics = p.screen.GraphicsSnapshot()
 	geometry := p.screen.Geometry()
 	currentGraphicsGeometry := domain.Geometry{
 		Size:       domain.Size{Cols: geometry.Cols, Rows: geometry.Rows},
