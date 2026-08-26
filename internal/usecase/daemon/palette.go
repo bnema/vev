@@ -80,6 +80,30 @@ func remotePaletteSessionIdentity(endpoint string, lifecycle domain.SessionLifec
 	return paletteSessionIdentity{kind: ports.RouteKindRemote, endpoint: endpoint, lifecycle: lifecycle}
 }
 
+func paletteRemoteDisplayOrigin(hostLabel string) string {
+	origin := domain.RemoteDisplayOrigin(hostLabel)
+	if origin == "" {
+		return "remote"
+	}
+	return origin
+}
+
+func paletteDaemonDisplayOrigin(snapshot ports.RecentRouteSnapshot, lifecycle domain.SessionLifecycleID) string {
+	active, ok := activeRouteEntryForLifecycle(snapshot, lifecycle)
+	if !ok || active.Kind != ports.RouteKindRemote {
+		return ""
+	}
+	return paletteRemoteDisplayOrigin(active.HostLabel)
+}
+
+func paletteRouteRepresentsDaemonSession(entry ports.RecentRouteEntry, daemonDisplayOrigin string) bool {
+	if entry.Kind == ports.RouteKindLocal {
+		return true
+	}
+	return entry.Kind == ports.RouteKindRemote && daemonDisplayOrigin != "" &&
+		paletteRemoteDisplayOrigin(entry.HostLabel) == daemonDisplayOrigin
+}
+
 func remotePaletteUnavailableReason(status remoteHostStatus, session ports.RemoteCatalogSession) string {
 	if session.State == ports.RemoteCatalogSessionBroken {
 		return "session_broken"
@@ -101,6 +125,13 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		}
 	}
 	d.mu.Unlock()
+	var currentLifecycle domain.SessionLifecycleID
+	if current != nil {
+		current.mu.Lock()
+		currentLifecycle = current.incarnation
+		current.mu.Unlock()
+	}
+	daemonDisplayOrigin := paletteDaemonDisplayOrigin(routeSnapshot, currentLifecycle)
 
 	remoteCatalog := d.remoteCatalogSnapshot()
 	sortRemoteCatalog(remoteCatalog, d.remoteHostRanks())
@@ -124,7 +155,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			continue
 		}
 		target := ports.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
-		active = append(active, palette.NewActiveSessionResult(target, time.Unix(0, snap.createdAt)))
+		active = append(active, palette.NewActiveSessionResultWithDisplayOrigin(target, time.Unix(0, snap.createdAt), daemonDisplayOrigin))
 	}
 	sort.Slice(active, func(i, j int) bool {
 		left, _ := active[i].SessionName()
@@ -135,7 +166,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	results = append(results, active...)
 	for _, candidate := range stopped {
 		target := ports.ExactSessionTarget{LifecycleID: candidate.incarnation, SessionName: candidate.name}
-		results = append(results, palette.NewStoppedSessionResult(target, time.Unix(0, candidate.createdAt)))
+		results = append(results, palette.NewStoppedSessionResultWithDisplayOrigin(target, time.Unix(0, candidate.createdAt), daemonDisplayOrigin))
 		represented[localPaletteSessionIdentity(target.LifecycleID)] = struct{}{}
 	}
 	type discoveredRemote struct {
@@ -176,7 +207,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			continue
 		}
 		identity := localPaletteSessionIdentity(entry.Target.LifecycleID)
-		if _, exists := represented[identity]; entry.Kind == ports.RouteKindLocal && exists {
+		if _, exists := represented[identity]; exists && paletteRouteRepresentsDaemonSession(entry, daemonDisplayOrigin) {
 			continue
 		}
 		results = append(results, palette.NewRecentRouteResult(label, ports.RouteNavigationAction{
@@ -498,7 +529,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		var err error
 		if effect != nil {
-			err = d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{}, "palette-session")
+			err = d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{allowSamePeer: true}, "palette-session")
 		} else {
 			err = d.switchToTarget(sess, ac, target)
 		}
