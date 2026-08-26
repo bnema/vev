@@ -116,6 +116,45 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 	}
 }
 
+func TestCatalogCacheLoadMigratesExactV2TabList(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "vev", "remote-catalog-cache.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	raw := []byte(`{"version":2,"hosts":[{"target":"user@arch","fetched_at_unix_nano":1780000000000000000,"sessions":[{"lifecycle_id":"02000000000000000000000000000000","name":"dumber","state":"down","ephemeral":false,"tab_list":[],"attached":false},{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","ephemeral":false,"last_used_seq":42,"tab_list":[{"id":"t_work","index":0,"name":"shell"}],"active_tab_id":"t_work","attached":false}]}]}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	got, err := NewFileCatalogCache(path).Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	want := []ports.RemoteCatalogCacheEntry{{
+		Host:      "user@arch",
+		FetchedAt: time.Unix(0, 1780000000000000000),
+		Sessions: []ports.RemoteCatalogSession{
+			{LifecycleID: [16]byte{2}, Name: "dumber", State: ports.RemoteCatalogSessionDown, Tabs: []ports.RemoteCatalogTab{}},
+			{
+				LifecycleID: [16]byte{1}, Name: "work", State: ports.RemoteCatalogSessionUp,
+				LastUsedSeq: 42, Tabs: []ports.RemoteCatalogTab{{ID: "t_work", Name: "shell"}}, ActiveTabID: "t_work",
+			},
+		},
+	}}
+	if !slices.EqualFunc(got, want, equalRemoteCatalogCacheEntry) {
+		t.Fatalf("Load() = %#v, want %#v", got, want)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cache after load: %v", err)
+	}
+	if !slices.Equal(after, raw) {
+		t.Fatalf("Load changed v2 cache: got %q, want %q", after, raw)
+	}
+}
+
 func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 	t.Parallel()
 
@@ -125,7 +164,7 @@ func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 	}{
 		{name: "truncated", raw: []byte(`{"version":3,"hosts":[`)},
 		{name: "trailing JSON", raw: []byte(`{"version":3,"hosts":[]} {}`)},
-		{name: "obsolete count-only version", raw: []byte(`{"version":2,"hosts":[]}`)},
+		{name: "obsolete count-only version", raw: []byte(`{"version":2,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","ephemeral":false,"tabs":1,"active_tab_id":"t_work","attached":false}]}]}`)},
 		{name: "unknown version", raw: []byte(`{"version":4,"hosts":[]}`)},
 		{name: "missing hosts", raw: []byte(`{"version":3}`)},
 		{name: "null hosts", raw: []byte(`{"version":3,"hosts":null}`)},

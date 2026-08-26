@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	catalogCacheFileName    = "remote-catalog-cache.json"
-	catalogCacheFileVersion = 3
+	catalogCacheFileName         = "remote-catalog-cache.json"
+	catalogCacheExactFileVersion = 2
+	catalogCacheFileVersion      = 3
 )
 
 // CatalogCachePath returns the canonical location of the remote catalog cache in stateDir.
@@ -26,6 +27,10 @@ func CatalogCachePath(stateDir string) string { return filepath.Join(stateDir, c
 type catalogCacheFile struct {
 	Version *int                `json:"version"`
 	Hosts   *[]catalogCacheHost `json:"hosts"`
+}
+
+type catalogCacheVersion struct {
+	Version *int `json:"version"`
 }
 
 type catalogCacheHost struct {
@@ -45,6 +50,29 @@ type catalogCacheSession struct {
 	Attached    *bool                            `json:"attached"`
 }
 
+type catalogCacheFileV2 struct {
+	Version *int                  `json:"version"`
+	Hosts   *[]catalogCacheHostV2 `json:"hosts"`
+}
+
+type catalogCacheHostV2 struct {
+	Target            *string                  `json:"target"`
+	FetchedAtUnixNano *int64                   `json:"fetched_at_unix_nano"`
+	Sessions          *[]catalogCacheSessionV2 `json:"sessions"`
+}
+
+type catalogCacheSessionV2 struct {
+	LifecycleID *domain.SessionLifecycleID       `json:"lifecycle_id,omitempty"`
+	Name        *string                          `json:"name"`
+	State       *ports.RemoteCatalogSessionState `json:"state"`
+	Ephemeral   *bool                            `json:"ephemeral"`
+	LastUsedSeq *uint64                          `json:"last_used_seq,omitempty"`
+	Tabs        *uint16                          `json:"tabs,omitempty"`
+	TabList     *[]ports.RemoteCatalogTab        `json:"tab_list,omitempty"`
+	ActiveTabID *string                          `json:"active_tab_id,omitempty"`
+	Attached    *bool                            `json:"attached"`
+}
+
 type fileCatalogCache struct {
 	path string
 }
@@ -56,8 +84,9 @@ func NewFileCatalogCache(path string) ports.RemoteCatalogCache {
 
 var _ ports.RemoteCatalogCache = (*fileCatalogCache)(nil)
 
-// Load reads and validates one complete cache snapshot. A missing cache is an
-// empty snapshot; malformed cache data is never changed by Load.
+// Load reads and validates one complete cache snapshot. Exact v2 tab-list
+// snapshots are upgraded in memory; ambiguous count-only v2 data is rejected.
+// A missing cache is an empty snapshot, and Load never changes cache data.
 func (c *fileCatalogCache) Load() ([]ports.RemoteCatalogCacheEntry, error) {
 	raw, err := os.ReadFile(c.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -70,20 +99,32 @@ func (c *fileCatalogCache) Load() ([]ports.RemoteCatalogCacheEntry, error) {
 		return nil, fmt.Errorf("remote catalog cache: malformed cache file: invalid UTF-8")
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	var file catalogCacheFile
-	if err := dec.Decode(&file); err != nil {
-		return nil, fmt.Errorf("remote catalog cache: malformed cache file: %w", err)
+	var version catalogCacheVersion
+	if err := decodeCatalogCacheFile(raw, false, &version); err != nil {
+		return nil, err
 	}
-	if err := rejectTrailingJSON(dec); err != nil {
-		return nil, fmt.Errorf("remote catalog cache: malformed cache file: %w", err)
-	}
-	if file.Version == nil {
+	if version.Version == nil {
 		return nil, fmt.Errorf("remote catalog cache: malformed cache file: missing version")
 	}
-	if *file.Version != catalogCacheFileVersion {
-		return nil, fmt.Errorf("remote catalog cache: unsupported cache file version %d", *file.Version)
+
+	var file catalogCacheFile
+	switch *version.Version {
+	case catalogCacheFileVersion:
+		if err := decodeCatalogCacheFile(raw, true, &file); err != nil {
+			return nil, err
+		}
+	case catalogCacheExactFileVersion:
+		var legacy catalogCacheFileV2
+		if err := decodeCatalogCacheFile(raw, true, &legacy); err != nil {
+			return nil, err
+		}
+		migrated, err := migrateExactCatalogCacheV2(legacy)
+		if err != nil {
+			return nil, err
+		}
+		file = migrated
+	default:
+		return nil, fmt.Errorf("remote catalog cache: unsupported cache file version %d", *version.Version)
 	}
 	if file.Hosts == nil {
 		return nil, fmt.Errorf("remote catalog cache: malformed cache file: missing hosts")
@@ -137,6 +178,53 @@ func (c *fileCatalogCache) Load() ([]ports.RemoteCatalogCacheEntry, error) {
 		return nil, err
 	}
 	return normalized, nil
+}
+
+func decodeCatalogCacheFile(raw []byte, strict bool, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if strict {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("remote catalog cache: malformed cache file: %w", err)
+	}
+	if err := rejectTrailingJSON(dec); err != nil {
+		return fmt.Errorf("remote catalog cache: malformed cache file: %w", err)
+	}
+	return nil
+}
+
+func migrateExactCatalogCacheV2(legacy catalogCacheFileV2) (catalogCacheFile, error) {
+	if legacy.Version == nil || *legacy.Version != catalogCacheExactFileVersion || legacy.Hosts == nil {
+		return catalogCacheFile{}, fmt.Errorf("remote catalog cache: malformed version 2 cache file")
+	}
+	hosts := make([]catalogCacheHost, 0, len(*legacy.Hosts))
+	for _, host := range *legacy.Hosts {
+		if host.Sessions == nil {
+			return catalogCacheFile{}, fmt.Errorf("remote catalog cache: malformed cache file: missing host fields")
+		}
+		sessions := make([]catalogCacheSession, 0, len(*host.Sessions))
+		for _, session := range *host.Sessions {
+			if session.Tabs != nil || session.TabList == nil {
+				return catalogCacheFile{}, fmt.Errorf("remote catalog cache: unsupported ambiguous version 2 tab count")
+			}
+			sessions = append(sessions, catalogCacheSession{
+				LifecycleID: session.LifecycleID,
+				Name:        session.Name,
+				State:       session.State,
+				Ephemeral:   session.Ephemeral,
+				LastUsedSeq: session.LastUsedSeq,
+				Tabs:        session.TabList,
+				ActiveTabID: session.ActiveTabID,
+				Attached:    session.Attached,
+			})
+		}
+		hosts = append(hosts, catalogCacheHost{
+			Target: host.Target, FetchedAtUnixNano: host.FetchedAtUnixNano, Sessions: &sessions,
+		})
+	}
+	version := catalogCacheFileVersion
+	return catalogCacheFile{Version: &version, Hosts: &hosts}, nil
 }
 
 // Store atomically replaces the cache with a complete normalized snapshot.
