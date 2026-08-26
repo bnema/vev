@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 func TestCatalogCachePath(t *testing.T) {
@@ -120,7 +121,7 @@ func TestCatalogCacheLoadMigratesExactV2TabList(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "vev", "remote-catalog-cache.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	raw := []byte(`{"version":2,"hosts":[{"target":"user@arch","fetched_at_unix_nano":1780000000000000000,"sessions":[{"lifecycle_id":"02000000000000000000000000000000","name":"dumber","state":"down","ephemeral":false,"tab_list":[],"attached":false},{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","ephemeral":false,"last_used_seq":42,"tab_list":[{"id":"t_work","index":0,"name":"shell"}],"active_tab_id":"t_work","attached":false}]}]}`)
