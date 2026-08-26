@@ -102,7 +102,12 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			want := appendNoNavigationTail(append([]byte(nil), tt.want...))
+			geometryOffset := 33 + len(tt.msg.Name)
+			base := make([]byte, 0, len(tt.want)+4)
+			base = append(base, tt.want[:geometryOffset]...)
+			base = append(base, 0, 0, 0, 0)
+			base = append(base, tt.want[geometryOffset:]...)
+			want := appendNoNavigationTail(base)
 			got := MarshalHello(tt.msg)
 			if !bytes.Equal(got, want) {
 				t.Fatalf("MarshalHello() = %#v, want %#v", got, want)
@@ -141,7 +146,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
 			0x00, 0x00, // name
 			0x00, 0x01, 0x00, 0x01, // size
-			0x00, 0x00, 0x00, 0x00, // optional pixel size
+			0x00, 0x00, 0x00, 0x00, // pixel width and height
 			0x00, 0x00, // TERM
 			0x00, 0x00, // cwd
 			0x00, 0x00, // true color, max output in flight
@@ -947,7 +952,7 @@ func TestHelloOutputWindowByteExactValues(t *testing.T) {
 	for _, window := range []uint8{0, 1, 8} {
 		t.Run(fmt.Sprintf("window_%d", window), func(t *testing.T) {
 			hello := Hello{Version: 14, Size: domain.Size{Cols: 1, Rows: 1}, MaxOutputInFlight: window}
-			// The empty Hello has a fixed 1x1 size before the negotiated output window.
+			// The empty Hello has a fixed 1x1 size and zero pixel geometry before the negotiated output window.
 			want := append(make([]byte, 42), window, 0, 0, 0, 0, 0, 0)
 			want = appendNoNavigationTail(want)
 			want[1] = 14

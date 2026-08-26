@@ -193,6 +193,58 @@ func TestPaneGraphicsCoordinateGeometrySurvivesAttachmentResize(t *testing.T) {
 	require.Equal(t, oldGeometry, second.graphicsGeometry, "retained scene pixels must not be reinterpreted as the resized cell units")
 }
 
+func TestGraphicsOutputChunksLargeRGBUpload(t *testing.T) {
+	const width, height = 300, 300
+	raw := make([]byte, width*height*3)
+	state := uint32(1)
+	for i := range raw {
+		state = state*1664525 + 1013904223
+		raw[i] = byte(state >> 24)
+	}
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: raw, Format: graphics.AssetFormatRGB, Width: width, Height: height})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(asset, graphics.PixelRect{Width: width, Height: height})
+	require.NoError(t, err)
+
+	prepared, err := newGraphicsOutputState().prepare(scene.Snapshot(), true)
+	require.NoError(t, err)
+	var uploadHeaders []string
+	for data := prepared.data; ; {
+		start := bytes.Index(data, []byte("\x1b_G"))
+		if start < 0 {
+			break
+		}
+		end := bytes.Index(data[start+3:], []byte("\x1b\\"))
+		require.NotEqual(t, -1, end)
+		body := data[start+3 : start+3+end]
+		header, payload, _ := bytes.Cut(body, []byte(";"))
+		if bytes.Contains(header, []byte("a=t")) {
+			uploadHeaders = append(uploadHeaders, string(header))
+			require.LessOrEqual(t, len(payload), graphicsUploadChunkBytes)
+		}
+		data = data[start+3+end+2:]
+	}
+	require.Greater(t, len(uploadHeaders), 1, "large RGB data must use Kitty continuation chunks")
+	require.Contains(t, uploadHeaders[0], "f=24")
+	require.Contains(t, uploadHeaders[0], "m=1")
+	require.Contains(t, uploadHeaders[len(uploadHeaders)-1], "m=0")
+}
+
+func TestGraphicsOutputCompressesLargeRGBUpload(t *testing.T) {
+	const width, height = 100, 100
+	raw := bytes.Repeat([]byte{0x7f}, width*height*3)
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: raw, Format: graphics.AssetFormatRGB, Width: width, Height: height})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(asset, graphics.PixelRect{Width: width, Height: height})
+	require.NoError(t, err)
+
+	prepared, err := newGraphicsOutputState().prepare(scene.Snapshot(), true)
+	require.NoError(t, err)
+	require.Contains(t, string(prepared.data), ",f=24,s=100,v=100,o=z")
+}
+
 func TestGraphicsOutputIDsAreIsolatedAcrossAttachments(t *testing.T) {
 	snapshot := kittenGraphicsSnapshot(t)
 	left, right := newGraphicsOutputState(), newGraphicsOutputState()
@@ -529,9 +581,9 @@ func TestGraphicsOutputClipsPlacementToPaneContent(t *testing.T) {
 	prepared, err := graphicsOutputData(state, ac, true)
 	require.NoError(t, err)
 	text := string(prepared.data)
-	require.Contains(t, text, ",x=3,y=5")
-	require.Contains(t, text, ",X=2,Y=1,w=4,h=3")
-	require.NotContains(t, text, ",x=2,y=4", "graphics must not paint the title bar or adjacent area")
+	require.Contains(t, text, "\x1b[6;4H", "placement must move to the clipped pane-local destination")
+	require.Contains(t, text, ",x=2,y=1,w=4,h=3", "lowercase coordinates must preserve the source crop")
+	require.NotContains(t, text, ",X=2,Y=1", "source coordinates must not become destination offsets")
 }
 
 func TestGraphicsOutputClipsEachAttachmentToOuterContentFrame(t *testing.T) {
@@ -613,7 +665,7 @@ func TestGraphicsOutputComposesPaneOriginAndPixelGeometry(t *testing.T) {
 	placement := graphicsOutputPlacement{
 		id:     1,
 		source: graphics.PixelRect{Width: 20, Height: 10},
-		dest:   graphics.PixelRect{X: 100, Y: 50, Width: 20, Height: 10},
+		dest:   graphics.PixelRect{X: 103, Y: 50, Width: 20, Height: 10},
 		cells:  graphics.CellRect{Width: 2, Height: 1},
 	}
 	record := placementRecordWithTransform(1, placement, graphicsOutputTransform{
@@ -621,7 +673,29 @@ func TestGraphicsOutputComposesPaneOriginAndPixelGeometry(t *testing.T) {
 		originY:        2,
 		sourceGeometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480},
 	})
-	require.Contains(t, string(record), "a=p,i=1,p=1,x=13,y=4")
+	text := string(record)
+	require.Contains(t, text, "\x1b7\x1b[5;14H", "destination cells must be expressed through cursor position")
+	require.Contains(t, text, ",X=3,Y=10", "destination pixel remainder must use uppercase offsets")
+	require.NotContains(t, text, ",x=13,y=4", "destination cells must never become source crop controls")
+	require.Contains(t, text, ",C=1", "placement must not move or scroll the text cursor")
+	require.True(t, strings.HasSuffix(text, "\x1b8"), "placement must restore the outer text cursor")
+}
+
+func TestGraphicsOutputPreservesKittenIcatCenteredPlacement(t *testing.T) {
+	placement := graphicsOutputPlacement{
+		id:     1,
+		source: graphics.PixelRect{Width: 103, Height: 128},
+		dest:   graphics.PixelRect{X: 343, Width: 103, Height: 128},
+	}
+	record := placementRecordWithTransform(1, placement, graphicsOutputTransform{
+		originY:        1,
+		sourceGeometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480},
+	})
+	text := string(record)
+	require.Contains(t, text, "\x1b[2;35H", "icat's centered cursor column must survive composition")
+	require.Contains(t, text, ",w=103,h=128", "natural image dimensions must be preserved")
+	require.Contains(t, text, ",X=3", "sub-cell destination offset must be preserved")
+	require.NotContains(t, text, ",x=34", "center position must not crop the image source")
 }
 
 func TestGraphicsOutputFailedSendRetainsSpeculativeIDsForCleanup(t *testing.T) {
@@ -700,7 +774,7 @@ func TestGraphicsOutputComposesSplitPanesWithStableOrderAndChildIDIsolation(t *t
 	require.Len(t, prepared.state.assets, 2, "raw a1 IDs from separate child scenes must not alias")
 	require.Len(t, prepared.state.placements, 2)
 	text := string(prepared.data)
-	require.Less(t, strings.Index(text, ",x=0,y=1"), strings.Index(text, ",x=22,y=1"), "pane traversal order must be deterministic")
+	require.Less(t, strings.Index(text, "\x1b[2;1H"), strings.Index(text, "\x1b[2;23H"), "pane traversal order must be deterministic")
 	var ids []uint64
 	for _, asset := range prepared.state.assets {
 		ids = append(ids, asset.id)
@@ -745,7 +819,7 @@ func TestGraphicsOutputPaneReorderRetainsAssetsButReplaysPlacementsInLayoutOrder
 	require.NotContains(t, string(second.data), "a=t,i=", "moving panes must not re-upload immutable assets")
 	require.Contains(t, string(second.data), "a=d,d=p,p=")
 	require.Contains(t, string(second.data), "a=p,i=")
-	require.Less(t, strings.Index(string(second.data), ",x=0,y=1"), strings.Index(string(second.data), ",x=21,y=1"))
+	require.Less(t, strings.Index(string(second.data), "\x1b[2;1H"), strings.Index(string(second.data), "\x1b[2;22H"))
 }
 
 func TestGraphicsOutputTabSwitchReplaysSameRawChildIDsInNewSourceNamespace(t *testing.T) {

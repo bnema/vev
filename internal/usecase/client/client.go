@@ -15,7 +15,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -154,13 +153,16 @@ const (
 type AttachHandoffFunc func(ports.AttachTarget) (ports.Dialer, AttachRequest, error)
 
 type Dependencies struct {
-	Dialer            ports.Dialer
-	Terminal          ports.Terminal
-	Clock             ports.Clock
-	Clipboard         ports.ClipboardReader
-	Logger            *slog.Logger
-	RuntimeObserver   ports.SerializedRuntimeObserver
-	RemoteHostLearner ports.RemoteHostLearner
+	Dialer   ports.Dialer
+	Terminal ports.Terminal
+	Clock    ports.Clock
+	// DisableCapabilityProbe skips active outer-terminal discovery for headless
+	// embedders and deterministic tests. Interactive clients leave it false.
+	DisableCapabilityProbe bool
+	Clipboard              ports.ClipboardReader
+	Logger                 *slog.Logger
+	RuntimeObserver        ports.SerializedRuntimeObserver
+	RemoteHostLearner      ports.RemoteHostLearner
 	// AttachHandoff keeps one Runner and one terminal/input ownership across a
 	// local daemon's structured remote handoff. It is nil for direct CLI attach.
 	AttachHandoff AttachHandoffFunc
@@ -238,7 +240,7 @@ func NewRunner(deps Dependencies) *Runner {
 		attachHandoff:     deps.AttachHandoff,
 		remote:            deps.Remote,
 		origin:            normalizeRouteOrigin(deps.Origin, deps.Remote),
-		probeCapabilities: true,
+		probeCapabilities: !deps.DisableCapabilityProbe,
 		ledger:            newRouteLedger(),
 	}
 }
@@ -259,11 +261,7 @@ func (r *Runner) terminalInput() *terminalInputPump {
 }
 
 func (r *Runner) kittyProbeEnabled() bool {
-	if r == nil || !r.probeCapabilities {
-		return false
-	}
-	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
-	return term == "xterm-kitty"
+	return r != nil && r.probeCapabilities
 }
 
 // probeKittyDirectGraphics performs one bounded probe for the outer terminal.
@@ -1622,12 +1620,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	defer clearParkedPending()
 
 	sendParkedRouteSize := func() error {
-		current, err := term.Geometry()
+		geometry, err := term.Geometry()
 		if err != nil {
 			return fmt.Errorf("reading terminal geometry for parked route: %w", err)
 		}
-		current = current.NormalizePixels()
-		payload, err := ports.MarshalResize(ports.Resize{Size: current.Size, PixelWidth: current.PixelWidth, PixelHeight: current.PixelHeight})
+		geometry = geometry.NormalizePixels()
+		payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for parked route: %w", err)
 		}
@@ -1719,12 +1717,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if awaitingReconnectReset {
 			return nil
 		}
-		current, serr := term.Geometry()
+		geometry, serr := term.Geometry()
 		if serr != nil {
 			return fmt.Errorf("reading terminal geometry for reconnect reconciliation: %w", serr)
 		}
-		current = current.NormalizePixels()
-		payload, err := ports.MarshalResize(ports.Resize{Size: current.Size, PixelWidth: current.PixelWidth, PixelHeight: current.PixelHeight})
+		geometry = geometry.NormalizePixels()
+		payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for reconnect reconciliation: %w", err)
 		}
@@ -1912,11 +1910,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					awaitingReconnectReset = false
 				}
 				if reconnect.showing && reconnect.remote {
-					current, serr := term.Geometry()
+					geometry, serr := term.Geometry()
 					if serr != nil {
 						return welcomedResult(fmt.Errorf("vev: reading terminal geometry for reconnect redraw: %w", serr))
 					}
-					if rerr := reconnect.redraw(current.Size); rerr != nil {
+					if rerr := reconnect.redraw(geometry.Size); rerr != nil {
 						return welcomedResult(fmt.Errorf("vev: redrawing reconnect toast: %w", rerr))
 					}
 				} else if ferr := term.Flush(); ferr != nil {
@@ -2225,8 +2223,12 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 
 // runSender preserves normal-frame order while allowing switch control and
 // output ACKs to make progress when raw input is held for a same-peer switch.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger, replay ...*inputReplayLedger) {
 	defer log.Debug("sender pump exited")
+	var inputReplay *inputReplayLedger
+	if len(replay) != 0 {
+		inputReplay = replay[0]
+	}
 	send := func(f ports.Frame) bool {
 		if err := transport.Send(f); err != nil {
 			select {
@@ -2235,6 +2237,11 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 			}
 			cancel()
 			return false
+		}
+		if inputReplay != nil && f.Type == ports.MsgInput {
+			if input, err := ports.UnmarshalInput(f.Payload); err == nil {
+				inputReplay.markSent(input.InputSeq)
+			}
 		}
 		return true
 	}

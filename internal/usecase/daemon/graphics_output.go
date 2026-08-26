@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -24,8 +25,9 @@ import (
 // attachment-local state is also the ownership boundary for Kitty IDs: raw
 // scene IDs are never sent to the outer terminal.
 const (
-	maxGraphicsRecordBytes = 8 << 20
-	maxGraphicsOutputBytes = 8 << 20
+	maxGraphicsRecordBytes   = 8 << 20
+	maxGraphicsOutputBytes   = 8 << 20
+	graphicsUploadChunkBytes = 128 << 10
 )
 
 // Kitty image IDs are terminal-global and survive the daemon that allocated
@@ -756,19 +758,50 @@ func deleteImageRecord(id uint64) []byte {
 }
 
 func uploadRecord(id uint64, asset graphics.AssetView) []byte {
-	encoded := asset.Encoded()
-	payload := base64.RawStdEncoding.EncodeToString(encoded)
+	data := asset.Encoded()
 	format := "32"
-	if bytes.HasPrefix(encoded, []byte("\x89PNG\r\n\x1a\n")) {
+	if bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
 		format = "100"
 	} else if asset.Width() > 0 && asset.Height() > 0 &&
 		uint64(asset.Width()) <= ^uint64(0)/uint64(asset.Height())/3 &&
-		uint64(len(encoded)) == uint64(asset.Width())*uint64(asset.Height())*3 {
+		uint64(len(data)) == uint64(asset.Width())*uint64(asset.Height())*3 {
 		format = "24"
 	}
 	header := "a=t,i=" + strconv.FormatUint(id, 10) + ",f=" + format +
 		",s=" + strconv.FormatInt(asset.Width(), 10) + ",v=" + strconv.FormatInt(asset.Height(), 10)
-	return kittyRecord(header, []byte(payload))
+	if format != "100" && len(data) > 2048 {
+		var compressed bytes.Buffer
+		zw := zlib.NewWriter(&compressed)
+		_, writeErr := zw.Write(data)
+		closeErr := zw.Close()
+		if writeErr == nil && closeErr == nil && compressed.Len() < len(data) {
+			data = compressed.Bytes()
+			header += ",o=z"
+		}
+	}
+	payload := base64.RawStdEncoding.EncodeToString(data)
+	if len(payload) <= graphicsUploadChunkBytes {
+		return kittyRecord(header, []byte(payload))
+	}
+	out := make([]byte, 0, len(payload)+len(payload)/graphicsUploadChunkBytes*32)
+	first := true
+	for len(payload) != 0 {
+		n := min(len(payload), graphicsUploadChunkBytes)
+		chunk := payload[:n]
+		payload = payload[n:]
+		chunkHeader := "a=t"
+		if first {
+			chunkHeader = header
+			first = false
+		}
+		if len(payload) != 0 {
+			chunkHeader += ",m=1"
+		} else {
+			chunkHeader += ",m=0"
+		}
+		out = append(out, kittyRecord(chunkHeader, []byte(chunk))...)
+	}
+	return out
 }
 
 func placementRecord(assetID uint64, placement graphicsOutputPlacement) []byte {
@@ -776,15 +809,21 @@ func placementRecord(assetID uint64, placement graphicsOutputPlacement) []byte {
 }
 
 func placementRecordWithTransform(assetID uint64, placement graphicsOutputPlacement, transform graphicsOutputTransform) []byte {
-	destinationX, destinationY, cells := transformedGraphicsPlacement(placement, transform)
+	column, row, offsetX, offsetY, cells := transformedGraphicsPlacement(placement, transform)
 	header := "a=p,i=" + strconv.FormatUint(assetID, 10) + ",p=" + strconv.FormatUint(placement.id, 10)
-	if destinationX >= 0 && destinationY >= 0 {
-		header += ",x=" + strconv.FormatInt(destinationX, 10) + ",y=" + strconv.FormatInt(destinationY, 10)
+	if placement.source.X != 0 {
+		header += ",x=" + strconv.FormatInt(placement.source.X, 10)
 	}
-	if placement.source.X >= 0 && placement.source.Y >= 0 {
-		header += ",X=" + strconv.FormatInt(placement.source.X, 10) + ",Y=" + strconv.FormatInt(placement.source.Y, 10)
+	if placement.source.Y != 0 {
+		header += ",y=" + strconv.FormatInt(placement.source.Y, 10)
 	}
 	header += ",w=" + strconv.FormatInt(placement.source.Width, 10) + ",h=" + strconv.FormatInt(placement.source.Height, 10)
+	if offsetX != 0 {
+		header += ",X=" + strconv.FormatInt(offsetX, 10)
+	}
+	if offsetY != 0 {
+		header += ",Y=" + strconv.FormatInt(offsetY, 10)
+	}
 	if cells.Valid() && !cells.Empty() {
 		header += ",c=" + strconv.FormatInt(cells.Width, 10) + ",r=" + strconv.FormatInt(cells.Height, 10)
 		if cells.X != 0 {
@@ -797,31 +836,46 @@ func placementRecordWithTransform(assetID uint64, placement graphicsOutputPlacem
 	if placement.layer != 0 {
 		header += ",z=" + strconv.FormatInt(placement.layer, 10)
 	}
-	return kittyRecord(header, nil)
+	// The relayed placement must not advance or scroll the outer text cursor.
+	header += ",C=1"
+	record := kittyRecord(header, nil)
+	if column < 0 || row < 0 {
+		return record
+	}
+	out := make([]byte, 0, len(record)+32)
+	out = append(out, "\x1b7\x1b["...)
+	out = strconv.AppendInt(out, row+1, 10)
+	out = append(out, ';')
+	out = strconv.AppendInt(out, column+1, 10)
+	out = append(out, 'H')
+	out = append(out, record...)
+	out = append(out, "\x1b8"...)
+	return out
 }
 
-// transformedGraphicsPlacement converts pane-local graphics coordinates into
-// the outer terminal's one-pane content origin. Kitty's x/y controls are cell
-// coordinates; the VT scene stores them in pixels when the pane knows pixel
-// geometry and in cells otherwise.
-func transformedGraphicsPlacement(placement graphicsOutputPlacement, transform graphicsOutputTransform) (int64, int64, graphics.CellRect) {
-	destinationX, destinationY := placement.dest.X, placement.dest.Y
-	cells := placement.cells
+// transformedGraphicsPlacement converts pane-local destination pixels into an
+// outer cursor cell plus Kitty X/Y sub-cell pixel offsets. Lowercase x/y are
+// source-crop controls and are therefore handled separately by the encoder.
+func transformedGraphicsPlacement(placement graphicsOutputPlacement, transform graphicsOutputTransform) (column, row, offsetX, offsetY int64, cells graphics.CellRect) {
+	column, row = placement.dest.X, placement.dest.Y
+	cells = placement.cells
 	if transform.sourceGeometry.PixelsKnown() && transform.sourceGeometry.Cols > 0 && transform.sourceGeometry.Rows > 0 {
 		cellWidth := transform.sourceGeometry.PixelWidth / transform.sourceGeometry.Cols
 		cellHeight := transform.sourceGeometry.PixelHeight / transform.sourceGeometry.Rows
-		if cellWidth > 0 && cellHeight > 0 && destinationX >= 0 && destinationY >= 0 {
-			destinationX /= int64(cellWidth)
-			destinationY /= int64(cellHeight)
+		if cellWidth > 0 && cellHeight > 0 && column >= 0 && row >= 0 {
+			offsetX = column % int64(cellWidth)
+			offsetY = row % int64(cellHeight)
+			column /= int64(cellWidth)
+			row /= int64(cellHeight)
 		}
 	}
-	if destinationX >= 0 {
-		destinationX += int64(transform.originX)
+	if column >= 0 {
+		column += int64(transform.originX)
 	}
-	if destinationY >= 0 {
-		destinationY += int64(transform.originY)
+	if row >= 0 {
+		row += int64(transform.originY)
 	}
-	return destinationX, destinationY, cells
+	return column, row, offsetX, offsetY, cells
 }
 
 func (s *graphicsOutputState) cleanup() {

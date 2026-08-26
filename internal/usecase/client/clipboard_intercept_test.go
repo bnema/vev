@@ -179,7 +179,7 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 
 	result := make(chan error, 1)
 	go func() {
-		result <- client.NewRunner(client.Dependencies{Dialer: clipboardToastLifecycleDialer{transport: transport}, Terminal: term, Clock: realClock{}, Clipboard: clipboard}).Run(context.Background(), client.AttachRequest{Intent: ports.IntentEphemeral, Remote: true})
+		result <- client.NewRunner(client.Dependencies{Dialer: clipboardToastLifecycleDialer{transport: transport}, Terminal: term, Clock: realClock{}, DisableCapabilityProbe: true, Clipboard: clipboard}).Run(context.Background(), client.AttachRequest{Intent: ports.IntentEphemeral, Remote: true})
 	}()
 
 	var gotNotice bool

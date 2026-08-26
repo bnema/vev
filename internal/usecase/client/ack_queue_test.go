@@ -161,7 +161,7 @@ func TestInputReplayLedgerRetainsFramesAcceptedBeforeSenderFailure(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errs := make(chan error, 1)
-	go runSender(ctx, cancel, &failAfterOneInputTransport{}, frames, newCumulativeAckQueue(), errs, slog.Default(), ledger)
+	go runSender(ctx, cancel, &failAfterOneInputTransport{}, nil, nil, frames, newSamePeerInputGate(), newCumulativeAckQueue(), errs, slog.Default(), ledger)
 
 	require.Error(t, <-errs)
 	require.Equal(t, []byte("second"), ledger.takeUnsent(), "queued input must become residual after the transport failure")
