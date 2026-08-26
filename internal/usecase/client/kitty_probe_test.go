@@ -8,11 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/bnema/vev-vt/protocol/terminalquery"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/require"
 )
 
 type kittyProbeTerminal struct {
