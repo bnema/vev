@@ -8,35 +8,125 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNavigationActionWireTable(t *testing.T) {
+func TestNavigationDirectiveWireTable(t *testing.T) {
+	lease := ParkedRouteLeaseID{1, 2, 3}
 	tests := []struct {
-		name    string
-		action  NavigationAction
-		payload []byte
-		valid   bool
+		name      string
+		directive NavigationDirective
+		valid     bool
 	}{
-		{name: "open home", action: NavigationOpenHomePicker, payload: []byte{1}, valid: true},
-		{name: "back", action: NavigationBack, payload: []byte{2}, valid: true},
-		{name: "zero", action: 0, payload: []byte{0}, valid: false},
-		{name: "unknown", action: 3, payload: []byte{3}, valid: false},
+		{name: "open home", directive: NavigationDirective{Action: NavigationOpenHomePicker, LeaseID: lease}, valid: true},
+		{name: "back", directive: NavigationDirective{Action: NavigationBack}, valid: true},
+		{name: "open home without lease", directive: NavigationDirective{Action: NavigationOpenHomePicker}},
+		{name: "back with lease", directive: NavigationDirective{Action: NavigationBack, LeaseID: lease}},
+		{name: "zero", directive: NavigationDirective{}},
+		{name: "unknown", directive: NavigationDirective{Action: 3}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MarshalNavigationAction(tt.action)
+			got := MarshalNavigationDirective(tt.directive)
 			if !tt.valid {
 				require.Nil(t, got)
-				_, err := UnmarshalNavigationAction(tt.payload)
-				require.ErrorIs(t, err, ErrInvalidNavigation)
 				return
 			}
-			require.Equal(t, tt.payload, got)
-			decoded, err := UnmarshalNavigationAction(got)
+			decoded, err := UnmarshalNavigationDirective(got)
 			require.NoError(t, err)
-			require.Equal(t, tt.action, decoded)
-			assertAllPrefixesFail(t, got, UnmarshalNavigationAction)
-			_, err = UnmarshalNavigationAction(append(append([]byte(nil), got...), 0))
+			require.Equal(t, tt.directive, decoded)
+			assertAllPrefixesFail(t, got, UnmarshalNavigationDirective)
+			_, err = UnmarshalNavigationDirective(append(append([]byte(nil), got...), 0))
 			require.ErrorIs(t, err, ErrInvalidNavigation)
+		})
+	}
+}
+
+func TestParkedRouteWireRoundTripsStrictly(t *testing.T) {
+	lease := ParkedRouteLeaseID{1, 2, 3}
+	target := &domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: domain.SessionLifecycleID{4},
+		SessionName: "work", LiveTabID: "tab-1",
+	}
+	requests := []struct {
+		name   string
+		value  ParkedRouteRequest
+		golden string
+	}{
+		{name: "prepare", value: ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: ParkedRoutePrepare}, golden: "0000000000000001" + "01020300000000000000000000000000" + "010001"},
+		{name: "resume", value: ParkedRouteRequest{RequestID: 2, LeaseID: lease, Action: ParkedRouteResume}},
+		{name: "switch", value: ParkedRouteRequest{RequestID: 3, LeaseID: lease, Action: ParkedRouteSwitch, Target: target}},
+	}
+	for _, tt := range requests {
+		t.Run("request "+tt.name, func(t *testing.T) {
+			payload := MarshalParkedRouteRequest(tt.value)
+			require.NotNil(t, payload)
+			if tt.golden != "" {
+				golden, err := hex.DecodeString(tt.golden)
+				require.NoError(t, err)
+				require.Equal(t, golden, payload)
+			}
+			decoded, err := UnmarshalParkedRouteRequest(payload)
+			require.NoError(t, err)
+			require.Equal(t, tt.value, decoded)
+			assertAllPrefixesFail(t, payload, UnmarshalParkedRouteRequest)
+			assertTrailingGarbageFails(t, payload, UnmarshalParkedRouteRequest)
+		})
+	}
+
+	responses := []struct {
+		name   string
+		value  ParkedRouteResponse
+		golden string
+	}{
+		{name: "ready", value: ParkedRouteResponse{RequestID: 1, Status: ParkedRouteReady}, golden: "000000000000000101"},
+		{name: "resumed", value: ParkedRouteResponse{RequestID: 2, Status: ParkedRouteResumed}},
+		{name: "switched", value: ParkedRouteResponse{RequestID: 3, Status: ParkedRouteSwitched}},
+		{name: "rejected", value: ParkedRouteResponse{RequestID: 4, Status: ParkedRouteRejected}},
+		{name: "expired", value: ParkedRouteResponse{RequestID: 5, Status: ParkedRouteExpired}},
+		{name: "stale target", value: ParkedRouteResponse{RequestID: 6, Status: ParkedRouteStaleTarget}},
+	}
+	for _, tt := range responses {
+		t.Run("response "+tt.name, func(t *testing.T) {
+			payload := MarshalParkedRouteResponse(tt.value)
+			if tt.golden != "" {
+				golden, err := hex.DecodeString(tt.golden)
+				require.NoError(t, err)
+				require.Equal(t, golden, payload)
+			}
+			decoded, err := UnmarshalParkedRouteResponse(payload)
+			require.NoError(t, err)
+			require.Equal(t, tt.value, decoded)
+			assertAllPrefixesFail(t, payload, UnmarshalParkedRouteResponse)
+			assertTrailingGarbageFails(t, payload, UnmarshalParkedRouteResponse)
+		})
+	}
+
+	invalidRequests := []struct {
+		name  string
+		value ParkedRouteRequest
+	}{
+		{name: "zero request ID", value: ParkedRouteRequest{LeaseID: lease, Action: ParkedRoutePrepare}},
+		{name: "zero lease", value: ParkedRouteRequest{RequestID: 1, Action: ParkedRoutePrepare}},
+		{name: "unknown action", value: ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: 99}},
+		{name: "prepare target", value: ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: ParkedRoutePrepare, Target: target}},
+		{name: "resume target", value: ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: ParkedRouteResume, Target: target}},
+		{name: "missing switch target", value: ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: ParkedRouteSwitch}},
+		{name: "invalid switch target", value: ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: ParkedRouteSwitch, Target: &domain.RemoteSessionTarget{}}},
+	}
+	for _, tt := range invalidRequests {
+		t.Run("invalid request "+tt.name, func(t *testing.T) {
+			require.Nil(t, MarshalParkedRouteRequest(tt.value))
+		})
+	}
+	for _, tt := range []struct {
+		name  string
+		value ParkedRouteResponse
+	}{
+		{name: "zero request ID", value: ParkedRouteResponse{Status: ParkedRouteReady}},
+		{name: "zero status", value: ParkedRouteResponse{RequestID: 1}},
+		{name: "unknown status", value: ParkedRouteResponse{RequestID: 1, Status: 99}},
+	} {
+		t.Run("invalid response "+tt.name, func(t *testing.T) {
+			require.Nil(t, MarshalParkedRouteResponse(tt.value))
 		})
 	}
 }
@@ -62,7 +152,7 @@ func TestHelloNavigationValidationTable(t *testing.T) {
 		{name: "client-owned home picker rejected", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityHomePicker}, valid: false},
 		{name: "daemon-owned back picker rejected", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker, EnvironmentPolicy: EnvironmentPolicyDaemonOwned}, valid: false},
 		{name: "remote-target back picker rejected", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: remoteTarget, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker, EnvironmentPolicy: EnvironmentPolicyDaemonOwned}, valid: false},
-		{name: "back with startup picker", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker}, valid: true, capability: NavigationCapabilityBack, overlay: StartupOverlaySessionPicker, wantPayload: "002102" + "00000000000000000000000000000000" + "0000000000000000" + "0000" + "00500018" + "0000" + "0000" + "00" + "00" + "00000000" + "00" + "00" + "00" + "0000" + "0201"},
+		{name: "back with startup picker", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker}, valid: true, capability: NavigationCapabilityBack, overlay: StartupOverlaySessionPicker, wantPayload: "002202" + "00000000000000000000000000000000" + "0000000000000000" + "0000" + "00500018" + "0000" + "0000" + "00" + "00" + "00000000" + "00" + "00" + "00" + "0000" + "0201"},
 		{name: "new rejects navigation", hello: Hello{Version: ProtocolVersion, Intent: IntentNew, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack, StartupOverlay: StartupOverlaySessionPicker}, valid: false},
 		{name: "unknown capability", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: 4}, valid: false},
 		{name: "back without picker", hello: Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, NavigationCapabilities: NavigationCapabilityBack}, valid: false},

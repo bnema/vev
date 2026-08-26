@@ -100,6 +100,10 @@ type attachedClient struct {
 	pendingRouteIdentity       bool
 	samePeerOfferMu            sync.Mutex
 	samePeerOffer              *ports.ExactSessionTarget
+	parkedRouteMu              sync.Mutex
+	parkedRoute                *parkedRouteLease
+	parkedRouteOutput          atomic.Bool
+	parkedRouteFullPending     atomic.Bool
 	routeAttentionSubscription ports.RouteAttentionSubscription
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
@@ -514,6 +518,9 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if !ac.transportSnapshotCurrent(expected) {
 			return expected.transport, errTransportReplaced
 		}
+		if ac.parkedRouteOutput.Load() || ac.parkedRouteFullPending.Load() {
+			return expected.transport, nil
+		}
 		ac.output.lockView()
 		defer ac.output.unlockView()
 		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
@@ -527,6 +534,9 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		defer ac.sendMu.Unlock()
 		if !ac.transportSnapshotCurrent(expected) {
 			return errTransportReplaced
+		}
+		if ac.parkedRouteOutput.Load() || ac.parkedRouteFullPending.Load() {
+			return nil
 		}
 		ac.output.lockView()
 		defer ac.output.unlockView()
@@ -784,7 +794,8 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry *session) *ren
 			// outputStateStream publishes capacity atomically. Do not take
 			// attached.sendMu here: a slow transport may be holding it for an
 			// in-flight Send, and that peer must not gate healthy attachments.
-			return attached == nil || attached.output == nil || !attached.output.atCapacity()
+			return attached == nil ||
+				(!attached.parkedRouteOutput.Load() && (attached.output == nil || !attached.output.atCapacity()))
 		},
 	})
 	installAttachmentRenderCoordinator(entry, rc)

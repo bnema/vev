@@ -32,7 +32,7 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 	defer cancel()
 	tr := &ackRecordingTransport{sent: make(chan ports.Frame, sendQueueDepth+1)}
 	errCh := make(chan error, 1)
-	go runSender(ctx, cancel, tr, nil, normal, nil, acks, errCh, slog.Default())
+	go runSender(ctx, cancel, tr, nil, nil, normal, nil, acks, errCh, slog.Default())
 
 	first := <-tr.sent
 	require.Equal(t, ports.MsgAck, first.Type)
@@ -54,7 +54,7 @@ func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 	transport := &ackRecordingTransport{sent: make(chan ports.Frame, 2)}
 	acks := newCumulativeAckQueue()
 	errs := make(chan error, 1)
-	go runSender(ctx, cancel, transport, control, normal, gate, acks, errs, slog.Default())
+	go runSender(ctx, cancel, transport, control, nil, normal, gate, acks, errs, slog.Default())
 
 	normal <- ports.Frame{Type: ports.MsgInput, Payload: []byte("held")}
 	awaitSenderSignal(t, held)
@@ -71,6 +71,48 @@ func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 	if got := awaitSenderFrame(t, transport.sent); got.Type != ports.MsgInput {
 		t.Fatalf("released frame = %d, want input", got.Type)
 	}
+}
+
+func TestSenderBarrierLeavesPausedInputQueued(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	normal := make(chan ports.Frame, 1)
+	barriers := make(chan chan struct{})
+	gate := newSamePeerInputGate()
+	gate.setPaused(true)
+	transport := &ackRecordingTransport{sent: make(chan ports.Frame, 1)}
+	go runSender(ctx, cancel, transport, nil, barriers, normal, gate, newCumulativeAckQueue(), make(chan error, 1), slog.Default())
+
+	normal <- ports.Frame{Type: ports.MsgInput, Payload: []byte("held")}
+	barrierDone := make(chan struct{})
+	barriers <- barrierDone
+	awaitSenderSignal(t, barrierDone)
+	select {
+	case frame := <-transport.sent:
+		t.Fatalf("barrier sent paused input frame %d", frame.Type)
+	default:
+	}
+
+	gate.setPaused(false)
+	if got := awaitSenderFrame(t, transport.sent); got.Type != ports.MsgInput {
+		t.Fatalf("released frame = %d, want input", got.Type)
+	}
+}
+
+func TestSenderBarrierFlushesPendingAck(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	acks := newCumulativeAckQueue()
+	acks.offer(3, 9)
+	transport := &ackRecordingTransport{sent: make(chan ports.Frame, 1)}
+	barriers := make(chan chan struct{})
+	go runSender(ctx, cancel, transport, nil, barriers, make(chan ports.Frame, 1), newSamePeerInputGate(), acks, make(chan error, 1), slog.Default())
+
+	done := make(chan struct{})
+	barriers <- done
+	frame := awaitSenderFrame(t, transport.sent)
+	require.Equal(t, ports.MsgAck, frame.Type)
+	awaitSenderSignal(t, done)
 }
 
 func awaitSenderSignal(t *testing.T, signal <-chan struct{}) {
