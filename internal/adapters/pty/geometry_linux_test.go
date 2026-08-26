@@ -17,12 +17,20 @@ func TestSetGeometryPreservesPixelDimensions(t *testing.T) {
 		t.Skipf("open /dev/ptmx: %v", err)
 	}
 	master := os.NewFile(uintptr(masterFD), "pty-master")
-	defer master.Close()
+	defer func() {
+		if err := master.Close(); err != nil {
+			t.Errorf("close master: %v", err)
+		}
+	}()
 	slave, err := rawterm.PreparePty(masterFD)
 	if err != nil {
 		t.Fatalf("PreparePty: %v", err)
 	}
-	defer slave.Close()
+	defer func() {
+		if err := slave.Close(); err != nil {
+			t.Errorf("close slave: %v", err)
+		}
+	}()
 
 	geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 640, PixelHeight: 384}
 	if err := setGeometry(masterFD, geometry); err != nil {
