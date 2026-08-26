@@ -343,7 +343,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	d.mu.Lock()
 	d.graphicsNamespaces[block] = struct{}{}
 	d.mu.Unlock()
-	d.cleanupGraphicsOutput(failed)
+	require.Error(t, d.cleanupGraphicsOutput(failed), "failing transport must surface the cleanup send error")
 	require.Nil(t, failed.graphicsOutput)
 	d.mu.Lock()
 	_, reserved = d.graphicsNamespaces[block]
