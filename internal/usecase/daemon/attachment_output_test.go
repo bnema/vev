@@ -449,10 +449,20 @@ func TestAttachmentOutputRebaseRetiresAttachmentState(t *testing.T) {
 }
 
 func TestAttachmentOutputDefaultsAndNormalizesWindow(t *testing.T) {
-	require.Equal(t, uint64(8), newOutputStateStream().maxOutstanding)
-	require.Equal(t, uint64(8), newOutputStateStream(0).maxOutstanding)
-	require.Equal(t, uint64(8), newOutputStateStream(9).maxOutstanding)
-	require.Equal(t, uint64(1), newOutputStateStream(1).maxOutstanding)
+	for _, tt := range []struct {
+		name   string
+		window []uint8
+		want   uint64
+	}{
+		{name: "omitted", want: 8},
+		{name: "zero", window: []uint8{0}, want: 8},
+		{name: "oversized", window: []uint8{9}, want: 8},
+		{name: "exact window", window: []uint8{1}, want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, newOutputStateStream(tt.window...).maxOutstanding)
+		})
+	}
 
 	output := newOutputStateStream()
 	output.setWindow(2)
