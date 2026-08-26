@@ -58,10 +58,8 @@ type TerminalCapabilities struct {
 	KittyGraphics bool
 }
 
-// SupportsKittyGraphics reports whether this attachment's outer terminal is
-// known to accept the Kitty graphics protocol. The detector only sets this for
-// a direct Kitty terminal identity; inherited Kitty variables behind a
-// multiplexer remain ordinary text attachments.
+// SupportsKittyGraphics reports whether this attachment's active outer-terminal
+// probe accepted the Kitty graphics protocol. Environment detection never sets it.
 func (c TerminalCapabilities) SupportsKittyGraphics() bool {
 	return c.KittyGraphics
 }
@@ -99,7 +97,6 @@ func DetectTerminalCapabilities(env []string) TerminalCapabilities {
 			caps.ColorSource = TerminalCapabilityHeuristic
 		}
 		caps.ColorMode = TerminalColorTrueColor
-		caps.KittyGraphics = true
 		return caps
 	}
 	if caps.ColorSource == TerminalCapabilityDeclared {

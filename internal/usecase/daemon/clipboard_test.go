@@ -445,6 +445,8 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	sess.clipboardWorkerRunning = true
 	sess.mu.Unlock()
 	d.forwardClipboardAsync(clipboardOwnerLease(t, sess), base64.StdEncoding.EncodeToString([]byte("queued")))
+	sourceTab := testAttachmentTab(sess)
+	p := sourceTab.focusedPane()
 
 	workerDone := make(chan struct{})
 	go func() {
@@ -453,8 +455,6 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	}()
 	awaitTestCompletion(t, oldTransport.started, "clipboard send did not start")
 
-	sourceTab := testAttachmentTab(sess)
-	p := sourceTab.focusedPane()
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}}
 	publishPaneOwner(p, destination, &tab{}, 0)
 	publishPaneOwner(p, sess, sourceTab, 0)

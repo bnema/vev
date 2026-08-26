@@ -21,20 +21,49 @@ import (
 // Callers serialize access with attachedClient.sendMu. A prepared transaction
 // must be sent or committed as a no-op before the next transaction is prepared.
 type attachmentOutput struct {
-	renderer             *renderer.Renderer
-	epoch                uint64
-	next                 uint64
-	acked                uint64
-	generation           uint64
-	maxOutstanding       uint64
-	outstandingAtomic    atomic.Uint64
-	maxOutstandingAtomic atomic.Uint64
-	forceSnapshot        bool
-	initialized          bool
-	lastCursor           cursorOut
-	lastRoutePosition    ports.RoutePosition
-	attachment           *attachedClient
-	stateMu              sync.Mutex
+	renderer                  *renderer.Renderer
+	epoch                     uint64
+	next                      uint64
+	acked                     uint64
+	generation                uint64
+	maxOutstanding            uint64
+	outstandingAtomic         atomic.Uint64
+	maxOutstandingAtomic      atomic.Uint64
+	forceSnapshot             bool
+	initialized               bool
+	lastCursor                cursorOut
+	lastRoutePosition         ports.RoutePosition
+	graphicsOutput            *graphicsOutputState
+	graphicsUnsupportedWarned atomic.Bool
+	attachment                *attachedClient
+	stateMu                   sync.Mutex
+}
+
+// reconfigureAttachmentOutput applies a replacement terminal's declared
+// capabilities to attachment-owned output state. Caller holds d.mu.
+func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, h ports.Hello) {
+	if d == nil || ac == nil || ac.output == nil {
+		return
+	}
+	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
+	if h.KittyDirectGraphics {
+		ac.output.graphicsUnsupportedWarned.Store(false)
+	}
+	if !h.KittyDirectGraphics {
+		// The parked transport has already been retired. Do not emit cleanup into
+		// a replacement connection that did not declare graphics support.
+		d.discardAttachmentOutputLocked(ac)
+		return
+	}
+	if ac.output.graphicsOutput != nil {
+		return
+	}
+	if namespace, fence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, ac.clientID)); namespace != 0 {
+		ac.output.graphicsOutput = newGraphicsOutputStateWithLease(namespace, fence)
+		return
+	}
+	// Namespace exhaustion fails closed; ANSI output remains available.
+	ac.terminalCapabilities.KittyGraphics = false
 }
 
 // lockView serializes an attachment's view publication with every output
@@ -98,33 +127,51 @@ type cursorCandidate struct {
 // ANSI renderer state and cursor state advance together only after the output
 // frame is accepted by the attachment's state stream.
 type preparedAttachmentOutput struct {
-	output *attachmentOutput
-	ansi   *preparedOutput
-	cursor cursorCandidate
-	data   []byte
+	output   *attachmentOutput
+	ansi     *preparedOutput
+	graphics *preparedGraphicsOutput
+	cursor   cursorCandidate
+	data     []byte
 }
 
-func (o *attachmentOutput) prepareFrame(frame renderer.Frame, damage []renderer.Damage, reset bool, desired cursorOut) (*preparedAttachmentOutput, error) {
+func (o *attachmentOutput) prepareFrame(d *Daemon, state *capturedRenderState, frame renderer.Frame, damage []renderer.Damage, reset bool, desired cursorOut) (*preparedAttachmentOutput, error) {
+	graphicsReset := reset || o.forceSnapshot || !o.initialized
+	preparedGraphics, err := graphicsOutputDataWithDaemon(d, state, o.attachment, graphicsReset)
+	if err != nil {
+		return nil, err
+	}
 	ansi, err := o.prepare(frame, damage, reset)
 	if err != nil {
+		if preparedGraphics != nil {
+			preparedGraphics.abort()
+		}
 		return nil, err
 	}
 	cursor := o.prepareCursorTail(desired, len(ansi.data) > 0)
 	data := append([]byte(nil), ansi.data...)
+	if preparedGraphics != nil {
+		data = append(data, preparedGraphics.data...)
+	}
 	data = append(data, cursor.data...)
-	return &preparedAttachmentOutput{output: o, ansi: ansi, cursor: cursor, data: data}, nil
+	return &preparedAttachmentOutput{output: o, ansi: ansi, graphics: preparedGraphics, cursor: cursor, data: data}, nil
 }
 
 func (p *preparedAttachmentOutput) send(echoAck uint64, send func(ports.Frame) error) error {
 	if p == nil || p.ansi == nil {
 		return nil
 	}
-	if err := p.ansi.send(p.data, echoAck, send); err != nil {
+	sendFrame := send
+	if p.graphics != nil {
+		sendFrame = func(frame ports.Frame) error {
+			p.graphics.markSendAttempted()
+			return send(frame)
+		}
+	}
+	if err := p.ansi.send(p.data, echoAck, sendFrame); err != nil {
+		p.abortGraphics()
 		return err
 	}
-	if p.ansi.sent && p.output != nil {
-		p.output.lastCursor = p.cursor.next
-	}
+	p.commitIfSent()
 	return nil
 }
 
@@ -133,8 +180,31 @@ func (p *preparedAttachmentOutput) commitNoSend() {
 		return
 	}
 	p.ansi.commitNoSend()
-	if p.ansi.sent && p.output != nil {
+	p.commitIfSent()
+}
+
+func (p *preparedAttachmentOutput) commitIfSent() {
+	if p == nil || p.ansi == nil || !p.ansi.sent {
+		p.abortGraphics()
+		return
+	}
+	if p.graphics != nil {
+		p.graphics.commit()
+	}
+	if p.output != nil {
 		p.output.lastCursor = p.cursor.next
+	}
+}
+
+func (p *preparedAttachmentOutput) abort() {
+	if p != nil {
+		p.abortGraphics()
+	}
+}
+
+func (p *preparedAttachmentOutput) abortGraphics() {
+	if p != nil && p.graphics != nil {
+		p.graphics.abort()
 	}
 }
 

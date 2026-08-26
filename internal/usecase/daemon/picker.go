@@ -945,8 +945,8 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	// same-peer transition keeps the attachment and its namespace; the target
 	// scene diff deletes and replaces the source session's placements.
 	if !samePeerEligible {
-		if err := d.cleanupGraphicsOutput(token.ac); err != nil {
-			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up graphics before local handoff", err)
+		if err := d.cleanupAttachmentOutput(token.ac); err != nil {
+			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up attachment output before local handoff", err)
 		}
 	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {

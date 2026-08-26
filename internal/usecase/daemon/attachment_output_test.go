@@ -7,8 +7,10 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
+	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
 
@@ -429,6 +431,36 @@ func TestAttachmentOutputResizeFrameThenNoopAndDamageAreDifferential(t *testing.
 	damageOutput, err := ports.UnmarshalOutput(damaged.Payload)
 	require.NoError(t, err)
 	require.Equal(t, resizeOutput.New, damageOutput.Base, "later damage must remain incremental")
+}
+
+func TestAttachmentOutputFailedSendKeepsTextCursorAndGraphicsSpeculative(t *testing.T) {
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("asset"), Width: 1, Height: 1})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(asset, graphics.PixelRect{Width: 1, Height: 1})
+	require.NoError(t, err)
+	state := &capturedRenderState{panes: []capturedPaneRenderState{{
+		graphics:         scene.Snapshot(),
+		graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 1, Rows: 1}, PixelWidth: 1, PixelHeight: 1},
+		placement:        layout.Placement{Content: domain.Rect{Width: 1, Height: 1}},
+	}}}
+	graphicsState := newGraphicsOutputState()
+	output := attachmentOutputWithGraphics(graphicsState)
+	output.lastCursor = cursorOut{valid: true, row: 1, col: 1}
+	ac := &attachedClient{output: output, terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true}}
+	output.attachment = ac
+	frame := renderer.NewFrame(1, 1)
+	prepared, err := output.prepareFrame(nil, state, frame, []renderer.Damage{renderer.FullRedraw()}, true, cursorOut{row: 2, col: 3})
+	require.NoError(t, err)
+
+	sendErr := errors.New("send failed")
+	require.ErrorIs(t, prepared.send(0, func(ports.Frame) error { return sendErr }), sendErr)
+
+	require.Equal(t, cursorOut{valid: true, row: 1, col: 1}, output.lastCursor)
+	require.Empty(t, graphicsState.assets)
+	require.Empty(t, graphicsState.placements)
+	require.NotEmpty(t, graphicsState.pendingImages)
+	require.NotEmpty(t, graphicsState.pendingPlaces)
 }
 
 func TestAttachmentOutputRebaseRetiresAttachmentState(t *testing.T) {

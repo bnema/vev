@@ -97,8 +97,8 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 	d.closePicker(ac)
 	d.closePalette(ac)
-	if err := d.cleanupGraphicsOutput(ac); err != nil {
-		d.log.Warn("graphics cleanup failed during detach", "err", err, "session", name)
+	if err := d.cleanupAttachmentOutput(ac); err != nil {
+		d.log.Warn("output cleanup failed during detach", "err", err, "session", name)
 	}
 
 	d.resetScreenDefaultColors(sess)
@@ -190,8 +190,8 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
 	d.closePicker(ac)
 	d.closePalette(ac)
-	if err := d.cleanupGraphicsOutput(ac); err != nil {
-		d.log.Warn("graphics cleanup failed after send error", "err", err, "session", name)
+	if err := d.cleanupAttachmentOutput(ac); err != nil {
+		d.log.Warn("output cleanup failed after send error", "err", err, "session", name)
 	}
 	d.resetScreenDefaultColors(sess)
 	_ = ac.closeCapturedTransport(failed)

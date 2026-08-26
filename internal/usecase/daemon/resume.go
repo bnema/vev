@@ -11,39 +11,6 @@ import (
 
 var errResumeTokenLifecycleRace = errors.New("resume token lifecycle race")
 
-func (d *Daemon) reapplyAttachmentGraphicsCapability(sess *session, ac *attachedClient, h ports.Hello) {
-	if d == nil || ac == nil {
-		return
-	}
-	// A resumed transport may be connected to a different outer terminal.
-	// Attachment-owned objects are replayed only when the replacement declares
-	// graphics support; foreign terminal images are never globally deleted.
-	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
-	if h.KittyDirectGraphics {
-		// Capability belongs to the replacement outer terminal, not the parked
-		// link. A later unsupported resume may therefore need its one warning.
-		ac.graphicsUnsupportedWarned.Store(false)
-	}
-	if !h.KittyDirectGraphics {
-		if ac.graphicsOutput != nil {
-			// The parked transport has already been retired. Do not emit the old
-			// attachment's cleanup records into a replacement connection that did
-			// not declare direct graphics.
-			d.discardGraphicsOutputLocked(ac)
-		}
-		return
-	}
-	if ac.graphicsOutput != nil {
-		return
-	}
-	if namespace, fence := d.reserveGraphicsNamespaceLeaseLocked(graphicsNamespaceKey(sess, ac.clientID)); namespace != 0 {
-		ac.graphicsOutput = newGraphicsOutputStateWithLease(namespace, fence)
-		return
-	}
-	// Namespace exhaustion fails closed. The text renderer remains available.
-	ac.terminalCapabilities.KittyGraphics = false
-}
-
 // resumeTokenSnapshot reads the credential under the same daemon lock used by
 // its lifecycle writers. Callers must not hold d.mu.
 func (d *Daemon) resumeTokenSnapshot(ac *attachedClient) uint64 {
@@ -342,7 +309,7 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
 	delete(d.parked, token)
 	if parked != nil {
-		d.discardGraphicsOutputLocked(parked.ac)
+		d.discardAttachmentOutputLocked(parked.ac)
 	}
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
@@ -446,7 +413,7 @@ type parkedAttachmentRetirement struct {
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
 	delete(d.parked, token)
-	d.discardGraphicsOutputLocked(parked.ac)
+	d.discardAttachmentOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	parked.ac.connectionGeneration.Add(1)
@@ -689,7 +656,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// A parked attachment can resume through any route. Reapply the declared
 	// direct-terminal capability before resumed capture or first paint observes
 	// the replacement transport.
-	d.reapplyAttachmentGraphicsCapability(sess, ac, h)
+	d.reconfigureAttachmentOutput(sess, ac, h)
 	geometry := h.Geometry()
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}

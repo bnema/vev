@@ -65,11 +65,7 @@ type attachedClient struct {
 	// sendMu and must never share mutable backing storage.
 	pipelineCache   composeCacheInput
 	pipelineScratch composeCacheInput
-	// graphicsOutput is allocated only for a Kitty outer attachment. Its
-	// speculative state is committed with the enclosing Output record.
-	graphicsOutput            *graphicsOutputState
-	graphicsUnsupportedWarned atomic.Bool
-	renderScratch             renderCaptureScratch // only touched while sendMu is held
+	renderScratch   renderCaptureScratch // only touched while sendMu is held
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
@@ -683,7 +679,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 		ready:             false,
 	})
 	if err != nil {
-		d.discardGraphicsOutput(ac)
+		d.discardAttachmentOutput(ac)
 		if tr != nil {
 			_ = tr.Close()
 		}
@@ -737,10 +733,10 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.Transport, 
 			opts.terminalCapabilities.KittyGraphics = false
 		}
 	}
+	output.graphicsOutput = graphicsOutput
 	ac := &attachedClient{
 		tr:                     tr,
 		output:                 output,
-		graphicsOutput:         graphicsOutput,
 		size:                   geometry.Size,
 		geometry:               geometry,
 		view:                   attachmentView{windowRows: geometry.Rows, windowSet: true},

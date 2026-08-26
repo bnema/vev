@@ -143,8 +143,8 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	for _, attachment := range p.retiredAttachments {
 		d.unregisterPreview(attachment.ac)
 		attachment.ac.clearCaptureFrames()
-		if err := d.cleanupGraphicsOutput(attachment.ac); err != nil {
-			d.log.Warn("move graphics cleanup failed", "err", err, "operation", p.operation, "source_session", p.source.name)
+		if err := d.cleanupAttachmentOutput(attachment.ac); err != nil {
+			d.log.Warn("move attachment output cleanup failed", "err", err, "operation", p.operation, "source_session", p.source.name)
 		}
 		d.notifyDetachedSnapshotAsync(attachment, ports.ReasonSessionKilled)
 	}

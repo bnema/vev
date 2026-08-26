@@ -21,7 +21,7 @@ func TestMixedAttachmentCapabilitiesKeepGraphicsAttachmentLocal(t *testing.T) {
 		ClientID: [16]byte{1}, KittyDirectGraphics: true,
 	}, kittyTransport)
 	require.NoError(t, err)
-	require.NotNil(t, kitty.graphicsOutput)
+	require.NotNil(t, kitty.output.graphicsOutput)
 
 	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
 	require.NoError(t, err)
@@ -36,7 +36,7 @@ func TestMixedAttachmentCapabilitiesKeepGraphicsAttachmentLocal(t *testing.T) {
 		ClientID: [16]byte{2},
 	}, textTransport)
 	require.NoError(t, err)
-	require.Nil(t, text.graphicsOutput)
+	require.Nil(t, text.output.graphicsOutput)
 	text.overlays.noticeMu.Lock()
 	var warning string
 	for _, toast := range text.overlays.noticeToasts {
@@ -59,7 +59,7 @@ func TestDirectRemoteAttachSuppressesUndeclaredGraphicsBackend(t *testing.T) {
 	}, tr)
 	require.NoError(t, err)
 	require.NotNil(t, ac)
-	require.Nil(t, ac.graphicsOutput, "environment heuristics do not declare direct graphics")
+	require.Nil(t, ac.output.graphicsOutput, "environment heuristics do not declare direct graphics")
 	d.clientGone(sess, ac, tr, false)
 }
 
@@ -74,7 +74,7 @@ func TestResumeRemoteRoutePreservesDeclaredGraphicsCapability(t *testing.T) {
 	oldTransport, _ := newCapturingTransport(t)
 	_, ac, err := d.route(local, oldTransport)
 	require.NoError(t, err)
-	require.NotNil(t, ac.graphicsOutput)
+	require.NotNil(t, ac.output.graphicsOutput)
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
 
@@ -86,7 +86,7 @@ func TestResumeRemoteRoutePreservesDeclaredGraphicsCapability(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Same(t, ac, resumed)
-	require.NotNil(t, resumed.graphicsOutput, "remote resume must retain the declared direct graphics backend")
+	require.NotNil(t, resumed.output.graphicsOutput, "remote resume must retain the declared direct graphics backend")
 	require.True(t, resumed.terminalCapabilities.SupportsKittyGraphics())
 	d.clientGone(sess, resumed, replacement, false)
 }

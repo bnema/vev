@@ -920,12 +920,12 @@ func graphicsOutputNamespaceMustQuarantine(state *graphicsOutputState) bool {
 	return state != nil && (state.mayHaveEmitted || len(state.assets) != 0 || len(state.placements) != 0 || len(state.pendingImages) != 0 || len(state.pendingPlaces) != 0)
 }
 
-func (d *Daemon) discardGraphicsOutput(ac *attachedClient) {
-	if d == nil || ac == nil || ac.graphicsOutput == nil {
+func (d *Daemon) discardAttachmentOutput(ac *attachedClient) {
+	if d == nil || ac == nil || ac.output == nil || ac.output.graphicsOutput == nil {
 		return
 	}
 	d.mu.Lock()
-	d.retireGraphicsOutputLocked(ac, ac.graphicsOutput)
+	d.retireGraphicsOutputLocked(ac, ac.output.graphicsOutput)
 	d.mu.Unlock()
 }
 
@@ -947,8 +947,8 @@ func (d *Daemon) retireGraphicsOutputLocked(ac *attachedClient, state *graphicsO
 	if d == nil || state == nil {
 		return nil
 	}
-	if ac != nil && ac.graphicsOutput == state {
-		ac.graphicsOutput = nil
+	if ac != nil && ac.output != nil && ac.output.graphicsOutput == state {
+		ac.output.graphicsOutput = nil
 	}
 	quarantine := graphicsOutputNamespaceMustQuarantine(state)
 	state.cleanup()
@@ -959,24 +959,24 @@ func (d *Daemon) retireGraphicsOutputLocked(ac *attachedClient, state *graphicsO
 	return d.quarantineGraphicsNamespaceLocked(state)
 }
 
-// discardGraphicsOutputLocked is used by lifecycle publication paths that
+// discardAttachmentOutputLocked is used by lifecycle publication paths that
 // already hold d.mu. Since those paths cannot establish terminal receipt, any
 // namespace that may have emitted remains quarantined.
-func (d *Daemon) discardGraphicsOutputLocked(ac *attachedClient) {
-	if d == nil || ac == nil || ac.graphicsOutput == nil {
+func (d *Daemon) discardAttachmentOutputLocked(ac *attachedClient) {
+	if d == nil || ac == nil || ac.output == nil || ac.output.graphicsOutput == nil {
 		return
 	}
-	d.retireGraphicsOutputLocked(ac, ac.graphicsOutput)
+	d.retireGraphicsOutputLocked(ac, ac.output.graphicsOutput)
 }
 
-// cleanupGraphicsOutput removes the objects owned by a closing attachment
-// before its transport is closed. Parked resumable attachments intentionally do
-// not call this: their state remains attached to the parked link and the next
-// epoch deletes and replays it as needed. Even a successful cleanup socket send
-// cannot release an exposed namespace because side-effect Output frames are not
-// terminal-ACKed.
-func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) error {
-	if d == nil || ac == nil {
+// cleanupAttachmentOutput removes terminal objects owned by a closing
+// attachment before its transport is closed. Parked resumable attachments
+// intentionally do not call this: their state remains attached to the parked
+// link and the next epoch deletes and replays it as needed. Even a successful
+// cleanup socket send cannot release an exposed namespace because side-effect
+// Output frames are not terminal-ACKed.
+func (d *Daemon) cleanupAttachmentOutput(ac *attachedClient) error {
+	if d == nil || ac == nil || ac.output == nil || ac.output.graphicsOutput == nil {
 		return nil
 	}
 	// Keep preparation, the side-effect frame, and retirement under one
@@ -984,7 +984,7 @@ func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) error {
 	// between the delete preparation and the handoff control frame.
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	state := ac.graphicsOutput
+	state := ac.output.graphicsOutput
 	if state == nil {
 		return nil
 	}
@@ -1043,13 +1043,13 @@ func (d *Daemon) cleanupGraphicsOutput(ac *attachedClient) error {
 }
 
 func (d *Daemon) disableGraphicsOutput(ac *attachedClient) {
-	if ac == nil || ac.graphicsOutput == nil {
+	if ac == nil || ac.output == nil || ac.output.graphicsOutput == nil {
 		return
 	}
 	ac.terminalCapabilities.KittyGraphics = false
-	state := ac.graphicsOutput
+	state := ac.output.graphicsOutput
 	if d == nil {
-		ac.graphicsOutput = nil
+		ac.output.graphicsOutput = nil
 		state.cleanup()
 		return
 	}
@@ -1280,11 +1280,11 @@ func intersectGraphicsDomainRect(a, b domain.Rect) (domain.Rect, bool) {
 }
 
 func graphicsOutputDataWithDaemon(d *Daemon, state *capturedRenderState, ac *attachedClient, reset bool) (*preparedGraphicsOutput, error) {
-	if ac == nil || ac.graphicsOutput == nil || state == nil || !ac.terminalCapabilities.SupportsKittyGraphics() {
+	if ac == nil || ac.output == nil || ac.output.graphicsOutput == nil || state == nil || !ac.terminalCapabilities.SupportsKittyGraphics() {
 		return nil, nil
 	}
 	assets, placements := composedGraphicsRecords(state)
-	prepared, err := ac.graphicsOutput.prepareWithRecords(assets, placements, reset, graphicsOutputTransform{})
+	prepared, err := ac.output.graphicsOutput.prepareWithRecords(assets, placements, reset, graphicsOutputTransform{})
 	if errors.Is(err, errGraphicsIDExhausted) {
 		d.disableGraphicsOutput(ac)
 		return nil, nil
@@ -1296,7 +1296,7 @@ func graphicsOutputDataWithDaemon(d *Daemon, state *capturedRenderState, ac *att
 	// budget, suppress it and still return the bounded cleanup for objects that
 	// were already proven to be owned by this attachment. ANSI composition is
 	// prepared and emitted by the caller independently.
-	prepared, err = ac.graphicsOutput.prepareWithRecords(nil, nil, reset, graphicsOutputTransform{})
+	prepared, err = ac.output.graphicsOutput.prepareWithRecords(nil, nil, reset, graphicsOutputTransform{})
 	if errors.Is(err, errGraphicsIDExhausted) {
 		d.disableGraphicsOutput(ac)
 		return nil, nil

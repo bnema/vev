@@ -18,6 +18,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func attachmentOutputWithGraphics(state *graphicsOutputState) *attachmentOutput {
+	output := newOutputStateStream()
+	output.graphicsOutput = state
+	return output
+}
+
 func kittenGraphicsSnapshot(t *testing.T) *graphics.Snapshot {
 	t.Helper()
 	data, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
@@ -107,7 +113,7 @@ func TestKittyAttachmentPaintCarriesGraphicsInTheOutputStateRecord(t *testing.T)
 	defer releasePTY()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	ac.terminalCapabilities.KittyGraphics = true
-	ac.graphicsOutput = newGraphicsOutputState()
+	ac.output.graphicsOutput = newGraphicsOutputState()
 	fixture, err := os.ReadFile("testdata/kitten-icat-stream-chunk.bin")
 	require.NoError(t, err)
 	pane := sess.tabs[0].focusedPane()
@@ -140,12 +146,12 @@ func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) 
 	defer releasePTY()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	ac.terminalCapabilities.KittyGraphics = true
-	ac.graphicsOutput = newGraphicsOutputState()
+	ac.output.graphicsOutput = newGraphicsOutputState()
 	d.mu.Lock()
-	d.reapplyAttachmentGraphicsCapability(sess, ac, ports.Hello{KittyDirectGraphics: false})
+	d.reconfigureAttachmentOutput(sess, ac, ports.Hello{KittyDirectGraphics: false})
 	d.mu.Unlock()
 	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
-	require.Nil(t, ac.graphicsOutput)
+	require.Nil(t, ac.output.graphicsOutput)
 
 	d.paint(sess, ac, true, nil)
 	frame := awaitFrame(t, sends, ports.MsgOutput)
@@ -317,7 +323,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	parkedState := newGraphicsOutputStateWithBase(base)
 	parked := &parkedAttachment{
 		sess: &session{sessionCore: sessionCore{name: "parked"}},
-		ac:   &attachedClient{graphicsOutput: parkedState},
+		ac:   &attachedClient{output: attachmentOutputWithGraphics(parkedState)},
 		done: make(chan struct{}),
 	}
 	d.mu.Lock()
@@ -325,7 +331,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	d.parked[1] = parked
 	d.mu.Unlock()
 	d.expireParked(1, parked)
-	require.Nil(t, parked.ac.graphicsOutput)
+	require.Nil(t, parked.ac.output.graphicsOutput)
 	d.mu.Lock()
 	_, reserved := d.graphicsNamespaces[block]
 	d.mu.Unlock()
@@ -336,15 +342,14 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	require.NoError(t, err)
 	seed.commit()
 	failed := &attachedClient{
-		tr:             failingOutputTransport{},
-		output:         newOutputStateStream(),
-		graphicsOutput: failedState,
+		tr:     failingOutputTransport{},
+		output: attachmentOutputWithGraphics(failedState),
 	}
 	d.mu.Lock()
 	d.graphicsNamespaces[block] = struct{}{}
 	d.mu.Unlock()
-	require.Error(t, d.cleanupGraphicsOutput(failed), "failing transport must surface the cleanup send error")
-	require.Nil(t, failed.graphicsOutput)
+	require.Error(t, d.cleanupAttachmentOutput(failed), "failing transport must surface the cleanup send error")
+	require.Nil(t, failed.output.graphicsOutput)
 	d.mu.Lock()
 	_, reserved = d.graphicsNamespaces[block]
 	d.mu.Unlock()
@@ -368,9 +373,9 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 	// deliberately provides no evidence that the client flushed the side effect
 	// to its outer terminal before being lost.
 	transport := &closeTrackingTransport{}
-	ac := &attachedClient{tr: transport, output: newOutputStateStream(), graphicsOutput: state}
-	d.cleanupGraphicsOutput(ac)
-	require.Nil(t, ac.graphicsOutput)
+	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(state)}
+	d.cleanupAttachmentOutput(ac)
+	require.Nil(t, ac.output.graphicsOutput)
 	sends := transport.Sends()
 	require.Len(t, sends, 1)
 	cleanup, err := ports.UnmarshalOutput(sends[0].Payload)
@@ -407,7 +412,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testi
 
 	parked := &parkedAttachment{
 		sess: &session{sessionCore: sessionCore{name: "parked"}},
-		ac:   &attachedClient{graphicsOutput: state},
+		ac:   &attachedClient{output: attachmentOutputWithGraphics(state)},
 		done: make(chan struct{}),
 	}
 	d.mu.Lock()
@@ -440,7 +445,7 @@ func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
 	)
 	d.mu.Unlock()
 
-	require.Nil(t, ac.graphicsOutput)
+	require.Nil(t, ac.output.graphicsOutput)
 	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
 	require.NotNil(t, ac.output, "namespace exhaustion must preserve the ordinary text renderer")
 }
@@ -464,10 +469,10 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	require.NotZero(t, oldID)
 
 	transport := newLateGraphicsCleanupTransport()
-	ac := &attachedClient{tr: transport, output: newOutputStateStream(), graphicsOutput: oldState}
+	ac := &attachedClient{tr: transport, output: attachmentOutputWithGraphics(oldState)}
 	cleanupDone := make(chan struct{})
 	go func() {
-		d.cleanupGraphicsOutput(ac)
+		d.cleanupAttachmentOutput(ac)
 		close(cleanupDone)
 	}()
 	awaitTestCompletion(t, transport.started, "timed-out cleanup did not reach the stale transport")
@@ -546,7 +551,7 @@ func TestGraphicsOutputOversizeSuppressesGraphicsWithoutCompositionError(t *test
 		placement: layout.Placement{Content: domain.Rect{Width: 1, Height: 1}},
 	}}}
 	ac := &attachedClient{
-		graphicsOutput:       newGraphicsOutputState(),
+		output:               attachmentOutputWithGraphics(newGraphicsOutputState()),
 		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
 	}
 	prepared, err := graphicsOutputData(state, ac, true)
@@ -566,7 +571,7 @@ func TestGraphicsOutputClipsPlacementToPaneContent(t *testing.T) {
 		placement:        layout.Placement{Content: domain.Rect{X: 3, Y: 4, Width: 4, Height: 3}},
 	}}}
 	ac := &attachedClient{
-		graphicsOutput:       newGraphicsOutputState(),
+		output:               attachmentOutputWithGraphics(newGraphicsOutputState()),
 		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
 	}
 	prepared, err := graphicsOutputData(state, ac, true)
@@ -747,7 +752,7 @@ func graphicsPaneTestState(tab domain.TabStableID, panes ...capturedPaneRenderSt
 
 func graphicsPaneTestClient() *attachedClient {
 	return &attachedClient{
-		graphicsOutput:       newGraphicsOutputState(),
+		output:               attachmentOutputWithGraphics(newGraphicsOutputState()),
 		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
 	}
 }

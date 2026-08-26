@@ -44,11 +44,11 @@ func sessionHasKittyGraphics(sess *session) bool {
 }
 
 func (d *Daemon) warnUnsupportedGraphics(ac *attachedClient) bool {
-	if d == nil || ac == nil || ac.terminalCapabilities.SupportsKittyGraphics() {
+	if d == nil || ac == nil || ac.output == nil || ac.terminalCapabilities.SupportsKittyGraphics() {
 		return false
 	}
 	sess := ac.currentAttachmentSession()
-	if sess == nil || !sessionHasKittyGraphics(sess) || ac.graphicsUnsupportedWarned.Swap(true) {
+	if sess == nil || !sessionHasKittyGraphics(sess) || ac.output.graphicsUnsupportedWarned.Swap(true) {
 		return false
 	}
 	return d.publishToast(ac, domain.Notification{
