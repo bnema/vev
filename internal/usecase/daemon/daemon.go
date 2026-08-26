@@ -1374,6 +1374,9 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		ready:             false,
 	})
 	if err != nil {
+		if ac.graphicsOutput != nil {
+			d.retireGraphicsOutput(ac, ac.graphicsOutput)
+		}
 		if tr != nil {
 			_ = tr.Close()
 		}

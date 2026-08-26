@@ -67,13 +67,9 @@ type attachedClient struct {
 	pipelineScratch composeCacheInput
 	// graphicsOutput is allocated only for a Kitty outer attachment. Its
 	// speculative state is committed with the enclosing Output record.
-	graphicsOutput *graphicsOutputState
-	// graphicsTerminalResetPending is protected by sendMu. Every fresh outer
-	// connection clears terminal-global Kitty objects before its first ordinary
-	// output, including reconnects that downgrade graphics capability.
-	graphicsTerminalResetPending bool
-	graphicsUnsupportedWarned    atomic.Bool
-	renderScratch                renderCaptureScratch // only touched while sendMu is held
+	graphicsOutput            *graphicsOutputState
+	graphicsUnsupportedWarned atomic.Bool
+	renderScratch             renderCaptureScratch // only touched while sendMu is held
 	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
 	// snapshots cannot leak when an attachment switches tabs or sessions.
 	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
@@ -178,7 +174,14 @@ func (ac *attachedClient) sizeSnapshot() domain.Size {
 }
 
 func (ac *attachedClient) setSize(size domain.Size) {
-	ac.setGeometry(domain.Geometry{Size: size})
+	if ac == nil {
+		return
+	}
+	ac.sizeMu.Lock()
+	ac.size = size
+	ac.geometry.Size = size
+	ac.geometry = ac.geometry.NormalizePixels()
+	ac.sizeMu.Unlock()
 }
 
 func (ac *attachedClient) geometrySnapshot() domain.Geometry {
@@ -735,19 +738,18 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.Transport, 
 		}
 	}
 	ac := &attachedClient{
-		tr:                           tr,
-		output:                       output,
-		graphicsOutput:               graphicsOutput,
-		graphicsTerminalResetPending: true,
-		size:                         geometry.Size,
-		geometry:                     geometry,
-		view:                         attachmentView{windowRows: geometry.Rows, windowSet: true},
-		clientID:                     opts.clientID,
-		terminalCapabilities:         opts.terminalCapabilities,
-		navigationCapabilities:       opts.navigationCapabilities,
-		startupOverlay:               opts.startupOverlay,
-		resumeCapable:                opts.resumeCapable,
-		resumeToken:                  resumeToken,
+		tr:                     tr,
+		output:                 output,
+		graphicsOutput:         graphicsOutput,
+		size:                   geometry.Size,
+		geometry:               geometry,
+		view:                   attachmentView{windowRows: geometry.Rows, windowSet: true},
+		clientID:               opts.clientID,
+		terminalCapabilities:   opts.terminalCapabilities,
+		navigationCapabilities: opts.navigationCapabilities,
+		startupOverlay:         opts.startupOverlay,
+		resumeCapable:          opts.resumeCapable,
+		resumeToken:            resumeToken,
 	}
 	output.attachment = ac
 	ac.initOverlays()

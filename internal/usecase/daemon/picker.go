@@ -941,11 +941,13 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	if samePeerEligible {
 		token.ac.offerSamePeerTarget(*exactTarget)
 	}
-	// A route handoff leaves this daemon's terminal-global Kitty namespace.
-	// Delete the old attachment's objects before publishing the target so the
-	// destination daemon/session never inherits those IDs.
-	if err := d.cleanupGraphicsOutput(token.ac); err != nil {
-		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up graphics before local handoff", err)
+	// A close-and-dial handoff leaves this daemon's Kitty namespace. A
+	// same-peer transition keeps the attachment and its namespace; the target
+	// scene diff deletes and replaces the source session's placements.
+	if !samePeerEligible {
+		if err := d.cleanupGraphicsOutput(token.ac); err != nil {
+			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up graphics before local handoff", err)
+		}
 	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
 		if samePeerEligible {

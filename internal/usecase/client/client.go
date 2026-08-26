@@ -304,7 +304,9 @@ func (r *Runner) probeKittyDirectGraphics(ctx context.Context, input *terminalIn
 	}
 	timer := clock.NewTimer(kittyCapabilityProbeTimeout)
 	defer timer.Stop()
-	for !probe.Ready() {
+	// DA1 is the FIFO sentinel for the preceding graphics query. Once it
+	// arrives, the presence or absence of the Kitty response is definitive.
+	for !probe.DA1() {
 		select {
 		case <-ctx.Done():
 			replay = append(replay, probe.Finish()...)
@@ -337,7 +339,7 @@ done:
 		// the replacement attach consumes these bytes before another OS read.
 		input.preserveResidual(consumer, replay)
 	}
-	return r.rememberKittyDirectGraphics(probe.Ready())
+	return r.rememberKittyDirectGraphics(probe.KittyGraphics() && probe.DA1())
 }
 
 func (r *Runner) rememberKittyDirectGraphics(value bool) bool {
@@ -1185,8 +1187,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		return nil
 	}
-	// Probe the direct outer terminal before Hello. The probe uses the lifecycle
-	// input pump; unsupported and silent terminals fail closed within its bound.
+	// Actively probe the direct outer terminal before Hello. The probe uses the
+	// lifecycle input pump; unsupported and silent terminals fail closed within
+	// its bounded deadline.
 	kittyDirectGraphics := false
 	if a.runner != nil && a.runner.kittyProbeEnabled() && a.terminalInput != nil {
 		if err := enterRaw(); err != nil {
@@ -2223,12 +2226,8 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 
 // runSender preserves normal-frame order while allowing switch control and
 // output ACKs to make progress when raw input is held for a same-peer switch.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger, replay ...*inputReplayLedger) {
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
-	var inputReplay *inputReplayLedger
-	if len(replay) != 0 {
-		inputReplay = replay[0]
-	}
 	send := func(f ports.Frame) bool {
 		if err := transport.Send(f); err != nil {
 			select {
@@ -2237,11 +2236,6 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 			}
 			cancel()
 			return false
-		}
-		if inputReplay != nil && f.Type == ports.MsgInput {
-			if input, err := ports.UnmarshalInput(f.Payload); err == nil {
-				inputReplay.markSent(input.InputSeq)
-			}
 		}
 		return true
 	}

@@ -453,9 +453,6 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	if err == nil {
 		cursor = ac.output.prepareCursorTail(composed.cursor, len(preparedANSI.data) > 0)
-		if ac.graphicsTerminalResetPending {
-			data = append(data, graphicsTerminalResetRecord...)
-		}
 		data = append(data, preparedANSI.data...)
 		if preparedGraphics != nil {
 			data = append(data, preparedGraphics.data...)
@@ -556,7 +553,6 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		if preparedGraphics != nil {
 			preparedGraphics.commit()
 		}
-		ac.graphicsTerminalResetPending = false
 		// Publish only after output preparation and transport emission both
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this

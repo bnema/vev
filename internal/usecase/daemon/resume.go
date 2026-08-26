@@ -15,11 +15,9 @@ func (d *Daemon) reapplyAttachmentGraphicsCapability(sess *session, ac *attached
 	if d == nil || ac == nil {
 		return
 	}
-	// A resumed transport may be connected to a different outer terminal, and a
-	// daemon restart has no inventory of objects emitted by its predecessor.
-	// The first state-bearing paint clears terminal-global Kitty state even when
-	// this replacement connection no longer advertises graphics support.
-	ac.graphicsTerminalResetPending = true
+	// A resumed transport may be connected to a different outer terminal.
+	// Attachment-owned objects are replayed only when the replacement declares
+	// graphics support; foreign terminal images are never globally deleted.
 	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
 	if h.KittyDirectGraphics {
 		// Capability belongs to the replacement outer terminal, not the parked
