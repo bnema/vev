@@ -5,6 +5,15 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+func activeRouteEntryForLifecycle(snapshot ports.RecentRouteSnapshot, lifecycle domain.SessionLifecycleID) (ports.RecentRouteEntry, bool) {
+	active := snapshot.ActiveEntry
+	activeRef := ports.RouteRef{Key: active.Key, Generation: active.Generation}
+	if lifecycle == (domain.SessionLifecycleID{}) || active.Target.LifecycleID != lifecycle || snapshot.Active != activeRef {
+		return ports.RecentRouteEntry{}, false
+	}
+	return active, true
+}
+
 func recentRoutePresentationsFromSnapshot(snapshot ports.RecentRouteSnapshot) []recentRoutePresentation {
 	if snapshot.Entries == nil {
 		return nil

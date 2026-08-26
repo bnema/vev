@@ -197,9 +197,7 @@ func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle boo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	presentation := recentRoutePresentation{name: s.name, ephemeral: s.ephemeral}
-	active := routeSnapshot.ActiveEntry
-	activeRef := ports.RouteRef{Key: active.Key, Generation: active.Generation}
-	if s.incarnation != (domain.SessionLifecycleID{}) && active.Target.LifecycleID == s.incarnation && routeSnapshot.Active == activeRef {
+	if active, ok := activeRouteEntryForLifecycle(routeSnapshot, s.incarnation); ok {
 		presentation.hostLabel = domain.RemoteDisplayOrigin(active.HostLabel)
 		if active.Kind == ports.RouteKindRemote {
 			presentation.kind = recentRouteRemote

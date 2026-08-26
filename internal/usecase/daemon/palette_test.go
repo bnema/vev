@@ -464,6 +464,42 @@ func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *te
 	}, remoteTarget)
 }
 
+func TestPaletteQualifiesDaemonSessionForRemoteAttachment(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	current := addControlSession(d, "current", "tab-current", "pane-current")
+	current.ephemeral = false
+	current.incarnation = domain.SessionLifecycleID{41}
+	target := addControlSession(d, "target", "tab-target", "pane-target")
+	target.ephemeral = false
+	target.incarnation = domain.SessionLifecycleID{42}
+
+	results := d.paletteResults(current, nil, ports.RecentRouteSnapshot{
+		Generation: 1,
+		Active:     ports.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: ports.RecentRouteEntry{
+			Key: 1, Generation: 1,
+			Target: ports.ExactSessionTarget{LifecycleID: current.incarnation, SessionName: "current"},
+			Name:   "current", HostLabel: "user@remote-host", Kind: ports.RouteKindRemote,
+		},
+		Entries: []ports.RecentRouteEntry{{
+			Key: 2, Generation: 1,
+			Target: ports.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: "target"},
+			Name:   "target", HostLabel: "user@remote-host", Kind: ports.RouteKindRemote,
+		}},
+	})
+
+	var matching []palette.Result
+	for _, result := range results {
+		if result.DisplayText() == "Switch to session target@remote-host" {
+			matching = append(matching, result)
+		}
+	}
+	require.Len(t, matching, 1)
+	got, ok := matching[0].SessionTarget()
+	require.True(t, ok)
+	require.Equal(t, ports.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: "target"}, got)
+}
+
 func TestPaletteMatchesRecentRemoteRouteToCatalog(t *testing.T) {
 	tests := []struct {
 		name                 string

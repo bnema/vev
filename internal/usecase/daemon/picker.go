@@ -423,7 +423,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		}
 		var err error
 		if len(effects) != 0 && effects[0] != nil {
-			err = d.switchToTargetForAttachment(effects[0].connectionToken(), target, sessionHandoffGuard{closePicker: true}, "picker-select")
+			err = d.switchToTargetForAttachment(effects[0].connectionToken(), target, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-select")
 		} else {
 			d.closePicker(ac)
 			err = d.switchToTarget(sess, ac, target)
@@ -780,12 +780,13 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 	return d.sessions[id]
 }
 
-// sessionHandoffGuard optionally constrains an active-session handoff to the
-// tab that initiated navigation. Its zero value preserves ordinary picker and
-// command switching behavior.
+// sessionHandoffGuard carries explicit capabilities and source constraints for
+// one active-session handoff. Its zero value keeps daemon-owned transitions on
+// their established path.
 type sessionHandoffGuard struct {
 	expectedSource *tab
 	closePicker    bool
+	allowSamePeer  bool
 }
 
 // switchActiveTargetForAttachment hands a frame-bound navigation request to the
@@ -932,7 +933,11 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	if payload == nil || exactTarget == nil {
 		return errAttachmentTransition
 	}
-	samePeerEligible := action == "picker-select" && targetSess != nil && target.TabIndex == 0
+	// An active session row with no explicit non-default tab is on the
+	// authenticated daemon and can use the client-confirmed same-peer path.
+	// Explicit tab rows already take the direct transition path above, while
+	// stopped sessions have no active target session and retain the fallback.
+	samePeerEligible := guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
 	if samePeerEligible {
 		token.ac.offerSamePeerTarget(*exactTarget)
 	}
@@ -943,8 +948,8 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't offer local session switch", err)
 	}
 	if !samePeerEligible {
-		// Only ordinary active picker session rows are eligible. Stopped,
-		// index-only, and non-picker navigation retain close-and-dial handoff.
+		// Stopped and explicit non-default index targets retain the close-and-dial
+		// handoff instead of losing their target-specific transition semantics.
 		if guard.closePicker {
 			d.closePicker(token.ac)
 		}

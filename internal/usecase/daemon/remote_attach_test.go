@@ -28,7 +28,7 @@ func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 	token.effect = effect
 	defer effect.End()
 
-	require.NoError(t, d.switchToTargetForAttachment(token, picker.Target{Session: target.id}, sessionHandoffGuard{}, "picker-select"))
+	require.NoError(t, d.switchToTargetForAttachment(token, picker.Target{Session: target.id}, sessionHandoffGuard{allowSamePeer: true}, "picker-select"))
 	frame := receiveRemotePicker(t, sends, "local attach target")
 	got, err := ports.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)

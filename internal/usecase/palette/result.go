@@ -30,7 +30,7 @@ type Result struct {
 }
 
 type sessionPayload struct {
-	name      string
+	display   string
 	createdAt time.Time
 	target    ports.ExactSessionTarget
 }
@@ -53,18 +53,38 @@ func NewCommandResult(cmd command.Command) Result {
 
 // NewActiveSessionResult creates an immutable active named-session target.
 func NewActiveSessionResult(target ports.ExactSessionTarget, createdAt time.Time) Result {
+	return NewActiveSessionResultWithDisplayOrigin(target, createdAt, "")
+}
+
+// NewActiveSessionResultWithDisplayOrigin creates an active named-session target
+// qualified for presentation through a remote attachment origin.
+func NewActiveSessionResultWithDisplayOrigin(target ports.ExactSessionTarget, createdAt time.Time, displayOrigin string) Result {
 	return Result{
 		kind:    ResultKindActiveSession,
-		session: sessionPayload{name: target.SessionName, createdAt: createdAt, target: target},
+		session: newSessionPayload(target, createdAt, displayOrigin),
 	}
 }
 
 // NewStoppedSessionResult creates an immutable stopped named-session target.
 func NewStoppedSessionResult(target ports.ExactSessionTarget, createdAt time.Time) Result {
+	return NewStoppedSessionResultWithDisplayOrigin(target, createdAt, "")
+}
+
+// NewStoppedSessionResultWithDisplayOrigin creates a stopped named-session target
+// qualified for presentation through a remote attachment origin.
+func NewStoppedSessionResultWithDisplayOrigin(target ports.ExactSessionTarget, createdAt time.Time, displayOrigin string) Result {
 	return Result{
 		kind:    ResultKindStoppedSession,
-		session: sessionPayload{name: target.SessionName, createdAt: createdAt, target: target},
+		session: newSessionPayload(target, createdAt, displayOrigin),
 	}
+}
+
+func newSessionPayload(target ports.ExactSessionTarget, createdAt time.Time, displayOrigin string) sessionPayload {
+	display := target.SessionName
+	if displayOrigin != "" {
+		display = domain.RemoteSessionDisplay(target.SessionName, displayOrigin)
+	}
+	return sessionPayload{display: display, createdAt: createdAt, target: target}
 }
 
 // NewRemoteSessionResult creates an immutable catalog-backed remote target.
@@ -112,7 +132,7 @@ func (r Result) DisplayText() string {
 	if r.kind == ResultKindRecentRoute {
 		return activeSessionDisplayPrefix + r.route.label
 	}
-	return r.sessionDisplayPrefix() + r.session.name
+	return r.sessionDisplayPrefix() + r.session.display
 }
 
 func (r Result) sessionDisplayPrefix() string {
@@ -133,7 +153,7 @@ func (r Result) Command() (command.Command, bool) {
 
 // SessionName returns the session name only for session results.
 func (r Result) SessionName() (string, bool) {
-	return r.session.name, r.kind == ResultKindActiveSession || r.kind == ResultKindStoppedSession
+	return r.session.target.SessionName, r.kind == ResultKindActiveSession || r.kind == ResultKindStoppedSession
 }
 
 // SessionCreatedAt returns the session creation time only for session results.

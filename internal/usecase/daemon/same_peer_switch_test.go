@@ -9,6 +9,45 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+func TestPaletteSessionSelectionCompletesSamePeerSwitch(t *testing.T) {
+	d, source, ac, sends, releases := newManualTabSession(t, 1)
+	defer releaseAll(releases)
+
+	lifecycle := domain.SessionLifecycleID{7}
+	target := &session{
+		sessionCore: sessionCore{
+			id: "target", name: "target", incarnation: lifecycle,
+			attachments: make(map[*attachedClient]struct{}),
+		},
+		ctx: source.ctx, cancel: func() {},
+		tabs: []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
+	}
+	publishTiledPaneOwners(target, target.tabs[0])
+	d.mu.Lock()
+	d.sessions[target.id] = target
+	d.mu.Unlock()
+	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+
+	token := beginRecentRoutePaletteEffect(t, d, source, ac)
+	d.handleInputForAttachment(token, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInputForAttachment(token, []byte("target\r"))
+	targetFrame := awaitFrame(t, sends, ports.MsgAttachTarget)
+	attachTarget, err := ports.UnmarshalAttachTarget(targetFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, attachTarget.ExactTarget)
+
+	d.switchSamePeerForAttachment(token, ports.SamePeerSwitchRequest{
+		RequestID: 1, Target: *attachTarget.ExactTarget,
+	})
+
+	require.Same(t, target, ac.currentAttachmentSession())
+	identityFrame := awaitFrame(t, sends, ports.MsgCommittedRouteIdentity)
+	identity, err := ports.UnmarshalCommittedRouteIdentity(identityFrame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, attachTarget.ExactTarget, &identity.Target)
+}
+
 func TestSamePeerSwitchTransitionsExactTargetAndPreferredTab(t *testing.T) {
 	d, source, ac, sends, releases := newManualTabSession(t, 1)
 	defer releaseAll(releases)
