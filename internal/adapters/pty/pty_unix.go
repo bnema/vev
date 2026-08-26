@@ -150,12 +150,7 @@ func (p *unixPTY) Write(b []byte) (int, error) {
 // every subsequent Read into a thread-parking syscall and breaking the
 // Close-unblocks-Read behavior. Control also pins the fd for the duration and
 // fails cleanly (os.ErrClosed) after Close.
-func (p *unixPTY) Resize(sz domain.Size) error {
-	return p.ResizeGeometry(domain.Geometry{Size: sz})
-}
-
-// ResizeGeometry updates the complete terminal cell and pixel geometry.
-func (p *unixPTY) ResizeGeometry(geometry domain.Geometry) error {
+func (p *unixPTY) Resize(geometry domain.Geometry) error {
 	geometry = geometry.NormalizePixels()
 	rc, err := p.master.SyscallConn()
 	if err != nil {

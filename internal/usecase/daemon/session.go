@@ -182,31 +182,19 @@ func (d *Daemon) touchMRU(entry *session) {
 	entry.mu.Unlock()
 }
 
-func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, env []string, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithMode(name, ephemeral, cwd, sz, env, restoredTabNames...)
-}
-
-func (d *Daemon) createSessionLockedWithGeometry(name string, ephemeral bool, cwd string, sz domain.Size, geometry domain.Geometry, env []string, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndGeometry(name, ephemeral, cwd, sz, geometry, env, restoredTabNames...)
+func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, geometry domain.Geometry, env []string, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithMode(name, ephemeral, cwd, geometry, env, restoredTabNames...)
 }
 
 // resumeInactiveSessionLocked resumes exactly expectedInactive. It rechecks
 // lifecycle and resumability after catalogue I/O, which intentionally runs
 // without d.mu.
-func (d *Daemon) resumeInactiveSessionLocked(name string, cwd string, sz domain.Size, env []string, expectedInactive inactiveSession, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndInactiveFence(name, false, cwd, sz, domain.Geometry{Size: sz}, env, &expectedInactive, nil, restoredTabNames...)
+func (d *Daemon) resumeInactiveSessionLocked(name string, cwd string, geometry domain.Geometry, env []string, expectedInactive inactiveSession, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndInactiveFence(name, false, cwd, geometry, env, &expectedInactive, nil, restoredTabNames...)
 }
 
-func (d *Daemon) resumeInactiveSessionWithGeometryLocked(name string, cwd string, sz domain.Size, geometry domain.Geometry, env []string, expectedInactive inactiveSession, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndInactiveFence(name, false, cwd, sz, geometry, env, &expectedInactive, nil, restoredTabNames...)
-}
-
-func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, sz domain.Size, env []string, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndInactiveFence(name, ephemeral, cwd, sz, domain.Geometry{Size: sz}, env, nil, nil, restoredTabNames...)
-}
-
-func (d *Daemon) createSessionLockedWithModeAndGeometry(name string, ephemeral bool, cwd string, sz domain.Size, geometry domain.Geometry, env []string, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionLockedWithModeAndInactiveFence(name, ephemeral, cwd, sz, geometry, env, nil, nil, restoredTabNames...)
+func (d *Daemon) createSessionLockedWithMode(name string, ephemeral bool, cwd string, geometry domain.Geometry, env []string, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionLockedWithModeAndInactiveFence(name, ephemeral, cwd, geometry, env, nil, nil, restoredTabNames...)
 }
 
 type inactiveResumeValidator func(inactiveSession, domain.CatalogueRecord, bool) bool
@@ -231,12 +219,10 @@ func inactiveResumeFenceAllows(current inactiveSession, exists bool, expected *i
 	return validate == nil || validate(current, authoritative, authoritativeExists)
 }
 
-func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, ephemeral bool, cwd string, sz domain.Size, geometry domain.Geometry, env []string, expectedInactive *inactiveSession, validateInactive inactiveResumeValidator, restoredTabNames ...[]string) (*session, error) {
+func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, ephemeral bool, cwd string, geometry domain.Geometry, env []string, expectedInactive *inactiveSession, validateInactive inactiveResumeValidator, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
 	geometry = geometry.NormalizePixels()
-	if geometry.Size != sz {
-		geometry = domain.Geometry{Size: sz}
-	}
+	sz := geometry.Size
 	if _, reserved := d.creating[name]; reserved {
 		return nil, errSessionNameInUse
 	}
@@ -475,7 +461,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
-	sz := ac.sizeSnapshot()
+	geometry := ac.geometrySnapshot()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
@@ -495,7 +481,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		return errors.New("client detached")
 	}
 
-	newSess, err := d.createSessionLockedWithMode(name, false, cwd, sz, env)
+	newSess, err := d.createSessionLockedWithMode(name, false, cwd, geometry, env)
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -559,7 +545,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 			cwd, env := source.cwd, copyEnvironment(source.env)
 			source.mu.Unlock()
 			var createErr error
-			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.sizeSnapshot(), env)
+			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.geometrySnapshot(), env)
 			return created, createErr
 		},
 	})
@@ -578,7 +564,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 }
 
 func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClient) error {
-	sz := ac.sizeSnapshot()
+	geometry := ac.geometrySnapshot()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
@@ -593,7 +579,7 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 		return errors.New("client detached")
 	}
 	name := d.allocEphemeralNameLocked()
-	newSess, err := d.createSessionLockedWithMode(name, true, cwd, sz, env)
+	newSess, err := d.createSessionLockedWithMode(name, true, cwd, geometry, env)
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -635,7 +621,7 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(token attachmentCo
 			source.mu.Unlock()
 			name := d.allocEphemeralNameLocked()
 			var createErr error
-			created, createErr = d.createSessionLockedWithMode(name, true, cwd, token.ac.sizeSnapshot(), env)
+			created, createErr = d.createSessionLockedWithMode(name, true, cwd, token.ac.geometrySnapshot(), env)
 			return created, createErr
 		},
 	})
@@ -664,6 +650,12 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	attachments := sess.snapshotAttachmentsLocked()
 	sess.mu.Unlock()
 	tbSize := contentSize(sess.fullViewportSize())
+	claimGeometry := domain.Geometry{Size: tbSize}
+	if source, ok := sess.geometrySourceSnapshot(); ok {
+		claimGeometry = scalePaneGeometry(source.geometry, tbSize)
+	} else if ac != nil {
+		claimGeometry = scalePaneGeometry(ac.geometrySnapshot(), tbSize)
+	}
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err
@@ -680,6 +672,10 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
 	tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
+	if pane := tb.focusedPane(); pane != nil {
+		pane.geometry = claimGeometry
+		setScreenGeometry(pane.screen, claimGeometry)
+	}
 	themeClient := ac
 	if themeClient == nil && len(attachments) != 0 {
 		themeClient = attachments[0]

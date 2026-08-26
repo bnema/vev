@@ -147,7 +147,7 @@ func TestResize_SttySize(t *testing.T) {
 			t.Cleanup(func() { _ = p.Close() })
 
 			if tt.resize != nil {
-				require.NoError(t, p.Resize(*tt.resize))
+				require.NoError(t, p.Resize(domain.Geometry{Size: *tt.resize}))
 			}
 
 			out := readAll(t, p, 5*time.Second)
@@ -268,7 +268,7 @@ func TestResize_DeliversSIGWINCH(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, p.Resize(domain.Size{Cols: 100, Rows: 30}))
+	require.NoError(t, p.Resize(domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}}))
 
 	for !strings.Contains(acc, "GOTWINCH") {
 		if time.Now().After(deadline) {

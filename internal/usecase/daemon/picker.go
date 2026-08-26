@@ -1256,7 +1256,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 				from.mu.Lock()
 				cwd, env := d.dirOrHome(current.cwd), copyEnvironment(from.env)
 				from.mu.Unlock()
-				created, createErr := d.resumeInactiveSessionWithGeometryLocked(target.Name, cwd, ac.sizeSnapshot(), ac.geometrySnapshot(), env, current, current.tabNames)
+				created, createErr := d.resumeInactiveSessionLocked(target.Name, cwd, ac.geometrySnapshot(), env, current, current.tabNames)
 				targetSess = created
 				return created, createErr
 			},
@@ -1287,7 +1287,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		return nil, attachmentTransitionResult{}, false, errAttachmentTransition
 	}
 	cwd := d.dirOrHome(current.cwd)
-	targetSess, err := d.resumeInactiveSessionWithGeometryLocked(target.Name, cwd, ac.sizeSnapshot(), ac.geometrySnapshot(), env, current, current.tabNames)
+	targetSess, err := d.resumeInactiveSessionLocked(target.Name, cwd, ac.geometrySnapshot(), env, current, current.tabNames)
 	if err != nil {
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
 		return nil, attachmentTransitionResult{}, false, err

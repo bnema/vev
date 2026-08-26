@@ -38,9 +38,9 @@ func (p *contextAwareFloatingPTY) Read([]byte) (int, error) {
 	return 0, p.ctx.Err()
 }
 
-func (*contextAwareFloatingPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (*contextAwareFloatingPTY) Resize(domain.Size) error    { return nil }
-func (*contextAwareFloatingPTY) Pid() int                    { return 1 }
+func (*contextAwareFloatingPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*contextAwareFloatingPTY) Resize(domain.Geometry) error { return nil }
+func (*contextAwareFloatingPTY) Pid() int                     { return 1 }
 func (*contextAwareFloatingPTY) ForegroundPgid() (int, error) {
 	return 1, nil
 }
@@ -182,9 +182,9 @@ func (p *failedOpenPTY) Read([]byte) (int, error) {
 	}
 }
 
-func (*failedOpenPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (*failedOpenPTY) Resize(domain.Size) error    { return nil }
-func (*failedOpenPTY) Pid() int                    { return 1 }
+func (*failedOpenPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*failedOpenPTY) Resize(domain.Geometry) error { return nil }
+func (*failedOpenPTY) Pid() int                     { return 1 }
 func (*failedOpenPTY) ForegroundPgid() (int, error) {
 	return 1, nil
 }

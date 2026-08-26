@@ -55,16 +55,12 @@ func TestTerminal_RealPTY_RawModeSizeAndEscapes(t *testing.T) {
 
 	tm := NewWithFiles(slave, slave)
 
-	sz, err := tm.Size()
-	if err != nil {
-		t.Fatalf("Size: %v", err)
-	}
-	if sz.Cols != 80 || sz.Rows != 24 {
-		t.Fatalf("Size = %+v, want {Cols:80 Rows:24}", sz)
-	}
 	geometry, err := tm.Geometry()
 	if err != nil {
 		t.Fatalf("Geometry: %v", err)
+	}
+	if geometry.Cols != 80 || geometry.Rows != 24 {
+		t.Fatalf("Geometry = %+v, want {Cols:80 Rows:24}", geometry)
 	}
 	if geometry.PixelWidth != 640 || geometry.PixelHeight != 384 {
 		t.Fatalf("Geometry = %+v, want 640x384 pixels", geometry)

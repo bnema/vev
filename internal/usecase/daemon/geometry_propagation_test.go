@@ -65,11 +65,7 @@ type recordingGeometryPTY struct {
 func (p *recordingGeometryPTY) Read([]byte) (int, error)    { return 0, io.EOF }
 func (p *recordingGeometryPTY) Write(b []byte) (int, error) { return len(b), nil }
 func (p *recordingGeometryPTY) Close() error                { return nil }
-func (p *recordingGeometryPTY) Resize(size domain.Size) error {
-	p.geometry = domain.Geometry{Size: size}
-	return nil
-}
-func (p *recordingGeometryPTY) ResizeGeometry(geometry domain.Geometry) error {
+func (p *recordingGeometryPTY) Resize(geometry domain.Geometry) error {
 	p.geometry = geometry
 	return nil
 }
@@ -169,13 +165,7 @@ func (p *blockingRecordingGeometryPTY) Close() error {
 	p.once.Do(func() { close(p.done) })
 	return nil
 }
-func (p *blockingRecordingGeometryPTY) Resize(size domain.Size) error {
-	p.mu.Lock()
-	p.geometry = domain.Geometry{Size: size}
-	p.mu.Unlock()
-	return nil
-}
-func (p *blockingRecordingGeometryPTY) ResizeGeometry(geometry domain.Geometry) error {
+func (p *blockingRecordingGeometryPTY) Resize(geometry domain.Geometry) error {
 	p.mu.Lock()
 	p.geometry = geometry
 	p.mu.Unlock()
@@ -196,7 +186,7 @@ func TestInitialSessionPTYReceivesClaimingPixelGeometry(t *testing.T) {
 	geometry := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480}
 
 	d.mu.Lock()
-	sess, err := d.createSessionLockedWithModeAndGeometry("pixels", true, "/tmp", geometry.Size, geometry, nil)
+	sess, err := d.createSessionLockedWithMode("pixels", true, "/tmp", geometry, nil)
 	d.mu.Unlock()
 	require.NoError(t, err)
 	want := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 22}, PixelWidth: 800, PixelHeight: 440}

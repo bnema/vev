@@ -136,7 +136,7 @@ func (*resizeLockProbePTY) Write(b []byte) (int, error)  { return len(b), nil }
 func (*resizeLockProbePTY) Close() error                 { return nil }
 func (*resizeLockProbePTY) Pid() int                     { return 0 }
 func (*resizeLockProbePTY) ForegroundPgid() (int, error) { return 0, nil }
-func (p *resizeLockProbePTY) Resize(domain.Size) error {
+func (p *resizeLockProbePTY) Resize(domain.Geometry) error {
 	p.once.Do(func() {
 		func() {
 			defer close(p.entered)

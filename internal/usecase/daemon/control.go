@@ -491,7 +491,7 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	if e.d.nameLiveOrStoppedLocked(name) {
 		return errSessionNameInUse
 	}
-	_, err := e.d.createSessionLocked(name, false, cwd, size, env)
+	_, err := e.d.createSessionLocked(name, false, cwd, domain.Geometry{Size: size}, env)
 	return err
 }
 func (e controlExec) CloseTab() error {

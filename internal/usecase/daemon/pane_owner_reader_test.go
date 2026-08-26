@@ -43,10 +43,10 @@ func (p *ownerRoutingPTY) Read(buf []byte) (int, error) {
 	return copy(buf, step.data), step.err
 }
 
-func (*ownerRoutingPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (p *ownerRoutingPTY) Close() error              { p.closes.Add(1); return nil }
-func (*ownerRoutingPTY) Resize(domain.Size) error    { return nil }
-func (*ownerRoutingPTY) Pid() int                    { return 0 }
+func (*ownerRoutingPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (p *ownerRoutingPTY) Close() error               { p.closes.Add(1); return nil }
+func (*ownerRoutingPTY) Resize(domain.Geometry) error { return nil }
+func (*ownerRoutingPTY) Pid() int                     { return 0 }
 func (*ownerRoutingPTY) ForegroundPgid() (int, error) {
 	return 0, nil
 }

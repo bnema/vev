@@ -206,15 +206,6 @@ func (t *Terminal) restoreRawLocked() error {
 	return err
 }
 
-// Size returns the current terminal cell dimensions.
-func (t *Terminal) Size() (domain.Size, error) {
-	geometry, err := t.Geometry()
-	if err != nil {
-		return domain.Size{}, err
-	}
-	return geometry.Size, nil
-}
-
 // Geometry returns the current terminal cell dimensions and optional pixel
 // dimensions reported by the controlling terminal.
 func (t *Terminal) Geometry() (domain.Geometry, error) {

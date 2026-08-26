@@ -36,9 +36,9 @@ func (p *lifetimePTY) Read([]byte) (int, error) {
 	}
 }
 
-func (*lifetimePTY) Write(b []byte) (int, error) { return len(b), nil }
-func (*lifetimePTY) Resize(domain.Size) error    { return nil }
-func (*lifetimePTY) Pid() int                    { return 1 }
+func (*lifetimePTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*lifetimePTY) Resize(domain.Geometry) error { return nil }
+func (*lifetimePTY) Pid() int                     { return 1 }
 func (*lifetimePTY) ForegroundPgid() (int, error) {
 	return 1, nil
 }

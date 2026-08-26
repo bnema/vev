@@ -264,7 +264,7 @@ func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
 	tb.focusedPane().rect = domain.Rect{Width: 20, Height: 10}
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	pty.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Run(func(domain.Size) {
+	pty.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 41, Rows: 10}}).Run(func(domain.Geometry) {
 		close(entered)
 		<-release
 	}).Return(nil).Once()
@@ -296,7 +296,7 @@ func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
 	oldPane.screen.Resize(20, 10)
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Run(func(domain.Size) {
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 41, Rows: 10}}).Run(func(domain.Geometry) {
 		close(entered)
 		<-release
 	}).Return(nil).Once()
@@ -310,7 +310,7 @@ func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
 
 	newPTY := portsmocks.NewMockPTY(t)
 	replacement := newPane("pane-1", newPTY, domain.Size{Cols: 20, Rows: 10})
-	newPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+	newPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 41, Rows: 10}}).Return(nil).Once()
 	tb.mu.Lock()
 	tb.panes["pane-1"] = replacement
 	tb.bumpLayoutGenerationLocked()
@@ -470,7 +470,7 @@ func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, oldPTY, factory := newSplitTestDaemon(t, tt.size)
 			newPTY := portsmocks.NewMockPTY(t)
-			oldPTY.EXPECT().Resize(rectSize(tt.wantOld)).Return(nil).Once()
+			oldPTY.EXPECT().Resize(domain.Geometry{Size: rectSize(tt.wantOld)}).Return(nil).Once()
 			newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 			factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Geometry{Size: rectSize(tt.wantNew)}).Return(newPTY, nil).Once()
 
@@ -497,7 +497,7 @@ func TestSplitPaneActionFocusesNewPaneForInitiatingAttachment(t *testing.T) {
 	require.True(t, sess.registerAttachment(ac))
 	require.True(t, sess.registerAttachment(other))
 	newPTY := portsmocks.NewMockPTY(t)
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Once()
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(newPTY, nil).Once()
 
@@ -535,7 +535,7 @@ func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-2"}, Focus: "pane-2"}
 	tb.nextPaneID = 3
 	newPTY := portsmocks.NewMockPTY(t)
-	stackPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Once()
+	stackPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 3}}).Return(nil).Once()
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Geometry{Size: domain.Size{Cols: 20, Rows: 4}}).Return(newPTY, nil).Once()
 
@@ -588,8 +588,8 @@ func TestApplyLayoutResizesPTYsAndScreens(t *testing.T) {
 	newPane := newPane("pane-2", newPTY, domain.Size{Cols: 41, Rows: 10})
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
 	tb.panes["pane-2"] = newPane
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
-	newPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Once()
+	newPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Once()
 
 	d.applyTabLayout(sess, tb)
 
@@ -606,8 +606,8 @@ func TestResizeReflowsAllPanes(t *testing.T) {
 	tb.panes["pane-2"] = newPane("pane-2", newPTY, domain.Size{Cols: 20, Rows: 10})
 	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 30, Rows: 18}).Return(nil).Once()
-	newPTY.EXPECT().Resize(domain.Size{Cols: 29, Rows: 18}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 30, Rows: 18}}).Return(nil).Once()
+	newPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 29, Rows: 18}}).Return(nil).Once()
 
 	d.resize(sess, nil, domain.Size{Cols: 60, Rows: 20})
 
@@ -689,7 +689,7 @@ func TestClosePaneRepaintFanoutRespectsAttachmentScope(t *testing.T) {
 			tb.panes["pane-2"] = newPane("pane-2", closingPTY, domain.Size{Cols: 20, Rows: 10})
 			tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 			tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
-			oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+			oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 41, Rows: 10}}).Return(nil).Once()
 			closingPTY.EXPECT().Close().Return(nil).Once()
 
 			clients := make([]*attachedClient, 2)
@@ -761,7 +761,7 @@ func TestClosePaneActionDoesNotReenterDispatchBoundary(t *testing.T) {
 	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
 	d.sessions[sess.id] = sess
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 41, Rows: 10}}).Return(nil).Once()
 	closingPTY.EXPECT().Close().Return(nil).Once()
 
 	done := make(chan error, 1)
@@ -789,7 +789,7 @@ func TestCloseFocusedPaneRemovesPaneReflowsAndIsIdempotent(t *testing.T) {
 	tb.panes["pane-2"] = newPane("pane-2", closingPTY, domain.Size{Cols: 20, Rows: 10})
 	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 41, Rows: 10}}).Return(nil).Once()
 	closingPTY.EXPECT().Close().Return(nil).Once()
 
 	require.NoError(t, d.closeFocusedPane(sess, nil))
@@ -809,7 +809,7 @@ func TestReapPaneSharesClosePathAndIsIdempotent(t *testing.T) {
 	tb.panes["pane-2"] = reaped
 	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 41, Rows: 10}}).Return(nil).Once()
 	reapedPTY.EXPECT().Close().Return(nil).Once()
 
 	d.reapPane(sess, tb, reaped)
@@ -859,8 +859,8 @@ func TestStackPaneCreatesStackAndToggleRestoresSplit(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
 	require.Len(t, tb.panes, 2)
 
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
-	newPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 2}}).Return(nil).Once()
+	newPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 2}}).Return(nil).Once()
 	require.NoError(t, d.toggleStack(sess, nil))
 	require.Equal(t, layout.Split, tb.tree.Root.Kind)
 	require.Equal(t, layout.Vertical, tb.tree.Root.Dir)
@@ -872,7 +872,7 @@ func TestStackFocusWalkExpandsAndOverflowRefuses(t *testing.T) {
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Geometry{Size: domain.Size{Cols: 20, Rows: 2}}).Return(newPTY, nil).Once()
 	require.NoError(t, d.stackPane(sess, nil))
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 2}}).Return(nil).Once()
 
 	require.NoError(t, d.focusDir(sess, nil, layout.Up, nil))
 
@@ -916,7 +916,7 @@ func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
 	d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 	newPTY, releaseNew := newBlockingPTYWithWrites(t, writes)
 	defer releaseNew()
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Once()
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(newPTY, nil).Once()
 
@@ -973,7 +973,7 @@ func TestSplitPaneUsesExactAuthoritativeEnvironment(t *testing.T) {
 			d.shellOverride = false
 			sess.env = []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 			newPTY := portsmocks.NewMockPTY(t)
-			oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
+			oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Once()
 			newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 			var command string
 			var gotEnv []string

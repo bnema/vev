@@ -3,7 +3,7 @@ module github.com/bnema/vev
 go 1.26
 
 require (
-	github.com/bnema/vev-vt v0.3.1-0.20260820135858-b222670d256f
+	github.com/bnema/vev-vt v0.4.1
 	github.com/stretchr/testify v1.11.1
 )
 

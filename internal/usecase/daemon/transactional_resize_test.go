@@ -28,9 +28,9 @@ type transactionalResizePTY struct {
 	onWrite   func([]byte)
 }
 
-func (p *transactionalResizePTY) Resize(size domain.Size) error {
+func (p *transactionalResizePTY) Resize(geometry domain.Geometry) error {
 	p.mu.Lock()
-	p.sizes = append(p.sizes, size)
+	p.sizes = append(p.sizes, geometry.Size)
 	n := len(p.sizes)
 	hook := p.onResize
 	var err error
@@ -92,7 +92,7 @@ func newResizeReaderPTY(redraw []byte) *resizeReaderPTY {
 	return &resizeReaderPTY{redraw: redraw, reads: make(chan []byte), accepted: make(chan struct{}), closed: make(chan struct{})}
 }
 
-func (p *resizeReaderPTY) Resize(domain.Size) error {
+func (p *resizeReaderPTY) Resize(domain.Geometry) error {
 	p.reads <- p.redraw
 	<-p.accepted
 	// A second, empty read cannot begin until ptyReader has processed the

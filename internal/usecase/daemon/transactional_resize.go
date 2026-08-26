@@ -40,10 +40,7 @@ type resizeMember struct {
 }
 
 func resizePTYGeometry(pty ports.PTY, geometry domain.Geometry) error {
-	if geometryPTY, ok := pty.(ports.GeometryPTY); ok {
-		return geometryPTY.ResizeGeometry(geometry)
-	}
-	return pty.Resize(geometry.Size)
+	return pty.Resize(geometry.NormalizePixels())
 }
 
 func setScreenGeometry(screen *vt.Screen, geometry domain.Geometry) {

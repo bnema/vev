@@ -106,7 +106,7 @@ func TestOpen_DarwinResizeAndForegroundPgid(t *testing.T) {
 	pgid, err := p.ForegroundPgid()
 	require.NoError(t, err)
 	require.Greater(t, pgid, 0)
-	require.NoError(t, p.Resize(domain.Size{Cols: 120, Rows: 40}))
+	require.NoError(t, p.Resize(domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}}))
 	_, err = io.WriteString(p, "release\n")
 	require.NoError(t, err)
 	require.Equal(t, "40 120", strings.TrimSpace(string(readAllDarwin(t, p, 5*time.Second))))

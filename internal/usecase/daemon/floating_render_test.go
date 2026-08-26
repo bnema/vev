@@ -1012,9 +1012,9 @@ type resizePTY struct {
 	maxConcurrent int
 }
 
-func (p *resizePTY) Resize(sz domain.Size) error {
+func (p *resizePTY) Resize(geometry domain.Geometry) error {
 	p.mu.Lock()
-	p.resizes = append(p.resizes, sz)
+	p.resizes = append(p.resizes, geometry.Size)
 	p.activeCalls++
 	p.maxConcurrent = max(p.maxConcurrent, p.activeCalls)
 	n := len(p.resizes)

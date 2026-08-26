@@ -223,7 +223,7 @@ func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
 		<-readerRelease
 		return 0, io.EOF
 	}).Once()
-	floatingPTY.EXPECT().Resize(rectSize(latestGeometry.Inner)).Run(func(domain.Size) { close(resized) }).Return(nil).Once()
+	floatingPTY.EXPECT().Resize(domain.Geometry{Size: rectSize(latestGeometry.Inner)}).Run(func(domain.Geometry) { close(resized) }).Return(nil).Once()
 	floatingPTY.EXPECT().Close().RunAndReturn(func() error {
 		select {
 		case <-readerRelease:
