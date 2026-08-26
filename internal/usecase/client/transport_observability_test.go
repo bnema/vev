@@ -28,10 +28,10 @@ func TestRuntimeObserverDependencyUsesSerializedContract(t *testing.T) {
 func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	var out bytes.Buffer
 	var restores atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	flushed := make(chan struct{})
 	term := portsmocks.NewMockTerminal(t)
-	term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	term.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	term.EXPECT().EnterRaw().Return(func() error { restores.Add(1); return nil }, nil).Once()
 	in := newBlockingReader()
 	defer in.unblock()
@@ -78,7 +78,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	var out bytes.Buffer
 	var restores atomic.Int32
-	resizeCh := make(chan domain.Size)
+	resizeCh := make(chan domain.Geometry)
 	term, in := newHappyTerminal(t, &out, &restores, resizeCh)
 	defer in.unblock()
 

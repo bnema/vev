@@ -83,6 +83,24 @@ func TestSetWinsizeGetSizeRoundtrip(t *testing.T) {
 	}
 }
 
+func TestWinsizeFullRoundtrip(t *testing.T) {
+	master, slave := openPTYPair(t)
+	defer func() { _ = master.Close() }()
+	defer func() { _ = slave.Close() }()
+
+	want := Winsize{Col: 80, Row: 24, Xpixel: 640, Ypixel: 384}
+	if err := SetWinsizeFull(int(slave.Fd()), want); err != nil {
+		t.Fatalf("SetWinsizeFull: %v", err)
+	}
+	got, err := GetWinsize(int(slave.Fd()))
+	if err != nil {
+		t.Fatalf("GetWinsize: %v", err)
+	}
+	if got != want {
+		t.Fatalf("GetWinsize = %+v, want %+v", got, want)
+	}
+}
+
 func TestMakeRawRestore(t *testing.T) {
 	master, slave := openPTYPair(t)
 	defer func() { _ = master.Close() }()

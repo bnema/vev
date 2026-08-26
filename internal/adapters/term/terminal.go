@@ -73,7 +73,7 @@ type Terminal struct {
 	// (ResizeEvents) and watcher stop (restore) are strictly ordered:
 	// a restore that runs before the first ResizeEvents call must
 	// prevent any watcher (and its signal.Notify) from ever starting.
-	resizeCh   chan domain.Size
+	resizeCh   chan domain.Geometry
 	resizeQuit chan struct{}
 	sigCh      chan os.Signal
 	resizeDone bool // set by stopResizeLocked; no watcher may start afterwards
@@ -206,13 +206,18 @@ func (t *Terminal) restoreRawLocked() error {
 	return err
 }
 
-// Size returns the current terminal dimensions.
-func (t *Terminal) Size() (domain.Size, error) {
-	cols, rows, err := rawterm.GetSize(t.fd)
+// Geometry returns the current terminal cell dimensions and optional pixel
+// dimensions reported by the controlling terminal.
+func (t *Terminal) Geometry() (domain.Geometry, error) {
+	ws, err := rawterm.GetWinsize(t.fd)
 	if err != nil {
-		return domain.Size{}, fmt.Errorf("term: get size: %w", err)
+		return domain.Geometry{}, fmt.Errorf("term: get size: %w", err)
 	}
-	return domain.Size{Cols: cols, Rows: rows}, nil
+	return (domain.Geometry{
+		Size:        domain.Size{Cols: int(ws.Col), Rows: int(ws.Row)},
+		PixelWidth:  int(ws.Xpixel),
+		PixelHeight: int(ws.Ypixel),
+	}).NormalizePixels(), nil
 }
 
 // ResizeEvents returns a channel of coalesced terminal sizes, one per
@@ -221,14 +226,14 @@ func (t *Terminal) Size() (domain.Size, error) {
 // restore (returned by EnterRaw) runs. If restore has already run when
 // ResizeEvents is first called, no watcher is started and the returned
 // channel is already closed.
-func (t *Terminal) ResizeEvents() <-chan domain.Size {
+func (t *Terminal) ResizeEvents() <-chan domain.Geometry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.resizeCh != nil {
 		return t.resizeCh
 	}
-	t.resizeCh = make(chan domain.Size)
+	t.resizeCh = make(chan domain.Geometry)
 
 	if t.resizeDone {
 		// restore ran before the first ResizeEvents call: never start a
@@ -244,7 +249,7 @@ func (t *Terminal) ResizeEvents() <-chan domain.Size {
 
 	t.resizeWG.Go(func() {
 		defer signal.Stop(t.sigCh)
-		resizeLoop(t.sigCh, t.resizeCh, t.resizeQuit, t.Size)
+		resizeLoop(t.sigCh, t.resizeCh, t.resizeQuit, t.Geometry)
 	})
 
 	return t.resizeCh

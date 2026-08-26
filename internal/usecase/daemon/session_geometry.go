@@ -8,7 +8,7 @@ import "github.com/bnema/vev/internal/domain"
 // directly instead of publishing them through the attachment registry.
 type sessionGeometrySource struct {
 	attachment *attachedClient
-	size       domain.Size
+	geometry   domain.Geometry
 	claim      uint64
 }
 
@@ -25,18 +25,18 @@ func (s *session) geometrySourceSnapshot() (sessionGeometrySource, bool) {
 	s.mu.Lock()
 	s.refreshGeometryOwnerLocked()
 	owner := s.geometryOwner.Load()
-	var size domain.Size
+	var geometry domain.Geometry
 	var claim uint64
 	if owner != nil {
-		size = owner.geometryClaimSizeSnapshot()
+		geometry = owner.geometryClaimSnapshot()
 		claim = owner.geometryClaim.Load()
 	}
 	s.mu.Unlock()
 
-	if owner == nil || !size.Valid() {
+	if owner == nil || !geometry.Valid() {
 		return sessionGeometrySource{}, false
 	}
-	return sessionGeometrySource{attachment: owner, size: size, claim: claim}, true
+	return sessionGeometrySource{attachment: owner, geometry: geometry, claim: claim}, true
 }
 
 // geometryClaimTokenCurrent is deliberately lock-free. applySessionLayout invokes
@@ -51,7 +51,36 @@ func (s *session) geometryClaimTokenCurrent(attachment *attachedClient, claim ui
 
 func (s *session) geometryClaimCurrent(source sessionGeometrySource) bool {
 	return s.geometryClaimTokenCurrent(source.attachment, source.claim) &&
-		(source.attachment == nil || source.attachment.geometryClaimSizeSnapshot() == source.size)
+		(source.attachment == nil || source.attachment.geometryClaimSnapshot() == source.geometry)
+}
+
+// paneGeometry maps the controlling terminal's optional pixel dimensions to a
+// pane's cell rectangle. Integer division deliberately truncates: the kernel
+// winsize and CSI reports cannot represent fractional pixels.
+// scalePaneGeometry maps a full terminal claim to one pane rectangle. Pixel
+// dimensions are deliberately scaled with integer truncation, matching the
+// mapping used by paneGeometry, but it is also usable while a session is still
+// private and has not published its attachment owner.
+func scalePaneGeometry(full domain.Geometry, size domain.Size) domain.Geometry {
+	geometry := domain.Geometry{Size: size}
+	if !full.Valid() || !size.Valid() || !full.PixelsKnown() {
+		return geometry
+	}
+	geometry.PixelWidth = int(int64(full.PixelWidth) * int64(size.Cols) / int64(full.Cols))
+	geometry.PixelHeight = int(int64(full.PixelHeight) * int64(size.Rows) / int64(full.Rows))
+	return geometry.NormalizePixels()
+}
+
+func (s *session) paneGeometry(size domain.Size) domain.Geometry {
+	geometry := domain.Geometry{Size: size}
+	if s == nil || !size.Valid() {
+		return geometry
+	}
+	owner := s.geometryOwner.Load()
+	if owner == nil {
+		return geometry
+	}
+	return scalePaneGeometry(owner.geometryClaimSnapshot(), size)
 }
 
 // sessionGeometryViewport is called with a non-nil session by the daemon
@@ -61,7 +90,7 @@ func sessionGeometryViewport(sess *session) (domain.Size, sessionGeometrySource,
 	if !ok {
 		return domain.Size{}, sessionGeometrySource{}, false
 	}
-	content := contentSize(source.size)
+	content := contentSize(source.geometry.Size)
 	return domain.Size{Cols: content.Cols, Rows: content.Rows + tabChromeRows}, source, true
 }
 
@@ -84,10 +113,21 @@ func (d *Daemon) recalculateSessionGeometry(sess *session, source *attachedClien
 		return false
 	}
 	current := func() bool { return sess.geometryClaimCurrent(owner) }
-	if contentSize(sess.fullViewportSize()) == contentSize(want) {
+	sess.geometryMu.Lock()
+	appliedGeometry := sess.appliedGeometry
+	sess.geometryMu.Unlock()
+	pixelGeometryChanged := (appliedGeometry.PixelsKnown() || owner.geometry.PixelsKnown()) && appliedGeometry != owner.geometry
+	if !pixelGeometryChanged && contentSize(sess.fullViewportSize()) == contentSize(want) {
 		return false
 	}
 	failed, ok := d.applySessionLayout(sess, want, current, nil)
+	if ok {
+		sess.geometryMu.Lock()
+		if current() {
+			sess.appliedGeometry = owner.geometry
+		}
+		sess.geometryMu.Unlock()
+	}
 	if ok && len(failed) != 0 {
 		seen := make(map[*tab]struct{}, len(failed))
 		for _, member := range failed {

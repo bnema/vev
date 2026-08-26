@@ -470,7 +470,7 @@ func (d *Daemon) transitionParkedRouteTarget(token attachmentConnectionToken, ta
 			env := copyEnvironment(d.baseEnv)
 			cwd := d.dirOrHome(current.cwd)
 			var createErr error
-			created, createErr = d.resumeRemoteInactiveSessionLocked(target, cwd, token.ac.sizeSnapshot(), env, current)
+			created, createErr = d.resumeRemoteInactiveSessionLocked(target, cwd, token.ac.geometrySnapshot(), env, current)
 			return created, createErr
 		},
 	})

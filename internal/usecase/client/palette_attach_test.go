@@ -61,19 +61,19 @@ func (r *paletteAttachReader) close() { r.once.Do(func() { close(r.done) }) }
 type paletteAttachTerminal struct {
 	in     io.Reader
 	out    bytes.Buffer
-	resize chan domain.Size
+	resize chan domain.Geometry
 }
 
 func (t *paletteAttachTerminal) EnterRaw() (func() error, error) {
 	return func() error { return nil }, nil
 }
-func (t *paletteAttachTerminal) Size() (domain.Size, error) {
-	return domain.Size{Cols: 80, Rows: 24}, nil
+func (t *paletteAttachTerminal) Geometry() (domain.Geometry, error) {
+	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
 }
-func (t *paletteAttachTerminal) ResizeEvents() <-chan domain.Size { return t.resize }
-func (t *paletteAttachTerminal) In() io.Reader                    { return t.in }
-func (t *paletteAttachTerminal) Out() io.Writer                   { return &t.out }
-func (t *paletteAttachTerminal) Flush() error                     { return nil }
+func (t *paletteAttachTerminal) ResizeEvents() <-chan domain.Geometry { return t.resize }
+func (t *paletteAttachTerminal) In() io.Reader                        { return t.in }
+func (t *paletteAttachTerminal) Out() io.Writer                       { return &t.out }
+func (t *paletteAttachTerminal) Flush() error                         { return nil }
 
 type paletteAttachTransport struct {
 	mu       sync.Mutex
@@ -136,7 +136,7 @@ func TestPaletteAttachReaderPreservesShortReadRemainderAndCloses(t *testing.T) {
 func TestAttachPublishesOnlyClearedAndDefinitiveInitialPalette(t *testing.T) {
 	input := newPaletteAttachReader([]byte("\x1b]10;#010203\a\x1b]11;#040506\a\x1b]4;2;#102030\a\x1b[?2031;1$y"))
 	t.Cleanup(input.close)
-	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Size)}
+	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Geometry)}
 	transport := &paletteAttachTransport{finalSet: make(chan struct{})}
 	ms := &milestones{}
 	runner := &Runner{term: term, clock: paletteAttachClock{}, logger: slog.New(slog.DiscardHandler)}

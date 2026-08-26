@@ -11,8 +11,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 34 {
-		t.Fatalf("ProtocolVersion = %d, want 34", ProtocolVersion)
+	if ProtocolVersion != 35 {
+		t.Fatalf("ProtocolVersion = %d, want 35", ProtocolVersion)
 	}
 	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -26,8 +26,8 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 34, 2}, make([]byte, 16+8)...)
-	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	want := append([]byte{0, 35, 2}, make([]byte, 16+8)...)
+	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Hello bytes = %x, want %x", got, want)
@@ -66,7 +66,7 @@ func TestFinalHelloSemanticValidation(t *testing.T) {
 
 func TestFinalResizeGoldenStrict(t *testing.T) {
 	msg := Resize{Size: domain.Size{Cols: 80, Rows: 24}}
-	want := []byte{0, 80, 0, 24}
+	want := []byte{0, 80, 0, 24, 0, 0, 0, 0}
 	got, err := MarshalResize(msg)
 	if err != nil {
 		t.Fatalf("MarshalResize() error = %v", err)

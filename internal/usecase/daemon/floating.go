@@ -316,6 +316,7 @@ type floatingLaunchSpec struct {
 	sessionName  string
 	cwd          string
 	size         domain.Size
+	ptyGeometry  domain.Geometry
 	geometry     floatingGeometry
 	paneStableID string
 	env          []string
@@ -385,6 +386,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		sessionName:  name,
 		cwd:          cwd,
 		size:         size,
+		ptyGeometry:  sess.paneGeometry(size),
 		geometry:     geometry,
 		paneStableID: paneStableID,
 		env:          childEnvFrom(env, name, tabStableID, paneStableID),
@@ -412,7 +414,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 			lifetime.abort()
 		}
 	}()
-	pty, err := d.ptys.Open(lifetime.ctx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
+	pty, err := d.ptys.Open(lifetime.ctx, spec.command, spec.args, spec.env, spec.cwd, spec.ptyGeometry)
 	if err != nil {
 		// Open retains ownership of a nonnil PTY only on success. Some factory
 		// implementations can return a partially opened PTY with an error, so
@@ -424,7 +426,10 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, err)
 		return
 	}
+	ptyGeometry := spec.ptyGeometry
 	p := newPaneWithStableIDAndTitle(layout.PaneID("floating"), spec.paneStableID, pty, spec.size, spec.fallback)
+	p.geometry = ptyGeometry
+	setScreenGeometry(p.screen, ptyGeometry)
 	p.rect = spec.geometry.ptyRect()
 	p.popupGeometry = spec.geometry
 	if !lifetime.publish(p) {

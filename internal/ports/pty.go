@@ -10,7 +10,7 @@ import (
 // PTY is a running pseudo-terminal-backed child process.
 type PTY interface {
 	io.ReadWriteCloser // Read = child output, Write = child input
-	Resize(sz domain.Size) error
+	Resize(geometry domain.Geometry) error
 	Pid() int
 	ForegroundPgid() (int, error)
 }
@@ -19,5 +19,7 @@ type PTY interface {
 type PTYFactory interface {
 	// Open creates a PTY while honoring ctx cancellation. Implementations must
 	// return promptly once ctx is cancelled and must not leave a child running.
-	Open(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size) (PTY, error)
+	// geometry is applied before the child starts, including optional pixel
+	// dimensions when they are known.
+	Open(ctx context.Context, cmd string, args []string, env []string, dir string, geometry domain.Geometry) (PTY, error)
 }

@@ -110,7 +110,7 @@ type pane struct {
 	id       layout.PaneID
 	stableID string
 	pty      ports.PTY
-	mu       sync.Mutex // guards screen, history, syncGen, rect, resizeApplying, resizeRetry, resizePending, PTY side effects, title, and owner publication
+	mu       sync.Mutex // guards screen, history, syncGen, rect, geometry, resize state, PTY side effects, title, and owner publication
 	owner    atomic.Pointer[paneOwner]
 	// ownerGeneration is advanced only while mu is held. Readers consume the
 	// generation through the immutable owner pointer above.
@@ -120,6 +120,7 @@ type pane struct {
 	history         *vt.History
 	syncGen         uint64
 	rect            domain.Rect
+	geometry        domain.Geometry
 	// resizeApplying gates VT parsing across PTY.Resize. The reader continues
 	// draining into resizePending so output is replayed against the target (or
 	// retained old) screen only after apply resolves.

@@ -433,7 +433,7 @@ func TestTerminal_ResizeEvents_ConcurrentWithRestore(t *testing.T) {
 		}
 
 		start := make(chan struct{})
-		chch := make(chan (<-chan domain.Size), 1)
+		chch := make(chan (<-chan domain.Geometry), 1)
 		go func() {
 			<-start
 			chch <- tm.ResizeEvents()
@@ -486,7 +486,7 @@ func TestTerminal_Size_NonTTY_ReturnsError(t *testing.T) {
 
 	tm := NewWithFiles(inR, outW)
 
-	if _, err := tm.Size(); err == nil {
-		t.Fatalf("expected Size() to error on a non-tty fd")
+	if _, err := tm.Geometry(); err == nil {
+		t.Fatalf("expected Geometry() to error on a non-tty fd")
 	}
 }

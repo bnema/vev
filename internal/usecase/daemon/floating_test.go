@@ -39,8 +39,8 @@ func newGatedOpenFactory(t *testing.T, result ports.PTY, openErr error) (*portsm
 	releaseOpen := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseOpen)
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, command string, args, env []string, dir string, size domain.Size) (ports.PTY, error) {
-			opened <- gatedFloatingOpen{command: command, args: append([]string(nil), args...), env: append([]string(nil), env...), dir: dir, size: size}
+		func(_ context.Context, command string, args, env []string, dir string, geometry domain.Geometry) (ports.PTY, error) {
+			opened <- gatedFloatingOpen{command: command, args: append([]string(nil), args...), env: append([]string(nil), env...), dir: dir, size: geometry.Size}
 			<-release
 			return result, openErr
 		}).Once()
@@ -223,7 +223,7 @@ func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
 		<-readerRelease
 		return 0, io.EOF
 	}).Once()
-	floatingPTY.EXPECT().Resize(rectSize(latestGeometry.Inner)).Run(func(domain.Size) { close(resized) }).Return(nil).Once()
+	floatingPTY.EXPECT().Resize(domain.Geometry{Size: rectSize(latestGeometry.Inner)}).Run(func(domain.Geometry) { close(resized) }).Return(nil).Once()
 	floatingPTY.EXPECT().Close().RunAndReturn(func() error {
 		select {
 		case <-readerRelease:
@@ -615,7 +615,7 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 			factory := portsmocks.NewMockPTYFactory(t)
 			opened := make(chan string, 1)
 			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-				func(_ context.Context, _ string, _ []string, _ []string, cwd string, _ domain.Size) (ports.PTY, error) {
+				func(_ context.Context, _ string, _ []string, _ []string, cwd string, _ domain.Geometry) (ports.PTY, error) {
 					opened <- cwd
 					return nil, io.ErrUnexpectedEOF
 				}).Once()

@@ -597,6 +597,12 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 	sess, resumed, ok, err := d.resumeParkedLocked(h, tr, sz)
 	d.mu.Unlock()
 	ac.sendMu.Unlock()
+	if err == nil && ok && sess != nil && resumed != nil {
+		// Resume publication normally schedules reconciliation asynchronously;
+		// complete the claiming terminal's geometry before the resumed
+		// attachment is allowed to produce its first frame.
+		d.recalculateSessionGeometry(sess, resumed)
+	}
 	if err != nil && resumed != nil {
 		d.abortResumeClaim(resumed)
 	}
@@ -640,7 +646,11 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.rebaseOutput()
 	ac.output.setWindow(h.MaxOutputInFlight)
 	ac.replaceTransport(tr)
-	ac.setSize(sz)
+	geometry := h.Geometry()
+	if geometry.Size != sz {
+		geometry = domain.Geometry{Size: sz}
+	}
+	ac.setGeometry(geometry)
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
 	// The resumed session's snapshot is the sole source for future PTY children.

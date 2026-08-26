@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -25,6 +26,7 @@ type resizeMember struct {
 	pane       *pane
 	owner      paneEffectLease
 	rect       domain.Rect
+	geometry   domain.Geometry
 	floating   floatingGeometry
 	isFloating bool
 	// floatingGeneration identifies the exact popup slot accepted by a failed
@@ -35,6 +37,20 @@ type resizeMember struct {
 	ok                 bool
 	err                error
 	screenResized      bool
+}
+
+func resizePTYGeometry(pty ports.PTY, geometry domain.Geometry) error {
+	return pty.Resize(geometry.NormalizePixels())
+}
+
+func setScreenGeometry(screen *vt.Screen, geometry domain.Geometry) {
+	if screen == nil {
+		return
+	}
+	screen.SetGeometry(vt.Geometry{
+		Cols: geometry.Cols, Rows: geometry.Rows,
+		PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight,
+	})
 }
 
 type preparedTabLayout struct {
@@ -71,7 +87,11 @@ func prepareTabLayoutForSizeLocked(sess *session, tb *tab, size domain.Size) pre
 			p.mu.Lock()
 			owner := p.effectLeaseLocked()
 			p.mu.Unlock()
-			plan.members = append(plan.members, resizeMember{session: sess, tab: tb, pane: p, owner: owner, rect: placement.Content})
+			paneSize := rectSize(placement.Content)
+			plan.members = append(plan.members, resizeMember{
+				session: sess, tab: tb, pane: p, owner: owner, rect: placement.Content,
+				geometry: sess.paneGeometry(paneSize),
+			})
 		}
 	}
 	return plan
@@ -82,6 +102,9 @@ func prepareTabLayoutForSizeLocked(sess *session, tb *tab, size domain.Size) pre
 func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 	for i := range plan.members {
 		member := &plan.members[i]
+		if !member.geometry.Valid() {
+			member.geometry = domain.Geometry{Size: rectSize(member.rect)}
+		}
 		p := member.pane
 		p.resizeMu.Lock()
 		p.mu.Lock()
@@ -98,14 +121,15 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 		// Reapply even if the committed rectangle already matches: the PTY may
 		// still be at that rejected attempt's external size. An accepted failed
 		// attempt records resizeRetry for the same reason after its gate closes.
-		needsApply := p.resizeApplying || p.resizeRetry || old.Width != member.rect.Width || old.Height != member.rect.Height
+		pixelGeometryChanged := (p.geometry.PixelsKnown() || member.geometry.PixelsKnown()) && p.geometry != member.geometry
+		needsApply := p.resizeApplying || p.resizeRetry || old.Width != member.rect.Width || old.Height != member.rect.Height || pixelGeometryChanged
 		if needsApply && pty != nil {
 			p.resizeApplying = true
 		}
 		p.mu.Unlock()
 		if !needsApply || pty == nil {
 			member.ok = true
-		} else if err := pty.Resize(rectSize(member.rect)); err != nil {
+		} else if err := resizePTYGeometry(pty, member.geometry); err != nil {
 			d.log.Warn("pty resize failed", "err", err)
 			p.mu.Lock()
 			current := resizeMemberOwnerCurrent(member)
@@ -184,7 +208,8 @@ func commitPreparedTabLayoutLocked(plan *preparedTabLayout) bool {
 		member.pane.rect = member.rect
 		if member.ok {
 			member.pane.resizeRetry = false
-			member.pane.screen.Resize(member.rect.Width, member.rect.Height)
+			member.pane.geometry = member.geometry
+			setScreenGeometry(member.pane.screen, member.geometry)
 		}
 		member.pane.mu.Unlock()
 	}
@@ -460,8 +485,11 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	p.mu.Lock()
 	owner := p.effectLeaseLocked()
 	p.mu.Unlock()
+	ptyRect := geometry.ptyRect()
 	plan := preparedTabLayout{members: []resizeMember{{
-		session: sess, tab: tb, pane: p, owner: owner, rect: geometry.ptyRect(), floating: geometry, isFloating: true, floatingGeneration: generation,
+		session: sess, tab: tb, pane: p, owner: owner, rect: ptyRect,
+		geometry: sess.paneGeometry(rectSize(ptyRect)), floating: geometry,
+		isFloating: true, floatingGeneration: generation,
 	}}}
 	d.applyPreparedTabMembers(&plan)
 
@@ -477,9 +505,10 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 		currentSlot = resizeMemberOwnerCurrent(&plan.members[0])
 		if currentSlot {
 			p.rect = plan.members[0].rect
+			p.geometry = plan.members[0].geometry
 			p.popupGeometry = geometry
 			p.resizeRetry = false
-			p.screen.Resize(plan.members[0].rect.Width, plan.members[0].rect.Height)
+			setScreenGeometry(p.screen, plan.members[0].geometry)
 		}
 		p.mu.Unlock()
 	}

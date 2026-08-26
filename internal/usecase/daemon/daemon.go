@@ -1320,7 +1320,11 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		terminalCapabilities:   terminalCapabilities,
 		capabilitiesSet:        true,
 	}
-	ac := d.prepareAttachedClientLocked(tr, sz, opts)
+	geometry := h.Geometry()
+	if geometry.Size != sz {
+		geometry = domain.Geometry{Size: sz}
+	}
+	ac := d.prepareAttachedClientLocked(tr, geometry, opts)
 	d.mu.Unlock()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target:            sess,
@@ -1535,7 +1539,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	switch h.Intent {
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, sz, h.Env)
+		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, h.Geometry(), h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -1556,7 +1560,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, sz, h.Env)
+		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, h.Geometry(), h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -1579,7 +1583,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 				env = copyEnvironment(d.baseEnv)
 			}
 			var err error
-			sess, err = d.resumeInactiveSessionLocked(h.Name, cwd, sz, env, stopped, stopped.tabNames)
+			sess, err = d.resumeInactiveSessionLocked(h.Name, cwd, h.Geometry(), env, stopped, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

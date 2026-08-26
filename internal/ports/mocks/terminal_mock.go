@@ -137,6 +137,59 @@ func (_c *MockTerminal_Flush_Call) RunAndReturn(run func() error) *MockTerminal_
 	return _c
 }
 
+// Geometry provides a mock function for the type MockTerminal
+func (_mock *MockTerminal) Geometry() (domain.Geometry, error) {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for Geometry")
+	}
+
+	var r0 domain.Geometry
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() (domain.Geometry, error)); ok {
+		return returnFunc()
+	}
+	if returnFunc, ok := ret.Get(0).(func() domain.Geometry); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.Geometry)
+	}
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockTerminal_Geometry_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Geometry'
+type MockTerminal_Geometry_Call struct {
+	*mock.Call
+}
+
+// Geometry is a helper method to define mock.On call
+func (_e *MockTerminal_Expecter) Geometry() *MockTerminal_Geometry_Call {
+	return &MockTerminal_Geometry_Call{Call: _e.mock.On("Geometry")}
+}
+
+func (_c *MockTerminal_Geometry_Call) Run(run func()) *MockTerminal_Geometry_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockTerminal_Geometry_Call) Return(geometry domain.Geometry, err error) *MockTerminal_Geometry_Call {
+	_c.Call.Return(geometry, err)
+	return _c
+}
+
+func (_c *MockTerminal_Geometry_Call) RunAndReturn(run func() (domain.Geometry, error)) *MockTerminal_Geometry_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // In provides a mock function for the type MockTerminal
 func (_mock *MockTerminal) In() io.Reader {
 	ret := _mock.Called()
@@ -230,19 +283,19 @@ func (_c *MockTerminal_Out_Call) RunAndReturn(run func() io.Writer) *MockTermina
 }
 
 // ResizeEvents provides a mock function for the type MockTerminal
-func (_mock *MockTerminal) ResizeEvents() <-chan domain.Size {
+func (_mock *MockTerminal) ResizeEvents() <-chan domain.Geometry {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for ResizeEvents")
 	}
 
-	var r0 <-chan domain.Size
-	if returnFunc, ok := ret.Get(0).(func() <-chan domain.Size); ok {
+	var r0 <-chan domain.Geometry
+	if returnFunc, ok := ret.Get(0).(func() <-chan domain.Geometry); ok {
 		r0 = returnFunc()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(<-chan domain.Size)
+			r0 = ret.Get(0).(<-chan domain.Geometry)
 		}
 	}
 	return r0
@@ -265,65 +318,12 @@ func (_c *MockTerminal_ResizeEvents_Call) Run(run func()) *MockTerminal_ResizeEv
 	return _c
 }
 
-func (_c *MockTerminal_ResizeEvents_Call) Return(sizeCh <-chan domain.Size) *MockTerminal_ResizeEvents_Call {
-	_c.Call.Return(sizeCh)
+func (_c *MockTerminal_ResizeEvents_Call) Return(geometryCh <-chan domain.Geometry) *MockTerminal_ResizeEvents_Call {
+	_c.Call.Return(geometryCh)
 	return _c
 }
 
-func (_c *MockTerminal_ResizeEvents_Call) RunAndReturn(run func() <-chan domain.Size) *MockTerminal_ResizeEvents_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// Size provides a mock function for the type MockTerminal
-func (_mock *MockTerminal) Size() (domain.Size, error) {
-	ret := _mock.Called()
-
-	if len(ret) == 0 {
-		panic("no return value specified for Size")
-	}
-
-	var r0 domain.Size
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() (domain.Size, error)); ok {
-		return returnFunc()
-	}
-	if returnFunc, ok := ret.Get(0).(func() domain.Size); ok {
-		r0 = returnFunc()
-	} else {
-		r0 = ret.Get(0).(domain.Size)
-	}
-	if returnFunc, ok := ret.Get(1).(func() error); ok {
-		r1 = returnFunc()
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockTerminal_Size_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Size'
-type MockTerminal_Size_Call struct {
-	*mock.Call
-}
-
-// Size is a helper method to define mock.On call
-func (_e *MockTerminal_Expecter) Size() *MockTerminal_Size_Call {
-	return &MockTerminal_Size_Call{Call: _e.mock.On("Size")}
-}
-
-func (_c *MockTerminal_Size_Call) Run(run func()) *MockTerminal_Size_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run()
-	})
-	return _c
-}
-
-func (_c *MockTerminal_Size_Call) Return(size domain.Size, err error) *MockTerminal_Size_Call {
-	_c.Call.Return(size, err)
-	return _c
-}
-
-func (_c *MockTerminal_Size_Call) RunAndReturn(run func() (domain.Size, error)) *MockTerminal_Size_Call {
+func (_c *MockTerminal_ResizeEvents_Call) RunAndReturn(run func() <-chan domain.Geometry) *MockTerminal_ResizeEvents_Call {
 	_c.Call.Return(run)
 	return _c
 }

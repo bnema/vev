@@ -21,3 +21,17 @@ func ValidateSize(size domain.Size) error {
 	}
 	return nil
 }
+
+// ValidateGeometry validates cell geometry and its optional uint16 pixel pair.
+func ValidateGeometry(geometry domain.Geometry) error {
+	if err := ValidateSize(geometry.Size); err != nil {
+		return err
+	}
+	if geometry.PixelWidth == 0 && geometry.PixelHeight == 0 {
+		return nil
+	}
+	if geometry.PixelWidth <= 0 || geometry.PixelHeight <= 0 || geometry.PixelWidth > math.MaxUint16 || geometry.PixelHeight > math.MaxUint16 {
+		return ErrInvalidSize
+	}
+	return nil
+}

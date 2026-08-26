@@ -462,9 +462,9 @@ type paneRearrangePTY struct {
 
 func (*paneRearrangePTY) Read([]byte) (int, error)    { return 0, io.EOF }
 func (*paneRearrangePTY) Write(b []byte) (int, error) { return len(b), nil }
-func (p *paneRearrangePTY) Resize(size domain.Size) error {
+func (p *paneRearrangePTY) Resize(geometry domain.Geometry) error {
 	p.mu.Lock()
-	p.resizes = append(p.resizes, size)
+	p.resizes = append(p.resizes, geometry.Size)
 	hook := p.onResize
 	p.mu.Unlock()
 	if hook != nil {

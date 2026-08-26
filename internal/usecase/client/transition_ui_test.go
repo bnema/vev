@@ -72,13 +72,13 @@ type transitionTestTerminal struct {
 func (*transitionTestTerminal) EnterRaw() (func() error, error) {
 	return func() error { return nil }, nil
 }
-func (*transitionTestTerminal) Size() (domain.Size, error) {
-	return domain.Size{Cols: 80, Rows: 24}, nil
+func (*transitionTestTerminal) Geometry() (domain.Geometry, error) {
+	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
 }
-func (*transitionTestTerminal) ResizeEvents() <-chan domain.Size { return nil }
-func (*transitionTestTerminal) In() io.Reader                    { return strings.NewReader("") }
-func (t *transitionTestTerminal) Out() io.Writer                 { return &t.out }
-func (*transitionTestTerminal) Flush() error                     { return nil }
+func (*transitionTestTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
+func (*transitionTestTerminal) In() io.Reader                        { return strings.NewReader("") }
+func (t *transitionTestTerminal) Out() io.Writer                     { return &t.out }
+func (*transitionTestTerminal) Flush() error                         { return nil }
 
 func TestTransitionUIStartsAfterDelayTicksResizesAndStops(t *testing.T) {
 	for _, tt := range []struct {

@@ -956,10 +956,10 @@ type scriptedPerformancePTY struct {
 	fails uint64
 }
 
-func (p *scriptedPerformancePTY) Resize(size domain.Size) error {
+func (p *scriptedPerformancePTY) Resize(geometry domain.Geometry) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.sizes = append(p.sizes, size)
+	p.sizes = append(p.sizes, geometry.Size)
 	index := len(p.sizes) - 1
 	if index < len(p.errs) && p.errs[index] != nil {
 		p.fails++

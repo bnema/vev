@@ -79,11 +79,11 @@ func (u *transitionUI) advance() error {
 	if u == nil || !u.active {
 		return nil
 	}
-	size, err := u.term.Size()
+	geometry, err := u.term.Geometry()
 	if err != nil {
-		return fmt.Errorf("reading terminal size for transition toast: %w", err)
+		return fmt.Errorf("reading terminal geometry for transition toast: %w", err)
 	}
-	if err := u.redraw(size); err != nil {
+	if err := u.redraw(geometry.Size); err != nil {
 		return err
 	}
 	u.frame = (u.frame + 1) % len(transitionSpinnerFrames)

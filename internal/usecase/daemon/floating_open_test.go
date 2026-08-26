@@ -38,9 +38,9 @@ func (p *contextAwareFloatingPTY) Read([]byte) (int, error) {
 	return 0, p.ctx.Err()
 }
 
-func (*contextAwareFloatingPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (*contextAwareFloatingPTY) Resize(domain.Size) error    { return nil }
-func (*contextAwareFloatingPTY) Pid() int                    { return 1 }
+func (*contextAwareFloatingPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*contextAwareFloatingPTY) Resize(domain.Geometry) error { return nil }
+func (*contextAwareFloatingPTY) Pid() int                     { return 1 }
 func (*contextAwareFloatingPTY) ForegroundPgid() (int, error) {
 	return 1, nil
 }
@@ -60,7 +60,7 @@ type contextAwareFloatingFactory struct {
 	onOpen func()
 }
 
-func (f *contextAwareFloatingFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+func (f *contextAwareFloatingFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 	if f.pty != nil {
 		f.pty.ctx = ctx
 	}
@@ -182,9 +182,9 @@ func (p *failedOpenPTY) Read([]byte) (int, error) {
 	}
 }
 
-func (*failedOpenPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (*failedOpenPTY) Resize(domain.Size) error    { return nil }
-func (*failedOpenPTY) Pid() int                    { return 1 }
+func (*failedOpenPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*failedOpenPTY) Resize(domain.Geometry) error { return nil }
+func (*failedOpenPTY) Pid() int                     { return 1 }
 func (*failedOpenPTY) ForegroundPgid() (int, error) {
 	return 1, nil
 }
@@ -214,7 +214,7 @@ func TestFloatingOpenErrorReleasesReturnedPTYBeforePublishingFailure(t *testing.
 			cancelCallbacks := atomic.Int32{}
 			cancelled := make(chan struct{})
 			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-				func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+				func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 					pty.ctx = ctx
 					context.AfterFunc(ctx, func() {
 						cancelCallbacks.Add(1)
@@ -392,7 +392,7 @@ func TestFloatingOpenCancellationBoundsSessionTeardownAndClosesLatePTY(t *testin
 	closed := make(chan struct{})
 	latePTY.EXPECT().Close().RunAndReturn(func() error { close(closed); return nil }).Once()
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			close(opened)
 			<-ctx.Done()
 			return latePTY, nil
@@ -435,7 +435,7 @@ func TestFloatingOpensFromUnrelatedSessionsAreConcurrent(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
 			entered <- struct{}{}
 			<-release
 			return newQuietPTY(), nil

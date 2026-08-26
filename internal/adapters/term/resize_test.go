@@ -19,19 +19,19 @@ func TestResizeLoop_CoalescesBurstToOneEmission(t *testing.T) {
 		sig <- syscall.SIGWINCH
 	}
 
-	out := make(chan domain.Size)
+	out := make(chan domain.Geometry)
 	quit := make(chan struct{})
 
 	var calls int
-	getSize := func() (domain.Size, error) {
+	getGeometry := func() (domain.Geometry, error) {
 		calls++
-		return domain.Size{Cols: 80, Rows: 24}, nil
+		return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480}, nil
 	}
 
-	go resizeLoop(sig, out, quit, getSize)
+	go resizeLoop(sig, out, quit, getGeometry)
 
 	got := <-out
-	want := domain.Size{Cols: 80, Rows: 24}
+	want := domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 800, PixelHeight: 480}
 	if got != want {
 		t.Fatalf("emitted size = %+v, want %+v", got, want)
 	}
@@ -54,28 +54,28 @@ func TestResizeLoop_CoalescesBurstToOneEmission(t *testing.T) {
 
 func TestResizeLoop_GetSizeErrorSkipsEmission(t *testing.T) {
 	sig := make(chan os.Signal) // unbuffered: sends rendezvous with the loop's receive
-	out := make(chan domain.Size)
+	out := make(chan domain.Geometry)
 	quit := make(chan struct{})
 
 	var calls int
 	firstGetSize := make(chan struct{})
-	getSize := func() (domain.Size, error) {
+	getGeometry := func() (domain.Geometry, error) {
 		calls++
 		if calls == 1 {
 			close(firstGetSize)
-			return domain.Size{}, errors.New("boom")
+			return domain.Geometry{}, errors.New("boom")
 		}
-		return domain.Size{Cols: 10, Rows: 5}, nil
+		return domain.Geometry{Size: domain.Size{Cols: 10, Rows: 5}}, nil
 	}
 
-	go resizeLoop(sig, out, quit, getSize)
+	go resizeLoop(sig, out, quit, getGeometry)
 
 	sig <- syscall.SIGWINCH // errors; no emission
 	<-firstGetSize          // wait until the failed signal has been handled
 	sig <- syscall.SIGWINCH // succeeds
 
 	got := <-out
-	want := domain.Size{Cols: 10, Rows: 5}
+	want := domain.Geometry{Size: domain.Size{Cols: 10, Rows: 5}}
 	if got != want {
 		t.Fatalf("emitted size = %+v, want %+v", got, want)
 	}
@@ -91,15 +91,15 @@ func TestResizeLoop_GetSizeErrorSkipsEmission(t *testing.T) {
 
 func TestResizeLoop_QuitClosesOutImmediately(t *testing.T) {
 	sig := make(chan os.Signal)
-	out := make(chan domain.Size)
+	out := make(chan domain.Geometry)
 	quit := make(chan struct{})
 
-	getSize := func() (domain.Size, error) {
-		t.Fatalf("getSize should not be called")
-		return domain.Size{}, nil
+	getGeometry := func() (domain.Geometry, error) {
+		t.Fatalf("getGeometry should not be called")
+		return domain.Geometry{}, nil
 	}
 
-	go resizeLoop(sig, out, quit, getSize)
+	go resizeLoop(sig, out, quit, getGeometry)
 	close(quit)
 
 	select {

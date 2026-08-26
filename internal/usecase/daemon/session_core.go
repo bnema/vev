@@ -29,8 +29,9 @@ type sessionCore struct {
 	// controls shared PTY/layout geometry. The pointer is published atomically
 	// so resize transactions can reject stale claims without taking session.mu.
 	// geometryMu serializes claim publication with the final shared-layout commit.
-	geometryMu    sync.Mutex
-	geometryOwner atomic.Pointer[attachedClient]
+	geometryMu      sync.Mutex
+	geometryOwner   atomic.Pointer[attachedClient]
+	appliedGeometry domain.Geometry // guarded by geometryMu
 	// geometryClaimSeq is mutated while mu and geometryMu are held; its value
 	// is copied into attachedClient.geometryClaim.
 	geometryClaimSeq uint64

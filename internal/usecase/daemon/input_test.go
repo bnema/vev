@@ -1289,9 +1289,9 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 
 func TestMouseWheelOverUnfocusedPaneDoesNotFocusAndForwardsChildMouse(t *testing.T) {
 	p1 := portsmocks.NewMockPTY(t)
-	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p1.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	p2 := portsmocks.NewMockPTY(t)
-	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	p2.EXPECT().Write([]byte("\x1b[<64;1;1M")).Return(len("\x1b[<64;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
@@ -1495,9 +1495,9 @@ func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {
 
 func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	p1 := portsmocks.NewMockPTY(t)
-	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Maybe()
+	p1.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Maybe()
 	p2 := portsmocks.NewMockPTY(t)
-	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Maybe()
+	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Maybe()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
 	tb := testAttachmentTab(sess)
@@ -1528,9 +1528,9 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 
 func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
 	p1 := portsmocks.NewMockPTY(t)
-	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p1.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	p2 := portsmocks.NewMockPTY(t)
-	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	p2.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
@@ -1556,9 +1556,9 @@ func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
 // the modal's coordinates.
 func TestMouseGatedWhileNoticesOverlayActive(t *testing.T) {
 	p1 := portsmocks.NewMockPTY(t)
-	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p1.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	p2 := portsmocks.NewMockPTY(t)
-	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 5}}).Return(nil).Maybe()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
 	tb := testAttachmentTab(sess)
@@ -1586,9 +1586,9 @@ func TestMouseGatedWhileNoticesOverlayActive(t *testing.T) {
 
 func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 	p1 := portsmocks.NewMockPTY(t)
-	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 4}).Return(nil).Maybe()
+	p1.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 4}}).Return(nil).Maybe()
 	p2 := portsmocks.NewMockPTY(t)
-	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 4}).Return(nil).Maybe()
+	p2.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 4}}).Return(nil).Maybe()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
 	d.procComm = nil
 	tb := testAttachmentTab(sess)

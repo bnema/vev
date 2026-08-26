@@ -28,7 +28,7 @@ type reconnectToastTerminalHarness struct {
 	inWriter   *io.PipeWriter
 	out        bytes.Buffer
 	size       domain.Size
-	resizeCh   chan domain.Size
+	resizeCh   chan domain.Geometry
 	sizeCalls  atomic.Int32
 	sizeCalled chan int32
 }
@@ -41,18 +41,18 @@ func newReconnectToastTerminalHarness(t *testing.T) *reconnectToastTerminalHarne
 		in:         in,
 		inWriter:   inWriter,
 		size:       domain.Size{Cols: 80, Rows: 24},
-		resizeCh:   make(chan domain.Size, sendQueueDepth),
+		resizeCh:   make(chan domain.Geometry, sendQueueDepth),
 		sizeCalled: make(chan int32, 16),
 	}
 	h.term.EXPECT().EnterRaw().Return(func() error { return nil }, nil).Maybe()
-	h.term.EXPECT().Size().Run(func() {
+	h.term.EXPECT().Geometry().Run(func() {
 		call := h.sizeCalls.Add(1)
 		select {
 		case h.sizeCalled <- call:
 		default:
 		}
-	}).Return(h.size, nil).Maybe()
-	h.term.EXPECT().ResizeEvents().Return((<-chan domain.Size)(h.resizeCh)).Maybe()
+	}).Return(domain.Geometry{Size: h.size}, nil).Maybe()
+	h.term.EXPECT().ResizeEvents().Return((<-chan domain.Geometry)(h.resizeCh)).Maybe()
 	h.term.EXPECT().In().Return(h.in).Maybe()
 	h.term.EXPECT().Out().Return(&h.out).Maybe()
 	h.term.EXPECT().Flush().Return(nil).Maybe()
@@ -72,18 +72,18 @@ func newReconnectToastTerminalHarnessWithOutputAndFlush(t *testing.T, out io.Wri
 		in:         in,
 		inWriter:   inWriter,
 		size:       domain.Size{Cols: 80, Rows: 24},
-		resizeCh:   make(chan domain.Size, sendQueueDepth),
+		resizeCh:   make(chan domain.Geometry, sendQueueDepth),
 		sizeCalled: make(chan int32, 16),
 	}
 	h.term.EXPECT().EnterRaw().Return(func() error { return nil }, nil).Maybe()
-	h.term.EXPECT().Size().Run(func() {
+	h.term.EXPECT().Geometry().Run(func() {
 		call := h.sizeCalls.Add(1)
 		select {
 		case h.sizeCalled <- call:
 		default:
 		}
-	}).Return(h.size, nil).Maybe()
-	h.term.EXPECT().ResizeEvents().Return((<-chan domain.Size)(h.resizeCh)).Maybe()
+	}).Return(domain.Geometry{Size: h.size}, nil).Maybe()
+	h.term.EXPECT().ResizeEvents().Return((<-chan domain.Geometry)(h.resizeCh)).Maybe()
 	h.term.EXPECT().In().Return(h.in).Maybe()
 	h.term.EXPECT().Out().Return(out).Maybe()
 	h.term.EXPECT().Flush().RunAndReturn(flush).Maybe()
@@ -1071,14 +1071,14 @@ func TestReconnectResetEnqueueCancellationExitsCleanly(t *testing.T) {
 			requireTerminalSizeCalls(t, term, 2)
 			tr.blockType = ports.MsgResize
 			tr.armed.Store(true)
-			term.resizeCh <- term.size
+			term.resizeCh <- domain.Geometry{Size: term.size}
 			select {
 			case <-tr.entered:
 			case <-time.After(time.Second):
 				t.Fatal("timed out waiting for sender to block")
 			}
 			for range sendQueueDepth {
-				term.resizeCh <- term.size
+				term.resizeCh <- domain.Geometry{Size: term.size}
 			}
 			require.Eventually(t, func() bool { return len(term.resizeCh) == 0 }, time.Second, time.Millisecond)
 
@@ -1111,14 +1111,14 @@ func TestReconnectResetCancellationPreservesQueuedSenderError(t *testing.T) {
 	requireTerminalSizeCalls(t, term, 2)
 	tr.blockType = ports.MsgResize
 	tr.armed.Store(true)
-	term.resizeCh <- term.size
+	term.resizeCh <- domain.Geometry{Size: term.size}
 	select {
 	case <-tr.entered:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for sender to block")
 	}
 	for range sendQueueDepth {
-		term.resizeCh <- term.size
+		term.resizeCh <- domain.Geometry{Size: term.size}
 	}
 	require.Eventually(t, func() bool { return len(term.resizeCh) == 0 }, time.Second, time.Millisecond)
 
@@ -1261,9 +1261,9 @@ func TestReconnectSleepWithResizeEventsRedrawsUntilTimerFires(t *testing.T) {
 	clk.EXPECT().NewTimer(time.Hour).Return(timer).Once()
 	timer.EXPECT().C().Return((<-chan time.Time)(timerCh)).Maybe()
 	timer.EXPECT().Stop().Return(true).Once()
-	resizeCh := make(chan domain.Size, 2)
-	resizeCh <- domain.Size{Cols: 100, Rows: 30}
-	resizeCh <- domain.Size{Cols: 120, Rows: 40}
+	resizeCh := make(chan domain.Geometry, 2)
+	resizeCh <- domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}}
+	resizeCh <- domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}}
 	got := make(chan domain.Size, 2)
 	type sleepResult struct {
 		slept bool
@@ -1293,8 +1293,8 @@ func TestReconnectSleepWithResizeEventsReturnsRedrawError(t *testing.T) {
 	clk.EXPECT().NewTimer(time.Hour).Return(timer).Once()
 	timer.EXPECT().C().Return((<-chan time.Time)(make(chan time.Time))).Maybe()
 	timer.EXPECT().Stop().Return(true).Once()
-	resizeCh := make(chan domain.Size, 1)
-	resizeCh <- domain.Size{Cols: 100, Rows: 30}
+	resizeCh := make(chan domain.Geometry, 1)
+	resizeCh <- domain.Geometry{Size: domain.Size{Cols: 100, Rows: 30}}
 	redrawErr := errors.New("redraw failed")
 
 	slept, err := sleepReconnectWithResizeEvents(context.Background(), clk, time.Hour, resizeCh, func(domain.Size) error {
@@ -1349,7 +1349,7 @@ func TestReconnectRetryFailuresPreserveAttachError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			oldSleepWithResize := reconnectSleepWithResize
-			reconnectSleepWithResize = func(_ context.Context, _ ports.Clock, _ time.Duration, _ <-chan domain.Size, redraw func(domain.Size) error) (bool, error) {
+			reconnectSleepWithResize = func(_ context.Context, _ ports.Clock, _ time.Duration, _ <-chan domain.Geometry, redraw func(domain.Size) error) (bool, error) {
 				return tt.retrySleep(redraw)
 			}
 			defer func() { reconnectSleepWithResize = oldSleepWithResize }()
@@ -1394,7 +1394,7 @@ func TestReconnectRetrySleepFailuresPreserveDialError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			oldSleepWithResize := reconnectSleepWithResize
 			calls := 0
-			reconnectSleepWithResize = func(_ context.Context, _ ports.Clock, _ time.Duration, _ <-chan domain.Size, redraw func(domain.Size) error) (bool, error) {
+			reconnectSleepWithResize = func(_ context.Context, _ ports.Clock, _ time.Duration, _ <-chan domain.Geometry, redraw func(domain.Size) error) (bool, error) {
 				calls++
 				if calls == 1 {
 					return true, nil
@@ -1431,7 +1431,7 @@ func TestRemoteReconnectToastFailedDrawDoesNotBlankBounds(t *testing.T) {
 	oldSleepWithResize := reconnectSleepWithResize
 	ctx, cancel := context.WithCancel(context.Background())
 	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return false }
-	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size) error) (bool, error) {
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Geometry, func(domain.Size) error) (bool, error) {
 		cancel()
 		return false, nil
 	}
@@ -1508,7 +1508,7 @@ func TestReconnectCancellationPreservesContextWhenStatusClearFails(t *testing.T)
 			oldSleepWithResize := reconnectSleepWithResize
 			ctx, cancel := context.WithCancel(context.Background())
 			reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return tt.sleep(cancel) }
-			reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size) error) (bool, error) {
+			reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Geometry, func(domain.Size) error) (bool, error) {
 				return tt.sleep(cancel), nil
 			}
 			defer func() {
@@ -1542,7 +1542,7 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	oldSleep := reconnectSleep
 	oldSleepWithResize := reconnectSleepWithResize
 	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }
-	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size) error) (bool, error) {
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Geometry, func(domain.Size) error) (bool, error) {
 		return true, nil
 	}
 	defer func() {
@@ -1586,7 +1586,7 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 	oldSleep := reconnectSleep
 	oldSleepWithResize := reconnectSleepWithResize
 	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }
-	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size) error) (bool, error) {
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Geometry, func(domain.Size) error) (bool, error) {
 		return true, nil
 	}
 	defer func() {
@@ -1677,7 +1677,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			oldSleepWithResize := reconnectSleepWithResize
 			ctx, cancel := context.WithCancel(context.Background())
 			reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return tt.sleep(cancel) }
-			reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size) error) (bool, error) {
+			reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Geometry, func(domain.Size) error) (bool, error) {
 				return tt.sleep(cancel), nil
 			}
 			defer func() {

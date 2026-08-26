@@ -104,13 +104,13 @@ type acceptanceRemoteTerminal struct {
 func (t *acceptanceRemoteTerminal) EnterRaw() (func() error, error) {
 	return func() error { return nil }, nil
 }
-func (*acceptanceRemoteTerminal) Size() (domain.Size, error) {
-	return domain.Size{Cols: 80, Rows: 24}, nil
+func (*acceptanceRemoteTerminal) Geometry() (domain.Geometry, error) {
+	return domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil
 }
-func (*acceptanceRemoteTerminal) ResizeEvents() <-chan domain.Size { return nil }
-func (t *acceptanceRemoteTerminal) In() io.Reader                  { return t.in }
-func (t *acceptanceRemoteTerminal) Out() io.Writer                 { return &t.out }
-func (*acceptanceRemoteTerminal) Flush() error                     { return nil }
+func (*acceptanceRemoteTerminal) ResizeEvents() <-chan domain.Geometry { return nil }
+func (t *acceptanceRemoteTerminal) In() io.Reader                      { return t.in }
+func (t *acceptanceRemoteTerminal) Out() io.Writer                     { return &t.out }
+func (*acceptanceRemoteTerminal) Flush() error                         { return nil }
 
 func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 	outputs := make(chan string, 4)

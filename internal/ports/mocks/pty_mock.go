@@ -241,16 +241,16 @@ func (_c *MockPTY_Read_Call) RunAndReturn(run func(p []byte) (int, error)) *Mock
 }
 
 // Resize provides a mock function for the type MockPTY
-func (_mock *MockPTY) Resize(sz domain.Size) error {
-	ret := _mock.Called(sz)
+func (_mock *MockPTY) Resize(geometry domain.Geometry) error {
+	ret := _mock.Called(geometry)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Resize")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(domain.Size) error); ok {
-		r0 = returnFunc(sz)
+	if returnFunc, ok := ret.Get(0).(func(domain.Geometry) error); ok {
+		r0 = returnFunc(geometry)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -263,16 +263,16 @@ type MockPTY_Resize_Call struct {
 }
 
 // Resize is a helper method to define mock.On call
-//   - sz domain.Size
-func (_e *MockPTY_Expecter) Resize(sz any) *MockPTY_Resize_Call {
-	return &MockPTY_Resize_Call{Call: _e.mock.On("Resize", sz)}
+//   - geometry domain.Geometry
+func (_e *MockPTY_Expecter) Resize(geometry any) *MockPTY_Resize_Call {
+	return &MockPTY_Resize_Call{Call: _e.mock.On("Resize", geometry)}
 }
 
-func (_c *MockPTY_Resize_Call) Run(run func(sz domain.Size)) *MockPTY_Resize_Call {
+func (_c *MockPTY_Resize_Call) Run(run func(geometry domain.Geometry)) *MockPTY_Resize_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 domain.Size
+		var arg0 domain.Geometry
 		if args[0] != nil {
-			arg0 = args[0].(domain.Size)
+			arg0 = args[0].(domain.Geometry)
 		}
 		run(
 			arg0,
@@ -286,7 +286,7 @@ func (_c *MockPTY_Resize_Call) Return(err error) *MockPTY_Resize_Call {
 	return _c
 }
 
-func (_c *MockPTY_Resize_Call) RunAndReturn(run func(sz domain.Size) error) *MockPTY_Resize_Call {
+func (_c *MockPTY_Resize_Call) RunAndReturn(run func(geometry domain.Geometry) error) *MockPTY_Resize_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -379,8 +379,8 @@ func (_m *MockPTYFactory) EXPECT() *MockPTYFactory_Expecter {
 }
 
 // Open provides a mock function for the type MockPTYFactory
-func (_mock *MockPTYFactory) Open(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
-	ret := _mock.Called(ctx, cmd, args, env, dir, sz)
+func (_mock *MockPTYFactory) Open(ctx context.Context, cmd string, args []string, env []string, dir string, geometry domain.Geometry) (ports.PTY, error) {
+	ret := _mock.Called(ctx, cmd, args, env, dir, geometry)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Open")
@@ -388,18 +388,18 @@ func (_mock *MockPTYFactory) Open(ctx context.Context, cmd string, args []string
 
 	var r0 ports.PTY
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error)); ok {
-		return returnFunc(ctx, cmd, args, env, dir, sz)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, []string, []string, string, domain.Geometry) (ports.PTY, error)); ok {
+		return returnFunc(ctx, cmd, args, env, dir, geometry)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, []string, []string, string, domain.Size) ports.PTY); ok {
-		r0 = returnFunc(ctx, cmd, args, env, dir, sz)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, []string, []string, string, domain.Geometry) ports.PTY); ok {
+		r0 = returnFunc(ctx, cmd, args, env, dir, geometry)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(ports.PTY)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, string, []string, []string, string, domain.Size) error); ok {
-		r1 = returnFunc(ctx, cmd, args, env, dir, sz)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, []string, []string, string, domain.Geometry) error); ok {
+		r1 = returnFunc(ctx, cmd, args, env, dir, geometry)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -417,12 +417,12 @@ type MockPTYFactory_Open_Call struct {
 //   - args []string
 //   - env []string
 //   - dir string
-//   - sz domain.Size
-func (_e *MockPTYFactory_Expecter) Open(ctx any, cmd any, args any, env any, dir any, sz any) *MockPTYFactory_Open_Call {
-	return &MockPTYFactory_Open_Call{Call: _e.mock.On("Open", ctx, cmd, args, env, dir, sz)}
+//   - geometry domain.Geometry
+func (_e *MockPTYFactory_Expecter) Open(ctx any, cmd any, args any, env any, dir any, geometry any) *MockPTYFactory_Open_Call {
+	return &MockPTYFactory_Open_Call{Call: _e.mock.On("Open", ctx, cmd, args, env, dir, geometry)}
 }
 
-func (_c *MockPTYFactory_Open_Call) Run(run func(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size)) *MockPTYFactory_Open_Call {
+func (_c *MockPTYFactory_Open_Call) Run(run func(ctx context.Context, cmd string, args []string, env []string, dir string, geometry domain.Geometry)) *MockPTYFactory_Open_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -444,9 +444,9 @@ func (_c *MockPTYFactory_Open_Call) Run(run func(ctx context.Context, cmd string
 		if args[4] != nil {
 			arg4 = args[4].(string)
 		}
-		var arg5 domain.Size
+		var arg5 domain.Geometry
 		if args[5] != nil {
-			arg5 = args[5].(domain.Size)
+			arg5 = args[5].(domain.Geometry)
 		}
 		run(
 			arg0,
@@ -465,7 +465,7 @@ func (_c *MockPTYFactory_Open_Call) Return(pTY ports.PTY, err error) *MockPTYFac
 	return _c
 }
 
-func (_c *MockPTYFactory_Open_Call) RunAndReturn(run func(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error)) *MockPTYFactory_Open_Call {
+func (_c *MockPTYFactory_Open_Call) RunAndReturn(run func(ctx context.Context, cmd string, args []string, env []string, dir string, geometry domain.Geometry) (ports.PTY, error)) *MockPTYFactory_Open_Call {
 	_c.Call.Return(run)
 	return _c
 }

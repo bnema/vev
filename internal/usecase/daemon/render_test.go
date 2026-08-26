@@ -264,10 +264,10 @@ func (p *concurrentExitPTY) Read([]byte) (int, error) {
 	<-p.release
 	return 0, io.EOF
 }
-func (*concurrentExitPTY) Write(b []byte) (int, error) { return len(b), nil }
-func (*concurrentExitPTY) Close() error                { return nil }
-func (*concurrentExitPTY) Resize(domain.Size) error    { return nil }
-func (*concurrentExitPTY) Pid() int                    { return 0 }
+func (*concurrentExitPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*concurrentExitPTY) Close() error                 { return nil }
+func (*concurrentExitPTY) Resize(domain.Geometry) error { return nil }
+func (*concurrentExitPTY) Pid() int                     { return 0 }
 func (*concurrentExitPTY) ForegroundPgid() (int, error) {
 	return 0, nil
 }
@@ -666,8 +666,8 @@ func TestPTYEOFFinalTabKillsSessionAndDetaches(t *testing.T) {
 
 func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)
-	p.EXPECT().Resize(domain.Size{Cols: 4, Rows: 2}).Return(nil).Once()
-	p.EXPECT().Resize(domain.Size{Cols: 6, Rows: 4}).Return(nil).Once()
+	p.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 4, Rows: 2}}).Return(nil).Once()
+	p.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 6, Rows: 4}}).Return(nil).Once()
 
 	win := newTab(p, domain.Size{Cols: 4, Rows: 4})
 	for y, text := range []string{"0000", "1111", "2222", "3333"} {
@@ -922,7 +922,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)
 	var screenWidthAtResize int
 	win := newTab(newScriptPTY(nil), domain.Size{Cols: 80, Rows: 24})
-	p.EXPECT().Resize(domain.Size{Cols: 100, Rows: 28}).RunAndReturn(func(sz domain.Size) error {
+	p.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 100, Rows: 28}}).RunAndReturn(func(domain.Geometry) error {
 		// The screen must not yet be resized when the PTY is: proves order.
 		screenWidthAtResize = win.focusedPane().screen.Frame.Width
 		return nil

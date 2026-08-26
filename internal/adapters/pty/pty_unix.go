@@ -36,9 +36,10 @@ func NewFactory() *Factory { return &Factory{} }
 // Open spawns command with args attached to a freshly allocated pseudo-terminal
 // and returns the master side as a ports.PTY. env is passed to the child
 // verbatim (nil means inherit the current process environment); the caller
-// decides TERM and friends. sz sets the terminal window size before the child
-// starts, so the child observes the correct dimensions on its first query.
-func (Factory) Open(ctx context.Context, command string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+// decides TERM and friends. geometry sets the terminal window geometry before
+// the child starts, so the child observes the correct dimensions on its first
+// query.
+func (Factory) Open(ctx context.Context, command string, args []string, env []string, dir string, geometry domain.Geometry) (ports.PTY, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -63,10 +64,11 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 	// parent always drops the slave once Start has run (or on any error).
 	defer func() { _ = slave.Close() }()
 
-	// Set the initial window size on the master before Start so the child's very
-	// first size query already reflects sz.
-	if sz.Valid() {
-		if err := setWinsize(masterFd, sz); err != nil {
+	// Set the initial window geometry on the master before Start so the child's
+	// very first size query already reflects the authoritative geometry.
+	geometry = geometry.NormalizePixels()
+	if geometry.Valid() {
+		if err := setGeometry(masterFd, geometry); err != nil {
 			return nil, fmt.Errorf("pty: initial TIOCSWINSZ: %w", err)
 		}
 	}
@@ -148,14 +150,15 @@ func (p *unixPTY) Write(b []byte) (int, error) {
 // every subsequent Read into a thread-parking syscall and breaking the
 // Close-unblocks-Read behavior. Control also pins the fd for the duration and
 // fails cleanly (os.ErrClosed) after Close.
-func (p *unixPTY) Resize(sz domain.Size) error {
+func (p *unixPTY) Resize(geometry domain.Geometry) error {
+	geometry = geometry.NormalizePixels()
 	rc, err := p.master.SyscallConn()
 	if err != nil {
 		return fmt.Errorf("pty: resize: %w", err)
 	}
 	var ioctlErr error
 	if err := rc.Control(func(fd uintptr) {
-		ioctlErr = setWinsize(int(fd), sz)
+		ioctlErr = setGeometry(int(fd), geometry)
 	}); err != nil {
 		return fmt.Errorf("pty: resize: %w", err)
 	}
@@ -228,5 +231,17 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 
 // setWinsize applies sz to the terminal referenced by fd via TIOCSWINSZ.
 func setWinsize(fd int, sz domain.Size) error {
-	return rawterm.SetWinsize(fd, uint16(sz.Cols), uint16(sz.Rows))
+	return setGeometry(fd, domain.Geometry{Size: sz})
+}
+
+// setGeometry applies cell dimensions and any pixel dimensions reported by the
+// geometry authority. Zero pixel dimensions deliberately preserve the kernel's
+// explicit unknown value instead of fabricating a cell-derived size.
+func setGeometry(fd int, geometry domain.Geometry) error {
+	return rawterm.SetWinsizeFull(fd, rawterm.Winsize{
+		Col:    uint16(geometry.Cols),
+		Row:    uint16(geometry.Rows),
+		Xpixel: uint16(geometry.PixelWidth),
+		Ypixel: uint16(geometry.PixelHeight),
+	})
 }

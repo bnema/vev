@@ -863,11 +863,11 @@ func (u *reconnectUI) redraw(size domain.Size) error {
 func (u *reconnectUI) drawStage(stage reconnectStage) error {
 	u.stage = stage
 	if u.showing && u.remote {
-		size, err := u.term.Size()
+		geometry, err := u.term.Geometry()
 		if err != nil {
-			return fmt.Errorf("reading terminal size for reconnect toast: %w", err)
+			return fmt.Errorf("reading terminal geometry for reconnect toast: %w", err)
 		}
-		return u.redraw(size)
+		return u.redraw(geometry.Size)
 	}
 	return u.draw()
 }
@@ -877,11 +877,11 @@ func (u *reconnectUI) draw() error {
 		return nil
 	}
 	if u.remote {
-		size, err := u.term.Size()
+		geometry, err := u.term.Geometry()
 		if err != nil {
-			return fmt.Errorf("reading terminal size for reconnect toast: %w", err)
+			return fmt.Errorf("reading terminal geometry for reconnect toast: %w", err)
 		}
-		return u.redraw(size)
+		return u.redraw(geometry.Size)
 	}
 	if _, err := u.term.Out().Write([]byte(statusReconnect)); err != nil {
 		return fmt.Errorf("writing reconnect status: %w", err)
@@ -927,7 +927,7 @@ func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool 
 	}
 }
 
-func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size) error) (bool, error) {
+func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Geometry, onResize func(domain.Size) error) (bool, error) {
 	t := clk.NewTimer(d)
 	defer t.Stop()
 	for {
@@ -936,13 +936,13 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 			return true, nil
 		case <-ctx.Done():
 			return false, nil
-		case size, ok := <-resizeEvents:
+		case geometry, ok := <-resizeEvents:
 			if !ok {
 				resizeEvents = nil
 				continue
 			}
 			if onResize != nil {
-				if err := onResize(size); err != nil {
+				if err := onResize(geometry.Size); err != nil {
 					return false, err
 				}
 			}
@@ -1083,11 +1083,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		return nil
 	}
-	// 1. Handshake: send Hello with our size and TERM.
-	size, err := term.Size()
+	// 1. Handshake: send Hello with our geometry and TERM.
+	geometry, err := term.Geometry()
 	if err != nil {
-		return attachResult{err: fmt.Errorf("vev: reading terminal size: %w", err)}
+		return attachResult{err: fmt.Errorf("vev: reading terminal geometry: %w", err)}
 	}
+	geometry = geometry.NormalizePixels()
+	size := geometry.Size
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = ""
@@ -1110,6 +1112,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		ResumeToken:            resumeToken,
 		Name:                   name,
 		Size:                   size,
+		PixelWidth:             geometry.PixelWidth,
+		PixelHeight:            geometry.PixelHeight,
 		TermEnv:                termEnv,
 		Cwd:                    cwd,
 		TrueColor:              trueColor,
@@ -1383,7 +1387,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			// Before the asynchronous sender starts, preserve transport ordering by
 			// requesting the reset synchronously after the initial Theme publication.
 			resetErr := sendHandshake(func() error {
-				payload, err := ports.MarshalResize(ports.Resize{Size: size})
+				payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 				if err != nil {
 					return err
 				}
@@ -1504,11 +1508,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	defer clearParkedPending()
 
 	sendParkedRouteSize := func() error {
-		current, err := term.Size()
+		current, err := term.Geometry()
 		if err != nil {
-			return fmt.Errorf("reading terminal size for parked route: %w", err)
+			return fmt.Errorf("reading terminal geometry for parked route: %w", err)
 		}
-		payload, err := ports.MarshalResize(ports.Resize{Size: current})
+		current = current.NormalizePixels()
+		payload, err := ports.MarshalResize(ports.Resize{Size: current.Size, PixelWidth: current.PixelWidth, PixelHeight: current.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for parked route: %w", err)
 		}
@@ -1600,11 +1605,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if awaitingReconnectReset {
 			return nil
 		}
-		size, serr := term.Size()
+		current, serr := term.Geometry()
 		if serr != nil {
-			return fmt.Errorf("reading terminal size for reconnect reconciliation: %w", serr)
+			return fmt.Errorf("reading terminal geometry for reconnect reconciliation: %w", serr)
 		}
-		payload, err := ports.MarshalResize(ports.Resize{Size: size})
+		current = current.NormalizePixels()
+		payload, err := ports.MarshalResize(ports.Resize{Size: current.Size, PixelWidth: current.PixelWidth, PixelHeight: current.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for reconnect reconciliation: %w", err)
 		}
@@ -1792,11 +1798,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					awaitingReconnectReset = false
 				}
 				if reconnect.showing && reconnect.remote {
-					size, serr := term.Size()
+					current, serr := term.Geometry()
 					if serr != nil {
-						return welcomedResult(fmt.Errorf("vev: reading terminal size for reconnect redraw: %w", serr))
+						return welcomedResult(fmt.Errorf("vev: reading terminal geometry for reconnect redraw: %w", serr))
 					}
-					if rerr := reconnect.redraw(size); rerr != nil {
+					if rerr := reconnect.redraw(current.Size); rerr != nil {
 						return welcomedResult(fmt.Errorf("vev: redrawing reconnect toast: %w", rerr))
 					}
 				} else if ferr := term.Flush(); ferr != nil {
@@ -2844,15 +2850,16 @@ func (p *stdinPump) run() {
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
+func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- ports.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
 	defer log.Debug("resize pump exited")
 	for {
 		select {
-		case sz, ok := <-events:
+		case geometry, ok := <-events:
 			if !ok {
 				return
 			}
-			payload, err := ports.MarshalResize(ports.Resize{Size: sz})
+			geometry = geometry.NormalizePixels()
+			payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 			if err != nil {
 				log.Error("encoding terminal resize", "error", err)
 				continue

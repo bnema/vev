@@ -152,7 +152,7 @@ func TestTerminalInputPumpStopDropsLateReadWithoutStartingAnother(t *testing.T) 
 func TestRunnerReusesBlockedTerminalInputPumpAcrossRuns(t *testing.T) {
 	reader := newLateStopReader()
 	runner := &Runner{term: &attachPaletteTerminalHarness{
-		in: reader, out: newAttachPaletteWriter(), resize: make(chan domain.Size),
+		in: reader, out: newAttachPaletteWriter(), resize: make(chan domain.Geometry),
 	}}
 
 	first := runner.terminalInput()
