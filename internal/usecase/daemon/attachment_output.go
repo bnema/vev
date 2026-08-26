@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -10,16 +11,16 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// outputStateStream owns the terminal-output dependency chain for one
-// attached client. Each incremental output is rendered from the preceding
-// emitted frame and therefore remains pipelineable without waiting for an
+// attachmentOutput owns the terminal-output dependency chain and emitted
+// render state for one attached client. Each incremental output is rendered
+// from the preceding emitted frame and remains pipelineable without waiting for an
 // ACK. Cumulative ACKs advance the bounded paint window.
 // A reset frame starts a new epoch, clears the dependency chain, and advertises
 // state 0 as its base.
 //
 // Callers serialize access with attachedClient.sendMu. A prepared transaction
 // must be sent or committed as a no-op before the next transaction is prepared.
-type outputStateStream struct {
+type attachmentOutput struct {
 	renderer             *renderer.Renderer
 	epoch                uint64
 	next                 uint64
@@ -30,6 +31,8 @@ type outputStateStream struct {
 	maxOutstandingAtomic atomic.Uint64
 	forceSnapshot        bool
 	initialized          bool
+	lastCursor           cursorOut
+	lastRoutePosition    ports.RoutePosition
 	attachment           *attachedClient
 	stateMu              sync.Mutex
 }
@@ -38,7 +41,7 @@ type outputStateStream struct {
 // state transition. It deliberately does not take sendMu: callers that hold
 // architecture locks can publish a view without reversing the paint path's
 // sendMu -> session lock order.
-func (s *outputStateStream) lockView() {
+func (s *attachmentOutput) lockView() {
 	if s == nil {
 		return
 	}
@@ -49,7 +52,7 @@ func (s *outputStateStream) lockView() {
 	s.attachment.viewMu.Lock()
 }
 
-func (s *outputStateStream) unlockView() {
+func (s *attachmentOutput) unlockView() {
 	if s == nil {
 		return
 	}
@@ -60,11 +63,11 @@ func (s *outputStateStream) unlockView() {
 	s.attachment.viewMu.Unlock()
 }
 
-func newOutputStateStream(windowSize ...uint8) *outputStateStream {
+func newOutputStateStream(windowSize ...uint8) *attachmentOutput {
 	return newOutputStateStreamForProfile(renderer.ColorProfileTrueColor, windowSize...)
 }
 
-func newOutputStateStreamForCapabilities(capabilities ports.TerminalCapabilities, windowSize ...uint8) *outputStateStream {
+func newOutputStateStreamForCapabilities(capabilities ports.TerminalCapabilities, windowSize ...uint8) *attachmentOutput {
 	profile := renderer.ColorProfileANSI256
 	if capabilities.TrueColor() {
 		profile = renderer.ColorProfileTrueColor
@@ -72,12 +75,12 @@ func newOutputStateStreamForCapabilities(capabilities ports.TerminalCapabilities
 	return newOutputStateStreamForProfile(profile, windowSize...)
 }
 
-func newOutputStateStreamForProfile(profile renderer.ColorProfile, windowSize ...uint8) *outputStateStream {
+func newOutputStateStreamForProfile(profile renderer.ColorProfile, windowSize ...uint8) *attachmentOutput {
 	window := uint8(maxUnackedOutputStates)
 	if len(windowSize) > 0 {
 		window = normalizeOutputWindow(windowSize[0])
 	}
-	stream := &outputStateStream{
+	stream := &attachmentOutput{
 		renderer:       renderer.NewWithColorProfile(renderer.Capabilities{}, profile),
 		epoch:          1,
 		maxOutstanding: uint64(window),
@@ -86,8 +89,87 @@ func newOutputStateStreamForProfile(profile renderer.ColorProfile, windowSize ..
 	return stream
 }
 
+type cursorCandidate struct {
+	data []byte
+	next cursorOut
+}
+
+// preparedAttachmentOutput is one speculative terminal-output transaction.
+// ANSI renderer state and cursor state advance together only after the output
+// frame is accepted by the attachment's state stream.
+type preparedAttachmentOutput struct {
+	output *attachmentOutput
+	ansi   *preparedOutput
+	cursor cursorCandidate
+	data   []byte
+}
+
+func (o *attachmentOutput) prepareFrame(frame renderer.Frame, damage []renderer.Damage, reset bool, desired cursorOut) (*preparedAttachmentOutput, error) {
+	ansi, err := o.prepare(frame, damage, reset)
+	if err != nil {
+		return nil, err
+	}
+	cursor := o.prepareCursorTail(desired, len(ansi.data) > 0)
+	data := append([]byte(nil), ansi.data...)
+	data = append(data, cursor.data...)
+	return &preparedAttachmentOutput{output: o, ansi: ansi, cursor: cursor, data: data}, nil
+}
+
+func (p *preparedAttachmentOutput) send(echoAck uint64, send func(ports.Frame) error) error {
+	if p == nil || p.ansi == nil {
+		return nil
+	}
+	if err := p.ansi.send(p.data, echoAck, send); err != nil {
+		return err
+	}
+	if p.ansi.sent && p.output != nil {
+		p.output.lastCursor = p.cursor.next
+	}
+	return nil
+}
+
+func (p *preparedAttachmentOutput) commitNoSend() {
+	if p == nil || p.ansi == nil {
+		return
+	}
+	p.ansi.commitNoSend()
+	if p.ansi.sent && p.output != nil {
+		p.output.lastCursor = p.cursor.next
+	}
+}
+
+func (p *preparedAttachmentOutput) sent() bool {
+	return p != nil && p.ansi != nil && p.ansi.sent
+}
+
+func (o *attachmentOutput) prepareCursorTail(desired cursorOut, force bool) cursorCandidate {
+	candidate := cursorCandidate{next: desired}
+	candidate.next.valid = true
+	prev := o.lastCursor
+	changed := force || !prev.valid || prev.hidden != desired.hidden || prev.row != desired.row || prev.col != desired.col || prev.style != desired.style || prev.hasStyle != desired.hasStyle
+	if !changed {
+		return candidate
+	}
+	if desired.hidden {
+		candidate.data = []byte("\x1b[?25l")
+		return candidate
+	}
+	candidate.data = append(candidate.data, "\x1b["...)
+	candidate.data = strconv.AppendInt(candidate.data, int64(desired.row+1), 10)
+	candidate.data = append(candidate.data, ';')
+	candidate.data = strconv.AppendInt(candidate.data, int64(desired.col+1), 10)
+	candidate.data = append(candidate.data, 'H')
+	if !prev.valid || prev.hidden || prev.style != desired.style || prev.hasStyle != desired.hasStyle {
+		candidate.data = append(candidate.data, "\x1b["...)
+		candidate.data = strconv.AppendInt(candidate.data, int64(desired.style), 10)
+		candidate.data = append(candidate.data, " q"...)
+	}
+	candidate.data = append(candidate.data, "\x1b[?25h"...)
+	return candidate
+}
+
 type preparedOutput struct {
-	stream               *outputStateStream
+	stream               *attachmentOutput
 	draw                 renderer.PreparedDraw
 	base                 uint64
 	next                 uint64
@@ -102,7 +184,7 @@ type preparedOutput struct {
 	sent                 bool
 }
 
-func (s *outputStateStream) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
+func (s *attachmentOutput) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
 	s.lockView()
 	defer s.unlockView()
 	if s.epoch == 0 {
@@ -190,20 +272,20 @@ func (p *preparedOutput) commit() {
 	p.stream.forceSnapshot = false
 }
 
-func (s *outputStateStream) currentEpoch() uint64 {
+func (s *attachmentOutput) currentEpoch() uint64 {
 	s.lockView()
 	defer s.unlockView()
 	return s.currentEpochLocked()
 }
 
-func (s *outputStateStream) currentEpochLocked() uint64 {
+func (s *attachmentOutput) currentEpochLocked() uint64 {
 	if s.epoch == 0 {
 		s.epoch = 1
 	}
 	return s.epoch
 }
 
-func (s *outputStateStream) fenceLocked() (uint64, uint64, uint64) {
+func (s *attachmentOutput) fenceLocked() (uint64, uint64, uint64) {
 	if s == nil {
 		return 0, 1, 0
 	}
@@ -215,7 +297,7 @@ func (s *outputStateStream) fenceLocked() (uint64, uint64, uint64) {
 	return generation, s.currentEpochLocked(), revision
 }
 
-func (s *outputStateStream) preparedCurrentLocked(generation, epoch, viewRevision, base uint64) bool {
+func (s *attachmentOutput) preparedCurrentLocked(generation, epoch, viewRevision, base uint64) bool {
 	if s == nil || s.currentEpochLocked() != epoch || s.generation != generation || s.next != base {
 		return false
 	}
@@ -244,7 +326,7 @@ func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision ui
 // sideEffect builds an output frame without advancing the state stream. When
 // an attachment is present, callers must hold its sendMu; attachment-bound
 // sends use sideEffectLocked after validating their transport incarnation.
-func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) (ports.Frame, error) {
+func (s *attachmentOutput) sideEffect(data []byte, echoAck uint64) (ports.Frame, error) {
 	s.lockView()
 	defer s.unlockView()
 	return s.sideEffectLocked(data, echoAck)
@@ -253,7 +335,7 @@ func (s *outputStateStream) sideEffect(data []byte, echoAck uint64) (ports.Frame
 // sideEffectLocked requires the attachment view lock for both frame creation
 // and transport emission. Keeping that lock across the send prevents a view
 // publication from overtaking a frame that was fenced just before it.
-func (s *outputStateStream) sideEffectLocked(data []byte, echoAck uint64) (ports.Frame, error) {
+func (s *attachmentOutput) sideEffectLocked(data []byte, echoAck uint64) (ports.Frame, error) {
 	_, epoch, viewRevision := s.fenceLocked()
 	size := domain.Size{Cols: 1, Rows: 1}
 	if s != nil && s.attachment != nil {
@@ -262,7 +344,7 @@ func (s *outputStateStream) sideEffectLocked(data []byte, echoAck uint64) (ports
 	return marshalOutputState(data, epoch, 0, 0, echoAck, viewRevision, size, false)
 }
 
-func (s *outputStateStream) ack(epoch, state uint64) bool {
+func (s *attachmentOutput) ack(epoch, state uint64) bool {
 	if s == nil {
 		return false
 	}
@@ -276,7 +358,7 @@ func (s *outputStateStream) ack(epoch, state uint64) bool {
 	return true
 }
 
-func (s *outputStateStream) rebase() {
+func (s *attachmentOutput) rebase() {
 	if s == nil {
 		return
 	}
@@ -285,9 +367,19 @@ func (s *outputStateStream) rebase() {
 	s.rebaseLocked()
 }
 
+// rebaseAttachment retires all output state coupled to the attachment's
+// current session or transport while preserving independent client state.
+func (s *attachmentOutput) rebaseAttachment() {
+	if s == nil {
+		return
+	}
+	s.rebase()
+	s.lastRoutePosition = ports.RoutePosition{}
+}
+
 // rebaseLocked is called while the attachment view lock is held. Publishing
 // the next view revision takes this path before making that revision visible.
-func (s *outputStateStream) rebaseLocked() {
+func (s *attachmentOutput) rebaseLocked() {
 	if s == nil {
 		return
 	}
@@ -306,7 +398,7 @@ func (s *outputStateStream) rebaseLocked() {
 	s.initialized = false
 }
 
-func (s *outputStateStream) publishOutstanding() {
+func (s *attachmentOutput) publishOutstanding() {
 	if s == nil {
 		return
 	}
@@ -315,7 +407,7 @@ func (s *outputStateStream) publishOutstanding() {
 
 // syncCapacityLocked refreshes the lock-free readiness snapshot after a
 // caller mutates the legacy fields under attachedClient.sendMu.
-func (s *outputStateStream) syncCapacityLocked() {
+func (s *attachmentOutput) syncCapacityLocked() {
 	if s == nil {
 		return
 	}
@@ -325,7 +417,15 @@ func (s *outputStateStream) syncCapacityLocked() {
 	s.publishOutstanding()
 }
 
-func (s *outputStateStream) atCapacity() bool {
+func (s *attachmentOutput) setWindow(window uint8) {
+	if s == nil {
+		return
+	}
+	s.maxOutstanding = uint64(normalizeOutputWindow(window))
+	s.maxOutstandingAtomic.Store(s.maxOutstanding)
+}
+
+func (s *attachmentOutput) atCapacity() bool {
 	if s == nil {
 		return false
 	}
@@ -336,7 +436,7 @@ func (s *outputStateStream) atCapacity() bool {
 	return s.outstandingAtomic.Load() >= maxOutstanding
 }
 
-func (s *outputStateStream) outstanding() uint64 {
+func (s *attachmentOutput) outstanding() uint64 {
 	if s == nil {
 		return 0
 	}

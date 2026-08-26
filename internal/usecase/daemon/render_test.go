@@ -1085,8 +1085,8 @@ func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
 	want := committed.translate(contentArea.X, contentArea.Y)
 	require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, 1))
 	require.Contains(t, string(data), "F")
-	require.Equal(t, want.Inner.Y, ac.lastCursor.row)
-	require.Equal(t, want.Inner.X, ac.lastCursor.col)
+	require.Equal(t, want.Inner.Y, ac.output.lastCursor.row)
+	require.Equal(t, want.Inner.X, ac.output.lastCursor.col)
 	require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, want.Inner.X+1))
 }
 

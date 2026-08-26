@@ -103,7 +103,7 @@ type renderCoordinatorOptions struct {
 	// wake composes a coalesced render request.
 	wake func(renderWake)
 	// ackReady reports whether the attachment may compose another output
-	// state (the outputStateStream window has capacity). It is retained for
+	// state (the attachmentOutput window has capacity). It is retained for
 	// coordinator-only tests and headless callers; production uses ackReadyFor
 	// so one attachment cannot gate another.
 	ackReady    func() bool

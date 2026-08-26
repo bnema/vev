@@ -213,12 +213,12 @@ func TestProductionRenderUsesOnlyTypedComposeEntryPoint(t *testing.T) {
 }
 
 func TestCursorCandidateDoesNotPublishDuringPreparation(t *testing.T) {
-	ac := &attachedClient{lastCursor: cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}}
+	output := &attachmentOutput{lastCursor: cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}}
 	desired := cursorOut{row: 3, col: 4, style: 2, hasStyle: true}
 
-	candidate := ac.prepareCursorTail(desired, false)
+	candidate := output.prepareCursorTail(desired, false)
 
-	require.Equal(t, cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}, ac.lastCursor)
+	require.Equal(t, cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}, output.lastCursor)
 	require.NotEmpty(t, candidate.data)
 	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, candidate.next)
 }
@@ -227,7 +227,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t)
 	healthy := ac.transport()
 	beforeCursor := cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}
-	ac.lastCursor = beforeCursor
+	ac.output.lastCursor = beforeCursor
 	ac.replaceTransport(cacheFailTransport{})
 	state := cacheState("failed", 1)
 	state.attachment = ac
@@ -237,7 +237,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	ac.sendMu.Lock()
 	require.True(t, d.emitFrame(sess, ac, &state, composed))
 
-	require.Equal(t, beforeCursor, ac.lastCursor)
+	require.Equal(t, beforeCursor, ac.output.lastCursor)
 	require.Zero(t, ac.output.next)
 	probe, err := ac.output.renderer.Prepare(composed.frame, nil, false)
 	require.NoError(t, err)
@@ -251,7 +251,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	state.attachment = ac
 	ac.sendMu.Lock()
 	require.True(t, d.emitFrame(sess, ac, &state, composed))
-	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, ac.lastCursor)
+	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, ac.output.lastCursor)
 	require.Equal(t, uint64(1), ac.output.next)
 	out, err := ports.UnmarshalOutput((<-sends).Payload)
 	require.NoError(t, err)
@@ -276,7 +276,7 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	p.mu.Unlock()
 
 	beforeNext := ac.output.next
-	beforeCursor := ac.lastCursor
+	beforeCursor := ac.output.lastCursor
 	state.receipts = []damageReceipt{{pane: p, generation: capture.Generation}}
 	noByte := composedRenderFrame{
 		frame:  initial.frame,
@@ -288,7 +288,7 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	require.True(t, d.emitFrame(sess, ac, &state, noByte))
 
 	require.Equal(t, beforeNext, ac.output.next)
-	require.Equal(t, beforeCursor, ac.lastCursor)
+	require.Equal(t, beforeCursor, ac.output.lastCursor)
 	require.Equal(t, "no-byte-committed", ac.pipelineCache.layoutFingerprint)
 	p.mu.Lock()
 	require.Empty(t, p.screen.Damage())
@@ -330,15 +330,20 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 	require.True(t, composed.cursor.hidden, "overlay owns cursor visibility")
 
 	stream := newOutputStateStream()
-	prepared, err := stream.prepare(composed.frame, composed.damage, composed.reset)
+	prepared, err := stream.prepareFrame(composed.frame, composed.damage, composed.reset, composed.cursor)
 	require.NoError(t, err)
-	terminalBytes := append(append([]byte(nil), prepared.data...), (&attachedClient{}).prepareCursorTail(composed.cursor, true).data...)
+	var outputFrame ports.Frame
+	require.NoError(t, prepared.send(0, func(frame ports.Frame) error {
+		outputFrame = frame
+		return nil
+	}))
+	output, err := ports.UnmarshalOutput(outputFrame.Payload)
+	require.NoError(t, err)
+	terminalBytes := output.Data
 	require.Equal(t, "\x1b[1;1H\x1b[0;7m tab \x1b[0m      R\x1b[2;1HAAAAAAAAAAAA\x1b[3;1HBBB┌─fl─┐BBB\x1b[4;1H───Prompt───\x1b[5;1HPROMPT\x1b[K\x1b[B\x1b[2K\x1b[7;1H\x1b[0;7m sess \x1b[0m     B\x1b[0m\x1b[?25l", string(terminalBytes))
 	client := vt.NewScreen(composed.frame.Width, composed.frame.Height)
 	client.Write(terminalBytes)
 	require.Equal(t, frameRows(composed.frame), frameRows(client.Frame))
-	prepared.draw.Commit()
-	stream.forceSnapshot = false
 	again, err := stream.renderer.Draw(composed.frame, nil)
 	require.NoError(t, err)
 	require.Empty(t, again, "renderer shadow must exactly equal the composed frame")
