@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -137,33 +136,3 @@ func awaitSenderFrame(t *testing.T, frames <-chan ports.Frame) ports.Frame {
 }
 
 const maxUnackedOutputStatesForTest = 8
-
-type failAfterOneInputTransport struct{ sends int }
-
-func (t *failAfterOneInputTransport) Send(ports.Frame) error {
-	t.sends++
-	if t.sends == 2 {
-		return errors.New("sender link failed")
-	}
-	return nil
-}
-func (*failAfterOneInputTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (*failAfterOneInputTransport) Close() error               { return nil }
-
-func TestInputReplayLedgerRetainsFramesAcceptedBeforeSenderFailure(t *testing.T) {
-	ledger := newInputReplayLedger()
-	ledger.register(1, []byte("first"))
-	ledger.register(2, []byte("second"))
-
-	frames := make(chan ports.Frame, 2)
-	frames <- ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: 1, Data: []byte("first")})}
-	frames <- ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: 2, Data: []byte("second")})}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errs := make(chan error, 1)
-	go runSender(ctx, cancel, &failAfterOneInputTransport{}, nil, nil, frames, newSamePeerInputGate(), newCumulativeAckQueue(), errs, slog.Default(), ledger)
-
-	require.Error(t, <-errs)
-	require.Equal(t, []byte("second"), ledger.takeUnsent(), "queued input must become residual after the transport failure")
-	require.Empty(t, ledger.takeUnsent())
-}

@@ -1374,6 +1374,9 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 		ready:             false,
 	})
 	if err != nil {
+		if ac.graphicsOutput != nil {
+			d.retireGraphicsOutput(ac, ac.graphicsOutput)
+		}
 		if tr != nil {
 			_ = tr.Close()
 		}
@@ -1578,7 +1581,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	switch h.Intent {
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, sz, h.Env)
+		sess, err := d.createSessionLockedWithModeAndGeometry(name, true, h.Cwd, sz, h.Geometry(), h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -1599,7 +1602,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, sz, h.Env)
+		sess, err := d.createSessionLockedWithModeAndGeometry(h.Name, false, h.Cwd, sz, h.Geometry(), h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err

@@ -30,13 +30,6 @@ const (
 	graphicsUploadChunkBytes = 128 << 10
 )
 
-// Kitty image IDs are terminal-global and survive the daemon that allocated
-// them. A fresh outer connection therefore starts by deleting all retained
-// images and placements before vev emits ANSI or allocates its new namespace.
-// q=2 suppresses a protocol response; output remains byte-only and uses the
-// existing state-bearing frame acknowledgement rather than a graphics ACK.
-var graphicsTerminalResetRecord = kittyRecord("a=d,d=A", nil)
-
 var (
 	errGraphicsOutputTooLarge = errors.New("kitty graphics output exceeds bound")
 	errGraphicsIDExhausted    = errors.New("kitty graphics output ID exhausted")
@@ -760,12 +753,13 @@ func deleteImageRecord(id uint64) []byte {
 func uploadRecord(id uint64, asset graphics.AssetView) []byte {
 	data := asset.Encoded()
 	format := "32"
-	if bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
-		format = "100"
-	} else if asset.Width() > 0 && asset.Height() > 0 &&
-		uint64(asset.Width()) <= ^uint64(0)/uint64(asset.Height())/3 &&
-		uint64(len(data)) == uint64(asset.Width())*uint64(asset.Height())*3 {
+	switch asset.Format() {
+	case graphics.AssetFormatRGB:
 		format = "24"
+	case graphics.AssetFormatPNG:
+		format = "100"
+	case graphics.AssetFormatRGBA, graphics.AssetFormatUnknown:
+		format = "32"
 	}
 	header := "a=t,i=" + strconv.FormatUint(id, 10) + ",f=" + format +
 		",s=" + strconv.FormatInt(asset.Width(), 10) + ",v=" + strconv.FormatInt(asset.Height(), 10)

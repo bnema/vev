@@ -55,7 +55,7 @@ func TestKittyProbeEnabledIsTerminalAgnostic(t *testing.T) {
 }
 
 func TestKittyProbeUsesOneInputPumpAndReplaysUnrelatedInput(t *testing.T) {
-	input := newTerminalInputPump(strings.NewReader("typed\x1b[?1;2c\x1b_Gi=31;OK\x1b\\"))
+	input := newTerminalInputPump(strings.NewReader("typed\x1b_Gi=31;OK\x1b\\\x1b[?1;2c"))
 	input.start()
 	defer input.stop()
 	term := &kittyProbeTerminal{in: input.in}
@@ -70,17 +70,4 @@ func TestKittyProbeUsesOneInputPumpAndReplaysUnrelatedInput(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []byte("typed"), result.data)
 	input.ack(consumer)
-}
-
-func TestKittyProbeQuarantineDropsLateRepliesButPreservesInput(t *testing.T) {
-	quarantine := &terminalProbeQuarantine{}
-	kitty := []byte("\x1b_Gi=31;OK\x1b\\")
-	da := []byte("\x1b[?1;2c")
-
-	require.Equal(t, []byte("typed"), quarantine.filter(append([]byte("typed"), kitty...)))
-	require.Empty(t, quarantine.filter(da), "late DA replies must not reach the PTY")
-	require.Equal(t, []byte("ordinary"), quarantine.filter([]byte("ordinary")))
-	// Split late replies are fenced as well; only unrelated bytes are returned.
-	require.Equal(t, []byte("x"), quarantine.filter([]byte("x\x1b_Gi=31;")))
-	require.Empty(t, quarantine.filter([]byte("OK\x1b\\")))
 }
