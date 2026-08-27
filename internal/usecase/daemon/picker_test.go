@@ -900,13 +900,12 @@ func TestPickerNavigationBackSendFailureKeepsPickerOpen(t *testing.T) {
 	ac.overlays.pickerMu.Unlock()
 
 	rc := d.attachCoordinator(sess, nil, ac, true)
-	token := sess.attachmentToken(ac, tr)
+	token := sess.captureAttachmentCapability(ac, tr)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
-	token.effect = effect
 
 	d.handlePickerInput(ac, []byte("\r"), effect)
 	require.True(t, ac.overlays.pickerActive(), "failed navigation send must leave the picker open")
@@ -1063,7 +1062,7 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	case <-time.After(2 * time.Second):
 		t.Fatal("session switch waited for in-flight transport send")
 	}
-	require.True(t, result.published.attachmentCurrent())
+	require.True(t, result.published.current())
 	select {
 	case <-handoffAtSendMu:
 		t.Fatal("output rebase ran during architecture publication")
@@ -1584,9 +1583,9 @@ func TestPickerAttachmentEffectDeleteRemovesSelectedSessionAndRefreshes(t *testi
 	require.True(t, ok)
 	require.Equal(t, target.id, selected.Session)
 
-	token := current.attachmentToken(ac, ac.transport())
+	token := current.captureAttachmentCapability(ac, ac.transport())
 	token.lease = current.renderCoordinator().attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	d.handlePickerInput(ac, []byte("x"), effect)

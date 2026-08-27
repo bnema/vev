@@ -10,7 +10,7 @@ import (
 // effect gate is frozen and d.mu is held. No target is created before this
 // succeeds.
 func (d *Daemon) transitionSourcePreflightLocked(req attachmentTransitionRequest) bool {
-	if req.sourceToken == nil || req.source == nil || req.source.core() == nil || d.sessions[req.source.core().id] != req.source {
+	if req.sourceCapability == nil || req.source == nil || req.source.core() == nil || d.sessions[req.source.core().id] != req.source {
 		return false
 	}
 	d.notices.routingMu.Lock()
@@ -22,13 +22,13 @@ func (d *Daemon) transitionSourcePreflightLocked(req attachmentTransitionRequest
 		coordinator.mu.Lock()
 		defer coordinator.mu.Unlock()
 	}
-	if !transitionSourceTokenCurrentLocked(*req.sourceToken, req.source, coordinator, req) {
+	if !req.sourceCapability.currentInSessionAndLeaseLocked(req.source, req.next, coordinator) {
 		return false
 	}
 	return transitionSourceTabCurrentLocked(req.source, req.expectedSourceTab)
 }
 
-func (d *Daemon) sourceAttachmentTokenCurrentFrozen(token attachmentConnectionToken) bool {
+func (d *Daemon) sourceAttachmentCapabilityCurrentFrozen(token attachmentCapability) bool {
 	if token.sess == nil || token.ac == nil {
 		return false
 	}
@@ -46,8 +46,7 @@ func (d *Daemon) sourceAttachmentTokenCurrentFrozen(token attachmentConnectionTo
 		coordinator.mu.Lock()
 		defer coordinator.mu.Unlock()
 	}
-	req := attachmentTransitionRequest{source: token.sess, next: token.ac, expectedTransport: token.transport}
-	return transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
+	return token.currentInSessionAndLeaseLocked(token.sess, token.ac, coordinator)
 }
 
 func transitionSourceTabCurrentLocked(source *session, expected *tab) bool {
@@ -84,7 +83,6 @@ type attachmentPublication struct {
 	targetCoordinator   *renderCoordinator
 	sourceCoordinator   *renderCoordinator
 	releaseCoordinators func()
-	nextGeneration      uint64
 }
 
 func (p *attachmentPublication) unlockCoordinators() {
@@ -124,20 +122,20 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	if sourceCore == nil || targetCore == nil || !req.preflighted || !req.attachmentEffectsFrozen ||
 		req.next == nil || d.closing || d.sessions[sourceCore.id] != source || d.sessions[targetCore.id] != req.target ||
 		req.expectedTransport.transport == nil || !req.next.transportSnapshotCurrent(req.expectedTransport) ||
-		req.preserveAttachment && req.sourceToken == nil {
+		req.preserveAttachment && req.sourceCapability == nil {
 		return nil, errAttachmentTransition
 	}
 
 	sourceCoordinator := sourceCore.coordinator.Load()
 	targetCoordinator := d.ensureAttachmentRenderCoordinatorPrelocked(req.target)
-	// transitionSourceTokenCurrentLocked also reads the source lease. Hold the
+	// Capability validation also reads the source lease. Hold the
 	// source coordinator lock before calling it, following session -> coordinator
 	// ordering and preventing a lease rebind from racing validation.
 	releaseCoordinators := lockAttachmentCoordinators(source, sourceCoordinator, req.target, targetCoordinator)
 	if d.afterAttachmentTransitionCoordinatorsLocked != nil {
 		d.afterAttachmentTransitionCoordinatorsLocked()
 	}
-	if req.sourceToken != nil && !transitionSourceTokenCurrentLocked(*req.sourceToken, source, sourceCoordinator, req) {
+	if req.sourceCapability != nil && !req.sourceCapability.currentInSessionAndLeaseLocked(source, req.next, sourceCoordinator) {
 		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
@@ -155,7 +153,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	}
 	if !attachmentLifecycleCurrentLocked(req.target, req.expectedTargetLifecycle) ||
 		req.activateTargetTab && !req.target.validTargetTabLocked(req.targetTabIndex) ||
-		req.sourceToken != nil && !transitionSourceTabCurrentForRequestLocked(source, req.expectedSourceTab, req.transferExpectedSourceTab) {
+		req.sourceCapability != nil && !transitionSourceTabCurrentForRequestLocked(source, req.expectedSourceTab, req.transferExpectedSourceTab) {
 		releaseCoordinators()
 		return nil, errAttachmentTransition
 	}
@@ -196,7 +194,6 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 		// attachment claim with the replacement transport's current size.
 		req.target.claimGeometryOwnerLocked(req.next, req.next.geometrySnapshot())
 	}
-	publication.nextGeneration = req.next.connectionGeneration.Add(1)
 	req.next.setSession(req.target)
 }
 
@@ -214,14 +211,13 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 			lease = publication.targetCoordinator.attachWithReadinessLocked(req.next, req.ready)
 		}
 	}
-	result.published = attachmentConnectionToken{
+	result.published = attachmentCapability{
 		sess: req.target, ac: req.next,
-		generation: publication.nextGeneration,
-		transport:  req.expectedTransport, lease: lease,
+		transport: req.expectedTransport, lease: lease,
 		rebase: publication.source != req.target,
 	}
 	if req.attachmentEffectsFrozen {
-		req.next.publishFrozenAttachmentCapability(result.published)
+		result.published = req.next.publishFrozenAttachmentCapability(result.published)
 	}
 	return result
 }
@@ -229,7 +225,7 @@ func buildAttachmentPostcommitPlanLocked(publication *attachmentPublication) att
 func (d *Daemon) publishAttachmentTransitionPrelocked(publication *attachmentPublication) attachmentTransitionResult {
 	if publication.req.preserveAttachment {
 		d.applyTargetStateLocked(publication)
-		return attachmentTransitionResult{published: *publication.req.sourceToken}
+		return attachmentTransitionResult{published: *publication.req.sourceCapability}
 	}
 	publishAttachmentOwnershipLocked(publication)
 	d.applyTargetStateLocked(publication)

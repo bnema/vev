@@ -102,11 +102,11 @@ func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTa
 	return d.createSessionLockedWithModeAndInactiveFence(target.SessionName, false, cwd, geometry, env, &expected, validate, expected.tabNames)
 }
 
-func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionToken, action ports.NavigationAction) error {
+func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, action ports.NavigationAction) error {
 	directive := ports.NavigationDirective{Action: action}
 	armed := false
 	if action == ports.NavigationOpenHomePicker {
-		leaseID, err := d.armParkedRoute(token)
+		leaseID, err := d.armParkedRoute(effect)
 		if err != nil {
 			return err
 		}
@@ -115,7 +115,7 @@ func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionTok
 	}
 	rollback := func() {
 		if armed {
-			token.ac.clearParkedRoute()
+			effect.ac.clearParkedRoute()
 		}
 	}
 	payload := ports.MarshalNavigationDirective(directive)
@@ -123,36 +123,36 @@ func (d *Daemon) sendNavigationActionForAttachment(token attachmentConnectionTok
 		rollback()
 		return errAttachmentTransition
 	}
-	if err := token.sendControl(ports.Frame{Type: ports.MsgNavigationAction, Payload: payload}); err != nil {
+	if err := effect.sendControl(ports.Frame{Type: ports.MsgNavigationAction, Payload: payload}); err != nil {
 		rollback()
 		return err
 	}
 	return nil
 }
 
-func (d *Daemon) sendRecentRouteNavigationActionForAttachment(token attachmentConnectionToken, action ports.RouteNavigationAction) error {
+func (d *Daemon) sendRecentRouteNavigationActionForAttachment(effect *attachmentEffect, action ports.RouteNavigationAction) error {
 	payload, err := ports.MarshalRouteNavigationAction(action)
 	if err != nil {
 		return errAttachmentTransition
 	}
-	return token.sendControl(ports.Frame{Type: ports.MsgNavigateRecentRoute, Payload: payload})
+	return effect.sendControl(ports.Frame{Type: ports.MsgNavigateRecentRoute, Payload: payload})
 }
 
-func (d *Daemon) sendCommittedRouteIdentityForAttachment(token attachmentConnectionToken) error {
-	if token.sess == nil {
+func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffect) error {
+	if !effect.current() || effect.sess == nil {
 		return errAttachmentTransition
 	}
-	token.sess.mu.Lock()
+	effect.sess.mu.Lock()
 	identity := ports.CommittedRouteIdentity{
-		Target:    ports.ExactSessionTarget{LifecycleID: token.sess.incarnation, SessionName: token.sess.name},
-		Ephemeral: token.sess.ephemeral,
+		Target:    ports.ExactSessionTarget{LifecycleID: effect.sess.incarnation, SessionName: effect.sess.name},
+		Ephemeral: effect.sess.ephemeral,
 	}
-	token.sess.mu.Unlock()
+	effect.sess.mu.Unlock()
 	payload, err := ports.MarshalCommittedRouteIdentity(identity)
 	if err != nil {
 		return errAttachmentTransition
 	}
-	return token.sendControl(ports.Frame{Type: ports.MsgCommittedRouteIdentity, Payload: payload})
+	return effect.sendControl(ports.Frame{Type: ports.MsgCommittedRouteIdentity, Payload: payload})
 }
 
 func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, h ports.Hello, routeCreated, purge bool) (*attachedClient, error) {

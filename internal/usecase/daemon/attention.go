@@ -50,16 +50,20 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 // happened — it also covers "no target exists", which is routine and not an
 // error. Only a failure to reach a target that does exist is a genuine error.
 func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {
-	return d.jumpAttentionForAttachment(sess, ac, attachmentConnectionToken{})
+	return d.jumpAttentionForAttachment(sess, ac, nil)
 }
 
-func (d *Daemon) jumpAttentionForAttachment(sess *session, ac *attachedClient, token attachmentConnectionToken) error {
+func (d *Daemon) jumpAttentionForAttachment(sess *session, ac *attachedClient, effect *attachmentEffect) error {
 	if sess == nil || ac == nil {
 		return nil
 	}
 	if idx, ok := oldestAttentionTab(sess); ok {
 		if sess.switchAttachmentTab(ac, idx) {
-			d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(ac), false, ac, token.lease)
+			var lease *attachmentLease
+			if effect != nil {
+				lease = effect.lease
+			}
+			d.activateTabAfterResizeForLease(sess, sess.tabForAttachment(ac), false, ac, lease)
 			d.invalidateRender(sess, ac, true, "attention.go")
 		}
 		return nil
@@ -70,10 +74,10 @@ func (d *Daemon) jumpAttentionForAttachment(sess *session, ac *attachedClient, t
 		return nil
 	}
 	pickerTarget := picker.Target{Session: target.sessionID, TabIndex: target.tabIndex}
-	if token.ac == nil {
+	if effect == nil {
 		return d.switchToTarget(sess, ac, pickerTarget)
 	}
-	return d.switchActiveTargetForAttachment(token, pickerTarget)
+	return d.switchActiveTargetForAttachment(effect, pickerTarget)
 }
 
 func oldestAttentionTab(sess *session) (int, bool) {

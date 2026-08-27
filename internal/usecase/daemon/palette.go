@@ -329,7 +329,7 @@ func (d *Daemon) recordPaletteUse(code string) {
 	d.paletteRecent = recent
 }
 
-func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
+func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*attachmentEffect) {
 	entry := ac.currentAttachmentSession()
 	if entry == nil {
 		return
@@ -350,7 +350,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var rawQuery string
 	changed, cancel, execute := false, false, false
 	var closedDiscovery remoteDiscoveryInstance
-	var effect *attachmentEffectTicket
+	var effect *attachmentEffect
 	if len(effects) != 0 {
 		effect = effects[0]
 	}
@@ -490,7 +490,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			RemoteKey: &remoteKey, RemoteTarget: &remoteTarget, RemoteHost: remoteKey.Host,
 			UnavailableReason: remoteUnavailableReason, TabIndex: -1,
 		}
-		err := d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{}, "palette-remote-session")
+		err := d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{}, "palette-remote-session")
 		if err == nil {
 			d.closeExecutedPalette(ac, generation, rawQuery)
 			return
@@ -529,7 +529,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		var err error
 		if effect != nil {
-			err = d.switchToTargetForAttachment(effect.connectionToken(), target, sessionHandoffGuard{allowSamePeer: true}, "palette-session")
+			err = d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{allowSamePeer: true}, "palette-session")
 		} else {
 			err = d.switchToTarget(sess, ac, target)
 		}
@@ -582,7 +582,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	sess.dispatchMu.Unlock()
 	if attachmentHandoff {
 		if current := ac.currentSession(); current != nil {
-			currentToken := current.attachmentToken(ac, ac.transport())
+			currentToken := current.captureAttachmentCapability(ac, ac.transport())
 			fresh, admitted := ac.beginAttachmentEffect(currentToken)
 			if d.closeExecutedPalette(ac, generation, rawQuery) {
 				d.invalidateRender(current, ac, true, "palette.go")
@@ -681,7 +681,7 @@ type paletteExec struct {
 	ac                  *attachedClient
 	routeSnapshot       ports.RecentRouteSnapshot
 	actions             daemonActionRunner
-	effect              *attachmentEffectTicket
+	effect              *attachmentEffect
 	redrawClosedPalette bool
 }
 
@@ -719,14 +719,14 @@ func (e paletteExec) CreateSession() error {
 	if entry == nil {
 		entry = e.sess
 	}
-	e.d.enterTransitionPrompt(entry, e.ac, " Create session ", "", func(name string, token attachmentConnectionToken) error {
-		if token.ac == nil {
+	e.d.enterTransitionPrompt(entry, e.ac, " Create session ", "", func(name string, effect *attachmentEffect) error {
+		if effect == nil || effect.ac == nil {
 			if e.sess == nil {
 				return errAttachmentTransition
 			}
 			return e.d.createSessionAndSwitch(e.sess, e.ac, name)
 		}
-		return e.d.createSessionAndSwitchForAttachment(token, name)
+		return e.d.createSessionAndSwitchForAttachment(effect, name)
 	})
 	return nil
 }
@@ -735,14 +735,14 @@ func (e paletteExec) CreateSessionNamed(name string) error {
 	if e.effect == nil {
 		return e.d.createSessionAndSwitch(e.sess, e.ac, name)
 	}
-	return e.d.createSessionAndSwitchForAttachment(e.effect.connectionToken(), name)
+	return e.d.createSessionAndSwitchForAttachment(e.effect, name)
 }
 
 func (e paletteExec) CreateEphemeralSession() error {
 	if e.effect == nil {
 		return e.d.createEphemeralSessionAndSwitch(e.sess, e.ac)
 	}
-	return e.d.createEphemeralSessionAndSwitchForAttachment(e.effect.connectionToken())
+	return e.d.createEphemeralSessionAndSwitchForAttachment(e.effect)
 }
 
 func (e paletteExec) CloseTab() error {
@@ -839,7 +839,7 @@ func (e paletteExec) ToggleFloatingPane() error {
 
 func (e paletteExec) BackSession() error {
 	if e.effect != nil {
-		return e.d.backSessionForAttachment(e.effect.connectionToken())
+		return e.d.backSessionForAttachment(e.effect)
 	}
 	e.d.backSession(e.sess, e.ac)
 	return nil
@@ -847,7 +847,7 @@ func (e paletteExec) BackSession() error {
 
 func (e paletteExec) Detach() error {
 	if e.effect != nil {
-		if !e.d.clientGoneForAttachment(e.effect.connectionToken(), true) {
+		if !e.d.clientGoneForAttachment(e.effect, true) {
 			return errAttachmentTransition
 		}
 		return nil
@@ -912,7 +912,7 @@ func (e paletteExec) RenameTabTo(name string) error {
 
 func (e paletteExec) OpenSessionPicker() error {
 	if e.ac != nil && e.ac.navigationCapabilities&ports.NavigationCapabilityHomePicker != 0 && e.effect != nil {
-		return e.d.sendNavigationActionForAttachment(e.effect.connectionToken(), ports.NavigationOpenHomePicker)
+		return e.d.sendNavigationActionForAttachment(e.effect, ports.NavigationOpenHomePicker)
 	}
 	e.d.enterPicker(e.sess, e.ac)
 	return nil
@@ -957,12 +957,18 @@ func (e paletteExec) NavigateRecentRoute(action ports.RouteNavigationAction) err
 		e.d.beforeRecentSessionHandoff()
 	}
 	if e.effect != nil {
-		return e.d.sendRecentRouteNavigationActionForAttachment(e.effect.connectionToken(), action)
+		return e.d.sendRecentRouteNavigationActionForAttachment(e.effect, action)
 	}
 	if e.ac == nil || e.attachment == nil {
 		return errAttachmentTransition
 	}
-	return e.d.sendRecentRouteNavigationActionForAttachment(e.attachment.attachmentToken(e.ac, e.ac.transport()), action)
+	capability := e.attachment.captureAttachmentCapability(e.ac, e.ac.transport())
+	effect, admitted := e.ac.beginAttachmentEffect(capability)
+	if !admitted {
+		return errAttachmentTransition
+	}
+	defer effect.End()
+	return e.d.sendRecentRouteNavigationActionForAttachment(effect, action)
 }
 
 func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeui.Styles) (renderer.Frame, []renderer.Damage) {

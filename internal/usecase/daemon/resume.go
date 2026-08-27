@@ -362,16 +362,32 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 		d.mu.Unlock()
 		return false
 	}
+	d.mu.Unlock()
+
+	// A successful claim may already have published active membership. Freeze
+	// and drain without architecture locks before restoring parked identity.
+	frozen := freezeAttachmentEffectGates(ac)
+	defer frozen.unfreeze()
+
+	d.mu.Lock()
+	if d.parked[token] != parked || !parked.claimed || ac.resumeClaimToken != token {
+		d.mu.Unlock()
+		return false
+	}
 	parked.claimed = false
 	ac.resumeClaimToken = 0
 	ac.resumeToken = token
 	ac.parked = true
-	ac.connectionGeneration.Add(1)
 	sess := parked.sess
 	if sess != nil {
 		sess.mu.Lock()
 		sess.unregisterAttachmentLocked(ac)
+		ac.setSession(nil)
+		ac.invalidateFrozenAttachmentCapability()
 		sess.mu.Unlock()
+	} else {
+		ac.setSession(nil)
+		ac.invalidateFrozenAttachmentCapability()
 	}
 	// Recreate the parked entry and its watcher instead of restoring a timer
 	// that may already have fired while the claim held the old entry. This also
@@ -390,7 +406,6 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	}
 	d.parked[token] = rearmed
 	captured := ac.transportSnapshot().transport
-	ac.setSession(nil)
 	d.mu.Unlock()
 	if sess != nil {
 		d.recalculateSessionGeometryAndInvalidate(sess, nil, "resume.go")
@@ -414,8 +429,8 @@ func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttach
 	d.discardAttachmentOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
-	parked.ac.connectionGeneration.Add(1)
 	parked.ac.setSession(nil)
+	parked.ac.invalidateRetiredAttachmentCapability()
 	return parkedAttachmentRetirement{
 		parked:            parked,
 		pickerGeneration:  parked.pickerGeneration,

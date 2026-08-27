@@ -21,7 +21,7 @@ func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation
 	sourceCoordinator := newRenderCoordinator(renderCoordinatorOptions{})
 	source.installRenderCoordinator(sourceCoordinator)
 	sourceCoordinator.attach(ac)
-	token := source.attachmentToken(ac, transport)
+	token := source.captureAttachmentCapability(ac, transport)
 	require.NotNil(t, token.lease)
 	d.sessions[source.id] = source
 	d.sessions[target.id] = target
@@ -37,7 +37,7 @@ func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation
 	}
 	req := attachmentTransitionRequest{
 		source: source, target: target, next: ac,
-		expectedTransport: ac.transportSnapshot(), sourceToken: &token,
+		expectedTransport: ac.transportSnapshot(), sourceCapability: &token,
 		preflighted: true, attachmentEffectsFrozen: true,
 	}
 	d.mu.Lock()
@@ -56,7 +56,7 @@ func TestValidateAttachmentTransitionLocksSourceCoordinatorBeforeLeaseValidation
 	require.NotNil(t, publication)
 }
 
-func TestAttachmentTokenRevalidatesTheCapturedTransportIncarnation(t *testing.T) {
+func TestAttachmentCapabilityRevalidatesTheCapturedTransportIncarnation(t *testing.T) {
 	first := &closeTrackingTransport{}
 	second := &closeTrackingTransport{}
 	ac := &attachedClient{tr: first}
@@ -69,12 +69,12 @@ func TestAttachmentTokenRevalidatesTheCapturedTransportIncarnation(t *testing.T)
 
 	captured := make(chan struct{})
 	release := make(chan struct{})
-	ac.beforeAttachmentTokenValidation = func() {
+	ac.beforeAttachmentCapabilityValidation = func() {
 		close(captured)
 		<-release
 	}
-	result := make(chan attachmentConnectionToken, 1)
-	go func() { result <- sess.attachmentToken(ac, first) }()
+	result := make(chan attachmentCapability, 1)
+	go func() { result <- sess.captureAttachmentCapability(ac, first) }()
 	<-captured
 	ac.replaceTransport(second)
 	close(release)

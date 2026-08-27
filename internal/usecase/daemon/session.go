@@ -511,27 +511,28 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 
 // createSessionAndSwitchForAttachment creates no target until the initiating role
 // ticket has ended and the exact source capability is frozen and revalidated.
-func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionToken, name string) error {
+func (d *Daemon) createSessionAndSwitchForAttachment(effect *attachmentEffect, name string) error {
 	if name == "" {
 		return errSessionNameRequired
 	}
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
-	if token.sess == nil || token.ac == nil || token.effect == nil {
+	if effect == nil || effect.sess == nil || effect.ac == nil {
 		return errAttachmentTransition
 	}
-	token.effect.bindActionEnd(d, "create-session")
-	token.effect.End()
+	effect.bindActionEnd(d, "create-session")
+	effect.End()
+	capability := effect.capability()
 
 	var created *session
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source: token.sess, next: token.ac,
+		source: capability.sess, next: capability.ac,
 
-		expectedTransport: token.transport, sourceToken: &token, action: "create-session",
+		expectedTransport: capability.transport, sourceCapability: &capability, sourceEffect: effect, action: "create-session",
 		copySourceEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
-			source := token.sess
+			source := capability.sess
 			if source == nil {
 				return nil, errAttachmentTransition
 			}
@@ -545,7 +546,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 			cwd, env := source.cwd, copyEnvironment(source.env)
 			source.mu.Unlock()
 			var createErr error
-			created, createErr = d.createSessionLockedWithMode(name, false, cwd, token.ac.geometrySnapshot(), env)
+			created, createErr = d.createSessionLockedWithMode(name, false, cwd, capability.ac.geometrySnapshot(), env)
 			return created, createErr
 		},
 	})
@@ -557,7 +558,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(token attachmentConnectionT
 	}
 
 	d.touchMRU(created)
-	d.log.Info("client attached", "session", created.name, "resume", token.ac.resumeCapable)
+	d.log.Info("client attached", "session", created.name, "resume", capability.ac.resumeCapable)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
 	return nil
@@ -599,29 +600,30 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 	return nil
 }
 
-func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(token attachmentConnectionToken) error {
-	if token.sess == nil || token.ac == nil || token.effect == nil {
+func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(effect *attachmentEffect) error {
+	if effect == nil || effect.sess == nil || effect.ac == nil {
 		return errAttachmentTransition
 	}
-	token.effect.bindActionEnd(d, "create-ephemeral-session")
-	token.effect.End()
+	effect.bindActionEnd(d, "create-ephemeral-session")
+	effect.End()
+	capability := effect.capability()
 
 	var created *session
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source: token.sess, next: token.ac,
-		expectedTransport: token.transport, sourceToken: &token, action: "create-ephemeral-session",
+		source: capability.sess, next: capability.ac,
+		expectedTransport: capability.transport, sourceCapability: &capability, sourceEffect: effect, action: "create-ephemeral-session",
 		copySourceEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
-			if token.sess == nil || d.closing {
+			if capability.sess == nil || d.closing {
 				return nil, errAttachmentTransition
 			}
-			source := token.sess
+			source := capability.sess
 			source.mu.Lock()
 			cwd, env := source.cwd, copyEnvironment(source.env)
 			source.mu.Unlock()
 			name := d.allocEphemeralNameLocked()
 			var createErr error
-			created, createErr = d.createSessionLockedWithMode(name, true, cwd, token.ac.geometrySnapshot(), env)
+			created, createErr = d.createSessionLockedWithMode(name, true, cwd, capability.ac.geometrySnapshot(), env)
 			return created, createErr
 		},
 	})
@@ -632,7 +634,7 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(token attachmentCo
 		return err
 	}
 	d.touchMRU(created)
-	d.log.Info("client attached", "session", created.name, "resume", token.ac.resumeCapable)
+	d.log.Info("client attached", "session", created.name, "resume", capability.ac.resumeCapable)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
 	return nil
@@ -855,17 +857,6 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	go d.readPanePTY(p)
 }
 
-func (s *session) detachIfCurrent(ac *attachedClient) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !attachmentRegisteredLocked(s, ac) || ac.currentAttachmentSession() != s {
-		return false
-	}
-	s.unregisterAttachmentLocked(ac)
-	ac.setSession(nil)
-	return true
-}
-
 // detachIfCurrent publishes terminal attachment invalidation through the attachment
 // gate. Freeze/drain happens before routing or session locks are acquired.
 func (d *Daemon) detachIfCurrent(sess *session, ac *attachedClient) bool {
@@ -892,7 +883,6 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 	}
 	if current {
 		sess.unregisterAttachmentLocked(ac)
-		ac.connectionGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenAttachmentCapability()
 	}
@@ -904,11 +894,11 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 // detachIfAttachmentCurrent invalidates only the exact attachment generation and transport
 // whose admitted send failed. A queued stale error cannot detach a later
 // attachment publication or a rebound transport on the same attachment object.
-func (d *Daemon) detachIfAttachmentCurrent(token attachmentConnectionToken) bool {
+func (d *Daemon) detachIfAttachmentCurrent(token attachmentCapability) bool {
 	return d.detachIfAttachmentCurrentUntil(token, nil)
 }
 
-func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken, done func() <-chan struct{}) bool {
+func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentCapability, done func() <-chan struct{}) bool {
 	if token.sess == nil || token.ac == nil || token.transport.transport == nil {
 		return false
 	}
@@ -938,13 +928,9 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentConnectionToken,
 	if coordinator != nil {
 		coordinator.mu.Lock()
 	}
-	req := attachmentTransitionRequest{
-		source: token.sess, next: token.ac, expectedTransport: token.transport,
-	}
-	current := coordinator != nil && transitionSourceTokenCurrentLocked(token, token.sess, coordinator, req)
+	current := coordinator != nil && token.currentInSessionAndLeaseLocked(token.sess, token.ac, coordinator)
 	if current {
 		unregisterAttachmentSessionLocked(token.sess, token.ac)
-		token.ac.connectionGeneration.Add(1)
 		token.ac.setSession(nil)
 		token.ac.invalidateFrozenAttachmentCapability()
 	}
@@ -1059,7 +1045,7 @@ func (d *Daemon) publishRenamedSessionRouteIdentity(sess *session) {
 		if ac.deferRouteIdentityUntilSnapshot() {
 			continue
 		}
-		token := sess.attachmentToken(ac, ac.transport())
+		token := sess.captureAttachmentCapability(ac, ac.transport())
 		if token.ac == nil {
 			continue
 		}
@@ -1067,11 +1053,11 @@ func (d *Daemon) publishRenamedSessionRouteIdentity(sess *session) {
 		if !admitted {
 			continue
 		}
-		token = effect.connectionToken()
-		err := d.sendCommittedRouteIdentityForAttachment(token)
+		err := d.sendCommittedRouteIdentityForAttachment(effect)
+		capability := effect.capability()
 		effect.End()
 		if err != nil {
-			d.detachOnAttachmentSendError(token, token.transport.transport)
+			d.detachOnAttachmentSendError(capability, capability.transport.transport)
 		}
 	}
 }
@@ -1149,7 +1135,7 @@ func (d *Daemon) closeTabLocked(sess *session, tb *tab, repaint bool) error {
 	return d.closeTabLockedWithEffect(sess, tb, repaint, nil)
 }
 
-func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, effect *attachmentEffectTicket) error {
+func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, effect *attachmentEffect) error {
 	if sess == nil || tb == nil {
 		return layout.ErrNotFound
 	}
@@ -1178,7 +1164,7 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 		var err error
 		if effect != nil {
 			effect.bindActionEnd(d, "close-tab")
-			err = d.killSessionForAttachment(sess, ports.ReasonSessionKilled, false, effect.connectionToken(), "close-tab")
+			err = d.killSessionForAttachment(sess, ports.ReasonSessionKilled, false, effect, "close-tab")
 		} else {
 			err = d.killSession(sess, ports.ReasonSessionKilled, false)
 		}
@@ -1305,8 +1291,9 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 }
 
 type sessionKillAdmission struct {
-	token  attachmentConnectionToken
-	action string
+	capability attachmentCapability
+	effect     *attachmentEffect
+	action     string
 }
 
 type sessionKillParticipants struct {
@@ -1315,12 +1302,15 @@ type sessionKillParticipants struct {
 	effectGates []*attachedClient
 	interrupts  []attachmentTransportInterrupt
 	source      *session
-	sourceToken *attachmentConnectionToken
+	sourceToken *attachmentCapability
 	target      *session
 }
 
-func (d *Daemon) killSessionForAttachment(sess *session, reason uint8, purge bool, token attachmentConnectionToken, action string) error {
-	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil, &sessionKillAdmission{token: token, action: action})
+func (d *Daemon) killSessionForAttachment(sess *session, reason uint8, purge bool, effect *attachmentEffect, action string) error {
+	if effect == nil {
+		return errAttachmentTransition
+	}
+	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil, &sessionKillAdmission{capability: effect.capability(), effect: effect, action: action})
 }
 
 // snapshotSessionKillParticipants captures attachment membership under the canonical
@@ -1330,7 +1320,7 @@ func (d *Daemon) killSessionForAttachment(sess *session, reason uint8, purge boo
 func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *sessionKillAdmission, requireEmpty bool) (sessionKillParticipants, bool) {
 	snapshot := sessionKillParticipants{target: target}
 	if admission != nil {
-		token := admission.token
+		token := admission.capability
 		if token.sess == nil || token.ac == nil || token.transport.transport == nil {
 			return sessionKillParticipants{}, false
 		}
@@ -1338,7 +1328,7 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		if snapshot.source == nil {
 			return sessionKillParticipants{}, false
 		}
-		snapshot.sourceToken = &admission.token
+		snapshot.sourceToken = &admission.capability
 	}
 
 	d.mu.Lock()
@@ -1381,7 +1371,7 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		snapshot.effectGates = append(snapshot.effectGates, ac)
 	}
 	if admission != nil {
-		add(admission.token.ac)
+		add(admission.capability.ac)
 	}
 	for ac := range snapshot.attachments {
 		add(ac)
@@ -1440,10 +1430,7 @@ func sessionKillParticipantsCurrentLocked(snapshot sessionKillParticipants, sour
 		return true
 	}
 	token := *snapshot.sourceToken
-	req := attachmentTransitionRequest{
-		source: token.sess, next: token.ac, expectedTransport: token.transport,
-	}
-	return transitionSourceTokenCurrentLocked(token, token.sess, sourceCoordinator, req)
+	return token.currentInSessionAndLeaseLocked(token.sess, token.ac, sourceCoordinator)
 }
 
 // stopInMemoryLifecycle cancels every session producer and closes every PTY
@@ -1570,7 +1557,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		return nil
 	}
 	if admission != nil {
-		d.endActionAttachmentEffect(admission.token.effect, admission.action)
+		d.endActionAttachmentEffect(admission.effect, admission.action)
 	}
 	action := ""
 	if admission != nil {
@@ -1740,7 +1727,6 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 			return
 		}
 		attachments = append(attachments, detachedAttachmentSnapshot{ac: attached, transport: participants.transports[attached]})
-		attached.connectionGeneration.Add(1)
 		attached.setSession(nil)
 		attached.invalidateFrozenAttachmentCapability()
 	}
@@ -1769,7 +1755,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	d.mu.Unlock()
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	frozen.unfreeze()
-	frozen = frozenAttachmentEffectGates{}
+	frozen = attachmentTransitionGuard{}
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
 	var purgeErr error

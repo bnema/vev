@@ -32,18 +32,17 @@ func testRecentRouteSnapshot() ports.RecentRouteSnapshot {
 	}
 }
 
-func beginRecentRoutePaletteEffect(t *testing.T, d *Daemon, sess *session, ac *attachedClient) attachmentConnectionToken {
+func beginRecentRoutePaletteEffect(t *testing.T, d *Daemon, sess *session, ac *attachedClient) *attachmentEffect {
 	t.Helper()
 	transport := ac.transport()
 	rc := d.attachCoordinator(sess, nil, ac, true)
-	token := sess.attachmentToken(ac, transport)
+	token := sess.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	t.Cleanup(effect.End)
-	token.effect = effect
-	return token
+	return effect
 }
 
 func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t *testing.T) {
@@ -355,14 +354,14 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	generation := ac.connectionGeneration.Load()
+	generation := ac.lifecycle.generationValue()
 	d.handleInput(current, ac, []byte("stopped\r"))
 
 	resumed := ac.currentSession()
 	require.Equal(t, "stopped", resumed.name)
 	require.Equal(t, int64(42), resumed.createdAt)
 	require.Equal(t, true, resumed.attachmentRegistered(ac))
-	require.Greater(t, ac.connectionGeneration.Load(), generation, "stopped-session handoff must publish through the attachment transition")
+	require.Greater(t, ac.lifecycle.generationValue(), generation, "stopped-session handoff must publish through the attachment transition")
 	require.False(t, ac.overlays.paletteActive())
 	firstPaint := awaitFrame(t, sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(firstPaint.Payload)
@@ -1004,7 +1003,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.True(t, ac.overlays.promptActive())
 	require.Contains(t, string(promptOutput.Data), "Create session")
 
-	generation := ac.connectionGeneration.Load()
+	generation := ac.lifecycle.generationValue()
 	d.handleInput(sess, ac, []byte("scratch\r"))
 	// The submit first paints the newly attached session while the prompt is
 	// still open, then handlePromptInput closes the prompt and repaints the
@@ -1026,7 +1025,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.False(t, newSess.ephemeral)
 	require.Contains(t, newSess.snapshotAttachments(), ac)
 	require.Equal(t, true, newSess.attachmentRegistered(ac))
-	require.Greater(t, ac.connectionGeneration.Load(), generation, "new-session handoff must publish through the attachment transition")
+	require.Greater(t, ac.lifecycle.generationValue(), generation, "new-session handoff must publish through the attachment transition")
 	require.Contains(t, string(finalOutput.Data), "scratch")
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }

@@ -1,11 +1,5 @@
 package daemon
 
-func moveAttachmentTokenCurrentLocked(token attachmentConnectionToken, sess *session) bool {
-	return token.sess == sess && token.ac != nil && token.generation == token.ac.connectionGeneration.Load() &&
-		token.ac.currentAttachmentSession() == sess && token.ac.transportSnapshotCurrent(token.transport) &&
-		attachmentRegisteredLocked(sess, token.ac)
-}
-
 // sameMoveAttachmentsLocked reports whether the source membership is unchanged
 // since admission. Caller holds the source session lock.
 func sameMoveAttachmentsLocked(sess *session, admitted []*attachedClient) bool {
@@ -33,7 +27,6 @@ func detachMoveAttachmentsLocked(sess *session, transports map[*attachedClient]t
 	retired := make([]detachedAttachmentSnapshot, 0, len(attachments))
 	for _, ac := range attachments {
 		retired = append(retired, detachedAttachmentSnapshot{ac: ac, transport: transports[ac]})
-		ac.connectionGeneration.Add(1)
 		ac.setSession(nil)
 		ac.invalidateFrozenAttachmentCapability()
 	}

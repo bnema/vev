@@ -17,7 +17,7 @@ type movePaneCommit struct {
 	sourceTransports          map[*attachedClient]transportSnapshot
 	sourceGeneration          uint64
 	destinationGeneration     uint64
-	frozenEffects             frozenAttachmentEffectGates
+	frozenEffects             attachmentTransitionGuard
 	err                       error
 
 	syncCleanup              syncTimerCleanup
@@ -51,7 +51,7 @@ func (c *movePaneCommit) publishLocked(d *Daemon) bool {
 	if c.req.Attachment != nil && !attachmentRegisteredLocked(c.source, c.req.Attachment) {
 		return false
 	}
-	if c.req.AttachmentToken.ac != nil && (c.req.AttachmentToken.ac != c.req.Attachment || !moveAttachmentTokenCurrentLocked(c.req.AttachmentToken, c.source)) {
+	if c.req.AttachmentCapability.ac != nil && (c.req.AttachmentCapability.ac != c.req.Attachment || !c.req.AttachmentCapability.currentInSessionLocked(c.source)) {
 		return false
 	}
 

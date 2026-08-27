@@ -20,11 +20,11 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 	d.handleInput(sess, ac, data)
 }
 
-func (d *Daemon) handleSequencedInputForAttachment(token attachmentConnectionToken, _ uint64, data []byte) {
-	if !token.attachmentEffectCurrent() {
+func (d *Daemon) handleSequencedInputForAttachment(effect *attachmentEffect, _ uint64, data []byte) {
+	if !effect.current() {
 		return
 	}
-	d.handleInputForAttachment(token, data)
+	d.handleInputForAttachment(effect, data)
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
@@ -40,26 +40,26 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	)
 }
 
-func (d *Daemon) handleInputForAttachment(token attachmentConnectionToken, data []byte) {
-	ac := token.ac
+func (d *Daemon) handleInputForAttachment(effect *attachmentEffect, data []byte) {
+	ac := effect.ac
 	ac.initOverlays()
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) {
-			if token.attachmentEffectCurrent() {
+			if effect.current() {
 				d.handleMouse(ac, ev)
 			}
 		},
 		func(b []byte) {
-			if !token.attachmentEffectCurrent() {
+			if !effect.current() {
 				return
 			}
-			if ac.overlays.HandleInput(d, b, token.effect) {
+			if ac.overlays.HandleInput(d, b, effect) {
 				return
 			}
-			if !token.attachmentEffectCurrent() {
+			if !effect.current() {
 				return
 			}
-			ac.keys.RouteWithHandler(b, daemonKeyHandler{d: d, ac: ac, connectionToken: token})
+			ac.keys.RouteWithHandler(b, daemonKeyHandler{d: d, ac: ac, effect: effect})
 		},
 	)
 }
@@ -371,21 +371,21 @@ func sgrOffset(raw []byte, colDelta, rowDelta int) []byte {
 }
 
 type daemonKeyHandler struct {
-	d               *Daemon
-	ac              *attachedClient
-	actions         daemonActionRunner
-	connectionToken attachmentConnectionToken
+	d       *Daemon
+	ac      *attachedClient
+	actions daemonActionRunner
+	effect  *attachmentEffect
 }
 
 // acquireAttachmentEffect preserves a synchronous frame's existing admission and
 // gives delayed router callbacks a fresh ticket for the exact captured attachment.
 // Direct/headless callers without an attachment token retain their existing behavior.
-func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffectTicket, bool) {
-	if h.connectionToken.ac != nil {
-		if effect := h.connectionToken.effect; effect != nil && !effect.ended.Load() {
-			return h.connectionToken.sess, effect, false
+func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffect, bool) {
+	if h.effect != nil && h.effect.ac != nil {
+		if h.effect.current() {
+			return h.effect.sess, h.effect, false
 		}
-		effect, admitted := h.connectionToken.ac.beginAttachmentEffect(h.connectionToken)
+		effect, admitted := h.effect.ac.beginAttachmentEffect(h.effect.capability())
 		if h.d.afterDelayedKeyEffectAttempt != nil {
 			h.d.afterDelayedKeyEffectAttempt(admitted)
 		}
@@ -393,16 +393,13 @@ func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffect
 			return nil, nil, false
 		}
 		if h.d.afterAttachmentEffectAdmitted != nil {
-			token := h.connectionToken
-			token.effect = effect
-			h.d.afterAttachmentEffectAdmitted(token)
+			h.d.afterAttachmentEffectAdmitted(effect.capability())
 		}
-		// Keep this defensive check even though token admission normally requires a session.
-		if h.connectionToken.sess == nil {
+		if effect.sess == nil {
 			effect.End()
 			return nil, nil, false
 		}
-		return h.connectionToken.sess, effect, true
+		return effect.sess, effect, true
 	}
 	sess := h.ac.currentSession()
 	if sess == nil {
@@ -475,9 +472,7 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 			return
 		}
 		effect.bindActionEnd(h.d, "jump-attention")
-		token := h.connectionToken
-		token.effect = effect
-		if err := h.d.jumpAttentionForAttachment(sess, h.ac, token); err != nil {
+		if err := h.d.jumpAttentionForAttachment(sess, h.ac, effect); err != nil {
 			h.d.reportError(sess, err)
 		}
 	case keys.ActionToggleFloatingPane:
@@ -521,7 +516,7 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 	}
 }
 
-func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *attachmentEffectTicket) {
+func (h daemonKeyHandler) focus(sess *session, dir layout.Direction, effect *attachmentEffect) {
 	err := h.d.focusDir(sess, h.ac, dir, effect)
 	if err != nil && !errors.Is(err, errAttachmentTransition) && !errors.Is(err, errNoNeighbor) {
 		h.d.reportError(sess, err)

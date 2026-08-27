@@ -161,7 +161,7 @@ type Daemon struct {
 	afterConnectionSessionSnapshot func(*session)
 	// afterAttachmentFrameDispatch is a deterministic test seam after the
 	// connection loop snapshots a token and before a decoded frame takes effect.
-	afterAttachmentFrameDispatch func(attachmentConnectionToken)
+	afterAttachmentFrameDispatch func(attachmentCapability)
 	// afterAttachmentEffectParticipantsSnapshotted observes immutable role-gate
 	// participants after architecture preflight locks are released and before
 	// the globally ordered freeze begins.
@@ -214,10 +214,10 @@ type Daemon struct {
 	beforeResumeParkedSendMu func()
 	// afterAttachmentEffectAdmitted is a deterministic test seam after a frame/paint
 	// reserves its exact capability and before its first observable mutation.
-	afterAttachmentEffectAdmitted func(attachmentConnectionToken)
+	afterAttachmentEffectAdmitted func(attachmentCapability)
 	// beforeFirstPaintSendWait is a test-only seam immediately before a
 	// transition first paint waits for the attachment send lock.
-	beforeFirstPaintSendWait func(attachmentConnectionToken)
+	beforeFirstPaintSendWait func(attachmentCapability)
 	// afterDelayedKeyEffectAttempt observes whether a timer callback acquired a
 	// fresh exact capability before producing PTY, action, or overlay effects.
 	afterDelayedKeyEffectAttempt func(bool)
@@ -226,7 +226,7 @@ type Daemon struct {
 	afterActionAttachmentEffectEnded func(string)
 	// beforeAttachmentSendErrorCleanup pauses asynchronous render-failure retirement
 	// after the render ticket ends and before exact lifecycle validation.
-	beforeAttachmentSendErrorCleanup func(attachmentConnectionToken)
+	beforeAttachmentSendErrorCleanup func(attachmentCapability)
 	afterAttachmentSendErrorCleanup  func()
 	ptys                             ports.PTYFactory
 	clock                            ports.Clock
@@ -1217,7 +1217,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 	expected := ac.transportSnapshot()
-	welcomeToken := sess.attachmentToken(ac, tr)
+	welcomeToken := sess.captureAttachmentCapability(ac, tr)
 	welcomeTicket, admitted := ac.beginAttachmentEffect(welcomeToken)
 	if expected.transport != tr || !admitted || welcomeToken.ac == nil {
 		if admitted {
@@ -1267,7 +1267,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
-	paintToken := sess.attachmentToken(ac, tr)
+	paintToken := sess.captureAttachmentCapability(ac, tr)
 	painted := make(chan bool, 1)
 	paintDone, paintErr := boundedHandshakeOperationTracked(handshakeCtx, tr, func() error {
 		//nolint:contextcheck // firstPaintForTransition is capability-bounded; the surrounding handshake operation owns cancellation.

@@ -89,7 +89,7 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
 	sess.repairAttachmentView(ac)
 
-	require.True(t, d.firstPaintForTransition(sess.attachmentToken(ac, tr)))
+	require.True(t, d.firstPaintForTransition(sess.captureAttachmentCapability(ac, tr)))
 	sess.selectAttachmentTab(ac, "tab-2")
 	d.paint(sess, ac, false, nil)
 

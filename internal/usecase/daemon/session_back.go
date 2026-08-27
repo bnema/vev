@@ -8,11 +8,11 @@ import (
 // backSessionForAttachment delegates previous-route ownership to the client
 // once it has published a complete route snapshot. There is no daemon-local
 // previous-session fallback after the global-history cutover.
-func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error {
-	if d == nil || token.sess == nil || token.ac == nil {
+func (d *Daemon) backSessionForAttachment(effect *attachmentEffect) error {
+	if d == nil || !effect.current() || effect.sess == nil || effect.ac == nil {
 		return nil
 	}
-	snapshot := token.ac.routeSnapshotCopy()
+	snapshot := effect.ac.routeSnapshotCopy()
 	if snapshot.Generation == 0 {
 		if d.log != nil {
 			d.log.Debug("back-session skipped: attachment has no published route snapshot")
@@ -22,7 +22,7 @@ func (d *Daemon) backSessionForAttachment(token attachmentConnectionToken) error
 	if snapshot.Previous.Key == 0 || snapshot.Previous.Generation == 0 {
 		return nil
 	}
-	return d.sendRecentRouteNavigationActionForAttachment(token, ports.RouteNavigationAction{
+	return d.sendRecentRouteNavigationActionForAttachment(effect, ports.RouteNavigationAction{
 		SnapshotGeneration: snapshot.Generation,
 		Key:                snapshot.Previous.Key,
 		Generation:         snapshot.Previous.Generation,
@@ -33,15 +33,14 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 	if d == nil || current == nil || ac == nil {
 		return
 	}
-	token := attachmentToken(current, ac, ac.transport())
+	token := captureAttachmentCapability(current, ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	if !admitted {
 		d.reportError(current, domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", errAttachmentTransition))
 		return
 	}
-	token.effect = effect
 	defer effect.End()
-	if err := d.backSessionForAttachment(token); err != nil {
+	if err := d.backSessionForAttachment(effect); err != nil {
 		d.reportError(current, err)
 	}
 }

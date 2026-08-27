@@ -188,7 +188,7 @@ func TestPreparedOutputDropsReplacedConnectionAndView(t *testing.T) {
 		name   string
 		change func(*attachedClient)
 	}{
-		{name: "connection generation", change: func(ac *attachedClient) { ac.connectionGeneration.Add(1) }},
+		{name: "connection generation", change: func(ac *attachedClient) { ac.lifecycle.generation.Add(1) }},
 		{name: "view revision", change: func(ac *attachedClient) {
 			ac.viewMu.Lock()
 			ac.view.revision++

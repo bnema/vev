@@ -357,7 +357,7 @@ func (s *attachmentOutput) fenceLocked() (uint64, uint64, uint64) {
 	}
 	generation, revision := uint64(0), uint64(0)
 	if s.attachment != nil {
-		generation = s.attachment.connectionGeneration.Load()
+		generation = s.attachment.lifecycle.generationValue()
 		revision = s.attachment.view.revision
 	}
 	return generation, s.currentEpochLocked(), revision
@@ -375,7 +375,7 @@ func (s *attachmentOutput) preparedCurrentLocked(generation, epoch, viewRevision
 
 func (p *preparedOutput) currentLocked() bool {
 	return p != nil && p.stream != nil && p.stream.preparedCurrentLocked(p.generation, p.epoch, p.viewRevision, p.base) &&
-		(p.stream.attachment == nil || p.stream.attachment.connectionGeneration.Load() == p.connectionGeneration)
+		(p.stream.attachment == nil || p.stream.attachment.lifecycle.generationValue() == p.connectionGeneration)
 }
 
 func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool) (ports.Frame, error) {

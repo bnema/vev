@@ -25,9 +25,9 @@ func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, transport)
+	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
 
 	target := &session{
@@ -75,9 +75,9 @@ func TestAttachmentTransitionTearsDownAfterCommittedIdentitySendFailure(t *testi
 	transport := &committedIdentityErrorTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, transport)
+	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
 
 	target := &session{

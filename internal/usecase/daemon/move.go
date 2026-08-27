@@ -10,21 +10,21 @@ import (
 // immutable identity. Session names are advisory; the ID and incarnation are
 // the commit-time authority.
 type movePaneRequest struct {
-	Attachment       *attachedClient
-	AttachmentToken  attachmentConnectionToken
-	Source           moveSessionLocator
-	SourceTabID      domain.TabStableID
-	SourcePaneID     domain.PaneStableID
-	Destination      moveSessionLocator
-	DestinationTabID domain.TabStableID
+	Attachment           *attachedClient
+	AttachmentCapability attachmentCapability
+	Source               moveSessionLocator
+	SourceTabID          domain.TabStableID
+	SourcePaneID         domain.PaneStableID
+	Destination          moveSessionLocator
+	DestinationTabID     domain.TabStableID
 }
 
 type moveTabRequest struct {
-	Attachment      *attachedClient
-	AttachmentToken attachmentConnectionToken
-	Source          moveSessionLocator
-	SourceTabID     domain.TabStableID
-	Destination     moveSessionLocator
+	Attachment           *attachedClient
+	AttachmentCapability attachmentCapability
+	Source               moveSessionLocator
+	SourceTabID          domain.TabStableID
+	Destination          moveSessionLocator
 }
 
 // movePane resolves, reserves, validates, and commits one pane relocation. All
@@ -115,7 +115,7 @@ func (d *Daemon) movePane(req movePaneRequest) (result error) {
 	// A final source tab is retired without transferring any attachment to the
 	// destination. Freeze every affected source connection before publication so
 	// teardown invalidates exact generations rather than racing input or render.
-	var frozen frozenAttachmentEffectGates
+	var frozen attachmentTransitionGuard
 	var sourceEffectsFrozen bool
 	if finalSourceTab && source != destination && len(admission.sourceAttachments) != 0 {
 		interrupts := make([]attachmentTransportInterrupt, 0, len(admission.sourceAttachments))

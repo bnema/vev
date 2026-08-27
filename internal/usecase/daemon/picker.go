@@ -291,7 +291,7 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 	}
 }
 
-func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*attachmentEffectTicket) {
+func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*attachmentEffect) {
 	sess := ac.currentAttachmentSession()
 	if sess == nil {
 		return
@@ -344,7 +344,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		return
 	}
 	if result.action == 'x' {
-		var effect *attachmentEffectTicket
+		var effect *attachmentEffect
 		if len(effects) != 0 {
 			effect = effects[0]
 		}
@@ -352,7 +352,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			var err error
 			if effect != nil {
 				effect.bindActionEnd(d, "picker-delete")
-				err = d.killPickerTargetForAttachment(target, effect.connectionToken())
+				err = d.killPickerTargetForAttachment(target, effect)
 			} else {
 				err = d.killPickerTarget(target)
 			}
@@ -360,8 +360,8 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 				d.reportAttachmentError(sess, err)
 			}
 		}
-		if effect != nil && effect.ended.Load() {
-			fresh, admitted := ac.beginAttachmentEffect(effect.token)
+		if effect != nil && !effect.current() {
+			fresh, admitted := ac.beginAttachmentEffect(effect.capability())
 			if !admitted {
 				return
 			}
@@ -379,20 +379,12 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	if result.exit && !committing {
 		back := ac.startupOverlay == ports.StartupOverlaySessionPicker && ac.navigationCapabilities&ports.NavigationCapabilityBack != 0
 		if back {
-			var token attachmentConnectionToken
-			if len(effects) != 0 && effects[0] != nil {
-				token = effects[0].connectionToken()
-			} else {
-				var effect *attachmentEffectTicket
-				var admitted bool
-				token, effect, admitted = ac.beginCurrentAttachmentEffect(sess, ac.transport())
-				if !admitted {
-					d.invalidateRender(sess, ac, true, "picker.go")
-					return
-				}
-				defer effect.End()
+			if len(effects) == 0 || effects[0] == nil {
+				d.invalidateRender(sess, ac, true, "picker.go")
+				return
 			}
-			if err := d.sendNavigationActionForAttachment(token, ports.NavigationBack); err != nil {
+			effect := effects[0]
+			if err := d.sendNavigationActionForAttachment(effect, ports.NavigationBack); err != nil {
 				d.reportAttachmentError(sess, err)
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
@@ -423,7 +415,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		}
 		var err error
 		if len(effects) != 0 && effects[0] != nil {
-			err = d.switchToTargetForAttachment(effects[0].connectionToken(), target, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-select")
+			err = d.switchToTargetForAttachment(effects[0], target, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-select")
 		} else {
 			d.closePicker(ac)
 			err = d.switchToTarget(sess, ac, target)
@@ -793,8 +785,8 @@ type sessionHandoffGuard struct {
 // centralized transition. The transition releases admission at its freeze seam
 // and revalidates the exact initiating token before changing target focus or
 // attachment ownership.
-func (d *Daemon) switchActiveTargetForAttachment(token attachmentConnectionToken, target picker.Target) error {
-	return d.switchActiveTargetForAttachmentGuarded(token, target, sessionHandoffGuard{}, "jump-attention")
+func (d *Daemon) switchActiveTargetForAttachment(effect *attachmentEffect, target picker.Target) error {
+	return d.switchActiveTargetForAttachmentGuarded(effect, target, sessionHandoffGuard{}, "jump-attention")
 }
 
 func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence {
@@ -819,43 +811,44 @@ func pickerTargetLifecycleFence(target picker.Target) *attachmentLifecycleFence 
 	return fence
 }
 
-func (d *Daemon) switchActiveTargetForAttachmentGuarded(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.sess == nil || token.ac == nil {
+func (d *Daemon) switchActiveTargetForAttachmentGuarded(effect *attachmentEffect, target picker.Target, guard sessionHandoffGuard, action string) error {
+	if !effect.current() || effect.sess == nil || effect.ac == nil {
 		return nil
 	}
 	d.mu.Lock()
 	targetSess := d.sessions[target.Session]
 	d.mu.Unlock()
 	if targetSess == nil {
-		if !token.attachmentCurrent() {
+		if !effect.current() {
 			return nil
 		}
-		d.invalidateRender(token.sess, token.ac, true, "picker.go")
+		d.invalidateRender(effect.sess, effect.ac, true, "picker.go")
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", nil)
 	}
-	if targetSess == token.sess {
+	if targetSess == effect.sess {
 		return nil
 	}
 
+	capability := effect.capability()
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source: token.sess, target: targetSess, next: token.ac,
+		source: effect.sess, target: targetSess, next: effect.ac,
 
-		expectedTransport: token.transport, sourceToken: &token, action: action,
+		expectedTransport: effect.transport, sourceCapability: &capability, sourceEffect: effect, action: action,
 		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
 		activateTargetTab:       true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
 	})
 	if err != nil {
 		// Losing the exact source role is a benign stale action, not a notice for
 		// whichever attachment replaced the initiator.
-		if !token.attachmentCurrent() {
+		if !capability.current() {
 			return nil
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", err)
 	}
 	if guard.closePicker {
-		fresh, admitted := token.ac.beginAttachmentEffect(transition.published)
+		fresh, admitted := effect.ac.beginAttachmentEffect(transition.published)
 		if admitted {
-			d.closePicker(token.ac)
+			d.closePicker(effect.ac)
 			fresh.End()
 		}
 	}
@@ -876,21 +869,21 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 // intent captures the exact initiating capability before admission is released;
 // every active, stopped, and same-session target then uses transitionAttachment
 // for frozen, atomic source-token preflight.
-func (d *Daemon) switchToTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
-	if token.sess == nil || token.ac == nil || token.effect == nil {
+func (d *Daemon) switchToTargetForAttachment(effect *attachmentEffect, target picker.Target, guard sessionHandoffGuard, action string) error {
+	if !effect.current() || effect.sess == nil || effect.ac == nil {
 		return nil
 	}
 	if target.RemoteTarget != nil || target.RemoteKey != nil {
-		return d.sendRemoteAttachTargetForAttachment(token, target, guard, action)
+		return d.sendRemoteAttachTargetForAttachment(effect, target, guard, action)
 	}
-	return d.sendLocalAttachTargetForAttachment(token, target, guard, action)
+	return d.sendLocalAttachTargetForAttachment(effect, target, guard, action)
 }
 
 // sendLocalAttachTargetForAttachment offers an endpoint-empty, exact local
 // target on the current authenticated connection. A current client confirms it
 // with MsgSamePeerSwitchRequest; an interrupted or older client retains the
 // existing close-and-redial fallback without any daemon-origin inference.
-func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, action string) error {
+func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, target picker.Target, guard sessionHandoffGuard, action string) error {
 	d.mu.Lock()
 	var targetSess *session
 	var sessionName string
@@ -915,13 +908,13 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 		targetSess.mu.Unlock()
 	}
 	d.mu.Unlock()
-	if !matches || !token.attachmentCurrent() {
+	if !matches || !effect.current() {
 		return errAttachmentTransition
 	}
 	if targetSess != nil && target.TabID != "" {
 		// An explicit tab row is a direct user choice, not route memory; retain
 		// the established daemon-side transition so it opens exactly that tab.
-		return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)
+		return d.switchToTargetGuardedForAttachment(effect.sess, effect.ac, target, guard, effect, action)
 	}
 
 	// An active session row with no explicit non-default tab is on the
@@ -943,15 +936,15 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	// same-peer transition keeps the attachment and its namespace; the target
 	// scene diff deletes and replaces the source session's placements.
 	if !samePeerEligible {
-		if err := d.cleanupAttachmentOutput(token.ac); err != nil {
+		if err := d.cleanupAttachmentOutput(effect.ac); err != nil {
 			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up attachment output before local handoff", err)
 		}
 	} else {
-		token.ac.offerSamePeerTarget(*exactTarget)
+		effect.ac.offerSamePeerTarget(*exactTarget)
 	}
-	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
+	if err := effect.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
 		if samePeerEligible {
-			token.ac.clearSamePeerOffer()
+			effect.ac.clearSamePeerOffer()
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't offer local session switch", err)
 	}
@@ -961,10 +954,10 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 		// Keep the source link open until the client receives the ordered cleanup
 		// and handoff frames, then let the client's close drive ordinary parking.
 		if guard.closePicker {
-			d.closePicker(token.ac)
+			d.closePicker(effect.ac)
 		}
-		token.effect.bindActionEnd(d, "detach")
-		token.effect.End()
+		effect.bindActionEnd(d, "detach")
+		effect.End()
 	}
 	return nil
 }
@@ -973,10 +966,10 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 // endpoint to the thin client. The daemon owns no remote session shadow: after
 // the target is sent, the local attachment is detached and the client opens a
 // fresh connection to the owning daemon.
-func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionToken, target picker.Target, guard sessionHandoffGuard, _ string) error {
+func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, target picker.Target, guard sessionHandoffGuard, _ string) error {
 	failUnavailable := func() error {
-		if token.attachmentCurrent() {
-			d.notifyRemotePickerUnavailable(token.sess, target)
+		if effect.current() {
+			d.notifyRemotePickerUnavailable(effect.sess, target)
 		}
 		return errAttachmentTransition
 	}
@@ -999,13 +992,13 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(token attachmentConnectionT
 	if payload == nil {
 		return failUnavailable()
 	}
-	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
+	if err := effect.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to remote session", err)
 	}
 	if guard.closePicker {
-		d.closePicker(token.ac)
+		d.closePicker(effect.ac)
 	}
-	d.clientGoneForAttachment(token, false)
+	d.clientGoneForAttachment(effect, false)
 	return nil
 }
 
@@ -1054,14 +1047,19 @@ func (d *Daemon) switchToTargetGuarded(from *session, ac *attachedClient, target
 	return d.switchToTargetGuardedForAttachment(from, ac, target, guard, nil, "")
 }
 
-func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedClient, target picker.Target, guard sessionHandoffGuard, sourceToken *attachmentConnectionToken, action string) error {
+func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedClient, target picker.Target, guard sessionHandoffGuard, sourceEffect *attachmentEffect, action string) error {
+	var sourceCapability *attachmentCapability
+	if sourceEffect != nil {
+		capability := sourceEffect.capability()
+		sourceCapability = &capability
+	}
 	if target.Name != "" {
 		ctx := d.serveCtx
 		if ctx == nil {
 			ctx = context.Background()
 		}
 		if err := d.waitForTargetRestore(ctx, target.Name); err != nil {
-			if sourceToken != nil && !sourceToken.attachmentCurrent() {
+			if sourceCapability != nil && !sourceCapability.current() {
 				return errAttachmentTransition
 			}
 			d.invalidateRender(from, ac, true, "picker.go")
@@ -1080,22 +1078,22 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 		active, stopped, isStopped, ok := d.resolveNamedLifecycleTargetLocked(target)
 		if ok {
 			if isStopped {
-				targetSess, transition, switched, cause = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped, sourceToken, guard, action)
+				targetSess, transition, switched, cause = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped, sourceEffect, guard, action)
 			} else {
 				// The snapshot ID may describe the stopped representation. The
 				// locked name/lifecycle resolver chose this active incarnation.
 				resolvedTarget := target
 				resolvedTarget.Session = active.id
-				targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, resolvedTarget, guard, sourceToken, action)
+				targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, resolvedTarget, guard, sourceEffect, action)
 			}
 		}
 	} else if active := d.sessions[target.Session]; active != nil {
-		targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, target, guard, sourceToken, action)
+		targetSess, transition, switched = d.switchToActiveTargetLocked(from, ac, active, target, guard, sourceEffect, action)
 	}
 	d.mu.Unlock()
 
 	if !switched {
-		if sourceToken != nil && !sourceToken.attachmentCurrent() {
+		if sourceCapability != nil && !sourceCapability.current() {
 			return errAttachmentTransition
 		}
 		if guard.expectedSource != nil {
@@ -1105,7 +1103,7 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", cause)
 	}
 	if guard.closePicker {
-		if sourceToken != nil {
+		if sourceEffect != nil {
 			fresh, admitted := ac.beginAttachmentEffect(transition.published)
 			if admitted {
 				d.closePicker(ac)
@@ -1117,7 +1115,7 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 	}
 	d.deferAttachmentTransitionCleanups(transition)
 	if targetSess == from {
-		if sourceToken != nil {
+		if sourceEffect != nil {
 			fresh, admitted := ac.beginAttachmentEffect(transition.published)
 			if admitted {
 				d.activateTabAfterResizeForLease(from, from.tabForAttachment(ac), false, ac, transition.published.lease)
@@ -1156,12 +1154,17 @@ func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*sessi
 
 // switchToActiveTargetLocked commits an active target handoff through the
 // centralized attachment transition. Caller holds d.mu.
-func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target, guard sessionHandoffGuard, sourceToken *attachmentConnectionToken, action string) (*session, attachmentTransitionResult, bool) {
+func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target, guard sessionHandoffGuard, sourceEffect *attachmentEffect, action string) (*session, attachmentTransitionResult, bool) {
+	var sourceCapability *attachmentCapability
+	if sourceEffect != nil {
+		capability := sourceEffect.capability()
+		sourceCapability = &capability
+	}
 	if d.sessions[target.Session] != targetSess {
 		return nil, attachmentTransitionResult{}, false
 	}
 	if targetSess == from {
-		if sourceToken == nil {
+		if sourceEffect == nil {
 			targetSess.mu.Lock()
 			defer targetSess.mu.Unlock()
 			_, attached := targetSess.attachments[ac]
@@ -1177,8 +1180,9 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		transition, err := d.transitionAttachment(attachmentTransitionRequest{
 			source: from, target: targetSess, next: ac,
 
-			expectedTransport:       sourceToken.transport,
-			sourceToken:             sourceToken,
+			expectedTransport:       sourceCapability.transport,
+			sourceCapability:        sourceCapability,
+			sourceEffect:            sourceEffect,
 			action:                  action,
 			expectedTargetLifecycle: pickerTargetLifecycleFence(target),
 			activateTargetTab:       true,
@@ -1215,8 +1219,8 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 	// d.mu and revalidates both registered lifecycles for publication.
 	d.mu.Unlock()
 	expectedTransport := ac.transportSnapshot()
-	if sourceToken != nil {
-		expectedTransport = sourceToken.transport
+	if sourceCapability != nil {
+		expectedTransport = sourceCapability.transport
 	}
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: from,
@@ -1224,7 +1228,8 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		next:   ac,
 
 		expectedTransport:       expectedTransport,
-		sourceToken:             sourceToken,
+		sourceCapability:        sourceCapability,
+		sourceEffect:            sourceEffect,
 		action:                  action,
 		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
 		expectedSourceTab:       guard.expectedSource,
@@ -1244,7 +1249,7 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // resumeStoppedAndSwitchLocked creates the stopped representation and commits
 // the handoff while d.mu is held. Creation failure leaves the source client
 // and stopped record untouched.
-func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped inactiveSession, sourceToken *attachmentConnectionToken, guard sessionHandoffGuard, action string) (*session, attachmentTransitionResult, bool, error) {
+func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped inactiveSession, sourceEffect *attachmentEffect, guard sessionHandoffGuard, action string) (*session, attachmentTransitionResult, bool, error) {
 	if stopped.broken() {
 		return nil, attachmentTransitionResult{}, false, &protoErr{ports.ErrInternal, "session durable state is broken: " + target.Name}
 	}
@@ -1252,12 +1257,13 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		return nil, attachmentTransitionResult{}, false, errAttachmentTransition
 	}
 
-	if sourceToken != nil {
+	if sourceEffect != nil {
+		sourceCapability := sourceEffect.capability()
 		var targetSess *session
 		d.mu.Unlock()
 		transition, err := d.transitionAttachment(attachmentTransitionRequest{
 			source: from, next: ac,
-			expectedTransport: sourceToken.transport, sourceToken: sourceToken, action: action,
+			expectedTransport: sourceCapability.transport, sourceCapability: &sourceCapability, sourceEffect: sourceEffect, action: action,
 			expectedSourceTab: guard.expectedSource, copySourceEnvironment: true, ready: true,
 			createTargetLocked: func() (*session, error) {
 				current, ok := d.inactive[target.Name]
@@ -1359,19 +1365,20 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	return true
 }
 
-func (d *Daemon) killPickerTargetForAttachment(target picker.Target, token attachmentConnectionToken) error {
-	if token.ac == nil {
+func (d *Daemon) killPickerTargetForAttachment(target picker.Target, effect *attachmentEffect) error {
+	if effect == nil || effect.ac == nil {
 		return d.killPickerTarget(target)
 	}
 	if target.RemoteKey != nil {
 		return nil
 	}
+	capability := effect.capability()
 	if target.Stopped {
-		token.effect.bindActionEnd(d, "picker-delete")
-		token.effect.End()
-		frozen := freezeAttachmentEffectGates(token.ac)
+		effect.bindActionEnd(d, "picker-delete")
+		effect.End()
+		frozen := freezeAttachmentEffectGates(effect.ac)
 		defer frozen.unfreeze()
-		if !d.sourceAttachmentTokenCurrentFrozen(token) {
+		if !d.sourceAttachmentCapabilityCurrentFrozen(capability) {
 			return nil
 		}
 		return d.killPickerTarget(target)
@@ -1382,7 +1389,7 @@ func (d *Daemon) killPickerTargetForAttachment(target picker.Target, token attac
 	if targetSess == nil {
 		return nil
 	}
-	return d.killSessionForAttachment(targetSess, ports.ReasonSessionKilled, true, token, "picker-delete")
+	return d.killSessionForAttachment(targetSess, ports.ReasonSessionKilled, true, effect, "picker-delete")
 }
 
 func (d *Daemon) killPickerTarget(target picker.Target) error {

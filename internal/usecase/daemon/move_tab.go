@@ -28,7 +28,7 @@ type moveTabCommit struct {
 	destination         *session
 	admission           moveTabAdmission
 	sourceEffectsFrozen bool
-	frozenEffects       frozenAttachmentEffectGates
+	frozenEffects       attachmentTransitionGuard
 	syncCleanup         syncTimerCleanup
 	oldTabCancel        context.CancelFunc
 	sourceEmpty         bool
@@ -110,7 +110,7 @@ func (d *Daemon) moveTab(req moveTabRequest) (result error) {
 		d.afterMoveTabSourceSnapshot()
 	}
 	commit := moveTabCommit{req: req, source: source, destination: destination, admission: *admission}
-	var frozen frozenAttachmentEffectGates
+	var frozen attachmentTransitionGuard
 	if admission.finalSource && len(admission.sourceAttachments) != 0 {
 		interrupts := make([]attachmentTransportInterrupt, 0, len(admission.sourceAttachments))
 		for _, ac := range admission.sourceAttachments {
@@ -190,7 +190,7 @@ func (d *Daemon) snapshotMoveTabAdmission(req moveTabRequest, source, destinatio
 	if req.Attachment != nil && !attachmentRegisteredLocked(source, req.Attachment) {
 		return nil, errMoveStaleTarget
 	}
-	if req.AttachmentToken.ac != nil && (req.AttachmentToken.ac != req.Attachment || !moveAttachmentTokenCurrentLocked(req.AttachmentToken, source)) {
+	if req.AttachmentCapability.ac != nil && (req.AttachmentCapability.ac != req.Attachment || !req.AttachmentCapability.currentInSessionLocked(source)) {
 		return nil, errMoveStaleTarget
 	}
 	moved := findMoveTabLocked(source, req.SourceTabID)
@@ -251,7 +251,7 @@ func (c *moveTabCommit) publishLocked(d *Daemon, fencedPanes []*pane) bool {
 	if c.req.Attachment != nil && !attachmentRegisteredLocked(c.source, c.req.Attachment) {
 		return false
 	}
-	if c.req.AttachmentToken.ac != nil && (c.req.AttachmentToken.ac != c.req.Attachment || !moveAttachmentTokenCurrentLocked(c.req.AttachmentToken, c.source)) {
+	if c.req.AttachmentCapability.ac != nil && (c.req.AttachmentCapability.ac != c.req.Attachment || !c.req.AttachmentCapability.currentInSessionLocked(c.source)) {
 		return false
 	}
 	moved := c.admission.tab

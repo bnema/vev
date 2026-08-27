@@ -19,9 +19,9 @@ func TestNavigationHandoffRejectsReplacedTargetLifecycleAtPublication(t *testing
 	d.mu.Unlock()
 
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 
@@ -30,7 +30,7 @@ func TestNavigationHandoffRejectsReplacedTargetLifecycleAtPublication(t *testing
 		// transition's lifecycle fence is validated.
 		target.incarnation = domain.SessionLifecycleID{2}
 	}
-	err := d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{
+	err := d.switchToTargetForAttachment(effect, picker.Target{
 		Session:     target.id,
 		Incarnation: domain.SessionLifecycleID{1},
 		TabID:       domain.TabStableID(target.tabs[1].stableID),
@@ -69,9 +69,9 @@ func TestNavigationHandoffDoesNotMutateAfterInitiatorIncarnationChanges(t *testi
 			name: "transport incarnation rebound on same attachment",
 			rebind: func(t *testing.T, _ *Daemon, source *session, ac *attachedClient) {
 				ac.replaceTransport(&closeTrackingTransport{})
-				current := source.attachmentToken(ac, ac.transport())
+				current := source.captureAttachmentCapability(ac, ac.transport())
 				current.lease = source.renderCoordinator().attachmentLease(ac)
-				ac.publishAttachmentCapability(current)
+				ac.installTestAttachmentCapability(current)
 			},
 		},
 	}
@@ -88,9 +88,9 @@ func TestNavigationHandoffDoesNotMutateAfterInitiatorIncarnationChanges(t *testi
 			d.mu.Unlock()
 
 			rc := d.attachCoordinator(source, nil, ac, true)
-			token := source.attachmentToken(ac, ac.transport())
+			token := source.captureAttachmentCapability(ac, ac.transport())
 			token.lease = rc.attachmentLease(ac)
-			ac.publishAttachmentCapability(token)
+			ac.installTestAttachmentCapability(token)
 			effect, admitted := ac.beginAttachmentEffect(token)
 			require.True(t, admitted)
 
@@ -104,7 +104,7 @@ func TestNavigationHandoffDoesNotMutateAfterInitiatorIncarnationChanges(t *testi
 			}
 			done := make(chan error, 1)
 			go func() {
-				done <- d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "test-handoff")
+				done <- d.switchToTargetForAttachment(effect, picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "test-handoff")
 			}()
 			awaitTestCompletion(t, ended, "test handoff did not release its role ticket")
 			tt.rebind(t, d, source, ac)

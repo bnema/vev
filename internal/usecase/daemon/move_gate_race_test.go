@@ -194,11 +194,11 @@ func TestPaletteFinalCloseEndsCurrentEffectBeforeDrainingPeers(t *testing.T) {
 	sess.mu.Unlock()
 	d.attachCoordinator(sess, nil, other, true)
 
-	currentToken := sess.attachmentToken(current, current.transport())
+	currentToken := sess.captureAttachmentCapability(current, current.transport())
 	currentEffect, admitted := current.beginAttachmentEffect(currentToken)
 	require.True(t, admitted)
 	t.Cleanup(currentEffect.End)
-	otherToken := sess.attachmentToken(other, otherTransport)
+	otherToken := sess.captureAttachmentCapability(other, otherTransport)
 	otherEffect, admitted := other.beginAttachmentEffect(otherToken)
 	require.True(t, admitted)
 	t.Cleanup(otherEffect.End)

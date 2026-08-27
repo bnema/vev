@@ -117,7 +117,7 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 	paintStarted := make(chan struct{})
 	releasePaint := make(chan struct{})
 	paintDone := make(chan struct{})
-	d.afterAttachmentEffectAdmitted = func(attachmentConnectionToken) {
+	d.afterAttachmentEffectAdmitted = func(attachmentCapability) {
 		close(paintStarted)
 		<-ctx.Done()
 		<-releasePaint

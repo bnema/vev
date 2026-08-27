@@ -22,13 +22,12 @@ func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "source")
 	target, _, _ := addRemoteRefreshPickerOwner(t, d, "target")
 	target.incarnation = remoteLifecycleForTest()
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
 
-	require.NoError(t, d.switchToTargetForAttachment(token, picker.Target{Session: target.id}, sessionHandoffGuard{allowSamePeer: true}, "picker-select"))
+	require.NoError(t, d.switchToTargetForAttachment(effect, picker.Target{Session: target.id}, sessionHandoffGuard{allowSamePeer: true}, "picker-select"))
 	frame := receiveRemotePicker(t, sends, "local attach target")
 	got, err := ports.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
@@ -51,13 +50,12 @@ func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
 	graphics.mayHaveEmitted = true
 	ac.output.graphicsOutput = graphics
 
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
 
-	require.NoError(t, d.switchToTargetForAttachment(token, picker.Target{
+	require.NoError(t, d.switchToTargetForAttachment(effect, picker.Target{
 		Name: "stopped", Incarnation: lifecycle,
 	}, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-select"))
 
@@ -85,15 +83,14 @@ func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
 	d.remoteCatalog.status["arch"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-	token := sess.attachmentToken(ac, ac.transport())
+	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
-	require.NoError(t, d.sendRemoteAttachTargetForAttachment(token, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
 	frame := receiveRemotePicker(t, sends, "rich attach target")
 	got, err := ports.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
@@ -128,10 +125,9 @@ func TestRemotePickerRichHandoffRejectsMismatchedRouteKey(t *testing.T) {
 			d.remoteCatalog.status["arch"] = remoteHostFresh
 			d.remoteCatalog.mu.Unlock()
 			sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-			token := sess.attachmentToken(ac, ac.transport())
+			token := sess.captureAttachmentCapability(ac, ac.transport())
 			effect, admitted := ac.beginAttachmentEffect(token)
 			require.True(t, admitted)
-			token.effect = effect
 			defer effect.End()
 
 			key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
@@ -139,7 +135,7 @@ func TestRemotePickerRichHandoffRejectsMismatchedRouteKey(t *testing.T) {
 			target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
 			test.mutate(&target)
 
-			require.ErrorIs(t, d.sendRemoteAttachTargetForAttachment(token, target, sessionHandoffGuard{}, "picker-select"), errAttachmentTransition)
+			require.ErrorIs(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{}, "picker-select"), errAttachmentTransition)
 			for {
 				select {
 				case frame := <-sends:
@@ -166,15 +162,14 @@ func TestRemotePickerRichHandoffRejectsReplacedLifecycle(t *testing.T) {
 	d.remoteCatalog.status["arch"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-	token := sess.attachmentToken(ac, ac.transport())
+	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
-	require.ErrorIs(t, d.sendRemoteAttachTargetForAttachment(token, target, sessionHandoffGuard{}, "picker-select"), errAttachmentTransition)
+	require.ErrorIs(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{}, "picker-select"), errAttachmentTransition)
 	for {
 		select {
 		case frame := <-sends:

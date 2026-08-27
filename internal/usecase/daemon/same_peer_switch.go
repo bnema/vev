@@ -33,27 +33,29 @@ func (ac *attachedClient) consumeSamePeerOffer(target ports.ExactSessionTarget) 
 // switchSamePeerForAttachment commits one client-confirmed endpoint-empty
 // target. The request never names an endpoint: its authority is the current
 // authenticated attachment plus the target's exact lifecycle identity.
-func (d *Daemon) switchSamePeerForAttachment(token attachmentConnectionToken, request ports.SamePeerSwitchRequest) {
-	if err := request.Validate(); err != nil || token.sess == nil || token.ac == nil {
+func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request ports.SamePeerSwitchRequest) {
+	if err := request.Validate(); err != nil || !effect.current() || effect.sess == nil || effect.ac == nil {
 		return
 	}
-	if !token.ac.consumeSamePeerOffer(request.Target) {
-		d.sendSamePeerSwitchFailure(token, request.RequestID, ports.SamePeerSwitchStaleTarget)
+	if !effect.ac.consumeSamePeerOffer(request.Target) {
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, ports.SamePeerSwitchStaleTarget)
 		return
 	}
 
 	target, targetTabIndex, ok := d.samePeerTarget(request)
-	if !ok || target == token.sess {
-		d.sendSamePeerSwitchFailure(token, request.RequestID, ports.SamePeerSwitchStaleTarget)
+	if !ok || target == effect.sess {
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, ports.SamePeerSwitchStaleTarget)
 		return
 	}
 
+	capability := effect.capability()
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
-		source:            token.sess,
+		source:            effect.sess,
 		target:            target,
-		next:              token.ac,
-		expectedTransport: token.transport,
-		sourceToken:       &token,
+		next:              effect.ac,
+		expectedTransport: effect.transport,
+		sourceCapability:  &capability,
+		sourceEffect:      effect,
 		action:            "same-peer-switch",
 		expectedTargetLifecycle: &attachmentLifecycleFence{
 			name:             request.Target.SessionName,
@@ -65,12 +67,12 @@ func (d *Daemon) switchSamePeerForAttachment(token attachmentConnectionToken, re
 		ready:             true,
 	})
 	if err != nil {
-		d.sendSamePeerSwitchFailure(token, request.RequestID, ports.SamePeerSwitchStaleTarget)
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, ports.SamePeerSwitchStaleTarget)
 		return
 	}
 
-	if fresh, admitted := token.ac.beginAttachmentEffect(transition.published); admitted {
-		d.closePicker(token.ac)
+	if fresh, admitted := effect.ac.beginAttachmentEffect(transition.published); admitted {
+		d.closePicker(effect.ac)
 		fresh.End()
 	}
 	d.touchMRU(target)
@@ -106,15 +108,24 @@ func (d *Daemon) samePeerTarget(request ports.SamePeerSwitchRequest) (*session, 
 	return target, tabIndex, true
 }
 
-func (d *Daemon) sendSamePeerSwitchFailure(token attachmentConnectionToken, requestID uint64, code ports.SamePeerSwitchFailureCode) {
-	if !token.attachmentCurrent() {
+func (d *Daemon) sendSamePeerSwitchFailure(effect *attachmentEffect, requestID uint64, code ports.SamePeerSwitchFailureCode) {
+	if effect == nil || effect.ac == nil {
 		return
+	}
+	sender := effect
+	if !sender.current() {
+		var admitted bool
+		sender, admitted = effect.ac.beginAttachmentEffect(effect.capability())
+		if !admitted {
+			return
+		}
+		defer sender.End()
 	}
 	payload, err := ports.MarshalSamePeerSwitchFailure(ports.SamePeerSwitchFailure{RequestID: requestID, Code: code})
 	if err != nil {
 		return
 	}
-	if err := token.sendControl(ports.Frame{Type: ports.MsgSamePeerSwitchFailure, Payload: payload}); err != nil {
-		d.detachOnAttachmentSendError(token, token.transport.transport)
+	if err := sender.sendControl(ports.Frame{Type: ports.MsgSamePeerSwitchFailure, Payload: payload}); err != nil {
+		d.detachOnAttachmentSendError(sender.capability(), sender.transport.transport)
 	}
 }

@@ -348,7 +348,7 @@ func (d *Daemon) closePaneLocked(sess *session, tb *tab, id layout.PaneID, ac *a
 	return d.closePaneLockedWithEffect(sess, tb, id, ac, repaint, nil)
 }
 
-func (d *Daemon) closePaneLockedWithEffect(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool, effect *attachmentEffectTicket) error {
+func (d *Daemon) closePaneLockedWithEffect(sess *session, tb *tab, id layout.PaneID, ac *attachedClient, repaint bool, effect *attachmentEffect) error {
 	if tb == nil {
 		return layout.ErrNotFound
 	}
@@ -406,7 +406,7 @@ func (d *Daemon) closePaneLockedWithEffect(sess *session, tb *tab, id layout.Pan
 	return nil
 }
 
-func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction, effect *attachmentEffectTicket) error {
+func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction, effect *attachmentEffect) error {
 	target := resolveDaemonActionTargetForAttachment(sess, ac)
 	oldFocus := layout.PaneID("")
 	if target.pane != nil {
@@ -434,7 +434,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 			return errNoNeighbor
 		}
 		if effect != nil {
-			return d.switchToTargetForAttachment(effect.connectionToken(), sessionTarget, sessionHandoffGuard{expectedSource: target.tab}, "overflow-session")
+			return d.switchToTargetForAttachment(effect, sessionTarget, sessionHandoffGuard{expectedSource: target.tab}, "overflow-session")
 		}
 		return d.commitSessionOverflow(sess, ac, target.tab, sessionTarget)
 	}

@@ -103,7 +103,7 @@ func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	oldToken := ac.resumeToken
-	oldGeneration := ac.connectionGeneration.Load()
+	oldGeneration := ac.lifecycle.generationValue()
 	d.clientGone(sess, ac, oldTransport, false)
 
 	newTransport := &closeTrackingTransport{}
@@ -113,7 +113,7 @@ func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 	require.Same(t, sess, resumed)
 	require.Same(t, ac, same)
 	require.NotEqual(t, oldToken, ac.resumeToken)
-	require.Greater(t, ac.connectionGeneration.Load(), oldGeneration)
+	require.Greater(t, ac.lifecycle.generationValue(), oldGeneration)
 	require.True(t, d.commitResumeClaim(ac))
 	d.mu.Lock()
 	_, oldRetained := d.parked[oldToken]

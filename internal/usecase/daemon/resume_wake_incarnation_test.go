@@ -88,7 +88,7 @@ func TestSameAttachmentRebindRejectsQueuedWakeAndFansOutFreshGeneration(t *testi
 	}()
 	<-wakeDispatched
 
-	oldGeneration := ac.connectionGeneration.Load()
+	oldGeneration := ac.lifecycle.generationValue()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: sess, target: sess, next: ac,
 
@@ -96,7 +96,7 @@ func TestSameAttachmentRebindRejectsQueuedWakeAndFansOutFreshGeneration(t *testi
 	})
 	require.NoError(t, err)
 	d.deferAttachmentTransitionCleanups(result)
-	require.Greater(t, ac.connectionGeneration.Load(), oldGeneration)
+	require.Greater(t, ac.lifecycle.generationValue(), oldGeneration)
 	freshLease := rc.attachmentLease(ac)
 	require.NotSame(t, oldLease, freshLease)
 

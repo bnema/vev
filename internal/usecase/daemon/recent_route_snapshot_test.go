@@ -64,8 +64,8 @@ func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
 
 func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	token := sess.attachmentToken(ac, ac.transport())
-	ac.publishAttachmentCapability(token)
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	ac.installTestAttachmentCapability(token)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
 
 	payload, err := ports.MarshalRecentRouteSnapshot(ports.RecentRouteSnapshot{Generation: 2})
@@ -93,13 +93,12 @@ func TestPaletteRecentRouteSelectionSendsTypedClientAction(t *testing.T) {
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, transport)
+	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
-	token.effect = effect
 
 	exec := paletteExec{
 		d: d, sess: source, attachment: source, ac: ac,
