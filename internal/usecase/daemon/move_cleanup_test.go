@@ -103,7 +103,7 @@ func TestMovePaneReleasesResizeFencesBeforeAttachmentCleanup(t *testing.T) {
 	require.False(t, awaitTestValue(t, resizeDone, "resize commit did not drop stale owner"))
 }
 
-func TestMovePaneCleanupUsesCommitPointSourceAttachmentCapability(t *testing.T) {
+func TestMovePaneCleanupUsesCapturedSourceAttachment(t *testing.T) {
 	movedPTY, releaseMoved := newBlockingPTY(t)
 	remainingPTY, releaseRemaining := newBlockingPTY(t)
 	destinationPTY, releaseDestination := newBlockingPTY(t)

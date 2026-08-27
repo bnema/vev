@@ -163,6 +163,16 @@ func TestBeginCurrentAttachmentEffectFailsClosedOnStableCapabilityMismatch(t *te
 	}
 }
 
+func TestBeginCurrentAttachmentEffectContextRejectsNilContext(t *testing.T) {
+	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+
+	token, effect, admitted := ac.beginCurrentAttachmentEffectContext(nil, sess, ac.transport())
+
+	require.False(t, admitted)
+	require.Nil(t, effect)
+	require.Equal(t, attachmentCapability{}, token)
+}
+
 func TestBeginAttachmentLeaseEffectRejectsForeignLease(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	rc := d.attachCoordinator(sess, nil, ac, true)

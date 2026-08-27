@@ -209,7 +209,7 @@ func (t *attachmentEffect) sendControl(frame ports.Frame) error {
 // held only long enough to reserve the capability; the effect itself must run
 // without the gate mutex.
 func (ac *attachedClient) beginAttachmentEffect(token attachmentCapability) (*attachmentEffect, bool) {
-	if ac == nil || token.ac != ac {
+	if ac == nil || token.ac != ac || !token.current() {
 		return nil, false
 	}
 	g := &ac.lifecycle
@@ -234,10 +234,7 @@ func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.T
 }
 
 func (ac *attachedClient) beginCurrentAttachmentEffectContext(ctx context.Context, sess *session, tr ports.Transport) (attachmentCapability, *attachmentEffect, bool) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ac == nil || sess == nil || tr == nil {
+	if ctx == nil || ac == nil || sess == nil || tr == nil {
 		return attachmentCapability{}, nil, false
 	}
 	for {

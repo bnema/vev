@@ -89,6 +89,9 @@ func TestAttachmentCapabilityRejectsIndependentIdentityChanges(t *testing.T) {
 			require.True(t, capability.current())
 			tt.change(sess, ac, rc)
 			require.False(t, capability.current())
+			effect, admitted := ac.beginAttachmentEffect(capability)
+			require.False(t, admitted)
+			require.Nil(t, effect)
 		})
 	}
 }

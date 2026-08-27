@@ -338,7 +338,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	sess := entry
 	local := sess != nil
 	marks := d.newRuntimeMarkBatch()
-	var attachmentEffect *attachmentEffect
+	var paintEffect *attachmentEffect
 	if lease != nil {
 		token := captureAttachmentCapability(entry, ac, ac.transport())
 		token.lease = lease
@@ -346,7 +346,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		if !admitted {
 			return paintRejected
 		}
-		attachmentEffect = ticket
+		paintEffect = ticket
 		marks.attachmentEffect = ticket
 		defer ticket.End()
 	}
@@ -359,8 +359,8 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	}
 
 	ac.sendMu.Lock()
-	if attachmentEffect != nil {
-		if !attachmentEffect.current() || ac.parkedRouteOutput.Load() {
+	if paintEffect != nil {
+		if !paintEffect.current() || ac.parkedRouteOutput.Load() {
 			ac.sendMu.Unlock()
 			return paintRejected
 		}
