@@ -2,47 +2,60 @@ package daemon
 
 import "github.com/bnema/vev/internal/usecase/layout"
 
-// movePaneAdmission is an immutable snapshot of the exact live objects and
-// generations a move may later commit. Resize fences are acquired only after
-// this snapshot; the locked commit revalidates every field before publication.
+// movePaneTopology is the private pane topology Implementation consumed by the
+// shared moveTransaction Module.
+type movePaneTopology struct {
+	req       movePaneRequest
+	admission movePaneAdmission
+}
+
+// movePaneAdmission is an immutable snapshot of the exact live topology and
+// generations a move may later publish. Common Session and Attachment authority
+// is snapshotted by moveTransaction.
 type movePaneAdmission struct {
 	source                *session
 	destination           *session
 	sourceTab             *tab
 	destinationTab        *tab
 	movedPane             *pane
-	sourceAttachments     []*attachedClient
-	sourceTransports      map[*attachedClient]transportSnapshot
 	sourceGeneration      uint64
 	destinationGeneration uint64
 	finalSourceTab        bool
 }
 
-func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destination *session) (*movePaneAdmission, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.closing || d.sessions[source.id] != source || d.sessions[destination.id] != destination {
-		return nil, errMoveStaleTarget
+func (p *movePaneTopology) transactionRequest() moveTransactionRequest {
+	req := p.req
+	return moveTransactionRequest{
+		operation:            "pane",
+		attachment:           req.Attachment,
+		attachmentCapability: req.AttachmentCapability,
+		source:               req.Source,
+		destination:          req.Destination,
+		logAttrs: []any{
+			"source_session_id", req.Source.ID,
+			"source_tab_id", req.SourceTabID,
+			"source_pane_id", req.SourcePaneID,
+			"destination_session_id", req.Destination.ID,
+			"destination_tab_id", req.DestinationTabID,
+		},
 	}
-	unlockSessions := lockAttachmentSessions(source, destination)
-	defer unlockSessions()
-	if !moveSessionLocatorCurrentLocked(source, req.Source) || !moveSessionLocatorCurrentLocked(destination, req.Destination) {
-		return nil, errMoveStaleTarget
-	}
-	if req.Attachment != nil && !attachmentRegisteredLocked(source, req.Attachment) {
-		return nil, errMoveStaleTarget
-	}
-	if req.AttachmentCapability.ac != nil && (req.AttachmentCapability.ac != req.Attachment || !req.AttachmentCapability.currentInSessionLocked(source)) {
-		return nil, errMoveStaleTarget
-	}
+}
 
+func (p *movePaneTopology) validRequest() bool {
+	return p != nil && p.req.SourceTabID != "" && p.req.SourcePaneID != "" && p.req.DestinationTabID != ""
+}
+
+// admitLocked runs with daemon and ordered Session locks held. It acquires only
+// the private ordered Tab locks and performs no publication.
+func (p *movePaneTopology) admitLocked(_ *Daemon, source, destination *session) error {
+	req := p.req
 	sourceTab := findMoveTabLocked(source, req.SourceTabID)
 	destinationTab := findMoveTabLocked(destination, req.DestinationTabID)
 	if sourceTab == nil || destinationTab == nil {
-		return nil, errMoveStaleTarget
+		return errMoveStaleTarget
 	}
 	if sourceTab == destinationTab {
-		return nil, errMovePaneInvalid
+		return errMovePaneInvalid
 	}
 	unlockTabs := lockMoveTabs(sourceTab, destinationTab)
 	defer unlockTabs()
@@ -55,19 +68,45 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 		}
 	}
 	if movedPane == nil {
-		return nil, errMoveStaleTarget
+		return errMoveStaleTarget
 	}
 
-	attachments := source.snapshotAttachmentsLocked()
-	transports := make(map[*attachedClient]transportSnapshot, len(attachments))
-	for _, ac := range attachments {
-		transports[ac] = ac.transportSnapshot()
-	}
-	return &movePaneAdmission{
+	p.admission = movePaneAdmission{
 		source: source, destination: destination, sourceTab: sourceTab, destinationTab: destinationTab,
-		movedPane: movedPane, sourceAttachments: attachments, sourceTransports: transports,
+		movedPane:        movedPane,
 		sourceGeneration: sourceTab.layoutGeneration, destinationGeneration: destinationTab.layoutGeneration,
 		finalSourceTab: len(source.tabs) == 1 && source.tabs[0] == sourceTab &&
 			sourceTab.tree != nil && sourceTab.tree.Root != nil && len(layout.LeafIDs(sourceTab.tree.Root)) == 1,
-	}, nil
+	}
+	return nil
+}
+
+func (p *movePaneTopology) afterAdmission(d *Daemon) {
+	if d.afterMovePaneSourceSnapshot != nil {
+		d.afterMovePaneSourceSnapshot()
+	}
+}
+
+func (p *movePaneTopology) willRetireSource() bool {
+	return p != nil && p.admission.finalSourceTab && p.admission.source != p.admission.destination
+}
+
+func (p *movePaneTopology) resizeFences(source, destination *session) *moveResizeFences {
+	admission := p.admission
+	return newMovePaneResizeFences(source, destination, admission.sourceTab, admission.destinationTab, admission.movedPane)
+}
+
+func (p *movePaneTopology) publishLocked(d *Daemon, source, destination *session) (moveTopologyPublication, error) {
+	admission := p.admission
+	commit := movePaneCommit{
+		req:                   p.req,
+		source:                source,
+		destination:           destination,
+		sourceTab:             admission.sourceTab,
+		destinationTab:        admission.destinationTab,
+		movedPane:             admission.movedPane,
+		sourceGeneration:      admission.sourceGeneration,
+		destinationGeneration: admission.destinationGeneration,
+	}
+	return commit.publishTopologyLocked(d)
 }

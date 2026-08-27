@@ -9,7 +9,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// movePanePostcommitPlan is captured while the move's architecture and owner
+// movePostcommitPlan is captured while the move's architecture and owner
 // fences still protect publication. It contains only immutable pointers,
 // generations, and exact attachment tokens needed by fallible follow-up work.
 func firstMovePane(panes []*pane) *pane {
@@ -19,9 +19,11 @@ func firstMovePane(panes []*pane) *pane {
 	return panes[0]
 }
 
-type movePanePostcommitPlan struct {
+type movePostcommitPlan struct {
 	source            *session
 	destination       *session
+	sourceName        string
+	destinationName   string
 	sourceTab         *tab
 	destinationTab    *tab
 	movedPane         *pane
@@ -49,7 +51,7 @@ type movePanePostcommitPlan struct {
 // execute runs only after every resize-owner fence and architecture lock is
 // released. Generation-bound tokens make stale effects drop rather than route
 // back to the retired source.
-func (p movePanePostcommitPlan) execute(d *Daemon) {
+func (p movePostcommitPlan) execute(d *Daemon) {
 	if p.oldTabCancel != nil {
 		p.oldTabCancel()
 	} else if p.sourceTabRemoved && p.sourceTab != nil && p.sourceTab.cancel != nil {
@@ -82,10 +84,10 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	p.reservation.Release()
 	attrs := []any{
 		"operation", p.operation,
-		"source_session", p.source.name,
+		"source_session", p.sourceName,
 		"source_session_id", p.source.id,
 		"source_tab_id", p.sourceTab.stableID,
-		"destination_session", p.destination.name,
+		"destination_session", p.destinationName,
 		"destination_session_id", p.destination.id,
 		"source_retired", p.sourceEmpty,
 	}
@@ -134,7 +136,7 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	if len(p.retiredAttachments) != 0 {
 		d.log.Info("move detaching source attachments",
 			"operation", p.operation,
-			"source_session", p.source.name,
+			"source_session", p.sourceName,
 			"source_session_id", p.source.id,
 			"reason", "session-killed",
 			"attachments", len(p.retiredAttachments),
@@ -144,7 +146,7 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 		d.unregisterPreview(attachment.ac)
 		attachment.ac.clearCaptureFrames()
 		if err := d.cleanupAttachmentOutput(attachment.ac); err != nil {
-			d.log.Warn("move attachment output cleanup failed", "err", err, "operation", p.operation, "source_session", p.source.name)
+			d.log.Warn("move attachment output cleanup failed", "err", err, "operation", p.operation, "source_session", p.sourceName)
 		}
 		d.notifyDetachedSnapshotAsync(attachment, ports.ReasonSessionKilled)
 	}
@@ -157,9 +159,9 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 	}
 	d.finishParkedAttachmentRetirements(p.retiredParked)
 	if p.sourceEmpty && p.sourceMetadataValid && d.persistEnabled {
-		if err := d.beginSnapshotPurge(p.source.name, p.source.incarnation); err == nil {
-			if err := d.finishSnapshotPurge(d.serveCtx, p.source.name, p.source.incarnation); err != nil {
-				d.log.Warn("moving final pane source purge failed", "err", err, "session", p.source.name)
+		if err := d.beginSnapshotPurge(p.sourceName, p.source.incarnation); err == nil {
+			if err := d.finishSnapshotPurge(d.serveCtx, p.sourceName, p.source.incarnation); err != nil {
+				d.log.Warn("moving final pane source purge failed", "err", err, "session", p.sourceName)
 			}
 		}
 	}
