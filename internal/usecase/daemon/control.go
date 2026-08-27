@@ -300,7 +300,7 @@ type daemonActionTarget struct {
 type daemonActionRequest struct {
 	kind      daemonActionKind
 	target    daemonActionTarget
-	effect    *attachmentEffectTicket
+	effect    *attachmentEffect
 	direction layout.Direction
 	axis      layout.Axis
 	delta     int
@@ -513,21 +513,21 @@ func (e controlExec) MovePane(destinationSession, destinationTabID string) error
 		return errMovePaneInvalid
 	}
 	attachment := e.target.attachment
-	token := attachmentConnectionToken{}
+	token := attachmentCapability{}
 	if attachment != nil {
-		token = e.sess.attachmentToken(attachment, attachment.transport())
+		token = e.sess.captureAttachmentCapability(attachment, attachment.transport())
 		if token.ac == nil {
 			return errMoveStaleTarget
 		}
 	}
 	return e.d.movePane(movePaneRequest{
-		Attachment:       attachment,
-		AttachmentToken:  token,
-		Source:           sessionMoveLocator(e.sess),
-		SourceTabID:      domain.TabStableID(e.tab.stableID),
-		SourcePaneID:     domain.PaneStableID(e.target.pane.stableID),
-		Destination:      sessionMoveLocator(destination),
-		DestinationTabID: domain.TabStableID(destinationTabID),
+		Attachment:           attachment,
+		AttachmentCapability: token,
+		Source:               sessionMoveLocator(e.sess),
+		SourceTabID:          domain.TabStableID(e.tab.stableID),
+		SourcePaneID:         domain.PaneStableID(e.target.pane.stableID),
+		Destination:          sessionMoveLocator(destination),
+		DestinationTabID:     domain.TabStableID(destinationTabID),
 	})
 }
 
@@ -540,19 +540,19 @@ func (e controlExec) MoveTab(destinationSession string) error {
 		return errMovePaneInvalid
 	}
 	attachment := e.target.attachment
-	token := attachmentConnectionToken{}
+	token := attachmentCapability{}
 	if attachment != nil {
-		token = e.sess.attachmentToken(attachment, attachment.transport())
+		token = e.sess.captureAttachmentCapability(attachment, attachment.transport())
 		if token.ac == nil {
 			return errMoveStaleTarget
 		}
 	}
 	return e.d.moveTab(moveTabRequest{
-		Attachment:      attachment,
-		AttachmentToken: token,
-		Source:          sessionMoveLocator(e.sess),
-		SourceTabID:     domain.TabStableID(e.tab.stableID),
-		Destination:     sessionMoveLocator(destination),
+		Attachment:           attachment,
+		AttachmentCapability: token,
+		Source:               sessionMoveLocator(e.sess),
+		SourceTabID:          domain.TabStableID(e.tab.stableID),
+		Destination:          sessionMoveLocator(destination),
 	})
 }
 

@@ -64,18 +64,17 @@ func (c *parkedRouteClock) setNow(now time.Time) {
 func armAndPrepareParkedRoute(t *testing.T, d *Daemon, source *session, ac *attachedClient, sends chan ports.Frame) ports.ParkedRouteLeaseID {
 	t.Helper()
 	ac.navigationCapabilities |= ports.NavigationCapabilityHomePicker
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
-	require.NoError(t, d.sendNavigationActionForAttachment(token, ports.NavigationOpenHomePicker))
+	require.NoError(t, d.sendNavigationActionForAttachment(effect, ports.NavigationOpenHomePicker))
 	effect.End()
 	directiveFrame := awaitFrame(t, sends, ports.MsgNavigationAction)
 	directive, err := ports.UnmarshalNavigationDirective(directiveFrame.Payload)
 	require.NoError(t, err)
 
 	prepare := ports.ParkedRouteRequest{RequestID: 1, LeaseID: directive.LeaseID, Action: ports.ParkedRoutePrepare}
-	require.False(t, d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(prepare)}))
+	require.False(t, d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(prepare)}))
 	readyFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
 	ready, err := ports.UnmarshalParkedRouteResponse(readyFrame.Payload)
 	require.NoError(t, err)
@@ -108,7 +107,7 @@ func TestParkedRouteSwitchesExactLiveTargetOnRetainedTransport(t *testing.T) {
 		SessionName: "target", LiveTabID: domain.TabStableID(target.tabs[0].stableID),
 	}
 	switchRequest := ports.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: ports.ParkedRouteSwitch, Target: &targetRequest}
-	require.False(t, d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)}))
+	require.False(t, d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)}))
 
 	require.Same(t, target, ac.currentAttachmentSession())
 	require.False(t, ac.parkedRouteOutput.Load())
@@ -147,7 +146,7 @@ func TestParkedRouteSwitchAcceptedBeforeLeaseExpiryCommitsAtomically(t *testing.
 		SessionName: "target", LiveTabID: domain.TabStableID(target.tabs[0].stableID),
 	}
 	switchRequest := ports.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: ports.ParkedRouteSwitch, Target: &targetRequest}
-	d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
 
 	require.Same(t, target, ac.currentAttachmentSession())
 	responseFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
@@ -185,7 +184,7 @@ func TestParkedRouteRestoresExactStoppedTargetWithDaemonEnvironment(t *testing.T
 		SessionName: "stopped", Stopped: true, StoppedTab: domain.NewStableTabSelector("tab-b"),
 	}
 	switchRequest := ports.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: ports.ParkedRouteSwitch, Target: &target}
-	d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
 
 	restored := ac.currentAttachmentSession()
 	require.NotNil(t, restored)
@@ -210,7 +209,7 @@ func TestParkedRouteStaleTargetLeavesSourceResumable(t *testing.T) {
 		SessionName: "missing", LiveTabID: "tab-1",
 	}
 	switchRequest := ports.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: ports.ParkedRouteSwitch, Target: &missing}
-	d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
 	staleFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
 	stale, err := ports.UnmarshalParkedRouteResponse(staleFrame.Payload)
 	require.NoError(t, err)
@@ -219,7 +218,7 @@ func TestParkedRouteStaleTargetLeavesSourceResumable(t *testing.T) {
 	require.True(t, ac.parkedRouteOutput.Load())
 
 	resume := ports.ParkedRouteRequest{RequestID: 3, LeaseID: leaseID, Action: ports.ParkedRouteResume}
-	d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
 	resumedFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
 	resumed, err := ports.UnmarshalParkedRouteResponse(resumedFrame.Payload)
 	require.NoError(t, err)
@@ -245,7 +244,7 @@ func TestParkedRouteDoesNotReplayOneShotEffectsAfterResume(t *testing.T) {
 	}
 
 	resume := ports.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: ports.ParkedRouteResume}
-	d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
 	_ = awaitFrame(t, sends, ports.MsgParkedRouteResponse)
 	outputFrame := awaitFrame(t, sends, ports.MsgOutput)
 	output, err := ports.UnmarshalOutput(outputFrame.Payload)
@@ -270,7 +269,7 @@ func TestParkedRouteExpiredLeaseFailsClosed(t *testing.T) {
 	ac.parkedRoute.expiresAt = d.clock.Now()
 	ac.parkedRouteMu.Unlock()
 	resume := ports.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: ports.ParkedRouteResume}
-	d.handleAttachmentClientFrame(source.attachmentToken(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
 	responseFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
 	response, err := ports.UnmarshalParkedRouteResponse(responseFrame.Payload)
 	require.NoError(t, err)
@@ -288,7 +287,7 @@ func TestParkedRouteResumeRejectsSwitchInFlight(t *testing.T) {
 	ac.parkedRouteMu.Lock()
 	ac.parkedRoute.inFlight = true
 	ac.parkedRouteMu.Unlock()
-	status := ac.consumeParkedRoute(source.attachmentToken(ac, ac.transport()), leaseID, d.clock.Now())
+	status := ac.consumeParkedRoute(source.captureAttachmentCapability(ac, ac.transport()), leaseID, d.clock.Now())
 
 	require.Equal(t, ports.ParkedRouteRejected, status)
 	ac.parkedRouteMu.Lock()
@@ -335,7 +334,11 @@ func TestParkedRouteMalformedSwitchRequestsFailClosed(t *testing.T) {
 		{RequestID: 2, Action: ports.ParkedRouteSwitch, Target: &domain.RemoteSessionTarget{}},
 		{RequestID: 3, LeaseID: leaseID, Action: 99},
 	} {
-		d.handleParkedRouteRequest(source.attachmentToken(ac, ac.transport()), request)
+		capability := source.captureAttachmentCapability(ac, ac.transport())
+		effect, admitted := ac.beginAttachmentEffect(capability)
+		require.True(t, admitted)
+		d.handleParkedRouteRequest(effect, request)
+		effect.End()
 	}
 	require.Same(t, source, ac.currentAttachmentSession())
 	select {
@@ -349,14 +352,13 @@ func TestParkedRouteResponseFailureDoesNotDrainItsOwnFrameEffect(t *testing.T) {
 	d, source, ac, _, releases := newManualTabSession(t, 1)
 	defer releaseAll(releases)
 	ac.replaceTransport(parkedRouteFailTransport{})
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 
 	result := make(chan bool, 1)
 	go func() {
-		result <- d.respondParkedRoute(token, ports.ParkedRouteResponse{RequestID: 1, Status: ports.ParkedRouteReady})
+		result <- d.respondParkedRoute(effect, ports.ParkedRouteResponse{RequestID: 1, Status: ports.ParkedRouteReady})
 	}()
 	require.False(t, awaitTestValue(t, result, "parked-route send failure cleanup"))
 	d.attachmentCleanupWg.Wait()

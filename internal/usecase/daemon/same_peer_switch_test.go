@@ -70,15 +70,14 @@ func TestSamePeerSwitchTransitionsExactTargetAndPreferredTab(t *testing.T) {
 	d.mu.Unlock()
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
 
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
 	requestTarget := ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
 	ac.offerSamePeerTarget(requestTarget)
 
-	d.switchSamePeerForAttachment(token, ports.SamePeerSwitchRequest{
+	d.switchSamePeerForAttachment(effect, ports.SamePeerSwitchRequest{
 		RequestID:      1,
 		Target:         requestTarget,
 		PreferredTabID: domain.TabStableID(target.tabs[1].stableID),
@@ -109,13 +108,12 @@ func TestSamePeerSwitchRejectsStaleTargetWithoutMutation(t *testing.T) {
 	defer releaseAll(releases)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
 
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
 
-	d.switchSamePeerForAttachment(token, ports.SamePeerSwitchRequest{
+	d.switchSamePeerForAttachment(effect, ports.SamePeerSwitchRequest{
 		RequestID: 1,
 		Target:    ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{9}, SessionName: "missing"},
 	})

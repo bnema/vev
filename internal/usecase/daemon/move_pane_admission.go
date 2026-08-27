@@ -32,7 +32,7 @@ func (d *Daemon) snapshotMovePaneAdmission(req movePaneRequest, source, destinat
 	if req.Attachment != nil && !attachmentRegisteredLocked(source, req.Attachment) {
 		return nil, errMoveStaleTarget
 	}
-	if req.AttachmentToken.ac != nil && (req.AttachmentToken.ac != req.Attachment || !moveAttachmentTokenCurrentLocked(req.AttachmentToken, source)) {
+	if req.AttachmentCapability.ac != nil && (req.AttachmentCapability.ac != req.Attachment || !req.AttachmentCapability.currentInSessionLocked(source)) {
 		return nil, errMoveStaleTarget
 	}
 

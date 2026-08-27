@@ -408,12 +408,12 @@ func (r *moveTabPurgeRepository) DeleteIncarnation(_ context.Context, id domain.
 	sourceFenceUnlocked := r.source.layoutApplyMu.TryLock()
 	destinationFenceUnlocked := r.destination.layoutApplyMu.TryLock()
 	tabFenceUnlocked := r.moved.layoutApplyMu.TryLock()
-	roleUnlocked := r.client.attachmentEffects.mu.TryLock()
-	roleStable := roleUnlocked && r.client.attachmentEffects.phase == attachmentEffectsStable
+	roleUnlocked := r.client.lifecycle.mu.TryLock()
+	roleStable := roleUnlocked && r.client.lifecycle.phase == attachmentEffectsStable
 	r.outside = daemonUnlocked && routingUnlocked && sourceUnlocked && destinationUnlocked && tabUnlocked && paneUnlocked &&
 		sourceFenceUnlocked && destinationFenceUnlocked && tabFenceUnlocked && roleStable
 	if roleUnlocked {
-		r.client.attachmentEffects.mu.Unlock()
+		r.client.lifecycle.mu.Unlock()
 	}
 	if tabFenceUnlocked {
 		r.moved.layoutApplyMu.Unlock()

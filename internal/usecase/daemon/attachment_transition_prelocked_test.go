@@ -55,7 +55,7 @@ func TestValidateAttachmentTransitionPrelockedLeavesMembershipUntouchedOnFailure
 	require.Equal(t, false, target.attachmentRegistered(next))
 	require.Equal(t, true, target.attachmentRegistered(old))
 	require.Same(t, source, next.currentSession())
-	require.Equal(t, uint64(0), next.connectionGeneration.Load())
-	require.Equal(t, uint64(0), old.connectionGeneration.Load())
+	require.Equal(t, uint64(0), next.lifecycle.generationValue())
+	require.Equal(t, uint64(0), old.lifecycle.generationValue())
 	require.Equal(t, 0, testAttachmentTabIndex(target))
 }

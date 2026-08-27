@@ -26,27 +26,27 @@ var (
 	clipPasteCloseMarker = []byte("\x1b[201~")
 )
 
-func (d *Daemon) handleSequencedImagePushForAttachment(token attachmentConnectionToken, _ uint64, ip ports.ImagePush) {
-	if !token.attachmentEffectCurrent() {
+func (d *Daemon) handleSequencedImagePushForAttachment(effect *attachmentEffect, _ uint64, ip ports.ImagePush) {
+	if !effect.current() {
 		return
 	}
-	d.handleImagePushForAttachment(token, ip)
+	d.handleImagePushForAttachment(effect, ip)
 }
 
-func (d *Daemon) handleImagePushForAttachment(token attachmentConnectionToken, ip ports.ImagePush) {
-	if len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !token.attachmentEffectCurrent() {
+func (d *Daemon) handleImagePushForAttachment(effect *attachmentEffect, ip ports.ImagePush) {
+	if len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !effect.current() {
 		return
 	}
-	path, err := d.writeClipboardImageForAttachment(token, ip)
+	path, err := d.writeClipboardImageForAttachment(effect, ip)
 	if err != nil {
 		d.log.Error("writing clipboard image failed", "err", err)
 		return
 	}
-	if !token.attachmentEffectCurrent() {
+	if !effect.current() {
 		_ = os.Remove(path)
 		return
 	}
-	d.injectClipboardPathForAttachment(token, path)
+	d.injectClipboardPathForAttachment(effect, path)
 }
 
 // handleImagePush writes an ImagePush's bytes to a temp file and injects the
@@ -84,18 +84,18 @@ func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string,
 	return path, nil
 }
 
-func (d *Daemon) writeClipboardImageForAttachment(token attachmentConnectionToken, ip ports.ImagePush) (string, error) {
+func (d *Daemon) writeClipboardImageForAttachment(effect *attachmentEffect, ip ports.ImagePush) (string, error) {
 	path, err := d.createClipboardImage(ip)
 	if err != nil {
 		return "", err
 	}
-	sess := token.sess
+	sess := effect.sess
 	if sess == nil {
 		_ = os.Remove(path)
 		return "", errAttachmentTransition
 	}
 	sess.mu.Lock()
-	if !token.attachmentEffectCurrentSessionLocked() {
+	if !effect.currentSessionLocked() {
 		sess.mu.Unlock()
 		_ = os.Remove(path)
 		return "", errAttachmentTransition
@@ -134,18 +134,18 @@ func (d *Daemon) injectClipboardPath(sess *session, path string) {
 	d.injectClipboardPathToTarget(sess, path, nil)
 }
 
-func (d *Daemon) injectClipboardPathForAttachment(token attachmentConnectionToken, path string) {
-	sess := token.sess
-	if sess == nil || !token.attachmentEffectCurrent() {
+func (d *Daemon) injectClipboardPathForAttachment(effect *attachmentEffect, path string) {
+	sess := effect.sess
+	if sess == nil || !effect.current() {
 		return
 	}
-	d.injectClipboardPathToTarget(sess, path, &token)
+	d.injectClipboardPathToTarget(sess, path, effect)
 }
 
-func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, token *attachmentConnectionToken) {
+func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, effect *attachmentEffect) {
 	var ac *attachedClient
-	if token != nil {
-		ac = token.ac
+	if effect != nil {
+		ac = effect.ac
 	}
 	var tb *tab
 	if ac != nil {
@@ -175,7 +175,7 @@ func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, token *
 		wrapped = append(wrapped, clipPasteCloseMarker...)
 		data = wrapped
 	}
-	if token != nil && !token.attachmentEffectCurrent() {
+	if effect != nil && !effect.current() {
 		return
 	}
 	d.writeToPane(sess, p, data)
@@ -202,7 +202,7 @@ func clipboardExt(mime string) string {
 
 type clipboardForward struct {
 	owner paneEffectLease
-	token attachmentConnectionToken
+	token attachmentCapability
 	seq   []byte
 }
 
@@ -237,8 +237,8 @@ func (d *Daemon) forwardClipboardAsync(owner paneEffectLease, b64 string) {
 	items := make([]clipboardForward, 0, len(attachments))
 	for _, ac := range attachments {
 		transport := ac.transport()
-		token := sess.attachmentToken(ac, transport)
-		if token.attachmentCurrent() {
+		token := sess.captureAttachmentCapability(ac, transport)
+		if token.current() {
 			items = append(items, clipboardForward{owner: owner, token: token, seq: seq})
 		}
 	}
@@ -254,7 +254,7 @@ func (d *Daemon) forwardClipboardAsync(owner paneEffectLease, b64 string) {
 	sess.mu.Unlock()
 }
 
-func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *attachmentEffectTicket) (ports.Transport, error) {
+func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *attachmentEffect) (ports.Transport, error) {
 	token := item.token
 	if token.ac == nil || ticket == nil || ticket.ended.Load() || token.transport.transport == nil {
 		return token.transport.transport, errAttachmentTransition
@@ -300,7 +300,7 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *atta
 // admission and marks the transport interval while ownership publication is
 // excluded. Publication therefore orders either before this check (the send is
 // dropped) or after transport admission (the send belongs to the old owner).
-func beginClipboardOwnerSend(lease paneEffectLease, ticket *attachmentEffectTicket, expected transportSnapshot) bool {
+func beginClipboardOwnerSend(lease paneEffectLease, ticket *attachmentEffect, expected transportSnapshot) bool {
 	if lease.pane == nil || lease.owner == nil || lease.owner.session == nil || lease.owner.tab == nil {
 		return false
 	}

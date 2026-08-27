@@ -703,12 +703,13 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 			return false
 		}
 	}
-	connectionGeneration := ac.connectionGeneration.Load()
-	connection := ac.transportSnapshot()
+	effect, admitted := beginAttachmentLeaseEffect(sess, ac, lease)
+	if !admitted {
+		return false
+	}
+	defer effect.End()
 	current := func() bool {
-		return ac.connectionGeneration.Load() == connectionGeneration &&
-			ac.transportSnapshotCurrent(connection) &&
-			sess.geometryClaimTokenCurrent(ac, geometryClaim) &&
+		return effect.current() && sess.geometryClaimTokenCurrent(ac, geometryClaim) &&
 			rc.resizeCurrentForLease(epoch, ac, lease, false)
 	}
 	if !current() {

@@ -783,13 +783,12 @@ func TestPaletteBackSessionSendsClientPreviousRouteAction(t *testing.T) {
 	defer releaseAll(releases)
 	transport := ac.transport()
 	rc := d.attachCoordinator(current, nil, ac, true)
-	token := current.attachmentToken(ac, transport)
+	token := current.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
-	token.effect = effect
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
 		Generation: 3,
 		Active:     ports.RouteRef{Key: 3, Generation: 3},
@@ -797,7 +796,7 @@ func TestPaletteBackSessionSendsClientPreviousRouteAction(t *testing.T) {
 		Entries:    []ports.RecentRouteEntry{testRouteEntry(2, 2, "recent", 2, ports.RouteKindLocal)},
 	})
 
-	require.NoError(t, d.backSessionForAttachment(token))
+	require.NoError(t, d.backSessionForAttachment(effect))
 	frame := awaitFrame(t, sends, ports.MsgNavigateRecentRoute)
 	action, err := ports.UnmarshalRouteNavigationAction(frame.Payload)
 	require.NoError(t, err)

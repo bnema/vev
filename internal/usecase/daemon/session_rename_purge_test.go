@@ -17,8 +17,8 @@ func TestRenamePublishesCommittedRouteIdentityToAttachedClients(t *testing.T) {
 	sess.ephemeral = true
 	sess.incarnation = domain.IncarnationID{1}
 	sess.mu.Unlock()
-	token := sess.attachmentToken(ac, ac.transport())
-	ac.publishAttachmentCapability(token)
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	ac.installTestAttachmentCapability(token)
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
 
 	require.NoError(t, d.renameSession(sess, "vps-infra"))
@@ -40,8 +40,8 @@ func TestRenameDefersCommittedRouteIdentityUntilFirstRouteSnapshot(t *testing.T)
 	sess.ephemeral = true
 	sess.incarnation = domain.IncarnationID{1}
 	sess.mu.Unlock()
-	token := sess.attachmentToken(ac, ac.transport())
-	ac.publishAttachmentCapability(token)
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	ac.installTestAttachmentCapability(token)
 
 	require.NoError(t, d.renameSession(sess, "vps-infra"))
 	require.Empty(t, sends, "the route ledger must be published before its identity can be updated")

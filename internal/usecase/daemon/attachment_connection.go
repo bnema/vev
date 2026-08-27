@@ -2,44 +2,42 @@ package daemon
 
 import "github.com/bnema/vev/internal/ports"
 
-// attachmentConnectionToken is the exact capability for one registered
-// attachment connection incarnation. It is invalid as soon as any of the
-// session, attachment membership, connection generation, transport link, or
-// coordinator lease changes.
-type attachmentConnectionToken struct {
+// attachmentCapability is the exact capability for one registered
+// Attachment Connection incarnation. It is invalid as soon as its Session
+// membership, generation, Transport incarnation, or render lease changes.
+type attachmentCapability struct {
 	sess       *session
 	ac         *attachedClient
 	generation uint64
 	transport  transportSnapshot
 	lease      *attachmentLease
-	effect     *attachmentEffectTicket
 	// rebase marks a cross-session move whose first paint starts a dependency-
 	// free output chain after publication releases architecture locks.
 	rebase bool
 }
 
-func attachmentToken(entry *session, ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
+func captureAttachmentCapability(entry *session, ac *attachedClient, tr ports.Transport) attachmentCapability {
 	if entry == nil || entry.core() == nil || ac == nil || tr == nil {
-		return attachmentConnectionToken{}
+		return attachmentCapability{}
 	}
 	// Capture one concrete link incarnation before taking the session lock. The
 	// same snapshot is revalidated below; do not take a second snapshot and
 	// accidentally bind a replacement link.
 	transport := ac.transportSnapshot()
 	if transport.transport != tr {
-		return attachmentConnectionToken{}
+		return attachmentCapability{}
 	}
-	if ac.beforeAttachmentTokenValidation != nil {
-		ac.beforeAttachmentTokenValidation()
+	if ac.beforeAttachmentCapabilityValidation != nil {
+		ac.beforeAttachmentCapabilityValidation()
 	}
 	core := entry.core()
 	core.mu.Lock()
 	if !attachmentRegisteredLocked(entry, ac) || !ac.transportSnapshotCurrent(transport) {
 		core.mu.Unlock()
-		return attachmentConnectionToken{}
+		return attachmentCapability{}
 	}
-	generation := ac.connectionGeneration.Load()
-	token := attachmentConnectionToken{
+	generation := ac.lifecycle.generation.Load()
+	token := attachmentCapability{
 		sess:       entry,
 		ac:         ac,
 		generation: generation,
@@ -50,101 +48,93 @@ func attachmentToken(entry *session, ac *attachedClient, tr ports.Transport) att
 	}
 	core.mu.Unlock()
 	if !token.current() {
-		return attachmentConnectionToken{}
+		return attachmentCapability{}
 	}
-	ac.bootstrapAttachmentCapability(token)
+	ac.lifecycle.installInitialCapability(token)
 	return token
 }
 
-func (s *session) attachmentToken(ac *attachedClient, tr ports.Transport) attachmentConnectionToken {
-	return attachmentToken(s, ac, tr)
+func (s *session) captureAttachmentCapability(ac *attachedClient, tr ports.Transport) attachmentCapability {
+	return captureAttachmentCapability(s, ac, tr)
 }
 
-// current validates every immutable identity captured by the token. Membership
-// is the sole authority; there is no owner, replacement, or compatibility role.
-func (t attachmentConnectionToken) current() bool {
-	return t.sess != nil && t.ac != nil &&
-		t.ac.connectionGeneration.Load() == t.generation &&
-		t.ac.currentAttachmentSession() == t.sess &&
-		t.ac.transportSnapshotCurrent(t.transport) &&
-		attachmentRegistered(t.sess, t.ac)
+func (t attachmentCapability) sameIdentity(other attachmentCapability) bool {
+	return t.sess != nil && t.ac != nil && t.sess == other.sess && t.ac == other.ac &&
+		t.generation == other.generation && t.transport.transport == other.transport.transport &&
+		t.transport.incarnation == other.transport.incarnation && t.lease == other.lease
 }
 
-// attachmentCurrent additionally validates the optional coordinator lease used
-// by render and resize effects. Attachments without that optional lease still
-// own their independent connection lifecycle.
-func (t attachmentConnectionToken) attachmentCurrent() bool {
-	if !t.current() || t.ac.currentAttachmentSession() != t.sess {
+func (t attachmentCapability) matchesConnectionSnapshot(sess *session, ac *attachedClient, transport transportSnapshot) bool {
+	return t.sess == sess && t.ac == ac && ac != nil && t.transport == transport &&
+		ac.lifecycle.identityCurrent(t)
+}
+
+func (l *attachmentLifecycle) identityCurrent(capability attachmentCapability) bool {
+	return l != nil && capability.sess != nil && capability.ac != nil &&
+		capability.ac.lifecycle.generation.Load() == capability.generation &&
+		capability.ac.currentAttachmentSession() == capability.sess &&
+		capability.ac.transportSnapshotCurrent(capability.transport)
+}
+
+// current validates every immutable identity captured by the capability.
+// Membership is the sole authority; there is no owner, replacement, or
+// compatibility role.
+func (l *attachmentLifecycle) current(capability attachmentCapability) bool {
+	if !l.identityCurrent(capability) || !attachmentRegistered(capability.sess, capability.ac) {
 		return false
 	}
-	if t.lease == nil {
+	if capability.lease == nil {
 		return true
 	}
-	rc := t.sess.core().coordinator.Load()
-	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)
+	rc := capability.sess.core().coordinator.Load()
+	return rc != nil && capability.lease.attachment == capability.ac && rc.leaseCurrent(capability.lease, false)
 }
 
-func (t attachmentConnectionToken) attachmentEffectCurrent() bool {
-	if t.effect != nil && !t.effect.ended.Load() {
-		return true
-	}
-	return t.attachmentCurrent()
+func (t attachmentCapability) current() bool {
+	return t.ac != nil && t.ac.lifecycle.current(t)
 }
 
-func beginAttachmentLeaseEffect(sess *session, ac *attachedClient, lease *attachmentLease) (*attachmentEffectTicket, bool) {
+func beginAttachmentLeaseEffect(sess *session, ac *attachedClient, lease *attachmentLease) (*attachmentEffect, bool) {
 	if sess == nil || ac == nil || lease == nil {
 		return nil, false
 	}
-	token := attachmentToken(sess, ac, ac.transport())
+	token := captureAttachmentCapability(sess, ac, ac.transport())
 	token.lease = lease
 	return ac.beginAttachmentEffect(token)
 }
 
-func (t *attachmentConnectionToken) endAttachmentEffect() {
-	if t == nil || t.effect == nil {
-		return
-	}
-	t.effect.End()
-	t.effect = nil
+func (t attachmentCapability) currentInSessionLocked(sess *session) bool {
+	return t.sess == sess && t.ac != nil && t.ac.lifecycle.currentSessionLocked(t)
 }
 
-// attachmentEffectCurrentSessionLocked validates authority at a session-owned
-// mutation boundary where sess.core().mu is already held. A live effect ticket
-// preserves the exact capability it captured for the effect because attachment
-// transitions drain the gate before changing identity. This differs from
-// attachmentCurrent, which revalidates the attachment's currently published identity.
-func (t attachmentConnectionToken) attachmentEffectCurrentSessionLocked() bool {
-	if t.effect != nil && !t.effect.ended.Load() {
-		return true
-	}
-	if t.sess == nil || t.ac == nil ||
-		t.ac.connectionGeneration.Load() != t.generation ||
-		!t.ac.transportSnapshotCurrent(t.transport) ||
-		t.ac.currentAttachmentSession() != t.sess ||
-		!attachmentRegisteredLocked(t.sess, t.ac) {
+func (t attachmentCapability) currentInSessionAndLeaseLocked(sess *session, ac *attachedClient, coordinator *renderCoordinator) bool {
+	return t.sess == sess && t.ac == ac && ac != nil &&
+		ac.lifecycle.currentSessionAndLeaseLocked(t, coordinator)
+}
+
+// currentSessionLocked validates capability authority where sess.core().mu is
+// already held. An admitted effect does not use this comparison: a transition
+// cannot change identity until that effect ends.
+func (l *attachmentLifecycle) currentSessionLocked(capability attachmentCapability) bool {
+	if !l.identityCurrent(capability) || !attachmentRegisteredLocked(capability.sess, capability.ac) {
 		return false
 	}
-	if t.lease == nil {
+	if capability.lease == nil {
 		return true
 	}
-	rc := t.sess.core().coordinator.Load()
-	return rc != nil && t.lease.attachment == t.ac && rc.leaseCurrent(t.lease, true)
+	rc := capability.sess.core().coordinator.Load()
+	return rc != nil && capability.lease.attachment == capability.ac && rc.leaseCurrent(capability.lease, false)
 }
 
-func (t attachmentConnectionToken) sendControl(frame ports.Frame) error {
-	if t.ac == nil || t.transport.transport == nil {
-		return errAttachmentTransition
+// currentSessionAndLeaseLocked validates the same capability tuple when the
+// caller already holds both the Session and coordinator locks.
+func (l *attachmentLifecycle) currentSessionAndLeaseLocked(capability attachmentCapability, coordinator *renderCoordinator) bool {
+	if !l.identityCurrent(capability) || !attachmentRegisteredLocked(capability.sess, capability.ac) {
+		return false
 	}
-	t.ac.sendMu.Lock()
-	defer t.ac.sendMu.Unlock()
-	if t.effect == nil || t.effect.ended.Load() || !t.ac.transportSnapshotCurrent(t.transport) ||
-		!t.effect.beginTransportSend(t.transport) {
-		return errAttachmentTransition
+	if capability.lease == nil {
+		return true
 	}
-	err := t.transport.transport.Send(frame)
-	if err != nil {
-		t.effect.reportTransportFailure(t.transport)
-	}
-	t.effect.endTransportSend()
-	return err
+	return coordinator != nil && capability.lease.attachment == capability.ac &&
+		coordinator.leaseCurrentLocked(capability.lease, false)
 }

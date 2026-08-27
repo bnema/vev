@@ -24,14 +24,15 @@ type attachmentTransitionRequest struct {
 	target                *session
 	next                  *attachedClient
 	expectedTransport     transportSnapshot
-	sourceToken           *attachmentConnectionToken
+	sourceCapability      *attachmentCapability
+	sourceEffect          *attachmentEffect
 	action                string
 	activateTargetTab     bool
 	targetTabIndex        int
 	copySourceEnvironment bool
-	// preserveAttachment commits attachment-local navigation state without
-	// changing session membership. The initiating connection token remains the
-	// exact authority for this mutation.
+	// preserveAttachment commits Attachment-local navigation state without
+	// changing Session membership. The initiating capability remains the exact
+	// authority for this mutation.
 	preserveAttachment bool
 	expectedSourceTab  *tab
 	// transferExpectedSourceTab permits an installed visible floating pane only
@@ -44,33 +45,8 @@ type attachmentTransitionRequest struct {
 	attachmentEffectsFrozen   bool
 }
 
-func transitionSourceTokenMatchesRequest(token attachmentConnectionToken, source *session, req attachmentTransitionRequest) bool {
-	return source != nil && token.sess != nil && token.sess == source && token.ac == req.next &&
-		token.generation == req.next.connectionGeneration.Load() &&
-		token.transport.transport == req.expectedTransport.transport &&
-		token.transport.incarnation == req.expectedTransport.incarnation
-}
-
-// transitionSourceTokenCurrentLocked requires source.core().mu and, when a
-// lease exists, sourceCoordinator.mu. It is the canonical exact-connection
-// handoff check for client-originated navigation and lifecycle mutations.
-func transitionSourceTokenCurrentLocked(token attachmentConnectionToken, source *session, sourceCoordinator *renderCoordinator, req attachmentTransitionRequest) bool {
-	if token.sess != source || token.ac != req.next ||
-		token.generation != req.next.connectionGeneration.Load() ||
-		token.sess == nil || token.ac.currentAttachmentSession() != source ||
-		!attachmentRegisteredLocked(source, req.next) ||
-		!req.next.transportSnapshotCurrent(token.transport) {
-		return false
-	}
-	if token.lease == nil {
-		return true
-	}
-	return sourceCoordinator != nil && token.lease.attachment == req.next &&
-		sourceCoordinator.leaseCurrentLocked(token.lease, true)
-}
-
 type attachmentTransitionResult struct {
-	published             attachmentConnectionToken
+	published             attachmentCapability
 	cleanups              []renderLifecycleCleanup
 	sourceGeometrySession *session
 }
@@ -103,7 +79,7 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 		d.sessions[sourceCore.id] != source || req.target != nil && d.sessions[targetCore.id] != req.target {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
-	if req.sourceToken != nil && !transitionSourceTokenMatchesRequest(*req.sourceToken, source, req) {
+	if req.sourceCapability != nil && !req.sourceCapability.matchesConnectionSnapshot(source, req.next, req.expectedTransport) {
 		return attachmentTransitionRequest{}, attachmentTransitionParticipants{}, errAttachmentTransition
 	}
 	req.preflighted = true
@@ -112,7 +88,7 @@ func (d *Daemon) snapshotAttachmentTransition(req attachmentTransitionRequest) (
 
 // freezeAttachmentTransition drains the snapshotted connection without any
 // architecture lock held. The returned guard remains frozen through publication.
-func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, participants attachmentTransitionParticipants) (frozenAttachmentEffectGates, error) {
+func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, participants attachmentTransitionParticipants) (attachmentTransitionGuard, error) {
 	if d.afterAttachmentEffectParticipantsSnapshotted != nil {
 		d.afterAttachmentEffectParticipantsSnapshotted(req.action, participants.clients)
 	}
@@ -131,7 +107,7 @@ func (d *Daemon) freezeAttachmentTransition(req attachmentTransitionRequest, par
 }
 
 // publishAttachmentTransition revalidates the frozen source, creates an
-// optional target, and performs exact membership publication under d.mu.
+// optional target, and performs exact capability publication under d.mu.
 func (d *Daemon) publishAttachmentTransition(req attachmentTransitionRequest) (attachmentTransitionResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -162,8 +138,8 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if err != nil {
 		return attachmentTransitionResult{}, err
 	}
-	if req.sourceToken != nil {
-		d.endActionAttachmentEffect(req.sourceToken.effect, req.action)
+	if req.sourceEffect != nil {
+		d.endActionAttachmentEffect(req.sourceEffect, req.action)
 	}
 
 	frozen, err := d.freezeAttachmentTransition(req, participants)
@@ -183,7 +159,7 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if req.ready && result.published.ac != nil && result.published.ac.routeSnapshotCopy().Generation != 0 {
 		identityErr := errAttachmentTransition
 		if effect, admitted := result.published.ac.beginAttachmentEffect(result.published); admitted {
-			identityErr = d.sendCommittedRouteIdentityForAttachment(effect.connectionToken())
+			identityErr = d.sendCommittedRouteIdentityForAttachment(effect)
 			effect.End()
 		}
 		if identityErr != nil {

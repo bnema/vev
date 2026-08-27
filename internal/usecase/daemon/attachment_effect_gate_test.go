@@ -118,7 +118,7 @@ func (t *teardownBlockingTransport) Closed() bool {
 	}
 }
 
-func startBlockedAttachmentSend(t *testing.T, token attachmentConnectionToken) <-chan struct{} {
+func startBlockedAttachmentSend(t *testing.T, token attachmentCapability) <-chan struct{} {
 	t.Helper()
 	ticket, admitted := token.ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
@@ -133,19 +133,19 @@ func startBlockedAttachmentSend(t *testing.T, token attachmentConnectionToken) <
 
 func requireAttachmentEffectGateRetired(t *testing.T, ac *attachedClient) {
 	t.Helper()
-	ac.attachmentEffects.mu.Lock()
-	defer ac.attachmentEffects.mu.Unlock()
-	require.Equal(t, attachmentEffectsStable, ac.attachmentEffects.phase)
-	require.Zero(t, ac.attachmentEffects.inFlight)
-	require.Empty(t, ac.attachmentEffects.transportEffects)
+	ac.lifecycle.mu.Lock()
+	defer ac.lifecycle.mu.Unlock()
+	require.Equal(t, attachmentEffectsStable, ac.lifecycle.phase)
+	require.Zero(t, ac.lifecycle.inFlight)
+	require.Empty(t, ac.lifecycle.transportEffects)
 }
 
 func TestBeginCurrentAttachmentEffectFailsClosedOnStableCapabilityMismatch(t *testing.T) {
 	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
-	current := sess.attachmentToken(ac, ac.transport())
+	current := sess.captureAttachmentCapability(ac, ac.transport())
 	stale := current
 	stale.generation++
-	ac.publishAttachmentCapability(stale)
+	ac.installTestAttachmentCapability(stale)
 
 	result := make(chan bool, 1)
 	go func() {
@@ -163,6 +163,16 @@ func TestBeginCurrentAttachmentEffectFailsClosedOnStableCapabilityMismatch(t *te
 	}
 }
 
+func TestBeginCurrentAttachmentEffectContextRejectsNilContext(t *testing.T) {
+	_, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+
+	token, effect, admitted := ac.beginCurrentAttachmentEffectContext(nil, sess, ac.transport())
+
+	require.False(t, admitted)
+	require.Nil(t, effect)
+	require.Equal(t, attachmentCapability{}, token)
+}
+
 func TestBeginAttachmentLeaseEffectRejectsForeignLease(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	rc := d.attachCoordinator(sess, nil, ac, true)
@@ -173,9 +183,9 @@ func TestBeginAttachmentLeaseEffectRejectsForeignLease(t *testing.T) {
 }
 
 func attachmentEffectGatePublicationSnapshot(ac *attachedClient) (attachmentEffectPhase, attachmentCapability) {
-	ac.attachmentEffects.mu.Lock()
-	defer ac.attachmentEffects.mu.Unlock()
-	return ac.attachmentEffects.phase, ac.attachmentEffects.capability
+	ac.lifecycle.mu.Lock()
+	defer ac.lifecycle.mu.Unlock()
+	return ac.lifecycle.phase, ac.lifecycle.capability
 }
 
 func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testing.T) {
@@ -197,21 +207,21 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	sess.mu.Unlock()
 
 	rc := d.attachCoordinator(sess, nil, first, true)
-	firstToken := sess.attachmentToken(first, firstTransport)
+	firstToken := sess.captureAttachmentCapability(first, firstTransport)
 	firstToken.lease = rc.attachmentLease(first)
-	first.publishAttachmentCapability(firstToken)
-	blockedToken := sess.attachmentToken(blocked, blockedTransport)
-	blocked.publishAttachmentCapability(blockedToken)
-	laterToken := sess.attachmentToken(later, laterTransport)
-	later.publishAttachmentCapability(laterToken)
+	first.installTestAttachmentCapability(firstToken)
+	blockedToken := sess.captureAttachmentCapability(blocked, blockedTransport)
+	blocked.installTestAttachmentCapability(blockedToken)
+	laterToken := sess.captureAttachmentCapability(later, laterTransport)
+	later.installTestAttachmentCapability(laterToken)
 
 	// Fix the canonical order so teardown acquires first, waits behind the gate
 	// owned by this test, and never reaches the still-stable later participant.
-	first.attachmentEffects.immutableOrder()
-	blocked.attachmentEffects.immutableOrder()
-	later.attachmentEffects.immutableOrder()
-	require.Less(t, first.attachmentEffects.order.Load(), blocked.attachmentEffects.order.Load())
-	require.Less(t, blocked.attachmentEffects.order.Load(), later.attachmentEffects.order.Load())
+	first.lifecycle.immutableOrder()
+	blocked.lifecycle.immutableOrder()
+	later.lifecycle.immutableOrder()
+	require.Less(t, first.lifecycle.order.Load(), blocked.lifecycle.order.Load())
+	require.Less(t, blocked.lifecycle.order.Load(), later.lifecycle.order.Load())
 
 	blockedOwner := freezeAttachmentEffectGates(blocked)
 	blockedOwnerHeld := true
@@ -227,9 +237,9 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	require.Equal(t, attachmentEffectsStable, firstPhase)
 	require.Equal(t, attachmentEffectsFrozen, blockedPhase)
 	require.Equal(t, attachmentEffectsStable, laterPhase)
-	firstGeneration := first.connectionGeneration.Load()
-	blockedGeneration := blocked.connectionGeneration.Load()
-	laterGeneration := later.connectionGeneration.Load()
+	firstGeneration := first.lifecycle.generationValue()
+	blockedGeneration := blocked.lifecycle.generationValue()
+	laterGeneration := later.lifecycle.generationValue()
 	firstSnapshot := first.transportSnapshot()
 	blockedSnapshot := blocked.transportSnapshot()
 	laterSnapshot := later.transportSnapshot()
@@ -264,9 +274,9 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	for _, ac := range []*attachedClient{first, blocked, later} {
 		require.Same(t, sess, ac.currentSession(), "partial gate acquisition cleared attachment ownership")
 	}
-	require.Equal(t, firstGeneration, first.connectionGeneration.Load())
-	require.Equal(t, blockedGeneration, blocked.connectionGeneration.Load())
-	require.Equal(t, laterGeneration, later.connectionGeneration.Load())
+	require.Equal(t, firstGeneration, first.lifecycle.generationValue())
+	require.Equal(t, blockedGeneration, blocked.lifecycle.generationValue())
+	require.Equal(t, laterGeneration, later.lifecycle.generationValue())
 	require.True(t, first.transportSnapshotCurrent(firstSnapshot))
 	require.True(t, blocked.transportSnapshotCurrent(blockedSnapshot))
 	require.True(t, later.transportSnapshotCurrent(laterSnapshot))
@@ -290,7 +300,7 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	require.True(t, complete.acquired, "rolled-back gate set could not be acquired again")
 	require.True(t, complete.drained)
 	complete.unfreeze()
-	for _, token := range []attachmentConnectionToken{firstToken, blockedToken, laterToken} {
+	for _, token := range []attachmentCapability{firstToken, blockedToken, laterToken} {
 		ticket, admitted := token.ac.beginAttachmentEffect(token)
 		require.True(t, admitted, "pre-publication abort changed an attachment capability")
 		ticket.End()
@@ -303,7 +313,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	snatchedTransport := newTeardownBlockingTransport()
 	snatched.replaceTransport(snatchedTransport)
 	d.attachCoordinator(sess, nil, snatched, true)
-	snatched.publishAttachmentCapability(sess.attachmentToken(snatched, snatchedTransport))
+	snatched.installTestAttachmentCapability(sess.captureAttachmentCapability(snatched, snatchedTransport))
 
 	activeTransport := newTeardownBlockingTransport()
 	active := &attachedClient{tr: activeTransport, output: newOutputStateStream(), size: snatched.size}
@@ -324,8 +334,8 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	d.mu.Unlock()
 	d.attachCoordinator(unrelated, nil, unrelatedClient, true)
 
-	snatchedToken := sess.attachmentToken(snatched, snatchedTransport)
-	activeToken := sess.attachmentToken(active, activeTransport)
+	snatchedToken := sess.captureAttachmentCapability(snatched, snatchedTransport)
+	activeToken := sess.captureAttachmentCapability(active, activeTransport)
 	snatchedDone := startBlockedAttachmentSend(t, snatchedToken)
 	activeDone := startBlockedAttachmentSend(t, activeToken)
 	awaitTestCompletion(t, snatchedTransport.sendEntered, "snatched send did not block")
@@ -359,9 +369,9 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 	stale := newTeardownBlockingTransport()
 	ac.replaceTransport(stale)
 	d.attachCoordinator(sess, nil, ac, true)
-	ac.publishAttachmentCapability(sess.attachmentToken(ac, stale))
+	ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, stale))
 
-	token := sess.attachmentToken(ac, stale)
+	token := sess.captureAttachmentCapability(ac, stale)
 	sendDone := startBlockedAttachmentSend(t, token)
 	awaitTestCompletion(t, stale.sendEntered, "captured incarnation send did not block")
 	fresh := &closeTrackingTransport{}
@@ -388,7 +398,7 @@ func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T
 	transport := &closeTrackingTransport{}
 	active.replaceTransport(transport)
 	d.attachCoordinator(sess, nil, active, true)
-	active.publishAttachmentCapability(sess.attachmentToken(active, transport))
+	active.installTestAttachmentCapability(sess.captureAttachmentCapability(active, transport))
 
 	owner := freezeAttachmentEffectGates(active)
 	require.True(t, owner.acquired)
@@ -419,9 +429,9 @@ func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 	blocked := newTeardownBlockingTransport()
 	active.replaceTransport(blocked)
 	d.attachCoordinator(sess, nil, active, true)
-	active.publishAttachmentCapability(sess.attachmentToken(active, blocked))
+	active.installTestAttachmentCapability(sess.captureAttachmentCapability(active, blocked))
 
-	token := sess.attachmentToken(active, blocked)
+	token := sess.captureAttachmentCapability(active, blocked)
 	sendDone := startBlockedAttachmentSend(t, token)
 	awaitTestCompletion(t, blocked.sendEntered, "active send did not block")
 
@@ -445,9 +455,9 @@ func TestRenderSendFailureCleanupIsDeadlineBoundedWhileAttachmentEffectGateIsBus
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)
-	token := sess.attachmentToken(ac, transport)
+	token := sess.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clock
@@ -476,9 +486,9 @@ func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublicat
 	old.replaceTransport(oldTransport)
 	rc := d.attachCoordinator(sess, nil, old, true)
 	lease := rc.attachmentLease(old)
-	token := sess.attachmentToken(old, oldTransport)
+	token := sess.captureAttachmentCapability(old, oldTransport)
 	token.lease = lease
-	old.publishAttachmentCapability(token)
+	old.installTestAttachmentCapability(token)
 
 	paintDone := make(chan struct{})
 	go func() {
@@ -530,9 +540,9 @@ func TestAttachmentEffectGateAdmittedEffectCompletesBeforeConflictingTransition(
 	oldTransport := newDatagramTestTransport()
 	old.replaceTransport(oldTransport)
 	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
+	token := sess.captureAttachmentCapability(old, oldTransport)
 	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
+	old.installTestAttachmentCapability(token)
 
 	ticket, ok := old.beginAttachmentEffect(token)
 	require.True(t, ok)
@@ -631,15 +641,16 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 			old.replaceTransport(oldTransport)
 			old.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: old}, &d.bindings)
 			rc := d.attachCoordinator(sess, nil, old, true)
-			token := sess.attachmentToken(old, oldTransport)
+			token := sess.captureAttachmentCapability(old, oldTransport)
 			token.lease = rc.attachmentLease(old)
+			old.installTestAttachmentCapability(token)
 			if tt.setup != nil {
 				tt.setup(d, sess, old, pty)
 			}
 
 			admitted := make(chan struct{})
 			release := make(chan struct{})
-			d.afterAttachmentEffectAdmitted = func(attachmentConnectionToken) {
+			d.afterAttachmentEffectAdmitted = func(attachmentCapability) {
 				close(admitted)
 				<-release
 			}
@@ -672,9 +683,9 @@ func TestAttachedRouteSnapshotIsAcceptedAsAnAttachmentValue(t *testing.T) {
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, transport)
+	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 
 	activeRef := ports.RouteRef{Key: 8, Generation: 4}
 	activeTarget := testRouteTarget(source.name, 8)
@@ -711,9 +722,9 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, transport)
+	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	payload, err := ports.MarshalCommandRequest(ports.CommandRequest{
 		Version: ports.ProtocolVersion, RequestID: 1, Slug: "back-session", Attached: true,
 	})
@@ -762,9 +773,9 @@ func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	d.sessions[target.id] = target
 
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, ac.transport())
+	token := source.captureAttachmentCapability(ac, ac.transport())
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 
 	d.handleAttachmentClientFrame(token, frameInput([]byte("\x1ba")))
 
@@ -780,9 +791,9 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 
 	oldTransport := old.transport()
 	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
+	token := sess.captureAttachmentCapability(old, oldTransport)
 	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
+	old.installTestAttachmentCapability(token)
 
 	admissionEnded := make(chan struct{})
 	releaseAction := make(chan struct{})
@@ -824,9 +835,9 @@ func TestPickerDeleteSourceForCurrentInitiatorDoesNotDeadlock(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	d.enterPicker(sess, ac)
 	rc := d.attachCoordinator(sess, nil, ac, true)
-	token := sess.attachmentToken(ac, ac.transport())
+	token := sess.captureAttachmentCapability(ac, ac.transport())
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 
 	d.handleAttachmentClientFrame(token, frameInput([]byte("x")))
 
@@ -841,12 +852,13 @@ func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *test
 	oldTransport := newDatagramTestTransport()
 	old.replaceTransport(oldTransport)
 	rc := d.attachCoordinator(sess, nil, old, true)
-	token := sess.attachmentToken(old, oldTransport)
+	token := sess.captureAttachmentCapability(old, oldTransport)
 	token.lease = rc.attachmentLease(old)
+	old.installTestAttachmentCapability(token)
 
 	admitted := make(chan struct{})
 	release := make(chan struct{})
-	d.afterAttachmentEffectAdmitted = func(attachmentConnectionToken) {
+	d.afterAttachmentEffectAdmitted = func(attachmentCapability) {
 		close(admitted)
 		<-release
 	}
@@ -875,7 +887,7 @@ func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testi
 	aTransport := newDatagramTestTransport()
 	a.replaceTransport(aTransport)
 	d.attachCoordinator(first, nil, a, true)
-	first.attachmentToken(a, aTransport)
+	first.captureAttachmentCapability(a, aTransport)
 
 	bTransport := newDatagramTestTransport()
 	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), size: a.size}
@@ -886,7 +898,7 @@ func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testi
 	d.sessions[second.id] = second
 	d.mu.Unlock()
 	d.attachCoordinator(second, nil, b, true)
-	second.attachmentToken(b, bTransport)
+	second.captureAttachmentCapability(b, bTransport)
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -933,9 +945,9 @@ func TestAttachmentEffectGateFrozenConnectionRejectsLateEffect(t *testing.T) {
 	transport := newDatagramTestTransport()
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(sess, nil, ac, true)
-	token := sess.attachmentToken(ac, transport)
+	token := sess.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 
 	frozen := freezeAttachmentEffectGates(ac)
 	require.True(t, frozen.acquired)

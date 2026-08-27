@@ -29,7 +29,7 @@ type movePanePostcommitPlan struct {
 	operation         string
 	sourceAttachments []*attachedClient
 	syncCleanup       syncTimerCleanup
-	frozenEffects     frozenAttachmentEffectGates
+	frozenEffects     attachmentTransitionGuard
 	effectsFrozen     bool
 	unlockDispatch    func()
 	reservation       *moveLifecycleReservation

@@ -1150,7 +1150,7 @@ func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.
 	token := ac.resumeToken
 	require.True(t, sess.detachIfCurrent(ac))
 	require.True(t, d.parkAttachment(sess, ac))
-	generation := ac.connectionGeneration.Load()
+	generation := ac.lifecycle.generationValue()
 
 	newTr := &closeTrackingTransport{}
 	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), newTr, domain.Size{Cols: 80, Rows: 24})
@@ -1158,7 +1158,7 @@ func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.
 	require.True(t, ok)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
-	require.Greater(t, ac.connectionGeneration.Load(), generation, "resume must publish active ownership through the attachment transition")
+	require.Greater(t, ac.lifecycle.generationValue(), generation, "resume must publish active ownership through the attachment transition")
 
 	_ = ac.closeCapturedTransport(oldTr)
 	require.True(t, oldTr.Closed(), "old transport is closed")

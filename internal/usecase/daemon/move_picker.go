@@ -16,7 +16,7 @@ func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
 	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	if source.AttachmentToken.ac != nil && !moveAttachmentTokenCurrentLocked(source.AttachmentToken, sess) {
+	if source.AttachmentCapability.ac != nil && !source.AttachmentCapability.currentInSessionLocked(sess) {
 		return domain.UserWarn(domain.NoticeSessionUnavailable, "Source attachment is no longer active.", errMovePaneInvalid)
 	}
 	if source.Attachment != nil && !attachmentRegisteredLocked(sess, source.Attachment) {
@@ -52,11 +52,11 @@ type moveSessionLocator struct {
 }
 
 type moveSourceLocator struct {
-	Session         moveSessionLocator
-	TabID           domain.TabStableID
-	PaneID          domain.PaneStableID
-	Attachment      *attachedClient
-	AttachmentToken attachmentConnectionToken
+	Session              moveSessionLocator
+	TabID                domain.TabStableID
+	PaneID               domain.PaneStableID
+	Attachment           *attachedClient
+	AttachmentCapability attachmentCapability
 }
 
 // enterPickerForIntent returns errNoMoveDestination only for move intents.
@@ -64,8 +64,8 @@ func (d *Daemon) enterPickerForIntent(sess *session, ac *attachedClient, intent 
 	if intent != pickerNavigate && !sess.capabilities().yieldsMoves() {
 		return errSessionCannotYieldMoves
 	}
-	if source.Attachment != nil && source.AttachmentToken.ac == nil {
-		source.AttachmentToken = sess.attachmentToken(source.Attachment, source.Attachment.transport())
+	if source.Attachment != nil && source.AttachmentCapability.ac == nil {
+		source.AttachmentCapability = sess.captureAttachmentCapability(source.Attachment, source.Attachment.transport())
 	}
 	model := d.newPickerModel(sess, ac, intent, source, picker.SourceFilter{})
 	if intent != pickerNavigate {
@@ -97,21 +97,21 @@ func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourc
 			return errMovePaneInvalid
 		}
 		return d.movePane(movePaneRequest{
-			Attachment:       source.Attachment,
-			AttachmentToken:  source.AttachmentToken,
-			Source:           source.Session,
-			SourceTabID:      source.TabID,
-			SourcePaneID:     source.PaneID,
-			Destination:      destination,
-			DestinationTabID: target.TabID,
+			Attachment:           source.Attachment,
+			AttachmentCapability: source.AttachmentCapability,
+			Source:               source.Session,
+			SourceTabID:          source.TabID,
+			SourcePaneID:         source.PaneID,
+			Destination:          destination,
+			DestinationTabID:     target.TabID,
 		})
 	case pickerMoveTab:
 		return d.moveTab(moveTabRequest{
-			Attachment:      source.Attachment,
-			AttachmentToken: source.AttachmentToken,
-			Source:          source.Session,
-			SourceTabID:     source.TabID,
-			Destination:     destination,
+			Attachment:           source.Attachment,
+			AttachmentCapability: source.AttachmentCapability,
+			Source:               source.Session,
+			SourceTabID:          source.TabID,
+			Destination:          destination,
 		})
 	default:
 		return errMovePaneInvalid

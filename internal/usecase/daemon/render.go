@@ -294,7 +294,7 @@ func (d *Daemon) observeRuntime(kind ports.RuntimeMarkKind, bytes uint64, valid 
 type runtimeMarkBatch struct {
 	observer         ports.RuntimeObserver
 	marks            []ports.RuntimeMark
-	attachmentEffect *attachmentEffectTicket
+	attachmentEffect *attachmentEffect
 }
 
 func (d *Daemon) newRuntimeMarkBatch() runtimeMarkBatch {
@@ -338,13 +338,15 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	sess := entry
 	local := sess != nil
 	marks := d.newRuntimeMarkBatch()
+	var paintEffect *attachmentEffect
 	if lease != nil {
-		token := attachmentToken(entry, ac, ac.transport())
+		token := captureAttachmentCapability(entry, ac, ac.transport())
 		token.lease = lease
 		ticket, admitted := ac.beginAttachmentEffect(token)
 		if !admitted {
 			return paintRejected
 		}
+		paintEffect = ticket
 		marks.attachmentEffect = ticket
 		defer ticket.End()
 	}
@@ -357,25 +359,24 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	}
 
 	ac.sendMu.Lock()
-	// sendMu is the attachment ownership boundary. Check the session's
-	// published identity while holding it so a deadline captured before an
-	// attach/replace cannot emit on either the old or new output chain.
-	entry.core().mu.Lock()
-	_, owned := entry.core().attachments[ac]
-	entry.core().mu.Unlock()
-	if !owned || ac.currentAttachmentSession() != entry || ac.parkedRouteOutput.Load() {
-		ac.sendMu.Unlock()
-		return paintRejected
-	}
-	if ac.parkedRouteFullPending.Load() {
-		reset = true
-	}
-	if lease != nil {
-		rc := attachmentRenderCoordinator(entry)
-		if rc == nil || lease.attachment != ac || !rc.leaseCurrent(lease, true) {
+	if paintEffect != nil {
+		if !paintEffect.current() || ac.parkedRouteOutput.Load() {
 			ac.sendMu.Unlock()
 			return paintRejected
 		}
+	} else {
+		// Direct/headless rendering has no Attachment effect and retains its
+		// membership-only fixture path.
+		entry.core().mu.Lock()
+		_, owned := entry.core().attachments[ac]
+		entry.core().mu.Unlock()
+		if !owned || ac.currentAttachmentSession() != entry || ac.parkedRouteOutput.Load() {
+			ac.sendMu.Unlock()
+			return paintRejected
+		}
+	}
+	if ac.parkedRouteFullPending.Load() {
+		reset = true
 	}
 	// Capacity is checked before any destructive capture. Refresh the atomic
 	// readiness snapshot while sendMu is held so direct test/setup mutations of

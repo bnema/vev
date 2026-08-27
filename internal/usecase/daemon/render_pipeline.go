@@ -424,15 +424,22 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		ActiveTabID: state.view.tabID,
 	}
 	entry.core().mu.Unlock()
-	if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
-		ac.sendMu.Unlock()
-		return false
-	}
-	if state.lease != nil {
-		rc := attachmentRenderCoordinator(entry)
-		if rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
+	if marks.attachmentEffect != nil {
+		if !marks.attachmentEffect.current() || state.attachment != ac {
 			ac.sendMu.Unlock()
 			return false
+		}
+	} else {
+		if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
+			ac.sendMu.Unlock()
+			return false
+		}
+		if state.lease != nil {
+			rc := attachmentRenderCoordinator(entry)
+			if rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
+				ac.sendMu.Unlock()
+				return false
+			}
 		}
 	}
 	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
@@ -581,8 +588,8 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 			// Capture the exact admitted capability, including its coordinator
 			// lease, before End permits a new attachment publication. Reserve
 			// cleanup accounting before End so terminal Wait cannot race a later Add.
-			token := marks.attachmentEffect.connectionToken()
-			launchCleanup := d.reserveAttachmentSendErrorCleanup(token, sendTr)
+			capability := marks.attachmentEffect.capability()
+			launchCleanup := d.reserveAttachmentSendErrorCleanup(capability, sendTr)
 			marks.attachmentEffect.End()
 			launchCleanup()
 		}

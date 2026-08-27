@@ -14,26 +14,26 @@ const connectionSnapshotAttempts = 8
 // currentAttachmentConnection retries the lock-free session-to-role snapshot when a
 // handoff lands between those reads. The attachment gate still performs the final
 // mutation admission after this function returns.
-func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (*session, attachmentConnectionToken, bool) {
+func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (*session, attachmentCapability, bool) {
 	for range connectionSnapshotAttempts {
 		if !ac.currentTransportIs(tr) {
 			break
 		}
 		sess := ac.currentAttachmentSession()
 		if sess == nil {
-			return nil, attachmentConnectionToken{}, false
+			return nil, attachmentCapability{}, false
 		}
 		if d.afterConnectionSessionSnapshot != nil {
 			d.afterConnectionSessionSnapshot(sess)
 		}
-		token := attachmentToken(sess, ac, tr)
+		token := captureAttachmentCapability(sess, ac, tr)
 		if token.ac == nil || ac.currentAttachmentSession() != sess {
 			runtime.Gosched()
 			continue
 		}
 		return sess, token, true
 	}
-	return nil, attachmentConnectionToken{}, false
+	return nil, attachmentCapability{}, false
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
@@ -74,57 +74,56 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 }
 
 // handleAttachmentClientFrame owns the attached-client protocol.
-func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f ports.Frame) bool {
-	if !token.attachmentEffectCurrent() {
+func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f ports.Frame) bool {
+	if !capability.current() {
 		return false
 	}
 	if d.afterAttachmentFrameDispatch != nil {
-		d.afterAttachmentFrameDispatch(token)
+		d.afterAttachmentFrameDispatch(capability)
 	}
-	ticket, admitted := token.ac.beginAttachmentEffect(token)
+	effect, admitted := capability.ac.beginAttachmentEffect(capability)
 	if !admitted {
 		return false
 	}
-	token.effect = ticket
-	defer token.endAttachmentEffect()
+	defer effect.End()
 	if d.afterAttachmentEffectAdmitted != nil {
-		d.afterAttachmentEffectAdmitted(token)
+		d.afterAttachmentEffectAdmitted(effect.capability())
 	}
 	switch f.Type {
 	case ports.MsgInput:
 		if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
-			d.handleSequencedInputForAttachment(token, in.InputSeq, in.Data)
+			d.handleSequencedInputForAttachment(effect, in.InputSeq, in.Data)
 		}
 	case ports.MsgResize:
-		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && token.attachmentEffectCurrent() {
-			d.resizeAttachmentGeometryForLease(token, rz.Geometry())
+		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && effect.current() {
+			d.resizeAttachmentGeometryForLease(effect, rz.Geometry())
 		}
 	case ports.MsgTheme:
 		if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
-			d.applyThemeForAttachment(token, th)
+			d.applyThemeForAttachment(effect, th)
 		}
 	case ports.MsgImagePush:
 		if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
-			d.handleSequencedImagePushForAttachment(token, ip.InputSeq, ip)
+			d.handleSequencedImagePushForAttachment(effect, ip.InputSeq, ip)
 		}
 	case ports.MsgClientNotice:
 		if notice, derr := ports.UnmarshalClientNotice(f.Payload); derr == nil {
-			d.handleClientNoticeForAttachment(token, notice)
+			d.handleClientNoticeForAttachment(effect, notice)
 		} else {
 			d.log.Warn("malformed client notice", "err", derr)
 		}
 	case ports.MsgDetach:
-		if token.attachmentEffectCurrent() {
-			d.clientGoneForAttachment(token, true)
+		if effect.current() {
+			d.clientGoneForAttachment(effect, true)
 			return true
 		}
 	case ports.MsgAck:
 		if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
-			d.ackOutput(token, ack.Epoch, ack.State)
+			d.ackOutput(effect, ack.Epoch, ack.State)
 		}
 	case ports.MsgOutputResetRequest:
 		if _, derr := ports.UnmarshalOutputResetRequest(f.Payload); derr == nil {
-			d.resetOutput(token)
+			d.resetOutput(effect)
 		}
 	case ports.MsgSamePeerSwitchRequest:
 		request, derr := ports.UnmarshalSamePeerSwitchRequest(f.Payload)
@@ -132,27 +131,27 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 			d.log.Warn("malformed same-peer switch request", "err", derr)
 			break
 		}
-		d.switchSamePeerForAttachment(token, request)
+		d.switchSamePeerForAttachment(effect, request)
 	case ports.MsgParkedRouteRequest:
 		request, derr := ports.UnmarshalParkedRouteRequest(f.Payload)
 		if derr != nil {
 			d.log.Warn("malformed parked-route request", "err", derr)
 			break
 		}
-		d.handleParkedRouteRequest(token, request)
+		d.handleParkedRouteRequest(effect, request)
 	case ports.MsgRecentRouteSnapshot:
 		snapshot, derr := ports.UnmarshalRecentRouteSnapshot(f.Payload)
 		if derr != nil {
 			d.log.Warn("malformed recent route snapshot", "err", derr)
 			break
 		}
-		replayIdentity := token.ac.setRouteSnapshot(snapshot)
-		d.invalidateRender(token.sess, token.ac, false, "client_frame_routing.go:route-snapshot")
+		replayIdentity := effect.ac.setRouteSnapshot(snapshot)
+		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-snapshot")
 		if !replayIdentity {
 			break
 		}
-		if err := d.sendCommittedRouteIdentityForAttachment(token); err != nil {
-			d.detachOnAttachmentSendError(token, token.transport.transport)
+		if err := d.sendCommittedRouteIdentityForAttachment(effect); err != nil {
+			d.detachOnAttachmentSendError(effect.capability(), effect.transport.transport)
 		}
 	case ports.MsgRouteAttentionSubscription:
 		subscription, derr := ports.UnmarshalRouteAttentionSubscription(f.Payload)
@@ -160,8 +159,8 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 			d.log.Warn("malformed route attention subscription", "err", derr)
 			break
 		}
-		token.ac.setRouteAttentionSubscription(subscription)
-		d.invalidateRender(token.sess, token.ac, false, "client_frame_routing.go:route-attention")
+		effect.ac.setRouteAttentionSubscription(subscription)
+		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-attention")
 	case ports.MsgRouteNavigationFailure:
 		failure, derr := ports.UnmarshalRouteNavigationFailure(f.Payload)
 		if derr != nil {
@@ -181,29 +180,29 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 		case ports.RouteFailureNoSuchRoute:
 			message = "that recent route no longer exists"
 		}
-		d.notify(token.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)
+		d.notify(effect.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)
 	case ports.MsgCommand:
 		request, derr := ports.UnmarshalCommandRequest(f.Payload)
 		if derr != nil {
 			return false
 		}
-		result := d.executeAttachedCommand(token, request)
-		resultToken, ok := d.commandResultToken(token)
+		result := d.executeAttachedCommand(effect, request)
+		resultEffect, ok := d.commandResultEffect(effect)
 		if !ok {
 			// A remote handoff or explicit detach deliberately retired the old
 			// attachment; it must not be treated as a stale-result send error.
 			return true
 		}
-		if err := resultToken.sendControl(frameCommandResult(result)); err != nil {
-			resultToken.endAttachmentEffect()
-			d.detachOnAttachmentSendError(resultToken, resultToken.transport.transport)
+		if err := resultEffect.sendControl(frameCommandResult(result)); err != nil {
+			resultEffect.End()
+			d.detachOnAttachmentSendError(resultEffect.capability(), resultEffect.transport.transport)
 			return true
 		}
-		resultToken.endAttachmentEffect()
+		resultEffect.End()
 	case ports.MsgPing:
-		if err := token.sendControl(framePong()); err != nil {
-			token.endAttachmentEffect()
-			d.detachOnAttachmentSendError(token, token.transport.transport)
+		if err := effect.sendControl(framePong()); err != nil {
+			effect.End()
+			d.detachOnAttachmentSendError(effect.capability(), effect.transport.transport)
 			return true
 		}
 	default:
@@ -213,34 +212,28 @@ func (d *Daemon) handleAttachmentClientFrame(token attachmentConnectionToken, f 
 	return false
 }
 
-// commandResultToken renews the attachment effect after a local navigation
-// transition ends the command's initiating effect. A retired transport/session
-// means the command deliberately handed off or detached and has no result to
-// send on the old carriage.
-func (d *Daemon) commandResultToken(token attachmentConnectionToken) (attachmentConnectionToken, bool) {
-	if token.ac == nil || !token.ac.currentTransportIs(token.transport.transport) {
-		return attachmentConnectionToken{}, false
+// commandResultEffect renews admission after a local navigation transition
+// ends the command's initiating effect. A retired Transport or Session means
+// the command deliberately handed off or detached and has no result carriage.
+func (d *Daemon) commandResultEffect(effect *attachmentEffect) (*attachmentEffect, bool) {
+	if effect == nil || effect.ac == nil || !effect.ac.currentTransportIs(effect.transport.transport) {
+		return nil, false
 	}
-	sess := token.ac.currentAttachmentSession()
+	if effect.current() && effect.attachmentCapability.current() {
+		return effect, true
+	}
+	sess := effect.ac.currentAttachmentSession()
 	if sess == nil {
-		return attachmentConnectionToken{}, false
+		return nil, false
 	}
-	resultToken := attachmentToken(sess, token.ac, token.transport.transport)
-	if resultToken.ac == nil {
-		return attachmentConnectionToken{}, false
+	capability := captureAttachmentCapability(sess, effect.ac, effect.transport.transport)
+	if capability.ac == nil {
+		return nil, false
 	}
-	if token.effect != nil && !token.effect.ended.Load() && token.current() {
-		return token, true
-	}
-	ticket, admitted := token.ac.beginAttachmentEffect(resultToken)
-	if !admitted {
-		return attachmentConnectionToken{}, false
-	}
-	resultToken.effect = ticket
-	return resultToken, true
+	return effect.ac.beginAttachmentEffect(capability)
 }
 
-func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request ports.CommandRequest) ports.CommandResult {
+func (d *Daemon) executeAttachedCommand(effect *attachmentEffect, request ports.CommandRequest) ports.CommandResult {
 	result := ports.CommandResult{RequestID: request.RequestID}
 	if request.Version != ports.ProtocolVersion {
 		result.Code = ports.ErrInvalidCommandArgs
@@ -267,8 +260,8 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 		result.Text = "attached commands cannot override their active session target"
 		return result
 	}
-	sess := token.sess
-	if sess == nil || !token.attachmentEffectCurrent() {
+	sess := effect.sess
+	if sess == nil || !effect.current() {
 		result.Code = ports.ErrNoSuchTarget
 		result.Text = "attached session is no longer active"
 		return result
@@ -292,7 +285,7 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 	// The frame's attachment token is the target capability. No registry/name lookup is
 	// performed, so the command cannot escape to another remote session.
 	err := sess.runMutation(func() error {
-		return cmd.Run(paletteExec{d: d, sess: sess, ac: token.ac, effect: token.effect}, request.Args)
+		return cmd.Run(paletteExec{d: d, sess: sess, ac: effect.ac, effect: effect}, request.Args)
 	})
 	if err == nil {
 		result.OK = true
@@ -311,13 +304,13 @@ func (d *Daemon) executeAttachedCommand(token attachmentConnectionToken, request
 // resetOutput rebases only the exact attachment and transport admitted
 // by the frame router. sendMu serializes the rebase with every output send;
 // transport revalidation under that lock rejects a link replaced while waiting.
-func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
-	ac := token.ac
-	if ac == nil || token.effect == nil || token.effect.ended.Load() {
+func (d *Daemon) resetOutput(effect *attachmentEffect) bool {
+	if !effect.current() || effect.ac == nil {
 		return false
 	}
+	ac := effect.ac
 	ac.sendMu.Lock()
-	if token.effect.ended.Load() || !token.attachmentCurrent() || ac.output == nil {
+	if !effect.current() || ac.output == nil {
 		ac.sendMu.Unlock()
 		return false
 	}
@@ -325,15 +318,15 @@ func (d *Daemon) resetOutput(token attachmentConnectionToken) bool {
 	ac.pipelineCache = composeCacheInput{}
 	ac.pipelineScratch = composeCacheInput{}
 	ac.sendMu.Unlock()
-	go d.paint(token.sess, ac, true, token.lease)
+	go d.paint(effect.sess, ac, true, effect.lease)
 	return true
 }
 
-func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64) bool {
-	ac := token.ac
-	if token.effect == nil || token.effect.ended.Load() {
+func (d *Daemon) ackOutput(effect *attachmentEffect, epoch, state uint64) bool {
+	if !effect.current() || effect.ac == nil {
 		return false
 	}
+	ac := effect.ac
 	ac.sendMu.Lock()
 	if ac.output == nil {
 		ac.sendMu.Unlock()
@@ -342,8 +335,8 @@ func (d *Daemon) ackOutput(token attachmentConnectionToken, epoch, state uint64)
 	acknowledged := ac.output.ack(epoch, state)
 	ac.sendMu.Unlock()
 	if acknowledged {
-		if rc := token.sess.renderCoordinator(); rc != nil {
-			rc.notifyAckForLease(token.lease)
+		if rc := effect.sess.renderCoordinator(); rc != nil {
+			rc.notifyAckForLease(effect.lease)
 		}
 	}
 	return acknowledged

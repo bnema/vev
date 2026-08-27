@@ -42,14 +42,11 @@ type attachedClient struct {
 	terminalCapabilities   ports.TerminalCapabilities
 	navigationCapabilities ports.NavigationCapabilities
 	startupOverlay         ports.StartupOverlay
-	// connectionGeneration is the wire-facing capability generation. attachmentEffects is
-	// the linearization gate for every attachment-bound observable operation. A role
-	// transition freezes and drains this gate before changing either generation
-	// or the session/coordinator registries.
-	connectionGeneration atomic.Uint64
-	attachmentEffects    attachmentEffectGate
-	resumeCapable        bool
-	resumeToken          uint64
+	// lifecycle is the sole authority for attachment capability publication,
+	// effect admission, transition freeze/drain, and connection generation.
+	lifecycle     attachmentLifecycle
+	resumeCapable bool
+	resumeToken   uint64
 	// resumeClaimToken is non-zero only between a parked resume claim and its
 	// successful Welcome. It lets a failed pre-claim handshake restore the old
 	// credential instead of consuming it.
@@ -111,9 +108,9 @@ type attachedClient struct {
 	// routeSessionPurge distinguishes a brand-new session from a restored
 	// stopped session when failed-handshake cleanup removes the live instance.
 	routeSessionPurge bool
-	// beforeAttachmentTokenValidation is a deterministic lifecycle-race seam
+	// beforeAttachmentCapabilityValidation is a deterministic lifecycle-race Seam
 	// used only by package tests.
-	beforeAttachmentTokenValidation func()
+	beforeAttachmentCapabilityValidation func()
 }
 
 type cursorOut struct {
@@ -474,7 +471,7 @@ func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f po
 // attachment's current transport incarnation and admits ticket's interruptible
 // transport send. The caller must already hold ac.sendMu and, on success, owns
 // both the send and its matching ticket.endTransportSend.
-func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSnapshot, ticket *attachmentEffectTicket) error {
+func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSnapshot, ticket *attachmentEffect) error {
 	if expected.transport == nil || !ac.transportSnapshotCurrent(expected) {
 		return errTransportReplaced
 	}
@@ -484,7 +481,7 @@ func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSna
 	return nil
 }
 
-func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportSnapshot, f ports.Frame, ticket *attachmentEffectTicket) error {
+func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportSnapshot, f ports.Frame, ticket *attachmentEffect) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	// A attachment-bound send requires a live ticket, and reports every rejection,
@@ -862,37 +859,36 @@ func (d *Daemon) resetScreenDefaultColors(sess *session) {
 // firstPaintForTransition is the only active post-transition paint entry
 // point. It rejects a stale attachment capability before rebasing output and carries
 // the exact coordinator lease through every resize and render effect.
-func (d *Daemon) firstPaintForTransition(token attachmentConnectionToken) bool {
-	if !token.attachmentCurrent() {
+func (d *Daemon) firstPaintForTransition(capability attachmentCapability) bool {
+	if !capability.current() {
 		return false
 	}
-	ticket, admitted := token.ac.beginAttachmentEffect(token)
+	effect, admitted := capability.ac.beginAttachmentEffect(capability)
 	if !admitted {
 		return false
 	}
-	token.effect = ticket
-	defer token.endAttachmentEffect()
+	defer effect.End()
 	if d.afterAttachmentEffectAdmitted != nil {
-		d.afterAttachmentEffectAdmitted(token)
+		d.afterAttachmentEffectAdmitted(effect.capability())
 	}
-	if token.rebase {
+	if effect.rebase {
 		if d.beforeFirstPaintSendWait != nil {
-			d.beforeFirstPaintSendWait(token)
+			d.beforeFirstPaintSendWait(effect.capability())
 		}
-		token.ac.sendMu.Lock()
-		if token.ac.renderStages.handoffRebase != nil {
-			token.ac.renderStages.handoffRebase()
+		effect.ac.sendMu.Lock()
+		if effect.ac.renderStages.handoffRebase != nil {
+			effect.ac.renderStages.handoffRebase()
 		}
-		token.ac.rebaseOutput()
+		effect.ac.rebaseOutput()
 		// Captures belong to the old session even when pane-local IDs happen
 		// to be reused by the destination.
-		token.ac.captureFrames = nil
-		token.ac.sendMu.Unlock()
+		effect.ac.captureFrames = nil
+		effect.ac.sendMu.Unlock()
 	}
-	if token.sess == nil {
+	if effect.sess == nil {
 		return false
 	}
-	d.firstPaintWithLease(token.sess, token.ac, token.lease, true)
+	d.firstPaintWithLease(effect.sess, effect.ac, effect.lease, true)
 	return true
 }
 
@@ -958,25 +954,25 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 	d.invalidateRender(sess, ac, true, "client.go")
 }
 
-func (d *Daemon) applyThemeForAttachment(token attachmentConnectionToken, msg ports.Theme) {
-	if !token.attachmentEffectCurrent() {
+func (d *Daemon) applyThemeForAttachment(effect *attachmentEffect, msg ports.Theme) {
+	if !effect.current() {
 		return
 	}
 	clientTheme := themeFromMessage(msg)
-	token.ac.setClientTheme(clientTheme)
-	sess := token.sess
-	if sess == nil || !token.attachmentEffectCurrent() || !d.applyHostTheme(sess, token.ac, clientTheme, false) {
+	effect.ac.setClientTheme(clientTheme)
+	sess := effect.sess
+	if sess == nil || !effect.current() || !d.applyHostTheme(sess, effect.ac, clientTheme, false) {
 		return
 	}
-	if !token.attachmentEffectCurrent() {
+	if !effect.current() {
 		return
 	}
 	rc := sess.renderCoordinator()
-	if token.lease == nil || rc == nil {
-		d.invalidateRender(sess, token.ac, true, "client.go")
+	if effect.lease == nil || rc == nil {
+		d.invalidateRender(sess, effect.ac, true, "client.go")
 		return
 	}
-	rc.invalidateForLease(token.ac, token.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
+	rc.invalidateForLease(effect.ac, effect.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "client.go"})
 }
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
@@ -987,26 +983,26 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 // attachment the latest shared tab/PTY geometry claimant. Callers hold the
 // attachment effect admission; output state is rebased before any redraw so
 // every subsequent frame starts a new epoch.
-func (d *Daemon) resizeAttachmentForLease(token attachmentConnectionToken, size domain.Size) bool {
+func (d *Daemon) resizeAttachmentForLease(effect *attachmentEffect, size domain.Size) bool {
 	geometry := domain.Geometry{Size: size}
-	if token.ac != nil {
+	if effect != nil && effect.ac != nil {
 		// Direct size-only callers do not have a fresh pixel pair. Preserve the
 		// attachment's last complete pair instead of downgrading its claim to
 		// cell-only geometry.
-		geometry = token.ac.geometrySnapshot()
+		geometry = effect.ac.geometrySnapshot()
 		geometry.Size = size
 	}
-	return d.resizeAttachmentGeometryForLease(token, geometry)
+	return d.resizeAttachmentGeometryForLease(effect, geometry)
 }
 
-func (d *Daemon) resizeAttachmentGeometryForLease(token attachmentConnectionToken, geometry domain.Geometry) bool {
+func (d *Daemon) resizeAttachmentGeometryForLease(effect *attachmentEffect, geometry domain.Geometry) bool {
 	geometry = geometry.NormalizePixels()
-	if token.ac == nil || !geometry.Valid() || !token.attachmentEffectCurrent() {
+	if !effect.current() || effect.ac == nil || !geometry.Valid() {
 		return false
 	}
-	ac := token.ac
+	ac := effect.ac
 	ac.sendMu.Lock()
-	if !token.attachmentEffectCurrent() || !ac.transportSnapshotCurrent(token.transport) {
+	if !effect.current() || !ac.transportSnapshotCurrent(effect.transport) {
 		ac.sendMu.Unlock()
 		return false
 	}
@@ -1036,7 +1032,7 @@ func (d *Daemon) resizeAttachmentGeometryForLease(token attachmentConnectionToke
 		d.registerPreviewForSelection(ac)
 	}
 
-	sess := token.sess
+	sess := effect.sess
 	if sess == nil {
 		return false
 	}
@@ -1056,8 +1052,8 @@ func (d *Daemon) resizeAttachmentGeometryForLease(token attachmentConnectionToke
 	}
 	// Rendering is attachment-scoped. Schedule it through the coordinator so
 	// rapid resize frames coalesce under the attachment lease and deadline.
-	return rc.scheduleResizeForLease(geometry.Size, ac, token.lease, func(uint64) {
-		go d.paint(sess, ac, true, token.lease)
+	return rc.scheduleResizeForLease(geometry.Size, ac, effect.lease, func(uint64) {
+		go d.paint(sess, ac, true, effect.lease)
 	}) != 0
 }
 
@@ -1071,37 +1067,42 @@ func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice po
 		return
 	}
 	tr := ac.transport()
-	token := sess.attachmentToken(ac, tr)
+	token := sess.captureAttachmentCapability(ac, tr)
 	if token.lease == nil {
 		// Direct test/headless callers retain pointer-based routing. Production
 		// client frames always carry the exact lease through the attachment path below.
 		d.handleClientNoticeDirect(sess, ac, notice)
 		return
 	}
-	d.handleClientNoticeForAttachment(token, notice)
+	effect, admitted := ac.beginAttachmentEffect(token)
+	if !admitted {
+		return
+	}
+	defer effect.End()
+	d.handleClientNoticeForAttachment(effect, notice)
 }
 
-func (d *Daemon) handleClientNoticeForAttachment(token attachmentConnectionToken, notice ports.ClientNotice) {
+func (d *Daemon) handleClientNoticeForAttachment(effect *attachmentEffect, notice ports.ClientNotice) {
 	d.notices.routingMu.Lock()
-	if !token.attachmentEffectCurrent() {
+	if !effect.current() {
 		d.notices.routingMu.Unlock()
 		return
 	}
 	if d.notices.beforeClientNoticeMutation != nil {
 		d.notices.beforeClientNoticeMutation()
 	}
-	if !token.attachmentEffectCurrent() {
+	if !effect.current() {
 		d.notices.routingMu.Unlock()
 		return
 	}
-	if token.sess == nil {
+	if effect.sess == nil {
 		d.notices.routingMu.Unlock()
 		return
 	}
-	repaint := d.mutateClientNotice(token.sess, token.ac, notice)
+	repaint := d.mutateClientNotice(effect.sess, effect.ac, notice)
 	d.notices.routingMu.Unlock()
-	if repaint && token.attachmentEffectCurrent() {
-		d.repaintForNotice(token.ac)
+	if repaint && effect.current() {
+		d.repaintForNotice(effect.ac)
 	}
 }
 

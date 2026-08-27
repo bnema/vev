@@ -60,7 +60,7 @@ func (d *attachmentEffectDrainDeadline) Done() <-chan struct{} {
 	return d.done
 }
 
-type frozenAttachmentEffectGates struct {
+type attachmentTransitionGuard struct {
 	clients       []*attachedClient
 	interruptions map[*attachedClient]transportSnapshot
 	acquired      bool
@@ -84,7 +84,7 @@ type attachmentEffectFreezeOptions struct {
 
 // freezeAttachmentEffectGates establishes transition priority in immutable attachment
 // order, then drains earlier admissions.
-func freezeAttachmentEffectGates(clients ...*attachedClient) frozenAttachmentEffectGates {
+func freezeAttachmentEffectGates(clients ...*attachedClient) attachmentTransitionGuard {
 	return freezeAttachmentEffectGatesWith(attachmentEffectFreezeOptions{}, clients...)
 }
 
@@ -93,11 +93,11 @@ func freezeAttachmentEffectGates(clients ...*attachedClient) frozenAttachmentEff
 // behind another owner, only gates acquired by this call are rolled back, in
 // reverse order. nonblocking is used by move reservations to avoid inverting
 // the move/teardown protocols.
-func freezeAttachmentEffectGatesWith(options attachmentEffectFreezeOptions, clients ...*attachedClient) frozenAttachmentEffectGates {
+func freezeAttachmentEffectGatesWith(options attachmentEffectFreezeOptions, clients ...*attachedClient) attachmentTransitionGuard {
 	ordered := orderedAttachmentEffectClients(clients)
 	frozen, acquired := acquireAttachmentEffectGates(ordered, options.done, options.afterFrozen, options.nonblocking)
 	if !acquired {
-		return frozenAttachmentEffectGates{}
+		return attachmentTransitionGuard{}
 	}
 
 	interruptByClient := attachmentTransportInterruptsByClient(options.interrupts)
@@ -121,18 +121,18 @@ func orderedAttachmentEffectClients(clients []*attachedClient) []*attachedClient
 			continue
 		}
 		unique[ac] = struct{}{}
-		ac.attachmentEffects.immutableOrder()
+		ac.lifecycle.immutableOrder()
 		ordered = append(ordered, ac)
 	}
 	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].attachmentEffects.order.Load() < ordered[j].attachmentEffects.order.Load()
+		return ordered[i].lifecycle.order.Load() < ordered[j].lifecycle.order.Load()
 	})
 	return ordered
 }
 
 // waitForAttachmentEffectChangeLocked requires g.mu and returns with g.mu held. A
 // true result means the overall deadline won and the caller must stop waiting.
-func waitForAttachmentEffectChangeLocked(g *attachmentEffectGate, done func() <-chan struct{}) bool {
+func waitForAttachmentEffectChangeLocked(g *attachmentLifecycle, done func() <-chan struct{}) bool {
 	if done == nil {
 		g.cond.Wait()
 		return false
@@ -156,22 +156,22 @@ func waitForAttachmentEffectChangeLocked(g *attachmentEffectGate, done func() <-
 // acquireAttachmentEffectGates establishes exclusive transition ownership in order.
 // It must run without architecture locks. Deadline rollback releases only this
 // call's partial acquisition and does so in reverse order.
-func acquireAttachmentEffectGates(ordered []*attachedClient, done func() <-chan struct{}, afterFrozen func(*attachedClient), nonblocking bool) (frozenAttachmentEffectGates, bool) {
-	frozen := frozenAttachmentEffectGates{clients: make([]*attachedClient, 0, len(ordered))}
+func acquireAttachmentEffectGates(ordered []*attachedClient, done func() <-chan struct{}, afterFrozen func(*attachedClient), nonblocking bool) (attachmentTransitionGuard, bool) {
+	frozen := attachmentTransitionGuard{clients: make([]*attachedClient, 0, len(ordered))}
 	for _, ac := range ordered {
-		g := &ac.attachmentEffects
+		g := &ac.lifecycle
 		g.mu.Lock()
 		g.initLocked()
 		for g.phase == attachmentEffectsFrozen {
 			if nonblocking {
 				g.mu.Unlock()
 				frozen.unfreeze()
-				return frozenAttachmentEffectGates{}, false
+				return attachmentTransitionGuard{}, false
 			}
 			if waitForAttachmentEffectChangeLocked(g, done) {
 				g.mu.Unlock()
 				frozen.unfreeze()
-				return frozenAttachmentEffectGates{}, false
+				return attachmentTransitionGuard{}, false
 			}
 		}
 		g.phase = attachmentEffectsFrozen
@@ -204,7 +204,7 @@ func interruptFrozenAttachmentTransports(ordered []*attachedClient, interruptByC
 		if !mayInterrupt {
 			continue
 		}
-		g := &ac.attachmentEffects
+		g := &ac.lifecycle
 		g.mu.Lock()
 		if gateHasTransportEffectLocked(g, expected) {
 			toClose = append(toClose, attachmentTransportInterrupt{ac: ac, transport: expected})
@@ -221,7 +221,7 @@ func interruptFrozenAttachmentTransports(ordered []*attachedClient, interruptByC
 // late tickets can then retire without pinning the owner indefinitely.
 func drainFrozenAttachmentEffects(ordered []*attachedClient, interruptByClient, interruptions map[*attachedClient]transportSnapshot, done func() <-chan struct{}) bool {
 	for _, ac := range ordered {
-		g := &ac.attachmentEffects
+		g := &ac.lifecycle
 		g.mu.Lock()
 		for g.inFlight != 0 {
 			if waitForAttachmentEffectChangeLocked(g, done) {
@@ -238,7 +238,7 @@ func drainFrozenAttachmentEffects(ordered []*attachedClient, interruptByClient, 
 	return true
 }
 
-func gateHasTransportEffectLocked(g *attachmentEffectGate, expected transportSnapshot) bool {
+func gateHasTransportEffectLocked(g *attachmentLifecycle, expected transportSnapshot) bool {
 	for _, active := range g.transportEffects {
 		if active.transport == expected.transport && active.incarnation == expected.incarnation {
 			return true
@@ -247,9 +247,9 @@ func gateHasTransportEffectLocked(g *attachmentEffectGate, expected transportSna
 	return false
 }
 
-func (f frozenAttachmentEffectGates) unfreeze() {
+func (f attachmentTransitionGuard) unfreeze() {
 	for i := len(f.clients) - 1; i >= 0; i-- {
-		g := &f.clients[i].attachmentEffects
+		g := &f.clients[i].lifecycle
 		g.mu.Lock()
 		g.initLocked()
 		g.phase = attachmentEffectsStable

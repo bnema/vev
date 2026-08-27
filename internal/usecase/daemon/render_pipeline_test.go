@@ -686,12 +686,12 @@ func TestNoticeStylesFromMapsWarnToDedicatedRoleDistinctFromInfo(t *testing.T) {
 
 func TestEmitFrameSkipsTransportSendWhenAttachmentEffectFenceRejects(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	token := sess.attachmentToken(ac, ac.transport())
+	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	ac.attachmentEffects.mu.Lock()
-	ac.attachmentEffects.capability.transport = transportSnapshot{}
-	ac.attachmentEffects.mu.Unlock()
+	ac.lifecycle.mu.Lock()
+	ac.lifecycle.capability.transport = transportSnapshot{}
+	ac.lifecycle.mu.Unlock()
 
 	state := cacheState("stale", 1)
 	state.attachment = ac

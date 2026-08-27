@@ -39,25 +39,26 @@ func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed 
 	d.finishClientGone(sess, ac, failed, explicit, notice)
 }
 
-func (d *Daemon) clientGoneForAttachment(token attachmentConnectionToken, explicit bool) bool {
-	if token.effect == nil {
+func (d *Daemon) clientGoneForAttachment(effect *attachmentEffect, explicit bool) bool {
+	if effect == nil {
 		return false
 	}
-	token.effect.bindActionEnd(d, "detach")
-	token.effect.End()
-	sess := token.sess
+	effect.bindActionEnd(d, "detach")
+	effect.End()
+	capability := effect.capability()
+	sess := capability.sess
 	if sess == nil {
 		return false
 	}
 	var parkingToken uint64
 	if !explicit {
-		parkingToken = d.markParkingInFlight(sess, token.ac)
+		parkingToken = d.markParkingInFlight(sess, capability.ac)
 	}
-	if !d.detachIfAttachmentCurrent(token) {
-		d.clearParkingInFlightIfAbandoned(sess, token.ac, parkingToken)
+	if !d.detachIfAttachmentCurrent(capability) {
+		d.clearParkingInFlightIfAbandoned(sess, capability.ac, parkingToken)
 		return false
 	}
-	d.finishClientGone(sess, token.ac, token.transport.transport, explicit, true)
+	d.finishClientGone(sess, capability.ac, capability.transport.transport, explicit, true)
 	return true
 }
 
@@ -131,11 +132,11 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
 }
 
-func (d *Daemon) detachOnAttachmentSendError(token attachmentConnectionToken, failed ports.Transport) {
+func (d *Daemon) detachOnAttachmentSendError(token attachmentCapability, failed ports.Transport) {
 	d.detachOnAttachmentSendErrorUntil(token, failed, nil)
 }
 
-func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToken, failed ports.Transport, done func() <-chan struct{}) {
+func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentCapability, failed ports.Transport, done func() <-chan struct{}) {
 	// A delayed sender may report after the client has rebound. Only the exact
 	// transport captured by this attachment is allowed to detach either lifecycle.
 	if failed == nil || failed != token.transport.transport {
@@ -156,7 +157,7 @@ func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentConnectionToke
 // reserveAttachmentSendErrorCleanup accounts for cleanup before End releases the
 // attachment gate. This closes the WaitGroup Add/Wait race with terminal teardown;
 // the returned launch function must be invoked immediately after ticket End.
-func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentConnectionToken, failed ports.Transport) func() {
+func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentCapability, failed ports.Transport) func() {
 	d.attachmentCleanupWg.Add(1)
 	return func() {
 		go func() {

@@ -204,9 +204,9 @@ func chunkReadPTY(t *testing.T, chunks ...[]byte) *portsmocks.MockPTY {
 
 func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClient, tr ports.Transport) {
 	rc := d.attachCoordinator(sess, nil, ac, true)
-	token := sess.attachmentToken(ac, tr)
+	token := sess.captureAttachmentCapability(ac, tr)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 }
 
 func clipboardOwnerLease(t *testing.T, sess *session) paneEffectLease {
@@ -419,7 +419,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 		close(workerDone)
 	}()
 	require.Eventually(t, func() bool {
-		return ac.attachmentEffects.inFlightCount() == 1
+		return ac.lifecycle.inFlightCount() == 1
 	}, time.Second, time.Millisecond, "clipboard send was not admitted before waiting on sendMu")
 
 	sourceTab := testAttachmentTab(sess)

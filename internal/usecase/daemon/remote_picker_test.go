@@ -686,14 +686,13 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	d.remoteCatalog.status["arch"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-	token := sess.attachmentToken(ac, ac.transport())
+	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
-	require.NoError(t, d.sendRemoteAttachTargetForAttachment(token, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "attach target")
 	require.Equal(t, ports.MsgAttachTarget, frame.Type)
@@ -742,11 +741,10 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	local.remoteCatalog.status["arch"] = remoteHostFresh
 	local.remoteCatalog.mu.Unlock()
 	localSession, localAttachment, sends := addRemoteRefreshPickerOwner(t, local, "local")
-	token := localSession.attachmentToken(localAttachment, localAttachment.transport())
+	token := localSession.captureAttachmentCapability(localAttachment, localAttachment.transport())
 	effect, admitted := localAttachment.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
-	require.NoError(t, local.sendRemoteAttachTargetForAttachment(token, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "stopped remote target")
 	handoff, err := ports.UnmarshalAttachTarget(frame.Payload)
@@ -814,11 +812,10 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	local.remoteCatalog.status["arch"] = remoteHostFresh
 	local.remoteCatalog.mu.Unlock()
 	localSession, localAttachment, sends := addRemoteRefreshPickerOwner(t, local, "local")
-	token := localSession.attachmentToken(localAttachment, localAttachment.transport())
+	token := localSession.captureAttachmentCapability(localAttachment, localAttachment.transport())
 	effect, admitted := localAttachment.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
-	require.NoError(t, local.sendRemoteAttachTargetForAttachment(token, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "stopped remote target without tab metadata")
 	handoff, err := ports.UnmarshalAttachTarget(frame.Payload)
@@ -858,11 +855,11 @@ func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 			if tt.action == ports.NavigationOpenHomePicker {
 				ac.navigationCapabilities = ports.NavigationCapabilityHomePicker
 			}
-			token := sess.attachmentToken(ac, ac.transport())
+			token := sess.captureAttachmentCapability(ac, ac.transport())
 			effect, admitted := ac.beginAttachmentEffect(token)
 			require.True(t, admitted)
-			token.effect = effect
-			require.NoError(t, d.sendNavigationActionForAttachment(token, tt.action))
+			defer effect.End()
+			require.NoError(t, d.sendNavigationActionForAttachment(effect, tt.action))
 			frame := receiveRemotePicker(t, sends, "navigation action")
 			require.Equal(t, ports.MsgNavigationAction, frame.Type)
 			directive, err := ports.UnmarshalNavigationDirective(frame.Payload)
@@ -901,15 +898,14 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 
 	gone := make(chan struct{})
 	d.afterClientGoneDetach = func() { close(gone) }
-	token := sess.attachmentToken(ac, tr)
+	token := sess.captureAttachmentCapability(ac, tr)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
-	err := d.sendRemoteAttachTargetForAttachment(token, target, sessionHandoffGuard{closePicker: true}, "picker-select")
+	err := d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true}, "picker-select")
 	var userErr *domain.UserError
 	require.ErrorAs(t, err, &userErr)
 	require.Equal(t, "couldn't attach to remote session", userErr.Msg)

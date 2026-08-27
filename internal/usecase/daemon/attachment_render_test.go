@@ -123,13 +123,13 @@ func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 	rc := sess.renderCoordinator()
 	lease := rc.attachmentLease(second)
 	require.True(t, rc.markAttachmentReady(lease))
-	token := sess.attachmentToken(second, secondTransport)
+	token := sess.captureAttachmentCapability(second, secondTransport)
 	token.lease = lease
-	ticket, admitted := second.beginAttachmentEffect(token)
+	second.installTestAttachmentCapability(token)
+	effect, admitted := second.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = ticket
-	require.True(t, d.resizeAttachmentForLease(token, domain.Size{Cols: 120, Rows: 50}))
-	ticket.End()
+	require.True(t, d.resizeAttachmentForLease(effect, domain.Size{Cols: 120, Rows: 50}))
+	effect.End()
 
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
@@ -166,7 +166,7 @@ func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
 
 	require.True(t, rc.markAttachmentReady(freshLease))
-	token := sess.attachmentToken(fresh, newTransport)
+	token := sess.captureAttachmentCapability(fresh, newTransport)
 	token.lease = freshLease
 	painted := make(chan bool, 1)
 	go func() { painted <- d.firstPaintForTransition(token) }()
@@ -282,7 +282,7 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	require.True(t, rc.markAttachmentReady(firstLease))
 	require.True(t, rc.markAttachmentReady(secondLease))
 	resize := func(ac *attachedClient, tr ports.Transport, size domain.Size) {
-		token := sess.attachmentToken(ac, tr)
+		token := sess.captureAttachmentCapability(ac, tr)
 		d.handleAttachmentClientFrame(token, ports.Frame{
 			Type:    ports.MsgResize,
 			Payload: mustMarshalResize(ports.Resize{Size: size}),

@@ -11,7 +11,7 @@ type resizeCommitPublication struct {
 	attachment  *attachedClient
 	lease       *attachmentLease
 	epoch       uint64
-	connection  attachmentConnectionToken
+	effect      *attachmentEffect
 	coordinator *renderCoordinator
 	observer    ports.RuntimeObserver
 	mark        ports.RuntimeMark
@@ -24,19 +24,13 @@ func (p resizeCommitPublication) current() bool {
 	if p.attachment == nil {
 		return true
 	}
-	// Attached resize publication is admitted only through a live attachment effect ticket.
-	if p.connection.effect == nil {
+	// Attached resize publication retains the exact admitted effect; lifecycle
+	// identity cannot change until that effect ends.
+	if !p.effect.current() || p.effect.sess != p.session ||
+		p.effect.ac != p.attachment || p.effect.lease != p.lease || p.coordinator == nil {
 		return false
 	}
-	if p.connection.effect.ended.Load() || p.connection.sess != p.session ||
-		p.connection.ac != p.attachment || p.connection.lease != p.lease ||
-		p.connection.generation != p.attachment.connectionGeneration.Load() ||
-		!p.attachment.transportSnapshotCurrent(p.connection.transport) ||
-		p.attachment.currentSession() != p.session || p.coordinator == nil {
-		return false
-	}
-	registered := attachmentRegistered(p.session, p.attachment)
-	return registered && p.coordinator.resizeCurrentForLease(p.epoch, p.attachment, p.lease, false)
+	return p.coordinator.resizeCurrentForLease(p.epoch, p.attachment, p.lease, false)
 }
 
 // emit performs observer work only after every resize-owner fence and
@@ -57,7 +51,7 @@ func (p resizeCommitPublication) emit() bool {
 // reservation with pane ownership. sendMu is acquired before resize fences, so
 // the canonical rule never acquires an attachment lock while a pane fence is
 // held. Observer callbacks run only after both lock families are released.
-func (d *Daemon) publishResizeCommit(members []resizeMember, sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, ticket *attachmentEffectTicket, size domain.Size) bool {
+func (d *Daemon) publishResizeCommit(members []resizeMember, sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, ticket *attachmentEffect, size domain.Size) bool {
 	if ac != nil && ticket == nil {
 		return false
 	}
@@ -85,7 +79,7 @@ func (d *Daemon) publishResizeCommit(members []resizeMember, sess *session, ac *
 		mark:       ports.NewRuntimeMark("daemon", ports.RuntimeResizeCommitted, 0, true),
 	}
 	if ticket != nil {
-		publication.connection = ticket.connectionToken()
+		publication.effect = ticket
 		publication.coordinator = sess.renderCoordinator()
 	}
 	if !publication.current() {

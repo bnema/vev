@@ -12,13 +12,12 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 	transport := &closeTrackingTransport{}
 	ac.replaceTransport(transport)
 	rc := d.attachCoordinator(source, nil, ac, true)
-	token := source.attachmentToken(ac, transport)
+	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
-	ac.publishAttachmentCapability(token)
+	ac.installTestAttachmentCapability(token)
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
-	token.effect = effect
 	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
 		Generation: 5,
 		Active:     ports.RouteRef{Key: 9, Generation: 5},
@@ -26,7 +25,7 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 		Entries:    []ports.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, ports.RouteKindLocal)},
 	})
 
-	require.NoError(t, d.backSessionForAttachment(token))
+	require.NoError(t, d.backSessionForAttachment(effect))
 	frames := transport.Sends()
 	require.NotEmpty(t, frames)
 	var action ports.RouteNavigationAction

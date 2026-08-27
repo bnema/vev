@@ -17,25 +17,25 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 		name           string
 		releasedAction string
 		wantErr        bool
-		run            func(*Daemon, *session, *session, *attachedClient, *attachmentEffectTicket) error
+		run            func(*Daemon, *session, *session, *attachedClient, *attachmentEffect) error
 		check          func(*testing.T, *Daemon, *session, *session)
 	}{
 		{
 			name: "picker selection", releasedAction: "detach",
-			run: func(d *Daemon, source, target *session, ac *attachedClient, effect *attachmentEffectTicket) error {
+			run: func(d *Daemon, source, target *session, ac *attachedClient, effect *attachmentEffect) error {
 				d.enterPicker(source, ac)
-				return d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "picker-select")
+				return d.switchToTargetForAttachment(effect, picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "picker-select")
 			},
 		},
 		{
 			name: "palette session", releasedAction: "detach",
-			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffectTicket) error {
-				return d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "palette-session")
+			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffect) error {
+				return d.switchToTargetForAttachment(effect, picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "palette-session")
 			},
 		},
 		{
 			name: "session overflow", releasedAction: "detach",
-			run: func(d *Daemon, source, target *session, ac *attachedClient, effect *attachmentEffectTicket) error {
+			run: func(d *Daemon, source, target *session, ac *attachedClient, effect *attachmentEffect) error {
 				source.mu.Lock()
 				source.name = "alpha"
 				source.mu.Unlock()
@@ -48,13 +48,13 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 		},
 		{
 			name: "stopped session resume", releasedAction: "detach",
-			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffectTicket) error {
+			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffect) error {
 				d.mu.Lock()
 				delete(d.sessions, target.id)
 				d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 9, incarnation: domain.IncarnationID{2}, state: ports.SessionDown}
 				d.mu.Unlock()
 				expectedCreatedAt := int64(9)
-				return d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "stopped-session")
+				return d.switchToTargetForAttachment(effect, picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "stopped-session")
 			},
 			check: func(t *testing.T, d *Daemon, _, _ *session) {
 				d.mu.Lock()
@@ -67,8 +67,8 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 		},
 		{
 			name: "transition prompt creation", releasedAction: "create-session", wantErr: true,
-			run: func(d *Daemon, _ *session, _ *session, _ *attachedClient, effect *attachmentEffectTicket) error {
-				return d.createSessionAndSwitchForAttachment(effect.connectionToken(), "created")
+			run: func(d *Daemon, _ *session, _ *session, _ *attachedClient, effect *attachmentEffect) error {
+				return d.createSessionAndSwitchForAttachment(effect, "created")
 			},
 			check: func(t *testing.T, d *Daemon, _, _ *session) {
 				d.mu.Lock()
@@ -93,9 +93,9 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			d.mu.Unlock()
 
 			rc := d.attachCoordinator(source, nil, old, true)
-			token := source.attachmentToken(old, old.transport())
+			token := source.captureAttachmentCapability(old, old.transport())
 			token.lease = rc.attachmentLease(old)
-			old.publishAttachmentCapability(token)
+			old.installTestAttachmentCapability(token)
 			effect, admitted := old.beginAttachmentEffect(token)
 			require.True(t, admitted)
 
@@ -153,9 +153,9 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 	d.mu.Unlock()
 
 	rc := d.attachCoordinator(source, nil, old, true)
-	token := source.attachmentToken(old, old.transport())
+	token := source.captureAttachmentCapability(old, old.transport())
 	token.lease = rc.attachmentLease(old)
-	old.publishAttachmentCapability(token)
+	old.installTestAttachmentCapability(token)
 	effect, admitted := old.beginAttachmentEffect(token)
 	require.True(t, admitted)
 
@@ -171,7 +171,7 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 	expectedCreatedAt := int64(7)
 	done := make(chan error, 1)
 	go func() {
-		done <- d.switchToTargetForAttachment(effect.connectionToken(), picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "picker-stopped")
+		done <- d.switchToTargetForAttachment(effect, picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "picker-stopped")
 	}()
 	select {
 	case <-ended:

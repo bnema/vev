@@ -457,12 +457,11 @@ func TestRemotePickerPreviewRefreshesAfterAttachmentResize(t *testing.T) {
 	client.release = nil
 	client.startedSignal = false
 	client.mu.Unlock()
-	token := sess.attachmentToken(ac, ac.transport())
+	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	token.effect = effect
 	defer effect.End()
-	require.True(t, d.resizeAttachmentForLease(token, domain.Size{Cols: 100, Rows: 30}))
+	require.True(t, d.resizeAttachmentForLease(effect, domain.Size{Cols: 100, Rows: 30}))
 	<-secondStarted
 	wantWidth, wantHeight := remotePickerPreviewSize(domain.Size{Cols: 100, Rows: 30})
 	gotWidth, gotHeight := client.LastSize()
