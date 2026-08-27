@@ -227,9 +227,9 @@ func (g *sharedPTYGeometry) paneGeometry(size domain.Size) domain.Geometry {
 	return scaleSharedPTYGeometry(claim.geometry, size)
 }
 
-// sessionGeometryViewport returns false when no valid Attachment claim exists.
-func sessionGeometryViewport(sess *session) (domain.Size, *sharedPTYClaim, bool) {
-	claim, ok := sess.geometry.sourceSnapshot(sess)
+// viewport returns false when no valid Attachment claim exists.
+func (g *sharedPTYGeometry) viewport(sess *session) (domain.Size, *sharedPTYClaim, bool) {
+	claim, ok := g.sourceSnapshot(sess)
 	if !ok {
 		return domain.Size{}, nil, false
 	}
@@ -244,23 +244,23 @@ func (g *sharedPTYGeometry) reconcile(d *Daemon, sess *session, source *attached
 		return false
 	}
 	if source != nil {
-		if _, ok := sess.geometry.claimAttachment(sess, source); !ok {
+		if _, ok := g.claimAttachment(sess, source); !ok {
 			return false
 		}
 	}
-	want, claim, ok := sessionGeometryViewport(sess)
+	want, claim, ok := g.viewport(sess)
 	if !ok {
 		return false
 	}
-	current := func() bool { return sess.geometry.current(claim) }
-	applied := sess.geometry.appliedSnapshot()
+	current := func() bool { return g.current(claim) }
+	applied := g.appliedSnapshot()
 	pixelGeometryChanged := (applied.PixelsKnown() || claim.geometry.PixelsKnown()) && applied != claim.geometry
 	if !pixelGeometryChanged && contentSize(sess.fullViewportSize()) == contentSize(want) {
 		return false
 	}
 	failed, ok := g.applySessionLayout(d, sess, want, current, nil)
 	if ok {
-		sess.geometry.publishAppliedIfCurrent(claim)
+		g.publishAppliedIfCurrent(claim)
 	}
 	if ok && len(failed) != 0 {
 		seen := make(map[*tab]struct{}, len(failed))
