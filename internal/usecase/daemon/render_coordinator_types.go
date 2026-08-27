@@ -90,9 +90,9 @@ type resizeRequestMetadata struct {
 	// lease binds every delayed resize/retry callback to the exact attachment
 	// incarnation that published this request.
 	lease         *attachmentLease
-	geometryClaim uint64 // session geometry claim captured by this request
-	epoch         uint64 // latest requested epoch
-	committed     uint64 // latest published epoch
+	geometryClaim *sharedPTYClaim // immutable Session geometry claim captured by this request
+	epoch         uint64          // latest requested epoch
+	committed     uint64          // latest published epoch
 	retryAttempts uint8
 }
 

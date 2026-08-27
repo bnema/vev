@@ -28,12 +28,12 @@ func TestSessionPaneGeometryUsesLatestAttachmentClaimAndTruncates(t *testing.T) 
 	require.True(t, sess.registerAttachment(second))
 	require.Equal(t, domain.Geometry{
 		Size: domain.Size{Cols: 39, Rows: 23}, PixelWidth: 391, PixelHeight: 466,
-	}, sess.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
+	}, sess.geometry.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
 
 	require.True(t, sess.unregisterAttachment(second))
 	require.Equal(t, domain.Geometry{
 		Size: domain.Size{Cols: 39, Rows: 23}, PixelWidth: 390, PixelHeight: 460,
-	}, sess.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
+	}, sess.geometry.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
 }
 
 func TestPreparedLayoutPropagatesGeometryToPTYAndScreenQueries(t *testing.T) {
@@ -45,7 +45,8 @@ func TestPreparedLayoutPropagatesGeometryToPTYAndScreenQueries(t *testing.T) {
 	plan := preparedTabLayout{members: []resizeMember{{pane: pane, rect: domain.Rect{Width: 39, Height: 23}, geometry: geometry}}}
 	daemon := &Daemon{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
-	daemon.applyPreparedTabMembers(&plan)
+	geometryModule := &sharedPTYGeometry{}
+	geometryModule.applyPreparedTabMembers(daemon, &plan)
 	require.True(t, commitPreparedTabLayoutLocked(&plan))
 	require.Equal(t, geometry, pty.geometry)
 	require.Equal(t, vt.Geometry{
@@ -85,27 +86,27 @@ func TestSizeOnlyGeometryClaimsPreservePixelsAndFallback(t *testing.T) {
 	require.True(t, sess.registerAttachment(first))
 	require.True(t, sess.registerAttachment(second))
 
-	_, claimed := sess.claimGeometryOwnerForSize(second, domain.Size{Cols: 80, Rows: 24})
+	_, claimed := sess.geometry.claimSize(sess, second, domain.Size{Cols: 80, Rows: 24})
 	require.True(t, claimed)
 	require.Equal(t, domain.Geometry{
 		Size: domain.Size{Cols: 39, Rows: 23}, PixelWidth: 438, PixelHeight: 517,
-	}, sess.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
+	}, sess.geometry.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
 
 	require.True(t, sess.unregisterAttachment(second))
 	require.Equal(t, domain.Geometry{
 		Size: domain.Size{Cols: 39, Rows: 23}, PixelWidth: 390, PixelHeight: 460,
-	}, sess.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
+	}, sess.geometry.paneGeometry(domain.Size{Cols: 39, Rows: 23}))
 
 	partial := &attachedClient{}
 	partial.setGeometry(domain.Geometry{
 		Size: domain.Size{Cols: 80, Rows: 24}, PixelWidth: 901,
 	})
 	require.True(t, sess.registerAttachment(partial))
-	require.Equal(t, domain.Geometry{Size: domain.Size{Cols: 39, Rows: 23}}, sess.paneGeometry(domain.Size{Cols: 39, Rows: 23}), "partial pixels must remain cell-only")
+	require.Equal(t, domain.Geometry{Size: domain.Size{Cols: 39, Rows: 23}}, sess.geometry.paneGeometry(domain.Size{Cols: 39, Rows: 23}), "partial pixels must remain cell-only")
 	require.True(t, sess.unregisterAttachment(partial))
 	require.Equal(t, domain.Geometry{
 		Size: domain.Size{Cols: 39, Rows: 23}, PixelWidth: 390, PixelHeight: 460,
-	}, sess.paneGeometry(domain.Size{Cols: 39, Rows: 23}), "fallback must restore the remaining complete pair")
+	}, sess.geometry.paneGeometry(domain.Size{Cols: 39, Rows: 23}), "fallback must restore the remaining complete pair")
 }
 
 func TestSizeOnlyLayoutAndFloatingRetainClaimingPixelGeometry(t *testing.T) {
@@ -119,7 +120,7 @@ func TestSizeOnlyLayoutAndFloatingRetainClaimingPixelGeometry(t *testing.T) {
 	tb := newTab(layoutPTY, domain.Size{Cols: 80, Rows: 22})
 	sess.tabs = []*tab{tb}
 	d := newTestDaemon(t, nil, stubClock{})
-	require.True(t, d.applyTabLayout(sess, tb))
+	require.True(t, sess.geometry.applyTabLayout(d, sess, tb))
 	require.Equal(t, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 22}, PixelWidth: 800, PixelHeight: 440}, layoutPTY.geometry)
 
 	floatingPTY := &recordingGeometryPTY{}
@@ -129,7 +130,7 @@ func TestSizeOnlyLayoutAndFloatingRetainClaimingPixelGeometry(t *testing.T) {
 	floating := newPane("floating", floatingPTY, rectSize(floatingGeometry.Inner))
 	floating.popupGeometry = floatingGeometry
 	tb.floating = floatingSlot{state: floatingVisible, pane: floating, generation: 1}
-	failed, ok := d.applyVisibleFloatingLayout(sess, tb, nil)
+	failed, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
 	require.True(t, ok)
 	require.Empty(t, failed)
 	ptyRect := floatingGeometry.ptyRect()

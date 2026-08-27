@@ -84,10 +84,10 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 		tb.bumpLayoutGenerationLocked()
 		tb.mu.Unlock()
 
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 		// A second accepted failure joins the existing worker rather than adding
 		// another timer/goroutine.
-		d.scheduleAcceptedTabLayoutRetry(sess, tb)
+		sess.geometry.scheduleAcceptedTabLayoutRetry(d, sess, tb)
 		for range maxAcceptedTabLayoutRetries {
 			var timer *layoutRetryTimer
 			for timer == nil {
@@ -123,7 +123,7 @@ func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
 		tb.size = domain.Size{Cols: 100, Rows: 20}
 		tb.bumpLayoutGenerationLocked()
 		tb.mu.Unlock()
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 		var timer *layoutRetryTimer
 		for timer == nil {
 			candidate := <-clock.timers
@@ -177,7 +177,7 @@ func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 			resized.Do(func() { close(secondResize) })
 		}
 	}
-	d.applyTabLayout(sess, tb)
+	sess.geometry.applyTabLayout(d, sess, tb)
 
 	var timer *layoutRetryTimer
 	for timer == nil {
@@ -271,7 +271,7 @@ func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 		close(done)
 	}()
 	awaitSignal(t, entered, "PTY resize did not start")
@@ -303,7 +303,7 @@ func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 		close(done)
 	}()
 	awaitSignal(t, entered, "stale PTY resize did not start")
@@ -351,7 +351,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		tb.mu.Unlock()
 
 		done := make(chan struct{})
-		go func() { d.applyTabLayout(sess, tb); close(done) }()
+		go func() { sess.geometry.applyTabLayout(d, sess, tb); close(done) }()
 		awaitSignal(t, entered, "old layout apply did not block")
 		closed := make(chan error, 1)
 		go func() { closed <- d.closePane(sess, tb, p2.id, nil, false) }()
@@ -393,7 +393,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		tb.mu.Unlock()
 
 		done := make(chan struct{})
-		go func() { d.applyTabLayout(sess, tb); close(done) }()
+		go func() { sess.geometry.applyTabLayout(d, sess, tb); close(done) }()
 		awaitSignal(t, entered, "old stack apply did not block")
 		tb.mu.Lock()
 		require.True(t, focusPlacementLocked(tb, p2.id))
@@ -422,10 +422,12 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		p.rect = domain.Rect{Width: 20, Height: 10}
 
 		oldDone := make(chan struct{})
-		go func() { d.applyTabLayout(sess, tb); close(oldDone) }()
+		go func() { sess.geometry.applyTabLayout(d, sess, tb); close(oldDone) }()
 		awaitSignal(t, entered, "old size apply did not block")
 		resizeDone := make(chan bool, 1)
-		go func() { resizeDone <- d.requestTransactionalResize(sess, nil, domain.Size{Cols: 100, Rows: 30}, true) }()
+		go func() {
+			resizeDone <- sess.geometry.requestResize(d, sess, nil, domain.Size{Cols: 100, Rows: 30}, true)
+		}()
 		// Session resize now stages the target privately until every external
 		// apply validates and the transaction is admitted, so neither the size
 		// nor pane geometry is visible while the old PTY call is blocked.
@@ -591,7 +593,7 @@ func TestApplyLayoutResizesPTYsAndScreens(t *testing.T) {
 	oldPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Once()
 	newPTY.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 20, Rows: 10}}).Return(nil).Once()
 
-	d.applyTabLayout(sess, tb)
+	sess.geometry.applyTabLayout(d, sess, tb)
 
 	require.Equal(t, 20, tb.panes["pane-1"].screen.Frame.Width)
 	require.Equal(t, 20, tb.panes["pane-2"].screen.Frame.Width)

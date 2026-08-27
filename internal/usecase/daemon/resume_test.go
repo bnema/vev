@@ -1217,7 +1217,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	tb.panes[closed.id] = closed
 	tb.bumpLayoutGenerationLocked()
 	tb.mu.Unlock()
-	d.applyTabLayout(sess, tb)
+	sess.geometry.applyTabLayout(d, sess, tb)
 	survivor.screen.Write([]byte("survivor"))
 	closed.screen.Write([]byte("closed"))
 	d.paint(sess, ac, true, nil)

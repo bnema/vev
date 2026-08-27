@@ -334,9 +334,9 @@ func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {
 			return
 		}
 		superseded = true
-		sess.claimGeometryOwner(second)
+		sess.geometry.claimAttachment(sess, second)
 	}
-	require.False(t, d.recalculateSessionGeometry(sess, first), "a newer attachment claim must reject the stale layout commit")
+	require.False(t, sess.geometry.reconcile(d, sess, first), "a newer attachment claim must reject the stale layout commit")
 
 	tb := sess.tabs[0]
 	tb.mu.Lock()
@@ -344,7 +344,7 @@ func TestStaleAttachmentGeometryClaimCannotCommit(t *testing.T) {
 	tb.mu.Unlock()
 
 	d.beforeSessionResizePublication = nil
-	require.True(t, d.recalculateSessionGeometry(sess, nil))
+	require.True(t, sess.geometry.reconcile(d, sess, nil))
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 90, Rows: 28}, tb.size)
 	tb.mu.Unlock()
@@ -358,9 +358,9 @@ func TestAttachmentMoveReconcilesSourceGeometryAfterOwnerRemoval(t *testing.T) {
 	require.True(t, source.registerAttachment(peer))
 
 	moved.setSize(domain.Size{Cols: 120, Rows: 40})
-	_, claimed := source.claimGeometryOwner(moved)
+	_, claimed := source.geometry.claimAttachment(source, moved)
 	require.True(t, claimed)
-	require.True(t, d.recalculateSessionGeometry(source, nil))
+	require.True(t, source.geometry.reconcile(d, source, nil))
 
 	target := &session{
 		sessionCore: sessionCore{id: "target-geometry", name: "target-geometry"},

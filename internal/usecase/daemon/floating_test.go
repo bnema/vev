@@ -244,7 +244,7 @@ func TestFloatingBlockedOpenReconcilesLatestResponsiveSize(t *testing.T) {
 	d.startFloating(sess, tb, true)
 	openCall := <-opened
 	require.Equal(t, rectSize(calculateContentFloatingGeometry(tabSize(initial), cfg).Inner), openCall.size)
-	require.True(t, d.requestTransactionalResize(sess, nil, latest, true))
+	require.True(t, sess.geometry.requestResize(d, sess, nil, latest, true))
 	allowOpen()
 	select {
 	case <-resized:

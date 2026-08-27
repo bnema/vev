@@ -68,7 +68,7 @@ func (d *Daemon) mutateTargetLayoutChanged(target daemonActionTarget, requirePan
 	target.session.mu.Unlock()
 	d.mu.Unlock()
 
-	if !d.applyTabLayout(target.session, target.tab) {
+	if !target.session.geometry.applyTabLayout(d, target.session, target.tab) {
 		target.tab.mu.Lock()
 		applied := target.tab.tree == candidate
 		target.tab.mu.Unlock()

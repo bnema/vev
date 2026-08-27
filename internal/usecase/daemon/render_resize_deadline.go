@@ -10,14 +10,14 @@ const maxResizeRetryAttempts = 3
 // Resize deadlines and retries retain coordinator-owned attachment, epoch, and
 // token validation at every callback effect boundary.
 func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
-	return c.recordResizeRequestForLeaseWithClaim(size, source, c.attachmentLease(source), 0)
+	return c.recordResizeRequestForLeaseWithClaim(size, source, c.attachmentLease(source), nil)
 }
 
 func (c *renderCoordinator) recordResizeRequestForLease(size domain.Size, source *attachedClient, lease *attachmentLease) uint64 {
-	return c.recordResizeRequestForLeaseWithClaim(size, source, lease, 0)
+	return c.recordResizeRequestForLeaseWithClaim(size, source, lease, nil)
 }
 
-func (c *renderCoordinator) recordResizeRequestForLeaseWithClaim(size domain.Size, source *attachedClient, lease *attachmentLease, geometryClaim uint64) uint64 {
+func (c *renderCoordinator) recordResizeRequestForLeaseWithClaim(size domain.Size, source *attachedClient, lease *attachmentLease, geometryClaim *sharedPTYClaim) uint64 {
 	c.mu.Lock()
 	if !c.leaseCurrentLocked(lease, false) || lease.attachment != source {
 		c.mu.Unlock()
@@ -35,10 +35,10 @@ func (c *renderCoordinator) recordResizeRequestForLeaseWithClaim(size domain.Siz
 }
 
 func (c *renderCoordinator) scheduleResizeForLease(size domain.Size, source *attachedClient, lease *attachmentLease, run func(uint64)) uint64 {
-	return c.scheduleResizeForLeaseWithClaim(size, source, lease, 0, run)
+	return c.scheduleResizeForLeaseWithClaim(size, source, lease, nil, run)
 }
 
-func (c *renderCoordinator) scheduleResizeForLeaseWithClaim(size domain.Size, source *attachedClient, lease *attachmentLease, geometryClaim uint64, run func(uint64)) uint64 {
+func (c *renderCoordinator) scheduleResizeForLeaseWithClaim(size domain.Size, source *attachedClient, lease *attachmentLease, geometryClaim *sharedPTYClaim, run func(uint64)) uint64 {
 	epoch := c.recordResizeRequestForLeaseWithClaim(size, source, lease, geometryClaim)
 	if epoch == 0 {
 		return 0

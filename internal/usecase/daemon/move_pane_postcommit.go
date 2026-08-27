@@ -110,10 +110,10 @@ func (p movePanePostcommitPlan) execute(d *Daemon) {
 			sourceLayoutTab = p.source.firstTab()
 		}
 		if sourceLayoutTab != nil && sourceLayoutTab != p.destinationTab {
-			d.applyTabLayout(p.source, sourceLayoutTab)
+			p.source.geometry.applyTabLayout(d, p.source, sourceLayoutTab)
 		}
 	}
-	d.applyTabLayout(p.destination, p.destinationTab)
+	p.destination.geometry.applyTabLayout(d, p.destination, p.destinationTab)
 	if p.sourceMetadataValid && !p.sourceEmpty {
 		d.markCatalogueDirty(p.sourceMetadata)
 	}

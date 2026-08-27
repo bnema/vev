@@ -1,67 +1,212 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import (
+	"sync"
+	"sync/atomic"
 
-// sessionGeometrySource identifies the attachment whose latest attach,
-// resume, or resize claim controls shared PTY/layout geometry. claim is zero
-// only for legacy/headless test fixtures that construct attachment maps
-// directly instead of publishing them through the attachment registry.
-type sessionGeometrySource struct {
+	"github.com/bnema/vev/internal/domain"
+)
+
+// sharedPTYClaim is one immutable attach, resume, or resize claim for shared
+// Session PTY geometry. A Session retains only the latest claim per registered
+// Attachment; historical claims from the same Attachment are never fallback
+// candidates.
+type sharedPTYClaim struct {
 	attachment *attachedClient
 	geometry   domain.Geometry
-	claim      uint64
+	sequence   uint64
 }
 
-// geometrySourceSnapshot returns the latest live attachment claim. The
-// attachment registry publishes geometryOwner under the session lock, and this
-// function reads the owner, claim, and claim size under that same lock. Later
-// revalidation at the layout publication fence is lock-free so a stale claim
-// can be rejected without taking session.mu.
-func (s *session) geometrySourceSnapshot() (sessionGeometrySource, bool) {
-	if s == nil {
-		return sessionGeometrySource{}, false
-	}
-
-	s.mu.Lock()
-	s.refreshGeometryOwnerLocked()
-	owner := s.geometryOwner.Load()
-	var geometry domain.Geometry
-	var claim uint64
-	if owner != nil {
-		geometry = owner.geometryClaimSnapshot()
-		claim = owner.geometryClaim.Load()
-	}
-	s.mu.Unlock()
-
-	if owner == nil || !geometry.Valid() {
-		return sessionGeometrySource{}, false
-	}
-	return sessionGeometrySource{attachment: owner, geometry: geometry, claim: claim}, true
+// sharedPTYGeometry is the concrete Session Module for shared PTY geometry.
+// It owns claim publication, latest-valid selection, and accepted geometry.
+// Attachment, render-coordinator, Tab, Pane, floating, and Move state retain
+// their independent owners and are consumed through their existing fences.
+type sharedPTYGeometry struct {
+	mu       sync.Mutex
+	latest   atomic.Pointer[sharedPTYClaim]
+	claims   map[*attachedClient]*sharedPTYClaim // session.mu -> mu
+	sequence uint64                              // session.mu -> mu
+	applied  domain.Geometry                     // mu
 }
 
-// geometryClaimTokenCurrent is deliberately lock-free. applySessionLayout invokes
-// its current callback while tab locks are held, so taking session.mu here
-// would reverse the session -> tab ordering used by layout mutation paths.
-func (s *session) geometryClaimTokenCurrent(attachment *attachedClient, claim uint64) bool {
-	if s == nil || attachment == nil || claim == 0 {
-		return true
+// latestValidClaimLocked selects the most recent valid remaining Attachment
+// claim. The caller holds both session.mu and g.mu.
+func (g *sharedPTYGeometry) latestValidClaimLocked(core *sessionCore, exclude *attachedClient) *sharedPTYClaim {
+	if g == nil || core == nil {
+		return nil
 	}
-	return s.geometryOwner.Load() == attachment && attachment.geometryClaim.Load() == claim
+	var latest *sharedPTYClaim
+	var latestOrder uint64
+	for attachment := range core.attachments {
+		if attachment == nil || attachment == exclude || !attachment.geometrySnapshot().Valid() {
+			continue
+		}
+		claim := g.claims[attachment]
+		if claim == nil || !claim.geometry.Valid() {
+			continue
+		}
+		order := core.attachmentOrder[attachment]
+		if latest == nil || claim.sequence > latest.sequence ||
+			(claim.sequence == latest.sequence && order > latestOrder) {
+			latest = claim
+			latestOrder = order
+		}
+	}
+	return latest
 }
 
-func (s *session) geometryClaimCurrent(source sessionGeometrySource) bool {
-	return s.geometryClaimTokenCurrent(source.attachment, source.claim) &&
-		(source.attachment == nil || source.attachment.geometryClaimSnapshot() == source.geometry)
+// refreshLocked repairs an invalid publication without creating a newer
+// claim. The caller holds session.mu.
+func (g *sharedPTYGeometry) refreshLocked(core *sessionCore) {
+	if g == nil || core == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	latest := g.latest.Load()
+	if latest != nil && latest.attachment != nil && g.claims[latest.attachment] == latest &&
+		latest.geometry.Valid() && latest.attachment.geometrySnapshot().Valid() {
+		if _, registered := core.attachments[latest.attachment]; registered {
+			return
+		}
+	}
+	g.latest.Store(g.latestValidClaimLocked(core, nil))
 }
 
-// paneGeometry maps the controlling terminal's optional pixel dimensions to a
-// pane's cell rectangle. Integer division deliberately truncates: the kernel
-// winsize and CSI reports cannot represent fractional pixels.
-// scalePaneGeometry maps a full terminal claim to one pane rectangle. Pixel
-// dimensions are deliberately scaled with integer truncation, matching the
-// mapping used by paneGeometry, but it is also usable while a session is still
-// private and has not published its attachment owner.
-func scalePaneGeometry(full domain.Geometry, size domain.Size) domain.Geometry {
+// claimLocked publishes a new immutable claim. The caller holds session.mu;
+// claim publication then follows the session.mu -> geometry.mu order.
+func (g *sharedPTYGeometry) claimLocked(core *sessionCore, attachment *attachedClient, geometry domain.Geometry) *sharedPTYClaim {
+	if g == nil || core == nil || attachment == nil || !geometry.Valid() {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.claims == nil {
+		g.claims = make(map[*attachedClient]*sharedPTYClaim)
+	}
+	g.sequence++
+	claim := &sharedPTYClaim{
+		attachment: attachment,
+		geometry:   geometry.NormalizePixels(),
+		sequence:   g.sequence,
+	}
+	g.claims[attachment] = claim
+	g.latest.Store(claim)
+	return claim
+}
+
+// removeAttachmentLocked removes the exact Attachment claim and republishes
+// the most recent valid remaining claimant. The caller holds session.mu.
+func (g *sharedPTYGeometry) removeAttachmentLocked(core *sessionCore, attachment *attachedClient) {
+	if g == nil || core == nil || attachment == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.claims, attachment)
+	latest := g.latest.Load()
+	if latest == nil || latest.attachment == attachment {
+		g.latest.Store(g.latestValidClaimLocked(core, attachment))
+	}
+}
+
+func (g *sharedPTYGeometry) claimAttachment(sess *session, attachment *attachedClient) (*sharedPTYClaim, bool) {
+	if attachment == nil {
+		return nil, false
+	}
+	return g.claimGeometry(sess, attachment, attachment.geometrySnapshot())
+}
+
+func (g *sharedPTYGeometry) claimSize(sess *session, attachment *attachedClient, size domain.Size) (*sharedPTYClaim, bool) {
+	if attachment == nil {
+		return nil, false
+	}
+	// Layout and floating requests carry only shared cells. Preserve the
+	// claimant's complete terminal pixel pair for pane mapping and fallback.
+	geometry := attachment.geometrySnapshot()
+	geometry.Size = size
+	return g.claimGeometry(sess, attachment, geometry)
+}
+
+func (g *sharedPTYGeometry) claimGeometry(sess *session, attachment *attachedClient, geometry domain.Geometry) (*sharedPTYClaim, bool) {
+	if g == nil || sess == nil || attachment == nil || !geometry.Valid() {
+		return nil, false
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if _, registered := sess.attachments[attachment]; !registered {
+		return nil, false
+	}
+	claim := g.claimLocked(sess.core(), attachment, geometry)
+	return claim, claim != nil
+}
+
+// release removes a claim that did not reach coordinator admission. It removes
+// only the exact current claim and never restores an older claim from the same
+// Attachment.
+func (g *sharedPTYGeometry) release(sess *session, claim *sharedPTYClaim) {
+	if g == nil || sess == nil || claim == nil || claim.attachment == nil {
+		return
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.latest.Load() != claim || g.claims[claim.attachment] != claim {
+		return
+	}
+	delete(g.claims, claim.attachment)
+	g.latest.Store(g.latestValidClaimLocked(sess.core(), claim.attachment))
+}
+
+// sourceSnapshot returns the latest live immutable claim. Refresh takes
+// session.mu only before Tab locks are involved; final transaction validation
+// uses current and remains lock-free.
+func (g *sharedPTYGeometry) sourceSnapshot(sess *session) (*sharedPTYClaim, bool) {
+	if g == nil || sess == nil {
+		return nil, false
+	}
+	sess.mu.Lock()
+	g.refreshLocked(sess.core())
+	claim := g.latest.Load()
+	sess.mu.Unlock()
+	if claim == nil || claim.attachment == nil || !claim.geometry.Valid() {
+		return nil, false
+	}
+	return claim, true
+}
+
+// current is deliberately one lock-free immutable-token comparison. Session
+// layout publication calls it while Tab locks and geometry.mu are held.
+func (g *sharedPTYGeometry) current(claim *sharedPTYClaim) bool {
+	return g != nil && claim != nil && g.latest.Load() == claim
+}
+
+func (g *sharedPTYGeometry) appliedSnapshot() domain.Geometry {
+	if g == nil {
+		return domain.Geometry{}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.applied
+}
+
+func (g *sharedPTYGeometry) publishAppliedIfCurrent(claim *sharedPTYClaim) {
+	if g == nil || claim == nil {
+		return
+	}
+	g.mu.Lock()
+	if g.latest.Load() == claim {
+		g.applied = claim.geometry
+	}
+	g.mu.Unlock()
+}
+
+// scaleSharedPTYGeometry is the sole cell/pixel mapping policy. Integer
+// division deliberately truncates because kernel winsize and CSI reports
+// cannot represent fractional pixels. Session construction uses it before a
+// claim can be published; live paths call paneGeometry below.
+func scaleSharedPTYGeometry(full domain.Geometry, size domain.Size) domain.Geometry {
 	geometry := domain.Geometry{Size: size}
 	if !full.Valid() || !size.Valid() || !full.PixelsKnown() {
 		return geometry
@@ -71,62 +216,51 @@ func scalePaneGeometry(full domain.Geometry, size domain.Size) domain.Geometry {
 	return geometry.NormalizePixels()
 }
 
-func (s *session) paneGeometry(size domain.Size) domain.Geometry {
-	geometry := domain.Geometry{Size: size}
-	if s == nil || !size.Valid() {
-		return geometry
+func (g *sharedPTYGeometry) paneGeometry(size domain.Size) domain.Geometry {
+	if g == nil {
+		return domain.Geometry{Size: size}
 	}
-	owner := s.geometryOwner.Load()
-	if owner == nil {
-		return geometry
+	claim := g.latest.Load()
+	if claim == nil {
+		return domain.Geometry{Size: size}
 	}
-	return scalePaneGeometry(owner.geometryClaimSnapshot(), size)
+	return scaleSharedPTYGeometry(claim.geometry, size)
 }
 
-// sessionGeometryViewport is called with a non-nil session by the daemon
-// geometry paths; it returns ok == false when no valid claim exists.
-func sessionGeometryViewport(sess *session) (domain.Size, sessionGeometrySource, bool) {
-	source, ok := sess.geometrySourceSnapshot()
+// viewport returns false when no valid Attachment claim exists.
+func (g *sharedPTYGeometry) viewport(sess *session) (domain.Size, *sharedPTYClaim, bool) {
+	claim, ok := g.sourceSnapshot(sess)
 	if !ok {
-		return domain.Size{}, sessionGeometrySource{}, false
+		return domain.Size{}, nil, false
 	}
-	content := contentSize(source.geometry.Size)
-	return domain.Size{Cols: content.Cols, Rows: content.Rows + tabChromeRows}, source, true
+	content := contentSize(claim.geometry.Size)
+	return domain.Size{Cols: content.Cols, Rows: content.Rows + tabChromeRows}, claim, true
 }
 
-// recalculateSessionGeometry reconciles shared PTY/layout geometry with the
-// latest live attachment claim. An explicit source records a new claim before
-// the snapshot; attach and resume paths already claimed ownership when they
-// entered the attachment registry. If the owner detaches, unregistering the
-// attachment selects the most recently claimed remaining attachment.
-func (d *Daemon) recalculateSessionGeometry(sess *session, source *attachedClient) bool {
+// reconcile applies the latest live Attachment claim to shared Session
+// PTY/layout geometry. An explicit source records a new claim first.
+func (g *sharedPTYGeometry) reconcile(d *Daemon, sess *session, source *attachedClient) bool {
 	if sess == nil {
 		return false
 	}
 	if source != nil {
-		if _, ok := sess.claimGeometryOwner(source); !ok {
+		if _, ok := g.claimAttachment(sess, source); !ok {
 			return false
 		}
 	}
-	want, owner, ok := sessionGeometryViewport(sess)
+	want, claim, ok := g.viewport(sess)
 	if !ok {
 		return false
 	}
-	current := func() bool { return sess.geometryClaimCurrent(owner) }
-	sess.geometryMu.Lock()
-	appliedGeometry := sess.appliedGeometry
-	sess.geometryMu.Unlock()
-	pixelGeometryChanged := (appliedGeometry.PixelsKnown() || owner.geometry.PixelsKnown()) && appliedGeometry != owner.geometry
+	current := func() bool { return g.current(claim) }
+	applied := g.appliedSnapshot()
+	pixelGeometryChanged := (applied.PixelsKnown() || claim.geometry.PixelsKnown()) && applied != claim.geometry
 	if !pixelGeometryChanged && contentSize(sess.fullViewportSize()) == contentSize(want) {
 		return false
 	}
-	failed, ok := d.applySessionLayout(sess, want, current, nil)
+	failed, ok := g.applySessionLayout(d, sess, want, current, nil)
 	if ok {
-		sess.geometryMu.Lock()
-		if current() {
-			sess.appliedGeometry = owner.geometry
-		}
-		sess.geometryMu.Unlock()
+		g.publishAppliedIfCurrent(claim)
 	}
 	if ok && len(failed) != 0 {
 		seen := make(map[*tab]struct{}, len(failed))
@@ -138,29 +272,25 @@ func (d *Daemon) recalculateSessionGeometry(sess *session, source *attachedClien
 				continue
 			}
 			seen[member.tab] = struct{}{}
-			d.scheduleAcceptedTabLayoutRetry(sess, member.tab)
+			g.scheduleAcceptedTabLayoutRetry(d, sess, member.tab)
 		}
 	}
 	return ok
 }
 
-// recalculateSessionGeometryAndInvalidate publishes a shared render wake after
-// canonical geometry changes. A nil source uses the latest attach/resume/resize
-// claim already published by the attachment registry. The wake is asynchronous
-// so a slow peer cannot block a resize or detach.
-func (d *Daemon) recalculateSessionGeometryAndInvalidate(sess *session, source *attachedClient, producer string) bool {
-	if !d.recalculateSessionGeometry(sess, source) {
+func (g *sharedPTYGeometry) reconcileAndInvalidate(d *Daemon, sess *session, source *attachedClient, producer string) bool {
+	if !g.reconcile(d, sess, source) {
 		return false
 	}
 	d.invalidateRender(sess, nil, true, producer)
 	return true
 }
 
-func (d *Daemon) recalculateSessionGeometryAndInvalidateAsync(sess *session, producer string) {
-	if d == nil {
+func (g *sharedPTYGeometry) reconcileAndInvalidateAsync(d *Daemon, sess *session, producer string) {
+	if g == nil || d == nil {
 		return
 	}
 	d.sessWg.Go(func() {
-		d.recalculateSessionGeometryAndInvalidate(sess, nil, producer)
+		g.reconcileAndInvalidate(d, sess, nil, producer)
 	})
 }

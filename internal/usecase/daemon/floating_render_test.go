@@ -22,7 +22,8 @@ func applyFloatingResizePlanForTest(d *Daemon, p *pane, geometry floatingGeometr
 		return false
 	}
 	plan := preparedTabLayout{members: []resizeMember{{pane: p, rect: geometry.Inner, floating: geometry, isFloating: true}}}
-	d.applyPreparedTabMembers(&plan)
+	geometryModule := &sharedPTYGeometry{}
+	geometryModule.applyPreparedTabMembers(d, &plan)
 	member := plan.members[0]
 	if !member.ok {
 		return false
@@ -200,7 +201,8 @@ func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithoutPhysicalResize(t
 	d := newTestDaemon(t, nil, stubClock{})
 	d.ApplyConfig(domain.Config{Floating: cfg})
 
-	failed, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+	sess := &session{tabs: []*tab{tb}}
+	failed, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
 	require.True(t, ok)
 	require.Empty(t, failed)
 	require.Empty(t, pty.sizes(), "a zero-inner drawer must not issue a synthetic PTY resize")
@@ -925,10 +927,11 @@ func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
 	installTestFloating(tb, p, true)
 	d := newTestDaemon(t, nil, stubClock{})
 	d.ApplyConfig(domain.Config{Floating: cfg})
+	sess := &session{tabs: []*tab{tb}}
 
 	done := make(chan bool, 1)
 	go func() {
-		_, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+		_, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
 		done <- ok
 	}()
 	<-pty.entered
@@ -947,7 +950,7 @@ func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
 	require.False(t, p.resizeApplying, "a stale floating apply must release its parser gate")
 	p.mu.Unlock()
 
-	_, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+	_, ok := sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
 	require.True(t, ok)
 	require.Equal(t, []domain.Size{rectSize(oldGeometry.Inner), rectSize(newGeometry.Inner)}, pty.sizes())
 	require.Equal(t, newGeometry.Inner, p.rect)

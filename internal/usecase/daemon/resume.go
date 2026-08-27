@@ -408,7 +408,7 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	captured := ac.transportSnapshot().transport
 	d.mu.Unlock()
 	if sess != nil {
-		d.recalculateSessionGeometryAndInvalidate(sess, nil, "resume.go")
+		sess.geometry.reconcileAndInvalidate(d, sess, nil, "resume.go")
 	}
 	d.watchParkedTimer(token, rearmed)
 	if captured != nil {
@@ -557,7 +557,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
-	d.recalculateSessionGeometryAndInvalidate(sess, nil, "resume.go")
+	sess.geometry.reconcileAndInvalidate(d, sess, nil, "resume.go")
 	d.unregisterPreview(ac)
 	if !d.parkAttachment(sess, ac) {
 		// Detach already published; retire the captured link exactly once so
@@ -618,7 +618,7 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 		// Resume publication normally schedules reconciliation asynchronously;
 		// complete the claiming terminal's geometry before the resumed
 		// attachment is allowed to produce its first frame.
-		d.recalculateSessionGeometry(sess, resumed)
+		sess.geometry.reconcile(d, sess, resumed)
 		// A resumed unsupported attachment bypasses finishAttachedClient. Check
 		// the restored scene at this boundary so suppression is explained once.
 		d.warnUnsupportedGraphics(resumed)
