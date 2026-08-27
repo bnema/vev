@@ -243,6 +243,6 @@ func (d *Daemon) commitTabOverflowForAttachment(sess *session, ac *attachedClien
 	candidate.source.mu.Unlock()
 	sess.mu.Unlock()
 	sess.selectAttachmentTab(ac, domain.TabStableID(candidate.target.stableID))
-	d.applyTabLayout(sess, candidate.target)
+	sess.geometry.applyTabLayout(d, sess, candidate.target)
 	return true
 }

@@ -90,7 +90,7 @@ func prepareTabLayoutForSizeLocked(sess *session, tb *tab, size domain.Size) pre
 			paneSize := rectSize(placement.Content)
 			plan.members = append(plan.members, resizeMember{
 				session: sess, tab: tb, pane: p, owner: owner, rect: placement.Content,
-				geometry: sess.paneGeometry(paneSize),
+				geometry: sess.geometry.paneGeometry(paneSize),
 			})
 		}
 	}
@@ -99,7 +99,7 @@ func prepareTabLayoutForSizeLocked(sess *session, tb *tab, size domain.Size) pre
 
 // applyPreparedTabMembers performs only the external PTY phase. A successful
 // resize leaves the parser gate closed until the complete plan is validated.
-func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
+func (g *sharedPTYGeometry) applyPreparedTabMembers(d *Daemon, plan *preparedTabLayout) {
 	for i := range plan.members {
 		member := &plan.members[i]
 		if !member.geometry.Valid() {
@@ -219,7 +219,7 @@ func commitPreparedTabLayoutLocked(plan *preparedTabLayout) bool {
 // cancelStalePreparedGates releases gates for members which disappeared from
 // the next solved layout (for example a stack member collapsed by a focus
 // change). Members that remain are deliberately left gated for the retry.
-func (d *Daemon) cancelStalePreparedGates(sess *session, tb *tab, plan *preparedTabLayout) {
+func (g *sharedPTYGeometry) cancelStalePreparedGates(d *Daemon, sess *session, tb *tab, plan *preparedTabLayout) {
 	tb.mu.Lock()
 	latest := prepareTabLayoutLocked(sess, tb)
 	tb.mu.Unlock()
@@ -241,7 +241,7 @@ func (d *Daemon) cancelStalePreparedGates(sess *session, tb *tab, plan *prepared
 	}
 }
 
-func (d *Daemon) finishPreparedTabMembers(plan *preparedTabLayout, accepted bool) {
+func (g *sharedPTYGeometry) finishPreparedTabMembers(d *Daemon, plan *preparedTabLayout, accepted bool) {
 	if !accepted {
 		// cancelStalePreparedGates owns stale-plan cancellation. Keeping this
 		// path empty ensures a removed member's pending bytes are replayed once,
@@ -262,11 +262,11 @@ func (d *Daemon) finishPreparedTabMembers(plan *preparedTabLayout, accepted bool
 // applyTabLayoutTransaction is the canonical tiled-layout publisher. It owns
 // one per-tab single-writer loop, but never holds tab or pane state locks while
 // invoking PTY.Resize.
-func (d *Daemon) applyTabLayoutTransaction(sess *session, tb *tab, current ...func() bool) ([]resizeMember, bool) {
-	return d.applyTabLayoutTransactionWithNotice(sess, tb, true, current...)
+func (g *sharedPTYGeometry) applyTabLayoutTransaction(d *Daemon, sess *session, tb *tab, current ...func() bool) ([]resizeMember, bool) {
+	return g.applyTabLayoutTransactionWithNotice(d, sess, tb, true, current...)
 }
 
-func (d *Daemon) applyTabLayoutTransactionWithNotice(sess *session, tb *tab, reportFailure bool, current ...func() bool) ([]resizeMember, bool) {
+func (g *sharedPTYGeometry) applyTabLayoutTransactionWithNotice(d *Daemon, sess *session, tb *tab, reportFailure bool, current ...func() bool) ([]resizeMember, bool) {
 	if tb == nil {
 		return nil, false
 	}
@@ -282,7 +282,7 @@ func (d *Daemon) applyTabLayoutTransactionWithNotice(sess *session, tb *tab, rep
 		tb.mu.Lock()
 		plan := prepareTabLayoutLocked(sess, tb)
 		tb.mu.Unlock()
-		d.applyPreparedTabMembers(&plan)
+		g.applyPreparedTabMembers(d, &plan)
 
 		tb.mu.Lock()
 		accepted := validatePreparedTabLayoutLocked(tb, &plan)
@@ -293,9 +293,9 @@ func (d *Daemon) applyTabLayoutTransactionWithNotice(sess *session, tb *tab, rep
 			accepted = commitPreparedTabLayoutLocked(&plan)
 		}
 		tb.mu.Unlock()
-		d.finishPreparedTabMembers(&plan, accepted)
+		g.finishPreparedTabMembers(d, &plan, accepted)
 		if !accepted {
-			d.cancelStalePreparedGates(sess, tb, &plan)
+			g.cancelStalePreparedGates(d, sess, tb, &plan)
 			if len(current) != 0 && !current[0]() {
 				for i := range plan.members {
 					member := &plan.members[i]
@@ -324,14 +324,14 @@ func (d *Daemon) applyTabLayoutTransactionWithNotice(sess *session, tb *tab, rep
 	}
 }
 
-func (d *Daemon) applyTabLayout(sess *session, tb *tab) bool {
-	failed, ok := d.applyTabLayoutTransaction(sess, tb)
+func (g *sharedPTYGeometry) applyTabLayout(d *Daemon, sess *session, tb *tab) bool {
+	failed, ok := g.applyTabLayoutTransaction(d, sess, tb)
 	if !ok {
 		return false
 	}
 	markSnapshotDirty(sess)
 	if len(failed) != 0 {
-		d.scheduleAcceptedTabLayoutRetry(sess, tb)
+		g.scheduleAcceptedTabLayoutRetry(d, sess, tb)
 	}
 	return true
 }
@@ -341,7 +341,7 @@ const maxAcceptedTabLayoutRetries = 3
 // scheduleAcceptedTabLayoutRetry owns one bounded retry worker per tab. The
 // worker is deduplicated, derives cancellation from the tab lifecycle, and
 // suppresses repeat degradation notices after the accepted initial failure.
-func (d *Daemon) scheduleAcceptedTabLayoutRetry(sess *session, tb *tab) {
+func (g *sharedPTYGeometry) scheduleAcceptedTabLayoutRetry(d *Daemon, sess *session, tb *tab) {
 	if d.clock == nil || tb == nil || tb.ctx == nil {
 		return
 	}
@@ -382,7 +382,7 @@ func (d *Daemon) scheduleAcceptedTabLayoutRetry(sess *session, tb *tab) {
 			if ctx.Err() != nil {
 				return
 			}
-			failed, ok := d.applyTabLayoutTransactionWithNotice(sess, tb, false, func() bool { return ctx.Err() == nil })
+			failed, ok := g.applyTabLayoutTransactionWithNotice(d, sess, tb, false, func() bool { return ctx.Err() == nil })
 			if !ok || len(failed) == 0 {
 				return
 			}
@@ -430,14 +430,14 @@ func (d *Daemon) replayResizePending(sess *session, tb *tab, p *pane, resized bo
 // used for retryable PTY work. Floating state is not part of a tiled layout
 // generation, so its slot generation and exact pane identity validate its
 // publication instead.
-func (d *Daemon) applyVisibleFloatingLayout(sess *session, tb *tab, current func() bool) ([]resizeMember, bool) {
-	return d.applyVisibleFloatingLayoutForMember(sess, tb, current, nil)
+func (g *sharedPTYGeometry) applyVisibleFloatingLayout(d *Daemon, sess *session, tb *tab, current func() bool) ([]resizeMember, bool) {
+	return g.applyVisibleFloatingLayoutForMember(d, sess, tb, current, nil)
 }
 
 // applyVisibleFloatingLayoutForMember optionally fences a delayed retry to the
 // exact failed floating slot. Unlike tiled panes, a popup is not in tb.panes,
 // so accepting a replacement here would silently retry unrelated geometry.
-func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, current func() bool, expected *resizeMember) ([]resizeMember, bool) {
+func (g *sharedPTYGeometry) applyVisibleFloatingLayoutForMember(d *Daemon, sess *session, tb *tab, current func() bool, expected *resizeMember) ([]resizeMember, bool) {
 	if tb == nil {
 		return nil, true
 	}
@@ -488,10 +488,10 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 	ptyRect := geometry.ptyRect()
 	plan := preparedTabLayout{members: []resizeMember{{
 		session: sess, tab: tb, pane: p, owner: owner, rect: ptyRect,
-		geometry: sess.paneGeometry(rectSize(ptyRect)), floating: geometry,
+		geometry: sess.geometry.paneGeometry(rectSize(ptyRect)), floating: geometry,
 		isFloating: true, floatingGeneration: generation,
 	}}}
-	d.applyPreparedTabMembers(&plan)
+	g.applyPreparedTabMembers(d, &plan)
 
 	// The PTY may have accepted an intermediate size, but a hidden, replaced,
 	// relaunched, or resized slot must never receive this attempt's geometry.
@@ -531,7 +531,7 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 		return nil, true
 	}
 	if plan.members[0].ok {
-		d.finishPreparedTabMembers(&plan, true)
+		g.finishPreparedTabMembers(d, &plan, true)
 		return nil, true
 	}
 	return plan.members, true
@@ -542,7 +542,7 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 // stale per-tab retry, no succeeding attempt is owned by this call, so every
 // successful external resize must reopen its parser gate at the old screen
 // size.
-func (d *Daemon) releasePreparedSessionGates(plans []*preparedTabLayout) {
+func (g *sharedPTYGeometry) releasePreparedSessionGates(d *Daemon, plans []*preparedTabLayout) {
 	for _, plan := range plans {
 		if plan == nil {
 			continue
@@ -563,7 +563,7 @@ func (d *Daemon) releasePreparedSessionGates(plans []*preparedTabLayout) {
 // transaction: all PTYs are applied and plans validated first, then the
 // coordinator admits the epoch before any tab size, rectangle, VT screen,
 // snapshot dirtiness, or resize telemetry becomes visible.
-func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, admit func() bool) ([]resizeMember, bool) {
+func (g *sharedPTYGeometry) applySessionLayout(d *Daemon, sess *session, size domain.Size, current, admit func() bool) ([]resizeMember, bool) {
 	if sess == nil {
 		return nil, false
 	}
@@ -589,7 +589,7 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 			plans = append(plans, &plan)
 		}
 		for _, plan := range plans {
-			d.applyPreparedTabMembers(plan)
+			g.applyPreparedTabMembers(d, plan)
 		}
 
 		// Hold every tab lock across final validation, epoch admission, and all
@@ -614,7 +614,7 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 		// Claim publication and shared geometry commit use one fence. The hook
 		// above remains outside the fence so tests and lifecycle callbacks can
 		// publish a newer claim; the final validation then rejects this stale plan.
-		sess.geometryMu.Lock()
+		g.mu.Lock()
 		if valid && sess.ctx != nil && sess.ctx.Err() != nil {
 			valid = false
 		}
@@ -633,12 +633,12 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 				plan.tab.size = plan.size
 			}
 		}
-		sess.geometryMu.Unlock()
+		g.mu.Unlock()
 		for i := len(tabs) - 1; i >= 0; i-- {
 			tabs[i].mu.Unlock()
 		}
 		if !valid {
-			d.releasePreparedSessionGates(plans)
+			g.releasePreparedSessionGates(d, plans)
 			// Headless requests have no attachment epoch. A live tab mutation
 			// still invalidates their plan, but must trigger a fresh prepare rather
 			// than being mistaken for a canceled request.
@@ -652,7 +652,7 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 
 		failed := make([]resizeMember, 0)
 		for _, plan := range plans {
-			d.finishPreparedTabMembers(plan, true)
+			g.finishPreparedTabMembers(d, plan, true)
 			for _, member := range plan.members {
 				if !member.ok {
 					failed = append(failed, member)
@@ -660,7 +660,7 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 			}
 		}
 		for _, tb := range tabs {
-			floatingFailed, ok := d.applyVisibleFloatingLayout(sess, tb, current)
+			floatingFailed, ok := g.applyVisibleFloatingLayout(d, sess, tb, current)
 			if !ok {
 				return nil, false
 			}
@@ -689,16 +689,16 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 	}
 }
 
-func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64) bool {
+func (g *sharedPTYGeometry) runResizeTransaction(d *Daemon, sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64) bool {
 	rc := sess.renderCoordinator()
 	if rc == nil {
 		return false
 	}
 	snap := rc.resizeSnapshot()
 	geometryClaim := snap.geometryClaim
-	if geometryClaim == 0 {
+	if geometryClaim == nil {
 		var claimed bool
-		geometryClaim, claimed = sess.claimGeometryOwnerForSize(ac, snap.size)
+		geometryClaim, claimed = g.claimSize(sess, ac, snap.size)
 		if !claimed {
 			return false
 		}
@@ -709,14 +709,14 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 	}
 	defer effect.End()
 	current := func() bool {
-		return effect.current() && sess.geometryClaimTokenCurrent(ac, geometryClaim) &&
+		return effect.current() && sess.geometry.current(geometryClaim) &&
 			rc.resizeCurrentForLease(epoch, ac, lease, false)
 	}
 	if !current() {
 		return false
 	}
 	d.exitCopyMode(ac)
-	failed, ok := d.applySessionLayout(sess, snap.size, current, func() bool {
+	failed, ok := g.applySessionLayout(d, sess, snap.size, current, func() bool {
 		return rc.resizeCurrentForLease(epoch, ac, lease, true)
 	})
 	if !ok {
@@ -737,7 +737,7 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 		return false
 	}
 	if len(failed) != 0 && rc.resizeRetryAvailableForLease(epoch, ac, lease) {
-		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })
+		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { g.retryResizeMembers(d, sess, ac, lease, epoch, failed) })
 	}
 	if !current() {
 		return false
@@ -762,7 +762,7 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 // prepared tab transaction. The captured members identify retry candidates
 // only: their rectangles must never cross this delayed boundary, because any
 // later layout mutation may have changed their geometry or removed them.
-func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, members []resizeMember) {
+func (g *sharedPTYGeometry) retryResizeMembers(d *Daemon, sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, members []resizeMember) {
 	rc := sess.renderCoordinator()
 	if rc == nil || !rc.retryCurrentForLease(epoch, ac, lease) {
 		return
@@ -811,7 +811,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 		// pointers, and solved rectangles, and validates them again before any
 		// VT/rectangle publication. It also preserves the resize gate and
 		// degradation notice behavior for another failed external attempt.
-		freshFailed, ok := d.applyTabLayoutTransaction(sess, tb, func() bool {
+		freshFailed, ok := g.applyTabLayoutTransaction(d, sess, tb, func() bool {
 			return rc.retryCurrentForLease(epoch, ac, lease)
 		})
 		if !ok || !rc.retryCurrentForLease(epoch, ac, lease) {
@@ -856,7 +856,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 		if !currentSlot || !retryPending {
 			continue
 		}
-		freshFailed, ok := d.applyVisibleFloatingLayoutForMember(sess, member.tab, func() bool {
+		freshFailed, ok := g.applyVisibleFloatingLayoutForMember(d, sess, member.tab, func() bool {
 			return rc.retryCurrentForLease(epoch, ac, lease)
 		}, &member)
 		if !ok || !rc.retryCurrentForLease(epoch, ac, lease) {
@@ -875,7 +875,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 		}
 	}
 	if len(failed) != 0 && rc.resizeRetryAvailableForLease(epoch, ac, lease) {
-		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })
+		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { g.retryResizeMembers(d, sess, ac, lease, epoch, failed) })
 	}
 	if succeeded {
 		// Retry completion changes VT state after the original layout commit.
@@ -885,20 +885,20 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 	}
 }
 
-// requestTransactionalResize reports reset invalidation completion for immediate
+// requestResize reports reset invalidation completion for immediate
 // attached requests, and coordinator schedule acceptance for async requests.
 // Headless requests have no reset invalidation and report geometry completion.
-func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) bool {
+func (g *sharedPTYGeometry) requestResize(d *Daemon, sess *session, ac *attachedClient, size domain.Size, immediate bool) bool {
 	if ac == nil {
-		return d.requestTransactionalResizeForLease(sess, nil, nil, size, immediate)
+		return g.requestResizeForLease(d, sess, nil, nil, size, immediate)
 	}
 	rc := d.attachCoordinator(sess, nil, ac, true)
-	return d.requestTransactionalResizeForLease(sess, ac, rc.attachmentLease(ac), size, immediate)
+	return g.requestResizeForLease(d, sess, ac, rc.attachmentLease(ac), size, immediate)
 }
 
-// requestTransactionalResizeForLease carries the connection's captured lease
+// requestResizeForLease carries the Connection's captured lease
 // through the full resize transaction and every delayed retry callback.
-func (d *Daemon) requestTransactionalResizeForLease(sess *session, ac *attachedClient, lease *attachmentLease, size domain.Size, immediate bool) bool {
+func (g *sharedPTYGeometry) requestResizeForLease(d *Daemon, sess *session, ac *attachedClient, lease *attachmentLease, size domain.Size, immediate bool) bool {
 	valid := sess != nil && size.Valid()
 	d.observeRuntime(ports.RuntimeResizeRequested, 0, valid)
 	if !valid {
@@ -907,28 +907,28 @@ func (d *Daemon) requestTransactionalResizeForLease(sess *session, ac *attachedC
 	if ac == nil {
 		// Headless geometry has no coordinator/transport to coalesce, but keeps
 		// the same prepare/apply/commit ordering.
-		_, ok := d.applySessionLayout(sess, size, nil, nil)
+		_, ok := g.applySessionLayout(d, sess, size, nil, nil)
 		return ok
 	}
 	rc := sess.renderCoordinator()
 	if rc == nil || !rc.leaseCurrent(lease, true) {
 		return false
 	}
-	geometryClaim, claimed := sess.claimGeometryOwnerForSize(ac, size)
+	geometryClaim, claimed := g.claimSize(sess, ac, size)
 	if !claimed {
 		return false
 	}
 	if immediate {
 		epoch := rc.recordResizeRequestForLeaseWithClaim(size, ac, lease, geometryClaim)
 		if epoch == 0 {
-			sess.releaseGeometryClaim(ac, geometryClaim)
+			g.release(sess, geometryClaim)
 			return false
 		}
-		return d.runResizeTransaction(sess, ac, lease, epoch)
+		return g.runResizeTransaction(d, sess, ac, lease, epoch)
 	}
-	epoch := rc.scheduleResizeForLeaseWithClaim(size, ac, lease, geometryClaim, func(epoch uint64) { d.runResizeTransaction(sess, ac, lease, epoch) })
+	epoch := rc.scheduleResizeForLeaseWithClaim(size, ac, lease, geometryClaim, func(epoch uint64) { g.runResizeTransaction(d, sess, ac, lease, epoch) })
 	if epoch == 0 {
-		sess.releaseGeometryClaim(ac, geometryClaim)
+		g.release(sess, geometryClaim)
 	}
 	return epoch != 0
 }

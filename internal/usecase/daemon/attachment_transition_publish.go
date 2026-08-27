@@ -192,7 +192,7 @@ func publishAttachmentOwnershipLocked(publication *attachmentPublication) {
 	if !registered && publication.source == req.target && !req.preserveAttachment {
 		// A same-session rebind keeps membership but still represents a fresh
 		// attachment claim with the replacement transport's current size.
-		req.target.claimGeometryOwnerLocked(req.next, req.next.geometrySnapshot())
+		req.target.geometry.claimLocked(req.target.core(), req.next, req.next.geometrySnapshot())
 	}
 	req.next.setSession(req.target)
 }

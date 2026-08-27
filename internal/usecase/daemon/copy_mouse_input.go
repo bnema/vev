@@ -282,7 +282,7 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	}
 	tb.mu.Unlock()
 	if layoutChanged {
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 	}
 	if otherPane {
 		d.exitCopyMode(ac)

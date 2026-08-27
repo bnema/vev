@@ -1132,7 +1132,7 @@ func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyR
 	require.Len(f.t, placements, paneCount)
 	tb.bumpLayoutGenerationLocked()
 	tb.mu.Unlock()
-	_, _ = f.d.applyTabLayoutTransaction(f.sess, tb)
+	_, _ = f.sess.geometry.applyTabLayoutTransaction(f.d, f.sess, tb)
 	tb.mu.Lock()
 	panes := tb.panesSnapshot()
 	tb.mu.Unlock()
@@ -1272,7 +1272,7 @@ func (f *performanceFixture) retryLatest() {
 		members = append(members, plan.members...)
 	}
 	failuresBefore, callsBefore := f.pty.metrics()
-	f.d.retryResizeMembers(f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, members)
+	f.sess.geometry.retryResizeMembers(f.d, f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, members)
 	failuresAfter, callsAfter := f.pty.metrics()
 	f.ptyFailures += failuresAfter - failuresBefore
 	if callsAfter > callsBefore {

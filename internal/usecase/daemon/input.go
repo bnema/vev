@@ -243,7 +243,7 @@ func (d *Daemon) focusMousePane(sess *session, ac *attachedClient, tb *tab, id l
 	sess.setAttachmentPaneLocked(ac, tb, focused)
 	sess.mu.Unlock()
 	if changed {
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 	}
 	return changed, focused
 }

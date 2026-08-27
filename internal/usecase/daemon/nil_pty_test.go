@@ -28,7 +28,7 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 	first.bumpLayoutGenerationLocked()
 	first.mu.Unlock()
 	require.NotPanics(t, func() {
-		d.applyTabLayout(sess, first)
+		sess.geometry.applyTabLayout(d, sess, first)
 	})
 	require.Equal(t, 20, first.focusedPane().screen.Frame.Width)
 	require.Equal(t, 5, first.focusedPane().screen.Frame.Height)

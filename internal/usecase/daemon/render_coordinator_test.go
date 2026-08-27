@@ -1591,7 +1591,7 @@ func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 		t.Run("immediate reset invalidation", func(t *testing.T) {
 			d, sess, ac, _, _, invs := newResizeFixture(t)
 
-			require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, true))
+			require.True(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, true))
 			inv := awaitInvalidation(t, invs)
 			require.True(t, inv.reset)
 		})
@@ -1617,7 +1617,7 @@ func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 
 			result := make(chan bool, 1)
 			go func() {
-				result <- d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, true)
+				result <- sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, true)
 			}()
 			<-resizeStarted
 			require.NotZero(t, rc.recordResizeRequest(domain.Size{Cols: 140, Rows: 30}, ac))
@@ -1630,12 +1630,12 @@ func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 		t.Run("async schedule and teardown rejection", func(t *testing.T) {
 			d, sess, ac, _, clk, _ := newResizeFixture(t)
 
-			require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, false))
+			require.True(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 120, Rows: 24}, false))
 			awaitCoordinatorScheduledTimer(t, clk)
 
 			// A torn-down coordinator cannot accept a stale attachment's schedule.
 			sess.renderCoordinator().beginSessionTeardown().finish()
-			require.False(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 140, Rows: 30}, false))
+			require.False(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 140, Rows: 30}, false))
 		})
 	})
 }

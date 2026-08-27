@@ -152,10 +152,6 @@ type Daemon struct {
 	// and immediately before a post-commit effect is published. Tests use it to
 	// move a pane through the ordered resize fences at the former TOCTOU window.
 	beforeResizeOwnerPostEffect func(resizeOwnerPostEffect)
-	// afterResizeCommitSendLocked is a deterministic lock-order seam. It runs
-	// after publishResizeCommit acquires attachment sendMu and before it acquires
-	// owner fences. Tests must not perform external work from this callback.
-	afterResizeCommitSendLocked func()
 	// afterConnectionSessionSnapshot is a deterministic test seam after the
 	// connection loop reads its current session and before it captures that role.
 	afterConnectionSessionSnapshot func(*session)

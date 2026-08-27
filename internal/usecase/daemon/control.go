@@ -483,7 +483,7 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	cwd, env := e.sess.cwd, copyEnvironment(e.sess.env)
 	e.sess.mu.Unlock()
 	geometry := domain.Geometry{Size: e.sess.fullViewportSize()}
-	if source, ok := e.sess.geometrySourceSnapshot(); ok {
+	if source, ok := e.sess.geometry.sourceSnapshot(e.sess); ok {
 		geometry = source.geometry
 	}
 	e.d.mu.Lock()

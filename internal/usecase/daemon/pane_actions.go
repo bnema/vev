@@ -81,7 +81,7 @@ func (d *Daemon) spawnPaneOpAt(
 	tabStableID := tb.stableID
 	generation := tb.layoutGeneration
 	tb.mu.Unlock()
-	initialGeometry := sess.paneGeometry(rectSize(newRect))
+	initialGeometry := sess.geometry.paneGeometry(rectSize(newRect))
 
 	paneStableID, err := newStableID("p")
 	if err != nil {
@@ -123,7 +123,7 @@ func (d *Daemon) spawnPaneOpAt(
 	tb.bumpLayoutGenerationLocked()
 	tb.mu.Unlock()
 
-	d.applyTabLayout(sess, tb)
+	sess.geometry.applyTabLayout(d, sess, tb)
 	d.startPaneGoroutines(sess, tb, p)
 	return paneFocusChange{tab: tb, focused: p, layoutChanged: true}, nil
 }
@@ -188,7 +188,7 @@ func (d *Daemon) toggleStackAt(sess *session, tb *tab, target *pane) error {
 	}
 	tb.mu.Unlock()
 	if err == nil {
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 	}
 	return err
 }
@@ -312,7 +312,7 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		_ = d.closeTabLocked(sess, tb, true)
 		return true
 	}
-	d.applyTabLayout(sess, tb)
+	sess.geometry.applyTabLayout(d, sess, tb)
 	for _, ac := range attachments {
 		if ac.overlays != nil {
 			ac.overlays.clearCopyModeForPane(p)
@@ -380,7 +380,7 @@ func (d *Daemon) closePaneLockedWithEffect(sess *session, tb *tab, id layout.Pan
 	sess.mu.Lock()
 	sess.invalidateViewsLocked()
 	sess.mu.Unlock()
-	d.applyTabLayout(sess, tb)
+	sess.geometry.applyTabLayout(d, sess, tb)
 
 	for _, viewer := range attachments {
 		if viewer.overlays != nil {
@@ -545,7 +545,7 @@ func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Dir
 	}
 	tb.mu.Unlock()
 	if change.layoutChanged {
-		d.applyTabLayout(sess, tb)
+		sess.geometry.applyTabLayout(d, sess, tb)
 	}
 	if errors.Is(err, layout.ErrNoPane) {
 		return change, errNoNeighbor

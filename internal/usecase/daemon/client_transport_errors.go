@@ -74,7 +74,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
-	d.recalculateSessionGeometryAndInvalidate(sess, nil, "client_transport_errors.go")
+	sess.geometry.reconcileAndInvalidate(d, sess, nil, "client_transport_errors.go")
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral
 	name := sess.name
@@ -182,7 +182,7 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
-	d.recalculateSessionGeometryAndInvalidate(sess, nil, "client_transport_errors.go")
+	sess.geometry.reconcileAndInvalidate(d, sess, nil, "client_transport_errors.go")
 	if d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(failed)
 		d.log.Warn("parked client after send error", "session", name)

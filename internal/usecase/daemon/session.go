@@ -287,7 +287,7 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 		return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("daemon: PTY factory is unavailable"))
 	}
 	tbSize := contentSize(sz)
-	initialPaneGeometry := scalePaneGeometry(geometry, tbSize)
+	initialPaneGeometry := scaleSharedPTYGeometry(geometry, tbSize)
 	var names []string
 	var tabRecords []domain.CatalogueTabRecord
 	if resuming && len(stopped.tabRecords) != 0 {
@@ -653,10 +653,10 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 	sess.mu.Unlock()
 	tbSize := contentSize(sess.fullViewportSize())
 	claimGeometry := domain.Geometry{Size: tbSize}
-	if source, ok := sess.geometrySourceSnapshot(); ok {
-		claimGeometry = scalePaneGeometry(source.geometry, tbSize)
+	if source, ok := sess.geometry.sourceSnapshot(sess); ok {
+		claimGeometry = scaleSharedPTYGeometry(source.geometry, tbSize)
 	} else if ac != nil {
-		claimGeometry = scalePaneGeometry(ac.geometrySnapshot(), tbSize)
+		claimGeometry = scaleSharedPTYGeometry(ac.geometrySnapshot(), tbSize)
 	}
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {

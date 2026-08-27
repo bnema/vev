@@ -202,7 +202,7 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 		tb.mu.Unlock()
 		if hasFloating {
-			return d.requestTransactionalResize(sess, nil, size, true)
+			return sess.geometry.requestResize(d, sess, nil, size, true)
 		}
 		return false
 	}
@@ -216,9 +216,9 @@ func (d *Daemon) activateTabAfterResizeForLease(sess *session, tb *tab, outerRes
 	tb.mu.Unlock()
 	if hasFloating {
 		if lease != nil {
-			return d.requestTransactionalResizeForLease(sess, ac, lease, size, true)
+			return sess.geometry.requestResizeForLease(d, sess, ac, lease, size, true)
 		}
-		return d.requestTransactionalResize(sess, ac, size, true)
+		return sess.geometry.requestResize(d, sess, ac, size, true)
 	}
 	return false
 }
@@ -260,7 +260,7 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 		tb.mu.Lock()
 		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 		tb.mu.Unlock()
-		d.requestTransactionalResize(sess, ac, size, true)
+		sess.geometry.requestResize(d, sess, ac, size, true)
 	}
 	return nil
 }
@@ -386,7 +386,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		sessionName:  name,
 		cwd:          cwd,
 		size:         size,
-		ptyGeometry:  sess.paneGeometry(size),
+		ptyGeometry:  sess.geometry.paneGeometry(size),
 		geometry:     geometry,
 		paneStableID: paneStableID,
 		env:          childEnvFrom(env, name, tabStableID, paneStableID),
@@ -496,14 +496,14 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 		if len(attachments) == 0 {
 			// A headless resize may commit while Open is warming. Reconcile the
 			// visible floating geometry even without an attachment callback.
-			d.applyVisibleFloatingLayout(sess, tb, nil)
+			sess.geometry.applyVisibleFloatingLayout(d, sess, tb, nil)
 			return
 		}
 		tb.mu.Lock()
 		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 		tb.mu.Unlock()
 		for _, ac := range attachments {
-			d.requestTransactionalResize(sess, ac, size, true)
+			sess.geometry.requestResize(d, sess, ac, size, true)
 		}
 	}
 }

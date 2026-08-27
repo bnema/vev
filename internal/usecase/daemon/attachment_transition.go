@@ -168,7 +168,7 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 		}
 	}
 	if result.sourceGeometrySession != nil {
-		d.recalculateSessionGeometryAndInvalidateAsync(result.sourceGeometrySession, "attachment_transition.go")
+		result.sourceGeometrySession.geometry.reconcileAndInvalidateAsync(d, result.sourceGeometrySession, "attachment_transition.go")
 	}
 	return result, nil
 }

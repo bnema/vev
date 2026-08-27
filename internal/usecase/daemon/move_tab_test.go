@@ -212,7 +212,7 @@ func TestMoveTabWaitsForSourceResizeAndAppliesDestinationGeometryLast(t *testing
 		})
 	}
 	layoutDone := make(chan bool, 1)
-	go func() { layoutDone <- d.applyTabLayout(source, moved) }()
+	go func() { layoutDone <- source.geometry.applyTabLayout(d, source, moved) }()
 	<-resizeEntered
 	reserved := make(chan struct{})
 	d.afterMoveLifecycleReserved = func() { close(reserved) }
