@@ -1959,7 +1959,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					transitionWaitingFull = false
 					transition.start(target)
 				}
-				if target.Endpoint == "" && target.RemoteTarget == nil && target.ExactTarget != nil && a.runner.ledger != nil {
+				if target.SamePeer && target.Endpoint == "" && target.RemoteTarget == nil && target.ExactTarget != nil && a.runner.ledger != nil {
 					if samePeerSwitch != nil {
 						return welcomedResult(errors.New("vev: concurrent same-peer switch offer"))
 					}

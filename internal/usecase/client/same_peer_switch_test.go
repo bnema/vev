@@ -3,7 +3,57 @@ package client
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 )
+
+func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
+	term := newReconnectToastTerminalHarness(t)
+	defer term.closeInput()
+	transport := newReconnectToastLinkTransport()
+	transport.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempt := newReconnectAttachAttempt(
+		term.term,
+		transport,
+		newReconnectHandshakeClock(t),
+		AttachRequest{Intent: ports.IntentAttach, SessionName: "source"},
+		0,
+		&terminalThemeState{},
+		nil,
+		&milestones{},
+	)
+	attempt.runner.ledger = newRouteLedger()
+	resultCh := make(chan attachResult, 1)
+	go func() { resultCh <- attempt.run(ctx) }()
+
+	exact := ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{7}, SessionName: "stopped"}
+	target := ports.AttachTarget{
+		Session: "stopped", Intent: ports.IntentAttach, ExactTarget: &exact,
+		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	}
+	transport.recvCh <- reconnectToastRecv{frame: ports.Frame{
+		Type: ports.MsgAttachTarget, Payload: ports.MarshalAttachTarget(target),
+	}}
+
+	select {
+	case result := <-resultCh:
+		require.NoError(t, result.err)
+		require.Equal(t, &target, result.target)
+	case <-time.After(time.Second):
+		t.Fatal("close-and-dial target did not return a handoff")
+	}
+	_, sentSamePeer := transport.sends.find(func(frame ports.Frame) bool {
+		return frame.Type == ports.MsgSamePeerSwitchRequest
+	})
+	require.False(t, sentSamePeer)
+}
 
 func TestSamePeerInputGateBlocksUntilReleased(t *testing.T) {
 	gate := newSamePeerInputGate()

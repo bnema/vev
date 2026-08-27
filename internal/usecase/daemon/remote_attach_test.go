@@ -34,8 +34,43 @@ func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got.Endpoint)
 	require.Equal(t, ports.IntentAttach, got.Intent)
+	require.True(t, got.SamePeer)
 	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: target.name}, got.ExactTarget)
 	require.Same(t, source, ac.currentAttachmentSession(), "the source remains attached until the client confirms the switch")
+}
+
+func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "source")
+	lifecycle := remoteLifecycleForTest()
+	d.inactive["stopped"] = inactiveSession{
+		name: "stopped", state: ports.SessionDown, incarnation: lifecycle,
+	}
+	graphics := newGraphicsOutputState()
+	graphics.assets["asset"] = graphicsOutputAsset{id: graphics.namespaceBase}
+	graphics.mayHaveEmitted = true
+	ac.output.graphicsOutput = graphics
+
+	token := source.attachmentToken(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	token.effect = effect
+	defer effect.End()
+
+	require.NoError(t, d.switchToTargetForAttachment(token, picker.Target{
+		Name: "stopped", Incarnation: lifecycle,
+	}, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-select"))
+
+	cleanup := receiveRemotePicker(t, sends, "graphics cleanup")
+	require.Equal(t, ports.MsgOutput, cleanup.Type)
+	handoff := receiveRemotePicker(t, sends, "stopped local attach target")
+	require.Equal(t, ports.MsgAttachTarget, handoff.Type)
+	target, err := ports.UnmarshalAttachTarget(handoff.Payload)
+	require.NoError(t, err)
+	require.False(t, target.SamePeer)
+	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "stopped"}, target.ExactTarget)
+	require.Same(t, source, ac.currentAttachmentSession(), "the source remains attached until the client receives the handoff and closes")
+	require.True(t, attachmentRegistered(source, ac))
 }
 
 func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
