@@ -991,6 +991,29 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	d.waitNotifies()
 }
 
+func TestPTYKittyAnonymousGraphicsDoesNotWriteResponseToPTY(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	p := portsmocks.NewMockPTY(t)
+	chunks := [][]byte{[]byte("\x1b_Ga=T,f=32,s=1,v=1,C=1;AQIDBA\x1b\\")}
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if len(chunks) == 0 {
+			return 0, io.EOF
+		}
+		n := copy(buf, chunks[0])
+		chunks = chunks[1:]
+		return n, nil
+	})
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	sctx, cancel := context.WithCancel(context.Background())
+	win := newTestTabWithContext(p, sctx, cancel)
+	sess := &session{sessionCore: sessionCore{id: "anonymous", name: "anonymous"}, tabs: []*tab{win}, ctx: sctx, cancel: cancel}
+	d.sessions[sess.id] = sess
+	d.sessWg.Add(1)
+
+	d.ptyReader(sess, win, win.focusedPane())
+}
+
 func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	p := portsmocks.NewMockPTY(t)
