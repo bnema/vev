@@ -924,22 +924,20 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 		return d.switchToTargetGuardedForAttachment(token.sess, token.ac, target, guard, &token, action)
 	}
 
-	payload := ports.MarshalAttachTarget(ports.AttachTarget{
-		Session:           sessionName,
-		Intent:            ports.IntentAttach,
-		ExactTarget:       exactTarget,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
-	})
-	if payload == nil || exactTarget == nil {
-		return errAttachmentTransition
-	}
 	// An active session row with no explicit non-default tab is on the
 	// authenticated daemon and can use the client-confirmed same-peer path.
 	// Explicit tab rows already take the direct transition path above, while
 	// stopped sessions have no active target session and retain the fallback.
 	samePeerEligible := guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
-	if samePeerEligible {
-		token.ac.offerSamePeerTarget(*exactTarget)
+	payload := ports.MarshalAttachTarget(ports.AttachTarget{
+		Session:           sessionName,
+		Intent:            ports.IntentAttach,
+		ExactTarget:       exactTarget,
+		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		SamePeer:          samePeerEligible,
+	})
+	if payload == nil || exactTarget == nil {
+		return errAttachmentTransition
 	}
 	// A close-and-dial handoff leaves this daemon's Kitty namespace. A
 	// same-peer transition keeps the attachment and its namespace; the target
@@ -948,6 +946,8 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 		if err := d.cleanupAttachmentOutput(token.ac); err != nil {
 			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up attachment output before local handoff", err)
 		}
+	} else {
+		token.ac.offerSamePeerTarget(*exactTarget)
 	}
 	if err := token.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
 		if samePeerEligible {
@@ -958,10 +958,13 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(token attachmentConnectionTo
 	if !samePeerEligible {
 		// Stopped and explicit non-default index targets retain the close-and-dial
 		// handoff instead of losing their target-specific transition semantics.
+		// Keep the source link open until the client receives the ordered cleanup
+		// and handoff frames, then let the client's close drive ordinary parking.
 		if guard.closePicker {
 			d.closePicker(token.ac)
 		}
-		d.clientGoneForAttachment(token, false)
+		token.effect.bindActionEnd(d, "detach")
+		token.effect.End()
 	}
 	return nil
 }

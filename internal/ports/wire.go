@@ -338,6 +338,7 @@ type AttachTarget struct {
 	RemoteTarget      *domain.RemoteSessionTarget
 	ExactTarget       *ExactSessionTarget
 	EnvironmentPolicy EnvironmentPolicy
+	SamePeer          bool
 }
 
 // Detached tells a client it has been disconnected from its session and why.
@@ -865,6 +866,9 @@ func ValidateAttachTarget(m AttachTarget) error {
 		return ErrInvalidAttachTarget
 	}
 	if m.ExactTarget != nil && (m.ExactTarget.SessionName != m.Session || m.ExactTarget.Validate() != nil) {
+		return ErrInvalidAttachTarget
+	}
+	if m.SamePeer && (m.Endpoint != "" || m.RemoteTarget != nil || m.ExactTarget == nil) {
 		return ErrInvalidAttachTarget
 	}
 	if m.RemoteTarget == nil {
@@ -1662,6 +1666,7 @@ func MarshalAttachTarget(m AttachTarget) []byte {
 	w.putUint8(m.Intent)
 	marshalRemoteTargetSection(&w, m.RemoteTarget, m.EnvironmentPolicy)
 	marshalExactTargetSection(&w, m.ExactTarget)
+	w.putBool(m.SamePeer)
 	return w.b
 }
 
@@ -1689,6 +1694,9 @@ func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
 	if err := skipExactTargetSection(&probe); err != nil {
 		return AttachTarget{}, ErrInvalidAttachTarget
 	}
+	if _, err := probe.getBool(); err != nil {
+		return AttachTarget{}, ErrInvalidAttachTarget
+	}
 	if err := probe.done(); err != nil {
 		return AttachTarget{}, ErrInvalidAttachTarget
 	}
@@ -1708,6 +1716,9 @@ func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
 		return AttachTarget{}, err
 	}
 	if m.ExactTarget, err = unmarshalExactTargetSection(&r); err != nil {
+		return AttachTarget{}, err
+	}
+	if m.SamePeer, err = r.getBool(); err != nil {
 		return AttachTarget{}, err
 	}
 	if err := r.done(); err != nil {

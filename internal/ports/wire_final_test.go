@@ -11,8 +11,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 36 {
-		t.Fatalf("ProtocolVersion = %d, want 36", ProtocolVersion)
+	if ProtocolVersion != 37 {
+		t.Fatalf("ProtocolVersion = %d, want 37", ProtocolVersion)
 	}
 	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -26,7 +26,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 36, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 37, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	want = append(want, 0, 0)
 	got := MarshalHello(msg)
@@ -195,7 +195,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	msg := AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach}
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0}
+	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0}
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AttachTarget bytes = %x, want %x", got, want)
@@ -211,7 +211,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	if localPayload == nil {
 		t.Fatal("MarshalAttachTarget rejected same-peer route handoff")
 	}
-	wantLocal := []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 0}
+	wantLocal := []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 0, 0}
 	if !bytes.Equal(localPayload, wantLocal) {
 		t.Fatalf("same-peer bytes = %x, want %x", localPayload, wantLocal)
 	}
@@ -231,10 +231,10 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	var lifecycle domain.SessionLifecycleID
 	lifecycle[0] = 1
-	target := AttachTarget{Session: "work", Intent: IntentAttach, ExactTarget: &ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}}
+	target := AttachTarget{Session: "work", Intent: IntentAttach, ExactTarget: &ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, SamePeer: true}
 	payload := MarshalAttachTarget(target)
 	want := append([]byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 1, 1}, make([]byte, 15)...)
-	want = append(want, 0, 4, 'w', 'o', 'r', 'k')
+	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1)
 	if !bytes.Equal(payload, want) {
 		t.Fatalf("exact target bytes = %x, want %x", payload, want)
 	}
@@ -283,6 +283,15 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 				return b
 			}(),
 			decode: func(b []byte) error { _, err := UnmarshalHello(b); return err },
+		},
+		{
+			name: "attach target same-peer boolean",
+			payload: func() []byte {
+				b := MarshalAttachTarget(AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach})
+				b[len(b)-1] = 2
+				return b
+			}(),
+			decode: func(b []byte) error { _, err := UnmarshalAttachTarget(b); return err },
 		},
 		{
 			name: "welcome boolean",

@@ -496,7 +496,7 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 		{f: welcome("first", firstLifecycle)},
 		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
 			Session: "second", Intent: ports.IntentAttach, ExactTarget: &secondTarget,
-			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned, SamePeer: true,
 		}))},
 		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(ports.CommittedRouteIdentity{Target: secondTarget}))},
 		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
@@ -540,6 +540,45 @@ func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	require.Equal(t, request.EnvironmentPolicy, hello.EnvironmentPolicy)
 	require.Equal(t, request.NavigationCapabilities, hello.NavigationCapabilities)
 	require.Equal(t, request.StartupOverlay, hello.StartupOverlay)
+}
+
+func TestStoppedLocalHandoffDialsReplacementTransport(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	sourceLifecycle := domain.SessionLifecycleID{1}
+	targetLifecycle := domain.SessionLifecycleID{2}
+	target := ports.ExactSessionTarget{LifecycleID: targetLifecycle, SessionName: "stopped"}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
+		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{
+			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: ports.CapabilityResume,
+			CommittedIdentity: &ports.CommittedRouteIdentity{
+				Target: ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
+			},
+		}))
+	}
+	first := &recordingTransport{recvs: []recvItem{
+		{f: welcome("source", sourceLifecycle)},
+		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(ports.AttachTarget{
+			Session: "stopped", Intent: ports.IntentAttach, ExactTarget: &target,
+			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		}))},
+	}}
+	second := &recordingTransport{recvs: []recvItem{
+		{f: welcome("stopped", targetLifecycle)},
+		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	}}
+	dialer := &sequenceDialer{trs: []ports.Transport{first, second}}
+
+	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
+		Intent: ports.IntentAttach, SessionName: "source",
+		Origin: ports.RouteOriginLocal, OriginKey: "local",
+		EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int32(2), dialer.calls.Load())
+	require.Equal(t, &target, helloFromSend(t, second).ExactTarget)
 }
 
 func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testing.T) {
