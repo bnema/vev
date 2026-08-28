@@ -782,6 +782,123 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 	require.Equal(t, int32(1), remoteDialer.calls.Load(), "same-host picker switch must retain the authenticated remote transport")
 }
 
+func TestHybridPickerLocalSelectionCommitsLocalRoute(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localHomeLifecycle := domain.SessionLifecycleID{1}
+	localMiscLifecycle := domain.SessionLifecycleID{2}
+	remoteSourceLifecycle := domain.SessionLifecycleID{3}
+	remoteMiscLifecycle := domain.SessionLifecycleID{4}
+	remoteVev := protocol.ExactSessionTarget{LifecycleID: remoteSourceLifecycle, SessionName: "vev"}
+	remoteMisc := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "arch", LifecycleID: remoteMiscLifecycle,
+		SessionName: "misc", LiveTabID: "misc-tab",
+	}
+	localInitial := hybridLocalBootstrap(localHomeLifecycle, remoteMisc)
+	switchSent := make(chan struct{})
+	prepareSent := make(chan struct{})
+	resumeOrClosed := make(chan struct{})
+	remoteClosed := make(chan struct{})
+	var remoteCloseOnce sync.Once
+	var resumeOrCloseOnce sync.Once
+	remote := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("misc", remoteMiscLifecycle)},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+			Session: "vev", Intent: protocol.IntentAttach,
+			ExactTarget:       &remoteVev,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+		}))},
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
+			Target: remoteVev,
+		})), wait: switchSent},
+		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: prepareSent},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteResumed})), wait: resumeOrClosed},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}, stall: remoteClosed}
+	remote.onClose = func() {
+		remoteCloseOnce.Do(func() { close(remoteClosed) })
+		resumeOrCloseOnce.Do(func() { close(resumeOrClosed) })
+	}
+	parkedHandler := hybridParkedRequestHandler(nil, nil, map[protocol.ParkedRouteAction]chan struct{}{
+		protocol.ParkedRoutePrepare: prepareSent,
+	})
+	var switchOnce sync.Once
+	remote.onSend = func(frame wire.Frame) {
+		parkedHandler(frame)
+		if frame.Type == wire.MsgSamePeerSwitchRequest {
+			switchOnce.Do(func() { close(switchSent) })
+		}
+		if frame.Type != wire.MsgParkedRouteRequest {
+			return
+		}
+		request, err := wire.UnmarshalParkedRouteRequest(frame.Payload)
+		if err == nil && request.Action == protocol.ParkedRouteResume {
+			resumeOrCloseOnce.Do(func() { close(resumeOrClosed) })
+		}
+	}
+	localTarget := protocol.ExactSessionTarget{LifecycleID: localMiscLifecycle, SessionName: "misc"}
+	localPickerClosed := make(chan struct{})
+	var localPickerCloseOnce sync.Once
+	localPicker := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("local", localHomeLifecycle)},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+			Session: "misc", Intent: protocol.IntentAttach, ExactTarget: &localTarget,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+		}))},
+	}, stall: localPickerClosed}
+	localPicker.onClose = func() { localPickerCloseOnce.Do(func() { close(localPickerClosed) }) }
+	localMisc := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("misc", localMiscLifecycle)},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial, localPicker, localMisc}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{markedDatagramTransport{Transport: remote}}}
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
+
+	err := runTestClient(t.Context(), deps, client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(3), localDialer.calls.Load())
+	require.Equal(t, int32(1), remoteDialer.calls.Load())
+	var remoteSwitches []protocol.SamePeerSwitchRequest
+	for _, sent := range remote.Sends() {
+		if sent.Type != wire.MsgSamePeerSwitchRequest {
+			continue
+		}
+		switchRequest, err := wire.UnmarshalSamePeerSwitchRequest(sent.Payload)
+		require.NoError(t, err)
+		remoteSwitches = append(remoteSwitches, switchRequest)
+	}
+	require.Len(t, remoteSwitches, 1)
+	require.Equal(t, remoteVev, remoteSwitches[0].Target, "the local misc target must never be switched on the remote peer")
+
+	var snapshot protocol.RecentRouteSnapshot
+	for _, sent := range localMisc.Sends() {
+		if sent.Type != wire.MsgRecentRouteSnapshot {
+			continue
+		}
+		var err error
+		snapshot, err = wire.UnmarshalRecentRouteSnapshot(sent.Payload)
+		require.NoError(t, err)
+	}
+	require.Equal(t, localTarget, snapshot.ActiveEntry.Target)
+	require.Equal(t, protocol.RouteKindLocal, snapshot.ActiveEntry.Kind)
+	require.Empty(t, snapshot.ActiveEntry.HostLabel)
+	remoteMiscFound := false
+	for _, entry := range snapshot.Entries {
+		if entry.Target != (protocol.ExactSessionTarget{LifecycleID: remoteMiscLifecycle, SessionName: "misc"}) {
+			continue
+		}
+		remoteMiscFound = true
+		require.Equal(t, "arch", entry.HostLabel)
+		require.Equal(t, protocol.RouteKindRemote, entry.Kind)
+	}
+	require.True(t, remoteMiscFound, "the distinct remote misc route must remain qualified in history")
+}
+
 func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
