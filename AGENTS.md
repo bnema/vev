@@ -61,7 +61,7 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 
 ## Wire protocol
 
-Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/wire.go`. Connection framing lives in `internal/adapters/ipc/transport.go`.
+Semantic presentation and route values live in `internal/protocol`; session-control values live in `internal/ports/session_control.go`. Frame IDs and codecs live in `internal/ports/frame.go`, `internal/ports/wire.go`, `internal/ports/routes_wire.go`, and `internal/ports/wire_command.go`. Connection framing lives in `internal/adapters/ipc/transport.go`.
 
 - IPC frames on a connection are 4-byte big-endian length, 1 type byte, then payload.
 - Client message types occupy `1–13`, `15`, `32–33`, and `35` (`MsgParkedRouteRequest`); server types occupy `16–23`, `25–31`, `34`, and `36` (`MsgParkedRouteResponse`). Types `14` and `24` remain reserved.
