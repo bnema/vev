@@ -138,24 +138,52 @@ func killAll(dir string) error {
 }
 
 func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
-	dir, _ := startDaemon(t)
-	tr, err := ipc.DialContext(context.Background(), dir)
+	incompatibleVersion := make([]byte, 10)
+	binary.BigEndian.PutUint16(incompatibleVersion[:2], protocol.Version+1)
+	binary.BigEndian.PutUint64(incompatibleVersion[2:], 42)
+	valid, err := wire.MarshalCommandRequest(protocol.CommandRequest{
+		Version: protocol.Version, RequestID: 43, Slug: "list-sessions",
+	})
 	require.NoError(t, err)
-	defer func() { _ = tr.Close() }()
 
-	payload := make([]byte, 10)
-	binary.BigEndian.PutUint16(payload[:2], protocol.Version+1)
-	binary.BigEndian.PutUint64(payload[2:], 42)
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: payload}))
+	tests := []struct {
+		name    string
+		payload []byte
+		want    protocol.CommandResult
+	}{
+		{
+			name:    "incompatible version",
+			payload: incompatibleVersion,
+			want:    protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
+		},
+		{
+			name:    "truncated version prefix",
+			payload: []byte{0},
+			want:    protocol.CommandResult{Code: protocol.ErrInternal, Text: "malformed command request"},
+		},
+		{
+			name:    "trailing garbage",
+			payload: append(append([]byte(nil), valid...), 0xff),
+			want:    protocol.CommandResult{RequestID: 43, Code: protocol.ErrInternal, Text: "malformed command request"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, _ := startDaemon(t)
+			tr, err := ipc.DialContext(context.Background(), dir)
+			require.NoError(t, err)
+			defer func() { _ = tr.Close() }()
 
-	frame, err := tr.Recv()
-	require.NoError(t, err)
-	require.Equal(t, wire.MsgCommandResult, frame.Type)
-	result, err := wire.UnmarshalCommandResult(frame.Payload)
-	require.NoError(t, err)
-	require.False(t, result.OK)
-	require.Equal(t, uint64(42), result.RequestID)
-	require.Equal(t, protocol.ErrVersionMismatch, result.Code)
+			require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: tt.payload}))
+			frame, err := tr.Recv()
+			require.NoError(t, err)
+			require.Equal(t, wire.MsgCommandResult, frame.Type)
+			require.Equal(t, wire.MarshalCommandResult(tt.want), frame.Payload)
+			result, err := wire.UnmarshalCommandResult(frame.Payload)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, result)
+		})
+	}
 }
 
 // awaitText decodes MsgOutput frames into a fresh VT screen and returns once
