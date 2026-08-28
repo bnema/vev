@@ -812,9 +812,9 @@ func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
 	return nil, fmt.Errorf("not used: %s", d.name)
 }
 
-func requireNamedClientDialer(t *testing.T, dialer ports.ClientDialer, name string) {
+func requireNamedClientDialer(t *testing.T, ctx context.Context, dialer ports.ClientDialer, name string) {
 	t.Helper()
-	_, err := dialer.Dial(context.Background())
+	_, err := dialer.Dial(ctx)
 	require.EqualError(t, err, "not used: "+name)
 }
 
@@ -846,8 +846,8 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 				remoteDialerFactory:     factory,
 				selectedRemoteTransport: tt.selectedTransport,
 				clipboard:               clip,
-				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-					requireNamedClientDialer(t, deps.Dialer, "remote")
+				runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
+					requireNamedClientDialer(t, ctx, deps.Dialer, "remote")
 					gotDialer = "remote"
 					gotRemote = deps.Remote
 					if !request.Remote || request.EnvironmentPolicy != protocol.EnvironmentPolicyClientOwned {
@@ -1069,8 +1069,8 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
 		remoteDialerFactory: factory,
 		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
-		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			requireNamedClientDialer(t, deps.Dialer, "local")
+		runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			requireNamedClientDialer(t, ctx, deps.Dialer, "local")
 			gotDialer = "local"
 			gotRemote = deps.Remote
 			if request.Remote {

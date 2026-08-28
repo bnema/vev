@@ -1487,7 +1487,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			// Before the asynchronous sender starts, preserve transport ordering by
 			// requesting the reset synchronously after the initial Theme publication.
 			resetErr := sendHandshake(func() error {
-				return transport.SendClient(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+				message := protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight}
+				if err := protocol.ValidateGeometry(message.Geometry()); err != nil {
+					return fmt.Errorf("validating terminal size for reconnect reconciliation: %w", err)
+				}
+				return transport.SendClient(message)
 			})
 			if resetErr != nil {
 				resetErr = handshakeContextError(ctx, handshakeTimedOut, resetErr)
@@ -2111,6 +2115,13 @@ func runRecv(ctx context.Context, transport ports.ClientConnection, out chan<- r
 		if err != nil {
 			var failure *protocol.DecodeFailure
 			if errors.As(err, &failure) && (failure.Category == protocol.DecodeUnknownType || failure.Category == protocol.DecodeWrongDirection) {
+				log.Debug("ignoring rejected server message",
+					"category", failure.Category,
+					"kind", failure.Kind,
+					"type", failure.Type,
+					"version", failure.Version,
+					"request", failure.RequestID,
+				)
 				continue
 			}
 		}
@@ -2128,9 +2139,6 @@ func runRecv(ctx context.Context, transport ports.ClientConnection, out chan<- r
 	}
 }
 
-// runSender is the sole caller of SendClient: serialising the input and resize
-// pumps through one goroutine keeps the connection's single-writer contract.
-// A send failure cancels the loop and is surfaced once.
 type cumulativeAckQueue struct {
 	mu          sync.Mutex
 	latestEpoch uint64
@@ -2165,8 +2173,11 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 	return epoch, state
 }
 
-// runSender preserves normal-frame order while allowing switch control and
-// output ACKs to make progress when raw input is held for a same-peer switch.
+// runSender is the sole caller of SendClient: serialising the input and resize
+// pumps through one goroutine keeps the connection's single-writer contract.
+// It preserves normal-frame order while allowing switch control and output ACKs
+// to make progress when raw input is held for a same-peer switch. A send failure
+// cancels the loop and is surfaced once.
 func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.ClientConnection, control <-chan protocol.ClientMessage, barriers <-chan chan struct{}, in <-chan protocol.ClientMessage, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
 	send := func(message protocol.ClientMessage) bool {

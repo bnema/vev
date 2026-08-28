@@ -89,12 +89,17 @@ func (d *mockClientDialer) Dial(ctx context.Context) (ports.ClientConnection, er
 }
 
 func externalCapabilities(raw ports.Transport) protocol.ConnectionCapabilities {
-	_, d := raw.(ports.DatagramTransport)
-	window := uint8(8)
-	if d {
+	_, dgram := raw.(ports.DatagramTransport)
+	_, link := raw.(ports.LinkStateReporter)
+	window := uint8(protocol.MaxOutputWindow)
+	if dgram {
 		window = 1
 	}
-	return protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen, PreferredOutputWindow: window}
+	return protocol.ConnectionCapabilities{
+		OutputDataLimit:       protocol.MaxOutputDataLen,
+		PreferredOutputWindow: window,
+		LinkState:             link,
+	}
 }
 func externalClientFrame(m protocol.ClientMessage) (wire.Frame, error) {
 	switch x := m.(type) {

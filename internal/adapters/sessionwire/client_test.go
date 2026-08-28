@@ -35,7 +35,7 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 		{name: "command", message: protocol.CommandRequest{Version: protocol.Version, RequestID: 1, Slug: "list-sessions"}, typeID: wire.MsgCommand},
 		{name: "reset", message: protocol.OutputResetRequest{}, typeID: wire.MsgOutputResetRequest},
 		{name: "preview", message: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}, typeID: wire.MsgRemotePreviewRequest},
-		{name: "attention", message: protocol.RouteAttentionSubscription{}, typeID: wire.MsgRouteAttentionSubscription},
+		{name: "attention", message: protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{}}, typeID: wire.MsgRouteAttentionSubscription},
 		{name: "same peer", message: protocol.SamePeerSwitchRequest{RequestID: 1, Target: exact}, typeID: wire.MsgSamePeerSwitchRequest},
 		{name: "parked", message: protocol.ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: protocol.ParkedRoutePrepare}, typeID: wire.MsgParkedRouteRequest},
 		{name: "snapshot", message: protocol.RecentRouteSnapshot{}, typeID: wire.MsgRecentRouteSnapshot},
@@ -46,6 +46,9 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 			raw := &scriptedTransport{}
 			require.NoError(t, NewClientConnection(raw).SendClient(tt.message))
 			require.Equal(t, tt.typeID, raw.sent.Type)
+			got, err := decodeClient(raw.sent)
+			require.NoError(t, err)
+			require.Equal(t, tt.message, got)
 		})
 	}
 }
@@ -86,15 +89,27 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 }
 
 func TestClientConnectionClassifiesFailuresAndPreservesCapabilities(t *testing.T) {
-	connection := NewClientConnection(&scriptedTransport{recv: wire.Frame{Type: wire.MsgInput}})
-	_, err := connection.ReceiveServer()
-	var failure *protocol.DecodeFailure
-	require.ErrorAs(t, err, &failure)
-	require.Equal(t, protocol.DecodeWrongDirection, failure.Category)
+	validError := wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"})
+	for _, tt := range []struct {
+		name     string
+		frame    wire.Frame
+		category protocol.DecodeCategory
+	}{
+		{name: "wrong direction", frame: wire.Frame{Type: wire.MsgInput}, category: protocol.DecodeWrongDirection},
+		{name: "truncated payload", frame: wire.Frame{Type: wire.MsgError, Payload: validError[:1]}, category: protocol.DecodeMalformed},
+		{name: "trailing garbage", frame: wire.Frame{Type: wire.MsgError, Payload: append(append([]byte(nil), validError...), 0xff)}, category: protocol.DecodeMalformed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewClientConnection(&scriptedTransport{recv: tt.frame}).ReceiveServer()
+			var failure *protocol.DecodeFailure
+			require.ErrorAs(t, err, &failure)
+			require.Equal(t, tt.category, failure.Category)
+		})
+	}
 
 	events := make(chan ports.LinkEvent, 1)
 	raw := &capableTransport{events: events}
-	connection = NewClientConnection(raw)
+	connection := NewClientConnection(raw)
 	require.Equal(t, uint8(1), connection.Capabilities().PreferredOutputWindow)
 	require.True(t, connection.Capabilities().LinkState)
 	require.Equal(t, ports.LinkStateDegraded, connection.LinkState())

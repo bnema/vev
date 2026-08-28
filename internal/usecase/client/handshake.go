@@ -83,10 +83,6 @@ func watchHandshakeTransport(ctx context.Context, transport ports.ClientConnecti
 	}
 }
 
-func boundedHandshakeOperation(ctx context.Context, transport ports.ClientConnection, operation func() error) error {
-	return boundedHandshakeOperationWithTransition(ctx, transport, operation, nil)
-}
-
 func boundedHandshakeOperationWithTransition(ctx context.Context, transport ports.ClientConnection, operation func() error, transition *transitionUI) error {
 	if err := ctx.Err(); err != nil {
 		_ = transport.Close()

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -181,7 +182,7 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 func testClientCapabilities(raw ports.Transport) protocol.ConnectionCapabilities {
 	_, dgram := raw.(ports.DatagramTransport)
 	_, link := raw.(ports.LinkStateReporter)
-	window := uint8(8)
+	window := uint8(protocol.MaxOutputWindow)
 	if dgram {
 		window = 1
 	}
@@ -200,14 +201,17 @@ func testClientLinkEvents(raw ports.Transport) <-chan ports.LinkEvent {
 	return nil
 }
 
-func TestRunRecvIgnoresUnknownTypedBoundaryFailures(t *testing.T) {
+func TestRunRecvLogsIgnoredTypedBoundaryFailures(t *testing.T) {
 	connection := portsmocks.NewMockClientConnection(t)
-	connection.EXPECT().ReceiveServer().Return(nil, &protocol.DecodeFailure{Category: protocol.DecodeUnknownType}).Once()
+	connection.EXPECT().ReceiveServer().Return(nil, &protocol.DecodeFailure{Category: protocol.DecodeUnknownType, Type: 255}).Once()
+	connection.EXPECT().ReceiveServer().Return(nil, &protocol.DecodeFailure{Category: protocol.DecodeWrongDirection, Type: uint8(wire.MsgInput)}).Once()
 	connection.EXPECT().ReceiveServer().Return(protocol.Pong{}, nil).Once()
 	connection.EXPECT().ReceiveServer().Return(nil, io.EOF).Once()
 	results := make(chan recvResult, 2)
 	failed := make(chan struct{})
-	runRecv(context.Background(), connection, results, failed, slog.New(slog.DiscardHandler))
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	runRecv(context.Background(), connection, results, failed, log)
 	first := <-results
 	require.Equal(t, protocol.Pong{}, first.message)
 	require.NoError(t, first.err)
@@ -218,6 +222,11 @@ func TestRunRecvIgnoresUnknownTypedBoundaryFailures(t *testing.T) {
 	default:
 		t.Fatal("terminal receive failure was not reported")
 	}
+	require.Contains(t, logs.String(), "ignoring rejected server message")
+	require.Contains(t, logs.String(), "category=2")
+	require.Contains(t, logs.String(), "category=3")
+	require.Contains(t, logs.String(), "type=255")
+	require.Contains(t, logs.String(), "type=2")
 }
 
 func (t *ackRecordingTransport) SendClient(m protocol.ClientMessage) error {
