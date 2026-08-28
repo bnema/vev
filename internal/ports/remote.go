@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // RemoteTransportMode selects the transport used for remote attach after CLI parsing.
@@ -57,7 +58,7 @@ type RemoteCatalogClient interface {
 // RemotePreviewClient fetches one bounded, exact-target viewport without
 // attaching to or mutating the remote session.
 type RemotePreviewClient interface {
-	Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (RemotePreview, error)
+	Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error)
 }
 
 const (

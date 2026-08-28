@@ -5,6 +5,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func previewTargetForTest() domain.RemoteSessionTarget {
@@ -19,8 +20,8 @@ func TestRemotePreviewCodecPreservesWideStyledCells(t *testing.T) {
 	style.Attrs = renderer.AttrUnderline
 	style.HasForegroundRGB = true
 	style.ForegroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
-	preview := RemotePreview{
-		Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK,
+	preview := protocol.RemotePreview{
+		Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK,
 		LifecycleID: previewTargetForTest().LifecycleID, TabID: "tab-1", Revision: 4, Width: 3, Height: 1,
 		Cells: []renderer.Cell{{Rune: '界', Style: style}, {Continuation: true, Style: style}, {Rune: 'x', Style: style}},
 	}
@@ -38,7 +39,7 @@ func TestRemotePreviewCodecPreservesWideStyledCells(t *testing.T) {
 }
 
 func TestRemotePreviewCodecRejectsMalformedBoundsAndGarbage(t *testing.T) {
-	preview := RemotePreview{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: previewTargetForTest().LifecycleID, TabID: "tab-1", Revision: 1, Width: 1, Height: 1, Cells: []renderer.Cell{{Rune: 'x'}}}
+	preview := protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK, LifecycleID: previewTargetForTest().LifecycleID, TabID: "tab-1", Revision: 1, Width: 1, Height: 1, Cells: []renderer.Cell{{Rune: 'x'}}}
 	payload := MarshalRemotePreview(preview)
 	for i := 0; i < len(payload); i++ {
 		if _, err := UnmarshalRemotePreview(payload[:i]); err == nil {
@@ -49,7 +50,7 @@ func TestRemotePreviewCodecRejectsMalformedBoundsAndGarbage(t *testing.T) {
 		t.Fatal("trailing garbage unexpectedly decoded")
 	}
 	bad := preview
-	bad.Width = RemotePreviewMaxWidth + 1
+	bad.Width = protocol.RemotePreviewMaxWidth + 1
 	if MarshalRemotePreview(bad) != nil {
 		t.Fatal("oversized preview marshaled")
 	}
@@ -57,14 +58,14 @@ func TestRemotePreviewCodecRejectsMalformedBoundsAndGarbage(t *testing.T) {
 
 func TestRemotePreviewRequestRejectsStoppedAndInvalidTargets(t *testing.T) {
 	target := previewTargetForTest()
-	request := RemotePreviewRequest{Version: RemotePreviewSchemaVersion, Target: target, Width: 20, Height: 5}
+	request := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 20, Height: 5}
 	if MarshalRemotePreviewRequest(request) == nil {
 		t.Fatal("valid preview request did not marshal")
 	}
 	target.Stopped = true
 	target.LiveTabID = ""
 	target.StoppedTab = domain.NewOrdinalTabSelector(0, "", 1)
-	if MarshalRemotePreviewRequest(RemotePreviewRequest{Version: RemotePreviewSchemaVersion, Target: target, Width: 20, Height: 5}) != nil {
+	if MarshalRemotePreviewRequest(protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 20, Height: 5}) != nil {
 		t.Fatal("stopped preview request marshaled")
 	}
 }

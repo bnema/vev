@@ -1,6 +1,8 @@
 package daemon
 
-import "github.com/bnema/vev/internal/ports"
+import (
+	"github.com/bnema/vev/internal/ports"
+)
 
 // clientGone detaches ac if it is still the session's current client. The
 // session remains registered and headless after the client is gone.

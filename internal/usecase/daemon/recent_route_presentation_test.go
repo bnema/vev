@@ -3,7 +3,7 @@ package daemon
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/stretchr/testify/require"
@@ -76,11 +76,11 @@ func TestFormatRecentRoutePresentations(t *testing.T) {
 }
 
 func TestRecentSessionHintsAndRankedRenderingShareCanonicalLabels(t *testing.T) {
-	snapshot := ports.RecentRouteSnapshot{
+	snapshot := protocol.RecentRouteSnapshot{
 		Generation: 1,
-		Entries: []ports.RecentRouteEntry{
-			{Key: 1, Generation: 1, Target: testRouteTarget("logs", 1), Name: "logs", Kind: ports.RouteKindLocal, Attention: true},
-			testRouteEntry(2, 1, "logs", 2, ports.RouteKindLocal),
+		Entries: []protocol.RecentRouteEntry{
+			{Key: 1, Generation: 1, Target: testRouteTarget("logs", 1), Name: "logs", Kind: protocol.RouteKindLocal, Attention: true},
+			testRouteEntry(2, 1, "logs", 2, protocol.RouteKindLocal),
 		},
 	}
 

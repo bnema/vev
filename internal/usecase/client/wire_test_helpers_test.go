@@ -1,8 +1,11 @@
 package client
 
-import "github.com/bnema/vev/internal/ports"
+import (
+	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
+)
 
-func mustMarshalOutput(m ports.Output) []byte {
+func mustMarshalOutput(m protocol.Output) []byte {
 	payload, err := ports.MarshalOutput(m)
 	if err != nil {
 		panic(err)

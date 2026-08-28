@@ -350,9 +350,9 @@ func TestRemoteInactiveRouteRejectsReplacementDuringCatalogueRead(t *testing.T) 
 	d.mu.Unlock()
 	close(catalogue.release)
 
-	var protocol *protoErr
-	require.ErrorAs(t, <-result, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, <-result, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 	require.Empty(t, catalogue.MetadataUpdates())
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -443,9 +443,9 @@ func TestRemoteInactiveRouteRejectsTabAuthorityChangeDuringCatalogueRead(t *test
 			}
 			close(catalogue.release)
 
-			var protocol *protoErr
-			require.ErrorAs(t, <-result, &protocol)
-			require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+			var protocolErr *protoErr
+			require.ErrorAs(t, <-result, &protocolErr)
+			require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 			require.Empty(t, catalogue.MetadataUpdates())
 			d.mu.Lock()
 			defer d.mu.Unlock()

@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -660,7 +661,7 @@ func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello
 		return fmt.Errorf("welcome frame type %d", frame.Type)
 	}
 	tr.probe.recordControl(probeEventWelcome)
-	if err := tr.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(ports.Theme{TrueColor: hello.TrueColor, SchemeKnown: true})}); err != nil {
+	if err := tr.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(protocol.Theme{TrueColor: hello.TrueColor, SchemeKnown: true})}); err != nil {
 		return fmt.Errorf("send initial theme: %w", err)
 	}
 	return nil
@@ -756,7 +757,7 @@ func awaitRemotePickerPreview(ctx context.Context, tr *harnessTransport, marker 
 	}
 }
 
-func remotePreviewContains(preview ports.RemotePreview, want string) bool {
+func remotePreviewContains(preview protocol.RemotePreview, want string) bool {
 	var text strings.Builder
 	for _, cell := range preview.Cells {
 		if !cell.Continuation {

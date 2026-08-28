@@ -6,6 +6,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -416,8 +417,8 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	entry.core().mu.Lock()
 	_, owned := entry.core().attachments[ac]
-	position := ports.RoutePosition{
-		Target: ports.ExactSessionTarget{
+	position := protocol.RoutePosition{
+		Target: protocol.ExactSessionTarget{
 			LifecycleID: entry.core().incarnation,
 			SessionName: entry.core().name,
 		},

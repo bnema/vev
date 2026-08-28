@@ -16,6 +16,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // attachPaletteClock deliberately exposes each independently-created timer.
@@ -115,8 +116,8 @@ func (*attachPaletteTerminalHarness) Flush() error                           { r
 type attachPaletteTransport struct {
 	mu           sync.Mutex
 	frames       []ports.Frame
-	themes       []ports.Theme
-	themeCh      chan ports.Theme
+	themes       []protocol.Theme
+	themeCh      chan protocol.Theme
 	inputCh      chan ports.Input
 	detached     chan ports.Frame
 	themeSendErr error
@@ -125,7 +126,7 @@ type attachPaletteTransport struct {
 
 func newAttachPaletteTransport() *attachPaletteTransport {
 	return &attachPaletteTransport{
-		themeCh:  make(chan ports.Theme, 16),
+		themeCh:  make(chan protocol.Theme, 16),
 		inputCh:  make(chan ports.Input, 16),
 		detached: make(chan ports.Frame, 1),
 	}
@@ -168,10 +169,10 @@ func (t *attachPaletteTransport) Recv() (ports.Frame, error) {
 	return <-t.detached, nil
 }
 func (*attachPaletteTransport) Close() error { return nil }
-func (t *attachPaletteTransport) snapshots() []ports.Theme {
+func (t *attachPaletteTransport) snapshots() []protocol.Theme {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]ports.Theme(nil), t.themes...)
+	return append([]protocol.Theme(nil), t.themes...)
 }
 
 type attachPaletteHarness struct {
@@ -228,7 +229,7 @@ func (h *attachPaletteHarness) nextWrite(t *testing.T) string {
 	t.Helper()
 	return <-h.writer.wrote
 }
-func (h *attachPaletteHarness) nextTheme(t *testing.T) ports.Theme {
+func (h *attachPaletteHarness) nextTheme(t *testing.T) protocol.Theme {
 	t.Helper()
 	return <-h.transport.themeCh
 }
@@ -428,7 +429,7 @@ func TestStdinPumpSameReadSchemeAndOldMarkerCannotAdvanceReplacement(t *testing.
 	defer cancel()
 
 	coordinator := newPaletteGenerationCoordinator()
-	coordinator.start(ports.Theme{}, false)
+	coordinator.start(protocol.Theme{}, false)
 	var activeGeneration atomic.Uint64
 	activeGeneration.Store(uint64(coordinator.current.id))
 
@@ -466,7 +467,7 @@ func TestStdinPumpSameReadSchemeAndOldMarkerCannotAdvanceReplacement(t *testing.
 	// This models attachAttempt handling the scheme event. The replacement is
 	// draining, so a marker tagged with its ID would incorrectly start its
 	// color batch before the real drain boundary arrives.
-	coordinator.start(ports.Theme{SchemeKnown: true, Light: scheme.light}, true)
+	coordinator.start(protocol.Theme{SchemeKnown: true, Light: scheme.light}, true)
 	newID := coordinator.current.id
 	activeGeneration.Store(uint64(newID))
 	close(schemeHandled)

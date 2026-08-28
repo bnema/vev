@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // backSessionForAttachment delegates previous-route ownership to the client
@@ -22,7 +22,7 @@ func (d *Daemon) backSessionForAttachment(effect *attachmentEffect) error {
 	if snapshot.Previous.Key == 0 || snapshot.Previous.Generation == 0 {
 		return nil
 	}
-	return d.sendRecentRouteNavigationActionForAttachment(effect, ports.RouteNavigationAction{
+	return d.sendRecentRouteNavigationActionForAttachment(effect, protocol.RouteNavigationAction{
 		SnapshotGeneration: snapshot.Generation,
 		Key:                snapshot.Previous.Key,
 		Generation:         snapshot.Previous.Generation,

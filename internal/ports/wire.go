@@ -18,6 +18,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // errShortPayload is returned when a payload ends before a required field
@@ -53,338 +54,6 @@ var outputCompressorPool = sync.Pool{New: func() any {
 	return writer
 }}
 
-// ErrInvalidSize reports a terminal size that cannot be represented by the
-// protocol or would exceed the bounded screen area.
-var ErrInvalidSize = errors.New("ports: invalid terminal size")
-
-// ErrInvalidHello reports a malformed Hello semantic value.
-var ErrInvalidHello = errors.New("ports: invalid hello")
-
-// ErrInvalidOutput reports a malformed Output semantic value.
-var ErrInvalidOutput = errors.New("ports: invalid output")
-
-// ErrInvalidAck reports a malformed Ack semantic value.
-var ErrInvalidAck = errors.New("ports: invalid ack")
-
-// ErrInvalidAttachTarget reports a malformed attach target.
-var ErrInvalidAttachTarget = errors.New("ports: invalid attach target")
-
-// ErrInvalidNavigation reports an unknown or impossible navigation value.
-var ErrInvalidNavigation = errors.New("ports: invalid navigation")
-
-// Intent values carried by Hello, describing what the client wants to do.
-const (
-	IntentEphemeral uint8 = 0
-	IntentNew       uint8 = 1
-	IntentAttach    uint8 = 2
-	IntentResume    uint8 = 3
-)
-
-// EnvironmentPolicy controls which side owns the environment used for future
-// PTY children. Direct CLI attaches keep the historical client-owned policy;
-// picker handoffs use daemon ownership so a local environment cannot leak into
-// a remote daemon.
-type EnvironmentPolicy uint8
-
-const (
-	EnvironmentPolicyClientOwned EnvironmentPolicy = iota
-	EnvironmentPolicyDaemonOwned
-)
-
-func validEnvironmentPolicy(policy EnvironmentPolicy) bool {
-	return policy == EnvironmentPolicyClientOwned || policy == EnvironmentPolicyDaemonOwned
-}
-
-func validNavigationCapabilities(capabilities NavigationCapabilities) bool {
-	return capabilities&^(NavigationCapabilityHomePicker|NavigationCapabilityBack) == 0
-}
-
-func validStartupOverlay(overlay StartupOverlay) bool {
-	return overlay == StartupOverlayNone || overlay == StartupOverlaySessionPicker
-}
-
-// ValidateNavigation validates route capabilities independently of the rest of
-// the Hello payload. homePickerRoute indicates that the route may open its
-// home/session picker (for example, a remote target or daemon-owned route).
-func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOverlay, homePickerRoute bool) error {
-	if !validNavigationCapabilities(capabilities) || !validStartupOverlay(overlay) {
-		return ErrInvalidNavigation
-	}
-	home := capabilities&NavigationCapabilityHomePicker != 0
-	back := capabilities&NavigationCapabilityBack != 0
-	if (home && !homePickerRoute) || back != (overlay == StartupOverlaySessionPicker) {
-		return ErrInvalidNavigation
-	}
-	if homePickerRoute && back {
-		return ErrInvalidNavigation
-	}
-	return nil
-}
-
-func validateHelloNavigation(h Hello) error {
-	if h.Intent != IntentAttach && h.Intent != IntentResume {
-		if h.NavigationCapabilities != 0 || h.StartupOverlay != StartupOverlayNone {
-			return ErrInvalidNavigation
-		}
-		return nil
-	}
-	return ValidateNavigation(h.NavigationCapabilities, h.StartupOverlay, h.RemoteTarget != nil || h.EnvironmentPolicy == EnvironmentPolicyDaemonOwned)
-}
-
-// Capability bits advertised in Welcome.
-const (
-	CapabilityResume  uint32 = 1 << 0
-	CapabilityUDP     uint32 = 1 << 1
-	CapabilityPredict uint32 = 1 << 2
-)
-
-// ErrorMsg codes.
-const (
-	ErrVersionMismatch    uint16 = 1
-	ErrNoSuchSession      uint16 = 2
-	ErrNameTaken          uint16 = 3
-	ErrServerShutdown     uint16 = 4
-	ErrInvalidSessionName uint16 = 5
-	ErrUnknownCommand     uint16 = 6
-	ErrNotScriptable      uint16 = 7
-	ErrInvalidCommandArgs uint16 = 8
-	ErrNoSuchTarget       uint16 = 9
-	ErrAmbiguousTarget    uint16 = 10
-	ErrInternal           uint16 = 255
-)
-
-// Detached reasons.
-const (
-	ReasonDetach         uint8 = 0
-	ReasonSessionKilled  uint8 = 1
-	ReasonServerShutdown uint8 = 2
-	ReasonReplaced       uint8 = 3
-)
-
-// Hello is sent by the client immediately after connecting.
-type Hello struct {
-	Version     uint16
-	Intent      uint8
-	ClientID    [16]byte
-	ResumeToken uint64
-	Name        string
-	Size        domain.Size
-	PixelWidth  int
-	PixelHeight int
-	TermEnv     string
-	Cwd         string
-	TrueColor   bool
-	// KittyDirectGraphics is an explicit declaration that the client has
-	// probed its direct outer terminal and it accepts Kitty graphics output.
-	// Environment values are never sufficient to set this capability.
-	KittyDirectGraphics bool
-	// MaxOutputInFlight is the requested maximum number of unacknowledged
-	// state-bearing output frames.
-	MaxOutputInFlight uint8
-	// Env is the complete exported client environment for future PTY children.
-	// Entries are opaque strings so their ordering and contents are preserved.
-	Env []string
-	// RemoteTarget is present only for a picker-selected remote attach. It is
-	// carried through reconnects and is validated by the owning daemon before
-	// it creates or publishes any session resources.
-	RemoteTarget *domain.RemoteSessionTarget
-	// ExactTarget is an optional lifecycle/name identity selected by the client
-	// ledger. It is transport-neutral and never replaces the daemon's authority
-	// to validate or commit the target.
-	ExactTarget *ExactSessionTarget
-	// PreferredTabID is a client-owned route cursor. The daemon treats it as an
-	// attachment-local hint and falls back when the stable tab no longer exists.
-	PreferredTabID         domain.TabStableID
-	EnvironmentPolicy      EnvironmentPolicy
-	NavigationCapabilities NavigationCapabilities
-	StartupOverlay         StartupOverlay
-	// Remote identifies a direct remote carriage even when no exact picker
-	// target is present. It is daemon-facing so remote rendering backends can
-	// be disabled consistently for both direct and picker attaches.
-	Remote bool
-}
-
-// Input carries raw bytes typed/pasted by the client, destined for the PTY.
-type Input struct {
-	InputSeq uint64
-	Data     []byte
-}
-
-// Geometry returns the complete controlling-terminal geometry carried by the
-// handshake. Pixel dimensions are optional as a pair.
-func (h Hello) Geometry() domain.Geometry {
-	return domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}.NormalizePixels()
-}
-
-// Resize notifies the daemon of a client-side terminal geometry change.
-type Resize struct {
-	Size        domain.Size
-	PixelWidth  int
-	PixelHeight int
-}
-
-// Geometry returns the complete controlling-terminal geometry carried by the
-// resize message. Pixel dimensions are optional as a pair.
-func (m Resize) Geometry() domain.Geometry {
-	return domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}.NormalizePixels()
-}
-
-// Theme reports the client's terminal foreground/background colors, ANSI
-// palette entries, and whether the client terminal supports truecolor.
-type Theme struct {
-	HasForeground bool
-	Foreground    renderer.RGB
-	HasBackground bool
-	Background    renderer.RGB
-	TrueColor     bool
-	SchemeKnown   bool
-	Light         bool
-	PaletteKnown  uint16
-	Palette       [16]renderer.RGB
-}
-
-// ImagePush carries a clipboard image from a remote client, to be written to
-// a temp file and injected into the focused pane's PTY as a path (see
-// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
-type ImagePush struct {
-	InputSeq uint64
-	Mime     string
-	Data     []byte
-}
-
-// ClientNotice reports a fixed client-side event for daemon-rendered user
-// feedback. Action values are deliberately closed so a client cannot inject
-// arbitrary display text into a shared session.
-type ClientNotice struct {
-	Action uint8
-}
-
-const (
-	ClientNoticeClipboardFallback uint8 = 1
-	ClientNoticeClipboardTooLarge uint8 = 2
-	ClientNoticeLinkDegraded      uint8 = 3
-	ClientNoticeLinkConnected     uint8 = 4
-)
-
-func validClientNoticeAction(action uint8) bool {
-	switch action {
-	case ClientNoticeClipboardFallback, ClientNoticeClipboardTooLarge, ClientNoticeLinkDegraded, ClientNoticeLinkConnected:
-		return true
-	default:
-		return false
-	}
-}
-
-func validDetachedReason(reason uint8) bool {
-	switch reason {
-	case ReasonDetach, ReasonSessionKilled, ReasonServerShutdown, ReasonReplaced:
-		return true
-	default:
-		return false
-	}
-}
-
-// Detach asks the daemon to detach the current client without killing the
-// session.
-type Detach struct{}
-
-// Ping is a keepalive/liveness probe sent by either side.
-type Ping struct{}
-
-// Pong answers a Ping.
-type Pong struct{}
-
-// Ack acknowledges receipt/application of an output state in one output epoch.
-type Ack struct {
-	Epoch uint64
-	State uint64
-}
-
-// Welcome is the daemon's reply to a successful Hello.
-type Welcome struct {
-	SessionID         string
-	SessionName       string
-	Ephemeral         bool
-	ResumeToken       uint64
-	Capabilities      uint32
-	CommittedIdentity *CommittedRouteIdentity
-}
-
-// ErrorMsg reports a protocol- or session-level failure to the client.
-type ErrorMsg struct {
-	Code uint16
-	Text string
-}
-
-// Output carries one ordered output publication for an attachment.
-type Output struct {
-	Epoch        uint64
-	Base         uint64
-	New          uint64
-	Echo         uint64
-	ViewRevision uint64
-	Size         domain.Size
-	Full         bool
-	Data         []byte
-}
-
-// AttachTarget identifies the endpoint and exact session/tab selected for a
-// new attachment. Endpoint and Session remain the compatibility route fields;
-// RemoteTarget is the authoritative picker identity when non-nil.
-type AttachTarget struct {
-	Endpoint          string
-	Session           string
-	Intent            uint8
-	RemoteTarget      *domain.RemoteSessionTarget
-	ExactTarget       *ExactSessionTarget
-	EnvironmentPolicy EnvironmentPolicy
-	SamePeer          bool
-}
-
-// Detached tells a client it has been disconnected from its session and why.
-type Detached struct {
-	Reason uint8
-}
-
-// List asks the daemon to enumerate its live sessions. It carries no
-// fields; the request is fully described by its message type.
-type List struct{}
-
-// Kill asks the daemon to terminate one named session or all sessions.
-type Kill struct {
-	Name string
-	All  bool
-}
-
-// SessionState is the client-visible lifecycle state of a session.
-type SessionState uint8
-
-const (
-	SessionUp SessionState = iota
-	SessionDown
-	SessionBroken
-)
-
-// SessionInfo describes one session in a Sessions listing.
-type SessionInfo struct {
-	SessionID string
-	Name      string
-	State     SessionState
-	Ephemeral bool
-	Tabs      uint16
-	Attached  bool
-}
-
-// Sessions is the daemon's reply to a List, enumerating live sessions.
-type Sessions struct {
-	Sessions []SessionInfo
-}
-
-// OutputResetRequest asks a remote output stream to rebase.
-type OutputResetRequest struct{}
-
-// SessionTabMeta describes one tab in a remote session's metadata snapshot.
-// ID is stable for the lifetime of its remote tab and ordered only for display.
 // payloadWriter builds a message payload by appending fields in wire order.
 type payloadWriter struct {
 	b []byte
@@ -521,7 +190,7 @@ func skipRemoteTargetSection(r *payloadReader) error {
 	if err != nil {
 		return err
 	}
-	if !validEnvironmentPolicy(EnvironmentPolicy(policy)) {
+	if ValidateEnvironmentPolicy(EnvironmentPolicy(policy)) != nil {
 		return errInvalidEnum
 	}
 	return nil
@@ -596,7 +265,7 @@ func unmarshalRemoteTargetSection(r *payloadReader) (*domain.RemoteSessionTarget
 	if err != nil {
 		return nil, 0, err
 	}
-	if !validEnvironmentPolicy(EnvironmentPolicy(policy)) {
+	if ValidateEnvironmentPolicy(EnvironmentPolicy(policy)) != nil {
 		return nil, 0, errInvalidEnum
 	}
 	return target, EnvironmentPolicy(policy), nil
@@ -753,141 +422,14 @@ func PeekHelloVersion(b []byte) (uint16, bool) {
 
 // ValidateHello validates Hello semantics without retaining or allocating any
 // payload data.
-func ValidateHello(h Hello) error {
-	if h.Intent != IntentEphemeral && h.Intent != IntentNew && h.Intent != IntentAttach && h.Intent != IntentResume {
-		return ErrInvalidHello
-	}
-	if err := ValidateGeometry(domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}); err != nil {
-		return fmt.Errorf("%w: geometry", ErrInvalidHello)
-	}
-	if !validEnvironmentPolicy(h.EnvironmentPolicy) {
-		return ErrInvalidHello
-	}
-	if err := validateHelloNavigation(h); err != nil {
-		return fmt.Errorf("%w: navigation: %w", ErrInvalidHello, err)
-	}
-	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || len(h.Env) > math.MaxUint32 {
-		return ErrInvalidHello
-	}
-	for _, entry := range h.Env {
-		if uint64(len(entry)) > math.MaxUint32 {
-			return ErrInvalidHello
-		}
-	}
-	if h.PreferredTabID != "" {
-		if h.Intent != IntentAttach && h.Intent != IntentResume {
-			return ErrInvalidHello
-		}
-		if err := domain.ValidateTabStableID(h.PreferredTabID); err != nil {
-			return fmt.Errorf("%w: preferred tab: %v", ErrInvalidHello, err)
-		}
-	}
-	if h.ExactTarget != nil {
-		if h.Intent != IntentAttach && h.Intent != IntentResume {
-			return ErrInvalidHello
-		}
-		if err := h.ExactTarget.Validate(); err != nil {
-			return fmt.Errorf("%w: exact target: %v", ErrInvalidHello, err)
-		}
-		if h.Name != h.ExactTarget.SessionName {
-			return ErrInvalidHello
-		}
-		if h.RemoteTarget != nil && (h.RemoteTarget.LifecycleID != h.ExactTarget.LifecycleID || h.RemoteTarget.SessionName != h.ExactTarget.SessionName) {
-			return ErrInvalidHello
-		}
-	}
-	if h.RemoteTarget == nil {
-		if h.EnvironmentPolicy != EnvironmentPolicyClientOwned && h.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
-			return ErrInvalidHello
-		}
-		return nil
-	}
-	if h.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
-		return ErrInvalidHello
-	}
-	if h.Intent != IntentAttach && h.Intent != IntentResume {
-		return ErrInvalidHello
-	}
-	if err := validateWireRemoteTarget(*h.RemoteTarget); err != nil {
-		return fmt.Errorf("%w: remote target: %v", ErrInvalidHello, err)
-	}
-	if h.Name != h.RemoteTarget.SessionName {
-		return ErrInvalidHello
-	}
-	return nil
-}
 
 // ValidateOutput validates the final output state before data allocation.
-func ValidateOutput(m Output) error {
-	if m.Epoch == 0 {
-		return ErrInvalidOutput
-	}
-	if m.New == 0 {
-		if m.Base != 0 || m.Full {
-			return ErrInvalidOutput
-		}
-	} else if (m.Base == 0 && !m.Full) || (m.Base != 0 && (m.Full || m.New != m.Base+1)) {
-		return ErrInvalidOutput
-	}
-	if err := ValidateSize(m.Size); err != nil {
-		return fmt.Errorf("%w: size", ErrInvalidOutput)
-	}
-	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxOutputDataLen {
-		return ErrInvalidOutput
-	}
-	return nil
-}
 
 // ValidateAck validates an epoch-scoped output acknowledgement.
-func ValidateAck(m Ack) error {
-	if m.Epoch == 0 {
-		return ErrInvalidAck
-	}
-	return nil
-}
 
 // ValidateAttachTarget validates a client-owned route handoff. An empty
 // Endpoint selects another session on the currently connected daemon; a
 // non-empty Endpoint selects a discovered remote daemon.
-func ValidateAttachTarget(m AttachTarget) error {
-	if m.Session == "" || len(m.Endpoint) > math.MaxUint16 || len(m.Session) > math.MaxUint16 {
-		return ErrInvalidAttachTarget
-	}
-	if err := domain.ValidateSessionName(m.Session); err != nil {
-		return ErrInvalidAttachTarget
-	}
-	if m.Intent != IntentEphemeral && m.Intent != IntentNew && m.Intent != IntentAttach && m.Intent != IntentResume {
-		return ErrInvalidAttachTarget
-	}
-	if m.Intent == IntentResume {
-		return ErrInvalidAttachTarget
-	}
-	if !validEnvironmentPolicy(m.EnvironmentPolicy) {
-		return ErrInvalidAttachTarget
-	}
-	if m.ExactTarget != nil && (m.ExactTarget.SessionName != m.Session || m.ExactTarget.Validate() != nil) {
-		return ErrInvalidAttachTarget
-	}
-	if m.SamePeer && (m.Endpoint != "" || m.RemoteTarget != nil || m.ExactTarget == nil) {
-		return ErrInvalidAttachTarget
-	}
-	if m.RemoteTarget == nil {
-		return nil
-	}
-	if m.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
-		return ErrInvalidAttachTarget
-	}
-	if m.Intent != IntentAttach {
-		return ErrInvalidAttachTarget
-	}
-	if err := validateWireRemoteTarget(*m.RemoteTarget); err != nil {
-		return fmt.Errorf("%w: remote target: %v", ErrInvalidAttachTarget, err)
-	}
-	if m.Endpoint != m.RemoteTarget.Endpoint || m.Session != m.RemoteTarget.SessionName {
-		return ErrInvalidAttachTarget
-	}
-	return nil
-}
 
 func validateWireRemoteTarget(target domain.RemoteSessionTarget) error {
 	if len(target.Endpoint) > math.MaxUint16 || len(target.DisplayOrigin) > math.MaxUint16 || len(target.SessionName) > math.MaxUint16 || len(target.LiveTabID) > math.MaxUint16 || len(target.StoppedTab.RawName) > math.MaxUint16 {
@@ -1105,12 +647,12 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	if err != nil {
 		return Hello{}, err
 	}
-	h.NavigationCapabilities = NavigationCapabilities(capabilities)
+	h.NavigationCapabilities = protocol.NavigationCapabilities(capabilities)
 	overlay, err := r.getUint8()
 	if err != nil {
 		return Hello{}, err
 	}
-	h.StartupOverlay = StartupOverlay(overlay)
+	h.StartupOverlay = protocol.StartupOverlay(overlay)
 	if h.Remote, err = r.getBool(); err != nil {
 		return Hello{}, err
 	}
@@ -1146,7 +688,7 @@ func UnmarshalInput(b []byte) (Input, error) {
 }
 
 // MarshalImagePush encodes m into an ImagePush message payload.
-func MarshalImagePush(m ImagePush) []byte {
+func MarshalImagePush(m protocol.ImagePush) []byte {
 	w := payloadWriter{}
 	w.putUint64(m.InputSeq)
 	w.putString(m.Mime)
@@ -1157,17 +699,17 @@ func MarshalImagePush(m ImagePush) []byte {
 // UnmarshalImagePush decodes an ImagePush message payload. After the fixed
 // input sequence and length-prefixed mime string, the rest of the payload is
 // data; there is no length prefix for it.
-func UnmarshalImagePush(b []byte) (ImagePush, error) {
+func UnmarshalImagePush(b []byte) (protocol.ImagePush, error) {
 	r := payloadReader{b: b}
 	seq, err := r.getUint64()
 	if err != nil {
-		return ImagePush{}, err
+		return protocol.ImagePush{}, err
 	}
 	mime, err := r.getString()
 	if err != nil {
-		return ImagePush{}, err
+		return protocol.ImagePush{}, err
 	}
-	return ImagePush{InputSeq: seq, Mime: mime, Data: r.rest()}, nil
+	return protocol.ImagePush{InputSeq: seq, Mime: mime, Data: r.rest()}, nil
 }
 
 // MarshalClientNotice encodes a fixed one-byte client notice action.
@@ -1183,7 +725,7 @@ func UnmarshalClientNotice(b []byte) (ClientNotice, error) {
 	if err != nil {
 		return ClientNotice{}, err
 	}
-	if !validClientNoticeAction(action) {
+	if ValidateClientNotice(ClientNotice{Action: action}) != nil {
 		return ClientNotice{}, errors.New("ports: unknown client notice action")
 	}
 	if err := r.done(); err != nil {
@@ -1193,8 +735,8 @@ func UnmarshalClientNotice(b []byte) (ClientNotice, error) {
 }
 
 // MarshalResize encodes m into a Resize message payload.
-func MarshalResize(m Resize) ([]byte, error) {
-	if err := ValidateGeometry(domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}); err != nil {
+func MarshalResize(m protocol.Resize) ([]byte, error) {
+	if err := protocol.ValidateGeometry(domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}); err != nil {
 		return nil, err
 	}
 	w := payloadWriter{}
@@ -1206,7 +748,7 @@ func MarshalResize(m Resize) ([]byte, error) {
 }
 
 // MarshalTheme encodes m into a 57-byte fixed-width Theme message payload.
-func MarshalTheme(m Theme) []byte {
+func MarshalTheme(m protocol.Theme) []byte {
 	var flags uint8
 	if m.HasForeground {
 		flags |= 0x01
@@ -1242,45 +784,45 @@ func MarshalTheme(m Theme) []byte {
 }
 
 // UnmarshalTheme decodes a 57-byte fixed-width Theme message payload.
-func UnmarshalTheme(b []byte) (Theme, error) {
+func UnmarshalTheme(b []byte) (protocol.Theme, error) {
 	r := payloadReader{b: b}
 	flags, err := r.getUint8()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	if flags&^uint8(0x1f) != 0 {
-		return Theme{}, errInvalidEnum
+		return protocol.Theme{}, errInvalidEnum
 	}
 	fgR, err := r.getUint8()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	fgG, err := r.getUint8()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	fgB, err := r.getUint8()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	bgR, err := r.getUint8()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	bgG, err := r.getUint8()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	bgB, err := r.getUint8()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	paletteKnown, err := r.getUint16()
 	if err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 
-	m := Theme{
+	m := protocol.Theme{
 		HasForeground: flags&0x01 != 0,
 		Foreground:    renderer.RGB{R: fgR, G: fgG, B: fgB},
 		HasBackground: flags&0x02 != 0,
@@ -1292,50 +834,50 @@ func UnmarshalTheme(b []byte) (Theme, error) {
 	}
 	for i := range m.Palette {
 		if m.Palette[i].R, err = r.getUint8(); err != nil {
-			return Theme{}, err
+			return protocol.Theme{}, err
 		}
 		if m.Palette[i].G, err = r.getUint8(); err != nil {
-			return Theme{}, err
+			return protocol.Theme{}, err
 		}
 		if m.Palette[i].B, err = r.getUint8(); err != nil {
-			return Theme{}, err
+			return protocol.Theme{}, err
 		}
 	}
 	if err := r.done(); err != nil {
-		return Theme{}, err
+		return protocol.Theme{}, err
 	}
 	return m, nil
 }
 
 // UnmarshalResize decodes a Resize message payload.
-func UnmarshalResize(b []byte) (Resize, error) {
+func UnmarshalResize(b []byte) (protocol.Resize, error) {
 	r := payloadReader{b: b}
 	cols, err := r.getUint16()
 	if err != nil {
-		return Resize{}, err
+		return protocol.Resize{}, err
 	}
 	rows, err := r.getUint16()
 	if err != nil {
-		return Resize{}, err
+		return protocol.Resize{}, err
 	}
 	pixelWidth, err := r.getUint16()
 	if err != nil {
-		return Resize{}, err
+		return protocol.Resize{}, err
 	}
 	pixelHeight, err := r.getUint16()
 	if err != nil {
-		return Resize{}, err
+		return protocol.Resize{}, err
 	}
 	if err := r.done(); err != nil {
-		return Resize{}, err
+		return protocol.Resize{}, err
 	}
-	m := Resize{
+	m := protocol.Resize{
 		Size:        domain.Size{Cols: int(cols), Rows: int(rows)},
 		PixelWidth:  int(pixelWidth),
 		PixelHeight: int(pixelHeight),
 	}
-	if err := ValidateGeometry(domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}); err != nil {
-		return Resize{}, err
+	if err := protocol.ValidateGeometry(domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}); err != nil {
+		return protocol.Resize{}, err
 	}
 	return m, nil
 }
@@ -1383,8 +925,8 @@ func UnmarshalPong(b []byte) (Pong, error) {
 }
 
 // MarshalAck encodes m into an epoch/state Ack payload.
-func MarshalAck(m Ack) ([]byte, error) {
-	if err := ValidateAck(m); err != nil {
+func MarshalAck(m protocol.Ack) ([]byte, error) {
+	if err := protocol.ValidateAck(m); err != nil {
 		return nil, err
 	}
 	w := payloadWriter{}
@@ -1394,21 +936,21 @@ func MarshalAck(m Ack) ([]byte, error) {
 }
 
 // UnmarshalAck decodes an epoch/state Ack payload.
-func UnmarshalAck(b []byte) (Ack, error) {
+func UnmarshalAck(b []byte) (protocol.Ack, error) {
 	r := payloadReader{b: b}
-	var m Ack
+	var m protocol.Ack
 	var err error
 	if m.Epoch, err = r.getUint64(); err != nil {
-		return Ack{}, err
+		return protocol.Ack{}, err
 	}
 	if m.State, err = r.getUint64(); err != nil {
-		return Ack{}, err
+		return protocol.Ack{}, err
 	}
 	if err := r.done(); err != nil {
-		return Ack{}, err
+		return protocol.Ack{}, err
 	}
-	if err := ValidateAck(m); err != nil {
-		return Ack{}, err
+	if err := protocol.ValidateAck(m); err != nil {
+		return protocol.Ack{}, err
 	}
 	return m, nil
 }
@@ -1461,7 +1003,7 @@ func UnmarshalWelcome(b []byte) (Welcome, error) {
 		return Welcome{}, err
 	}
 	if m.CommittedIdentity != nil && (m.CommittedIdentity.Target.SessionName != m.SessionName || m.CommittedIdentity.Ephemeral != m.Ephemeral) {
-		return Welcome{}, fmt.Errorf("%w: committed identity does not match welcome", ErrInvalidRouteWire)
+		return Welcome{}, fmt.Errorf("%w: committed identity does not match welcome", protocol.ErrInvalidRouteWire)
 	}
 	if err := r.done(); err != nil {
 		return Welcome{}, err
@@ -1498,8 +1040,8 @@ func UnmarshalErrorMsg(b []byte) (ErrorMsg, error) {
 // MarshalOutput encodes m into the epoch/base/new/echo/viewRevision/
 // size/full/compression/decoded-length/data message layout. Compression is
 // limited to large, full snapshots and is retained only when it saves bytes.
-func MarshalOutput(m Output) ([]byte, error) {
-	if err := ValidateOutput(m); err != nil {
+func MarshalOutput(m protocol.Output) ([]byte, error) {
+	if err := protocol.ValidateOutput(m); err != nil {
 		return nil, err
 	}
 	kind, data, err := compressOutputData(m)
@@ -1521,7 +1063,7 @@ func MarshalOutput(m Output) ([]byte, error) {
 	return w.b, nil
 }
 
-func compressOutputData(m Output) (byte, []byte, error) {
+func compressOutputData(m protocol.Output) (byte, []byte, error) {
 	if !m.Full || len(m.Data) < outputCompressionThreshold {
 		return outputCompressionNone, m.Data, nil
 	}
@@ -1546,83 +1088,83 @@ func compressOutputData(m Output) (byte, []byte, error) {
 
 // UnmarshalOutput strictly decodes one final Output payload. Header semantics
 // are validated before its bounded decoded data allocation.
-func UnmarshalOutput(b []byte) (Output, error) {
+func UnmarshalOutput(b []byte) (protocol.Output, error) {
 	if len(b) > MaxFrameLen-1 {
-		return Output{}, ErrInvalidOutput
+		return protocol.Output{}, protocol.ErrInvalidOutput
 	}
 	if len(b) < outputPayloadOverhead {
-		return Output{}, errShortPayload
+		return protocol.Output{}, errShortPayload
 	}
 	r := payloadReader{b: b}
-	var m Output
+	var m protocol.Output
 	var err error
 	if m.Epoch, err = r.getUint64(); err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	if m.Base, err = r.getUint64(); err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	if m.New, err = r.getUint64(); err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	if m.Echo, err = r.getUint64(); err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	if m.ViewRevision, err = r.getUint64(); err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	cols, err := r.getUint16()
 	if err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	rows, err := r.getUint16()
 	if err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	m.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
 	if m.Full, err = r.getBool(); err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
-	if err := ValidateOutput(m); err != nil {
-		return Output{}, err
+	if err := protocol.ValidateOutput(m); err != nil {
+		return protocol.Output{}, err
 	}
 	kind, err := r.getUint8()
 	if err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	decodedLen, err := r.getUint32()
 	if err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
-	if int64(decodedLen) > int64(MaxOutputDataLen) {
-		return Output{}, ErrInvalidOutput
+	if int64(decodedLen) > int64(protocol.MaxOutputDataLen) {
+		return protocol.Output{}, protocol.ErrInvalidOutput
 	}
 	data, err := r.getLongBytes()
 	if err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	if err := r.done(); err != nil {
-		return Output{}, err
+		return protocol.Output{}, err
 	}
 	switch kind {
 	case outputCompressionNone:
 		if uint32(len(data)) != decodedLen {
-			return Output{}, ErrInvalidOutput
+			return protocol.Output{}, protocol.ErrInvalidOutput
 		}
 		m.Data = data
 	case outputCompressionZlib:
 		if !m.Full {
-			return Output{}, ErrInvalidOutput
+			return protocol.Output{}, protocol.ErrInvalidOutput
 		}
 		m.Data, err = decompressOutputData(data, int(decodedLen))
 		if err != nil {
-			return Output{}, ErrInvalidOutput
+			return protocol.Output{}, protocol.ErrInvalidOutput
 		}
 	default:
-		return Output{}, errInvalidEnum
+		return protocol.Output{}, errInvalidEnum
 	}
-	if err := ValidateOutput(m); err != nil {
-		return Output{}, err
+	if err := protocol.ValidateOutput(m); err != nil {
+		return protocol.Output{}, err
 	}
 	return m, nil
 }
@@ -1742,7 +1284,7 @@ func UnmarshalDetached(b []byte) (Detached, error) {
 	if err != nil {
 		return Detached{}, err
 	}
-	if !validDetachedReason(reason) {
+	if ValidateDetached(Detached{Reason: reason}) != nil {
 		return Detached{}, errInvalidEnum
 	}
 	if err := r.done(); err != nil {
@@ -1948,7 +1490,7 @@ func getPreviewStyle(r *payloadReader) (renderer.Style, error) {
 		return renderer.Style{}, err
 	}
 	if flags&0x80 != 0 {
-		return renderer.Style{}, ErrRemotePreviewUnsupportedStyle
+		return renderer.Style{}, protocol.ErrRemotePreviewUnsupportedStyle
 	}
 	attrs, err := r.getUint16()
 	if err != nil {
@@ -1989,8 +1531,8 @@ func getPreviewStyle(r *payloadReader) (renderer.Style, error) {
 		ForegroundRGB: fgrgb, BackgroundRGB: bgrgb, UnderlineColorRGB: ulrgb}, nil
 }
 
-func MarshalRemotePreviewRequest(request RemotePreviewRequest) []byte {
-	if ValidateRemotePreviewRequest(request) != nil {
+func MarshalRemotePreviewRequest(request protocol.RemotePreviewRequest) []byte {
+	if protocol.ValidateRemotePreviewRequest(request) != nil {
 		return nil
 	}
 	w := payloadWriter{}
@@ -2005,12 +1547,12 @@ func MarshalRemotePreviewRequest(request RemotePreviewRequest) []byte {
 	return w.b
 }
 
-func UnmarshalRemotePreviewRequest(data []byte) (RemotePreviewRequest, error) {
-	if len(data) > RemotePreviewMaxBytes {
-		return RemotePreviewRequest{}, ErrInvalidRemotePreviewRequest
+func UnmarshalRemotePreviewRequest(data []byte) (protocol.RemotePreviewRequest, error) {
+	if len(data) > protocol.RemotePreviewMaxBytes {
+		return protocol.RemotePreviewRequest{}, protocol.ErrInvalidRemotePreviewRequest
 	}
 	r := payloadReader{b: data}
-	var q RemotePreviewRequest
+	var q protocol.RemotePreviewRequest
 	var err error
 	if q.Version, err = r.getUint16(); err != nil {
 		return q, err
@@ -2043,7 +1585,7 @@ func UnmarshalRemotePreviewRequest(data []byte) (RemotePreviewRequest, error) {
 	if err := r.done(); err != nil {
 		return q, err
 	}
-	if err := ValidateRemotePreviewRequest(q); err != nil {
+	if err := protocol.ValidateRemotePreviewRequest(q); err != nil {
 		return q, err
 	}
 	return q, nil
@@ -2051,8 +1593,8 @@ func UnmarshalRemotePreviewRequest(data []byte) (RemotePreviewRequest, error) {
 
 const previewCellWireSize = 4 + 1 + 1 + 2 + 2 + 2 + 1 + 2 + 3 + 3 + 3
 
-func MarshalRemotePreview(preview RemotePreview) []byte {
-	if ValidateRemotePreview(preview) != nil {
+func MarshalRemotePreview(preview protocol.RemotePreview) []byte {
+	if protocol.ValidateRemotePreview(preview) != nil {
 		return nil
 	}
 	w := payloadWriter{}
@@ -2076,12 +1618,12 @@ func MarshalRemotePreview(preview RemotePreview) []byte {
 	return w.b
 }
 
-func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
-	if len(data) > RemotePreviewMaxBytes {
-		return RemotePreview{}, ErrRemotePreviewTooLarge
+func UnmarshalRemotePreview(data []byte) (protocol.RemotePreview, error) {
+	if len(data) > protocol.RemotePreviewMaxBytes {
+		return protocol.RemotePreview{}, protocol.ErrRemotePreviewTooLarge
 	}
 	r := payloadReader{b: data}
-	var p RemotePreview
+	var p protocol.RemotePreview
 	var err error
 	if p.Version, err = r.getUint16(); err != nil {
 		return p, err
@@ -2090,7 +1632,7 @@ func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 	if err != nil {
 		return p, err
 	}
-	p.Status = RemotePreviewStatus(status)
+	p.Status = protocol.RemotePreviewStatus(status)
 	id, err := r.getBytes(16)
 	if err != nil {
 		return p, err
@@ -2114,8 +1656,8 @@ func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 	if err != nil {
 		return p, err
 	}
-	if count > RemotePreviewMaxCells || uint64(count) > uint64(len(r.b)/previewCellWireSize) {
-		return p, ErrRemotePreviewTooLarge
+	if count > protocol.RemotePreviewMaxCells || uint64(count) > uint64(len(r.b)/previewCellWireSize) {
+		return p, protocol.ErrRemotePreviewTooLarge
 	}
 	if count != 0 {
 		p.Cells = make([]renderer.Cell, 0, int(count))
@@ -2129,7 +1671,7 @@ func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 				return p, e
 			}
 			if flags&^uint8(1) != 0 {
-				return p, ErrInvalidRemotePreview
+				return p, protocol.ErrInvalidRemotePreview
 			}
 			style, e := getPreviewStyle(&r)
 			if e != nil {
@@ -2141,18 +1683,18 @@ func UnmarshalRemotePreview(data []byte) (RemotePreview, error) {
 	if err := r.done(); err != nil {
 		return p, err
 	}
-	if err := ValidateRemotePreview(p); err != nil {
+	if err := protocol.ValidateRemotePreview(p); err != nil {
 		return p, err
 	}
 	return p, nil
 }
 
 // MarshalNavigationDirective encodes one bounded navigation directive.
-func MarshalNavigationDirective(directive NavigationDirective) []byte {
-	if directive.Action != NavigationOpenHomePicker && directive.Action != NavigationBack {
+func MarshalNavigationDirective(directive protocol.NavigationDirective) []byte {
+	if directive.Action != protocol.NavigationOpenHomePicker && directive.Action != protocol.NavigationBack {
 		return nil
 	}
-	if directive.Action == NavigationOpenHomePicker && directive.LeaseID.IsZero() || directive.Action == NavigationBack && !directive.LeaseID.IsZero() {
+	if directive.Action == protocol.NavigationOpenHomePicker && directive.LeaseID.IsZero() || directive.Action == protocol.NavigationBack && !directive.LeaseID.IsZero() {
 		return nil
 	}
 	w := payloadWriter{}
@@ -2162,51 +1704,33 @@ func MarshalNavigationDirective(directive NavigationDirective) []byte {
 }
 
 // UnmarshalNavigationDirective decodes one strict navigation directive.
-func UnmarshalNavigationDirective(b []byte) (NavigationDirective, error) {
+func UnmarshalNavigationDirective(b []byte) (protocol.NavigationDirective, error) {
 	r := payloadReader{b: b}
 	value, err := r.getUint8()
 	if err != nil {
-		return NavigationDirective{}, ErrInvalidNavigation
+		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
-	lease, err := r.getBytes(len(ParkedRouteLeaseID{}))
+	lease, err := r.getBytes(len(protocol.ParkedRouteLeaseID{}))
 	if err != nil {
-		return NavigationDirective{}, ErrInvalidNavigation
+		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
 	if err := r.done(); err != nil {
-		return NavigationDirective{}, ErrInvalidNavigation
+		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
-	directive := NavigationDirective{Action: NavigationAction(value)}
+	directive := protocol.NavigationDirective{Action: protocol.NavigationAction(value)}
 	copy(directive.LeaseID[:], lease)
 	if MarshalNavigationDirective(directive) == nil {
-		return NavigationDirective{}, ErrInvalidNavigation
+		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
 	return directive, nil
 }
 
 // ValidateParkedRouteRequest enforces the closed action/target shape before a
 // request reaches either side's route state machine.
-func ValidateParkedRouteRequest(request ParkedRouteRequest) error {
-	if request.RequestID == 0 || request.LeaseID.IsZero() {
-		return ErrInvalidNavigation
-	}
-	switch request.Action {
-	case ParkedRoutePrepare, ParkedRouteResume:
-		if request.Target != nil {
-			return ErrInvalidNavigation
-		}
-	case ParkedRouteSwitch:
-		if request.Target == nil || validateWireRemoteTarget(*request.Target) != nil {
-			return ErrInvalidNavigation
-		}
-	default:
-		return ErrInvalidNavigation
-	}
-	return nil
-}
 
 // MarshalParkedRouteRequest encodes one retained-route operation.
-func MarshalParkedRouteRequest(request ParkedRouteRequest) []byte {
-	if ValidateParkedRouteRequest(request) != nil {
+func MarshalParkedRouteRequest(request protocol.ParkedRouteRequest) []byte {
+	if protocol.ValidateParkedRouteRequest(request) != nil {
 		return nil
 	}
 	w := payloadWriter{}
@@ -2218,35 +1742,35 @@ func MarshalParkedRouteRequest(request ParkedRouteRequest) []byte {
 }
 
 // UnmarshalParkedRouteRequest decodes one strict retained-route operation.
-func UnmarshalParkedRouteRequest(b []byte) (ParkedRouteRequest, error) {
+func UnmarshalParkedRouteRequest(b []byte) (protocol.ParkedRouteRequest, error) {
 	r := payloadReader{b: b}
 	requestID, err := r.getUint64()
 	if err != nil {
-		return ParkedRouteRequest{}, ErrInvalidNavigation
+		return protocol.ParkedRouteRequest{}, protocol.ErrInvalidNavigation
 	}
-	lease, err := r.getBytes(len(ParkedRouteLeaseID{}))
+	lease, err := r.getBytes(len(protocol.ParkedRouteLeaseID{}))
 	if err != nil {
-		return ParkedRouteRequest{}, ErrInvalidNavigation
+		return protocol.ParkedRouteRequest{}, protocol.ErrInvalidNavigation
 	}
 	action, err := r.getUint8()
 	if err != nil {
-		return ParkedRouteRequest{}, ErrInvalidNavigation
+		return protocol.ParkedRouteRequest{}, protocol.ErrInvalidNavigation
 	}
 	target, policy, err := unmarshalRemoteTargetSection(&r)
 	if err != nil || policy != EnvironmentPolicyDaemonOwned || r.done() != nil {
-		return ParkedRouteRequest{}, ErrInvalidNavigation
+		return protocol.ParkedRouteRequest{}, protocol.ErrInvalidNavigation
 	}
-	request := ParkedRouteRequest{RequestID: requestID, Action: ParkedRouteAction(action), Target: target}
+	request := protocol.ParkedRouteRequest{RequestID: requestID, Action: protocol.ParkedRouteAction(action), Target: target}
 	copy(request.LeaseID[:], lease)
-	if ValidateParkedRouteRequest(request) != nil {
-		return ParkedRouteRequest{}, ErrInvalidNavigation
+	if protocol.ValidateParkedRouteRequest(request) != nil {
+		return protocol.ParkedRouteRequest{}, protocol.ErrInvalidNavigation
 	}
 	return request, nil
 }
 
 // MarshalParkedRouteResponse encodes one correlated retained-route outcome.
-func MarshalParkedRouteResponse(response ParkedRouteResponse) []byte {
-	if response.RequestID == 0 || response.Status < ParkedRouteReady || response.Status > ParkedRouteStaleTarget {
+func MarshalParkedRouteResponse(response protocol.ParkedRouteResponse) []byte {
+	if response.RequestID == 0 || response.Status < protocol.ParkedRouteReady || response.Status > protocol.ParkedRouteStaleTarget {
 		return nil
 	}
 	w := payloadWriter{}
@@ -2256,19 +1780,19 @@ func MarshalParkedRouteResponse(response ParkedRouteResponse) []byte {
 }
 
 // UnmarshalParkedRouteResponse decodes one strict retained-route outcome.
-func UnmarshalParkedRouteResponse(b []byte) (ParkedRouteResponse, error) {
+func UnmarshalParkedRouteResponse(b []byte) (protocol.ParkedRouteResponse, error) {
 	r := payloadReader{b: b}
 	requestID, err := r.getUint64()
 	if err != nil {
-		return ParkedRouteResponse{}, ErrInvalidNavigation
+		return protocol.ParkedRouteResponse{}, protocol.ErrInvalidNavigation
 	}
 	status, err := r.getUint8()
 	if err != nil || r.done() != nil {
-		return ParkedRouteResponse{}, ErrInvalidNavigation
+		return protocol.ParkedRouteResponse{}, protocol.ErrInvalidNavigation
 	}
-	response := ParkedRouteResponse{RequestID: requestID, Status: ParkedRouteStatus(status)}
+	response := protocol.ParkedRouteResponse{RequestID: requestID, Status: protocol.ParkedRouteStatus(status)}
 	if MarshalParkedRouteResponse(response) == nil {
-		return ParkedRouteResponse{}, ErrInvalidNavigation
+		return protocol.ParkedRouteResponse{}, protocol.ErrInvalidNavigation
 	}
 	return response, nil
 }

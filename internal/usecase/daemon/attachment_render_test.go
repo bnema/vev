@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -285,7 +286,7 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 		token := sess.captureAttachmentCapability(ac, tr)
 		d.handleAttachmentClientFrame(token, ports.Frame{
 			Type:    ports.MsgResize,
-			Payload: mustMarshalResize(ports.Resize{Size: size}),
+			Payload: mustMarshalResize(protocol.Resize{Size: size}),
 		})
 	}
 	resize(second, secondTransport, domain.Size{Cols: 120, Rows: 50})

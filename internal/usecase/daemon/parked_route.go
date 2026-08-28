@@ -8,12 +8,13 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const parkedRouteLeaseTTL = 15 * time.Minute
 
 type parkedRouteLease struct {
-	id         ports.ParkedRouteLeaseID
+	id         protocol.ParkedRouteLeaseID
 	generation uint64
 	transport  transportSnapshot
 	expiresAt  time.Time
@@ -24,14 +25,14 @@ type parkedRouteLease struct {
 	expired    bool
 }
 
-func (lease *parkedRouteLease) matches(id ports.ParkedRouteLeaseID, generation uint64, transport transportSnapshot) bool {
+func (lease *parkedRouteLease) matches(id protocol.ParkedRouteLeaseID, generation uint64, transport transportSnapshot) bool {
 	return lease != nil && lease.id == id && lease.generation == generation && lease.transport == transport
 }
 
-func newParkedRouteLeaseID() (ports.ParkedRouteLeaseID, error) {
-	var id ports.ParkedRouteLeaseID
+func newParkedRouteLeaseID() (protocol.ParkedRouteLeaseID, error) {
+	var id protocol.ParkedRouteLeaseID
 	if _, err := io.ReadFull(rand.Reader, id[:]); err != nil {
-		return ports.ParkedRouteLeaseID{}, err
+		return protocol.ParkedRouteLeaseID{}, err
 	}
 	return id, nil
 }
@@ -50,17 +51,17 @@ func stopParkedRouteLeaseLocked(lease *parkedRouteLease) {
 	}
 }
 
-func (d *Daemon) armParkedRoute(effect *attachmentEffect) (ports.ParkedRouteLeaseID, error) {
+func (d *Daemon) armParkedRoute(effect *attachmentEffect) (protocol.ParkedRouteLeaseID, error) {
 	if !effect.current() {
-		return ports.ParkedRouteLeaseID{}, errAttachmentTransition
+		return protocol.ParkedRouteLeaseID{}, errAttachmentTransition
 	}
 	ac := effect.ac
-	if ac == nil || ac.navigationCapabilities&ports.NavigationCapabilityHomePicker == 0 {
-		return ports.ParkedRouteLeaseID{}, errAttachmentTransition
+	if ac == nil || ac.navigationCapabilities&protocol.NavigationCapabilityHomePicker == 0 {
+		return protocol.ParkedRouteLeaseID{}, errAttachmentTransition
 	}
 	id, err := newParkedRouteLeaseID()
 	if err != nil {
-		return ports.ParkedRouteLeaseID{}, err
+		return protocol.ParkedRouteLeaseID{}, err
 	}
 	lease := &parkedRouteLease{
 		id: id, generation: effect.generation, transport: effect.transport,
@@ -123,30 +124,30 @@ func (ac *attachedClient) clearParkedRoute() {
 	ac.parkedRouteMu.Unlock()
 }
 
-func (ac *attachedClient) parkedRouteStatus(token attachmentCapability, id ports.ParkedRouteLeaseID, now time.Time, suspended bool) ports.ParkedRouteStatus {
+func (ac *attachedClient) parkedRouteStatus(token attachmentCapability, id protocol.ParkedRouteLeaseID, now time.Time, suspended bool) protocol.ParkedRouteStatus {
 	if ac == nil || !token.current() {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
 	if !lease.matches(id, token.generation, token.transport) {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	if !now.Before(lease.expiresAt) {
 		stopParkedRouteLeaseLocked(lease)
 		ac.parkedRoute = nil
 		ac.parkedRouteOutput.Store(false)
 		ac.parkedRouteFullPending.Store(false)
-		return ports.ParkedRouteExpired
+		return protocol.ParkedRouteExpired
 	}
 	if lease.suspended != suspended {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	return 0
 }
 
-func (ac *attachedClient) prepareParkedRoute(token attachmentCapability, id ports.ParkedRouteLeaseID, now time.Time) ports.ParkedRouteStatus {
+func (ac *attachedClient) prepareParkedRoute(token attachmentCapability, id protocol.ParkedRouteLeaseID, now time.Time) protocol.ParkedRouteStatus {
 	if status := ac.parkedRouteStatus(token, id, now, false); status != 0 {
 		return status
 	}
@@ -154,14 +155,14 @@ func (ac *attachedClient) prepareParkedRoute(token attachmentCapability, id port
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
 	if !lease.matches(id, token.generation, token.transport) || lease.suspended {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	lease.suspended = true
 	ac.parkedRouteOutput.Store(true)
 	return 0
 }
 
-func (ac *attachedClient) consumeParkedRoute(token attachmentCapability, id ports.ParkedRouteLeaseID, now time.Time) ports.ParkedRouteStatus {
+func (ac *attachedClient) consumeParkedRoute(token attachmentCapability, id protocol.ParkedRouteLeaseID, now time.Time) protocol.ParkedRouteStatus {
 	if status := ac.parkedRouteStatus(token, id, now, true); status != 0 {
 		return status
 	}
@@ -169,43 +170,43 @@ func (ac *attachedClient) consumeParkedRoute(token attachmentCapability, id port
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
 	if !lease.matches(id, token.generation, token.transport) || !lease.suspended || lease.inFlight {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	stopParkedRouteLeaseLocked(lease)
 	ac.parkedRoute = nil
 	return 0
 }
 
-func (ac *attachedClient) beginParkedRouteSwitch(token attachmentCapability, id ports.ParkedRouteLeaseID, now time.Time) ports.ParkedRouteStatus {
+func (ac *attachedClient) beginParkedRouteSwitch(token attachmentCapability, id protocol.ParkedRouteLeaseID, now time.Time) protocol.ParkedRouteStatus {
 	if ac == nil || !token.current() {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
 	if !lease.matches(id, token.generation, token.transport) || !lease.suspended || lease.inFlight {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	if lease.expired || !now.Before(lease.expiresAt) {
 		stopParkedRouteLeaseLocked(lease)
 		ac.parkedRoute = nil
 		ac.parkedRouteOutput.Store(false)
 		ac.parkedRouteFullPending.Store(false)
-		return ports.ParkedRouteExpired
+		return protocol.ParkedRouteExpired
 	}
 	lease.inFlight = true
 	return 0
 }
 
-func (ac *attachedClient) rejectParkedRouteSwitch(token attachmentCapability, id ports.ParkedRouteLeaseID, now time.Time) ports.ParkedRouteStatus {
+func (ac *attachedClient) rejectParkedRouteSwitch(token attachmentCapability, id protocol.ParkedRouteLeaseID, now time.Time) protocol.ParkedRouteStatus {
 	if ac == nil {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
 	if !lease.matches(id, token.generation, token.transport) || !lease.inFlight {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	lease.inFlight = false
 	if lease.expired || !now.Before(lease.expiresAt) {
@@ -213,20 +214,20 @@ func (ac *attachedClient) rejectParkedRouteSwitch(token attachmentCapability, id
 		ac.parkedRoute = nil
 		ac.parkedRouteOutput.Store(false)
 		ac.parkedRouteFullPending.Store(false)
-		return ports.ParkedRouteExpired
+		return protocol.ParkedRouteExpired
 	}
 	return 0
 }
 
-func (ac *attachedClient) consumePublishedParkedRoute(previous, published attachmentCapability, id ports.ParkedRouteLeaseID) ports.ParkedRouteStatus {
+func (ac *attachedClient) consumePublishedParkedRoute(previous, published attachmentCapability, id protocol.ParkedRouteLeaseID) protocol.ParkedRouteStatus {
 	if ac == nil || published.ac != ac || !published.current() {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	ac.parkedRouteMu.Lock()
 	defer ac.parkedRouteMu.Unlock()
 	lease := ac.parkedRoute
 	if !lease.matches(id, previous.generation, previous.transport) || !lease.suspended || !lease.inFlight {
-		return ports.ParkedRouteRejected
+		return protocol.ParkedRouteRejected
 	}
 	// Expiry is checked when the request is admitted. Once publication starts,
 	// the accepted request must commit atomically instead of turning a completed
@@ -236,7 +237,7 @@ func (ac *attachedClient) consumePublishedParkedRoute(previous, published attach
 	return 0
 }
 
-func parkedRouteResponseFrame(response ports.ParkedRouteResponse) (ports.Frame, error) {
+func parkedRouteResponseFrame(response protocol.ParkedRouteResponse) (ports.Frame, error) {
 	payload := ports.MarshalParkedRouteResponse(response)
 	if payload == nil {
 		return ports.Frame{}, errAttachmentTransition
@@ -244,7 +245,7 @@ func parkedRouteResponseFrame(response ports.ParkedRouteResponse) (ports.Frame, 
 	return ports.Frame{Type: ports.MsgParkedRouteResponse, Payload: payload}, nil
 }
 
-func (d *Daemon) sendParkedRouteResponse(effect *attachmentEffect, response ports.ParkedRouteResponse) error {
+func (d *Daemon) sendParkedRouteResponse(effect *attachmentEffect, response protocol.ParkedRouteResponse) error {
 	frame, err := parkedRouteResponseFrame(response)
 	if err != nil {
 		return err
@@ -254,7 +255,7 @@ func (d *Daemon) sendParkedRouteResponse(effect *attachmentEffect, response port
 
 // sendParkedRouteResponseLocked preserves response -> full-output ordering.
 // Caller holds ac.sendMu and keeps parkedRouteOutput set through this send.
-func (d *Daemon) sendParkedRouteResponseLocked(ac *attachedClient, expected transportSnapshot, response ports.ParkedRouteResponse) error {
+func (d *Daemon) sendParkedRouteResponseLocked(ac *attachedClient, expected transportSnapshot, response protocol.ParkedRouteResponse) error {
 	frame, err := parkedRouteResponseFrame(response)
 	if err != nil {
 		return err
@@ -283,7 +284,7 @@ func (d *Daemon) parkedRouteResponseFailed(effect *attachmentEffect) {
 	launch()
 }
 
-func (d *Daemon) respondParkedRoute(effect *attachmentEffect, response ports.ParkedRouteResponse) bool {
+func (d *Daemon) respondParkedRoute(effect *attachmentEffect, response protocol.ParkedRouteResponse) bool {
 	if effect == nil || effect.ac == nil {
 		return false
 	}
@@ -307,35 +308,35 @@ func (d *Daemon) respondParkedRoute(effect *attachmentEffect, response ports.Par
 	return true
 }
 
-func (d *Daemon) handleParkedRouteRequest(effect *attachmentEffect, request ports.ParkedRouteRequest) {
-	if ports.ValidateParkedRouteRequest(request) != nil || !effect.current() || effect.ac == nil {
+func (d *Daemon) handleParkedRouteRequest(effect *attachmentEffect, request protocol.ParkedRouteRequest) {
+	if protocol.ValidateParkedRouteRequest(request) != nil || !effect.current() || effect.ac == nil {
 		return
 	}
 	capability := effect.capability()
 	switch request.Action {
-	case ports.ParkedRoutePrepare:
+	case protocol.ParkedRoutePrepare:
 		status := effect.ac.prepareParkedRoute(capability, request.LeaseID, d.clock.Now())
 		if status == 0 {
-			status = ports.ParkedRouteReady
+			status = protocol.ParkedRouteReady
 		}
-		d.respondParkedRoute(effect, ports.ParkedRouteResponse{RequestID: request.RequestID, Status: status})
-	case ports.ParkedRouteResume:
+		d.respondParkedRoute(effect, protocol.ParkedRouteResponse{RequestID: request.RequestID, Status: status})
+	case protocol.ParkedRouteResume:
 		d.resumeParkedRoute(effect, request)
-	case ports.ParkedRouteSwitch:
+	case protocol.ParkedRouteSwitch:
 		d.switchParkedRoute(effect, request)
 	}
 }
 
-func (d *Daemon) resumeParkedRoute(effect *attachmentEffect, request ports.ParkedRouteRequest) {
+func (d *Daemon) resumeParkedRoute(effect *attachmentEffect, request protocol.ParkedRouteRequest) {
 	capability := effect.capability()
 	status := effect.ac.consumeParkedRoute(capability, request.LeaseID, d.clock.Now())
 	if status != 0 {
-		d.respondParkedRoute(effect, ports.ParkedRouteResponse{RequestID: request.RequestID, Status: status})
+		d.respondParkedRoute(effect, protocol.ParkedRouteResponse{RequestID: request.RequestID, Status: status})
 		return
 	}
 	ac := effect.ac
 	ac.sendMu.Lock()
-	err := d.sendParkedRouteResponseLocked(ac, effect.transport, ports.ParkedRouteResponse{RequestID: request.RequestID, Status: ports.ParkedRouteResumed})
+	err := d.sendParkedRouteResponseLocked(ac, effect.transport, protocol.ParkedRouteResponse{RequestID: request.RequestID, Status: protocol.ParkedRouteResumed})
 	if err == nil {
 		ac.releaseParkedOutputLocked()
 	}
@@ -349,21 +350,21 @@ func (d *Daemon) resumeParkedRoute(effect *attachmentEffect, request ports.Parke
 	}
 }
 
-func (d *Daemon) rejectParkedRouteSwitch(effect *attachmentEffect, request ports.ParkedRouteRequest, fallback ports.ParkedRouteStatus) {
+func (d *Daemon) rejectParkedRouteSwitch(effect *attachmentEffect, request protocol.ParkedRouteRequest, fallback protocol.ParkedRouteStatus) {
 	capability := effect.capability()
 	status := effect.ac.rejectParkedRouteSwitch(capability, request.LeaseID, d.clock.Now())
 	if status == 0 {
 		status = fallback
 	}
-	if d.respondParkedRoute(effect, ports.ParkedRouteResponse{RequestID: request.RequestID, Status: status}) && status == ports.ParkedRouteExpired {
+	if d.respondParkedRoute(effect, protocol.ParkedRouteResponse{RequestID: request.RequestID, Status: status}) && status == protocol.ParkedRouteExpired {
 		_ = effect.ac.closeCapturedTransport(effect.transport.transport)
 	}
 }
 
-func (d *Daemon) switchParkedRoute(effect *attachmentEffect, request ports.ParkedRouteRequest) {
+func (d *Daemon) switchParkedRoute(effect *attachmentEffect, request protocol.ParkedRouteRequest) {
 	capability := effect.capability()
 	if status := effect.ac.beginParkedRouteSwitch(capability, request.LeaseID, d.clock.Now()); status != 0 {
-		if d.respondParkedRoute(effect, ports.ParkedRouteResponse{RequestID: request.RequestID, Status: status}) && status == ports.ParkedRouteExpired {
+		if d.respondParkedRoute(effect, protocol.ParkedRouteResponse{RequestID: request.RequestID, Status: status}) && status == protocol.ParkedRouteExpired {
 			_ = effect.ac.closeCapturedTransport(effect.transport.transport)
 		}
 		return
@@ -374,13 +375,13 @@ func (d *Daemon) switchParkedRoute(effect *attachmentEffect, request ports.Parke
 		ctx = context.Background()
 	}
 	if err := d.waitForParkedTargetRestore(ctx, target.SessionName); err != nil {
-		d.rejectParkedRouteSwitch(effect, request, ports.ParkedRouteStaleTarget)
+		d.rejectParkedRouteSwitch(effect, request, protocol.ParkedRouteStaleTarget)
 		return
 	}
 
 	transition, targetSession, err := d.transitionParkedRouteTarget(effect, target)
 	if err != nil {
-		d.rejectParkedRouteSwitch(effect, request, ports.ParkedRouteStaleTarget)
+		d.rejectParkedRouteSwitch(effect, request, protocol.ParkedRouteStaleTarget)
 		return
 	}
 	if status := effect.ac.consumePublishedParkedRoute(capability, transition.published, request.LeaseID); status != 0 {
@@ -395,7 +396,7 @@ func (d *Daemon) switchParkedRoute(effect *attachmentEffect, request ports.Parke
 	freshCapability := fresh.capability()
 	ac := effect.ac
 	ac.sendMu.Lock()
-	responseErr := d.sendParkedRouteResponseLocked(ac, freshCapability.transport, ports.ParkedRouteResponse{RequestID: request.RequestID, Status: ports.ParkedRouteSwitched})
+	responseErr := d.sendParkedRouteResponseLocked(ac, freshCapability.transport, protocol.ParkedRouteResponse{RequestID: request.RequestID, Status: protocol.ParkedRouteSwitched})
 	if responseErr == nil {
 		ac.releaseParkedOutputLocked()
 	}

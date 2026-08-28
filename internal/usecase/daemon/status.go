@@ -8,7 +8,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -189,7 +189,7 @@ func (s *session) statusSegments(includeTerminalTitle bool) statusSnapshot {
 }
 
 func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle bool) statusSnapshot {
-	var routeSnapshot ports.RecentRouteSnapshot
+	var routeSnapshot protocol.RecentRouteSnapshot
 	if ac != nil {
 		routeSnapshot = ac.routeSnapshotCopy()
 	}
@@ -199,7 +199,7 @@ func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle boo
 	presentation := recentRoutePresentation{name: s.name, ephemeral: s.ephemeral}
 	if active, ok := activeRouteEntryForLifecycle(routeSnapshot, s.incarnation); ok {
 		presentation.hostLabel = domain.RemoteDisplayOrigin(active.HostLabel)
-		if active.Kind == ports.RouteKindRemote {
+		if active.Kind == protocol.RouteKindRemote {
 			presentation.kind = recentRouteRemote
 		}
 	}
@@ -231,7 +231,7 @@ func tabDisplayName(tb *tab, index int) string {
 	return strconv.Itoa(index + 1)
 }
 
-func rankedRecentForHintsWithSnapshot(hints *palette.ContextualHints, snapshot ports.RecentRouteSnapshot) []rankedRecent {
+func rankedRecentForHintsWithSnapshot(hints *palette.ContextualHints, snapshot protocol.RecentRouteSnapshot) []rankedRecent {
 	if hints == nil || hints.Kind != command.ContextHintRecentSessions {
 		return nil
 	}
@@ -270,10 +270,10 @@ func (d *Daemon) barStateForPaletteHints(cur *session, statusFeedback string, hi
 // attachment. Bar scripts remain local-session-only because
 // their existing execution contract depends on local tabs and PTYs.
 func (d *Daemon) barStateForAttachmentPaletteHints(cur *session, statusFeedback string, hints *palette.ContextualHints) barState {
-	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, ports.RecentRouteSnapshot{})
+	return d.barStateForAttachmentPaletteHintsFor(cur, nil, statusFeedback, hints, protocol.RecentRouteSnapshot{})
 }
 
-func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, capturedRouteSnapshot ports.RecentRouteSnapshot) barState {
+func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attachedClient, statusFeedback string, hints *palette.ContextualHints, capturedRouteSnapshot protocol.RecentRouteSnapshot) barState {
 	routeSnapshot := capturedRouteSnapshot
 	if routeSnapshot.Generation == 0 && ac != nil {
 		routeSnapshot = ac.routeSnapshotCopy()

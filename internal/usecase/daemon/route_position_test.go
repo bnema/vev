@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
@@ -28,7 +29,7 @@ func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
 			sess.tabs = append(sess.tabs, second)
 			sess.mu.Unlock()
 			tr := &closeTrackingTransport{}
-			target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+			target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 			hello := ports.Hello{
 				Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: sess.name,
 				Size: defaultSize, ExactTarget: &target, PreferredTabID: test.preferred,
@@ -78,7 +79,7 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	sess.tabs = append(sess.tabs, second)
 	sess.mu.Unlock()
 	tr := &closeTrackingTransport{}
-	target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 	hello := ports.Hello{
 		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: sess.name,
 		Size: defaultSize, ExactTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
@@ -93,7 +94,7 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	sess.selectAttachmentTab(ac, "tab-2")
 	d.paint(sess, ac, false, nil)
 
-	var positions []ports.RoutePosition
+	var positions []protocol.RoutePosition
 	for _, frame := range tr.Sends() {
 		if frame.Type != ports.MsgRoutePosition {
 			continue
@@ -102,7 +103,7 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 		require.NoError(t, err)
 		positions = append(positions, position)
 	}
-	require.Equal(t, []ports.RoutePosition{
+	require.Equal(t, []protocol.RoutePosition{
 		{Target: target, ActiveTabID: "tab-1"},
 		{Target: target, ActiveTabID: "tab-2"},
 	}, positions)

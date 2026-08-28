@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
@@ -50,7 +51,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgAck)).Run(func(ports.Frame) { close(acked) }).Return(nil).Once()
 	unblock := scriptRecv(transport,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(ports.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("flush-before-observe"), New: 3}))},
+		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("flush-before-observe"), New: 3}))},
 	)
 	defer unblock()
 	transport.EXPECT().Close().Return(nil).Once()
@@ -90,7 +91,7 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	unblock := scriptRecv(transport,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(ports.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("unchanged-by-observer"), New: 3}))},
+		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("unchanged-by-observer"), New: 3}))},
 		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
 	)
 	defer unblock()

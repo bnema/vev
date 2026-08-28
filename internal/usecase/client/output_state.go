@@ -1,6 +1,6 @@
 package client
 
-import "github.com/bnema/vev/internal/ports"
+import "github.com/bnema/vev/internal/protocol"
 
 // outputApplyState is the client-side dependency chain for one attachment.
 // State-bearing frames are accepted only when their epoch, base, and view
@@ -12,7 +12,7 @@ type outputApplyState struct {
 	initialized  bool
 }
 
-func (s outputApplyState) next(output ports.Output) (outputApplyState, bool) {
+func (s outputApplyState) next(output protocol.Output) (outputApplyState, bool) {
 	if output.Epoch == 0 {
 		return outputApplyState{}, false
 	}

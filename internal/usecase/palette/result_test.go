@@ -5,13 +5,13 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/stretchr/testify/require"
 )
 
-func testExactTarget(name string, marker byte) ports.ExactSessionTarget {
-	return ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{marker}, SessionName: name}
+func testExactTarget(name string, marker byte) protocol.ExactSessionTarget {
+	return protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{marker}, SessionName: name}
 }
 
 func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
@@ -73,7 +73,7 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 }
 
 func TestRecentRouteResultCarriesExactNavigationAction(t *testing.T) {
-	action := ports.RouteNavigationAction{SnapshotGeneration: 4, Key: 7, Generation: 3}
+	action := protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 7, Generation: 3}
 	result := NewRecentRouteResult("logs@edge", action)
 
 	require.Equal(t, ResultKindRecentRoute, result.Kind())

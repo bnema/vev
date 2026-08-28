@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/require"
 )
@@ -46,7 +47,7 @@ func awaitAcceptanceCommand(t *testing.T, p *pump, requestID uint64) ports.Comma
 	return result
 }
 
-func awaitAcceptanceOutput(t *testing.T, p *pump, predicate func(ports.Output) bool) ports.Output {
+func awaitAcceptanceOutput(t *testing.T, p *pump, predicate func(protocol.Output) bool) protocol.Output {
 	t.Helper()
 	frame := awaitAcceptanceFrame(t, p, ports.MsgOutput, func(frame ports.Frame) bool {
 		output, err := ports.UnmarshalOutput(frame.Payload)
@@ -113,15 +114,15 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	// The resize keeps its attachment-local output stream while recalculating
 	// shared PTY/content geometry from the latest valid attachment claim; the
 	// peer stream remains independent.
-	resizePayload, err := ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 100, Rows: 30}})
+	resizePayload, err := ports.MarshalResize(protocol.Resize{Size: domain.Size{Cols: 100, Rows: 30}})
 	require.NoError(t, err)
 	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgResize, Payload: resizePayload}))
-	resized := awaitAcceptanceOutput(t, firstPump, func(output ports.Output) bool { return output.Size == (domain.Size{Cols: 100, Rows: 30}) })
+	resized := awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Size == (domain.Size{Cols: 100, Rows: 30}) })
 	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, resized.Size)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
 	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}))
-	reset := awaitAcceptanceOutput(t, firstPump, func(output ports.Output) bool { return output.Base == 0 && output.Full })
+	reset := awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Base == 0 && output.Full })
 	require.True(t, reset.Full)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
@@ -173,6 +174,6 @@ func TestAcceptanceAttachedCommandUsesItsConnectionOnly(t *testing.T) {
 
 drained:
 	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}))
-	awaitAcceptanceOutput(t, firstPump, func(output ports.Output) bool { return output.Full && output.Base == 0 })
+	awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Full && output.Base == 0 })
 	assertNoTextAfterInput(t, secondPump, size, "Commands")
 }

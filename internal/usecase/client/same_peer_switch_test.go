@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
@@ -33,7 +34,7 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 	resultCh := make(chan attachResult, 1)
 	go func() { resultCh <- attempt.run(ctx) }()
 
-	exact := ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{7}, SessionName: "stopped"}
+	exact := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{7}, SessionName: "stopped"}
 	target := ports.AttachTarget{
 		Session: "stopped", Intent: ports.IntentAttach, ExactTarget: &exact,
 		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,

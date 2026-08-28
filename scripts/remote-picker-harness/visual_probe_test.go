@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,7 +30,7 @@ func (t *probeTestTransport) Send(frame ports.Frame) error {
 func (*probeTestTransport) Recv() (ports.Frame, error) { return ports.Frame{}, errors.New("not used") }
 func (*probeTestTransport) Close() error               { return nil }
 
-func probeTestOutput(t *testing.T, output ports.Output) ports.Frame {
+func probeTestOutput(t *testing.T, output protocol.Output) ports.Frame {
 	t.Helper()
 	payload, err := ports.MarshalOutput(output)
 	if err != nil {
@@ -43,19 +44,19 @@ func TestVisualProbePersistsFullAndIncrementalOutput(t *testing.T) {
 	probe := newVisualProbe(size)
 	for _, tt := range []struct {
 		name   string
-		output ports.Output
+		output protocol.Output
 		want   string
 		state  uint64
 	}{
 		{
 			name:   "full",
-			output: ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("full")},
+			output: protocol.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("full")},
 			want:   "full",
 			state:  1,
 		},
 		{
 			name:   "incremental",
-			output: ports.Output{Epoch: 1, Base: 1, New: 2, ViewRevision: 4, Size: size, Data: []byte(" incremental")},
+			output: protocol.Output{Epoch: 1, Base: 1, New: 2, ViewRevision: 4, Size: size, Data: []byte(" incremental")},
 			want:   "full incremental",
 			state:  2,
 		},
@@ -87,7 +88,7 @@ func TestVisualProbePersistsFullAndIncrementalOutput(t *testing.T) {
 func TestVisualProbeResizesToAcceptedOutput(t *testing.T) {
 	probe := newVisualProbe(domain.Size{Cols: probeTestCols, Rows: probeTestRows})
 	outputSize := domain.Size{Cols: 48, Rows: 3}
-	result := probe.apply(ports.Output{
+	result := probe.apply(protocol.Output{
 		Epoch: 1, New: 1, Full: true, ViewRevision: 1, Size: outputSize, Data: []byte("resized"),
 	})
 
@@ -103,30 +104,30 @@ func TestVisualProbeRejectsOutputWithoutMutationOrAck(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
 	for _, tt := range []struct {
 		name   string
-		output ports.Output
+		output protocol.Output
 	}{
 		{
 			name:   "base gap",
-			output: ports.Output{Epoch: 1, Base: 0, New: 3, Full: true, ViewRevision: 4, Size: size, Data: []byte("rejected")},
+			output: protocol.Output{Epoch: 1, Base: 0, New: 3, Full: true, ViewRevision: 4, Size: size, Data: []byte("rejected")},
 		},
 		{
 			name:   "revision gap",
-			output: ports.Output{Epoch: 1, Base: 1, New: 2, ViewRevision: 5, Size: size, Data: []byte("rejected")},
+			output: protocol.Output{Epoch: 1, Base: 1, New: 2, ViewRevision: 5, Size: size, Data: []byte("rejected")},
 		},
 		{
 			name:   "stale epoch",
-			output: ports.Output{Epoch: 0, Base: 1, New: 2, ViewRevision: 4, Size: size, Data: []byte("rejected")},
+			output: protocol.Output{Epoch: 0, Base: 1, New: 2, ViewRevision: 4, Size: size, Data: []byte("rejected")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			probe := newVisualProbe(size)
-			first := ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("keep")}
+			first := protocol.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("keep")}
 			if result := probe.apply(first); !result.Accepted {
 				t.Fatal("seed output was rejected")
 			}
 			beforeText, beforeState, beforeCheckpoints := probe.text(), probe.state, len(probe.checkpoints)
 			result := probe.apply(tt.output)
-			if result.Accepted || result.StateBearing || result.Ack != (ports.Ack{}) {
+			if result.Accepted || result.StateBearing || result.Ack != (protocol.Ack{}) {
 				t.Fatalf("result = %+v, want rejected output without ACK", result)
 			}
 			if got := probe.text(); got != beforeText {
@@ -144,13 +145,13 @@ func TestVisualProbeRejectsOutputWithoutMutationOrAck(t *testing.T) {
 
 func TestVisualProbeRejectsInvalidUninitializedSideEffects(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
-	for _, output := range []ports.Output{
+	for _, output := range []protocol.Output{
 		{Epoch: 1, Base: 1, Size: size, Data: []byte("invalid base")},
 		{Epoch: 1, Full: true, Size: size, Data: []byte("invalid full")},
 	} {
 		probe := newVisualProbe(size)
 		result := probe.apply(output)
-		if result.Accepted || result.StateBearing || result.Ack != (ports.Ack{}) {
+		if result.Accepted || result.StateBearing || result.Ack != (protocol.Ack{}) {
 			t.Fatalf("result = %+v, want rejected uninitialized side effect", result)
 		}
 		require.Len(t, probe.events, 1)
@@ -163,17 +164,17 @@ func TestVisualProbeSideEffectsApplyWithoutAck(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
 	for _, tt := range []struct {
 		name   string
-		seed   *ports.Output
-		effect ports.Output
+		seed   *protocol.Output
+		effect protocol.Output
 	}{
 		{
 			name:   "before state-bearing output",
-			effect: ports.Output{Epoch: 1, Size: size, Data: []byte("side effect")},
+			effect: protocol.Output{Epoch: 1, Size: size, Data: []byte("side effect")},
 		},
 		{
 			name:   "after state-bearing output",
-			seed:   &ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("seed")},
-			effect: ports.Output{Epoch: 1, ViewRevision: 4, Size: size, Data: []byte(" side effect")},
+			seed:   &protocol.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("seed")},
+			effect: protocol.Output{Epoch: 1, ViewRevision: 4, Size: size, Data: []byte(" side effect")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -183,7 +184,7 @@ func TestVisualProbeSideEffectsApplyWithoutAck(t *testing.T) {
 			}
 			beforeState, beforeCheckpoints := probe.state, len(probe.checkpoints)
 			result := probe.apply(tt.effect)
-			if !result.Accepted || result.StateBearing || result.Ack != (ports.Ack{}) {
+			if !result.Accepted || result.StateBearing || result.Ack != (protocol.Ack{}) {
 				t.Fatalf("result = %+v, want accepted side effect without ACK", result)
 			}
 			if !strings.Contains(probe.text(), string(tt.effect.Data)) {
@@ -203,24 +204,24 @@ func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 	size := domain.Size{Cols: probeTestCols, Rows: probeTestRows}
 	for _, tt := range []struct {
 		name       string
-		seed       *ports.Output
-		output     ports.Output
+		seed       *protocol.Output
+		output     protocol.Output
 		wantACKs   int
 		wantResets int
 	}{
 		{
 			name:     "accepted full",
-			output:   ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("full")},
+			output:   protocol.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("full")},
 			wantACKs: 1,
 		},
 		{
 			name:   "accepted side effect",
-			output: ports.Output{Epoch: 1, Size: size, Data: []byte("side effect")},
+			output: protocol.Output{Epoch: 1, Size: size, Data: []byte("side effect")},
 		},
 		{
 			name:       "rejected state",
-			seed:       &ports.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("seed")},
-			output:     ports.Output{Epoch: 1, New: 3, Full: true, ViewRevision: 4, Size: size, Data: []byte("gap")},
+			seed:       &protocol.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("seed")},
+			output:     protocol.Output{Epoch: 1, New: 3, Full: true, ViewRevision: 4, Size: size, Data: []byte("gap")},
 			wantResets: 1,
 		},
 	} {
@@ -307,7 +308,7 @@ func TestHarnessArtifactIsBoundedAndContainsOnlyMetadata(t *testing.T) {
 	artifact.registerProbe(probe)
 	secret := "not-for-artifact"
 	for state := uint64(1); state <= maxProbeEvents+1; state++ {
-		output := ports.Output{Epoch: 1, Base: state - 1, New: state, Size: size, Data: []byte(secret)}
+		output := protocol.Output{Epoch: 1, Base: state - 1, New: state, Size: size, Data: []byte(secret)}
 		if state == 1 {
 			output.Full = true
 		}

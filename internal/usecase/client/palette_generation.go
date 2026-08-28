@@ -4,7 +4,7 @@ import (
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // Palette queries always have a DECRQM boundary. The first marker drains
@@ -38,7 +38,7 @@ const (
 type paletteGeneration struct {
 	id                        paletteGenerationID
 	phase                     paletteGenerationPhase
-	theme                     ports.Theme
+	theme                     protocol.Theme
 	expectedMarkers           int
 	awaitingLateDrainBoundary bool
 }
@@ -83,7 +83,7 @@ type paletteGenerationAction struct {
 	kind     paletteGenerationActionKind
 	id       paletteGenerationID
 	bytes    string
-	theme    ports.Theme
+	theme    protocol.Theme
 	deadline time.Duration
 }
 
@@ -93,7 +93,7 @@ type paletteGenerationCoordinator struct {
 	next      paletteGenerationID
 	current   paletteGeneration
 	active    bool
-	finalized ports.Theme
+	finalized protocol.Theme
 }
 
 func newPaletteGenerationCoordinator() *paletteGenerationCoordinator {
@@ -104,7 +104,7 @@ func newPaletteGenerationCoordinator() *paletteGenerationCoordinator {
 // batch or a replacement drain. The retained foreground/background and
 // capability avoid a full neutral flash, while the accumulator begins with no
 // defaults or palette values so a definitive result never mixes generations.
-func (c *paletteGenerationCoordinator) start(retained ports.Theme, replacement bool) []paletteGenerationAction {
+func (c *paletteGenerationCoordinator) start(retained protocol.Theme, replacement bool) []paletteGenerationAction {
 	actions := c.cancelCurrent()
 	c.next++
 	id := c.next
@@ -115,7 +115,7 @@ func (c *paletteGenerationCoordinator) start(retained ports.Theme, replacement b
 	c.current = paletteGeneration{
 		id:    id,
 		phase: generationCollecting,
-		theme: ports.Theme{
+		theme: protocol.Theme{
 			TrueColor:   retained.TrueColor,
 			SchemeKnown: retained.SchemeKnown,
 			Light:       retained.Light,
@@ -250,7 +250,7 @@ func (c *paletteGenerationCoordinator) palette(id paletteGenerationID, slot uint
 	c.handle(paletteGenerationEvent{id: id, kind: paletteEventPalette, slot: slot, rgb: rgb})
 }
 
-func (c *paletteGenerationCoordinator) finalizedTheme() ports.Theme { return c.finalized }
+func (c *paletteGenerationCoordinator) finalizedTheme() protocol.Theme { return c.finalized }
 
 // paletteMarkerScanner consumes only complete DECRQM 2031 replies and retains
 // possible prefixes across reads, forwarding all ordinary input exactly once.

@@ -14,6 +14,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type paletteAttachClock struct{}
@@ -78,7 +79,7 @@ func (t *paletteAttachTerminal) Flush() error                         { return n
 type paletteAttachTransport struct {
 	mu       sync.Mutex
 	sent     []ports.Frame
-	themes   []ports.Theme
+	themes   []protocol.Theme
 	finals   int
 	finalSet chan struct{}
 }

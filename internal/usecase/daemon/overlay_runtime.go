@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -43,7 +43,7 @@ type overlayRuntime struct {
 
 	paletteMu            sync.Mutex
 	palette              *palette.Model
-	paletteRouteSnapshot ports.RecentRouteSnapshot
+	paletteRouteSnapshot protocol.RecentRouteSnapshot
 	paletteGeneration    uint64
 	paletteHints         palette.ContextualHints
 	palettePreview       string
@@ -309,7 +309,7 @@ type overlayRenderSnapshot struct {
 	paletteHints         *palette.ContextualHints
 	palettePreview       string
 	paletteFeedback      string
-	paletteRouteSnapshot ports.RecentRouteSnapshot
+	paletteRouteSnapshot protocol.RecentRouteSnapshot
 	paletteLocked        bool
 
 	promptActive bool
@@ -383,7 +383,7 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		snap.palettePreview = rt.palettePreview
 		snap.paletteFeedback = rt.paletteFeedback
 		snap.paletteRouteSnapshot = rt.paletteRouteSnapshot
-		snap.paletteRouteSnapshot.Entries = append([]ports.RecentRouteEntry(nil), rt.paletteRouteSnapshot.Entries...)
+		snap.paletteRouteSnapshot.Entries = append([]protocol.RecentRouteEntry(nil), rt.paletteRouteSnapshot.Entries...)
 		snap.paletteLocked = true
 	} else {
 		rt.paletteMu.Unlock()

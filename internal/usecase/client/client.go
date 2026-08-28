@@ -23,6 +23,7 @@ import (
 	"github.com/bnema/vev-vt/protocol/terminalquery"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/theme"
 )
 
@@ -55,7 +56,7 @@ func (e *DetachedError) Error() string { return "vev: " + e.Text }
 // without relying on another OSC response.
 type terminalThemeState struct {
 	mu    sync.Mutex
-	theme ports.Theme
+	theme protocol.Theme
 }
 
 func (s *terminalThemeState) setTrueColor(enabled bool) {
@@ -64,14 +65,14 @@ func (s *terminalThemeState) setTrueColor(enabled bool) {
 	s.mu.Unlock()
 }
 
-func (s *terminalThemeState) update(update func(*ports.Theme)) ports.Theme {
+func (s *terminalThemeState) update(update func(*protocol.Theme)) protocol.Theme {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	update(&s.theme)
 	return s.theme
 }
 
-func (s *terminalThemeState) snapshot() ports.Theme {
+func (s *terminalThemeState) snapshot() protocol.Theme {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.theme
@@ -171,7 +172,7 @@ type Dependencies struct {
 	Remote bool
 	// Origin is explicit composition metadata for the initial route. A zero
 	// value is normalized to local for direct package callers and old tests.
-	Origin    ports.RouteOrigin
+	Origin    protocol.RouteOrigin
 	OriginKey string
 }
 
@@ -182,15 +183,15 @@ type AttachRequest struct {
 	Intent                 uint8
 	SessionName            string
 	Remote                 bool
-	Origin                 ports.RouteOrigin
+	Origin                 protocol.RouteOrigin
 	OriginKey              string
 	RemoteTarget           *domain.RemoteSessionTarget
-	ExactTarget            *ports.ExactSessionTarget
+	ExactTarget            *protocol.ExactSessionTarget
 	PreferredTabID         domain.TabStableID
 	HostLabel              string
 	EnvironmentPolicy      ports.EnvironmentPolicy
-	NavigationCapabilities ports.NavigationCapabilities
-	StartupOverlay         ports.StartupOverlay
+	NavigationCapabilities protocol.NavigationCapabilities
+	StartupOverlay         protocol.StartupOverlay
 }
 
 // attachRoute captures the dialer, request, and resume token needed to
@@ -211,9 +212,9 @@ type Runner struct {
 	remoteHostLearner ports.RemoteHostLearner
 	attachHandoff     AttachHandoffFunc
 	remote            bool
-	origin            ports.RouteOrigin
+	origin            protocol.RouteOrigin
 	ledger            *routeLedger
-	routeFailure      *ports.RouteNavigationFailure
+	routeFailure      *protocol.RouteNavigationFailure
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -360,7 +361,7 @@ func validateAttachRequest(request AttachRequest) error {
 		}
 	}
 	if request.OriginKey != "" {
-		if err := ports.ValidateRouteLabel(request.OriginKey, false); err != nil {
+		if err := protocol.ValidateRouteLabel(request.OriginKey, false); err != nil {
 			return fmt.Errorf("vev: invalid route origin key: %w", err)
 		}
 	}
@@ -378,7 +379,7 @@ func validateAttachRequest(request AttachRequest) error {
 	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
 		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
-	if err := ports.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned); err != nil {
+	if err := protocol.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
@@ -452,7 +453,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	routeNavigationResumeFallback := false
 	var routeNavigationSelection *routeNavigationSelection
 	var routeNavigationFallback *attachRoute
-	var routeNavigationAction *ports.RouteNavigationAction
+	var routeNavigationAction *protocol.RouteNavigationAction
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
 	var rememberOnce sync.Once
@@ -513,8 +514,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		} else {
 			attemptRequest.Intent = ports.IntentAttach
 		}
-		attemptRequest.StartupOverlay = ports.StartupOverlayNone
-		attemptRequest.NavigationCapabilities &^= ports.NavigationCapabilityBack | ports.NavigationCapabilityHomePicker
+		attemptRequest.StartupOverlay = protocol.StartupOverlayNone
+		attemptRequest.NavigationCapabilities &^= protocol.NavigationCapabilityBack | protocol.NavigationCapabilityHomePicker
 		resumeToken = route.resumeToken
 		returnResumeFallback = route.resumeToken != 0
 		remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
@@ -524,8 +525,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		dialer = homeRoute.dialer
 		attemptRequest = homeRoute.request
 		attemptRequest.Intent = ports.IntentAttach
-		attemptRequest.NavigationCapabilities = ports.NavigationCapabilityBack
-		attemptRequest.StartupOverlay = ports.StartupOverlaySessionPicker
+		attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityBack
+		attemptRequest.StartupOverlay = protocol.StartupOverlaySessionPicker
 		attemptRequest.RemoteTarget = nil
 		attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
 		attemptRequest.Remote = homeRoute.request.Remote || r.remote
@@ -556,8 +557,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		request := cloneAttachRequest(homeRoute.request)
 		request.Intent = ports.IntentAttach
-		request.NavigationCapabilities = ports.NavigationCapabilityBack
-		request.StartupOverlay = ports.StartupOverlaySessionPicker
+		request.NavigationCapabilities = protocol.NavigationCapabilityBack
+		request.StartupOverlay = protocol.StartupOverlaySessionPicker
 		request.RemoteTarget = nil
 		request.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
 		request.Remote = false
@@ -739,10 +740,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			// Back is transient to the picker overlay. Re-derive the home-picker
 			// capability from the selected route instead of trusting request
 			// metadata, which may have been cleared after a daemon-side switch.
-			attemptRequest.StartupOverlay = ports.StartupOverlayNone
+			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
-			if homeRoute != nil && selection.selected.presentation.kind == ports.RouteKindRemote {
-				attemptRequest.NavigationCapabilities = ports.NavigationCapabilityHomePicker
+			if homeRoute != nil && selection.selected.presentation.kind == protocol.RouteKindRemote {
+				attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
 			}
 			resumeToken = selection.selected.resumeToken
 			routeNavigationPending = true
@@ -754,7 +755,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		if result.action != 0 {
 			switch result.action {
-			case ports.NavigationOpenHomePicker:
+			case protocol.NavigationOpenHomePicker:
 				// The daemon only sends this action after accepting a Hello that
 				// advertised Home support. The durable client-side prerequisite is
 				// the captured route itself; request metadata may have been rebased by
@@ -770,7 +771,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				homeNavigationPending = true
 				enterHomePicker()
 				continue
-			case ports.NavigationBack:
+			case protocol.NavigationBack:
 				// As with Home, the daemon accepted Back in Hello before sending
 				// this action. The retained concrete route is the durable client
 				// prerequisite; request metadata may have been rebased meanwhile.
@@ -796,7 +797,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 					}
 					routeRequest.Intent = ports.IntentAttach
 					routeRequest.NavigationCapabilities = 0
-					routeRequest.StartupOverlay = ports.StartupOverlayNone
+					routeRequest.StartupOverlay = protocol.StartupOverlayNone
 					homeRoute = &attachRoute{dialer: dialer, request: routeRequest}
 				}
 			}
@@ -832,9 +833,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				nextRequest.ExactTarget = result.target.ExactTarget
 			}
 			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned) {
-				nextRequest.NavigationCapabilities |= ports.NavigationCapabilityHomePicker
+				nextRequest.NavigationCapabilities |= protocol.NavigationCapabilityHomePicker
 			}
-			if attemptRequest.StartupOverlay == ports.StartupOverlaySessionPicker {
+			if attemptRequest.StartupOverlay == protocol.StartupOverlaySessionPicker {
 				returnRoute = nil
 				returnResumeFallback = false
 			}
@@ -882,7 +883,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if routeNavigationPending && routeNavigationFallback != nil {
 			if routeNavigationAction != nil {
 				action := *routeNavigationAction
-				r.routeFailure = &ports.RouteNavigationFailure{Key: action.Key, Generation: action.Generation, Code: routeFailureCode(result.err)}
+				r.routeFailure = &protocol.RouteNavigationFailure{Key: action.Key, Generation: action.Generation, Code: routeFailureCode(result.err)}
 				routeNavigationAction = nil
 			}
 			route := *routeNavigationFallback
@@ -1084,14 +1085,14 @@ type attachAttempt struct {
 type attachResult struct {
 	resumeToken       uint64
 	sessionName       string
-	committedIdentity *ports.CommittedRouteIdentity
-	routePosition     *ports.RoutePosition
+	committedIdentity *protocol.CommittedRouteIdentity
+	routePosition     *protocol.RoutePosition
 	welcomed          bool
 	transportClosed   bool
 	target            *ports.AttachTarget
-	action            ports.NavigationAction
+	action            protocol.NavigationAction
 	homePickerTarget  bool
-	routeAction       *ports.RouteNavigationAction
+	routeAction       *protocol.RouteNavigationAction
 	err               error
 }
 
@@ -1213,7 +1214,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	themeState.setTrueColor(trueColor)
 	exactTarget := request.ExactTarget
 	if exactTarget == nil && request.RemoteTarget != nil {
-		exactTarget = &ports.ExactSessionTarget{
+		exactTarget = &protocol.ExactSessionTarget{
 			LifecycleID: request.RemoteTarget.LifecycleID,
 			SessionName: request.RemoteTarget.SessionName,
 		}
@@ -1257,8 +1258,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}, transition); err != nil {
 		return handshakeFailure("awaiting welcome", err)
 	}
-	var committedIdentity *ports.CommittedRouteIdentity
-	var routePosition *ports.RoutePosition
+	var committedIdentity *protocol.CommittedRouteIdentity
+	var routePosition *protocol.RoutePosition
 	result := func(welcomed bool, err error) attachResult {
 		return attachResult{
 			resumeToken:       resumeToken,
@@ -1391,7 +1392,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			delete(timers, id)
 		}
 	}
-	publish := func(snapshot ports.Theme) error {
+	publish := func(snapshot protocol.Theme) error {
 		frame := ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(snapshot)}
 		// The initial cleared snapshot is sent before the sender exists. This
 		// keeps the generation publication ordered before the first query and
@@ -1417,7 +1418,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return fmt.Errorf("publishing theme: %w", err)
 				}
 			case paletteActionPublishFinal:
-				themeState.update(func(current *ports.Theme) { *current = action.theme })
+				themeState.update(func(current *protocol.Theme) { *current = action.theme })
 				if err := publish(action.theme); err != nil {
 					return fmt.Errorf("publishing theme: %w", err)
 				}
@@ -1487,8 +1488,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	var nextSamePeerRequestID uint64
 	type parkedRoutePending struct {
 		requestID      uint64
-		action         ports.ParkedRouteAction
-		leaseID        ports.ParkedRouteLeaseID
+		action         protocol.ParkedRouteAction
+		leaseID        protocol.ParkedRouteLeaseID
 		fallbackTarget *ports.AttachTarget
 		timer          ports.Timer
 	}
@@ -1502,7 +1503,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			// Before the asynchronous sender starts, preserve transport ordering by
 			// requesting the reset synchronously after the initial Theme publication.
 			resetErr := sendHandshake(func() error {
-				payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+				payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 				if err != nil {
 					return err
 				}
@@ -1628,7 +1629,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return fmt.Errorf("reading terminal geometry for parked route: %w", err)
 		}
 		geometry = geometry.NormalizePixels()
-		payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+		payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for parked route: %w", err)
 		}
@@ -1639,12 +1640,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return context.Canceled
 		}
 	}
-	sendParkedRouteRequest := func(action ports.ParkedRouteAction, leaseID ports.ParkedRouteLeaseID, target *domain.RemoteSessionTarget) error {
+	sendParkedRouteRequest := func(action protocol.ParkedRouteAction, leaseID protocol.ParkedRouteLeaseID, target *domain.RemoteSessionTarget) error {
 		if parkedPending != nil {
 			return errors.New("vev: parked-route request already pending")
 		}
 		nextParkedRequestID++
-		request := ports.ParkedRouteRequest{RequestID: nextParkedRequestID, LeaseID: leaseID, Action: action, Target: target}
+		request := protocol.ParkedRouteRequest{RequestID: nextParkedRequestID, LeaseID: leaseID, Action: action, Target: target}
 		payload := ports.MarshalParkedRouteRequest(request)
 		if payload == nil {
 			return errors.New("vev: invalid parked-route request")
@@ -1660,7 +1661,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return context.Canceled
 		}
 	}
-	handleParkedPicker := func(leaseID ports.ParkedRouteLeaseID) (attachResult, bool) {
+	handleParkedPicker := func(leaseID protocol.ParkedRouteLeaseID) (attachResult, bool) {
 		pickerCtx, cancelPicker := context.WithCancel(ctx)
 		pickerDone := make(chan struct{})
 		go func() {
@@ -1687,7 +1688,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if err := sendParkedRouteSize(); err != nil {
 				return welcomedResult(err), true
 			}
-			if err := sendParkedRouteRequest(ports.ParkedRouteSwitch, leaseID, &target); err != nil {
+			if err := sendParkedRouteRequest(protocol.ParkedRouteSwitch, leaseID, &target); err != nil {
 				return welcomedResult(fmt.Errorf("vev: switching parked route: %w", err)), true
 			}
 			fallback := *selection.target
@@ -1704,7 +1705,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if err := sendParkedRouteSize(); err != nil {
 			return welcomedResult(err), true
 		}
-		if err := sendParkedRouteRequest(ports.ParkedRouteResume, leaseID, nil); err != nil {
+		if err := sendParkedRouteRequest(protocol.ParkedRouteResume, leaseID, nil); err != nil {
 			return welcomedResult(fmt.Errorf("vev: resuming parked route: %w", err)), true
 		}
 		return attachResult{}, false
@@ -1725,7 +1726,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return fmt.Errorf("reading terminal geometry for reconnect reconciliation: %w", serr)
 		}
 		geometry = geometry.NormalizePixels()
-		payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+		payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for reconnect reconciliation: %w", err)
 		}
@@ -1761,8 +1762,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		return nil
 	}
-	sendRouteFailure := func(action ports.RouteNavigationAction, code ports.RouteFailureCode) error {
-		payload, err := ports.MarshalRouteNavigationFailure(ports.RouteNavigationFailure{
+	sendRouteFailure := func(action protocol.RouteNavigationAction, code protocol.RouteFailureCode) error {
+		payload, err := ports.MarshalRouteNavigationFailure(protocol.RouteNavigationFailure{
 			Key:        action.Key,
 			Generation: action.Generation,
 			Code:       code,
@@ -1861,7 +1862,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			}
 		case event := <-paletteEvents:
 			if event.kind == paletteEventScheme {
-				retained := themeState.update(func(current *ports.Theme) {
+				retained := themeState.update(func(current *protocol.Theme) {
 					current.SchemeKnown = true
 					current.Light = event.light
 				})
@@ -1965,7 +1966,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					nextSamePeerRequestID++
 					request := a.runner.ledger.samePeerHandoff(request, target)
-					payload, err := ports.MarshalSamePeerSwitchRequest(ports.SamePeerSwitchRequest{
+					payload, err := ports.MarshalSamePeerSwitchRequest(protocol.SamePeerSwitchRequest{
 						RequestID:      nextSamePeerRequestID,
 						Target:         *target.ExactTarget,
 						PreferredTabID: request.PreferredTabID,
@@ -1996,26 +1997,26 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				pending := *parkedPending
 				clearParkedPending()
 				switch pending.action {
-				case ports.ParkedRoutePrepare:
-					if response.Status != ports.ParkedRouteReady {
+				case protocol.ParkedRoutePrepare:
+					if response.Status != protocol.ParkedRouteReady {
 						fallback := welcomedResult(nil)
-						fallback.action = ports.NavigationOpenHomePicker
+						fallback.action = protocol.NavigationOpenHomePicker
 						return fallback
 					}
 					if selection, done := handleParkedPicker(pending.leaseID); done {
 						return selection
 					}
-				case ports.ParkedRouteResume:
-					if response.Status != ports.ParkedRouteResumed {
+				case protocol.ParkedRouteResume:
+					if response.Status != protocol.ParkedRouteResumed {
 						return welcomedResult(errors.New("vev: parked route could not resume"))
 					}
 					awaitParkedFull()
-				case ports.ParkedRouteSwitch:
+				case protocol.ParkedRouteSwitch:
 					switch response.Status {
-					case ports.ParkedRouteSwitched:
+					case protocol.ParkedRouteSwitched:
 						awaitParkedFull()
 						continue
-					case ports.ParkedRouteStaleTarget:
+					case protocol.ParkedRouteStaleTarget:
 						if transition != nil {
 							transition.stop()
 						}
@@ -2038,12 +2039,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("vev: decoding navigation action: %w", derr))
 				}
 				_, datagramRoute := transport.(ports.DatagramTransport)
-				if directive.Action == ports.NavigationOpenHomePicker && a.openHomePicker != nil && datagramRoute {
+				if directive.Action == protocol.NavigationOpenHomePicker && a.openHomePicker != nil && datagramRoute {
 					stopForeground()
 					if err := flushSender(); err != nil {
 						return welcomedResult(fmt.Errorf("vev: parking remote foreground: %w", err))
 					}
-					if err := sendParkedRouteRequest(ports.ParkedRoutePrepare, directive.LeaseID, nil); err != nil {
+					if err := sendParkedRouteRequest(protocol.ParkedRoutePrepare, directive.LeaseID, nil); err != nil {
 						return welcomedResult(fmt.Errorf("vev: preparing parked route: %w", err))
 					}
 					continue
@@ -2057,14 +2058,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("vev: decoding route navigation action: %w", derr))
 				}
 				if a.runner.ledger == nil {
-					if ferr := sendRouteFailure(action, ports.RouteFailureUnavailable); ferr != nil {
+					if ferr := sendRouteFailure(action, protocol.RouteFailureUnavailable); ferr != nil {
 						return welcomedResult(ferr)
 					}
 					continue
 				}
 				_, valid, noOp := a.runner.ledger.navigationRecord(action)
 				if !valid {
-					if ferr := sendRouteFailure(action, ports.RouteFailureStaleSelection); ferr != nil {
+					if ferr := sendRouteFailure(action, protocol.RouteFailureStaleSelection); ferr != nil {
 						return welcomedResult(ferr)
 					}
 					continue
@@ -2244,7 +2245,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 		if state == 0 {
 			return true
 		}
-		payload, err := ports.MarshalAck(ports.Ack{Epoch: epoch, State: state})
+		payload, err := ports.MarshalAck(protocol.Ack{Epoch: epoch, State: state})
 		if err != nil {
 			select {
 			case errCh <- fmt.Errorf("encoding output ACK: %w", err):
@@ -2802,7 +2803,7 @@ func (p *stdinPump) run() {
 			},
 			sendImage: func(mime string, data []byte) {
 				inputSeq++
-				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
+				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(protocol.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
 			},
 			next: coalescer.Scan,
 		}
@@ -2974,7 +2975,7 @@ func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- po
 				return
 			}
 			geometry = geometry.NormalizePixels()
-			payload, err := ports.MarshalResize(ports.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+			payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 			if err != nil {
 				log.Error("encoding terminal resize", "error", err)
 				continue

@@ -8,6 +8,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -42,8 +43,8 @@ func TestRemotePreviewCodecGoldenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalRemotePreview() error = %v", err)
 	}
-	if got.Version != RemotePreviewSchemaVersion || got.Status != RemotePreviewOK {
-		t.Fatalf("header = (%d, %d), want (%d, %d)", got.Version, got.Status, RemotePreviewSchemaVersion, RemotePreviewOK)
+	if got.Version != protocol.RemotePreviewSchemaVersion || got.Status != protocol.RemotePreviewOK {
+		t.Fatalf("header = (%d, %d), want (%d, %d)", got.Version, got.Status, protocol.RemotePreviewSchemaVersion, protocol.RemotePreviewOK)
 	}
 	var wantLifecycle domain.SessionLifecycleID
 	for i := range wantLifecycle {
@@ -86,19 +87,19 @@ func TestRemotePreviewCodecRejectsInvalidStatusFlagsAndRanges(t *testing.T) {
 func TestRemotePreviewCodecRejectsWideCellBoundaryAndInvalidIDs(t *testing.T) {
 	var lifecycle domain.SessionLifecycleID
 	lifecycle[0] = 1
-	valid := RemotePreview{
-		Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK,
+	valid := protocol.RemotePreview{
+		Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK,
 		LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 1,
 		Cells: []renderer.Cell{{Rune: '界'}, {Continuation: true}},
 	}
 	if MarshalRemotePreview(valid) == nil {
 		t.Fatal("valid wide-cell preview did not marshal")
 	}
-	for _, malformed := range []RemotePreview{
-		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 1, Height: 1, Cells: []renderer.Cell{{Rune: '界'}}},
-		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 1, Cells: []renderer.Cell{{Continuation: true}, {Rune: 'x'}}},
-		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 1, Cells: []renderer.Cell{{Rune: '界'}, {Continuation: true, Rune: 'x'}}},
-		{Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 2, Cells: []renderer.Cell{{Rune: 'x'}, {Rune: '界'}, {Continuation: true}, {Rune: 'y'}}},
+	for _, malformed := range []protocol.RemotePreview{
+		{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 1, Height: 1, Cells: []renderer.Cell{{Rune: '界'}}},
+		{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 1, Cells: []renderer.Cell{{Continuation: true}, {Rune: 'x'}}},
+		{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 1, Cells: []renderer.Cell{{Rune: '界'}, {Continuation: true, Rune: 'x'}}},
+		{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK, LifecycleID: lifecycle, TabID: "tab-1", Revision: 1, Width: 2, Height: 2, Cells: []renderer.Cell{{Rune: 'x'}, {Rune: '界'}, {Continuation: true}, {Rune: 'y'}}},
 	} {
 		if MarshalRemotePreview(malformed) != nil {
 			t.Fatalf("malformed wide-cell preview marshaled: %#v", malformed.Cells)
@@ -117,16 +118,16 @@ func TestRemotePreviewCodecRejectsWideCellBoundaryAndInvalidIDs(t *testing.T) {
 }
 
 func TestRemotePreviewRejectsControlRunes(t *testing.T) {
-	valid := RemotePreview{
-		Version: RemotePreviewSchemaVersion, Status: RemotePreviewOK,
+	valid := protocol.RemotePreview{
+		Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK,
 		LifecycleID: previewTargetForTest().LifecycleID, TabID: "tab-1", Revision: 1, Width: 1, Height: 1,
 		Cells: []renderer.Cell{{Rune: 'x'}},
 	}
 	for _, control := range []rune{'\x01', '\x1b', '\x7f', '\u0085'} {
 		preview := valid
 		preview.Cells = []renderer.Cell{{Rune: control}}
-		if err := ValidateRemotePreview(preview); err != ErrInvalidRemotePreview {
-			t.Fatalf("control rune %U: ValidateRemotePreview() error = %v, want %v", control, err, ErrInvalidRemotePreview)
+		if err := protocol.ValidateRemotePreview(preview); err != protocol.ErrInvalidRemotePreview {
+			t.Fatalf("control rune %U: ValidateRemotePreview() error = %v, want %v", control, err, protocol.ErrInvalidRemotePreview)
 		}
 		if MarshalRemotePreview(preview) != nil {
 			t.Fatalf("control rune %U was marshaled", control)
@@ -137,7 +138,7 @@ func TestRemotePreviewRejectsControlRunes(t *testing.T) {
 func TestRemotePreviewRequestRejectsOversizedNestedRouteData(t *testing.T) {
 	target := previewTargetForTest()
 	target.Endpoint = strings.Repeat("h", math.MaxUint16+1)
-	request := RemotePreviewRequest{Version: RemotePreviewSchemaVersion, Target: target, Width: 20, Height: 5}
+	request := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 20, Height: 5}
 	if MarshalRemotePreviewRequest(request) != nil {
 		t.Fatal("oversized endpoint was truncated and marshaled")
 	}

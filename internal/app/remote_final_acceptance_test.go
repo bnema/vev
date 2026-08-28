@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/require"
 )
@@ -78,7 +79,7 @@ func serveAcceptanceRemote(tr ports.Transport, target string, handoff ports.Atta
 		if outputs != nil {
 			outputs <- string(data)
 		}
-		payload, err := ports.MarshalOutput(ports.Output{
+		payload, err := ports.MarshalOutput(protocol.Output{
 			Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Data: data,
 		})
 		if err != nil {
@@ -155,7 +156,7 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 	welcome, err := wireTransport.Recv()
 	require.NoError(t, err)
 	require.Equal(t, ports.MsgWelcome, welcome.Type)
-	require.NoError(t, wireTransport.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(ports.Theme{})}))
+	require.NoError(t, wireTransport.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(protocol.Theme{})}))
 	attachTarget, err := wireTransport.Recv()
 	require.NoError(t, err)
 	target, err := ports.UnmarshalAttachTarget(attachTarget.Payload)

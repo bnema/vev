@@ -12,6 +12,7 @@ import (
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -102,7 +103,7 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	require.Equal(t, uint64(2), out.New)
 	// Both states were emitted before the MsgAck; the ordered dependency chain
 	// must therefore remain valid without waiting for renderer acknowledgement.
-	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(ports.Ack{Epoch: out.Epoch, State: out.New})}
+	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(protocol.Ack{Epoch: out.Epoch, State: out.New})}
 	require.NoError(t, tr.Close())
 	d.runConnLoop(ac)
 
@@ -197,7 +198,7 @@ func outputStateRow(row []renderer.Cell) string {
 	return string(runes)
 }
 
-func mustApplyOutput(t *testing.T, screen *vt.Screen, frame ports.Frame) ports.Output {
+func mustApplyOutput(t *testing.T, screen *vt.Screen, frame ports.Frame) protocol.Output {
 	t.Helper()
 	out, err := ports.UnmarshalOutput(frame.Payload)
 	require.NoError(t, err)

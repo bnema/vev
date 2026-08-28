@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,17 +19,17 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
 		Generation: 5,
-		Active:     ports.RouteRef{Key: 9, Generation: 5},
-		Previous:   ports.RouteRef{Key: 7, Generation: 3},
-		Entries:    []ports.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, ports.RouteKindLocal)},
+		Active:     protocol.RouteRef{Key: 9, Generation: 5},
+		Previous:   protocol.RouteRef{Key: 7, Generation: 3},
+		Entries:    []protocol.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, protocol.RouteKindLocal)},
 	})
 
 	require.NoError(t, d.backSessionForAttachment(effect))
 	frames := transport.Sends()
 	require.NotEmpty(t, frames)
-	var action ports.RouteNavigationAction
+	var action protocol.RouteNavigationAction
 	found := false
 	for _, frame := range frames {
 		if frame.Type != ports.MsgNavigateRecentRoute {
@@ -40,5 +41,5 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 		found = true
 	}
 	require.True(t, found)
-	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 5, Key: 7, Generation: 3}, action)
+	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 5, Key: 7, Generation: 3}, action)
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/testutil/replaytest"
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +54,7 @@ func TestTransportReplayIntegration(t *testing.T) {
 // SSH-stdio transports. The transports only carry frames; neither can infer
 // or alter the palette lifecycle.
 func TestThemeGenerationTransportSequences(t *testing.T) {
-	cleared := ports.Theme{
+	cleared := protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 		TrueColor: true, SchemeKnown: true,
@@ -62,7 +63,7 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 	definitive := cleared
 	definitive.Palette = palette
 	definitive.PaletteKnown = 1<<2 | 1<<10
-	sequence := []ports.Theme{cleared, definitive}
+	sequence := []protocol.Theme{cleared, definitive}
 
 	tests := []struct {
 		name string

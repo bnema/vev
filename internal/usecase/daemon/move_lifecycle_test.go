@@ -4,9 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/require"
 )
 
 func awaitMoveTeardownState(t *testing.T, sess *session, reservations, waiters uint) {

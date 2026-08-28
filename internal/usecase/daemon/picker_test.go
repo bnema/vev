@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
@@ -892,8 +893,8 @@ func TestPickerNavigationBackSendFailureKeepsPickerOpen(t *testing.T) {
 	const sendErr = "navigation back send failed"
 	tr := &remotePickerSendErrorTransport{err: errors.New(sendErr)}
 	ac.replaceTransport(tr)
-	ac.startupOverlay = ports.StartupOverlaySessionPicker
-	ac.navigationCapabilities = ports.NavigationCapabilityBack
+	ac.startupOverlay = protocol.StartupOverlaySessionPicker
+	ac.navigationCapabilities = protocol.NavigationCapabilityBack
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
 	ac.overlays.pickerGeneration++
@@ -926,8 +927,8 @@ func TestPickerNavigationBackWithoutCallerTicketKeepsPickerOpen(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, sess, ac, _, releases := newManualTabSession(t, 1)
 			defer releases[0]()
-			ac.startupOverlay = ports.StartupOverlaySessionPicker
-			ac.navigationCapabilities = ports.NavigationCapabilityBack
+			ac.startupOverlay = protocol.StartupOverlaySessionPicker
+			ac.navigationCapabilities = protocol.NavigationCapabilityBack
 			ac.overlays.pickerMu.Lock()
 			ac.overlays.picker = picker.New([]picker.SessionView{{ID: sess.id, Name: sess.name, Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, picker.SelectionConfig{})
 			ac.overlays.pickerGeneration++

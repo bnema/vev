@@ -8,7 +8,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestCaptureRemotePreviewUsesBottomRowsForShorterPreview(t *testing.T) {
@@ -28,8 +28,8 @@ func TestCaptureRemotePreviewUsesBottomRowsForShorterPreview(t *testing.T) {
 		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
 		SessionName: "work", LiveTabID: "tab-1",
 	}
-	preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
-		Version: ports.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 2,
+	preview, err := d.captureRemotePreview(protocol.RemotePreviewRequest{
+		Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 2,
 	})
 	require.NoError(t, err)
 	require.Equal(t, []rune{'b', 'c'}, []rune{preview.Cells[0].Rune, preview.Cells[1].Rune})
@@ -112,8 +112,8 @@ func TestCaptureRemotePreviewCompactsBlankTail(t *testing.T) {
 				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
 				SessionName: "work", LiveTabID: "tab-1",
 			}
-			preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
-				Version: ports.RemotePreviewSchemaVersion, Target: target, Width: test.width, Height: test.height,
+			preview, err := d.captureRemotePreview(protocol.RemotePreviewRequest{
+				Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: test.width, Height: test.height,
 			})
 			require.NoError(t, err)
 			require.Equal(t, test.wantHeight, preview.Height)
@@ -156,13 +156,13 @@ func TestCaptureRemotePreviewDoesNotSplitWideRuneAtCropBoundary(t *testing.T) {
 		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation,
 		SessionName: "work", LiveTabID: "tab-1",
 	}
-	preview, err := d.captureRemotePreview(ports.RemotePreviewRequest{
-		Version: ports.RemotePreviewSchemaVersion, Target: target, Width: 2, Height: 1,
+	preview, err := d.captureRemotePreview(protocol.RemotePreviewRequest{
+		Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 2, Height: 1,
 	})
 	require.NoError(t, err)
 	require.Equal(t, uint16(2), preview.Width)
 	require.Equal(t, rune(' '), preview.Cells[1].Rune, "a crop cannot expose a dangling wide rune")
 	require.False(t, preview.Cells[1].Continuation)
 	require.True(t, preview.Cells[1].Style.Equal(style), "boundary replacement preserves the cell style")
-	require.NoError(t, ports.ValidateRemotePreview(preview))
+	require.NoError(t, protocol.ValidateRemotePreview(preview))
 }

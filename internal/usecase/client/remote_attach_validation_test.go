@@ -9,6 +9,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestMalformedAttachRequestsNeverDial(t *testing.T) {
@@ -19,7 +20,7 @@ func TestMalformedAttachRequestsNeverDial(t *testing.T) {
 		{name: "missing session name", request: AttachRequest{Intent: ports.IntentAttach}},
 		{name: "unsafe session name", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "bad name"}},
 		{name: "daemon-owned without remote", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "main", EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}},
-		{name: "ephemeral with navigation capability", request: AttachRequest{Intent: ports.IntentEphemeral, NavigationCapabilities: ports.NavigationCapabilityHomePicker}},
+		{name: "ephemeral with navigation capability", request: AttachRequest{Intent: ports.IntentEphemeral, NavigationCapabilities: protocol.NavigationCapabilityHomePicker}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

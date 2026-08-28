@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type resumeWelcomeFailureTransport struct {
@@ -137,7 +138,7 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	oldToken := ac.resumeToken
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 	d.clientGone(sess, ac, oldTransport, false)
 
 	resumedTransport := &closeTrackingTransport{}

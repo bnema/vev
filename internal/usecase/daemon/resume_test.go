@@ -101,9 +101,9 @@ func TestTokenlessResumeIsRejectedBeforeNameRouting(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr, _ := newCapturingTransport(t)
 	_, _, err := d.route(helloResumeCapable(ports.IntentResume, "work", 0), tr)
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchSession, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchSession, protocolErr.code)
 	d.mu.Lock()
 	sessionCount := len(d.sessions)
 	d.mu.Unlock()
@@ -126,9 +126,9 @@ func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T
 	resume.RemoteTarget = &target
 	resume.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
 	_, _, err = d.route(resume, &closeTrackingTransport{})
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 	require.Same(t, oldTransport, ac.transport())
 	d.mu.Lock()
 	_, parked := d.parked[token]
@@ -155,9 +155,9 @@ func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
 	resume.RemoteTarget = &target
 	resume.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
 	_, _, err = d.route(resume, &closeTrackingTransport{})
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 	d.mu.Lock()
 	parked := d.parked[token]
 	claimed := parked != nil && parked.claimed

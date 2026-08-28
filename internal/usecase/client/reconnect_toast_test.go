@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type reconnectToastTerminalHarness struct {
@@ -393,7 +394,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.Contains(t, firstToast, "┌")
 	require.Contains(t, firstToast, "probing UDP path")
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   2,
@@ -412,7 +413,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 
 	beforeAwaitingReset := out.String()
 	beforeStatelessFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   0,
@@ -424,7 +425,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	}, time.Second, time.Millisecond)
 
 	afterStateless := out.String()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  2,
 		New:   3,
@@ -435,7 +436,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.Contains(t, out.String(), "intervening incremental")
 	require.Contains(t, afterStateless[len(beforeAwaitingReset):], "stateless side effect")
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  0,
 		New:   4,
@@ -448,7 +449,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.NotContains(t, out.String()[len(beforeAwaitingReset):], strings.Repeat(" ", reconnectToastBoundsFor(term.size, "probing UDP path").Width))
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  4,
 		New:   5,
@@ -491,7 +492,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	require.NotContains(t, out.String(), offlineMessage)
 
 	beforeReset := out.String()
-	for _, output := range []ports.Output{
+	for _, output := range []protocol.Output{
 		{Epoch: 1, Base: 1, New: 2, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("first skipped increment")},
 		{Epoch: 1, Base: 2, New: 3, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("second skipped increment")},
 	} {
@@ -507,7 +508,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	// Handoff cleanup is an ordered terminal side effect, not a replay state.
 	// It must cross the outstanding reset gate, flush before the control handoff,
 	// and must not manufacture an independent ACK.
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Data:  []byte("handoff graphics cleanup"),
@@ -518,7 +519,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	require.False(t, sentAck, "state-independent cleanup must not be ACKed")
 
 	beforeResetFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  0,
 		New:   4,
@@ -533,7 +534,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	requireAckedState(t, tr.sends, 2, 4)
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  4,
 		New:   5,
@@ -579,7 +580,7 @@ func requireSentFrame(t *testing.T, sends *reconnectToastSentFrames, description
 	}
 }
 
-func requireResize(t *testing.T, sends *reconnectToastSentFrames) ports.Resize {
+func requireResize(t *testing.T, sends *reconnectToastSentFrames) protocol.Resize {
 	t.Helper()
 	frame := requireSentFrame(t, sends, "Resize frame", func(frame ports.Frame) bool {
 		return frame.Type == ports.MsgResize
@@ -706,7 +707,7 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	require.Eventually(t, func() bool { return flushes.Load() > beforeStatus }, time.Second, time.Millisecond)
 	beforeOutput := flushes.Load()
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   2,
@@ -758,7 +759,7 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 			}
 
 			const output = "local status output remains visible"
-			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 				Epoch: 1,
 				Base:  0,
 				New:   2,
@@ -826,7 +827,7 @@ func TestReconnectOverlayRedrawFailureDoesNotObserveOrAckOutput(t *testing.T) {
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 			requireReconnectToastOutput(t, out.completed)
 			arm()
-			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{
+			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 				Epoch: 1,
 				Base:  0,
 				New:   2,

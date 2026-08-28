@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // routeRemoteTargetWithContext is the exact-target branch for picker handoffs.
@@ -27,8 +28,8 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote target requires attach or resume"}
 	}
 	if err := d.waitForTargetRestore(ctx, target.SessionName); err != nil {
-		var protocol *protoErr
-		if errors.As(err, &protocol) && protocol.code == ports.ErrInternal {
+		var protocolErr *protoErr
+		if errors.As(err, &protocolErr) && protocolErr.code == ports.ErrInternal {
 			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session is unavailable"}
 		}
 		return nil, nil, remoteTargetError(err)
@@ -102,10 +103,10 @@ func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTa
 	return d.createSessionLockedWithModeAndInactiveFence(target.SessionName, false, cwd, geometry, env, &expected, validate, expected.tabNames)
 }
 
-func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, action ports.NavigationAction) error {
-	directive := ports.NavigationDirective{Action: action}
+func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, action protocol.NavigationAction) error {
+	directive := protocol.NavigationDirective{Action: action}
 	armed := false
-	if action == ports.NavigationOpenHomePicker {
+	if action == protocol.NavigationOpenHomePicker {
 		leaseID, err := d.armParkedRoute(effect)
 		if err != nil {
 			return err
@@ -130,7 +131,7 @@ func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, act
 	return nil
 }
 
-func (d *Daemon) sendRecentRouteNavigationActionForAttachment(effect *attachmentEffect, action ports.RouteNavigationAction) error {
+func (d *Daemon) sendRecentRouteNavigationActionForAttachment(effect *attachmentEffect, action protocol.RouteNavigationAction) error {
 	payload, err := ports.MarshalRouteNavigationAction(action)
 	if err != nil {
 		return errAttachmentTransition
@@ -143,8 +144,8 @@ func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffec
 		return errAttachmentTransition
 	}
 	effect.sess.mu.Lock()
-	identity := ports.CommittedRouteIdentity{
-		Target:    ports.ExactSessionTarget{LifecycleID: effect.sess.incarnation, SessionName: effect.sess.name},
+	identity := protocol.CommittedRouteIdentity{
+		Target:    protocol.ExactSessionTarget{LifecycleID: effect.sess.incarnation, SessionName: effect.sess.name},
 		Ephemeral: effect.sess.ephemeral,
 	}
 	effect.sess.mu.Unlock()
@@ -188,9 +189,9 @@ func (d *Daemon) remoteTargetMatchesSessionLocked(sess *session, target domain.R
 }
 
 func remoteTargetError(err error) error {
-	var protocol *protoErr
-	if errors.As(err, &protocol) {
-		return protocol
+	var protocolErr *protoErr
+	if errors.As(err, &protocolErr) {
+		return protocolErr
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err

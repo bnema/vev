@@ -10,6 +10,7 @@ import (
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -468,7 +469,7 @@ func TestAttachmentOutputRebaseRetiresAttachmentState(t *testing.T) {
 	output.next = 3
 	output.acked = 2
 	output.lastCursor = cursorOut{valid: true, row: 2, col: 3}
-	output.lastRoutePosition = ports.RoutePosition{ActiveTabID: "tab"}
+	output.lastRoutePosition = protocol.RoutePosition{ActiveTabID: "tab"}
 
 	output.rebaseAttachment()
 
@@ -477,7 +478,7 @@ func TestAttachmentOutputRebaseRetiresAttachmentState(t *testing.T) {
 	require.Zero(t, output.acked)
 	require.True(t, output.forceSnapshot)
 	require.Equal(t, cursorOut{valid: true, row: 2, col: 3}, output.lastCursor, "the forced frame will reassert cursor state")
-	require.Equal(t, ports.RoutePosition{}, output.lastRoutePosition)
+	require.Equal(t, protocol.RoutePosition{}, output.lastRoutePosition)
 }
 
 func TestAttachmentOutputDefaultsAndNormalizesWindow(t *testing.T) {

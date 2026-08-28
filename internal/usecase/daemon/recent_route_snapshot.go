@@ -2,26 +2,26 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
-func activeRouteEntryForLifecycle(snapshot ports.RecentRouteSnapshot, lifecycle domain.SessionLifecycleID) (ports.RecentRouteEntry, bool) {
+func activeRouteEntryForLifecycle(snapshot protocol.RecentRouteSnapshot, lifecycle domain.SessionLifecycleID) (protocol.RecentRouteEntry, bool) {
 	active := snapshot.ActiveEntry
-	activeRef := ports.RouteRef{Key: active.Key, Generation: active.Generation}
+	activeRef := protocol.RouteRef{Key: active.Key, Generation: active.Generation}
 	if lifecycle == (domain.SessionLifecycleID{}) || active.Target.LifecycleID != lifecycle || snapshot.Active != activeRef {
-		return ports.RecentRouteEntry{}, false
+		return protocol.RecentRouteEntry{}, false
 	}
 	return active, true
 }
 
-func recentRoutePresentationsFromSnapshot(snapshot ports.RecentRouteSnapshot) []recentRoutePresentation {
+func recentRoutePresentationsFromSnapshot(snapshot protocol.RecentRouteSnapshot) []recentRoutePresentation {
 	if snapshot.Entries == nil {
 		return nil
 	}
 	out := make([]recentRoutePresentation, len(snapshot.Entries))
 	for i, entry := range snapshot.Entries {
 		kind := recentRouteLocal
-		if entry.Kind == ports.RouteKindRemote {
+		if entry.Kind == protocol.RouteKindRemote {
 			kind = recentRouteRemote
 		}
 		out[i] = recentRoutePresentation{
@@ -35,20 +35,20 @@ func recentRoutePresentationsFromSnapshot(snapshot ports.RecentRouteSnapshot) []
 	return out
 }
 
-func formatRecentRouteSnapshot(snapshot ports.RecentRouteSnapshot) []recentRouteDisplay {
+func formatRecentRouteSnapshot(snapshot protocol.RecentRouteSnapshot) []recentRouteDisplay {
 	return formatRecentRoutePresentations(recentRoutePresentationsFromSnapshot(snapshot))
 }
 
 // formatRecentRouteSnapshotForAttachment resolves attention against this
 // daemon's live sessions. The client retains route ordering and presentation;
 // it subscribes only the exact routes this daemon serves.
-func (d *Daemon) formatRecentRouteSnapshotForAttachment(ac *attachedClient, snapshot ports.RecentRouteSnapshot) []recentRouteDisplay {
+func (d *Daemon) formatRecentRouteSnapshotForAttachment(ac *attachedClient, snapshot protocol.RecentRouteSnapshot) []recentRouteDisplay {
 	presentations := recentRoutePresentationsFromSnapshot(snapshot)
 	if d == nil || ac == nil {
 		return formatRecentRoutePresentations(presentations)
 	}
 	for i, entry := range snapshot.Entries {
-		target, ok := ac.routeAttentionTarget(ports.RouteRef{Key: entry.Key, Generation: entry.Generation})
+		target, ok := ac.routeAttentionTarget(protocol.RouteRef{Key: entry.Key, Generation: entry.Generation})
 		if ok {
 			presentations[i].attention = d.routeHasAttention(target)
 		}
@@ -56,7 +56,7 @@ func (d *Daemon) formatRecentRouteSnapshotForAttachment(ac *attachedClient, snap
 	return formatRecentRoutePresentations(presentations)
 }
 
-func (d *Daemon) routeHasAttention(target ports.ExactSessionTarget) bool {
+func (d *Daemon) routeHasAttention(target protocol.ExactSessionTarget) bool {
 	d.mu.Lock()
 	sess := d.findByNameLocked(target.SessionName)
 	d.mu.Unlock()

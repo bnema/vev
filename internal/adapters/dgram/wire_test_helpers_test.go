@@ -1,8 +1,11 @@
 package dgram
 
-import "github.com/bnema/vev/internal/ports"
+import (
+	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
+)
 
-func mustMarshalOutput(m ports.Output) []byte {
+func mustMarshalOutput(m protocol.Output) []byte {
 	payload, err := ports.MarshalOutput(m)
 	if err != nil {
 		panic(err)
@@ -10,7 +13,7 @@ func mustMarshalOutput(m ports.Output) []byte {
 	return payload
 }
 
-func mustMarshalAck(m ports.Ack) []byte {
+func mustMarshalAck(m protocol.Ack) []byte {
 	payload, err := ports.MarshalAck(m)
 	if err != nil {
 		panic(err)
