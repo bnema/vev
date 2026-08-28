@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,11 +32,11 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 	var action protocol.RouteNavigationAction
 	found := false
 	for _, frame := range frames {
-		if frame.Type != ports.MsgNavigateRecentRoute {
+		if frame.Type != wire.MsgNavigateRecentRoute {
 			continue
 		}
 		var err error
-		action, err = ports.UnmarshalRouteNavigationAction(frame.Payload)
+		action, err = wire.UnmarshalRouteNavigationAction(frame.Payload)
 		require.NoError(t, err)
 		found = true
 	}

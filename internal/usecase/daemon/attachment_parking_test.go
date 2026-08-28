@@ -6,15 +6,15 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 type resumeWelcomeFailureTransport struct {
 	closeTrackingTransport
 }
 
-func (*resumeWelcomeFailureTransport) Send(ports.Frame) error { return errWelcomeSendFailed }
+func (*resumeWelcomeFailureTransport) Send(wire.Frame) error { return errWelcomeSendFailed }
 
 var errWelcomeSendFailed = errors.New("welcome send failed")
 
@@ -142,7 +142,7 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	d.clientGone(sess, ac, oldTransport, false)
 
 	resumedTransport := &closeTrackingTransport{}
-	d.handleHello(resumedTransport, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(helloResumeCapable(protocol.IntentResume, "work", oldToken))})
+	d.handleHello(resumedTransport, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, "work", oldToken))})
 	newToken := ac.resumeToken
 	require.NotEqual(t, oldToken, newToken)
 	d.mu.Lock()
@@ -152,7 +152,7 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	require.False(t, oldRetained)
 	require.NotNil(t, newParked)
 	require.NotEmpty(t, resumedTransport.Sends())
-	require.Equal(t, ports.MsgWelcome, resumedTransport.Sends()[0].Type, "Welcome must remain the first server frame after Hello")
+	require.Equal(t, wire.MsgWelcome, resumedTransport.Sends()[0].Type, "Welcome must remain the first server frame after Hello")
 }
 
 func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
@@ -166,7 +166,7 @@ func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 	d.clientGone(sess, ac, oldTransport, false)
 
 	failed := &resumeWelcomeFailureTransport{}
-	d.handleHello(failed, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(helloResumeCapable(protocol.IntentResume, "work", token))})
+	d.handleHello(failed, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, "work", token))})
 	require.Nil(t, ac.transport())
 	d.mu.Lock()
 	parked := d.parked[token]

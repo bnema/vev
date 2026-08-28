@@ -7,11 +7,12 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-func (d *Daemon) handleRemotePreview(tr ports.Transport, frame ports.Frame) error {
+func (d *Daemon) handleRemotePreview(tr ports.Transport, frame wire.Frame) error {
 	defer func() { _ = tr.Close() }()
-	request, err := ports.UnmarshalRemotePreviewRequest(frame.Payload)
+	request, err := wire.UnmarshalRemotePreviewRequest(frame.Payload)
 	if err != nil {
 		return d.sendRemotePreview(tr, protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewMalformed})
 	}
@@ -27,11 +28,11 @@ func (d *Daemon) handleRemotePreview(tr ports.Transport, frame ports.Frame) erro
 }
 
 func (d *Daemon) sendRemotePreview(tr ports.Transport, preview protocol.RemotePreview) error {
-	payload := ports.MarshalRemotePreview(preview)
+	payload := wire.MarshalRemotePreview(preview)
 	if payload == nil {
-		payload = ports.MarshalRemotePreview(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewMalformed})
+		payload = wire.MarshalRemotePreview(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewMalformed})
 	}
-	return d.boundedControlSend(tr, ports.Frame{Type: ports.MsgRemotePreviewResponse, Payload: payload})
+	return d.boundedControlSend(tr, wire.Frame{Type: wire.MsgRemotePreviewResponse, Payload: payload})
 }
 
 var errRemotePreviewNoSuchTarget = errors.New("daemon: remote preview target does not exist")

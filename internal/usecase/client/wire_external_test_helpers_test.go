@@ -1,12 +1,12 @@
 package client_test
 
 import (
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func mustMarshalOutput(m protocol.Output) []byte {
-	payload, err := ports.MarshalOutput(m)
+	payload, err := wire.MarshalOutput(m)
 	if err != nil {
 		panic(err)
 	}

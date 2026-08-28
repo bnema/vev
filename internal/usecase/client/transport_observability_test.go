@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
@@ -46,12 +47,12 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	defer reporter.Close()
 	acked := make(chan struct{})
 	transport := portsmocks.NewMockTransport(t)
-	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	transport.EXPECT().Send(isType(ports.MsgAck)).Run(func(ports.Frame) { close(acked) }).Return(nil).Once()
+	transport.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	transport.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	transport.EXPECT().Send(isType(wire.MsgAck)).Run(func(wire.Frame) { close(acked) }).Return(nil).Once()
 	unblock := scriptRecv(transport,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("flush-before-observe"), New: 3}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("flush-before-observe"), New: 3}))},
 	)
 	defer unblock()
 	transport.EXPECT().Close().Return(nil).Once()
@@ -87,15 +88,15 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
 	defer reporter.Close()
 	transport := portsmocks.NewMockTransport(t)
-	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	transport.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	transport.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	unblock := scriptRecv(transport,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("unchanged-by-observer"), New: 3}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("unchanged-by-observer"), New: 3}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
-	transport.EXPECT().Send(isType(ports.MsgAck)).Return(nil).Maybe()
+	transport.EXPECT().Send(isType(wire.MsgAck)).Return(nil).Maybe()
 	transport.EXPECT().Close().Return(nil).Once()
 
 	err := runTestClient(context.Background(), testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: protocol.IntentEphemeral})

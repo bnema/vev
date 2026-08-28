@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 type handshakeBlockingTransport struct {
@@ -29,8 +29,8 @@ func newHandshakeBlockingTransport(blockWelcome bool) *handshakeBlockingTranspor
 	}
 }
 
-func (t *handshakeBlockingTransport) Send(frame ports.Frame) error {
-	if t.blockWelcome && frame.Type == ports.MsgWelcome {
+func (t *handshakeBlockingTransport) Send(frame wire.Frame) error {
+	if t.blockWelcome && frame.Type == wire.MsgWelcome {
 		close(t.welcome)
 		<-t.closed
 		return io.ErrClosedPipe
@@ -38,9 +38,9 @@ func (t *handshakeBlockingTransport) Send(frame ports.Frame) error {
 	return nil
 }
 
-func (t *handshakeBlockingTransport) Recv() (ports.Frame, error) {
+func (t *handshakeBlockingTransport) Recv() (wire.Frame, error) {
 	<-t.closed
-	return ports.Frame{}, io.ErrClosedPipe
+	return wire.Frame{}, io.ErrClosedPipe
 }
 
 func (t *handshakeBlockingTransport) Close() error {
@@ -183,7 +183,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	resumeTransport := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(resumeTransport, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(helloResumeCapable(protocol.IntentResume, sess.name, token))})
+		d.handleHello(resumeTransport, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, sess.name, token))})
 		close(done)
 	}()
 

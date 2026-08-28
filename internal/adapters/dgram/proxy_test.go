@@ -13,11 +13,12 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 type fakeTransport struct {
 	recv       chan recvResult
-	sent       chan ports.Frame
+	sent       chan wire.Frame
 	sendErr    chan error
 	linkState  ports.LinkState
 	linkEvents chan ports.LinkEvent
@@ -26,14 +27,14 @@ type fakeTransport struct {
 }
 
 type recvResult struct {
-	frame ports.Frame
+	frame wire.Frame
 	err   error
 }
 
 func newFakeTransport() *fakeTransport {
-	return &fakeTransport{recv: make(chan recvResult, 4), sent: make(chan ports.Frame, 4), sendErr: make(chan error, 4), linkEvents: make(chan ports.LinkEvent, 4), linkState: ports.LinkStateConnected, closed: make(chan struct{})}
+	return &fakeTransport{recv: make(chan recvResult, 4), sent: make(chan wire.Frame, 4), sendErr: make(chan error, 4), linkEvents: make(chan ports.LinkEvent, 4), linkState: ports.LinkStateConnected, closed: make(chan struct{})}
 }
-func (f *fakeTransport) Send(fr ports.Frame) error {
+func (f *fakeTransport) Send(fr wire.Frame) error {
 	select {
 	case err := <-f.sendErr:
 		return err
@@ -42,12 +43,12 @@ func (f *fakeTransport) Send(fr ports.Frame) error {
 	f.sent <- fr
 	return nil
 }
-func (f *fakeTransport) Recv() (ports.Frame, error) {
+func (f *fakeTransport) Recv() (wire.Frame, error) {
 	select {
 	case r := <-f.recv:
 		return r.frame, r.err
 	case <-f.closed:
-		return ports.Frame{}, io.EOF
+		return wire.Frame{}, io.EOF
 	}
 }
 func (f *fakeTransport) Close() error {
@@ -62,10 +63,10 @@ func TestProxyRuntimeCopiesFramesAndDaemonEOFIsTerminal(t *testing.T) {
 	daemon := newFakeTransport()
 	errCh := make(chan error, 1)
 	go func() { errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context()) }()
-	client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgInput, Payload: []byte("x")}}
+	client.recv <- recvResult{frame: wire.Frame{Type: wire.MsgInput, Payload: []byte("x")}}
 	select {
 	case got := <-daemon.sent:
-		if got.Type != ports.MsgInput {
+		if got.Type != wire.MsgInput {
 			t.Fatalf("daemon got type %v", got.Type)
 		}
 	case <-time.After(time.Second):
@@ -90,11 +91,11 @@ func TestProxyRuntimeClampsDatagramHelloOutputWindowAndPreservesControl(t *testi
 			errCh := make(chan error, 1)
 			go func() { errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context()) }()
 			hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: requested}
-			client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}}
+			client.recv <- recvResult{frame: wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)}}
 
 			select {
 			case frame := <-daemon.sent:
-				got, err := ports.UnmarshalHello(frame.Payload)
+				got, err := wire.UnmarshalHello(frame.Payload)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -105,11 +106,11 @@ func TestProxyRuntimeClampsDatagramHelloOutputWindowAndPreservesControl(t *testi
 				t.Fatal("timeout waiting for proxied Hello")
 			}
 
-			input := ports.Frame{Type: ports.MsgInput, Payload: []byte("still flowing")}
-			ack := ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(protocol.Ack{Epoch: 1, State: 7})}
+			input := wire.Frame{Type: wire.MsgInput, Payload: []byte("still flowing")}
+			ack := wire.Frame{Type: wire.MsgAck, Payload: mustMarshalAck(protocol.Ack{Epoch: 1, State: 7})}
 			client.recv <- recvResult{frame: input}
 			client.recv <- recvResult{frame: ack}
-			for _, want := range []ports.Frame{input, ack} {
+			for _, want := range []wire.Frame{input, ack} {
 				select {
 				case got := <-daemon.sent:
 					if !reflect.DeepEqual(got, want) {
@@ -149,10 +150,10 @@ func TestProxyRuntimeRetriesRecoverableClientSendWithoutDroppingFrame(t *testing
 				errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour, RetryBackoff: time.Nanosecond}.Run(t.Context())
 			}()
 			client.sendErr <- tt.err
-			daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("preserved during outage")}}
+			daemon.recv <- recvResult{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("preserved during outage")}}
 			select {
 			case got := <-client.sent:
-				if got.Type != ports.MsgOutput || string(got.Payload) != "preserved during outage" {
+				if got.Type != wire.MsgOutput || string(got.Payload) != "preserved during outage" {
 					t.Fatalf("client got %+v, want retried output", got)
 				}
 			case <-time.After(time.Second):
@@ -187,10 +188,10 @@ func TestProxyRuntimeSurvivesPendingFullAndPreservesOrder(t *testing.T) {
 	const frames = 4
 	for i := range frames {
 		client.sendErr <- ErrPendingFull
-		daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}}
+		daemon.recv <- recvResult{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}}}
 		select {
 		case got := <-client.sent:
-			if got.Type != ports.MsgOutput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
+			if got.Type != wire.MsgOutput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
 				t.Fatalf("frame %d delivered out of order or dropped: %+v", i, got)
 			}
 		case <-time.After(time.Second):
@@ -378,7 +379,7 @@ func TestProxyRuntimeClientSendDeadWaitsForIdleTTL(t *testing.T) {
 	}()
 
 	client.sendErr <- ErrLinkDead
-	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("client is gone")}}
+	daemon.recv <- recvResult{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("client is gone")}}
 	waitForProxyManualTimers(t, clk, 1)
 	select {
 	case err := <-errCh:
@@ -443,14 +444,14 @@ func newRetryingOfflineTransport() *retryingOfflineTransport {
 	return &retryingOfflineTransport{closed: make(chan struct{}), firstSend: make(chan struct{})}
 }
 
-func (t *retryingOfflineTransport) Send(ports.Frame) error {
+func (t *retryingOfflineTransport) Send(wire.Frame) error {
 	t.firstSendOnce.Do(func() { close(t.firstSend) })
 	return errors.New("offline")
 }
 
-func (t *retryingOfflineTransport) Recv() (ports.Frame, error) {
+func (t *retryingOfflineTransport) Recv() (wire.Frame, error) {
 	<-t.closed
-	return ports.Frame{}, io.EOF
+	return wire.Frame{}, io.EOF
 }
 
 func (t *retryingOfflineTransport) Close() error {
@@ -474,7 +475,7 @@ func TestProxyCopierStopsRetryingWhenContextCanceled(t *testing.T) {
 		close(done)
 	}()
 
-	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("retry until cancel")}}
+	daemon.recv <- recvResult{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("retry until cancel")}}
 	select {
 	case <-client.firstSend:
 	case <-time.After(time.Second):
@@ -490,23 +491,23 @@ func TestProxyCopierStopsRetryingWhenContextCanceled(t *testing.T) {
 
 func TestClampDatagramHelloOutputWindowPreservesProtocolValidation(t *testing.T) {
 	t.Run("malformed payload remains malformed", func(t *testing.T) {
-		payload := append(ports.MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 8}), 0xff)
-		frame := ports.Frame{Type: ports.MsgHello, Payload: payload}
+		payload := append(wire.MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 8}), 0xff)
+		frame := wire.Frame{Type: wire.MsgHello, Payload: payload}
 		got := clampDatagramHelloOutputWindow(frame)
 		if !reflect.DeepEqual(got, frame) {
 			t.Fatalf("malformed Hello changed: got %#v, want %#v", got, frame)
 		}
-		if _, err := ports.UnmarshalHello(got.Payload); err == nil {
+		if _, err := wire.UnmarshalHello(got.Payload); err == nil {
 			t.Fatal("malformed Hello became decodable")
 		}
 	})
 
 	t.Run("mismatched version remains mismatched", func(t *testing.T) {
 		wantVersion := protocol.Version + 1
-		frame := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{
+		frame := wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(protocol.Hello{
 			Version: wantVersion, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 8,
 		})}
-		got, err := ports.UnmarshalHello(clampDatagramHelloOutputWindow(frame).Payload)
+		got, err := wire.UnmarshalHello(clampDatagramHelloOutputWindow(frame).Payload)
 		if err != nil {
 			t.Fatal(err)
 		}

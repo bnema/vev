@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
@@ -196,7 +197,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
 	// The version prefix is valid and mismatched, while the remainder is not a
 	// decodable request. The daemon must still return ErrVersionMismatch.
-	frame := ports.Frame{Type: ports.MsgCommand, Payload: []byte{0, byte(protocol.Version + 1)}}
+	frame := wire.Frame{Type: wire.MsgCommand, Payload: []byte{0, byte(protocol.Version + 1)}}
 	tr, sends, _ := newConn(t, frame)
 
 	d := newTestDaemon(t, nil, stubClock{})
@@ -210,9 +211,9 @@ func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
 func TestHandleConnRoutesCommand(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	request := protocol.CommandRequest{Version: protocol.Version, Slug: "list-sessions"}
-	payload, err := ports.MarshalCommandRequest(request)
+	payload, err := wire.MarshalCommandRequest(request)
 	require.NoError(t, err)
-	frame := ports.Frame{Type: ports.MsgCommand, Payload: payload}
+	frame := wire.Frame{Type: wire.MsgCommand, Payload: payload}
 	tr, sends, _ := newConn(t, frame)
 
 	d.handleConn(tr)
@@ -1299,7 +1300,7 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 		done <- struct{}{}
 	}()
 	close(start)
-	for _, sends := range []chan ports.Frame{leftSends, rightSends} {
+	for _, sends := range []chan wire.Frame{leftSends, rightSends} {
 		select {
 		case <-done:
 			result := awaitCommandResult(t, sends)
@@ -1324,14 +1325,14 @@ func addNamedMoveDestination(d *Daemon, name, tabID, paneID string) *session {
 	return sess
 }
 
-func commandFrame(t *testing.T, request protocol.CommandRequest) ports.Frame {
+func commandFrame(t *testing.T, request protocol.CommandRequest) wire.Frame {
 	t.Helper()
 	if request.Version == 0 {
 		request.Version = protocol.Version
 	}
-	payload, err := ports.MarshalCommandRequest(request)
+	payload, err := wire.MarshalCommandRequest(request)
 	require.NoError(t, err)
-	return ports.Frame{Type: ports.MsgCommand, Payload: payload}
+	return wire.Frame{Type: wire.MsgCommand, Payload: payload}
 }
 
 func sendCommand(t *testing.T, d *Daemon, request protocol.CommandRequest) protocol.CommandResult {
@@ -1342,10 +1343,10 @@ func sendCommand(t *testing.T, d *Daemon, request protocol.CommandRequest) proto
 	return awaitCommandResult(t, sends)
 }
 
-func awaitCommandResult(t *testing.T, sends chan ports.Frame) protocol.CommandResult {
+func awaitCommandResult(t *testing.T, sends chan wire.Frame) protocol.CommandResult {
 	t.Helper()
-	reply := awaitFrame(t, sends, ports.MsgCommandResult)
-	result, err := ports.UnmarshalCommandResult(reply.Payload)
+	reply := awaitFrame(t, sends, wire.MsgCommandResult)
+	result, err := wire.UnmarshalCommandResult(reply.Payload)
 	require.NoError(t, err)
 	return result
 }
@@ -1397,13 +1398,13 @@ func newBlockingControlSendTransport() *blockingControlSendTransport {
 	return &blockingControlSendTransport{started: make(chan struct{}), closed: make(chan struct{})}
 }
 
-func (tr *blockingControlSendTransport) Send(ports.Frame) error {
+func (tr *blockingControlSendTransport) Send(wire.Frame) error {
 	tr.once.Do(func() { close(tr.started) })
 	<-tr.closed
 	return io.ErrClosedPipe
 }
 
-func (*blockingControlSendTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*blockingControlSendTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
 func (tr *blockingControlSendTransport) Close() error {
 	tr.once.Do(func() { close(tr.started) })
 	select {
@@ -1419,9 +1420,9 @@ type commandSendErrorTransport struct {
 	closed bool
 }
 
-func (tr *commandSendErrorTransport) Send(ports.Frame) error  { return tr.err }
-func (*commandSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (tr *commandSendErrorTransport) Close() error            { tr.closed = true; return nil }
+func (tr *commandSendErrorTransport) Send(wire.Frame) error  { return tr.err }
+func (*commandSendErrorTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (tr *commandSendErrorTransport) Close() error           { tr.closed = true; return nil }
 
 func addControlSession(d *Daemon, name, tabID, paneID string) *session {
 	tb := newTabWithStableID(tabID, paneID, newQuietPTY(), domain.Size{Cols: 80, Rows: 22})

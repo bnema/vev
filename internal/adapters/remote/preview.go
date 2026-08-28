@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const (
@@ -42,7 +43,7 @@ func NewPreviewClient() ports.RemotePreviewClient {
 
 func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
 	request := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: width, Height: height}
-	payload := ports.MarshalRemotePreviewRequest(request)
+	payload := wire.MarshalRemotePreviewRequest(request)
 	if payload == nil {
 		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreviewRequest
 	}
@@ -78,7 +79,7 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 	if stdout.overflow || stderr.overflow {
 		return protocol.RemotePreview{}, errRemotePreviewTooLarge
 	}
-	preview, err := ports.UnmarshalRemotePreview(stdout.Bytes())
+	preview, err := wire.UnmarshalRemotePreview(stdout.Bytes())
 	if err != nil {
 		return protocol.RemotePreview{}, err
 	}

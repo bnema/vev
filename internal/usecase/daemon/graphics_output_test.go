@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +54,7 @@ type lateGraphicsCleanupTransport struct {
 	started     chan struct{}
 	release     chan struct{}
 	finished    chan struct{}
-	sends       chan ports.Frame
+	sends       chan wire.Frame
 	startedOnce sync.Once
 	finishOnce  sync.Once
 }
@@ -63,11 +64,11 @@ func newLateGraphicsCleanupTransport() *lateGraphicsCleanupTransport {
 		started:  make(chan struct{}),
 		release:  make(chan struct{}),
 		finished: make(chan struct{}),
-		sends:    make(chan ports.Frame, 1),
+		sends:    make(chan wire.Frame, 1),
 	}
 }
 
-func (t *lateGraphicsCleanupTransport) Send(frame ports.Frame) error {
+func (t *lateGraphicsCleanupTransport) Send(frame wire.Frame) error {
 	t.startedOnce.Do(func() { close(t.started) })
 	<-t.release
 	t.sends <- frame
@@ -75,8 +76,8 @@ func (t *lateGraphicsCleanupTransport) Send(frame ports.Frame) error {
 	return nil
 }
 
-func (*lateGraphicsCleanupTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (*lateGraphicsCleanupTransport) Close() error               { return nil }
+func (*lateGraphicsCleanupTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (*lateGraphicsCleanupTransport) Close() error              { return nil }
 
 func TestGraphicsOutputReplaysStaticKittenIcatFixture(t *testing.T) {
 	state := newGraphicsOutputState()
@@ -127,8 +128,8 @@ func TestKittyAttachmentPaintCarriesGraphicsInTheOutputStateRecord(t *testing.T)
 	pane.screen.Write(fixture)
 
 	d.paint(sess, ac, true, nil)
-	frame := awaitFrame(t, sends, ports.MsgOutput)
-	output, err := ports.UnmarshalOutput(frame.Payload)
+	frame := awaitFrame(t, sends, wire.MsgOutput)
+	output, err := wire.UnmarshalOutput(frame.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(output.Data), "\x1b_Ga=t,i=")
 	require.Contains(t, string(output.Data), ",f=100")
@@ -157,8 +158,8 @@ func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) 
 	require.False(t, ac.output.graphicsUnsupportedWarned.Load(), "replacement terminal must receive its own unsupported-graphics warning")
 
 	d.paint(sess, ac, true, nil)
-	frame := awaitFrame(t, sends, ports.MsgOutput)
-	output, err := ports.UnmarshalOutput(frame.Payload)
+	frame := awaitFrame(t, sends, wire.MsgOutput)
+	output, err := wire.UnmarshalOutput(frame.Payload)
 	require.NoError(t, err)
 	require.Positive(t, output.New)
 	require.NotContains(t, string(output.Data), "\x1b_Ga=d,d=A", "vev must never globally delete terminal images")
@@ -449,7 +450,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterSocketSendSuccessWithoutTerminalF
 	require.Nil(t, ac.output.graphicsOutput)
 	sends := transport.Sends()
 	require.Len(t, sends, 1)
-	cleanup, err := ports.UnmarshalOutput(sends[0].Payload)
+	cleanup, err := wire.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
 	require.Zero(t, cleanup.New, "graphics cleanup is an unacknowledged side-effect frame")
 
@@ -572,7 +573,7 @@ func TestGraphicsNamespaceQuarantineFencesTimedOutLateDelete(t *testing.T) {
 	close(transport.release)
 	staleFrame := awaitTestValue(t, transport.sends, "late stale cleanup did not execute")
 	awaitTestCompletion(t, transport.finished, "late stale cleanup did not return")
-	staleOutput, err := ports.UnmarshalOutput(staleFrame.Payload)
+	staleOutput, err := wire.UnmarshalOutput(staleFrame.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(staleOutput.Data), "i="+strconv.FormatUint(oldID, 10))
 	require.NotContains(t, string(staleOutput.Data), "i="+strconv.FormatUint(newID, 10), "late cleanup must never target the fresh attachment")

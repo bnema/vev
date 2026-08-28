@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
@@ -1020,7 +1021,7 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	defer finishHandshake()
 	defer stopTransport()
 
-	var first ports.Frame
+	var first wire.Frame
 	err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
 		var recvErr error
 		first, recvErr = tr.Recv()
@@ -1033,27 +1034,27 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 		return
 	}
 	switch first.Type {
-	case ports.MsgList:
+	case wire.MsgList:
 		stopTransport()
 		finishHandshake()
 		d.handleList(tr)
-	case ports.MsgCommand:
+	case wire.MsgCommand:
 		stopTransport()
 		finishHandshake()
 		if err := d.handleCommand(tr, first); err != nil {
 			d.log.Warn("command handler failed", "err", err)
 		}
-	case ports.MsgRemotePreviewRequest:
+	case wire.MsgRemotePreviewRequest:
 		stopTransport()
 		finishHandshake()
 		if err := d.handleRemotePreview(tr, first); err != nil {
 			d.log.Warn("remote preview handler failed", "err", err)
 		}
-	case ports.MsgKill:
+	case wire.MsgKill:
 		stopTransport()
 		finishHandshake()
 		d.handleKill(tr, first)
-	case ports.MsgHello:
+	case wire.MsgHello:
 		d.handleHelloWithContext(handshakeCtx, timedOut, stopTransport, finishHandshake, tr, first)
 	default:
 		d.log.Warn("hello rejected", "err", "expected hello", "type", first.Type)
@@ -1110,10 +1111,10 @@ func (d *Daemon) handleList(tr ports.Transport) {
 // handleKill terminates the requested live session or stopped named session,
 // or all sessions, and closes the control connection; the resulting EOF is the
 // client's success signal.
-func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
+func (d *Daemon) handleKill(tr ports.Transport, f wire.Frame) {
 	defer func() { _ = tr.Close() }()
 
-	k, err := ports.UnmarshalKill(f.Payload)
+	k, err := wire.UnmarshalKill(f.Payload)
 	if err != nil {
 		_ = d.boundedControlSend(tr, frameError(protocol.ErrInternal, "malformed kill request"))
 		return
@@ -1151,7 +1152,7 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 // handleHello runs the attach handshake for direct package callers. Accepted
 // connections use handleHelloWithContext so the deadline also covers the first
 // frame read in handleConn.
-func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
+func (d *Daemon) handleHello(tr ports.Transport, f wire.Frame) {
 	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(context.Background())
 	stopTransport := watchHandshakeTransport(handshakeCtx, tr)
 	defer finishHandshake()
@@ -1161,21 +1162,21 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 
 // handleHelloWithContext runs the attach handshake: version check, intent
 // routing, Welcome, guaranteed first paint, then the per-connection input loop.
-func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <-chan struct{}, stopHandshakeTransport, finishHandshake func(), tr ports.Transport, f ports.Frame) {
+func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <-chan struct{}, stopHandshakeTransport, finishHandshake func(), tr ports.Transport, f wire.Frame) {
 	if err := handshakeContextError(context.Background(), timedOut, handshakeCtx.Err()); err != nil {
 		_ = tr.Close()
 		return
 	}
-	sendHandshake := func(frame ports.Frame) error {
+	sendHandshake := func(frame wire.Frame) error {
 		err := boundedHandshakeOperation(handshakeCtx, tr, func() error { return tr.Send(frame) })
 		if err != nil {
 			return handshakeContextError(context.Background(), timedOut, err)
 		}
 		return nil
 	}
-	h, err := ports.UnmarshalHello(f.Payload)
+	h, err := wire.UnmarshalHello(f.Payload)
 	if err != nil {
-		if version, ok := ports.PeekHelloVersion(f.Payload); ok && version != protocol.Version {
+		if version, ok := wire.PeekHelloVersion(f.Payload); ok && version != protocol.Version {
 			d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", version, "expected", protocol.Version)
 			_ = sendHandshake(frameError(protocol.ErrVersionMismatch, "protocol version mismatch"))
 		} else {

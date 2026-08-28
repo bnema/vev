@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -166,7 +167,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	trW := portsmocks.NewMockTransport(t)
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
-	trW.EXPECT().Send(mock.Anything).RunAndReturn(func(ports.Frame) error {
+	trW.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Frame) error {
 		<-block
 		return nil
 	}).Maybe()

@@ -9,16 +9,17 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/require"
 )
 
 func sendAcceptanceInput(t *testing.T, tr ports.Transport, data string) {
 	t.Helper()
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(data)})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(data)})}))
 }
 
-func awaitAcceptanceFrame(t *testing.T, p *pump, typ ports.MsgType, predicate func(ports.Frame) bool) ports.Frame {
+func awaitAcceptanceFrame(t *testing.T, p *pump, typ wire.MsgType, predicate func(wire.Frame) bool) wire.Frame {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
@@ -37,35 +38,35 @@ func awaitAcceptanceFrame(t *testing.T, p *pump, typ ports.MsgType, predicate fu
 
 func awaitAcceptanceCommand(t *testing.T, p *pump, requestID uint64) protocol.CommandResult {
 	t.Helper()
-	frame := awaitAcceptanceFrame(t, p, ports.MsgCommandResult, func(frame ports.Frame) bool {
-		result, err := ports.UnmarshalCommandResult(frame.Payload)
+	frame := awaitAcceptanceFrame(t, p, wire.MsgCommandResult, func(frame wire.Frame) bool {
+		result, err := wire.UnmarshalCommandResult(frame.Payload)
 		require.NoError(t, err)
 		return result.RequestID == requestID
 	})
-	result, err := ports.UnmarshalCommandResult(frame.Payload)
+	result, err := wire.UnmarshalCommandResult(frame.Payload)
 	require.NoError(t, err)
 	return result
 }
 
 func awaitAcceptanceOutput(t *testing.T, p *pump, predicate func(protocol.Output) bool) protocol.Output {
 	t.Helper()
-	frame := awaitAcceptanceFrame(t, p, ports.MsgOutput, func(frame ports.Frame) bool {
-		output, err := ports.UnmarshalOutput(frame.Payload)
+	frame := awaitAcceptanceFrame(t, p, wire.MsgOutput, func(frame wire.Frame) bool {
+		output, err := wire.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
 		return predicate(output)
 	})
-	output, err := ports.UnmarshalOutput(frame.Payload)
+	output, err := wire.UnmarshalOutput(frame.Payload)
 	require.NoError(t, err)
 	return output
 }
 
 func awaitAcceptanceCommandResult(t *testing.T, tr ports.Transport, p *pump, requestID uint64, slug string) protocol.CommandResult {
 	t.Helper()
-	payload, err := ports.MarshalCommandRequest(protocol.CommandRequest{
+	payload, err := wire.MarshalCommandRequest(protocol.CommandRequest{
 		Version: protocol.Version, RequestID: requestID, Attached: true, Slug: slug,
 	})
 	require.NoError(t, err)
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgCommand, Payload: payload}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: payload}))
 	return awaitAcceptanceCommand(t, p, requestID)
 }
 
@@ -114,25 +115,25 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	// The resize keeps its attachment-local output stream while recalculating
 	// shared PTY/content geometry from the latest valid attachment claim; the
 	// peer stream remains independent.
-	resizePayload, err := ports.MarshalResize(protocol.Resize{Size: domain.Size{Cols: 100, Rows: 30}})
+	resizePayload, err := wire.MarshalResize(protocol.Resize{Size: domain.Size{Cols: 100, Rows: 30}})
 	require.NoError(t, err)
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgResize, Payload: resizePayload}))
+	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgResize, Payload: resizePayload}))
 	resized := awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Size == (domain.Size{Cols: 100, Rows: 30}) })
 	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, resized.Size)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
+	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
 	reset := awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Base == 0 && output.Full })
 	require.True(t, reset.Full)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})}))
+	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})}))
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
 		select {
 		case frame := <-firstPump.ch:
-			if frame.Type == ports.MsgDetached {
+			if frame.Type == wire.MsgDetached {
 				goto detached
 			}
 		case <-deadline.C:
@@ -173,7 +174,7 @@ func TestAcceptanceAttachedCommandUsesItsConnectionOnly(t *testing.T) {
 	}
 
 drained:
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
+	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
 	awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Full && output.Base == 0 })
 	assertNoTextAfterInput(t, secondPump, size, "Commands")
 }

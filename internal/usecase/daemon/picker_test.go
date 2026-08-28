@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
@@ -34,9 +35,9 @@ type remotePickerSendErrorTransport struct {
 	err error
 }
 
-func (t *remotePickerSendErrorTransport) Send(ports.Frame) error   { return t.err }
-func (*remotePickerSendErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (*remotePickerSendErrorTransport) Close() error               { return nil }
+func (t *remotePickerSendErrorTransport) Send(wire.Frame) error   { return t.err }
+func (*remotePickerSendErrorTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (*remotePickerSendErrorTransport) Close() error              { return nil }
 
 type refusingSnapshotDeleteRepository struct {
 	noOpSnapshotRepository
@@ -222,11 +223,11 @@ func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
 			d.mu.Unlock()
 
 			d.enterPicker(sess, ac)
-			awaitFrame(t, sends, ports.MsgOutput)
+			awaitFrame(t, sends, wire.MsgOutput)
 			// Move off the attached session's active tab: a navigate rebuild snaps
 			// back to it unless the toggle preserves the selection.
 			d.handleInput(sess, ac, tc.navigate)
-			awaitFrame(t, sends, ports.MsgOutput)
+			awaitFrame(t, sends, wire.MsgOutput)
 			ac.overlays.pickerMu.Lock()
 			before, ok := ac.overlays.picker.Selected()
 			ac.overlays.pickerMu.Unlock()
@@ -239,7 +240,7 @@ func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
 			}
 
 			d.handleInput(sess, ac, []byte("s"))
-			awaitFrame(t, sends, ports.MsgOutput)
+			awaitFrame(t, sends, wire.MsgOutput)
 
 			require.Equal(t, uint32(pickerSortGrouped), d.pickerSort.Load())
 			require.True(t, ac.overlays.pickerActive())
@@ -252,7 +253,7 @@ func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
 			require.Equal(t, " Sessions · grouped ", title)
 
 			d.handleInput(sess, ac, []byte("s"))
-			awaitFrame(t, sends, ports.MsgOutput)
+			awaitFrame(t, sends, wire.MsgOutput)
 
 			require.Equal(t, uint32(pickerSortRecent), d.pickerSort.Load())
 			require.True(t, ac.overlays.pickerActive())
@@ -812,7 +813,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: protocol.SessionDown}
 
 	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	target := ac.currentSession()
 	require.NotNil(t, target)
@@ -835,16 +836,16 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	}()
 
 	d.enterPicker(sess, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handleInput(sess, ac, []byte("j"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handleInput(sess, ac, []byte("\r"))
 
 	require.Equal(t, 1, testAttachmentTabIndex(sess))
 	requireFloatingInitialized(t, testAttachmentTab(sess))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.enterPicker(sess, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
 	d.handleInput(sess, ac, []byte("\x1b"))
@@ -852,7 +853,7 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	require.True(t, ac.overlays.pickerActive())
 	timer.ch <- time.Now()
 	require.Eventually(t, func() bool { return !ac.overlays.pickerActive() }, time.Second, 5*time.Millisecond)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 }
 
 func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
@@ -876,7 +877,7 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 			}()
 
 			d.enterPicker(sess, ac)
-			awaitFrame(t, sends, ports.MsgOutput)
+			awaitFrame(t, sends, wire.MsgOutput)
 			for _, input := range tc.input {
 				d.handleInput(sess, ac, input)
 			}
@@ -950,7 +951,7 @@ func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	defer releases[0]()
 
 	d.enterPicker(sess, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
 	d.handleInput(sess, ac, []byte("\x1b"))
@@ -984,10 +985,10 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	d.sessions[sess2.id] = sess2
 
 	d.firstPaint(sess1, ac1)
-	awaitFrame(t, sends1, ports.MsgOutput)
+	awaitFrame(t, sends1, wire.MsgOutput)
 	d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id})
 	d.firstPaint(sess2, ac1)
-	awaitFrame(t, sends1, ports.MsgOutput)
+	awaitFrame(t, sends1, wire.MsgOutput)
 	require.Same(t, sess2, ac1.currentSession())
 	for len(sends1) > 0 {
 		<-sends1
@@ -1011,7 +1012,7 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	enteredSend := make(chan struct{})
 	releaseSend := make(chan struct{})
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(ports.Frame) error {
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Frame) error {
 		close(enteredSend)
 		<-releaseSend
 		return nil
@@ -1370,14 +1371,14 @@ func TestPickerResizeRecomposesModal(t *testing.T) {
 	defer releasePTY()
 
 	d.enterPicker(sess, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
 	// Picker recomposition is the relevant event here; do not depend on a real
 	// resize-idle timer in this synchronous rendering test.
 	d.paint(sess, ac, false, nil)
 
-	out := awaitFrame(t, sends, ports.MsgOutput)
-	msg, err := ports.UnmarshalOutput(out.Payload)
+	out := awaitFrame(t, sends, wire.MsgOutput)
+	msg, err := wire.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "┌")
 	require.Contains(t, string(msg.Data), "Sessions")
@@ -1455,11 +1456,11 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	d.ptys = ptys
 
 	d.enterPicker(from, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handleInput(from, ac, []byte("j"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handleInput(from, ac, []byte("\r"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	history := d.notices.history()
 	require.Len(t, history, 1, "failed stopped-session restore must record exactly one notice")
@@ -1615,10 +1616,10 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	require.NoError(t, d.catalogue.Create(record))
 
 	d.enterPicker(from, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	// MRU-desc order is from(current), recent, older; "j" moves onto "recent".
 	d.handleInput(from, ac, []byte("j"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handleInput(from, ac, []byte("x"))
 
 	history := d.notices.history()
@@ -1662,11 +1663,11 @@ func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
 	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, incarnation: record.IncarnationID, record: record}
 
 	d.enterPicker(from, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handleInput(from, ac, []byte("j"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handleInput(from, ac, []byte("x"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	history := d.notices.history()
 	require.NotEmpty(t, history, "failed persisted-record delete must record a notice")

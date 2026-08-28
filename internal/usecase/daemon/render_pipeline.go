@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -539,7 +540,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		}
 
 		if position.ActiveTabID != "" && position != ac.output.lastRoutePosition {
-			payload, positionMarshalErr := ports.MarshalRoutePosition(position)
+			payload, positionMarshalErr := wire.MarshalRoutePosition(position)
 			if positionMarshalErr != nil {
 				d.log.Error("marshal route position", "err", positionMarshalErr)
 			} else {
@@ -560,7 +561,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 						if async, ok := sendTr.(ports.AsyncTransport); ok {
 							send = async.SendAsync
 						}
-						sendErr = send(ports.Frame{Type: ports.MsgRoutePosition, Payload: payload})
+						sendErr = send(wire.Frame{Type: wire.MsgRoutePosition, Payload: payload})
 					}
 				}
 				if marks.attachmentEffect != nil && interruptible {

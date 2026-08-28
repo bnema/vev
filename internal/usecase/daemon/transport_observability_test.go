@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // This acceptance boundary exercises the attached resize, render, and ACK
@@ -25,11 +26,11 @@ func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	if !d.resizeForFirstPaint(sess, ac, domain.Size{Cols: 90, Rows: 25}) {
 		t.Fatal("first resize was not accepted")
 	}
-	first := awaitFrame(t, sends, ports.MsgOutput)
-	if first.Type != ports.MsgOutput {
+	first := awaitFrame(t, sends, wire.MsgOutput)
+	if first.Type != wire.MsgOutput {
 		t.Fatalf("first frame = %v, want output", first.Type)
 	}
-	output, err := ports.UnmarshalOutput(first.Payload)
+	output, err := wire.UnmarshalOutput(first.Payload)
 	if err != nil {
 		t.Fatalf("decode first output: %v", err)
 	}
@@ -38,8 +39,8 @@ func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	}
 	ac.ackOutputState(output.Epoch, output.New)
 	rc.notifyAck()
-	second := awaitFrame(t, sends, ports.MsgOutput)
-	if second.Type != ports.MsgOutput {
+	second := awaitFrame(t, sends, wire.MsgOutput)
+	if second.Type != wire.MsgOutput {
 		t.Fatalf("second frame = %v, want output", second.Type)
 	}
 
@@ -118,8 +119,8 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 		close(paintDone)
 	}()
 	awaitDaemonObserver(t, observer.entered, "blocked render observer")
-	frame := awaitFrame(t, sends, ports.MsgOutput) // The frame was emitted before the observer began its I/O.
-	output, err := ports.UnmarshalOutput(frame.Payload)
+	frame := awaitFrame(t, sends, wire.MsgOutput) // The frame was emitted before the observer began its I/O.
+	output, err := wire.UnmarshalOutput(frame.Payload)
 	if err != nil {
 		t.Fatalf("decode emitted output: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 		d.paint(sess, ac, false, nil)
 		close(secondPaint)
 	}()
-	_ = awaitFrame(t, sends, ports.MsgOutput) // The second frame is live even though serialized observer I/O waits.
+	_ = awaitFrame(t, sends, wire.MsgOutput) // The second frame is live even though serialized observer I/O waits.
 
 	close(observer.release)
 	awaitDaemonObserver(t, paintDone, "first render completion")

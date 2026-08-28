@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestBuildCommandUsesExecArgs(t *testing.T) {
@@ -114,7 +114,7 @@ func TestCloseInterruptsBlockedSend(t *testing.T) {
 	transport := NewTransport(nil, writer, nil)
 
 	sendDone := make(chan error, 1)
-	go func() { sendDone <- transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("blocked")}) }()
+	go func() { sendDone <- transport.Send(wire.Frame{Type: wire.MsgOutput, Payload: []byte("blocked")}) }()
 	<-writer.started
 	if err := transport.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -166,7 +166,7 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 			t.Errorf("server Recv: %v", err)
 			return
 		}
-		got, err := ports.UnmarshalHello(f.Payload)
+		got, err := wire.UnmarshalHello(f.Payload)
 		if err != nil {
 			t.Errorf("UnmarshalHello: %v", err)
 			return
@@ -174,20 +174,20 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 		if got.Version == protocol.Version {
 			t.Errorf("test did not send a mismatched version")
 		}
-		_ = server.Send(ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})})
+		_ = server.Send(wire.Frame{Type: wire.MsgError, Payload: wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})})
 	}()
 
-	if err := client.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
+	if err := client.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)}); err != nil {
 		t.Fatalf("client Send: %v", err)
 	}
 	reply, err := client.Recv()
 	if err != nil {
 		t.Fatalf("client Recv: %v", err)
 	}
-	if reply.Type != ports.MsgError {
+	if reply.Type != wire.MsgError {
 		t.Fatalf("reply type = %d, want MsgError", reply.Type)
 	}
-	em, err := ports.UnmarshalErrorMsg(reply.Payload)
+	em, err := wire.UnmarshalErrorMsg(reply.Payload)
 	if err != nil {
 		t.Fatalf("UnmarshalErrorMsg: %v", err)
 	}
@@ -205,35 +205,35 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 }
 
 func TestTransportUsesCanonicalFrameMaximum(t *testing.T) {
-	boundaryPayload := make([]byte, ports.MaxFrameLen-1)
+	boundaryPayload := make([]byte, wire.MaxFrameLen-1)
 	boundaryWire := &bytes.Buffer{}
 	boundarySend := NewTransport(nil, boundaryWire, nil)
-	if err := boundarySend.Send(ports.Frame{Type: ports.MsgOutput, Payload: boundaryPayload}); err != nil {
+	if err := boundarySend.Send(wire.Frame{Type: wire.MsgOutput, Payload: boundaryPayload}); err != nil {
 		t.Fatalf("boundary Send error = %v", err)
 	}
-	if got := binary.BigEndian.Uint32(boundaryWire.Bytes()[:frameHeaderLen]); got != ports.MaxFrameLen {
-		t.Fatalf("boundary frame length = %d, want %d", got, ports.MaxFrameLen)
+	if got := binary.BigEndian.Uint32(boundaryWire.Bytes()[:frameHeaderLen]); got != wire.MaxFrameLen {
+		t.Fatalf("boundary frame length = %d, want %d", got, wire.MaxFrameLen)
 	}
 	boundaryRecv := NewTransport(bytes.NewReader(boundaryWire.Bytes()), io.Discard, nil)
 	boundaryFrame, err := boundaryRecv.Recv()
 	if err != nil {
 		t.Fatalf("boundary Recv error = %v", err)
 	}
-	if boundaryFrame.Type != ports.MsgOutput || len(boundaryFrame.Payload) != len(boundaryPayload) {
-		t.Fatalf("boundary frame = type %d, payload %d bytes; want type %d, payload %d bytes", boundaryFrame.Type, len(boundaryFrame.Payload), ports.MsgOutput, len(boundaryPayload))
+	if boundaryFrame.Type != wire.MsgOutput || len(boundaryFrame.Payload) != len(boundaryPayload) {
+		t.Fatalf("boundary frame = type %d, payload %d bytes; want type %d, payload %d bytes", boundaryFrame.Type, len(boundaryFrame.Payload), wire.MsgOutput, len(boundaryPayload))
 	}
 	if !bytes.Equal(boundaryFrame.Payload, boundaryPayload) {
 		t.Fatal("boundary payload was corrupted")
 	}
 
 	send := NewTransport(nil, io.Discard, nil)
-	err = send.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, ports.MaxFrameLen)})
+	err = send.Send(wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, wire.MaxFrameLen)})
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("Send error = %v, want ErrFrameTooLarge", err)
 	}
 
 	var header [frameHeaderLen]byte
-	binary.BigEndian.PutUint32(header[:], ports.MaxFrameLen+1)
+	binary.BigEndian.PutUint32(header[:], wire.MaxFrameLen+1)
 	recv := NewTransport(bytes.NewReader(header[:]), io.Discard, nil)
 	_, err = recv.Recv()
 	if !errors.Is(err, ErrFrameTooLarge) {

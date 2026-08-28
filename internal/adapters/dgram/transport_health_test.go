@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -32,7 +33,7 @@ func TestPortHopPreservesPendingReliableMessages(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 
-	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("survive")}); err != nil {
+	if err := a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("survive")}); err != nil {
 		t.Fatal(err)
 	}
 	a.mu.Lock()
@@ -44,7 +45,7 @@ func TestPortHopPreservesPendingReliableMessages(t *testing.T) {
 	}
 	aPC.drop = nil
 	got := recvWithin(t, b, time.Second)
-	if got.Type != ports.MsgInput || string(got.Payload) != "survive" {
+	if got.Type != wire.MsgInput || string(got.Payload) != "survive" {
 		t.Fatalf("got=%+v, want pending reliable message", got)
 	}
 	select {
@@ -151,8 +152,8 @@ func TestRecvUnblocksWhenPeerDeadAfter(t *testing.T) {
 func TestPendingAttemptsResetWhenLinkRecovers(t *testing.T) {
 	tr, _ := newResendTestTransport(t, 10)
 	tr.linkState = ports.LinkStateDegraded
-	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("stale")}, attempts: 4}
-	tr.pending[2] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("stale")}, attempts: 7}
+	tr.pending[1] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("stale")}, attempts: 4}
+	tr.pending[2] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("stale")}, attempts: 7}
 
 	tr.setLinkState(ports.LinkStateConnected, nil)
 
@@ -200,12 +201,12 @@ func TestPendingReliableQueueReturnsWhenLinkDegrades(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 
-	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
+	if err := a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("first")}); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 2)
-	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
-	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("third")}) }()
+	go func() { done <- a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("second")}) }()
+	go func() { done <- a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("third")}) }()
 	waitForManualTimers(t, clk, 2)
 	a.setLinkState(ports.LinkStateDegraded, nil)
 	for i := range 2 {
@@ -313,7 +314,7 @@ func TestLinkHealthPendingStallWithFreshContactProbesOnceWithoutDying(t *testing
 	now := time.Now()
 	a.mu.Lock()
 	a.health = healthTracker{lastPacket: now, lastRecord: now.Add(-time.Minute), lastProgress: now.Add(-time.Minute)}
-	a.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, enqueued: now.Add(-time.Minute), attempts: 3}
+	a.pending[1] = &pending{frame: wire.Frame{Type: wire.MsgOutput}, enqueued: now.Add(-time.Minute), attempts: 3}
 	a.mu.Unlock()
 
 	a.checkSilence()
@@ -347,7 +348,7 @@ func TestLinkHealthHeartbeatControlCannotMaskPendingACKStall(t *testing.T) {
 	}
 	defer func() { _ = tr.Close() }()
 	defer func() { _ = bPC.Close() }()
-	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("unacked")}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("unacked")}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -417,7 +418,7 @@ func TestLinkHealthOnlyAckProgressThatRemovesPendingRestoresConnected(t *testing
 	now := tr.clock.Now()
 	tr.linkState = ports.LinkStateDegraded
 	tr.health = healthTracker{lastPacket: now, lastRecord: now.Add(-time.Minute), lastProgress: now.Add(-time.Minute)}
-	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, first: now, last: now}
+	tr.pending[1] = &pending{frame: wire.Frame{Type: wire.MsgOutput}, first: now, last: now}
 
 	tr.handleRecord(ackRecord(1))
 	if got := tr.LinkState(); got != ports.LinkStateConnected {

@@ -21,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 type reconnectToastTerminalHarness struct {
@@ -129,20 +130,20 @@ func (r *reconnectToastOutputRecorder) String() string {
 	return r.all.String()
 }
 
-func reconnectToastWelcome(token uint64) ports.Frame {
+func reconnectToastWelcome(token uint64) wire.Frame {
 	return reconnectToastWelcomeNamed("", token)
 }
 
-func reconnectToastWelcomeNamed(name string, token uint64) ports.Frame {
-	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: name, ResumeToken: token, Capabilities: protocol.CapabilityResume})}
+func reconnectToastWelcomeNamed(name string, token uint64) wire.Frame {
+	return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: name, ResumeToken: token, Capabilities: protocol.CapabilityResume})}
 }
 
-func reconnectToastDetach(reason uint8) ports.Frame {
-	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: reason})}
+func reconnectToastDetach(reason uint8) wire.Frame {
+	return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: reason})}
 }
 
 type reconnectToastRecv struct {
-	frame ports.Frame
+	frame wire.Frame
 	err   error
 }
 
@@ -163,7 +164,7 @@ func (d *reconnectToastSequenceDialer) Dial(context.Context) (ports.Transport, e
 type reconnectToastRecordingTransport struct {
 	mu     sync.Mutex
 	recvs  []reconnectToastRecv
-	sends  []ports.Frame
+	sends  []wire.Frame
 	closed bool
 }
 
@@ -173,7 +174,7 @@ func newReconnectToastRecordingTransport(recvs ...reconnectToastRecv) *reconnect
 
 type reconnectToastSentFrames struct {
 	mu      sync.Mutex
-	frames  []ports.Frame
+	frames  []wire.Frame
 	changed chan struct{}
 }
 
@@ -181,7 +182,7 @@ func newReconnectToastSentFrames() *reconnectToastSentFrames {
 	return &reconnectToastSentFrames{changed: make(chan struct{}, 1)}
 }
 
-func (s *reconnectToastSentFrames) record(frame ports.Frame) {
+func (s *reconnectToastSentFrames) record(frame wire.Frame) {
 	s.mu.Lock()
 	s.frames = append(s.frames, frame)
 	s.mu.Unlock()
@@ -191,7 +192,7 @@ func (s *reconnectToastSentFrames) record(frame ports.Frame) {
 	}
 }
 
-func (s *reconnectToastSentFrames) find(match func(ports.Frame) bool) (ports.Frame, bool) {
+func (s *reconnectToastSentFrames) find(match func(wire.Frame) bool) (wire.Frame, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, frame := range s.frames {
@@ -199,7 +200,7 @@ func (s *reconnectToastSentFrames) find(match func(ports.Frame) bool) (ports.Fra
 			return frame, true
 		}
 	}
-	return ports.Frame{}, false
+	return wire.Frame{}, false
 }
 
 type reconnectToastLinkTransport struct {
@@ -220,12 +221,12 @@ func newReconnectToastLinkTransport() *reconnectToastLinkTransport {
 	}
 }
 
-func (t *reconnectToastLinkTransport) Send(f ports.Frame) error {
+func (t *reconnectToastLinkTransport) Send(f wire.Frame) error {
 	t.sends.record(f)
-	if f.Type != ports.MsgClientNotice {
+	if f.Type != wire.MsgClientNotice {
 		return nil
 	}
-	notice, err := ports.UnmarshalClientNotice(f.Payload)
+	notice, err := wire.UnmarshalClientNotice(f.Payload)
 	if err != nil {
 		return err
 	}
@@ -233,7 +234,7 @@ func (t *reconnectToastLinkTransport) Send(f ports.Frame) error {
 	return nil
 }
 
-func (t *reconnectToastLinkTransport) Recv() (ports.Frame, error) {
+func (t *reconnectToastLinkTransport) Recv() (wire.Frame, error) {
 	recv := <-t.recvCh
 	return recv.frame, recv.err
 }
@@ -244,18 +245,18 @@ func (t *reconnectToastLinkTransport) LinkEvents() <-chan ports.LinkEvent { retu
 
 func (t *reconnectToastLinkTransport) LinkState() ports.LinkState { return t.state }
 
-func (t *reconnectToastRecordingTransport) Send(f ports.Frame) error {
+func (t *reconnectToastRecordingTransport) Send(f wire.Frame) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sends = append(t.sends, f)
 	return nil
 }
 
-func (t *reconnectToastRecordingTransport) Recv() (ports.Frame, error) {
+func (t *reconnectToastRecordingTransport) Recv() (wire.Frame, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.recvs) == 0 {
-		return ports.Frame{}, io.EOF
+		return wire.Frame{}, io.EOF
 	}
 	recv := t.recvs[0]
 	t.recvs = t.recvs[1:]
@@ -269,10 +270,10 @@ func (t *reconnectToastRecordingTransport) Close() error {
 	return nil
 }
 
-func (t *reconnectToastRecordingTransport) sentFrames() []ports.Frame {
+func (t *reconnectToastRecordingTransport) sentFrames() []wire.Frame {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]ports.Frame(nil), t.sends...)
+	return append([]wire.Frame(nil), t.sends...)
 }
 
 func (t *reconnectToastRecordingTransport) wasClosed() bool {
@@ -288,9 +289,9 @@ func assertReconnectToastAttemptPublishesOnlyClearedTheme(t *testing.T, tr *reco
 	t.Helper()
 	frames := tr.sentFrames()
 	require.GreaterOrEqual(t, len(frames), 2)
-	require.Equal(t, ports.MsgHello, frames[0].Type)
-	require.Equal(t, ports.MsgTheme, frames[1].Type)
-	theme, err := ports.UnmarshalTheme(frames[1].Payload)
+	require.Equal(t, wire.MsgHello, frames[0].Type)
+	require.Equal(t, wire.MsgTheme, frames[1].Type)
+	theme, err := wire.UnmarshalTheme(frames[1].Payload)
 	require.NoError(t, err)
 	require.False(t, theme.HasForeground)
 	require.False(t, theme.HasBackground)
@@ -302,8 +303,8 @@ func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransp
 	t.Helper()
 	frames := tr.sentFrames()
 	require.NotEmpty(t, frames)
-	require.Equal(t, ports.MsgHello, frames[0].Type)
-	hello, err := ports.UnmarshalHello(frames[0].Payload)
+	require.Equal(t, wire.MsgHello, frames[0].Type)
+	hello, err := wire.UnmarshalHello(frames[0].Payload)
 	require.NoError(t, err)
 	return hello
 }
@@ -394,7 +395,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.Contains(t, firstToast, "┌")
 	require.Contains(t, firstToast, "probing UDP path")
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   2,
@@ -413,7 +414,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 
 	beforeAwaitingReset := out.String()
 	beforeStatelessFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   0,
@@ -425,7 +426,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	}, time.Second, time.Millisecond)
 
 	afterStateless := out.String()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  2,
 		New:   3,
@@ -436,7 +437,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.Contains(t, out.String(), "intervening incremental")
 	require.Contains(t, afterStateless[len(beforeAwaitingReset):], "stateless side effect")
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  0,
 		New:   4,
@@ -449,7 +450,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.NotContains(t, out.String()[len(beforeAwaitingReset):], strings.Repeat(" ", reconnectToastBoundsFor(term.size, "probing UDP path").Width))
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  4,
 		New:   5,
@@ -496,30 +497,30 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 		{Epoch: 1, Base: 1, New: 2, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("first skipped increment")},
 		{Epoch: 1, Base: 2, New: 3, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("second skipped increment")},
 	} {
-		tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(output)}}
+		tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(output)}}
 		require.Equal(t, beforeReset, out.String())
 	}
-	requireSentFrame(t, tr.sends, "output reset request", func(frame ports.Frame) bool {
-		return frame.Type == ports.MsgOutputResetRequest
+	requireSentFrame(t, tr.sends, "output reset request", func(frame wire.Frame) bool {
+		return frame.Type == wire.MsgOutputResetRequest
 	})
-	_, sentAck := tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgAck })
+	_, sentAck := tr.sends.find(func(frame wire.Frame) bool { return frame.Type == wire.MsgAck })
 	require.False(t, sentAck, "discarded output must not be ACKed")
 
 	// Handoff cleanup is an ordered terminal side effect, not a replay state.
 	// It must cross the outstanding reset gate, flush before the control handoff,
 	// and must not manufacture an independent ACK.
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Data:  []byte("handoff graphics cleanup"),
 	})}}
 	cleanup := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, cleanup, "handoff graphics cleanup")
-	_, sentAck = tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgAck })
+	_, sentAck = tr.sends.find(func(frame wire.Frame) bool { return frame.Type == wire.MsgAck })
 	require.False(t, sentAck, "state-independent cleanup must not be ACKed")
 
 	beforeResetFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  0,
 		New:   4,
@@ -534,7 +535,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	requireAckedState(t, tr.sends, 2, 4)
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 2,
 		Base:  4,
 		New:   5,
@@ -563,7 +564,7 @@ func requireReconnectToastOutput(t *testing.T, completed <-chan string) string {
 	}
 }
 
-func requireSentFrame(t *testing.T, sends *reconnectToastSentFrames, description string, match func(ports.Frame) bool) ports.Frame {
+func requireSentFrame(t *testing.T, sends *reconnectToastSentFrames, description string, match func(wire.Frame) bool) wire.Frame {
 	t.Helper()
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
@@ -575,31 +576,31 @@ func requireSentFrame(t *testing.T, sends *reconnectToastSentFrames, description
 		case <-sends.changed:
 		case <-timer.C:
 			t.Fatalf("timed out waiting for %s", description)
-			return ports.Frame{}
+			return wire.Frame{}
 		}
 	}
 }
 
 func requireResize(t *testing.T, sends *reconnectToastSentFrames) protocol.Resize {
 	t.Helper()
-	frame := requireSentFrame(t, sends, "Resize frame", func(frame ports.Frame) bool {
-		return frame.Type == ports.MsgResize
+	frame := requireSentFrame(t, sends, "Resize frame", func(frame wire.Frame) bool {
+		return frame.Type == wire.MsgResize
 	})
-	resize, err := ports.UnmarshalResize(frame.Payload)
+	resize, err := wire.UnmarshalResize(frame.Payload)
 	require.NoError(t, err)
 	return resize
 }
 
 func requireAckedState(t *testing.T, sends *reconnectToastSentFrames, epoch, state uint64) {
 	t.Helper()
-	frame := requireSentFrame(t, sends, fmt.Sprintf("ACK for epoch %d state %d", epoch, state), func(frame ports.Frame) bool {
-		if frame.Type != ports.MsgAck {
+	frame := requireSentFrame(t, sends, fmt.Sprintf("ACK for epoch %d state %d", epoch, state), func(frame wire.Frame) bool {
+		if frame.Type != wire.MsgAck {
 			return false
 		}
-		ack, err := ports.UnmarshalAck(frame.Payload)
+		ack, err := wire.UnmarshalAck(frame.Payload)
 		return err == nil && ack.Epoch == epoch && ack.State >= state
 	})
-	ack, err := ports.UnmarshalAck(frame.Payload)
+	ack, err := wire.UnmarshalAck(frame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, epoch, ack.Epoch)
 	require.GreaterOrEqual(t, ack.State, state)
@@ -707,7 +708,7 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	require.Eventually(t, func() bool { return flushes.Load() > beforeStatus }, time.Second, time.Millisecond)
 	beforeOutput := flushes.Load()
 
-	tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   2,
@@ -759,7 +760,7 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 			}
 
 			const output = "local status output remains visible"
-			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+			tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 				Epoch: 1,
 				Base:  0,
 				New:   2,
@@ -769,7 +770,7 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 			})}}
 			require.Eventually(t, func() bool { return strings.Contains(out.String(), output) }, time.Second, time.Millisecond)
 			requireAckedState(t, tr.sends, 1, 2)
-			_, sentResize := tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgResize })
+			_, sentResize := tr.sends.find(func(frame wire.Frame) bool { return frame.Type == wire.MsgResize })
 			require.False(t, sentResize, "local reconnect status must not request a daemon reset")
 
 			tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
@@ -827,7 +828,7 @@ func TestReconnectOverlayRedrawFailureDoesNotObserveOrAckOutput(t *testing.T) {
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 			requireReconnectToastOutput(t, out.completed)
 			arm()
-			tr.recvCh <- reconnectToastRecv{frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+			tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
 				Epoch: 1,
 				Base:  0,
 				New:   2,
@@ -932,8 +933,8 @@ func newReconnectResetBlockingTransport() *reconnectResetBlockingTransport {
 	}
 }
 
-func (t *reconnectResetBlockingTransport) Send(frame ports.Frame) error {
-	if frame.Type != ports.MsgResize {
+func (t *reconnectResetBlockingTransport) Send(frame wire.Frame) error {
+	if frame.Type != wire.MsgResize {
 		return nil
 	}
 	t.enterOnce.Do(func() { close(t.entered) })
@@ -941,11 +942,11 @@ func (t *reconnectResetBlockingTransport) Send(frame ports.Frame) error {
 	return io.ErrClosedPipe
 }
 
-func (t *reconnectResetBlockingTransport) Recv() (ports.Frame, error) {
+func (t *reconnectResetBlockingTransport) Recv() (wire.Frame, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.recvs) == 0 {
-		return ports.Frame{}, io.EOF
+		return wire.Frame{}, io.EOF
 	}
 	recv := t.recvs[0]
 	t.recvs = t.recvs[1:]
@@ -1014,7 +1015,7 @@ func TestPreSenderReconnectResetIsBounded(t *testing.T) {
 type reconnectToastBlockingSendTransport struct {
 	*reconnectToastLinkTransport
 	armed       atomic.Bool
-	blockType   ports.MsgType
+	blockType   wire.MsgType
 	sendErr     error
 	entered     chan struct{}
 	release     chan struct{}
@@ -1025,13 +1026,13 @@ type reconnectToastBlockingSendTransport struct {
 func newReconnectToastBlockingSendTransport() *reconnectToastBlockingSendTransport {
 	return &reconnectToastBlockingSendTransport{
 		reconnectToastLinkTransport: newReconnectToastLinkTransport(),
-		blockType:                   ports.MsgClientNotice,
+		blockType:                   wire.MsgClientNotice,
 		entered:                     make(chan struct{}),
 		release:                     make(chan struct{}),
 	}
 }
 
-func (t *reconnectToastBlockingSendTransport) Send(frame ports.Frame) error {
+func (t *reconnectToastBlockingSendTransport) Send(frame wire.Frame) error {
 	if err := t.reconnectToastLinkTransport.Send(frame); err != nil {
 		return err
 	}
@@ -1083,7 +1084,7 @@ func TestReconnectResetEnqueueCancellationExitsCleanly(t *testing.T) {
 
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 			requireTerminalSizeCalls(t, term, 2)
-			tr.blockType = ports.MsgResize
+			tr.blockType = wire.MsgResize
 			tr.armed.Store(true)
 			term.resizeCh <- domain.Geometry{Size: term.size}
 			select {
@@ -1123,7 +1124,7 @@ func TestReconnectResetCancellationPreservesQueuedSenderError(t *testing.T) {
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 	requireTerminalSizeCalls(t, term, 2)
-	tr.blockType = ports.MsgResize
+	tr.blockType = wire.MsgResize
 	tr.armed.Store(true)
 	term.resizeCh <- domain.Geometry{Size: term.size}
 	select {

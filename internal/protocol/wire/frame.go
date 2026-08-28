@@ -1,4 +1,4 @@
-package ports
+package wire
 
 // MaxFrameLen is the largest permitted frame length, including the type byte
 // and excluding the four-byte length prefix.

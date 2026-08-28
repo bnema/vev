@@ -4,13 +4,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const testWaitTimeout = 2 * time.Second
 
-func testFramesOfType(frames []ports.Frame, typ ports.MsgType) []ports.Frame {
-	matched := make([]ports.Frame, 0, len(frames))
+func testFramesOfType(frames []wire.Frame, typ wire.MsgType) []wire.Frame {
+	matched := make([]wire.Frame, 0, len(frames))
 	for _, frame := range frames {
 		if frame.Type == typ {
 			matched = append(matched, frame)
@@ -40,21 +40,21 @@ func awaitTestCompletion(t *testing.T, done <-chan struct{}, failure string) {
 
 func awaitCoordinatorOutput(
 	t *testing.T,
-	sends <-chan ports.Frame,
+	sends <-chan wire.Frame,
 	timers <-chan *coordinatorMockTimer,
 	frameContext string,
 	timeoutFailure string,
-) ports.Frame {
+) wire.Frame {
 	t.Helper()
 	deadline := time.NewTimer(testWaitTimeout)
 	defer deadline.Stop()
 	for {
 		select {
 		case frame := <-sends:
-			if frame.Type == ports.MsgRoutePosition {
+			if frame.Type == wire.MsgRoutePosition {
 				continue
 			}
-			if frame.Type != ports.MsgOutput {
+			if frame.Type != wire.MsgOutput {
 				t.Fatalf("unexpected frame type %d %s", frame.Type, frameContext)
 			}
 			return frame
@@ -62,7 +62,7 @@ func awaitCoordinatorOutput(
 			timer.ch <- time.Time{}
 		case <-deadline.C:
 			t.Fatal(timeoutFailure)
-			return ports.Frame{}
+			return wire.Frame{}
 		}
 	}
 }

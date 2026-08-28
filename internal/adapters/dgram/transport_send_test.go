@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +26,7 @@ func TestPendingWireBytesMatchSealedDatagrams(t *testing.T) {
 	defer func() { _ = a.Close() }()
 
 	maxFragmentData := mtu - pdgram.HeaderSize - a.codec.Overhead() - 16
-	frame := ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, maxFragmentData-dataRecordHeaderSize+1)}
+	frame := wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, maxFragmentData-dataRecordHeaderSize+1)}
 	if err := a.Send(frame); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestSendAsyncTransfersFragmentedRecordToBytePacedSender(t *testing.T) {
 	defer func() { _ = a.Close() }()
 
 	maxFragmentData := mtu - pdgram.HeaderSize - a.codec.Overhead()
-	frame := ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 2*maxFragmentData)}
+	frame := wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, 2*maxFragmentData)}
 	if err := a.SendAsync(frame); err != nil {
 		t.Fatal(err)
 	}
@@ -92,12 +92,12 @@ func TestSmallOutputsShareInitialByteBurst(t *testing.T) {
 	defer func() { _ = a.Close() }()
 
 	for i := range 3 {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	eventuallyPacketCount(t, bPC, 3)
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("next")}); err != nil {
 		t.Fatal(err)
 	}
 	eventuallyPacketCount(t, bPC, 4)
@@ -112,12 +112,12 @@ func TestOutputPacingSendsAtMostOneOversizedFramePerTick(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("prime")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("prime")}); err != nil {
 		t.Fatal(err)
 	}
 	large := mustMarshalOutput(protocol.Output{Epoch: 1, Base: 1, New: 2, Size: domain.Size{Cols: 1, Rows: 1}, Data: make([]byte, 24*a.mtu)})
 	for range 2 {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: large}); err != nil {
+		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: large}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -152,7 +152,7 @@ func TestPacedInitialSendTimestampsFinalFragmentCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = a.Close() }()
-	large := ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 24*a.mtu)}
+	large := wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, 24*a.mtu)}
 	done := make(chan error, 1)
 	go func() { done <- a.Send(large) }()
 	start := clk.Now()
@@ -209,7 +209,7 @@ func TestOwnedSynchronousMaxSideEffectCompletesThroughConcurrentPacedWork(t *tes
 	a.srtt = 500 * time.Millisecond
 	a.mu.Unlock()
 	for i := range 8 {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -217,13 +217,13 @@ func TestOwnedSynchronousMaxSideEffectCompletesThroughConcurrentPacedWork(t *tes
 	a.mu.Lock()
 	for _, seq := range []uint64{100, 101} {
 		a.pending[seq] = &pending{
-			frame:    ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 20*a.mtu)},
+			frame:    wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, 20*a.mtu)},
 			enqueued: now.Add(-time.Second), first: now.Add(-time.Second), last: now.Add(-time.Second),
 		}
 	}
 	a.mu.Unlock()
 	go a.resendPending()
-	sideEffect := ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: make([]byte, 100*1024)})}
+	sideEffect := wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: make([]byte, 100*1024)})}
 	done := make(chan error, 1)
 	go func() { done <- a.SendSynchronous(sideEffect) }()
 
@@ -256,12 +256,12 @@ func TestInputWaitsForDequeuedOutputBatch(t *testing.T) {
 
 	a.writeMu.Lock()
 	for _, payload := range []string{"first", "queued"} {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte(payload)}); err != nil {
+		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	done := make(chan error, 1)
-	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}) }()
+	go func() { done <- a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("typed")}) }()
 	select {
 	case err := <-done:
 		a.writeMu.Unlock()
@@ -295,7 +295,7 @@ func TestPacedControlQueueFailureClosesTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	inputDone := make(chan error, 1)
-	go func() { inputDone <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}) }()
+	go func() { inputDone <- a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("typed")}) }()
 	if err := <-inputDone; err == nil {
 		t.Fatal("data send succeeded after paced wire failure")
 	}
@@ -328,10 +328,10 @@ func TestRemoveQueuedPendingResolvesSynchronousWaiters(t *testing.T) {
 func TestCloseUnblocksQueuedSynchronousFrames(t *testing.T) {
 	frames := []struct {
 		name  string
-		frame ports.Frame
+		frame wire.Frame
 	}{
-		{name: "control", frame: ports.Frame{Type: ports.MsgPing}},
-		{name: "terminal side effect", frame: ports.Frame{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("osc")})}},
+		{name: "control", frame: wire.Frame{Type: wire.MsgPing}},
+		{name: "terminal side effect", frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("osc")})}},
 	}
 	for _, tt := range frames {
 		t.Run(tt.name, func(t *testing.T) {
@@ -341,7 +341,7 @@ func TestCloseUnblocksQueuedSynchronousFrames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 3*a.mtu)}); err != nil {
+			if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, 3*a.mtu)}); err != nil {
 				t.Fatal(err)
 			}
 			done := make(chan error, 1)
@@ -371,7 +371,7 @@ func TestOutputPaceFailureClosesTransportWithWriteError(t *testing.T) {
 	if err := bPC.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("fails")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("fails")}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -380,7 +380,7 @@ func TestOutputPaceFailureClosesTransportWithWriteError(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("transport remained open after paced output write failed")
 	}
-	if err := a.Send(ports.Frame{Type: ports.MsgInput}); err == nil || err.Error() != "peer closed" {
+	if err := a.Send(wire.Frame{Type: wire.MsgInput}); err == nil || err.Error() != "peer closed" {
 		t.Fatalf("send after paced write failure err=%v, want peer closed", err)
 	}
 }
@@ -394,24 +394,24 @@ func TestInputAndControlRemainOrderedInBoundedPacedQueue(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("output")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("output")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("queued")}); err != nil {
 		t.Fatal(err)
 	}
 	eventuallyPacketCount(t, bPC, 2)
 	inputDone := make(chan error, 1)
-	go func() { inputDone <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}) }()
+	go func() { inputDone <- a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("typed")}) }()
 	eventuallyPacketCount(t, bPC, 3)
 	if err := <-inputDone; err != nil {
 		t.Fatal(err)
 	}
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued-before-control")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("queued-before-control")}); err != nil {
 		t.Fatal(err)
 	}
 	controlDone := make(chan error, 1)
-	go func() { controlDone <- a.Send(ports.Frame{Type: ports.MsgPing}) }()
+	go func() { controlDone <- a.Send(wire.Frame{Type: wire.MsgPing}) }()
 	eventuallyPacketCount(t, bPC, 5)
 	if err := <-controlDone; err != nil {
 		t.Fatal(err)
@@ -431,7 +431,7 @@ func TestSendWriteTimeoutBoundsBlockedPacketConn(t *testing.T) {
 	defer func() { _ = tr.Close() }()
 
 	done := make(chan error, 1)
-	go func() { done <- tr.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("blocked")}) }()
+	go func() { done <- tr.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("blocked")}) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -460,11 +460,11 @@ func TestPendingReliableQueueBackpressuresUntilAck(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 
-	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
+	if err := a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("first")}); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
+	go func() { done <- a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("second")}) }()
 
 	select {
 	case err := <-done:
@@ -498,11 +498,11 @@ func TestPendingReliableQueueReturnsErrPendingFullWhileConnected(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 
-	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
+	if err := a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("first")}); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
+	go func() { done <- a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("second")}) }()
 	waitForManualTimers(t, clk, 4)
 
 	clk.advance(50 * time.Millisecond)
@@ -530,7 +530,7 @@ func TestWritePacketDeadlineUsesTransportClock(t *testing.T) {
 	}
 	defer func() { _ = tr.Close() }()
 
-	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("deadline")}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("deadline")}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := pc.deadline.Load().(time.Time)

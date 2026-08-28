@@ -11,8 +11,8 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const (
@@ -237,8 +237,8 @@ func (p *visualProbe) contains(want string) bool {
 	return strings.Contains(p.text(), want)
 }
 
-func (p *visualProbe) recordIncoming(frame ports.Frame) {
-	if p == nil || frame.Type != ports.MsgAttachTarget {
+func (p *visualProbe) recordIncoming(frame wire.Frame) {
+	if p == nil || frame.Type != wire.MsgAttachTarget {
 		return
 	}
 	p.unexpectedHandoffs++

@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestReportAttachmentErrorPreservesLocalOrNilScope(t *testing.T) {
@@ -56,11 +57,11 @@ func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	d.attachCoordinator(sess, nil, ac, true)
 	tr, ok := ac.tr.(*portsmocks.MockTransport)
 	require.True(t, ok, "attached client transport must be a MockTransport")
-	frames := []ports.Frame{
-		{Type: ports.MsgClientNotice, Payload: []byte{0xff}},
-		{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})},
+	frames := []wire.Frame{
+		{Type: wire.MsgClientNotice, Payload: []byte{0xff}},
+		{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})},
 	}
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		frame := frames[0]
 		frames = frames[1:]
 		return frame, nil
@@ -268,7 +269,7 @@ func (c *noticeClock) durations() []time.Duration {
 // caller-supplied clock so toast TTLs are deterministic. The session has no
 // render coordinator, so invalidateRender paints directly and every repaint is
 // observable as a frame on the returned channel.
-func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attachedClient, chan wire.Frame) {
 	t.Helper()
 	p, _ := newBlockingPTY(t)
 	d := newTestDaemon(t, nil, clk)
@@ -864,8 +865,8 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 
 	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
 	awaitToastCount(t, ac, 1)
-	shown := awaitFrame(t, sends, ports.MsgOutput)
-	shownOutput, err := ports.UnmarshalOutput(shown.Payload)
+	shown := awaitFrame(t, sends, wire.MsgOutput)
+	shownOutput, err := wire.UnmarshalOutput(shown.Payload)
 	require.NoError(t, err)
 	terminal := vt.NewScreen(80, 25)
 	terminal.Write(shownOutput.Data)
@@ -880,8 +881,8 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 	_, overflow := visibleToasts(ac)
 	require.Zero(t, overflow, "overflow resets once no toast is visible")
 
-	expired := awaitFrame(t, sends, ports.MsgOutput)
-	expiredOutput, err := ports.UnmarshalOutput(expired.Payload)
+	expired := awaitFrame(t, sends, wire.MsgOutput)
+	expiredOutput, err := wire.UnmarshalOutput(expired.Payload)
 	require.NoError(t, err)
 	terminal.Write(expiredOutput.Data)
 	ac.sendMu.Lock()

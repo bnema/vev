@@ -24,6 +24,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/theme"
 )
 
@@ -1243,14 +1244,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		Remote:                 remote,
 	}
 	if err := sendHandshake(func() error {
-		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
+		return transport.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)})
 	}); err != nil {
 		return handshakeFailure("sending hello", err)
 	}
 	ms.helloSent = true
 
 	// 2. Await Welcome or a typed rejection.
-	var reply ports.Frame
+	var reply wire.Frame
 	if err := boundedHandshakeOperationWithTransition(handshakeCtx, transport, func() error {
 		var recvErr error
 		reply, recvErr = transport.Recv()
@@ -1271,8 +1272,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 	}
 	switch reply.Type {
-	case ports.MsgWelcome:
-		welcome, derr := ports.UnmarshalWelcome(reply.Payload)
+	case wire.MsgWelcome:
+		welcome, derr := wire.UnmarshalWelcome(reply.Payload)
 		if derr != nil {
 			return result(false, fmt.Errorf("vev: decoding welcome: %w", derr))
 		}
@@ -1286,8 +1287,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				remember()
 			}
 		}
-	case ports.MsgError:
-		em, derr := ports.UnmarshalErrorMsg(reply.Payload)
+	case wire.MsgError:
+		em, derr := wire.UnmarshalErrorMsg(reply.Payload)
 		if derr != nil {
 			return result(false, fmt.Errorf("vev: decoding error reply: %w", derr))
 		}
@@ -1319,30 +1320,30 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(fmt.Errorf("vev: committing route identity: %w", commitErr))
 			}
 		}
-		snapshotPayload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		snapshotPayload, err := wire.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
 		if err != nil {
 			return welcomedResult(fmt.Errorf("vev: encoding route snapshot: %w", err))
 		}
-		attentionPayload, err := ports.MarshalRouteAttentionSubscription(a.runner.ledger.attentionSubscription())
+		attentionPayload, err := wire.MarshalRouteAttentionSubscription(a.runner.ledger.attentionSubscription())
 		if err != nil {
 			return welcomedResult(fmt.Errorf("vev: encoding route attention subscription: %w", err))
 		}
 		if err := sendHandshake(func() error {
-			if err := transport.Send(ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: snapshotPayload}); err != nil {
+			if err := transport.Send(wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: snapshotPayload}); err != nil {
 				return err
 			}
-			return transport.Send(ports.Frame{Type: ports.MsgRouteAttentionSubscription, Payload: attentionPayload})
+			return transport.Send(wire.Frame{Type: wire.MsgRouteAttentionSubscription, Payload: attentionPayload})
 		}); err != nil {
 			return welcomedResult(fmt.Errorf("vev: publishing route snapshot: %w", err))
 		}
 	}
 	if a.runner.routeFailure != nil {
-		payload, err := ports.MarshalRouteNavigationFailure(*a.runner.routeFailure)
+		payload, err := wire.MarshalRouteNavigationFailure(*a.runner.routeFailure)
 		if err != nil {
 			return welcomedResult(fmt.Errorf("vev: encoding route navigation failure: %w", err))
 		}
 		if err := sendHandshake(func() error {
-			return transport.Send(ports.Frame{Type: ports.MsgRouteNavigationFailure, Payload: payload})
+			return transport.Send(wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload})
 		}); err != nil {
 			return welcomedResult(fmt.Errorf("vev: publishing route navigation failure: %w", err))
 		}
@@ -1369,8 +1370,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		input.start()
 		defer input.stop()
 	}
-	sendCh := make(chan ports.Frame, sendQueueDepth)
-	controlCh := make(chan ports.Frame, 1)
+	sendCh := make(chan wire.Frame, sendQueueDepth)
+	controlCh := make(chan wire.Frame, 1)
 	barrierCh := make(chan chan struct{})
 	inputGate := newSamePeerInputGate()
 	ackQueue := newCumulativeAckQueue()
@@ -1393,7 +1394,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 	}
 	publish := func(snapshot protocol.Theme) error {
-		frame := ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(snapshot)}
+		frame := wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(snapshot)}
 		// The initial cleared snapshot is sent before the sender exists. This
 		// keeps the generation publication ordered before the first query and
 		// avoids leaving a queued Theme behind an immediate detach.
@@ -1503,11 +1504,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			// Before the asynchronous sender starts, preserve transport ordering by
 			// requesting the reset synchronously after the initial Theme publication.
 			resetErr := sendHandshake(func() error {
-				payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+				payload, err := wire.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 				if err != nil {
 					return err
 				}
-				return transport.Send(ports.Frame{Type: ports.MsgResize, Payload: payload})
+				return transport.Send(wire.Frame{Type: wire.MsgResize, Payload: payload})
 			})
 			if resetErr != nil {
 				resetErr = handshakeContextError(ctx, handshakeTimedOut, resetErr)
@@ -1629,12 +1630,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return fmt.Errorf("reading terminal geometry for parked route: %w", err)
 		}
 		geometry = geometry.NormalizePixels()
-		payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+		payload, err := wire.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for parked route: %w", err)
 		}
 		select {
-		case controlCh <- ports.Frame{Type: ports.MsgResize, Payload: payload}:
+		case controlCh <- wire.Frame{Type: wire.MsgResize, Payload: payload}:
 			return nil
 		case <-loopCtx.Done():
 			return context.Canceled
@@ -1646,12 +1647,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		nextParkedRequestID++
 		request := protocol.ParkedRouteRequest{RequestID: nextParkedRequestID, LeaseID: leaseID, Action: action, Target: target}
-		payload := ports.MarshalParkedRouteRequest(request)
+		payload := wire.MarshalParkedRouteRequest(request)
 		if payload == nil {
 			return errors.New("vev: invalid parked-route request")
 		}
 		select {
-		case controlCh <- ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: payload}:
+		case controlCh <- wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: payload}:
 			parkedPending = &parkedRoutePending{
 				requestID: request.RequestID, action: action, leaseID: leaseID,
 				timer: clk.NewTimer(protocol.HandshakeTimeout),
@@ -1726,12 +1727,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return fmt.Errorf("reading terminal geometry for reconnect reconciliation: %w", serr)
 		}
 		geometry = geometry.NormalizePixels()
-		payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+		payload, err := wire.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 		if err != nil {
 			return fmt.Errorf("encoding terminal size for reconnect reconciliation: %w", err)
 		}
 		select {
-		case sendCh <- ports.Frame{Type: ports.MsgResize, Payload: payload}:
+		case sendCh <- wire.Frame{Type: wire.MsgResize, Payload: payload}:
 			awaitingReconnectReset = true
 			return nil
 		case <-loopCtx.Done():
@@ -1742,17 +1743,17 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if a.runner.ledger == nil {
 			return errors.New("vev: route ledger unavailable")
 		}
-		snapshotPayload, err := ports.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
+		snapshotPayload, err := wire.MarshalRecentRouteSnapshot(a.runner.ledger.snapshot())
 		if err != nil {
 			return err
 		}
-		attentionPayload, err := ports.MarshalRouteAttentionSubscription(a.runner.ledger.attentionSubscription())
+		attentionPayload, err := wire.MarshalRouteAttentionSubscription(a.runner.ledger.attentionSubscription())
 		if err != nil {
 			return err
 		}
-		for _, frame := range []ports.Frame{
-			{Type: ports.MsgRecentRouteSnapshot, Payload: snapshotPayload},
-			{Type: ports.MsgRouteAttentionSubscription, Payload: attentionPayload},
+		for _, frame := range []wire.Frame{
+			{Type: wire.MsgRecentRouteSnapshot, Payload: snapshotPayload},
+			{Type: wire.MsgRouteAttentionSubscription, Payload: attentionPayload},
 		} {
 			select {
 			case sendCh <- frame:
@@ -1763,7 +1764,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return nil
 	}
 	sendRouteFailure := func(action protocol.RouteNavigationAction, code protocol.RouteFailureCode) error {
-		payload, err := ports.MarshalRouteNavigationFailure(protocol.RouteNavigationFailure{
+		payload, err := wire.MarshalRouteNavigationFailure(protocol.RouteNavigationFailure{
 			Key:        action.Key,
 			Generation: action.Generation,
 			Code:       code,
@@ -1772,7 +1773,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return err
 		}
 		select {
-		case sendCh <- ports.Frame{Type: ports.MsgRouteNavigationFailure, Payload: payload}:
+		case sendCh <- wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload}:
 			return nil
 		case <-loopCtx.Done():
 			return context.Canceled
@@ -1827,7 +1828,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("dismissing reconnect toast: %w", err))
 				}
 				select {
-				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected})}:
+				case sendCh <- wire.Frame{Type: wire.MsgClientNotice, Payload: wire.MarshalClientNotice(protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected})}:
 				case <-loopCtx.Done():
 					return welcomedResult(nil)
 				}
@@ -1836,7 +1837,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if ev.State == ports.LinkStateDegraded {
 				log.Warn("UDP link degraded")
 				select {
-				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(protocol.ClientNotice{Action: protocol.ClientNoticeLinkDegraded})}:
+				case sendCh <- wire.Frame{Type: wire.MsgClientNotice, Payload: wire.MarshalClientNotice(protocol.ClientNotice{Action: protocol.ClientNoticeLinkDegraded})}:
 				case <-loopCtx.Done():
 					return welcomedResult(nil)
 				}
@@ -1884,8 +1885,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(fmt.Errorf("vev: receiving from daemon: %w", r.err))
 			}
 			switch r.frame.Type {
-			case ports.MsgOutput:
-				o, derr := ports.UnmarshalOutput(r.frame.Payload)
+			case wire.MsgOutput:
+				o, derr := wire.UnmarshalOutput(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding output: %w", derr))
 				}
@@ -1896,7 +1897,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					// repeated gaps while that reset is in flight.
 					if !outputResetRequested {
 						select {
-						case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}:
+						case sendCh <- wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(protocol.OutputResetRequest{})}:
 							outputResetRequested = true
 						case <-loopCtx.Done():
 							return loopCanceledResult()
@@ -1946,8 +1947,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					log.Debug("received first output")
 					endHandshake()
 				}
-			case ports.MsgAttachTarget:
-				target, derr := ports.UnmarshalAttachTarget(r.frame.Payload)
+			case wire.MsgAttachTarget:
+				target, derr := wire.UnmarshalAttachTarget(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding attach target: %w", derr))
 				}
@@ -1966,7 +1967,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					nextSamePeerRequestID++
 					request := a.runner.ledger.samePeerHandoff(request, target)
-					payload, err := ports.MarshalSamePeerSwitchRequest(protocol.SamePeerSwitchRequest{
+					payload, err := wire.MarshalSamePeerSwitchRequest(protocol.SamePeerSwitchRequest{
 						RequestID:      nextSamePeerRequestID,
 						Target:         *target.ExactTarget,
 						PreferredTabID: request.PreferredTabID,
@@ -1977,7 +1978,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					samePeerSwitch = &samePeerSwitchPending{requestID: nextSamePeerRequestID, target: *target.ExactTarget}
 					inputGate.setPaused(true)
 					select {
-					case controlCh <- ports.Frame{Type: ports.MsgSamePeerSwitchRequest, Payload: payload}:
+					case controlCh <- wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: payload}:
 						continue
 					case <-loopCtx.Done():
 						return loopCanceledResult()
@@ -1986,8 +1987,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				handoff := welcomedResult(nil)
 				handoff.target = &target
 				return handoff
-			case ports.MsgParkedRouteResponse:
-				response, derr := ports.UnmarshalParkedRouteResponse(r.frame.Payload)
+			case wire.MsgParkedRouteResponse:
+				response, derr := wire.UnmarshalParkedRouteResponse(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding parked-route response: %w", derr))
 				}
@@ -2033,8 +2034,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						return fallback
 					}
 				}
-			case ports.MsgNavigationAction:
-				directive, derr := ports.UnmarshalNavigationDirective(r.frame.Payload)
+			case wire.MsgNavigationAction:
+				directive, derr := wire.UnmarshalNavigationDirective(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding navigation action: %w", derr))
 				}
@@ -2052,8 +2053,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				navigation := welcomedResult(nil)
 				navigation.action = directive.Action
 				return navigation
-			case ports.MsgNavigateRecentRoute:
-				action, derr := ports.UnmarshalRouteNavigationAction(r.frame.Payload)
+			case wire.MsgNavigateRecentRoute:
+				action, derr := wire.UnmarshalRouteNavigationAction(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding route navigation action: %w", derr))
 				}
@@ -2076,8 +2077,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				navigation := welcomedResult(nil)
 				navigation.routeAction = &action
 				return navigation
-			case ports.MsgCommittedRouteIdentity:
-				identity, derr := ports.UnmarshalCommittedRouteIdentity(r.frame.Payload)
+			case wire.MsgCommittedRouteIdentity:
+				identity, derr := wire.UnmarshalCommittedRouteIdentity(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding committed route identity: %w", derr))
 				}
@@ -2099,8 +2100,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					samePeerSwitch = nil
 					inputGate.setPaused(false)
 				}
-			case ports.MsgSamePeerSwitchFailure:
-				failure, derr := ports.UnmarshalSamePeerSwitchFailure(r.frame.Payload)
+			case wire.MsgSamePeerSwitchFailure:
+				failure, derr := wire.UnmarshalSamePeerSwitchFailure(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding same-peer switch failure: %w", derr))
 				}
@@ -2111,7 +2112,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						transitionWaitingFull = true
 						if !outputResetRequested {
 							select {
-							case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}:
+							case sendCh <- wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(protocol.OutputResetRequest{})}:
 								outputResetRequested = true
 							case <-loopCtx.Done():
 								return loopCanceledResult()
@@ -2121,8 +2122,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						transition.stop()
 					}
 				}
-			case ports.MsgRoutePosition:
-				position, derr := ports.UnmarshalRoutePosition(r.frame.Payload)
+			case wire.MsgRoutePosition:
+				position, derr := wire.UnmarshalRoutePosition(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding route position: %w", derr))
 				}
@@ -2133,14 +2134,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("vev: remembering route position: %w", derr))
 				}
 				routePosition = cloneRoutePosition(&position)
-			case ports.MsgRouteNavigationFailure:
-				failure, derr := ports.UnmarshalRouteNavigationFailure(r.frame.Payload)
+			case wire.MsgRouteNavigationFailure:
+				failure, derr := wire.UnmarshalRouteNavigationFailure(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding route navigation failure: %w", derr))
 				}
 				log.Warn("route navigation rejected", "key", failure.Key, "generation", failure.Generation, "code", failure.Code)
-			case ports.MsgDetached:
-				d, derr := ports.UnmarshalDetached(r.frame.Payload)
+			case wire.MsgDetached:
+				d, derr := wire.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding detached: %w", derr))
 				}
@@ -2151,7 +2152,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					log.Warn("detached by daemon", "reason", d.Reason)
 				}
 				return welcomedResult(detachedResult(d.Reason))
-			case ports.MsgPong:
+			case wire.MsgPong:
 				// Liveness reply; nothing to do.
 			default:
 				// Unknown/out-of-band message types are ignored so a newer
@@ -2164,7 +2165,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 // recvResult carries one framed message (or a read error) from the receive
 // pump to the main loop.
 type recvResult struct {
-	frame ports.Frame
+	frame wire.Frame
 	err   error
 }
 
@@ -2227,9 +2228,9 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 
 // runSender preserves normal-frame order while allowing switch control and
 // output ACKs to make progress when raw input is held for a same-peer switch.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan ports.Frame, barriers <-chan chan struct{}, in <-chan ports.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, control <-chan wire.Frame, barriers <-chan chan struct{}, in <-chan wire.Frame, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
-	send := func(f ports.Frame) bool {
+	send := func(f wire.Frame) bool {
 		if err := transport.Send(f); err != nil {
 			select {
 			case errCh <- err:
@@ -2245,7 +2246,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 		if state == 0 {
 			return true
 		}
-		payload, err := ports.MarshalAck(protocol.Ack{Epoch: epoch, State: state})
+		payload, err := wire.MarshalAck(protocol.Ack{Epoch: epoch, State: state})
 		if err != nil {
 			select {
 			case errCh <- fmt.Errorf("encoding output ACK: %w", err):
@@ -2254,7 +2255,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 			cancel()
 			return false
 		}
-		return send(ports.Frame{Type: ports.MsgAck, Payload: payload})
+		return send(wire.Frame{Type: wire.MsgAck, Payload: payload})
 	}
 	flushPending := func() bool {
 		for {
@@ -2286,7 +2287,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 		close(done)
 		return true
 	}
-	var heldInput *ports.Frame
+	var heldInput *wire.Frame
 	for {
 		if heldInput != nil {
 			paused, changed := inputGate.snapshot()
@@ -2353,7 +2354,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 				return
 			default:
 			}
-			if frame.Type == ports.MsgInput || frame.Type == ports.MsgImagePush {
+			if frame.Type == wire.MsgInput || frame.Type == wire.MsgImagePush {
 				if paused, _ := inputGate.snapshot(); paused {
 					held := frame
 					heldInput = &held
@@ -2725,7 +2726,7 @@ type stdinPump struct {
 	in                  io.Reader // compatibility for isolated scanner tests
 	input               *terminalInputPump
 	consumer            uint64
-	out                 chan<- ports.Frame
+	out                 chan<- wire.Frame
 	clock               ports.Clock
 	clipboard           ports.ClipboardReader
 	logger              *slog.Logger
@@ -2746,7 +2747,7 @@ func (p *stdinPump) run() {
 	var undeliveredMu sync.Mutex
 	var undelivered []byte
 	sendOK.Store(true)
-	send := func(frame ports.Frame) bool {
+	send := func(frame wire.Frame) bool {
 		if !sendOK.Load() {
 			return false
 		}
@@ -2785,7 +2786,7 @@ func (p *stdinPump) run() {
 			return
 		}
 		inputSeq++
-		if !send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})}) {
+		if !send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})}) {
 			undeliveredMu.Lock()
 			undelivered = append(undelivered, data...)
 			undeliveredMu.Unlock()
@@ -2799,11 +2800,11 @@ func (p *stdinPump) run() {
 			reader:    p.clipboard,
 			log:       p.logger,
 			sendNotice: func(action uint8) {
-				send(ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(protocol.ClientNotice{Action: action})})
+				send(wire.Frame{Type: wire.MsgClientNotice, Payload: wire.MarshalClientNotice(protocol.ClientNotice{Action: action})})
 			},
 			sendImage: func(mime string, data []byte) {
 				inputSeq++
-				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(protocol.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
+				send(wire.Frame{Type: wire.MsgImagePush, Payload: wire.MarshalImagePush(protocol.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
 			},
 			next: coalescer.Scan,
 		}
@@ -2945,7 +2946,7 @@ func (p *stdinPump) run() {
 				disarmMarkerDeadline()
 				markers.flush(sink)
 				select {
-				case p.out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})}:
+				case p.out <- wire.Frame{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})}:
 				case <-p.ctx.Done():
 				}
 				p.cancel()
@@ -2966,7 +2967,7 @@ func (p *stdinPump) run() {
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- ports.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
+func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- wire.Frame, sendLease *foregroundSendLease, log *slog.Logger) {
 	defer log.Debug("resize pump exited")
 	for {
 		select {
@@ -2975,12 +2976,12 @@ func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- po
 				return
 			}
 			geometry = geometry.NormalizePixels()
-			payload, err := ports.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
+			payload, err := wire.MarshalResize(protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight})
 			if err != nil {
 				log.Error("encoding terminal resize", "error", err)
 				continue
 			}
-			frame := ports.Frame{Type: ports.MsgResize, Payload: payload}
+			frame := wire.Frame{Type: wire.MsgResize, Payload: payload}
 			if !sendLease.send(func() bool {
 				select {
 				case out <- frame:

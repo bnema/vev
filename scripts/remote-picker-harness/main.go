@@ -21,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const (
@@ -458,7 +459,7 @@ func localEnvironment() []string {
 }
 
 type harnessFrame struct {
-	frame ports.Frame
+	frame wire.Frame
 	err   error
 }
 
@@ -642,44 +643,44 @@ func attachAndCheck(ctx context.Context, tr *harnessTransport, hello protocol.He
 	if hello.EnvironmentPolicy == 0 {
 		hello.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 	}
-	payload := ports.MarshalHello(hello)
-	if err := tr.Send(ports.Frame{Type: ports.MsgHello, Payload: payload}); err != nil {
+	payload := wire.MarshalHello(hello)
+	if err := tr.Send(wire.Frame{Type: wire.MsgHello, Payload: payload}); err != nil {
 		return err
 	}
 	frame, err := receiveWithTimeout(ctx, tr)
 	if err != nil {
 		return err
 	}
-	if frame.Type == ports.MsgError {
-		message, decodeErr := ports.UnmarshalErrorMsg(frame.Payload)
+	if frame.Type == wire.MsgError {
+		message, decodeErr := wire.UnmarshalErrorMsg(frame.Payload)
 		if decodeErr != nil {
 			return decodeErr
 		}
 		return fmt.Errorf("remote error code %d", message.Code)
 	}
-	if frame.Type != ports.MsgWelcome {
+	if frame.Type != wire.MsgWelcome {
 		return fmt.Errorf("welcome frame type %d", frame.Type)
 	}
 	tr.probe.recordControl(probeEventWelcome)
-	if err := tr.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(protocol.Theme{TrueColor: hello.TrueColor, SchemeKnown: true})}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(protocol.Theme{TrueColor: hello.TrueColor, SchemeKnown: true})}); err != nil {
 		return fmt.Errorf("send initial theme: %w", err)
 	}
 	return nil
 }
 
 func sendRawInput(tr *harnessTransport, data string) error {
-	return tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(data)})})
+	return tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(data)})})
 }
 
-func processOutputFrame(tr *harnessTransport, frame ports.Frame) error {
-	output, err := ports.UnmarshalOutput(frame.Payload)
+func processOutputFrame(tr *harnessTransport, frame wire.Frame) error {
+	output, err := wire.UnmarshalOutput(frame.Payload)
 	if err != nil {
 		return err
 	}
 	result := tr.probe.apply(output)
 	if !result.Accepted {
 		if !tr.probe.resetPending {
-			if err := tr.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}); err != nil {
+			if err := tr.Send(wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(protocol.OutputResetRequest{})}); err != nil {
 				return err
 			}
 			tr.probe.resetPending = true
@@ -690,11 +691,11 @@ func processOutputFrame(tr *harnessTransport, frame ports.Frame) error {
 	if !result.StateBearing {
 		return nil
 	}
-	payload, err := ports.MarshalAck(result.Ack)
+	payload, err := wire.MarshalAck(result.Ack)
 	if err != nil {
 		return err
 	}
-	if err := tr.Send(ports.Frame{Type: ports.MsgAck, Payload: payload}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgAck, Payload: payload}); err != nil {
 		return err
 	}
 	tr.probe.resetPending = false
@@ -714,7 +715,7 @@ func awaitOutputContains(ctx context.Context, tr *harnessTransport, want string)
 		if err != nil {
 			return err
 		}
-		if frame.Type != ports.MsgOutput {
+		if frame.Type != wire.MsgOutput {
 			continue
 		}
 		if err := processOutputFrame(tr, frame); err != nil {
@@ -738,7 +739,7 @@ func awaitRemotePickerPreview(ctx context.Context, tr *harnessTransport, marker 
 		if err != nil {
 			return fmt.Errorf("no rendered remote preview after %d output frames (loading=%t): %w", tr.probe.outputFrames, sawLoading, err)
 		}
-		if frame.Type != ports.MsgOutput {
+		if frame.Type != wire.MsgOutput {
 			continue
 		}
 		if err := processOutputFrame(tr, frame); err != nil {
@@ -768,7 +769,7 @@ func remotePreviewContains(preview protocol.RemotePreview, want string) bool {
 }
 
 func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want string) error {
-	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(command + "\n")})}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(command + "\n")})}); err != nil {
 		return err
 	}
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -779,7 +780,7 @@ func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want 
 		if err != nil {
 			return fmt.Errorf("waiting for marker after %d output frames/%d bytes: %w", tr.probe.outputFrames, tr.probe.outputBytes, err)
 		}
-		if frame.Type != ports.MsgOutput {
+		if frame.Type != wire.MsgOutput {
 			continue
 		}
 		if err := processOutputFrame(tr, frame); err != nil {
@@ -801,11 +802,11 @@ func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 		Attached:  true,
 		Slug:      slug,
 	}
-	payload, err := ports.MarshalCommandRequest(request)
+	payload, err := wire.MarshalCommandRequest(request)
 	if err != nil {
 		return err
 	}
-	if err := tr.Send(ports.Frame{Type: ports.MsgCommand, Payload: payload}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: payload}); err != nil {
 		return err
 	}
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -815,16 +816,16 @@ func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 		if err != nil {
 			return err
 		}
-		if frame.Type == ports.MsgOutput {
+		if frame.Type == wire.MsgOutput {
 			if err := processOutputFrame(tr, frame); err != nil {
 				return err
 			}
 			continue
 		}
-		if frame.Type != ports.MsgCommandResult {
+		if frame.Type != wire.MsgCommandResult {
 			continue
 		}
-		result, err := ports.UnmarshalCommandResult(frame.Payload)
+		result, err := wire.UnmarshalCommandResult(frame.Payload)
 		if err != nil {
 			return err
 		}
@@ -836,7 +837,7 @@ func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 }
 
 func detach(ctx context.Context, tr *harnessTransport) error {
-	if err := tr.Send(ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})}); err != nil {
 		return err
 	}
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -846,7 +847,7 @@ func detach(ctx context.Context, tr *harnessTransport) error {
 		if err != nil {
 			return err
 		}
-		if frame.Type == ports.MsgDetached {
+		if frame.Type == wire.MsgDetached {
 			return nil
 		}
 	}
@@ -871,18 +872,18 @@ func expectNoSuchTarget(ctx context.Context, tr *harnessTransport, target domain
 		RemoteTarget:      &target,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
-	payload := ports.MarshalHello(hello)
-	if err := tr.Send(ports.Frame{Type: ports.MsgHello, Payload: payload}); err != nil {
+	payload := wire.MarshalHello(hello)
+	if err := tr.Send(wire.Frame{Type: wire.MsgHello, Payload: payload}); err != nil {
 		return err
 	}
 	frame, err := receiveWithTimeout(ctx, tr)
 	if err != nil {
 		return err
 	}
-	if frame.Type != ports.MsgError {
+	if frame.Type != wire.MsgError {
 		return fmt.Errorf("stale target returned frame type %d", frame.Type)
 	}
-	message, err := ports.UnmarshalErrorMsg(frame.Payload)
+	message, err := wire.UnmarshalErrorMsg(frame.Payload)
 	if err != nil {
 		return err
 	}
@@ -1002,7 +1003,7 @@ func assertNoDirectHandoff(tr *harnessTransport) error {
 	queued := len(tr.frames)
 	for range queued {
 		outcome := <-tr.frames
-		if outcome.frame.Type == ports.MsgAttachTarget {
+		if outcome.frame.Type == wire.MsgAttachTarget {
 			tr.probe.recordIncoming(outcome.frame)
 		} else {
 			tr.queued = append(tr.queued, outcome)
@@ -1014,7 +1015,7 @@ func assertNoDirectHandoff(tr *harnessTransport) error {
 	return nil
 }
 
-func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (ports.Frame, error) {
+func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (wire.Frame, error) {
 	if len(tr.queued) != 0 {
 		outcome := tr.queued[0]
 		tr.queued = tr.queued[1:]
@@ -1025,7 +1026,7 @@ func receiveWithTimeout(ctx context.Context, tr *harnessTransport) (ports.Frame,
 	}
 	select {
 	case <-ctx.Done():
-		return ports.Frame{}, ctx.Err()
+		return wire.Frame{}, ctx.Err()
 	case outcome := <-tr.frames:
 		if outcome.err == nil {
 			tr.probe.recordIncoming(outcome.frame)

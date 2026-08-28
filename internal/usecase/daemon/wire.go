@@ -3,11 +3,11 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-func frameWelcome(s *session, resumeToken uint64) (ports.Frame, error) {
+func frameWelcome(s *session, resumeToken uint64) (wire.Frame, error) {
 	s.mu.Lock()
 	var identity *protocol.CommittedRouteIdentity
 	if s.incarnation != (domain.SessionLifecycleID{}) {
@@ -25,36 +25,36 @@ func frameWelcome(s *session, resumeToken uint64) (ports.Frame, error) {
 	}
 	s.mu.Unlock()
 	w.ResumeToken = resumeToken
-	payload := ports.MarshalWelcome(w)
+	payload := wire.MarshalWelcome(w)
 	if payload == nil {
-		return ports.Frame{}, protocol.ErrInvalidRouteWire
+		return wire.Frame{}, protocol.ErrInvalidRouteWire
 	}
-	return ports.Frame{Type: ports.MsgWelcome, Payload: payload}, nil
+	return wire.Frame{Type: wire.MsgWelcome, Payload: payload}, nil
 }
 
-func frameError(code uint16, text string) ports.Frame {
-	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(protocol.ErrorMsg{Code: code, Text: text})}
+func frameError(code uint16, text string) wire.Frame {
+	return wire.Frame{Type: wire.MsgError, Payload: wire.MarshalErrorMsg(protocol.ErrorMsg{Code: code, Text: text})}
 }
 
-func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) (ports.Frame, error) {
-	payload, err := ports.MarshalOutput(protocol.Output{
+func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) (wire.Frame, error) {
+	payload, err := wire.MarshalOutput(protocol.Output{
 		Epoch: 1, Base: baseState, New: state, Echo: echoAck,
 		Size: domain.Size{Cols: 1, Rows: 1}, Full: state != 0 && baseState == 0, Data: b,
 	})
 	if err != nil {
-		return ports.Frame{}, err
+		return wire.Frame{}, err
 	}
-	return ports.Frame{Type: ports.MsgOutput, Payload: payload}, nil
+	return wire.Frame{Type: wire.MsgOutput, Payload: payload}, nil
 }
 
-func frameDetached(reason uint8) ports.Frame {
-	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: reason})}
+func frameDetached(reason uint8) wire.Frame {
+	return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: reason})}
 }
 
-func framePong() ports.Frame {
-	return ports.Frame{Type: ports.MsgPong, Payload: ports.MarshalPong(protocol.Pong{})}
+func framePong() wire.Frame {
+	return wire.Frame{Type: wire.MsgPong, Payload: wire.MarshalPong(protocol.Pong{})}
 }
 
-func frameSessions(infos []protocol.SessionInfo) ports.Frame {
-	return ports.Frame{Type: ports.MsgSessions, Payload: ports.MarshalSessions(protocol.Sessions{Sessions: infos})}
+func frameSessions(infos []protocol.SessionInfo) wire.Frame {
+	return wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(protocol.Sessions{Sessions: infos})}
 }

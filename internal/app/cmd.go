@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	commandusecase "github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/daemon"
 )
@@ -170,7 +171,7 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return usagef("--self requires running inside a vev pane")
 	}
 
-	if _, err := ports.MarshalCommandRequest(request); errors.Is(err, ports.ErrTooManyCommandArgs) {
+	if _, err := wire.MarshalCommandRequest(request); errors.Is(err, wire.ErrTooManyCommandArgs) {
 		return usagef("too many command arguments")
 	} else if err != nil {
 		return fmt.Errorf("encoding command: %w", err)
@@ -190,12 +191,12 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 	const generation = uint64(1)
 	requestID, outcome := tracker.Publish(generation)
 	request.RequestID = requestID
-	payload, err := ports.MarshalCommandRequest(request)
+	payload, err := wire.MarshalCommandRequest(request)
 	if err != nil {
 		tracker.Remove(requestID, generation)
 		return fmt.Errorf("encoding command: %w", err)
 	}
-	if err := transport.Send(ports.Frame{Type: ports.MsgCommand, Payload: payload}); err != nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgCommand, Payload: payload}); err != nil {
 		tracker.Remove(requestID, generation)
 		return &exitCoded{code: 3, err: fmt.Errorf("sending command: %w", err)}
 	}
@@ -205,11 +206,11 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 			tracker.Fail(requestID, generation, fmt.Errorf("reading command reply: %w", recvErr))
 			return
 		}
-		if reply.Type != ports.MsgCommandResult {
+		if reply.Type != wire.MsgCommandResult {
 			tracker.Fail(requestID, generation, fmt.Errorf("unexpected command reply type %d", reply.Type))
 			return
 		}
-		result, decodeErr := ports.UnmarshalCommandResult(reply.Payload)
+		result, decodeErr := wire.UnmarshalCommandResult(reply.Payload)
 		if decodeErr != nil {
 			tracker.Fail(requestID, generation, fmt.Errorf("decoding command reply: %w", decodeErr))
 			return

@@ -19,10 +19,11 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const (
-	maxFrameLen     = ports.MaxFrameLen
+	maxFrameLen     = wire.MaxFrameLen
 	frameHeaderLen  = 4
 	sshCloseTimeout = 3 * time.Second
 )
@@ -260,7 +261,7 @@ func (r processStdinReader) Read(dst []byte) (int, error) {
 	return r.pump.read(r.done, dst)
 }
 
-func (t *transport) Send(f ports.Frame) error {
+func (t *transport) Send(f wire.Frame) error {
 	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	n := 1 + len(f.Payload)
 	if n > maxFrameLen {
@@ -280,23 +281,23 @@ func (t *transport) Send(f ports.Frame) error {
 	return err
 }
 
-func (t *transport) Recv() (ports.Frame, error) {
+func (t *transport) Recv() (wire.Frame, error) {
 	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(t.r, hdr[:]); err != nil {
 		err = t.mapEOFError(err)
 		end(false)
-		return ports.Frame{}, err
+		return wire.Frame{}, err
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n == 0 {
 		end(false)
-		return ports.Frame{}, ErrZeroLengthFrame
+		return wire.Frame{}, ErrZeroLengthFrame
 	}
 	if n > maxFrameLen {
 		end(false)
-		return ports.Frame{}, ErrFrameTooLarge
+		return wire.Frame{}, ErrFrameTooLarge
 	}
 
 	if cap(t.readBuf) < int(n) {
@@ -307,12 +308,12 @@ func (t *transport) Recv() (ports.Frame, error) {
 	if _, err := io.ReadFull(t.r, t.readBuf); err != nil {
 		err = t.mapEOFError(err)
 		end(false)
-		return ports.Frame{}, err
+		return wire.Frame{}, err
 	}
 
 	payload := append([]byte(nil), t.readBuf[1:]...)
 	end(true)
-	return ports.Frame{Type: ports.MsgType(t.readBuf[0]), Payload: payload}, nil
+	return wire.Frame{Type: wire.MsgType(t.readBuf[0]), Payload: payload}, nil
 }
 
 func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {

@@ -8,8 +8,8 @@ import (
 	"os"
 
 	"github.com/bnema/vev/internal/adapters/ipc"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // runRemotePreview is the hidden SSH-side carriage. The request is encoded in
@@ -20,7 +20,7 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 	if err != nil {
 		return fmt.Errorf("vev: invalid remote preview request: %w", err)
 	}
-	if _, err := ports.UnmarshalRemotePreviewRequest(request); err != nil {
+	if _, err := wire.UnmarshalRemotePreviewRequest(request); err != nil {
 		return fmt.Errorf("vev: invalid remote preview request: %w", err)
 	}
 	transport, err := ipc.DialContext(ctx, ipc.SocketDir())
@@ -31,17 +31,17 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 		return writeRemotePreviewStatus(protocol.RemotePreviewUnavailable)
 	}
 	defer func() { _ = transport.Close() }()
-	if err := transport.Send(ports.Frame{Type: ports.MsgRemotePreviewRequest, Payload: request}); err != nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgRemotePreviewRequest, Payload: request}); err != nil {
 		return fmt.Errorf("vev: sending remote preview request: %w", err)
 	}
 	frameCh := make(chan struct {
-		frame ports.Frame
+		frame wire.Frame
 		err   error
 	}, 1)
 	go func() {
 		frame, err := transport.Recv()
 		frameCh <- struct {
-			frame ports.Frame
+			frame wire.Frame
 			err   error
 		}{frame: frame, err: err}
 	}()
@@ -53,10 +53,10 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 		if result.err != nil {
 			return fmt.Errorf("vev: receiving remote preview: %w", result.err)
 		}
-		if result.frame.Type != ports.MsgRemotePreviewResponse {
+		if result.frame.Type != wire.MsgRemotePreviewResponse {
 			return fmt.Errorf("vev: unexpected remote preview response %d", result.frame.Type)
 		}
-		if _, err := ports.UnmarshalRemotePreview(result.frame.Payload); err != nil {
+		if _, err := wire.UnmarshalRemotePreview(result.frame.Payload); err != nil {
 			return fmt.Errorf("vev: malformed remote preview response: %w", err)
 		}
 		_, err := os.Stdout.Write(result.frame.Payload)
@@ -65,7 +65,7 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 }
 
 func writeRemotePreviewStatus(status protocol.RemotePreviewStatus) error {
-	payload := ports.MarshalRemotePreview(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: status})
+	payload := wire.MarshalRemotePreview(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: status})
 	if payload == nil {
 		return errors.New("vev: failed to encode remote preview status")
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -221,7 +222,7 @@ type Transport struct {
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
 	reasm  *pdgram.Reassembler
-	in     chan ports.Frame
+	in     chan wire.Frame
 	done   chan struct{}
 
 	// Connection replacement takes writeMu, controlConnMu, then mu. Data writes
@@ -257,11 +258,11 @@ type Transport struct {
 	deliverMu   sync.Mutex
 	deliverCond *sync.Cond
 	nextRecvSeq uint64
-	recvBuf     map[uint64]ports.Frame
+	recvBuf     map[uint64]wire.Frame
 }
 
 type pending struct {
-	frame           ports.Frame
+	frame           wire.Frame
 	enqueued        time.Time
 	first           time.Time
 	last            time.Time
@@ -273,7 +274,7 @@ type pending struct {
 
 type retransmitRecord struct {
 	seq uint64
-	f   ports.Frame
+	f   wire.Frame
 }
 
 type writeDeadlineState struct {

@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -923,7 +924,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	// Explicit tab rows already take the direct transition path above, while
 	// stopped sessions have no active target session and retain the fallback.
 	samePeerEligible := guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
-	payload := ports.MarshalAttachTarget(protocol.AttachTarget{
+	payload := wire.MarshalAttachTarget(protocol.AttachTarget{
 		Session:           sessionName,
 		Intent:            protocol.IntentAttach,
 		ExactTarget:       exactTarget,
@@ -943,7 +944,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	} else {
 		effect.ac.offerSamePeerTarget(*exactTarget)
 	}
-	if err := effect.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
+	if err := effect.sendControl(wire.Frame{Type: wire.MsgAttachTarget, Payload: payload}); err != nil {
 		if samePeerEligible {
 			effect.ac.clearSamePeerOffer()
 		}
@@ -989,11 +990,11 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 		RemoteTarget:      &remoteTarget,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
-	payload := ports.MarshalAttachTarget(handoff)
+	payload := wire.MarshalAttachTarget(handoff)
 	if payload == nil {
 		return failUnavailable()
 	}
-	if err := effect.sendControl(ports.Frame{Type: ports.MsgAttachTarget, Payload: payload}); err != nil {
+	if err := effect.sendControl(wire.Frame{Type: wire.MsgAttachTarget, Payload: payload}); err != nil {
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to remote session", err)
 	}
 	if guard.closePicker {

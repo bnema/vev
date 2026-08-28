@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
@@ -39,8 +39,8 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 		Session: "stopped", Intent: protocol.IntentAttach, ExactTarget: &exact,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
-	transport.recvCh <- reconnectToastRecv{frame: ports.Frame{
-		Type: ports.MsgAttachTarget, Payload: ports.MarshalAttachTarget(target),
+	transport.recvCh <- reconnectToastRecv{frame: wire.Frame{
+		Type: wire.MsgAttachTarget, Payload: wire.MarshalAttachTarget(target),
 	}}
 
 	select {
@@ -50,8 +50,8 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("close-and-dial target did not return a handoff")
 	}
-	_, sentSamePeer := transport.sends.find(func(frame ports.Frame) bool {
-		return frame.Type == ports.MsgSamePeerSwitchRequest
+	_, sentSamePeer := transport.sends.find(func(frame wire.Frame) bool {
+		return frame.Type == wire.MsgSamePeerSwitchRequest
 	})
 	require.False(t, sentSamePeer)
 }

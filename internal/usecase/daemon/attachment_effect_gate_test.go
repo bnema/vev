@@ -11,8 +11,8 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
 
@@ -44,14 +44,14 @@ func newBlockedRenderReplacementTransport(d *Daemon, sess *session) *blockedRend
 	}
 }
 
-func (t *blockedRenderReplacementTransport) Send(ports.Frame) error {
+func (t *blockedRenderReplacementTransport) Send(wire.Frame) error {
 	t.sendOnce.Do(func() { close(t.sendEntered) })
 	<-t.closed
 	return errors.New("transport closed")
 }
 
-func (*blockedRenderReplacementTransport) Recv() (ports.Frame, error) {
-	return ports.Frame{}, io.EOF
+func (*blockedRenderReplacementTransport) Recv() (wire.Frame, error) {
+	return wire.Frame{}, io.EOF
 }
 
 func (t *blockedRenderReplacementTransport) Close() error {
@@ -97,13 +97,13 @@ func newTeardownBlockingTransport() *teardownBlockingTransport {
 	return &teardownBlockingTransport{sendEntered: make(chan struct{}), closed: make(chan struct{})}
 }
 
-func (t *teardownBlockingTransport) Send(ports.Frame) error {
+func (t *teardownBlockingTransport) Send(wire.Frame) error {
 	t.sendOnce.Do(func() { close(t.sendEntered) })
 	<-t.closed
 	return errors.New("transport closed")
 }
 
-func (*teardownBlockingTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*teardownBlockingTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
 
 func (t *teardownBlockingTransport) Close() error {
 	t.closeOnce.Do(func() { close(t.closed) })
@@ -568,7 +568,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 	tests := []struct {
 		name   string
 		setup  func(*Daemon, *session, *attachedClient, *transactionalResizePTY)
-		frame  ports.Frame
+		frame  wire.Frame
 		assert func(*testing.T, *attachedClient, *transactionalResizePTY)
 	}{
 		{
@@ -612,7 +612,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 		},
 		{
 			name: "theme",
-			frame: ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(protocol.Theme{
+			frame: wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(protocol.Theme{
 				HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 				HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 			})},
@@ -625,7 +625,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 			setup: func(_ *Daemon, _ *session, ac *attachedClient, _ *transactionalResizePTY) {
 				ac.output.next = 3
 			},
-			frame: ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(protocol.Ack{Epoch: 1, State: 1})},
+			frame: wire.Frame{Type: wire.MsgAck, Payload: mustMarshalAck(protocol.Ack{Epoch: 1, State: 1})},
 			assert: func(t *testing.T, ac *attachedClient, _ *transactionalResizePTY) {
 				ac.sendMu.Lock()
 				defer ac.sendMu.Unlock()
@@ -697,10 +697,10 @@ func TestAttachedRouteSnapshotIsAcceptedAsAnAttachmentValue(t *testing.T) {
 		Home:        activeRef,
 		Entries:     []protocol.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, protocol.RouteKindLocal)},
 	}
-	payload, err := ports.MarshalRecentRouteSnapshot(snapshot)
+	payload, err := wire.MarshalRecentRouteSnapshot(snapshot)
 	require.NoError(t, err)
 
-	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}))
+	require.False(t, d.handleAttachmentClientFrame(token, wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: payload}))
 	require.Equal(t, snapshot, ac.routeSnapshotCopy())
 }
 
@@ -726,31 +726,31 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
-	payload, err := ports.MarshalCommandRequest(protocol.CommandRequest{
+	payload, err := wire.MarshalCommandRequest(protocol.CommandRequest{
 		Version: protocol.Version, RequestID: 1, Slug: "back-session", Attached: true,
 	})
 	require.NoError(t, err)
 
-	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgCommand, Payload: payload}))
+	require.False(t, d.handleAttachmentClientFrame(token, wire.Frame{Type: wire.MsgCommand, Payload: payload}))
 	require.Same(t, source, ac.currentAttachmentSession())
 	frames := transport.Sends()
 	require.NotEmpty(t, frames)
 	var result protocol.CommandResult
 	for _, frame := range frames {
-		if frame.Type != ports.MsgCommandResult {
+		if frame.Type != wire.MsgCommandResult {
 			continue
 		}
-		result, err = ports.UnmarshalCommandResult(frame.Payload)
+		result, err = wire.UnmarshalCommandResult(frame.Payload)
 		require.NoError(t, err)
 		break
 	}
 	require.True(t, result.OK, result.Text)
 	var action protocol.RouteNavigationAction
 	for _, frame := range frames {
-		if frame.Type != ports.MsgNavigateRecentRoute {
+		if frame.Type != wire.MsgNavigateRecentRoute {
 			continue
 		}
-		action, err = ports.UnmarshalRouteNavigationAction(frame.Payload)
+		action, err = wire.UnmarshalRouteNavigationAction(frame.Payload)
 		require.NoError(t, err)
 	}
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}, action)

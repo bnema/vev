@@ -13,19 +13,20 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // handleCommand serves one one-shot control request. The leading version is
 // checked before decoding the versioned body so newer layouts fail cleanly.
-func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
+func (d *Daemon) handleCommand(tr ports.Transport, f wire.Frame) error {
 	defer func() { _ = tr.Close() }()
 
-	if version, ok := ports.PeekCommandVersion(f.Payload); !ok || version != protocol.Version {
+	if version, ok := wire.PeekCommandVersion(f.Payload); !ok || version != protocol.Version {
 		return d.sendCommandResult(tr, protocol.CommandResult{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})
 	}
-	request, err := ports.UnmarshalCommandRequest(f.Payload)
+	request, err := wire.UnmarshalCommandRequest(f.Payload)
 	if err != nil {
 		return d.sendCommandResult(tr, protocol.CommandResult{Code: protocol.ErrInternal, Text: "malformed command request"})
 	}
@@ -79,7 +80,7 @@ func (d *Daemon) sendCommandResult(tr ports.Transport, result protocol.CommandRe
 // boundedControlSend keeps one-shot control handlers from waiting forever on a
 // client that stopped reading. A timeout closes the exact transport so a
 // blocked Send can unwind before the handler returns.
-func (d *Daemon) boundedControlSend(tr ports.Transport, frame ports.Frame) error {
+func (d *Daemon) boundedControlSend(tr ports.Transport, frame wire.Frame) error {
 	_, err := d.boundedSendWith(tr, func() error { return tr.Send(frame) })
 	if errors.Is(err, errSendTimedOut) {
 		_ = tr.Close()
@@ -87,8 +88,8 @@ func (d *Daemon) boundedControlSend(tr ports.Transport, frame ports.Frame) error
 	return err
 }
 
-func frameCommandResult(result protocol.CommandResult) ports.Frame {
-	return ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(result)}
+func frameCommandResult(result protocol.CommandResult) wire.Frame {
+	return wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(result)}
 }
 
 func (d *Daemon) dispatchCommand(ctx context.Context, request protocol.CommandRequest) protocol.CommandResult {

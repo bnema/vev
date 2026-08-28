@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 type paletteAttachClock struct{}
@@ -78,18 +79,18 @@ func (t *paletteAttachTerminal) Flush() error                         { return n
 
 type paletteAttachTransport struct {
 	mu       sync.Mutex
-	sent     []ports.Frame
+	sent     []wire.Frame
 	themes   []protocol.Theme
 	finals   int
 	finalSet chan struct{}
 }
 
-func (t *paletteAttachTransport) Send(frame ports.Frame) error {
+func (t *paletteAttachTransport) Send(frame wire.Frame) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sent = append(t.sent, frame)
-	if frame.Type == ports.MsgTheme {
-		theme, err := ports.UnmarshalTheme(frame.Payload)
+	if frame.Type == wire.MsgTheme {
+		theme, err := wire.UnmarshalTheme(frame.Payload)
 		if err != nil {
 			return err
 		}
@@ -104,15 +105,15 @@ func (t *paletteAttachTransport) Send(frame ports.Frame) error {
 	return nil
 }
 
-func (t *paletteAttachTransport) Recv() (ports.Frame, error) {
+func (t *paletteAttachTransport) Recv() (wire.Frame, error) {
 	t.mu.Lock()
 	first := len(t.sent) == 1
 	t.mu.Unlock()
 	if first {
-		return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
+		return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
 	}
 	<-t.finalSet
-	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
+	return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
 }
 func (*paletteAttachTransport) Close() error { return nil }
 
@@ -155,7 +156,7 @@ func TestAttachPublishesOnlyClearedAndDefinitiveInitialPalette(t *testing.T) {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
 	require.Len(t, transport.sent, 3)
-	require.Equal(t, []ports.MsgType{ports.MsgHello, ports.MsgTheme, ports.MsgTheme}, []ports.MsgType{
+	require.Equal(t, []wire.MsgType{wire.MsgHello, wire.MsgTheme, wire.MsgTheme}, []wire.MsgType{
 		transport.sent[0].Type, transport.sent[1].Type, transport.sent[2].Type,
 	}, "the protocol requires Hello before the two palette publications")
 	require.Len(t, transport.themes, 2)

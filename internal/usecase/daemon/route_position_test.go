@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
@@ -96,10 +96,10 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 
 	var positions []protocol.RoutePosition
 	for _, frame := range tr.Sends() {
-		if frame.Type != ports.MsgRoutePosition {
+		if frame.Type != wire.MsgRoutePosition {
 			continue
 		}
-		position, err := ports.UnmarshalRoutePosition(frame.Payload)
+		position, err := wire.UnmarshalRoutePosition(frame.Payload)
 		require.NoError(t, err)
 		positions = append(positions, position)
 	}

@@ -16,23 +16,24 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 type closeTrackingTransport struct {
 	mu     sync.Mutex
 	closed bool
-	sends  []ports.Frame
+	sends  []wire.Frame
 }
 
-func (t *closeTrackingTransport) Send(f ports.Frame) error {
+func (t *closeTrackingTransport) Send(f wire.Frame) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sends = append(t.sends, f)
 	return nil
 }
-func (t *closeTrackingTransport) Recv() (ports.Frame, error) {
-	return ports.Frame{}, errors.New("closed")
+func (t *closeTrackingTransport) Recv() (wire.Frame, error) {
+	return wire.Frame{}, errors.New("closed")
 }
 func (t *closeTrackingTransport) Close() error {
 	t.mu.Lock()
@@ -46,10 +47,10 @@ func (t *closeTrackingTransport) Closed() bool {
 	return t.closed
 }
 
-func (t *closeTrackingTransport) Sends() []ports.Frame {
+func (t *closeTrackingTransport) Sends() []wire.Frame {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]ports.Frame(nil), t.sends...)
+	return append([]wire.Frame(nil), t.sends...)
 }
 
 type closeCountingBlockedTransport struct {
@@ -63,13 +64,13 @@ func newCloseCountingBlockedTransport() *closeCountingBlockedTransport {
 	return &closeCountingBlockedTransport{closed: make(chan struct{})}
 }
 
-func (t *closeCountingBlockedTransport) Send(ports.Frame) error {
+func (t *closeCountingBlockedTransport) Send(wire.Frame) error {
 	<-t.closed
 	return errors.New("closed")
 }
 
-func (t *closeCountingBlockedTransport) Recv() (ports.Frame, error) {
-	return ports.Frame{}, errors.New("closed")
+func (t *closeCountingBlockedTransport) Recv() (wire.Frame, error) {
+	return wire.Frame{}, errors.New("closed")
 }
 
 func (t *closeCountingBlockedTransport) Close() error {
@@ -326,14 +327,14 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	done := make(chan struct{})
 	resumeHello := helloResumeCapable(protocol.IntentResume, sess.name, token)
 	go func() {
-		d.handleHello(tr.tr, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(resumeHello)})
+		d.handleHello(tr.tr, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(resumeHello)})
 		close(done)
 	}()
 
 	<-tr.welcomeEntered
 	handshakeTimer := awaitHandshakeTimer(t, clock)
 	welcome := <-tr.sends
-	require.Equal(t, ports.MsgWelcome, welcome.Type)
+	require.Equal(t, wire.MsgWelcome, welcome.Type)
 	sess.mu.Lock()
 	resumed := sess.snapshotAttachmentsLocked()[0]
 	sess.mu.Unlock()
@@ -351,8 +352,8 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 
 	tr.release()
-	output := awaitFrame(t, tr.sends, ports.MsgOutput)
-	first, err := ports.UnmarshalOutput(output.Payload)
+	output := awaitFrame(t, tr.sends, wire.MsgOutput)
+	first, err := wire.UnmarshalOutput(output.Payload)
 	require.NoError(t, err)
 	require.Zero(t, first.Base)
 	tr.finish()
@@ -1094,7 +1095,7 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 
 	f := outputStateFrame(ac.output, []byte("incremental while reliable backlog drains"), reset, 0)
 	ac.sendMu.Unlock()
-	out, err := ports.UnmarshalOutput(f.Payload)
+	out, err := wire.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(5), out.Base, "output should remain incremental unless an explicit reset is requested")
 	require.Equal(t, uint64(6), out.New)
@@ -1104,7 +1105,7 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	require.True(t, reset, "explicit reset should still force full repaint")
 	full := outputStateFrame(ac.output, []byte("explicit full repaint"), reset, 0)
 	ac.sendMu.Unlock()
-	fullOut, err := ports.UnmarshalOutput(full.Payload)
+	fullOut, err := wire.UnmarshalOutput(full.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), fullOut.Base)
 	require.Equal(t, uint64(7), fullOut.New)
@@ -1185,9 +1186,9 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	require.Same(t, ac, resumedAC)
 	d.paint(resumedSess, resumedAC, true, nil)
 
-	sends := testFramesOfType(newTr.Sends(), ports.MsgOutput)
+	sends := testFramesOfType(newTr.Sends(), wire.MsgOutput)
 	require.Len(t, sends, 1)
-	first, err := ports.UnmarshalOutput(sends[0].Payload)
+	first, err := wire.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
 	require.Zero(t, first.Base)
 	require.Equal(t, uint64(1), first.New)
@@ -1195,9 +1196,9 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(resumedSess, resumedAC, false, nil)
-	sends = testFramesOfType(newTr.Sends(), ports.MsgOutput)
+	sends = testFramesOfType(newTr.Sends(), wire.MsgOutput)
 	require.Len(t, sends, 2)
-	second, err := ports.UnmarshalOutput(sends[1].Payload)
+	second, err := wire.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
 	require.Equal(t, first.New, second.Base)
 }
@@ -1245,9 +1246,9 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
 	d.firstPaint(resumedSess, resumedAC)
 
-	sends := testFramesOfType(newTransport.Sends(), ports.MsgOutput)
+	sends := testFramesOfType(newTransport.Sends(), wire.MsgOutput)
 	require.Len(t, sends, 1)
-	output, err := ports.UnmarshalOutput(sends[0].Payload)
+	output, err := wire.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
 	require.Zero(t, output.Base, "resume must start with a complete frame")
 	terminal := vt.NewScreen(resumedAC.size.Cols, resumedAC.size.Rows)
@@ -1543,9 +1544,9 @@ func TestRawTerminalSideEffectsAreOutputStateNeutral(t *testing.T) {
 
 	sends := tr.Sends()
 	require.Len(t, sends, 2)
-	first, err := ports.UnmarshalOutput(sends[0].Payload)
+	first, err := wire.UnmarshalOutput(sends[0].Payload)
 	require.NoError(t, err)
-	second, err := ports.UnmarshalOutput(sends[1].Payload)
+	second, err := wire.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
 	require.Zero(t, first.Base)
 	require.Zero(t, first.New)

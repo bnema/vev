@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -482,7 +483,7 @@ func TestFloatingTeardownClearsCapturedCopyMode(t *testing.T) {
 }
 
 func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
-	newCase := func(t *testing.T, state floatingState) (*Daemon, *session, *attachedClient, chan ports.Frame, *tab, *pane, func()) {
+	newCase := func(t *testing.T, state floatingState) (*Daemon, *session, *attachedClient, chan wire.Frame, *tab, *pane, func()) {
 		t.Helper()
 		normalPTY, releaseNormal := newBlockingPTY(t)
 		d, sess, ac, sends := newManualSessionWithPTYs(t, normalPTY)
@@ -513,8 +514,8 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		// Establish a renderer shadow first. The EOF repaint must reset it and
 		// redraw the underlying cell rather than depending on popup damage.
 		d.paint(sess, ac, true, nil)
-		baseline := awaitFrame(t, sends, ports.MsgOutput)
-		baselineOutput, err := ports.UnmarshalOutput(baseline.Payload)
+		baseline := awaitFrame(t, sends, wire.MsgOutput)
+		baselineOutput, err := wire.UnmarshalOutput(baseline.Payload)
 		require.NoError(t, err)
 		require.Contains(t, string(baselineOutput.Data), "underlying-cell")
 
@@ -541,8 +542,8 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		require.Equal(t, floatingUninitialized, tb.floating.state)
 		require.Nil(t, tb.floating.pane)
 		tb.mu.Unlock()
-		repaint := awaitFrame(t, sends, ports.MsgOutput)
-		output, err := ports.UnmarshalOutput(repaint.Payload)
+		repaint := awaitFrame(t, sends, wire.MsgOutput)
+		output, err := wire.UnmarshalOutput(repaint.Payload)
 		require.NoError(t, err)
 		require.Zero(t, output.Base, "visible EOF must force a dependency-free full repaint")
 		require.Contains(t, string(output.Data), "underlying-cell", "repaint must restore cells previously covered by the popup")

@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 type attachmentEffectPhase uint8
@@ -188,7 +189,7 @@ func (t *attachmentEffect) endTransportSend() {
 	g.mu.Unlock()
 }
 
-func (t *attachmentEffect) sendControl(frame ports.Frame) error {
+func (t *attachmentEffect) sendControl(frame wire.Frame) error {
 	if !t.current() || t.ac == nil || t.transport.transport == nil {
 		return errAttachmentTransition
 	}

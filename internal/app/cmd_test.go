@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -141,14 +142,14 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 		t.Run(tt.slug, func(t *testing.T) {
 			parsed, err := parseArgs(append([]string{"cmd", tt.slug}, tt.args...))
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
+			transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 			require.NoError(t, runCmdWithDeps(context.Background(), parsed.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
 				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
 			}))
 			require.Len(t, transport.sent, 1)
-			request, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+			request, err := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
 			require.NoError(t, err)
 			require.Equal(t, tt.slug, request.Slug)
 			require.Equal(t, tt.args, request.Args)
@@ -158,7 +159,7 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 }
 
 func TestRemoteCatalogCommandEnsuresDaemon(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
+	transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 	ensureCalls := 0
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "remote-catalog", jsonOut: true}, cmdDeps{
 		stdout: io.Discard,
@@ -184,7 +185,7 @@ func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
 		{slug: "move-tab", args: []string{"work", "extra"}},
 	} {
 		t.Run(invocation.slug+"/"+strconv.Itoa(len(invocation.args)), func(t *testing.T) {
-			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{
+			transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{
 				Code: protocol.ErrInvalidCommandArgs, Text: "invalid command arguments",
 			})}}
 			err := runCmdWithDeps(context.Background(), invocation, cmdDeps{
@@ -207,14 +208,14 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 		t.Run(slug, func(t *testing.T) {
 			invocation, err := parseArgs([]string{"cmd", "--self", slug})
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
+			transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 			require.NoError(t, runCmdWithDeps(context.Background(), invocation.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "session=work,tab=t_abc,pane=p_def" },
 				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
 			}))
 			require.Len(t, transport.sent, 1)
-			request, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+			request, err := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
 			require.NoError(t, err)
 			require.Equal(t, slug, request.Slug)
 			require.True(t, request.Self)
@@ -226,7 +227,7 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 }
 
 func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true, Output: "done"})}}
+	transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{OK: true, Output: "done"})}}
 	out := new(strings.Builder)
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right", self: true}, cmdDeps{
 		stdout: out,
@@ -239,11 +240,11 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 	if len(transport.sent) != 1 || transport.recvCalls != 1 || transport.closeCalls != 1 {
 		t.Fatalf("transport calls: sent=%d recv=%d close=%d", len(transport.sent), transport.recvCalls, transport.closeCalls)
 	}
-	req, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+	req, err := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
 	if err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
-	if transport.sent[0].Type != ports.MsgCommand || req.Slug != "split-right" || !req.Self || req.TargetSession != "old" || req.TargetTab != "t_abc" || req.TargetPane != "p_def" {
+	if transport.sent[0].Type != wire.MsgCommand || req.Slug != "split-right" || !req.Self || req.TargetSession != "old" || req.TargetTab != "t_abc" || req.TargetPane != "p_def" {
 		t.Fatalf("request = type %d %+v", transport.sent[0].Type, req)
 	}
 	if out.String() != "done\n" {
@@ -252,7 +253,7 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 }
 
 func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
+	transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -261,7 +262,7 @@ func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
 	}
-	req, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+	req, err := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
 	if err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
@@ -271,7 +272,7 @@ func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
 }
 
 func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
+	transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "new-tab", session: "current"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -280,7 +281,7 @@ func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
 	}
-	req, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+	req, err := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
 	if err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
@@ -343,7 +344,7 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 	if ExitCode(err) != 3 || !errors.Is(err, daemon.ErrCommandRequestTimeout) {
 		t.Fatalf("timeout error=%v code=%d", err, ExitCode(err))
 	}
-	request, decodeErr := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+	request, decodeErr := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
 	if decodeErr != nil || request.RequestID == 0 {
 		t.Fatalf("request=%+v decode=%v, want non-zero request ID", request, decodeErr)
 	}
@@ -351,7 +352,7 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 
 func TestRunCmdZeroRequestIDReplyReturnsDaemonError(t *testing.T) {
 	const want = "daemon error"
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{
+	transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(protocol.CommandResult{
 		Code: protocol.ErrInternal, Text: want,
 	})}}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
@@ -415,7 +416,7 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(tt.result)}}
+			transport := &cmdTestTransport{recv: wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(tt.result)}}
 			err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
@@ -429,8 +430,8 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 }
 
 type cmdTestTransport struct {
-	sent        []ports.Frame
-	recv        ports.Frame
+	sent        []wire.Frame
+	recv        wire.Frame
 	recvErr     error
 	recvCalls   int
 	closeCalls  int
@@ -438,12 +439,12 @@ type cmdTestTransport struct {
 	recvGate    <-chan struct{}
 }
 
-func (t *cmdTestTransport) Send(frame ports.Frame) error {
+func (t *cmdTestTransport) Send(frame wire.Frame) error {
 	t.sent = append(t.sent, frame)
 	return nil
 }
 
-func (t *cmdTestTransport) Recv() (ports.Frame, error) {
+func (t *cmdTestTransport) Recv() (wire.Frame, error) {
 	t.recvCalls++
 	if t.recvStarted != nil {
 		close(t.recvStarted)

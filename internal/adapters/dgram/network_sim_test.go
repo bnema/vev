@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -454,7 +455,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		b.mu.Unlock()
 		primer := mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("primer")})
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: primer}); err != nil {
+		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: primer}); err != nil {
 			t.Fatal(err)
 		}
 		awaitSignal(t, primerWritten, "primer write")
@@ -537,7 +538,7 @@ func TestTransportFloodClassification(t *testing.T) {
 				Size:  domain.Size{Cols: 1, Rows: 1},
 				Data:  bytes.Repeat([]byte{byte(state + 1)}, outputDataBytes),
 			})
-			if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
+			if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: payload}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -631,7 +632,7 @@ func TestTransportFloodClassification(t *testing.T) {
 			for {
 				select {
 				case frame := <-b.in:
-					output, err := ports.UnmarshalOutput(frame.Payload)
+					output, err := wire.UnmarshalOutput(frame.Payload)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -795,7 +796,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		// A fresh record queues behind the sole data sender while control traffic
 		// remains independent of congestion tokens and the blocked data write.
 		go func() {
-			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodOutputPayload(floodRecordCount, 128)})
+			freshReturned <- a.Send(wire.Frame{Type: wire.MsgOutput, Payload: floodOutputPayload(floodRecordCount, 128)})
 		}()
 		select {
 		case err := <-freshReturned:
@@ -869,7 +870,7 @@ func TestFloodOutputPayloadIsIncrementalStateBearingOutput(t *testing.T) {
 	const mtu = 128
 	for state := range floodRecordCount {
 		payload := floodOutputPayload(state, mtu)
-		output, err := ports.UnmarshalOutput(payload)
+		output, err := wire.UnmarshalOutput(payload)
 		if err != nil {
 			t.Fatalf("state %d: %v", state, err)
 		}
@@ -889,7 +890,7 @@ func TestFloodOutputPayloadIsIncrementalStateBearingOutput(t *testing.T) {
 func sendFloodOutputs(t *testing.T, sender *Transport, count, mtu int) {
 	t.Helper()
 	for state := range count {
-		if err := sender.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: floodOutputPayload(state, mtu)}); err != nil {
+		if err := sender.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: floodOutputPayload(state, mtu)}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -696,8 +697,8 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "attach target")
-	require.Equal(t, ports.MsgAttachTarget, frame.Type)
-	got, err := ports.UnmarshalAttachTarget(frame.Payload)
+	require.Equal(t, wire.MsgAttachTarget, frame.Type)
+	got, err := wire.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.AttachTarget{Endpoint: "arch", Session: "work", Intent: protocol.IntentAttach, RemoteTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, got)
 	require.Nil(t, ac.currentAttachmentSession())
@@ -748,7 +749,7 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "stopped remote target")
-	handoff, err := ports.UnmarshalAttachTarget(frame.Payload)
+	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
 	require.NotNil(t, handoff.RemoteTarget)
 	require.Equal(t, selected.RemoteTarget, handoff.RemoteTarget)
@@ -819,7 +820,7 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "stopped remote target without tab metadata")
-	handoff, err := ports.UnmarshalAttachTarget(frame.Payload)
+	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, selected.RemoteTarget, handoff.RemoteTarget)
 
@@ -862,8 +863,8 @@ func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 			defer effect.End()
 			require.NoError(t, d.sendNavigationActionForAttachment(effect, tt.action))
 			frame := receiveRemotePicker(t, sends, "navigation action")
-			require.Equal(t, ports.MsgNavigationAction, frame.Type)
-			directive, err := ports.UnmarshalNavigationDirective(frame.Payload)
+			require.Equal(t, wire.MsgNavigationAction, frame.Type)
+			directive, err := wire.UnmarshalNavigationDirective(frame.Payload)
 			require.NoError(t, err)
 			require.Equal(t, tt.action, directive.Action)
 			if tt.action == protocol.NavigationOpenHomePicker {
@@ -920,10 +921,10 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	require.Same(t, sess, ac.currentAttachmentSession())
 }
 
-func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...ports.Transport) (*session, *attachedClient, chan ports.Frame) {
+func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...ports.Transport) (*session, *attachedClient, chan wire.Frame) {
 	t.Helper()
 	var tr ports.Transport
-	var sends chan ports.Frame
+	var sends chan wire.Frame
 	if len(transports) != 0 {
 		tr = transports[0]
 	} else {

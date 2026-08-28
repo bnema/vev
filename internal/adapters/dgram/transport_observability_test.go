@@ -13,6 +13,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestTransportObservabilityDgramFailedCloseEndsReceiveAndSend(t *testing.T) {
@@ -33,7 +34,7 @@ func TestTransportObservabilityDgramFailedCloseEndsReceiveAndSend(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewTransportWithOptions() error = %v", err)
 	}
-	if err := transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("write failure")}); err == nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgOutput, Payload: []byte("write failure")}); err == nil {
 		t.Fatal("Send() error = nil on packet write failure")
 	}
 	recvDone := make(chan error, 1)
@@ -155,11 +156,11 @@ func TestTransportObservabilityDgramKeepsBehaviorClockSeparate(t *testing.T) {
 	}
 	defer func() { _ = b.Close() }()
 
-	want := ports.Frame{Type: ports.MsgOutput, Payload: []byte("datagram carriage remains exact")}
+	want := wire.Frame{Type: wire.MsgOutput, Payload: []byte("datagram carriage remains exact")}
 	if err := a.Send(want); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
-	gotCh := make(chan ports.Frame, 1)
+	gotCh := make(chan wire.Frame, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		frame, recvErr := b.Recv()

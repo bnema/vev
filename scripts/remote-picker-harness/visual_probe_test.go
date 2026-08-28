@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,24 +19,24 @@ const (
 )
 
 type probeTestTransport struct {
-	sent []ports.Frame
+	sent []wire.Frame
 }
 
-func (t *probeTestTransport) Send(frame ports.Frame) error {
+func (t *probeTestTransport) Send(frame wire.Frame) error {
 	t.sent = append(t.sent, frame)
 	return nil
 }
 
-func (*probeTestTransport) Recv() (ports.Frame, error) { return ports.Frame{}, errors.New("not used") }
-func (*probeTestTransport) Close() error               { return nil }
+func (*probeTestTransport) Recv() (wire.Frame, error) { return wire.Frame{}, errors.New("not used") }
+func (*probeTestTransport) Close() error              { return nil }
 
-func probeTestOutput(t *testing.T, output protocol.Output) ports.Frame {
+func probeTestOutput(t *testing.T, output protocol.Output) wire.Frame {
 	t.Helper()
-	payload, err := ports.MarshalOutput(output)
+	payload, err := wire.MarshalOutput(output)
 	if err != nil {
 		t.Fatalf("marshal output: %v", err)
 	}
-	return ports.Frame{Type: ports.MsgOutput, Payload: payload}
+	return wire.Frame{Type: wire.MsgOutput, Payload: payload}
 }
 
 func TestVisualProbePersistsFullAndIncrementalOutput(t *testing.T) {
@@ -240,9 +240,9 @@ func TestProcessOutputFrameACKsOnlyAcceptedStateBearingFrames(t *testing.T) {
 			var ackCount, resetCount int
 			for _, frame := range transport.sent {
 				switch frame.Type {
-				case ports.MsgAck:
+				case wire.MsgAck:
 					ackCount++
-				case ports.MsgOutputResetRequest:
+				case wire.MsgOutputResetRequest:
 					resetCount++
 				}
 			}
@@ -268,7 +268,7 @@ func TestCaptureUnifiedPickerRowsRequiresLocalAndRemoteEntries(t *testing.T) {
 
 func TestVisualProbeRecordsUnexpectedAttachTarget(t *testing.T) {
 	probe := newVisualProbe(domain.Size{Cols: probeTestCols, Rows: probeTestRows})
-	probe.recordIncoming(ports.Frame{Type: ports.MsgAttachTarget})
+	probe.recordIncoming(wire.Frame{Type: wire.MsgAttachTarget})
 
 	if probe.unexpectedHandoffs != 1 {
 		t.Fatalf("unexpected handoffs = %d, want 1", probe.unexpectedHandoffs)

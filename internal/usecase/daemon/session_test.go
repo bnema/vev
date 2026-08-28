@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -42,12 +43,12 @@ func TestHandshakeEphemeralHappy(t *testing.T) {
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
 
-	w := awaitFrame(t, sends, ports.MsgWelcome)
-	welcome, err := ports.UnmarshalWelcome(w.Payload)
+	w := awaitFrame(t, sends, wire.MsgWelcome)
+	welcome, err := wire.UnmarshalWelcome(w.Payload)
 	require.NoError(t, err)
 	require.Equal(t, "0", welcome.SessionName)
 	require.True(t, welcome.Ephemeral)
-	awaitFrame(t, sends, ports.MsgOutput) // guaranteed first paint
+	awaitFrame(t, sends, wire.MsgOutput) // guaranteed first paint
 	require.Equal(t, 1, sessionCount(d))
 
 	releaseConn()
@@ -64,8 +65,8 @@ func TestHandshakeNewHappy(t *testing.T) {
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
 
-	w := awaitFrame(t, sends, ports.MsgWelcome)
-	welcome, err := ports.UnmarshalWelcome(w.Payload)
+	w := awaitFrame(t, sends, wire.MsgWelcome)
+	welcome, err := wire.UnmarshalWelcome(w.Payload)
 	require.NoError(t, err)
 	require.Equal(t, "work", welcome.SessionName)
 	require.False(t, welcome.Ephemeral)
@@ -84,15 +85,15 @@ func TestHandshakeNewHappy(t *testing.T) {
 func TestHandshakeVersionMismatch(t *testing.T) {
 	// No Open expectation: the factory must never be asked to spawn a PTY.
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	bad := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{
+	bad := wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(protocol.Hello{
 		Version: protocol.Version + 99, Intent: protocol.IntentEphemeral, Size: domain.Size{Cols: 80, Rows: 24},
 	})}
 	tr, sends, _ := newConn(t, bad)
 
 	d.handleConn(tr) // returns after the rejection; no session, no goroutines
 
-	e := awaitFrame(t, sends, ports.MsgError)
-	em, err := ports.UnmarshalErrorMsg(e.Payload)
+	e := awaitFrame(t, sends, wire.MsgError)
+	em, err := wire.UnmarshalErrorMsg(e.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ErrVersionMismatch, em.Code)
 	require.Equal(t, 0, sessionCount(d))
@@ -108,11 +109,11 @@ func TestHandshakeOldHelloLayoutReportsVersionMismatch(t *testing.T) {
 		0x00, 0x18,
 		0x00, 0x00,
 	}
-	tr, sends, _ := newConn(t, ports.Frame{Type: ports.MsgHello, Payload: oldLayout})
+	tr, sends, _ := newConn(t, wire.Frame{Type: wire.MsgHello, Payload: oldLayout})
 	d.handleConn(tr)
 
-	e := awaitFrame(t, sends, ports.MsgError)
-	em, err := ports.UnmarshalErrorMsg(e.Payload)
+	e := awaitFrame(t, sends, wire.MsgError)
+	em, err := wire.UnmarshalErrorMsg(e.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ErrVersionMismatch, em.Code)
 	require.Equal(t, 0, sessionCount(d))
@@ -126,8 +127,8 @@ func TestHandshakeNameTaken(t *testing.T) {
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	d.handleConn(tr)
 
-	e := awaitFrame(t, sends, ports.MsgError)
-	em, _ := ports.UnmarshalErrorMsg(e.Payload)
+	e := awaitFrame(t, sends, wire.MsgError)
+	em, _ := wire.UnmarshalErrorMsg(e.Payload)
 	require.Equal(t, protocol.ErrNameTaken, em.Code)
 }
 
@@ -136,14 +137,14 @@ func TestHandshakeNoSuchSession(t *testing.T) {
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentAttach, "ghost", domain.Size{Cols: 80, Rows: 24}))
 	d.handleConn(tr)
 
-	e := awaitFrame(t, sends, ports.MsgError)
-	em, _ := ports.UnmarshalErrorMsg(e.Payload)
+	e := awaitFrame(t, sends, wire.MsgError)
+	em, _ := wire.UnmarshalErrorMsg(e.Payload)
 	require.Equal(t, protocol.ErrNoSuchSession, em.Code)
 }
 
 func TestKillAllEmptyDaemonSignalsShutdown(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	tr, _, _ := newConn(t, ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{All: true})})
+	tr, _, _ := newConn(t, wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})})
 	d.handleConn(tr)
 
 	select {
@@ -232,8 +233,8 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 	tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgOutput)
 	sess := firstSession(d)
 	require.NotNil(t, sess)
 
@@ -289,13 +290,13 @@ func TestDetachKeepsEphemeralHeadless(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	tr, sends, _ := newConn(t,
 		mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}),
-		ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})},
+		wire.Frame{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})},
 	)
 
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgDetached)
+	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgDetached)
 	hg.Wait()
 
 	require.Equal(t, 1, sessionCount(d), "ephemeral session survives explicit detach")
@@ -338,14 +339,14 @@ func TestDetachKeepsNamed(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	tr, sends, _ := newConn(t,
 		mustHello(protocol.IntentNew, "keep", domain.Size{Cols: 80, Rows: 24}),
-		ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})},
+		wire.Frame{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})},
 	)
 
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgDetached) // ack for explicit detach
-	hg.Wait()                               // handler returns after detach
+	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgDetached) // ack for explicit detach
+	hg.Wait()                              // handler returns after detach
 
 	require.Equal(t, 1, sessionCount(d), "named session survives detach")
 	sess := firstSession(d)
@@ -375,8 +376,8 @@ func TestReaderEOFRemovesSessionAndSignalsShutdown(t *testing.T) {
 	hg.Go(func() { d.handleConn(tr) })
 
 	// The client is detached with ReasonSessionKilled when the child exits.
-	det := awaitFrame(t, sends, ports.MsgDetached)
-	dm, _ := ports.UnmarshalDetached(det.Payload)
+	det := awaitFrame(t, sends, wire.MsgDetached)
+	dm, _ := wire.UnmarshalDetached(det.Payload)
 	require.Equal(t, protocol.ReasonSessionKilled, dm.Reason)
 
 	select {
@@ -418,8 +419,8 @@ func TestServeReturnsWhenLastSessionExits(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(context.Background(), l) }()
 
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	// Child exits -> session removed -> registry empties -> Serve returns.
 	releasePTY()
@@ -459,13 +460,13 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	cancel() // graceful shutdown
 
-	det := awaitFrame(t, sends, ports.MsgDetached)
-	dm, _ := ports.UnmarshalDetached(det.Payload)
+	det := awaitFrame(t, sends, wire.MsgDetached)
+	dm, _ := wire.UnmarshalDetached(det.Payload)
 	require.Equal(t, protocol.ReasonServerShutdown, dm.Reason)
 
 	select {
@@ -515,11 +516,11 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 	tr1, sends1, release1 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr1) })
-	awaitFrame(t, sends1, ports.MsgWelcome)
+	awaitFrame(t, sends1, wire.MsgWelcome)
 	// firstPaint starts the background prewarm asynchronously. It is valid for
 	// this Open to occur before shutdown, so do not mistake it for the racing
 	// Hello's forbidden launch.
-	awaitFrame(t, sends1, ports.MsgOutput)
+	awaitFrame(t, sends1, wire.MsgOutput)
 	select {
 	case <-preShutdownFloatingOpen:
 	case <-time.After(time.Second):
@@ -548,8 +549,8 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 	} {
 		tr2, sends2, _ := newConn(t, mustHello(intent.intent, intent.sess, domain.Size{Cols: 80, Rows: 24}))
 		d.handleConn(tr2)
-		e := awaitFrame(t, sends2, ports.MsgError)
-		em, err := ports.UnmarshalErrorMsg(e.Payload)
+		e := awaitFrame(t, sends2, wire.MsgError)
+		em, err := wire.UnmarshalErrorMsg(e.Payload)
 		require.NoError(t, err)
 		require.Equal(t, protocol.ErrServerShutdown, em.Code, "%s hello racing shutdown must be rejected", intent.name)
 	}
@@ -573,23 +574,23 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 	p, _ := newBlockingPTY(t) // Close unblocks the parked reader
 
 	tr := portsmocks.NewMockTransport(t)
-	sends := make(chan ports.Frame, 64)
-	recvCh := make(chan ports.Frame, 1)
+	sends := make(chan wire.Frame, 64)
+	recvCh := make(chan wire.Frame, 1)
 	recvCh <- mustHello(protocol.IntentNew, "wedge", domain.Size{Cols: 80, Rows: 24})
 	connDone := make(chan struct{})
 	var connOnce sync.Once
 	closeConn := func() { connOnce.Do(func() { close(connDone) }) }
 
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		select {
 		case f := <-recvCh:
 			return f, nil
 		case <-connDone:
-			return ports.Frame{}, io.EOF
+			return wire.Frame{}, io.EOF
 		}
 	}).Maybe()
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
-		if f.Type == ports.MsgDetached {
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
+		if f.Type == wire.MsgDetached {
 			// Wedged: blocks until the transport is force-closed.
 			<-connDone
 			return io.ErrClosedPipe
@@ -621,8 +622,8 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	cancel() // shutdown with the wedged client still attached
 

@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -176,7 +177,7 @@ func (t *Transport) handleRecord(p []byte) {
 	}
 }
 
-func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) (ackSeq uint64, ack bool, queued bool) {
+func (t *Transport) enqueueReliable(seq uint64, f wire.Frame) (ackSeq uint64, ack bool, queued bool) {
 	t.deliverMu.Lock()
 	defer t.deliverMu.Unlock()
 	if seq < t.nextRecvSeq {
@@ -235,14 +236,14 @@ func (t *Transport) isClosed() bool {
 	return t.closed
 }
 
-func (t *Transport) deliver(f ports.Frame) {
+func (t *Transport) deliver(f wire.Frame) {
 	select {
 	case t.in <- f:
 	case <-t.done:
 	}
 }
 
-func encodeData(seq uint64, reliable bool, f ports.Frame) []byte {
+func encodeData(seq uint64, reliable bool, f wire.Frame) []byte {
 	b := make([]byte, dataRecordHeaderSize+len(f.Payload))
 	b[0] = recData
 	binary.BigEndian.PutUint64(b[1:9], seq)
@@ -253,12 +254,12 @@ func encodeData(seq uint64, reliable bool, f ports.Frame) []byte {
 	copy(b[dataRecordHeaderSize:], f.Payload)
 	return b
 }
-func decodeData(b []byte) (uint64, bool, ports.Frame, bool) {
+func decodeData(b []byte) (uint64, bool, wire.Frame, bool) {
 	if len(b) < dataRecordHeaderSize || b[0] != recData {
-		return 0, false, ports.Frame{}, false
+		return 0, false, wire.Frame{}, false
 	}
 	if b[11] != 0 {
-		return 0, false, ports.Frame{}, false
+		return 0, false, wire.Frame{}, false
 	}
-	return binary.BigEndian.Uint64(b[1:9]), b[9] == 1, ports.Frame{Type: ports.MsgType(b[10]), Payload: append([]byte(nil), b[dataRecordHeaderSize:]...)}, true
+	return binary.BigEndian.Uint64(b[1:9]), b[9] == 1, wire.Frame{Type: wire.MsgType(b[10]), Payload: append([]byte(nil), b[dataRecordHeaderSize:]...)}, true
 }

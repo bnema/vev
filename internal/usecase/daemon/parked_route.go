@@ -9,6 +9,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const parkedRouteLeaseTTL = 15 * time.Minute
@@ -237,12 +238,12 @@ func (ac *attachedClient) consumePublishedParkedRoute(previous, published attach
 	return 0
 }
 
-func parkedRouteResponseFrame(response protocol.ParkedRouteResponse) (ports.Frame, error) {
-	payload := ports.MarshalParkedRouteResponse(response)
+func parkedRouteResponseFrame(response protocol.ParkedRouteResponse) (wire.Frame, error) {
+	payload := wire.MarshalParkedRouteResponse(response)
 	if payload == nil {
-		return ports.Frame{}, errAttachmentTransition
+		return wire.Frame{}, errAttachmentTransition
 	}
-	return ports.Frame{Type: ports.MsgParkedRouteResponse, Payload: payload}, nil
+	return wire.Frame{Type: wire.MsgParkedRouteResponse, Payload: payload}, nil
 }
 
 func (d *Daemon) sendParkedRouteResponse(effect *attachmentEffect, response protocol.ParkedRouteResponse) error {

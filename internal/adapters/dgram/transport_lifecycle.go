@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -29,7 +30,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		pending:                 make(map[uint64]*pending),
 		replay:                  pdgram.NewReplayWindow(),
 		reasm:                   pdgram.NewReassembler(),
-		in:                      make(chan ports.Frame, 32),
+		in:                      make(chan wire.Frame, 32),
 		done:                    make(chan struct{}),
 		health:                  newHealthTracker(opts.Clock.Now()),
 		lastAuthenticatedPacket: opts.Clock.Now(),
@@ -56,7 +57,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		probeWait:               make(map[uint64]chan struct{}),
 		rebind:                  opts.RebindPacketConn,
 		nextRecvSeq:             1,
-		recvBuf:                 make(map[uint64]ports.Frame),
+		recvBuf:                 make(map[uint64]wire.Frame),
 	}
 	for _, opt := range runtimeOpts {
 		if opt != nil {
@@ -90,7 +91,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	return t, nil
 }
 
-func (t *Transport) Recv() (ports.Frame, error) {
+func (t *Transport) Recv() (wire.Frame, error) {
 	end := t.beginRuntimeOperation(ports.RuntimeAdapterReceiveStart, 0)
 	select {
 	case f := <-t.in:
@@ -102,11 +103,11 @@ func (t *Transport) Recv() (ports.Frame, error) {
 		t.mu.Unlock()
 		if err != nil {
 			end(false)
-			return ports.Frame{}, err
+			return wire.Frame{}, err
 		}
 		err = errors.New("dgram: closed")
 		end(false)
-		return ports.Frame{}, err
+		return wire.Frame{}, err
 	}
 }
 

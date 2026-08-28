@@ -29,6 +29,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 )
@@ -64,10 +65,10 @@ func startDaemonInDir(t *testing.T, dir string, opts ...daemon.Option) (string, 
 
 // pump wires a background Recv pump to a transport so tests can await frames
 // with a timeout (ports.Transport has no read deadline).
-type pump struct{ ch chan ports.Frame }
+type pump struct{ ch chan wire.Frame }
 
 func recvPump(tr ports.Transport) *pump {
-	p := &pump{ch: make(chan ports.Frame, 128)}
+	p := &pump{ch: make(chan wire.Frame, 128)}
 	go func() {
 		for {
 			f, err := tr.Recv()
@@ -92,12 +93,12 @@ func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, 
 	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	hello := protocol.Hello{Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", TrueColor: true, Env: env}
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)}))
 	p := recvPump(tr)
 	select {
 	case f, ok := <-p.ch:
 		require.True(t, ok, "connection closed before welcome")
-		require.Equal(t, ports.MsgWelcome, f.Type)
+		require.Equal(t, wire.MsgWelcome, f.Type)
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for welcome")
 	}
@@ -109,11 +110,11 @@ func listRemoteSessions(t *testing.T, dir string) protocol.Sessions {
 	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = tr.Close() }()
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}))
 	f, err := tr.Recv()
 	require.NoError(t, err)
-	require.Equal(t, ports.MsgSessions, f.Type)
-	sessions, err := ports.UnmarshalSessions(f.Payload)
+	require.Equal(t, wire.MsgSessions, f.Type)
+	sessions, err := wire.UnmarshalSessions(f.Payload)
 	require.NoError(t, err)
 	return sessions
 }
@@ -124,7 +125,7 @@ func killAll(dir string) error {
 		return err
 	}
 	defer func() { _ = tr.Close() }()
-	if err := tr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{All: true})}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}); err != nil {
 		return err
 	}
 	_, err = tr.Recv()
@@ -153,8 +154,8 @@ func awaitScreenText(t *testing.T, p *pump, sz domain.Size, want string) string 
 			if !ok {
 				t.Fatalf("connection closed before %q appeared; screen=%q", want, screenText(screen))
 			}
-			if f.Type == ports.MsgOutput {
-				o, err := ports.UnmarshalOutput(f.Payload)
+			if f.Type == wire.MsgOutput {
+				o, err := wire.UnmarshalOutput(f.Payload)
 				require.NoError(t, err)
 				screen.Write(o.Data)
 				text := screenText(screen)
@@ -178,8 +179,8 @@ func assertNoTextAfterInput(t *testing.T, p *pump, sz domain.Size, absent string
 			if !ok {
 				return
 			}
-			if f.Type == ports.MsgOutput {
-				o, err := ports.UnmarshalOutput(f.Payload)
+			if f.Type == wire.MsgOutput {
+				o, err := wire.UnmarshalOutput(f.Payload)
 				require.NoError(t, err)
 				screen.Write(o.Data)
 				require.NotContains(t, screenText(screen), absent)
@@ -214,7 +215,7 @@ func shellFixture(t *testing.T, label string) string {
 func assertChildEnvironment(t *testing.T, tr ports.Transport, p *pump, sz domain.Size, wantTestEnv, wantShell, wantRuntimeDir, wantWayland string) {
 	t.Helper()
 	command := "printf '\\033[2J\\033[H'; printf 'VEV_TEST_ENV=%s SHELL=%s XDG_RUNTIME_DIR=%s WAYLAND_DISPLAY=%s TERM=%s COLORTERM=%s TERM_PROGRAM=%s VEV_PREFIX=%.24s\\n' \"$VEV_TEST_ENV\" \"${SHELL##*/}\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$TERM\" \"$COLORTERM\" \"$TERM_PROGRAM\" \"$VEV\"\n"
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(command)})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(command)})}))
 	text := awaitScreenText(t, p, sz, "TERM_PROGRAM=vev")
 	for _, want := range []string{
 		"VEV_TEST_ENV=" + wantTestEnv,
@@ -255,9 +256,9 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	// The first shell was already running, so it retains its original environment.
 	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/first", "wayland-first")
 
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p2, sz, "Commands")
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
 	assertChildEnvironment(t, tr2, p2, sz, "second", secondShell, "/run/second", "wayland-second")
 }
@@ -288,17 +289,17 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 
 	// The second attachment mutates shared tab state. Its newly opened PTY must
 	// also be rendered to that attachment, not only to the coordinator primary.
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p2, sz, "Commands")
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
 
 	// Each attachment owns its selected tab. Move the first attachment to the
 	// new PTY before releasing its gate, so the fresh PTY output must reach both
 	// views rather than only being recovered by a later first paint.
-	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b2")})}))
+	require.NoError(t, tr1.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b2")})}))
 	awaitText(t, p1, sz, "SHELL_COMMAND=second")
-	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("go\n")})}))
+	require.NoError(t, tr1.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("go\n")})}))
 	awaitText(t, p2, sz, sharedOutput)
 	awaitText(t, p1, sz, sharedOutput)
 }
@@ -320,7 +321,7 @@ func TestIntegration_InputRoundtrip(t *testing.T) {
 	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	defer func() { _ = tr.Close() }()
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("PINGPONG\n")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("PINGPONG\n")})}))
 	awaitText(t, p, sz, "PINGPONG")
 }
 
@@ -332,10 +333,10 @@ func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	defer func() { _ = tr.Close() }()
 	awaitText(t, p, sz, "READY")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p, sz, "Commands")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
 	// Tab labels are enriched with the focused pane's title; with no process
 	// inspector wired in this test, that title falls back to the shell's
 	// basename ("sh").
@@ -352,24 +353,24 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	text := awaitScreenText(t, p, sz, "READY")
 	require.Contains(t, text, " 0* ")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p, sz, "Commands")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("RNS\r")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("RNS\r")})}))
 	awaitText(t, p, sz, "Rename session")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x7fwork\r")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x7fwork\r")})}))
 	text = awaitScreenText(t, p, sz, " work ")
 	require.NotContains(t, text, "work*")
 
 	listTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = listTr.Close() }()
-	require.NoError(t, listTr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})}))
+	require.NoError(t, listTr.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}))
 	f, err := listTr.Recv()
 	require.NoError(t, err)
-	require.Equal(t, ports.MsgSessions, f.Type)
-	sessions, err := ports.UnmarshalSessions(f.Payload)
+	require.Equal(t, wire.MsgSessions, f.Type)
+	sessions, err := wire.UnmarshalSessions(f.Payload)
 	require.NoError(t, err)
 	require.NotEmpty(t, sessions.Sessions)
 	require.Equal(t, "work", sessions.Sessions[0].Name)
@@ -385,7 +386,7 @@ func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	text := awaitScreenText(t, p, sz, "READY")
 	require.NotContains(t, text, " 1  2 ")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1bc")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1bc")})}))
 	assertNoTextAfterInput(t, p, sz, " 1  2 ")
 }
 
@@ -802,7 +803,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 	go func() { served <- d.Serve(ctx, listener) }()
 
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("checkpoint me\n")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("checkpoint me\n")})}))
 	require.Eventually(t, func() bool {
 		record, ok, _ := opened.Catalogue.Record(name)
 		return ok && record.Committed != nil && record.DegradedReason == ""
@@ -888,7 +889,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 
 	awaitLifecycleStage(t, listenerReady, "daemon listener")
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("dirty state\n")})}))
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("dirty state\n")})}))
 	awaitLifecycleStage(t, repository.entered, "snapshot publication")
 	require.NoError(t, tr.Close())
 	require.Eventually(t, func() bool {
@@ -1240,11 +1241,11 @@ func (c *lifecycleControlledCatalogue) Close() error {
 
 type integrationTransport struct{}
 
-func (*integrationTransport) Send(ports.Frame) error     { return nil }
-func (*integrationTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (*integrationTransport) Close() error               { return nil }
-func (*integrationTransport) LocalAddr() net.Addr        { return nil }
-func (*integrationTransport) RemoteAddr() net.Addr       { return nil }
+func (*integrationTransport) Send(wire.Frame) error     { return nil }
+func (*integrationTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (*integrationTransport) Close() error              { return nil }
+func (*integrationTransport) LocalAddr() net.Addr       { return nil }
+func (*integrationTransport) RemoteAddr() net.Addr      { return nil }
 
 func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
@@ -1258,7 +1259,7 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	killTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = killTr.Close() }()
-	require.NoError(t, killTr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{All: true})}))
+	require.NoError(t, killTr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}))
 
 	_, err = killTr.Recv()
 	require.ErrorIs(t, err, io.EOF)

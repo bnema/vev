@@ -1,13 +1,17 @@
 package ports
 
-import "context"
+import (
+	"context"
+
+	"github.com/bnema/vev/internal/protocol/wire"
+)
 
 // Transport is a framed message channel over a single connection. Close must
 // be safe to call concurrently with Send and Recv, and must unblock active
 // Send and Recv calls.
 type Transport interface {
-	Send(Frame) error
-	Recv() (Frame, error) // blocking; io.EOF on close
+	Send(wire.Frame) error
+	Recv() (wire.Frame, error) // blocking; io.EOF on close
 	Close() error
 }
 
@@ -22,13 +26,13 @@ type DatagramTransport interface {
 // returns once the adapter owns the frame; Send retains its synchronous wire-
 // attempt contract. Daemon paint output may use this capability to pipeline.
 type AsyncTransport interface {
-	SendAsync(Frame) error
+	SendAsync(wire.Frame) error
 }
 
 // OwnedSynchronousTransport owns the complete bounded synchronous operation,
 // including adapter queues, pacing, write deadlines, and close cancellation.
 type OwnedSynchronousTransport interface {
-	SendSynchronous(Frame) error
+	SendSynchronous(wire.Frame) error
 }
 
 // Dialer establishes outbound Transport connections.

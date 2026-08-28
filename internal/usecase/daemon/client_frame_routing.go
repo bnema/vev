@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
@@ -75,7 +76,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 }
 
 // handleAttachmentClientFrame owns the attached-client protocol.
-func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f ports.Frame) bool {
+func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f wire.Frame) bool {
 	if !capability.current() {
 		return false
 	}
@@ -91,57 +92,57 @@ func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f 
 		d.afterAttachmentEffectAdmitted(effect.capability())
 	}
 	switch f.Type {
-	case ports.MsgInput:
-		if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
+	case wire.MsgInput:
+		if in, derr := wire.UnmarshalInput(f.Payload); derr == nil {
 			d.handleSequencedInputForAttachment(effect, in.InputSeq, in.Data)
 		}
-	case ports.MsgResize:
-		if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil && effect.current() {
+	case wire.MsgResize:
+		if rz, derr := wire.UnmarshalResize(f.Payload); derr == nil && effect.current() {
 			d.resizeAttachmentGeometryForLease(effect, rz.Geometry())
 		}
-	case ports.MsgTheme:
-		if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
+	case wire.MsgTheme:
+		if th, derr := wire.UnmarshalTheme(f.Payload); derr == nil {
 			d.applyThemeForAttachment(effect, th)
 		}
-	case ports.MsgImagePush:
-		if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
+	case wire.MsgImagePush:
+		if ip, derr := wire.UnmarshalImagePush(f.Payload); derr == nil {
 			d.handleSequencedImagePushForAttachment(effect, ip.InputSeq, ip)
 		}
-	case ports.MsgClientNotice:
-		if notice, derr := ports.UnmarshalClientNotice(f.Payload); derr == nil {
+	case wire.MsgClientNotice:
+		if notice, derr := wire.UnmarshalClientNotice(f.Payload); derr == nil {
 			d.handleClientNoticeForAttachment(effect, notice)
 		} else {
 			d.log.Warn("malformed client notice", "err", derr)
 		}
-	case ports.MsgDetach:
+	case wire.MsgDetach:
 		if effect.current() {
 			d.clientGoneForAttachment(effect, true)
 			return true
 		}
-	case ports.MsgAck:
-		if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
+	case wire.MsgAck:
+		if ack, derr := wire.UnmarshalAck(f.Payload); derr == nil {
 			d.ackOutput(effect, ack.Epoch, ack.State)
 		}
-	case ports.MsgOutputResetRequest:
-		if _, derr := ports.UnmarshalOutputResetRequest(f.Payload); derr == nil {
+	case wire.MsgOutputResetRequest:
+		if _, derr := wire.UnmarshalOutputResetRequest(f.Payload); derr == nil {
 			d.resetOutput(effect)
 		}
-	case ports.MsgSamePeerSwitchRequest:
-		request, derr := ports.UnmarshalSamePeerSwitchRequest(f.Payload)
+	case wire.MsgSamePeerSwitchRequest:
+		request, derr := wire.UnmarshalSamePeerSwitchRequest(f.Payload)
 		if derr != nil {
 			d.log.Warn("malformed same-peer switch request", "err", derr)
 			break
 		}
 		d.switchSamePeerForAttachment(effect, request)
-	case ports.MsgParkedRouteRequest:
-		request, derr := ports.UnmarshalParkedRouteRequest(f.Payload)
+	case wire.MsgParkedRouteRequest:
+		request, derr := wire.UnmarshalParkedRouteRequest(f.Payload)
 		if derr != nil {
 			d.log.Warn("malformed parked-route request", "err", derr)
 			break
 		}
 		d.handleParkedRouteRequest(effect, request)
-	case ports.MsgRecentRouteSnapshot:
-		snapshot, derr := ports.UnmarshalRecentRouteSnapshot(f.Payload)
+	case wire.MsgRecentRouteSnapshot:
+		snapshot, derr := wire.UnmarshalRecentRouteSnapshot(f.Payload)
 		if derr != nil {
 			d.log.Warn("malformed recent route snapshot", "err", derr)
 			break
@@ -154,16 +155,16 @@ func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f 
 		if err := d.sendCommittedRouteIdentityForAttachment(effect); err != nil {
 			d.detachOnAttachmentSendError(effect.capability(), effect.transport.transport)
 		}
-	case ports.MsgRouteAttentionSubscription:
-		subscription, derr := ports.UnmarshalRouteAttentionSubscription(f.Payload)
+	case wire.MsgRouteAttentionSubscription:
+		subscription, derr := wire.UnmarshalRouteAttentionSubscription(f.Payload)
 		if derr != nil {
 			d.log.Warn("malformed route attention subscription", "err", derr)
 			break
 		}
 		effect.ac.setRouteAttentionSubscription(subscription)
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-attention")
-	case ports.MsgRouteNavigationFailure:
-		failure, derr := ports.UnmarshalRouteNavigationFailure(f.Payload)
+	case wire.MsgRouteNavigationFailure:
+		failure, derr := wire.UnmarshalRouteNavigationFailure(f.Payload)
 		if derr != nil {
 			d.log.Warn("malformed route navigation failure", "err", derr)
 			break
@@ -182,8 +183,8 @@ func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f 
 			message = "that recent route no longer exists"
 		}
 		d.notify(effect.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)
-	case ports.MsgCommand:
-		request, derr := ports.UnmarshalCommandRequest(f.Payload)
+	case wire.MsgCommand:
+		request, derr := wire.UnmarshalCommandRequest(f.Payload)
 		if derr != nil {
 			return false
 		}
@@ -200,7 +201,7 @@ func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f 
 			return true
 		}
 		resultEffect.End()
-	case ports.MsgPing:
+	case wire.MsgPing:
 		if err := effect.sendControl(framePong()); err != nil {
 			effect.End()
 			d.detachOnAttachmentSendError(effect.capability(), effect.transport.transport)

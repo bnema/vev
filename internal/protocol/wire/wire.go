@@ -1,10 +1,7 @@
-// Wire codecs for vev's IPC message payloads. They live in ports (alongside
-// Frame and the MsgType constants) because wire encoding is protocol
-// surface, not I/O: everything here is pure, stdlib-only byte marshalling.
-// Adapters keep what actually performs I/O (framing over a connection,
-// listening on a socket) and import these types for the payloads they carry.
+// Package wire owns vev's binary frame representation and strict payload
+// codecs. It performs no I/O; carriage adapters transport Frame values.
 
-package ports
+package wire
 
 import (
 	"bytes"
