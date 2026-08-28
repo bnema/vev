@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
@@ -47,7 +48,7 @@ func TestHandleImagePushWritesFileWithExactBytesAndMode0600(t *testing.T) {
 	d.tempDir = t.TempDir()
 
 	data := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02, 0x03}
-	d.handleImagePush(sess, ports.ImagePush{Mime: "image/png", Data: data})
+	d.handleImagePush(sess, protocol.ImagePush{Mime: "image/png", Data: data})
 
 	injected := <-writes
 	path := string(injected)
@@ -73,7 +74,7 @@ func TestHandleImagePushInjectsPathWithoutBracketedPasteWrapping(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 	require.False(t, pane.screen.BracketedPasteMode())
 
-	d.handleImagePush(sess, ports.ImagePush{Mime: "image/png", Data: []byte("x")})
+	d.handleImagePush(sess, protocol.ImagePush{Mime: "image/png", Data: []byte("x")})
 
 	injected := <-writes
 	require.False(t, hasBracketedPasteMarkers(injected), "path must not be wrapped when the pane is not in bracketed-paste mode")
@@ -90,7 +91,7 @@ func TestHandleImagePushInjectsPathWithBracketedPasteWrapping(t *testing.T) {
 	pane.screen.Write([]byte("\x1b[?2004h"))
 	require.True(t, pane.screen.BracketedPasteMode())
 
-	d.handleImagePush(sess, ports.ImagePush{Mime: "image/png", Data: []byte("x")})
+	d.handleImagePush(sess, protocol.ImagePush{Mime: "image/png", Data: []byte("x")})
 
 	injected := <-writes
 	require.True(t, len(injected) > len(clipPasteOpenMarker)+len(clipPasteCloseMarker))
@@ -114,7 +115,7 @@ func TestHandleImagePushRejectsOversizedPayloadWithoutWritingOrInjecting(t *test
 	d.tempDir = dir
 
 	huge := make([]byte, maxImagePushSize+1)
-	d.handleImagePush(sess, ports.ImagePush{Mime: "image/png", Data: huge})
+	d.handleImagePush(sess, protocol.ImagePush{Mime: "image/png", Data: huge})
 
 	select {
 	case w := <-writes:
@@ -134,7 +135,7 @@ func TestHandleImagePushIgnoresEmptyPayload(t *testing.T) {
 	dir := t.TempDir()
 	d.tempDir = dir
 
-	d.handleImagePush(sess, ports.ImagePush{Mime: "image/png", Data: nil})
+	d.handleImagePush(sess, protocol.ImagePush{Mime: "image/png", Data: nil})
 
 	select {
 	case w := <-writes:
@@ -170,7 +171,7 @@ func TestKillSessionRemovesClipboardTempFiles(t *testing.T) {
 	// killSession requires the session to be registered in the daemon's
 	// registry (newManualSessionWithPTYs already does this via d.sessions).
 
-	d.handleImagePush(sess, ports.ImagePush{Mime: "image/png", Data: []byte("x")})
+	d.handleImagePush(sess, protocol.ImagePush{Mime: "image/png", Data: []byte("x")})
 	injected := <-writes
 	path := string(injected)
 	require.FileExists(t, path)

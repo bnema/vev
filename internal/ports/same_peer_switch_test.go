@@ -5,19 +5,20 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
-func samePeerSwitchTarget() ExactSessionTarget {
+func samePeerSwitchTarget() protocol.ExactSessionTarget {
 	var lifecycle domain.SessionLifecycleID
 	lifecycle[0] = 9
-	return ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}
+	return protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}
 }
 
 func TestSamePeerSwitchWireStrict(t *testing.T) {
-	request := SamePeerSwitchRequest{RequestID: 7, Target: samePeerSwitchTarget(), PreferredTabID: "tab-2"}
+	request := protocol.SamePeerSwitchRequest{RequestID: 7, Target: samePeerSwitchTarget(), PreferredTabID: "tab-2"}
 	requestWire := append([]byte{0, 0, 0, 0, 0, 0, 0, 7, 9}, make([]byte, 15)...)
 	requestWire = append(requestWire, 0, 4, 'w', 'o', 'r', 'k', 0, 5, 't', 'a', 'b', '-', '2')
-	failure := SamePeerSwitchFailure{RequestID: 7, Code: SamePeerSwitchStaleTarget}
+	failure := protocol.SamePeerSwitchFailure{RequestID: 7, Code: protocol.SamePeerSwitchStaleTarget}
 
 	for _, tt := range []struct {
 		name    string
@@ -33,7 +34,7 @@ func TestSamePeerSwitchWireStrict(t *testing.T) {
 			decode:  func(payload []byte) (any, error) { return UnmarshalSamePeerSwitchRequest(payload) },
 			assert: func(t *testing.T, decoded any) {
 				t.Helper()
-				if got := decoded.(SamePeerSwitchRequest); got != request {
+				if got := decoded.(protocol.SamePeerSwitchRequest); got != request {
 					t.Fatalf("request = %+v, want %+v", got, request)
 				}
 			},
@@ -45,7 +46,7 @@ func TestSamePeerSwitchWireStrict(t *testing.T) {
 			decode:  func(payload []byte) (any, error) { return UnmarshalSamePeerSwitchFailure(payload) },
 			assert: func(t *testing.T, decoded any) {
 				t.Helper()
-				if got := decoded.(SamePeerSwitchFailure); got != failure {
+				if got := decoded.(protocol.SamePeerSwitchFailure); got != failure {
 					t.Fatalf("failure = %+v, want %+v", got, failure)
 				}
 			},
@@ -71,8 +72,8 @@ func TestSamePeerSwitchWireStrict(t *testing.T) {
 }
 
 func TestSamePeerSwitchWireRejectsInvalidValues(t *testing.T) {
-	valid := SamePeerSwitchRequest{RequestID: 1, Target: samePeerSwitchTarget()}
-	for _, request := range []SamePeerSwitchRequest{
+	valid := protocol.SamePeerSwitchRequest{RequestID: 1, Target: samePeerSwitchTarget()}
+	for _, request := range []protocol.SamePeerSwitchRequest{
 		{},
 		{RequestID: 1},
 		{RequestID: 1, Target: samePeerSwitchTarget(), PreferredTabID: "bad tab"},

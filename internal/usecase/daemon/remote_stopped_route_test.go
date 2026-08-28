@@ -30,9 +30,9 @@ func TestDaemonOwnedNoExactTargetRejectsNewAndEphemeral(t *testing.T) {
 				Env: []string{"UNTRUSTED=client"}, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 			}
 			_, _, err := d.route(hello, &closeTrackingTransport{})
-			var protocol *protoErr
-			require.ErrorAs(t, err, &protocol)
-			require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+			var protocolErr *protoErr
+			require.ErrorAs(t, err, &protocolErr)
+			require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 			d.mu.Lock()
 			sessions := len(d.sessions)
 			d.mu.Unlock()
@@ -83,9 +83,9 @@ func TestRouteRemoteTargetRejectsLiveIntentForInactiveSession(t *testing.T) {
 		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}, &closeTrackingTransport{})
 
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	require.Empty(t, d.sessions)
@@ -115,9 +115,9 @@ func TestRouteRemoteTargetMapsUnavailableInactiveStatesToNoSuchTarget(t *testing
 				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 			}, &closeTrackingTransport{})
 
-			var protocol *protoErr
-			require.ErrorAs(t, err, &protocol)
-			require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+			var protocolErr *protoErr
+			require.ErrorAs(t, err, &protocolErr)
+			require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 		})
 	}
 }
@@ -138,9 +138,9 @@ func TestRouteRemoteTargetMapsConcurrentInactiveResumeToNoSuchTarget(t *testing.
 		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}, &closeTrackingTransport{})
 
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 }
 
 func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
@@ -172,8 +172,8 @@ func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
 
 		err := route(d, newTarget(record))
 		require.ErrorIs(t, err, cause)
-		var protocol *protoErr
-		require.False(t, errors.As(err, &protocol))
+		var protocolErr *protoErr
+		require.False(t, errors.As(err, &protocolErr))
 	})
 
 	t.Run("catalogue read", func(t *testing.T) {
@@ -191,8 +191,8 @@ func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
 
 		err := route(d, newTarget(record))
 		require.ErrorIs(t, err, cause)
-		var protocol *protoErr
-		require.False(t, errors.As(err, &protocol))
+		var protocolErr *protoErr
+		require.False(t, errors.As(err, &protocolErr))
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // attachmentOutput owns the terminal-output dependency chain and emitted
@@ -32,7 +33,7 @@ type attachmentOutput struct {
 	forceSnapshot             bool
 	initialized               bool
 	lastCursor                cursorOut
-	lastRoutePosition         ports.RoutePosition
+	lastRoutePosition         protocol.RoutePosition
 	graphicsOutput            *graphicsOutputState
 	graphicsUnsupportedWarned atomic.Bool
 	attachment                *attachedClient
@@ -139,7 +140,7 @@ func (o *attachmentOutput) prepareFrame(d *Daemon, state *capturedRenderState, f
 	}
 	cursor := o.prepareCursorTail(desired, len(ansi.data) > 0)
 	graphicsReset := reset || o.forceSnapshot || !o.initialized
-	graphicsBudget := max(ports.MaxOutputDataLen-len(ansi.data)-len(cursor.data), 0)
+	graphicsBudget := max(protocol.MaxOutputDataLen-len(ansi.data)-len(cursor.data), 0)
 	preparedGraphics, err := graphicsOutputDataWithDaemonLimit(d, state, o.attachment, graphicsReset, graphicsBudget)
 	if err != nil {
 		return nil, err
@@ -379,7 +380,7 @@ func (p *preparedOutput) currentLocked() bool {
 }
 
 func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool) (ports.Frame, error) {
-	payload, err := ports.MarshalOutput(ports.Output{
+	payload, err := ports.MarshalOutput(protocol.Output{
 		Epoch: epoch, Base: base, New: next, Echo: echoAck, ViewRevision: viewRevision,
 		Size: size, Full: full, Data: data,
 	})
@@ -440,7 +441,7 @@ func (s *attachmentOutput) rebaseAttachment() {
 		return
 	}
 	s.rebase()
-	s.lastRoutePosition = ports.RoutePosition{}
+	s.lastRoutePosition = protocol.RoutePosition{}
 }
 
 // rebaseLocked is called while the attachment view lock is held. Publishing

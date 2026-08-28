@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -39,11 +40,11 @@ func NewPreviewClient() ports.RemotePreviewClient {
 	return &PreviewClient{command: exec.CommandContext}
 }
 
-func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (ports.RemotePreview, error) {
-	request := ports.RemotePreviewRequest{Version: ports.RemotePreviewSchemaVersion, Target: target, Width: width, Height: height}
+func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
+	request := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: width, Height: height}
 	payload := ports.MarshalRemotePreviewRequest(request)
 	if payload == nil {
-		return ports.RemotePreview{}, ports.ErrInvalidRemotePreviewRequest
+		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreviewRequest
 	}
 	runCtx, cancel := context.WithTimeout(ctx, c.previewTimeout())
 	defer cancel()
@@ -54,7 +55,7 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 	encoded := base64.RawURLEncoding.EncodeToString(payload)
 	spec := sshstdio.BuildCommandForRemoteCommand(target.Endpoint, "vev", "_remote-preview", encoded)
 	cmd := command(runCtx, spec.Path, spec.Args...)
-	stdout := boundedBuffer{limit: ports.RemotePreviewMaxBytes}
+	stdout := boundedBuffer{limit: protocol.RemotePreviewMaxBytes}
 	stderr := boundedBuffer{limit: remotePreviewMaxDiagnostic}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -62,30 +63,30 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 	if err := cmd.Run(); err != nil {
 		if ctxErr := runCtx.Err(); ctxErr != nil {
 			if parentErr := ctx.Err(); parentErr != nil {
-				return ports.RemotePreview{}, parentErr
+				return protocol.RemotePreview{}, parentErr
 			}
-			return ports.RemotePreview{}, ports.ErrRemotePreviewTimeout
+			return protocol.RemotePreview{}, protocol.ErrRemotePreviewTimeout
 		}
 		if stdout.overflow || stderr.overflow {
-			return ports.RemotePreview{}, errRemotePreviewTooLarge
+			return protocol.RemotePreview{}, errRemotePreviewTooLarge
 		}
 		if diagnostic := sanitizeCatalogDiagnostic(string(stderr.Bytes())); diagnostic != "" {
-			return ports.RemotePreview{}, fmt.Errorf("%w: %v: %s", errRemotePreviewSSH, err, diagnostic)
+			return protocol.RemotePreview{}, fmt.Errorf("%w: %v: %s", errRemotePreviewSSH, err, diagnostic)
 		}
-		return ports.RemotePreview{}, fmt.Errorf("%w: %v", errRemotePreviewSSH, err)
+		return protocol.RemotePreview{}, fmt.Errorf("%w: %v", errRemotePreviewSSH, err)
 	}
 	if stdout.overflow || stderr.overflow {
-		return ports.RemotePreview{}, errRemotePreviewTooLarge
+		return protocol.RemotePreview{}, errRemotePreviewTooLarge
 	}
 	preview, err := ports.UnmarshalRemotePreview(stdout.Bytes())
 	if err != nil {
-		return ports.RemotePreview{}, err
+		return protocol.RemotePreview{}, err
 	}
-	if preview.Status != ports.RemotePreviewOK {
-		return ports.RemotePreview{}, fmt.Errorf("remote preview unavailable: status %d", preview.Status)
+	if preview.Status != protocol.RemotePreviewOK {
+		return protocol.RemotePreview{}, fmt.Errorf("remote preview unavailable: status %d", preview.Status)
 	}
 	if preview.LifecycleID != target.LifecycleID || preview.TabID != target.LiveTabID {
-		return ports.RemotePreview{}, errRemotePreviewIdentity
+		return protocol.RemotePreview{}, errRemotePreviewIdentity
 	}
 	return preview, nil
 }

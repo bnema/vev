@@ -7,7 +7,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -26,7 +26,7 @@ func cacheTheme() themeui.Theme {
 func TestThemeAccentHotReloadRebuildsAppliedSnapshot(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t)
 	raw := cacheTheme()
-	d.applyTheme(sess, ac, ports.Theme{Foreground: raw.Foreground, Background: raw.Background, HasForeground: true, HasBackground: true, TrueColor: true, Palette: raw.Palette, PaletteKnown: raw.PaletteKnown})
+	d.applyTheme(sess, ac, protocol.Theme{Foreground: raw.Foreground, Background: raw.Background, HasForeground: true, HasBackground: true, TrueColor: true, Palette: raw.Palette, PaletteKnown: raw.PaletteKnown})
 	before := ac.getAppliedTheme()
 
 	cfg := domain.Defaults()

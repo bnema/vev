@@ -12,6 +12,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
 
@@ -611,7 +612,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 		},
 		{
 			name: "theme",
-			frame: ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(ports.Theme{
+			frame: ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(protocol.Theme{
 				HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 				HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 			})},
@@ -624,7 +625,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 			setup: func(_ *Daemon, _ *session, ac *attachedClient, _ *transactionalResizePTY) {
 				ac.output.next = 3
 			},
-			frame: ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(ports.Ack{Epoch: 1, State: 1})},
+			frame: ports.Frame{Type: ports.MsgAck, Payload: mustMarshalAck(protocol.Ack{Epoch: 1, State: 1})},
 			assert: func(t *testing.T, ac *attachedClient, _ *transactionalResizePTY) {
 				ac.sendMu.Lock()
 				defer ac.sendMu.Unlock()
@@ -687,14 +688,14 @@ func TestAttachedRouteSnapshotIsAcceptedAsAnAttachmentValue(t *testing.T) {
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
 
-	activeRef := ports.RouteRef{Key: 8, Generation: 4}
+	activeRef := protocol.RouteRef{Key: 8, Generation: 4}
 	activeTarget := testRouteTarget(source.name, 8)
-	snapshot := ports.RecentRouteSnapshot{
+	snapshot := protocol.RecentRouteSnapshot{
 		Generation:  4,
 		Active:      activeRef,
-		ActiveEntry: ports.RecentRouteEntry{Key: 8, Generation: 4, Target: activeTarget, Name: source.name, Kind: ports.RouteKindLocal},
+		ActiveEntry: protocol.RecentRouteEntry{Key: 8, Generation: 4, Target: activeTarget, Name: source.name, Kind: protocol.RouteKindLocal},
 		Home:        activeRef,
-		Entries:     []ports.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, ports.RouteKindLocal)},
+		Entries:     []protocol.RecentRouteEntry{testRouteEntry(7, 3, "previous", 7, protocol.RouteKindLocal)},
 	}
 	payload, err := ports.MarshalRecentRouteSnapshot(snapshot)
 	require.NoError(t, err)
@@ -711,12 +712,12 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	d.mu.Lock()
 	d.sessions[target.id] = target
 	d.mu.Unlock()
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
 		Generation:  2,
-		Active:      ports.RouteRef{Key: 2, Generation: 2},
-		ActiveEntry: testRouteEntry(2, 2, source.name, 2, ports.RouteKindLocal),
-		Previous:    ports.RouteRef{Key: 1, Generation: 1},
-		Entries:     []ports.RecentRouteEntry{testRouteEntry(1, 1, "target", 1, ports.RouteKindLocal)},
+		Active:      protocol.RouteRef{Key: 2, Generation: 2},
+		ActiveEntry: testRouteEntry(2, 2, source.name, 2, protocol.RouteKindLocal),
+		Previous:    protocol.RouteRef{Key: 1, Generation: 1},
+		Entries:     []protocol.RecentRouteEntry{testRouteEntry(1, 1, "target", 1, protocol.RouteKindLocal)},
 	})
 
 	transport := &closeTrackingTransport{}
@@ -744,7 +745,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 		break
 	}
 	require.True(t, result.OK, result.Text)
-	var action ports.RouteNavigationAction
+	var action protocol.RouteNavigationAction
 	for _, frame := range frames {
 		if frame.Type != ports.MsgNavigateRecentRoute {
 			continue
@@ -752,7 +753,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 		action, err = ports.UnmarshalRouteNavigationAction(frame.Payload)
 		require.NoError(t, err)
 	}
-	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}, action)
+	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}, action)
 	require.False(t, transport.Closed(), "client navigation must not tear down the attachment")
 }
 

@@ -6,10 +6,11 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestOutputCompression(t *testing.T) {
-	full := Output{
+	full := protocol.Output{
 		Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 120, Rows: 40}, Full: true,
 		Data: bytes.Repeat([]byte("\x1b[38;2;120;180;240mstyled viewport row\x1b[0m\r\n"), 128),
 	}
@@ -20,12 +21,12 @@ func TestOutputCompression(t *testing.T) {
 
 	for _, tt := range []struct {
 		name     string
-		output   Output
+		output   protocol.Output
 		wantKind byte
 	}{
 		{name: "large full snapshot", output: full, wantKind: outputCompressionZlib},
 		{name: "incremental output", output: incremental, wantKind: outputCompressionNone},
-		{name: "small full snapshot", output: Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("small")}, wantKind: outputCompressionNone},
+		{name: "small full snapshot", output: protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("small")}, wantKind: outputCompressionNone},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			payload, err := MarshalOutput(tt.output)
@@ -47,7 +48,7 @@ func TestOutputCompression(t *testing.T) {
 }
 
 func TestCompressedOutputRejectsMalformedPayloads(t *testing.T) {
-	output := Output{
+	output := protocol.Output{
 		Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 120, Rows: 40}, Full: true,
 		Data: bytes.Repeat([]byte("\x1b[31mcompressed\x1b[0m\r\n"), 256),
 	}
@@ -92,7 +93,7 @@ func TestCompressedOutputRejectsMalformedPayloads(t *testing.T) {
 }
 
 func BenchmarkMarshalOutput(b *testing.B) {
-	fixtures := map[string]Output{
+	fixtures := map[string]protocol.Output{
 		"empty-120x40": {
 			Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 120, Rows: 40}, Full: true,
 			Data: bytes.Repeat([]byte(" "), 120*40),

@@ -122,9 +122,9 @@ func TestFinishRouteAttachRollsBackCreatedSession(t *testing.T) {
 	// both success and error paths before returning.
 	d.mu.Lock()
 	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, hello, true, true)
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 	d.mu.Lock()
 	_, retained := d.sessions[sess.id]
 	d.mu.Unlock()
@@ -146,9 +146,9 @@ func TestFinishRouteAttachPreservesConcurrentAttachment(t *testing.T) {
 		RemoteTarget: &missing, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
 	}, true, true)
 
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 	require.Same(t, sess, winner().currentAttachmentSession())
 	d.mu.Lock()
 	require.Same(t, sess, d.sessions[sess.id])
@@ -217,7 +217,7 @@ func TestRouteRemoteTargetRejectsSameNameReplacement(t *testing.T) {
 	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: old, SessionName: "work", LiveTabID: "tab-new"}
 	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}
 	_, _, err := d.routeWithContext(context.Background(), hello, tr)
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchTarget, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
 }

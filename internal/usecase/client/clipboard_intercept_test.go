@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
@@ -22,7 +23,7 @@ import (
 // transport that captures every MsgInput/MsgImagePush send, and a Recv that
 // answers Welcome then, once triggered, Detached — mirroring the pattern used
 // by the OSC-color-response test elsewhere in this package.
-func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReader, stdin []byte, triggerByte byte) (gotInput chan []byte, gotImage chan ports.ImagePush) {
+func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReader, stdin []byte, triggerByte byte) (gotInput chan []byte, gotImage chan protocol.ImagePush) {
 	t.Helper()
 	var out bytes.Buffer
 	var restoreCount int32
@@ -39,7 +40,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
 
 	gotInput = make(chan []byte, 8)
-	gotImage = make(chan ports.ImagePush, 1)
+	gotImage = make(chan protocol.ImagePush, 1)
 	allowDetach := make(chan struct{})
 
 	tr := portsmocks.NewMockTransport(t)
@@ -198,7 +199,7 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 		}
 	}
 	beforeOutput := out.String()
-	transport.recv <- frameOf(ports.MsgOutput, mustMarshalOutput(ports.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("incremental")}))
+	transport.recv <- frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("incremental")}))
 	transport.recv <- frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
 
 	select {

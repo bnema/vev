@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
@@ -81,7 +82,7 @@ func TestFinalHelloSemanticValidation(t *testing.T) {
 }
 
 func TestFinalResizeGoldenStrict(t *testing.T) {
-	msg := Resize{Size: domain.Size{Cols: 80, Rows: 24}}
+	msg := protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}}
 	want := []byte{0, 80, 0, 24, 0, 0, 0, 0}
 	got, err := MarshalResize(msg)
 	if err != nil {
@@ -97,14 +98,14 @@ func TestFinalResizeGoldenStrict(t *testing.T) {
 	assertAllPrefixesFail(t, got, UnmarshalResize)
 	assertTrailingGarbageFails(t, got, UnmarshalResize)
 	for _, size := range []domain.Size{{}, {Cols: 513, Rows: 512}} {
-		if got, err := MarshalResize(Resize{Size: size}); err == nil || got != nil {
+		if got, err := MarshalResize(protocol.Resize{Size: size}); err == nil || got != nil {
 			t.Fatalf("MarshalResize(%+v) = (%x, %v), want nil payload and error", size, got, err)
 		}
 	}
 }
 
 func TestFinalOutputGoldenStrict(t *testing.T) {
-	msg := Output{
+	msg := protocol.Output{
 		Epoch: 1, Base: 0, New: 7, Echo: 8, ViewRevision: 9,
 		Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("ok"),
 	}
@@ -134,8 +135,8 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 }
 
 func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
-	valid := Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true}
-	for _, bad := range []Output{
+	valid := protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true}
+	for _, bad := range []protocol.Output{
 		{},
 		{Epoch: 1, Base: 0, New: 1, Size: valid.Size},
 		{Epoch: 1, Base: 0, New: 1, Full: true},
@@ -170,7 +171,7 @@ func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
 }
 
 func TestFinalAckGoldenStrict(t *testing.T) {
-	msg := Ack{Epoch: 2, State: 7}
+	msg := protocol.Ack{Epoch: 2, State: 7}
 	want := []byte{0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 7}
 	got, err := MarshalAck(msg)
 	if err != nil {
@@ -180,7 +181,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 		t.Fatalf("Ack bytes = %x, want %x", got, want)
 	}
 	back, err := UnmarshalAck(got)
-	if err != nil || back != (Ack{Epoch: 2, State: 7}) {
+	if err != nil || back != (protocol.Ack{Epoch: 2, State: 7}) {
 		t.Fatalf("Ack = %+v, error %v", back, err)
 	}
 	assertAllPrefixesFail(t, got, UnmarshalAck)
@@ -188,7 +189,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 	if _, err := UnmarshalAck(make([]byte, 16)); err == nil {
 		t.Fatal("UnmarshalAck accepted zero epoch")
 	}
-	if got, err := MarshalAck(Ack{State: 7}); err == nil || got != nil {
+	if got, err := MarshalAck(protocol.Ack{State: 7}); err == nil || got != nil {
 		t.Fatalf("MarshalAck accepted zero epoch: payload=%x err=%v", got, err)
 	}
 }
@@ -231,7 +232,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	var lifecycle domain.SessionLifecycleID
 	lifecycle[0] = 1
-	target := AttachTarget{Session: "work", Intent: IntentAttach, ExactTarget: &ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, SamePeer: true}
+	target := AttachTarget{Session: "work", Intent: IntentAttach, ExactTarget: &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, SamePeer: true}
 	payload := MarshalAttachTarget(target)
 	want := append([]byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 1, 1}, make([]byte, 15)...)
 	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1)
@@ -245,7 +246,7 @@ func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	assertAllPrefixesFail(t, payload, UnmarshalAttachTarget)
 	assertTrailingGarbageFails(t, payload, UnmarshalAttachTarget)
 	mismatched := target
-	mismatched.ExactTarget = &ExactSessionTarget{LifecycleID: lifecycle, SessionName: "other"}
+	mismatched.ExactTarget = &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "other"}
 	if got := MarshalAttachTarget(mismatched); got != nil {
 		t.Fatalf("MarshalAttachTarget accepted mismatched target: %x", got)
 	}

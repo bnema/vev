@@ -1,4 +1,4 @@
-package ports
+package protocol
 
 import (
 	"errors"
@@ -9,6 +9,40 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 )
+
+// RemotePreviewSchemaVersion is independent from the attachment protocol version.
+const RemotePreviewSchemaVersion uint16 = 1
+
+type RemotePreviewStatus uint8
+
+const (
+	RemotePreviewOK RemotePreviewStatus = iota
+	RemotePreviewUnavailable
+	RemotePreviewNoSuchTarget
+	RemotePreviewStale
+	RemotePreviewMalformed
+	RemotePreviewTooLarge
+)
+
+type RemotePreviewRequest struct {
+	Version uint16
+	Target  domain.RemoteSessionTarget
+	Width   uint16
+	Height  uint16
+}
+
+// RemotePreview is a bounded row-major styled-cell viewport. It is never
+// persisted, logged, or traced.
+type RemotePreview struct {
+	Version     uint16
+	Status      RemotePreviewStatus
+	LifecycleID domain.SessionLifecycleID
+	TabID       domain.TabStableID
+	Revision    uint64
+	Width       uint16
+	Height      uint16
+	Cells       []renderer.Cell
+}
 
 const (
 	RemotePreviewMaxWidth  = 256

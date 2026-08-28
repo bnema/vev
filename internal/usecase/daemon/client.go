@@ -13,6 +13,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -40,8 +41,8 @@ type attachedClient struct {
 	overlayOnce            sync.Once
 	clientID               [16]byte
 	terminalCapabilities   ports.TerminalCapabilities
-	navigationCapabilities ports.NavigationCapabilities
-	startupOverlay         ports.StartupOverlay
+	navigationCapabilities protocol.NavigationCapabilities
+	startupOverlay         protocol.StartupOverlay
 	// lifecycle is the sole authority for attachment capability publication,
 	// effect admission, transition freeze/drain, and connection generation.
 	lifecycle     attachmentLifecycle
@@ -86,15 +87,15 @@ type attachedClient struct {
 	linkMu                     sync.Mutex
 	sendMu                     sync.Mutex
 	routeMu                    sync.RWMutex
-	routeSnapshot              ports.RecentRouteSnapshot
+	routeSnapshot              protocol.RecentRouteSnapshot
 	pendingRouteIdentity       bool
 	samePeerOfferMu            sync.Mutex
-	samePeerOffer              *ports.ExactSessionTarget
+	samePeerOffer              *protocol.ExactSessionTarget
 	parkedRouteMu              sync.Mutex
 	parkedRoute                *parkedRouteLease
 	parkedRouteOutput          atomic.Bool
 	parkedRouteFullPending     atomic.Bool
-	routeAttentionSubscription ports.RouteAttentionSubscription
+	routeAttentionSubscription protocol.RouteAttentionSubscription
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -336,8 +337,8 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 
 // setRouteSnapshot records a client-owned route view and reports whether a
 // rename identity was deferred until that first usable publication.
-func (ac *attachedClient) setRouteSnapshot(snapshot ports.RecentRouteSnapshot) bool {
-	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
+func (ac *attachedClient) setRouteSnapshot(snapshot protocol.RecentRouteSnapshot) bool {
+	snapshot.Entries = append([]protocol.RecentRouteEntry(nil), snapshot.Entries...)
 	ac.routeMu.Lock()
 	ac.routeSnapshot = snapshot
 	replayPendingIdentity := snapshot.Generation != 0 && ac.pendingRouteIdentity
@@ -361,22 +362,22 @@ func (ac *attachedClient) deferRouteIdentityUntilSnapshot() bool {
 	return true
 }
 
-func (ac *attachedClient) routeSnapshotCopy() ports.RecentRouteSnapshot {
+func (ac *attachedClient) routeSnapshotCopy() protocol.RecentRouteSnapshot {
 	ac.routeMu.RLock()
 	defer ac.routeMu.RUnlock()
 	snapshot := ac.routeSnapshot
-	snapshot.Entries = append([]ports.RecentRouteEntry(nil), snapshot.Entries...)
+	snapshot.Entries = append([]protocol.RecentRouteEntry(nil), snapshot.Entries...)
 	return snapshot
 }
 
-func (ac *attachedClient) setRouteAttentionSubscription(subscription ports.RouteAttentionSubscription) {
-	subscription.Targets = append([]ports.RouteAttentionTarget(nil), subscription.Targets...)
+func (ac *attachedClient) setRouteAttentionSubscription(subscription protocol.RouteAttentionSubscription) {
+	subscription.Targets = append([]protocol.RouteAttentionTarget(nil), subscription.Targets...)
 	ac.routeMu.Lock()
 	ac.routeAttentionSubscription = subscription
 	ac.routeMu.Unlock()
 }
 
-func (ac *attachedClient) routeAttentionTarget(ref ports.RouteRef) (ports.ExactSessionTarget, bool) {
+func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.ExactSessionTarget, bool) {
 	ac.routeMu.RLock()
 	defer ac.routeMu.RUnlock()
 	for _, target := range ac.routeAttentionSubscription.Targets {
@@ -384,7 +385,7 @@ func (ac *attachedClient) routeAttentionTarget(ref ports.RouteRef) (ports.ExactS
 			return target.Target, true
 		}
 	}
-	return ports.ExactSessionTarget{}, false
+	return protocol.ExactSessionTarget{}, false
 }
 
 func (ac *attachedClient) ackOutputState(epoch, state uint64) {
@@ -613,8 +614,8 @@ type attachClientOptions struct {
 	maxOutputInFlight      uint8
 	terminalCapabilities   ports.TerminalCapabilities
 	capabilitiesSet        bool
-	navigationCapabilities ports.NavigationCapabilities
-	startupOverlay         ports.StartupOverlay
+	navigationCapabilities protocol.NavigationCapabilities
+	startupOverlay         protocol.StartupOverlay
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -882,7 +883,7 @@ func (d *Daemon) firstPaintWithLease(sess *session, ac *attachedClient, lease *a
 
 // detachIfCurrent clears the client iff ac is the current one, reporting
 
-func themeFromMessage(msg ports.Theme) themeui.Theme {
+func themeFromMessage(msg protocol.Theme) themeui.Theme {
 	return themeui.Theme{
 		Foreground:   msg.Foreground,
 		Background:   msg.Background,
@@ -897,7 +898,7 @@ func themeFromMessage(msg ports.Theme) themeui.Theme {
 	}
 }
 
-func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) {
+func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg protocol.Theme) {
 	clientTheme := themeFromMessage(msg)
 	ac.setClientTheme(clientTheme)
 
@@ -907,7 +908,7 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 	d.invalidateRender(sess, ac, true, "client.go")
 }
 
-func (d *Daemon) applyThemeForAttachment(effect *attachmentEffect, msg ports.Theme) {
+func (d *Daemon) applyThemeForAttachment(effect *attachmentEffect, msg protocol.Theme) {
 	if !effect.current() {
 		return
 	}

@@ -1,6 +1,8 @@
 package ports
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestProtocolVersion(t *testing.T) {
 	if ProtocolVersion != 37 {

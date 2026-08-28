@@ -5,21 +5,22 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
 func TestAttachmentStatusUsesClientRouteSnapshot(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
 		Generation: 2,
-		Active:     ports.RouteRef{Key: 3, Generation: 2},
-		Entries: []ports.RecentRouteEntry{
-			{Key: 2, Generation: 1, Target: testRouteTarget("logs", 2), Name: "logs", HostLabel: "user@edge", Kind: ports.RouteKindRemote},
-			testRouteEntry(1, 1, "work", 1, ports.RouteKindLocal),
+		Active:     protocol.RouteRef{Key: 3, Generation: 2},
+		Entries: []protocol.RecentRouteEntry{
+			{Key: 2, Generation: 1, Target: testRouteTarget("logs", 2), Name: "logs", HostLabel: "user@edge", Kind: protocol.RouteKindRemote},
+			testRouteEntry(1, 1, "work", 1, protocol.RouteKindLocal),
 		},
 	})
 
-	state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, ports.RecentRouteSnapshot{})
+	state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
 
 	require.Len(t, state.mru, 2)
 	require.Equal(t, []string{"logs@edge", "work"}, []string{state.mru[0].name, state.mru[1].name})
@@ -40,21 +41,21 @@ func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
 			sess.incarnation = domain.SessionLifecycleID{9}
 			sess.tabs[0].attention = true
 			sess.mu.Unlock()
-			ref := ports.RouteRef{Key: 2, Generation: 1}
-			ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+			ref := protocol.RouteRef{Key: 2, Generation: 1}
+			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
 				Generation: 2,
-				Active:     ports.RouteRef{Key: 3, Generation: 2},
-				Entries:    []ports.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Target: ports.ExactSessionTarget{LifecycleID: tt.targetID, SessionName: sess.name}, Name: sess.name, Kind: ports.RouteKindLocal}},
+				Active:     protocol.RouteRef{Key: 3, Generation: 2},
+				Entries:    []protocol.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Target: protocol.ExactSessionTarget{LifecycleID: tt.targetID, SessionName: sess.name}, Name: sess.name, Kind: protocol.RouteKindLocal}},
 			})
-			ac.setRouteAttentionSubscription(ports.RouteAttentionSubscription{Targets: []ports.RouteAttentionTarget{{
+			ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{
 				Ref: ref,
-				Target: ports.ExactSessionTarget{
+				Target: protocol.ExactSessionTarget{
 					LifecycleID: tt.targetID,
 					SessionName: sess.name,
 				},
 			}}})
 
-			state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, ports.RecentRouteSnapshot{})
+			state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
 
 			require.Len(t, state.mru, 1)
 			require.Equal(t, tt.attention, state.mru[0].attention)
@@ -66,9 +67,9 @@ func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	ac.installTestAttachmentCapability(token)
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
-	payload, err := ports.MarshalRecentRouteSnapshot(ports.RecentRouteSnapshot{Generation: 2})
+	payload, err := ports.MarshalRecentRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 2})
 	require.NoError(t, err)
 	require.False(t, d.handleAttachmentClientFrame(token, ports.Frame{Type: ports.MsgRecentRouteSnapshot, Payload: payload}))
 
@@ -77,8 +78,8 @@ func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {
 
 func TestAttachmentRouteSnapshotCopiesPublishedEntries(t *testing.T) {
 	_, _, ac, _ := newManualSessionWithPTYs(t, nil)
-	entries := []ports.RecentRouteEntry{testRouteEntry(1, 2, "before", 1, ports.RouteKindLocal)}
-	snapshot := ports.RecentRouteSnapshot{Generation: 3, Entries: entries}
+	entries := []protocol.RecentRouteEntry{testRouteEntry(1, 2, "before", 1, protocol.RouteKindLocal)}
+	snapshot := protocol.RecentRouteSnapshot{Generation: 3, Entries: entries}
 	ac.setRouteSnapshot(snapshot)
 
 	entries[0].Name = "after"
@@ -102,16 +103,16 @@ func TestPaletteRecentRouteSelectionSendsTypedClientAction(t *testing.T) {
 
 	exec := paletteExec{
 		d: d, sess: source, attachment: source, ac: ac,
-		routeSnapshot: ports.RecentRouteSnapshot{
+		routeSnapshot: protocol.RecentRouteSnapshot{
 			Generation: 4,
-			Entries:    []ports.RecentRouteEntry{testRouteEntry(2, 3, "remote", 2, ports.RouteKindRemote)},
+			Entries:    []protocol.RecentRouteEntry{testRouteEntry(2, 3, "remote", 2, protocol.RouteKindRemote)},
 		},
 		effect: effect,
 	}
 	require.NoError(t, exec.JumpRecentSession(1))
 
 	frames := transport.Sends()
-	var action ports.RouteNavigationAction
+	var action protocol.RouteNavigationAction
 	found := false
 	for _, frame := range frames {
 		if frame.Type != ports.MsgNavigateRecentRoute {
@@ -123,14 +124,14 @@ func TestPaletteRecentRouteSelectionSendsTypedClientAction(t *testing.T) {
 		found = true
 	}
 	require.True(t, found)
-	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 4, Key: 2, Generation: 3}, action)
+	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 2, Generation: 3}, action)
 }
 
 func TestRecentRouteHintsRetainSnapshotSelectionIdentity(t *testing.T) {
-	snapshot := ports.RecentRouteSnapshot{
+	snapshot := protocol.RecentRouteSnapshot{
 		Generation: 8,
-		Entries: []ports.RecentRouteEntry{{
-			Key: 11, Generation: 7, Target: testRouteTarget("logs", 11), Name: "logs", HostLabel: "edge", Kind: ports.RouteKindRemote,
+		Entries: []protocol.RecentRouteEntry{{
+			Key: 11, Generation: 7, Target: testRouteTarget("logs", 11), Name: "logs", HostLabel: "edge", Kind: protocol.RouteKindRemote,
 		}},
 	}
 

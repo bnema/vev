@@ -9,6 +9,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -63,7 +64,7 @@ func TestApplyThemeCopiesTerminalPaletteAndHotReloadGatesIt(t *testing.T) {
 	clientPalette := [16]renderer.RGB{}
 	clientPalette[1] = renderer.RGB{R: 1, G: 2, B: 3}
 	clientPalette[12] = renderer.RGB{R: 4, G: 5, B: 6}
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true,
 		Foreground:    renderer.RGB{R: 7, G: 8, B: 9},
 		HasBackground: true,

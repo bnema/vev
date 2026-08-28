@@ -9,9 +9,10 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
-func mustMarshalOutput(m ports.Output) []byte {
+func mustMarshalOutput(m protocol.Output) []byte {
 	payload, err := ports.MarshalOutput(m)
 	if err != nil {
 		panic(err)
@@ -20,8 +21,8 @@ func mustMarshalOutput(m ports.Output) []byte {
 }
 
 var transcript = []ports.Frame{
-	{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
-	{Type: ports.MsgOutput, Payload: mustMarshalOutput(ports.Output{Epoch: 1, Base: 1, New: 2, Echo: 7, Size: domain.Size{Cols: 80, Rows: 24}, Data: []byte("\x1b[2;1HTWO")})},
+	{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
+	{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Base: 1, New: 2, Echo: 7, Size: domain.Size{Cols: 80, Rows: 24}, Data: []byte("\x1b[2;1HTWO")})},
 }
 
 // Transcript returns a deep copy of the canonical replay transcript so an

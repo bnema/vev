@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +16,7 @@ func TestRouteExactSessionTargetSelectsLifecycle(t *testing.T) {
 	sess.ephemeral = false
 	sess.incarnation = remoteLifecycleForTest()
 	tr, _ := newCapturingTransport(t)
-	target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 	hello := ports.Hello{
 		Version:     ports.ProtocolVersion,
 		Intent:      ports.IntentAttach,
@@ -42,13 +43,13 @@ func TestRouteExactSessionTargetRejectsNameMismatch(t *testing.T) {
 		Intent:      ports.IntentAttach,
 		Name:        "other",
 		Size:        domain.Size{Cols: 80, Rows: 24},
-		ExactTarget: &ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name},
+		ExactTarget: &protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name},
 	}
 
 	_, _, err := d.routeWithContext(context.Background(), hello, tr)
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchSession, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchSession, protocolErr.code)
 }
 
 func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
@@ -56,7 +57,7 @@ func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	sess.incarnation = remoteLifecycleForTest()
-	target := ports.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 	replacement := sess.incarnation
 	replacement[0]++
 	sess.incarnation = replacement
@@ -65,9 +66,9 @@ func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
 	err := d.validateExactSessionTargetLocked(target)
 	d.mu.Unlock()
 
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchSession, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchSession, protocolErr.code)
 }
 
 func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
@@ -83,11 +84,11 @@ func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
 		Intent:      ports.IntentAttach,
 		Name:        sess.name,
 		Size:        domain.Size{Cols: 80, Rows: 24},
-		ExactTarget: &ports.ExactSessionTarget{LifecycleID: wrong, SessionName: sess.name},
+		ExactTarget: &protocol.ExactSessionTarget{LifecycleID: wrong, SessionName: sess.name},
 	}
 
 	_, _, err := d.routeWithContext(context.Background(), hello, tr)
-	var protocol *protoErr
-	require.ErrorAs(t, err, &protocol)
-	require.Equal(t, ports.ErrNoSuchSession, protocol.code)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, ports.ErrNoSuchSession, protocolErr.code)
 }

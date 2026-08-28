@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +29,7 @@ func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
 	target := &session{
 		sessionCore: sessionCore{
@@ -54,7 +55,7 @@ func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 	require.NoError(t, err)
 	d.deferAttachmentTransitionCleanups(transition)
 
-	var identity ports.CommittedRouteIdentity
+	var identity protocol.CommittedRouteIdentity
 	found := false
 	for _, frame := range transport.Sends() {
 		if frame.Type != ports.MsgCommittedRouteIdentity {
@@ -78,7 +79,7 @@ func TestAttachmentTransitionTearsDownAfterCommittedIdentitySendFailure(t *testi
 	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
 	target := &session{
 		sessionCore: sessionCore{

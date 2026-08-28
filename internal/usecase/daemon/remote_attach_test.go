@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -34,7 +35,7 @@ func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 	require.Empty(t, got.Endpoint)
 	require.Equal(t, ports.IntentAttach, got.Intent)
 	require.True(t, got.SamePeer)
-	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: target.name}, got.ExactTarget)
+	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: target.name}, got.ExactTarget)
 	require.Same(t, source, ac.currentAttachmentSession(), "the source remains attached until the client confirms the switch")
 }
 
@@ -66,7 +67,7 @@ func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
 	target, err := ports.UnmarshalAttachTarget(handoff.Payload)
 	require.NoError(t, err)
 	require.False(t, target.SamePeer)
-	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "stopped"}, target.ExactTarget)
+	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "stopped"}, target.ExactTarget)
 	require.Same(t, source, ac.currentAttachmentSession(), "the source remains attached until the client receives the handoff and closes")
 	require.True(t, attachmentRegistered(source, ac))
 }

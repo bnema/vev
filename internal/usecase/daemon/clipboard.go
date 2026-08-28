@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
@@ -26,14 +27,14 @@ var (
 	clipPasteCloseMarker = []byte("\x1b[201~")
 )
 
-func (d *Daemon) handleSequencedImagePushForAttachment(effect *attachmentEffect, _ uint64, ip ports.ImagePush) {
+func (d *Daemon) handleSequencedImagePushForAttachment(effect *attachmentEffect, _ uint64, ip protocol.ImagePush) {
 	if !effect.current() {
 		return
 	}
 	d.handleImagePushForAttachment(effect, ip)
 }
 
-func (d *Daemon) handleImagePushForAttachment(effect *attachmentEffect, ip ports.ImagePush) {
+func (d *Daemon) handleImagePushForAttachment(effect *attachmentEffect, ip protocol.ImagePush) {
 	if len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !effect.current() {
 		return
 	}
@@ -55,7 +56,7 @@ func (d *Daemon) handleImagePushForAttachment(effect *attachmentEffect, ip ports
 // failure is logged and the push is dropped: the client has already
 // consumed the Ctrl+V keystroke that triggered it, so there is nothing left
 // to re-trigger from here.
-func (d *Daemon) handleImagePush(sess *session, ip ports.ImagePush) {
+func (d *Daemon) handleImagePush(sess *session, ip protocol.ImagePush) {
 	if len(ip.Data) == 0 {
 		return
 	}
@@ -73,7 +74,7 @@ func (d *Daemon) handleImagePush(sess *session, ip ports.ImagePush) {
 
 // writeClipboardImage writes ip's bytes to a new 0600 temp file and records
 // the path on sess for best-effort cleanup at session end (killSession).
-func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string, error) {
+func (d *Daemon) writeClipboardImage(sess *session, ip protocol.ImagePush) (string, error) {
 	path, err := d.createClipboardImage(ip)
 	if err != nil {
 		return "", err
@@ -84,7 +85,7 @@ func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string,
 	return path, nil
 }
 
-func (d *Daemon) writeClipboardImageForAttachment(effect *attachmentEffect, ip ports.ImagePush) (string, error) {
+func (d *Daemon) writeClipboardImageForAttachment(effect *attachmentEffect, ip protocol.ImagePush) (string, error) {
 	path, err := d.createClipboardImage(ip)
 	if err != nil {
 		return "", err
@@ -105,7 +106,7 @@ func (d *Daemon) writeClipboardImageForAttachment(effect *attachmentEffect, ip p
 	return path, nil
 }
 
-func (d *Daemon) createClipboardImage(ip ports.ImagePush) (string, error) {
+func (d *Daemon) createClipboardImage(ip protocol.ImagePush) (string, error) {
 	dir := d.tempDir
 	if dir == "" {
 		dir = os.TempDir()

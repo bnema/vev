@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -789,18 +790,18 @@ func TestPaletteBackSessionSendsClientPreviousRouteAction(t *testing.T) {
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
 		Generation: 3,
-		Active:     ports.RouteRef{Key: 3, Generation: 3},
-		Previous:   ports.RouteRef{Key: 2, Generation: 2},
-		Entries:    []ports.RecentRouteEntry{testRouteEntry(2, 2, "recent", 2, ports.RouteKindLocal)},
+		Active:     protocol.RouteRef{Key: 3, Generation: 3},
+		Previous:   protocol.RouteRef{Key: 2, Generation: 2},
+		Entries:    []protocol.RecentRouteEntry{testRouteEntry(2, 2, "recent", 2, protocol.RouteKindLocal)},
 	})
 
 	require.NoError(t, d.backSessionForAttachment(effect))
 	frame := awaitFrame(t, sends, ports.MsgNavigateRecentRoute)
 	action, err := ports.UnmarshalRouteNavigationAction(frame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.RouteNavigationAction{SnapshotGeneration: 3, Key: 2, Generation: 2}, action)
+	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 3, Key: 2, Generation: 2}, action)
 }
 
 func TestBackSessionWithoutClientHistoryIsNoop(t *testing.T) {
@@ -1088,7 +1089,7 @@ func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
 	mustOutputData(t, sends)
 	d.handleInput(sess, ac, []byte("\x1b[<0;2;2m"))
 	d.handleInput(sess, ac, []byte("y"))
-	var msg ports.Output
+	var msg protocol.Output
 	require.Eventually(t, func() bool {
 		frame := awaitFrame(t, sends, ports.MsgOutput)
 		var err error

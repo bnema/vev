@@ -12,6 +12,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -37,7 +38,7 @@ func (c *remotePreviewTestClock) Advance(delta time.Duration) {
 type remotePreviewTestClient struct {
 	mu             sync.Mutex
 	calls          int
-	result         ports.RemotePreview
+	result         protocol.RemotePreview
 	err            error
 	started        chan struct{}
 	finished       chan struct{}
@@ -50,7 +51,7 @@ type remotePreviewTestClient struct {
 	finishedSignal bool
 }
 
-func (c *remotePreviewTestClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (ports.RemotePreview, error) {
+func (c *remotePreviewTestClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
 	c.mu.Lock()
 	c.calls++
 	c.lastTarget = target
@@ -69,7 +70,7 @@ func (c *remotePreviewTestClient) Preview(ctx context.Context, target domain.Rem
 			select {
 			case <-release:
 			case <-ctx.Done():
-				return ports.RemotePreview{}, ctx.Err()
+				return protocol.RemotePreview{}, ctx.Err()
 			}
 		}
 	}
@@ -111,13 +112,13 @@ func remotePreviewCacheTarget() domain.RemoteSessionTarget {
 	}
 }
 
-func remotePreviewCacheResult(target domain.RemoteSessionTarget, revision uint64) ports.RemotePreview {
+func remotePreviewCacheResult(target domain.RemoteSessionTarget, revision uint64) protocol.RemotePreview {
 	return remotePreviewCacheResultRune(target, revision, 'x')
 }
 
-func remotePreviewCacheResultRune(target domain.RemoteSessionTarget, revision uint64, value rune) ports.RemotePreview {
-	return ports.RemotePreview{
-		Version: ports.RemotePreviewSchemaVersion, Status: ports.RemotePreviewOK,
+func remotePreviewCacheResultRune(target domain.RemoteSessionTarget, revision uint64, value rune) protocol.RemotePreview {
+	return protocol.RemotePreview{
+		Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK,
 		LifecycleID: target.LifecycleID, TabID: target.LiveTabID,
 		Revision: revision, Width: 1, Height: 1,
 		Cells: []renderer.Cell{{Rune: value, Style: renderer.DefaultStyle()}},
@@ -136,7 +137,7 @@ func TestFetchRemotePreviewSingleFlightAndCopiesCache(t *testing.T) {
 	d.remotePreviewClient = client
 
 	firstDone := make(chan struct{})
-	var first ports.RemotePreview
+	var first protocol.RemotePreview
 	var firstErr error
 	go func() {
 		first, firstErr = d.fetchRemotePreview(context.Background(), target, 1, 1)
@@ -145,7 +146,7 @@ func TestFetchRemotePreviewSingleFlightAndCopiesCache(t *testing.T) {
 	<-client.started
 
 	secondDone := make(chan struct{})
-	var second ports.RemotePreview
+	var second protocol.RemotePreview
 	var secondErr error
 	go func() {
 		second, secondErr = d.fetchRemotePreview(context.Background(), target, 1, 1)
@@ -169,12 +170,12 @@ func TestFetchRemotePreviewSingleFlightAndCopiesCache(t *testing.T) {
 func TestFetchRemotePreviewAdapterTimeoutAppliesCooldown(t *testing.T) {
 	clock := &remotePreviewTestClock{now: time.Unix(250, 0)}
 	target := remotePreviewCacheTarget()
-	client := &remotePreviewTestClient{err: ports.ErrRemotePreviewTimeout}
+	client := &remotePreviewTestClient{err: protocol.ErrRemotePreviewTimeout}
 	d := newTestDaemon(t, nil, clock)
 	d.remotePreviewClient = client
 
 	_, firstErr := d.fetchRemotePreview(context.Background(), target, 1, 1)
-	require.ErrorIs(t, firstErr, ports.ErrRemotePreviewTimeout)
+	require.ErrorIs(t, firstErr, protocol.ErrRemotePreviewTimeout)
 	_, secondErr := d.fetchRemotePreview(context.Background(), target, 1, 1)
 	require.ErrorIs(t, secondErr, errRemotePreviewCooldown)
 	require.Equal(t, 1, client.Calls())
@@ -482,7 +483,7 @@ func TestFetchRemotePreviewRejectsInvalidDimensionsBeforeRemoteIO(t *testing.T) 
 	d := newTestDaemon(t, nil, clock)
 	d.remotePreviewClient = client
 
-	_, err := d.fetchRemotePreview(context.Background(), remotePreviewCacheTarget(), ports.RemotePreviewMaxWidth+1, 1)
-	require.ErrorIs(t, err, ports.ErrInvalidRemotePreviewRequest)
+	_, err := d.fetchRemotePreview(context.Background(), remotePreviewCacheTarget(), protocol.RemotePreviewMaxWidth+1, 1)
+	require.ErrorIs(t, err, protocol.ErrInvalidRemotePreviewRequest)
 	require.Zero(t, client.Calls())
 }

@@ -3,9 +3,10 @@ package daemon
 import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
-func (ac *attachedClient) offerSamePeerTarget(target ports.ExactSessionTarget) {
+func (ac *attachedClient) offerSamePeerTarget(target protocol.ExactSessionTarget) {
 	ac.samePeerOfferMu.Lock()
 	ac.samePeerOffer = &target
 	ac.samePeerOfferMu.Unlock()
@@ -20,7 +21,7 @@ func (ac *attachedClient) clearSamePeerOffer() {
 // consumeSamePeerOffer linearizes the client confirmation with the daemon's
 // endpoint-empty offer. A client cannot select an arbitrary local session by
 // manufacturing this frame.
-func (ac *attachedClient) consumeSamePeerOffer(target ports.ExactSessionTarget) bool {
+func (ac *attachedClient) consumeSamePeerOffer(target protocol.ExactSessionTarget) bool {
 	ac.samePeerOfferMu.Lock()
 	defer ac.samePeerOfferMu.Unlock()
 	if ac.samePeerOffer == nil || *ac.samePeerOffer != target {
@@ -33,18 +34,18 @@ func (ac *attachedClient) consumeSamePeerOffer(target ports.ExactSessionTarget) 
 // switchSamePeerForAttachment commits one client-confirmed endpoint-empty
 // target. The request never names an endpoint: its authority is the current
 // authenticated attachment plus the target's exact lifecycle identity.
-func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request ports.SamePeerSwitchRequest) {
+func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request protocol.SamePeerSwitchRequest) {
 	if err := request.Validate(); err != nil || !effect.current() || effect.sess == nil || effect.ac == nil {
 		return
 	}
 	if !effect.ac.consumeSamePeerOffer(request.Target) {
-		d.sendSamePeerSwitchFailure(effect, request.RequestID, ports.SamePeerSwitchStaleTarget)
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
 		return
 	}
 
 	target, targetTabIndex, ok := d.samePeerTarget(request)
 	if !ok || target == effect.sess {
-		d.sendSamePeerSwitchFailure(effect, request.RequestID, ports.SamePeerSwitchStaleTarget)
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
 		return
 	}
 
@@ -67,7 +68,7 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 		ready:             true,
 	})
 	if err != nil {
-		d.sendSamePeerSwitchFailure(effect, request.RequestID, ports.SamePeerSwitchStaleTarget)
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
 		return
 	}
 
@@ -83,7 +84,7 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 // samePeerTarget resolves the exact target and the client-owned tab cursor
 // under the daemon/session locks. A missing cursor deliberately falls back to
 // the target session's current default rather than leaking the source view.
-func (d *Daemon) samePeerTarget(request ports.SamePeerSwitchRequest) (*session, int, bool) {
+func (d *Daemon) samePeerTarget(request protocol.SamePeerSwitchRequest) (*session, int, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -108,7 +109,7 @@ func (d *Daemon) samePeerTarget(request ports.SamePeerSwitchRequest) (*session, 
 	return target, tabIndex, true
 }
 
-func (d *Daemon) sendSamePeerSwitchFailure(effect *attachmentEffect, requestID uint64, code ports.SamePeerSwitchFailureCode) {
+func (d *Daemon) sendSamePeerSwitchFailure(effect *attachmentEffect, requestID uint64, code protocol.SamePeerSwitchFailureCode) {
 	if effect == nil || effect.ac == nil {
 		return
 	}
@@ -121,7 +122,7 @@ func (d *Daemon) sendSamePeerSwitchFailure(effect *attachmentEffect, requestID u
 		}
 		defer sender.End()
 	}
-	payload, err := ports.MarshalSamePeerSwitchFailure(ports.SamePeerSwitchFailure{RequestID: requestID, Code: code})
+	payload, err := ports.MarshalSamePeerSwitchFailure(protocol.SamePeerSwitchFailure{RequestID: requestID, Code: code})
 	if err != nil {
 		return
 	}

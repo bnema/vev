@@ -17,6 +17,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
@@ -1286,7 +1287,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
-	if ac.startupOverlay == ports.StartupOverlaySessionPicker {
+	if ac.startupOverlay == protocol.StartupOverlaySessionPicker {
 		d.enterPicker(sess, ac)
 	}
 	postWelcomeTicket.End()
@@ -1449,7 +1450,7 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 // route resolves a Hello to a session and a freshly attached client, creating
 // the session for ephemeral/new intents. Direct package callers retain the
 // daemon lifetime context; inbound handshakes use routeWithContext.
-func (d *Daemon) validateExactSessionTargetLocked(target ports.ExactSessionTarget) error {
+func (d *Daemon) validateExactSessionTargetLocked(target protocol.ExactSessionTarget) error {
 	if sess := d.findByNameLocked(target.SessionName); sess != nil {
 		if sess.incarnation != target.LifecycleID {
 			return &protoErr{ports.ErrNoSuchSession, "session lifecycle has changed: " + target.SessionName}
@@ -1463,7 +1464,7 @@ func (d *Daemon) validateExactSessionTargetLocked(target ports.ExactSessionTarge
 	return nil
 }
 
-func (d *Daemon) validateExactSessionTarget(ctx context.Context, target ports.ExactSessionTarget) error {
+func (d *Daemon) validateExactSessionTarget(ctx context.Context, target protocol.ExactSessionTarget) error {
 	if err := target.Validate(); err != nil {
 		return &protoErr{ports.ErrNoSuchSession, "invalid exact session target"}
 	}

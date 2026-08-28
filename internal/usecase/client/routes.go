@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // maxRouteLedgerEntries is the product history cap. It is deliberately
@@ -36,11 +37,11 @@ type routeIdentity struct {
 
 func (i routeIdentity) empty() bool { return i.key == 0 && i.generation == 0 }
 
-func (i routeIdentity) wire() ports.RouteRef {
-	return ports.RouteRef{Key: uint64(i.key), Generation: uint64(i.generation)}
+func (i routeIdentity) wire() protocol.RouteRef {
+	return protocol.RouteRef{Key: uint64(i.key), Generation: uint64(i.generation)}
 }
 
-func identityFromWire(ref ports.RouteRef) routeIdentity {
+func identityFromWire(ref protocol.RouteRef) routeIdentity {
 	return routeIdentity{key: routeKey(ref.Key), generation: routeGeneration(ref.Generation)}
 }
 
@@ -50,16 +51,16 @@ func identityFromWire(ref ports.RouteRef) routeIdentity {
 type routePresentation struct {
 	name         string
 	hostLabel    string
-	kind         ports.RouteKind
+	kind         protocol.RouteKind
 	ephemeral    bool
 	attention    bool
-	reachability ports.RouteReachability
+	reachability protocol.RouteReachability
 }
 
 type routeCandidate struct {
-	origin       ports.RouteOrigin
+	origin       protocol.RouteOrigin
 	originKey    string
-	target       ports.ExactSessionTarget
+	target       protocol.ExactSessionTarget
 	presentation routePresentation
 	dialer       ports.Dialer
 	request      AttachRequest
@@ -69,9 +70,9 @@ type routeCandidate struct {
 
 type routeRecord struct {
 	identity     routeIdentity
-	origin       ports.RouteOrigin
+	origin       protocol.RouteOrigin
 	originKey    string
-	target       ports.ExactSessionTarget
+	target       protocol.ExactSessionTarget
 	presentation routePresentation
 	dialer       ports.Dialer
 	request      AttachRequest
@@ -98,7 +99,7 @@ type routeLedger struct {
 
 func newRouteLedger() *routeLedger { return &routeLedger{} }
 
-func cloneCommittedIdentity(identity *ports.CommittedRouteIdentity) *ports.CommittedRouteIdentity {
+func cloneCommittedIdentity(identity *protocol.CommittedRouteIdentity) *protocol.CommittedRouteIdentity {
 	if identity == nil {
 		return nil
 	}
@@ -106,7 +107,7 @@ func cloneCommittedIdentity(identity *ports.CommittedRouteIdentity) *ports.Commi
 	return &clone
 }
 
-func cloneRoutePosition(position *ports.RoutePosition) *ports.RoutePosition {
+func cloneRoutePosition(position *protocol.RoutePosition) *protocol.RoutePosition {
 	if position == nil {
 		return nil
 	}
@@ -114,13 +115,13 @@ func cloneRoutePosition(position *ports.RoutePosition) *ports.RoutePosition {
 	return &clone
 }
 
-func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRouteIdentity, dialer ports.Dialer, resumeToken uint64) routeCandidate {
+func routeCandidateForAttach(request AttachRequest, identity protocol.CommittedRouteIdentity, dialer ports.Dialer, resumeToken uint64) routeCandidate {
 	origin := normalizeRouteOrigin(request.Origin, request.Remote)
 	originKey := normalizeRouteOriginKey(request.OriginKey, origin)
-	kind := ports.RouteKindLocal
+	kind := protocol.RouteKindLocal
 	hostLabel := ""
-	if request.Remote || request.RemoteTarget != nil || origin != ports.RouteOriginLocal {
-		kind = ports.RouteKindRemote
+	if request.Remote || request.RemoteTarget != nil || origin != protocol.RouteOriginLocal {
+		kind = protocol.RouteKindRemote
 		if request.RemoteTarget != nil {
 			hostLabel = domain.RemoteDisplayOrigin(request.RemoteTarget.DisplayOrigin)
 		}
@@ -150,7 +151,7 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 			hostLabel:    hostLabel,
 			kind:         kind,
 			ephemeral:    identity.Ephemeral,
-			reachability: ports.RouteReachabilityReachable,
+			reachability: protocol.RouteReachabilityReachable,
 		},
 		dialer:      dialer,
 		request:     request,
@@ -158,7 +159,7 @@ func routeCandidateForAttach(request AttachRequest, identity ports.CommittedRout
 	}
 }
 
-func routeCandidateForCommittedIdentity(active routeRecord, identity ports.CommittedRouteIdentity) routeCandidate {
+func routeCandidateForCommittedIdentity(active routeRecord, identity protocol.CommittedRouteIdentity) routeCandidate {
 	request := cloneAttachRequest(active.request)
 	request.SessionName = identity.Target.SessionName
 	request.ExactTarget = &identity.Target
@@ -175,7 +176,7 @@ func routeCandidateForCommittedIdentity(active routeRecord, identity ports.Commi
 			hostLabel:    active.presentation.hostLabel,
 			kind:         active.presentation.kind,
 			ephemeral:    identity.Ephemeral,
-			reachability: ports.RouteReachabilityReachable,
+			reachability: protocol.RouteReachabilityReachable,
 		},
 		dialer:      active.dialer,
 		request:     request,
@@ -184,38 +185,38 @@ func routeCandidateForCommittedIdentity(active routeRecord, identity ports.Commi
 	}
 }
 
-func normalizeRouteOrigin(origin ports.RouteOrigin, remote bool) ports.RouteOrigin {
+func normalizeRouteOrigin(origin protocol.RouteOrigin, remote bool) protocol.RouteOrigin {
 	if origin != 0 {
 		return origin
 	}
 	if remote {
-		return ports.RouteOriginRemote
+		return protocol.RouteOriginRemote
 	}
-	return ports.RouteOriginLocal
+	return protocol.RouteOriginLocal
 }
 
-func routeFailureCode(err error) ports.RouteFailureCode {
+func routeFailureCode(err error) protocol.RouteFailureCode {
 	var protocolErr *ProtocolError
 	if errors.As(err, &protocolErr) {
 		switch protocolErr.Code {
 		case ports.ErrNoSuchSession, ports.ErrNoSuchTarget:
-			return ports.RouteFailureNoSuchRoute
+			return protocol.RouteFailureNoSuchRoute
 		}
 	}
 	if errors.Is(err, errRouteTargetChanged) {
-		return ports.RouteFailureTargetChanged
+		return protocol.RouteFailureTargetChanged
 	}
-	return ports.RouteFailureUnavailable
+	return protocol.RouteFailureUnavailable
 }
 
-func normalizeRouteOriginKey(key string, origin ports.RouteOrigin) string {
+func normalizeRouteOriginKey(key string, origin protocol.RouteOrigin) string {
 	if key != "" {
 		return key
 	}
 	switch origin {
-	case ports.RouteOriginLocal:
+	case protocol.RouteOriginLocal:
 		return "local"
-	case ports.RouteOriginDiscovery:
+	case protocol.RouteOriginDiscovery:
 		return "discovery"
 	default:
 		return "remote"
@@ -223,10 +224,10 @@ func normalizeRouteOriginKey(key string, origin ports.RouteOrigin) string {
 }
 
 func validateRoutePresentation(p routePresentation) error {
-	if err := ports.ValidateRouteLabel(p.name, false); err != nil {
+	if err := protocol.ValidateRouteLabel(p.name, false); err != nil {
 		return err
 	}
-	if err := ports.ValidateRouteLabel(p.hostLabel, true); err != nil {
+	if err := protocol.ValidateRouteLabel(p.hostLabel, true); err != nil {
 		return err
 	}
 	if err := p.kind.Validate(); err != nil {
@@ -247,7 +248,7 @@ func (l *routeLedger) nextIdentityLocked() (routeIdentity, error) {
 	return routeIdentity{key: l.nextKey, generation: l.generation}, nil
 }
 
-func (l *routeLedger) findByTargetLocked(origin ports.RouteOrigin, originKey string, target ports.ExactSessionTarget) int {
+func (l *routeLedger) findByTargetLocked(origin protocol.RouteOrigin, originKey string, target protocol.ExactSessionTarget) int {
 	for i := range l.entries {
 		entry := l.entries[i]
 		if entry.origin == origin && entry.originKey == originKey && entry.target == target {
@@ -340,7 +341,7 @@ func (l *routeLedger) commitAttach(candidate routeCandidate) (routeIdentity, err
 // commitCommittedIdentity snapshots the current active record and commits the
 // daemon's local transition under one lock. The active route, origin, dialer,
 // and attach request cannot be read from different ledger generations.
-func (l *routeLedger) commitCommittedIdentity(identity ports.CommittedRouteIdentity) (routeIdentity, error) {
+func (l *routeLedger) commitCommittedIdentity(identity protocol.CommittedRouteIdentity) (routeIdentity, error) {
 	if err := identity.Validate(); err != nil {
 		return routeIdentity{}, err
 	}
@@ -383,7 +384,7 @@ func (l *routeLedger) commitCommittedIdentity(identity ports.CommittedRouteIdent
 // updateRoutePosition remembers a cursor only for the currently active exact
 // route. Delayed frames from a prior transition are valid wire messages but do
 // not mutate another route.
-func (l *routeLedger) updateRoutePosition(position ports.RoutePosition) error {
+func (l *routeLedger) updateRoutePosition(position protocol.RoutePosition) error {
 	if err := position.Validate(); err != nil {
 		return err
 	}
@@ -459,7 +460,7 @@ func (l *routeLedger) indexByIdentityLocked(identity routeIdentity) int {
 	return -1
 }
 
-func (l *routeLedger) lookup(ref ports.RouteRef) (routeRecord, bool) {
+func (l *routeLedger) lookup(ref protocol.RouteRef) (routeRecord, bool) {
 	identity := identityFromWire(ref)
 	if identity.empty() {
 		return routeRecord{}, false
@@ -481,21 +482,21 @@ func cloneRouteRecord(entry routeRecord) routeRecord {
 
 // attentionSubscription publishes only routes served by the active route's
 // daemon. Other route origins remain private to their owning daemon.
-func (l *routeLedger) attentionSubscription() ports.RouteAttentionSubscription {
+func (l *routeLedger) attentionSubscription() protocol.RouteAttentionSubscription {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	activeIndex := l.indexByIdentityLocked(l.active)
 	if activeIndex < 0 {
-		return ports.RouteAttentionSubscription{}
+		return protocol.RouteAttentionSubscription{}
 	}
 	active := l.entries[activeIndex]
-	subscription := ports.RouteAttentionSubscription{Targets: make([]ports.RouteAttentionTarget, 0, len(l.entries))}
+	subscription := protocol.RouteAttentionSubscription{Targets: make([]protocol.RouteAttentionTarget, 0, len(l.entries))}
 	for _, entry := range l.entries {
 		if entry.identity == active.identity || entry.origin != active.origin || entry.originKey != active.originKey {
 			continue
 		}
-		subscription.Targets = append(subscription.Targets, ports.RouteAttentionTarget{
+		subscription.Targets = append(subscription.Targets, protocol.RouteAttentionTarget{
 			Ref:    entry.identity.wire(),
 			Target: entry.target,
 		})
@@ -503,8 +504,8 @@ func (l *routeLedger) attentionSubscription() ports.RouteAttentionSubscription {
 	return subscription
 }
 
-func (r routeRecord) snapshotEntry() ports.RecentRouteEntry {
-	return ports.RecentRouteEntry{
+func (r routeRecord) snapshotEntry() protocol.RecentRouteEntry {
+	return protocol.RecentRouteEntry{
 		Key:          uint64(r.identity.key),
 		Generation:   uint64(r.identity.generation),
 		Target:       r.target,
@@ -517,11 +518,11 @@ func (r routeRecord) snapshotEntry() ports.RecentRouteEntry {
 	}
 }
 
-func (l *routeLedger) snapshot() ports.RecentRouteSnapshot {
+func (l *routeLedger) snapshot() protocol.RecentRouteSnapshot {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	snapshot := ports.RecentRouteSnapshot{
+	snapshot := protocol.RecentRouteSnapshot{
 		Generation: uint64(l.generation),
 		Active:     l.active.wire(),
 		Previous:   l.previous.wire(),
@@ -530,7 +531,7 @@ func (l *routeLedger) snapshot() ports.RecentRouteSnapshot {
 	if len(l.entries) == 0 {
 		return snapshot
 	}
-	snapshot.Entries = make([]ports.RecentRouteEntry, 0, len(l.entries))
+	snapshot.Entries = make([]protocol.RecentRouteEntry, 0, len(l.entries))
 	for _, entry := range l.entries {
 		if entry.identity == l.active {
 			snapshot.ActiveEntry = entry.snapshotEntry()
@@ -548,7 +549,7 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 	origin := normalizeRouteOrigin(active.Origin, active.Remote)
 	originKey := normalizeRouteOriginKey(active.OriginKey, origin)
 	environmentPolicy := target.EnvironmentPolicy
-	if origin == ports.RouteOriginLocal {
+	if origin == protocol.RouteOriginLocal {
 		environmentPolicy = ports.EnvironmentPolicyClientOwned
 	}
 
@@ -569,7 +570,7 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 		request.RemoteTarget = nil
 		if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == ports.EnvironmentPolicyClientOwned {
 			request.NavigationCapabilities = 0
-			request.StartupOverlay = ports.StartupOverlayNone
+			request.StartupOverlay = protocol.StartupOverlayNone
 		}
 		request.EnvironmentPolicy = environmentPolicy
 		request.ExactTarget = target.ExactTarget
@@ -587,25 +588,25 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 	request.RemoteTarget = nil
 	if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == ports.EnvironmentPolicyClientOwned {
 		request.NavigationCapabilities = 0
-		request.StartupOverlay = ports.StartupOverlayNone
+		request.StartupOverlay = protocol.StartupOverlayNone
 	}
 	request.EnvironmentPolicy = environmentPolicy
 	return request
 }
 
-func (l *routeLedger) activeRef() ports.RouteRef {
+func (l *routeLedger) activeRef() protocol.RouteRef {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.active.wire()
 }
 
-func (l *routeLedger) previousRef() ports.RouteRef {
+func (l *routeLedger) previousRef() protocol.RouteRef {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.previous.wire()
 }
 
-func (l *routeLedger) homeRef() ports.RouteRef {
+func (l *routeLedger) homeRef() protocol.RouteRef {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.home.wire()
@@ -619,13 +620,13 @@ type routeTransitionPlan struct {
 	record             routeRecord
 	snapshotGeneration routeGeneration
 	active             routeIdentity
-	origin             ports.RouteOrigin
+	origin             protocol.RouteOrigin
 	originKey          string
-	target             ports.ExactSessionTarget
+	target             protocol.ExactSessionTarget
 }
 
 type routeTransitionCommit struct {
-	identity     ports.CommittedRouteIdentity
+	identity     protocol.CommittedRouteIdentity
 	presentation routePresentation
 	dialer       ports.Dialer
 	resumeToken  uint64
@@ -650,11 +651,11 @@ type routeNavigationSelection struct {
 // generation, and active identity under one read lock. The commit phase uses
 // the captured generation and active identity to reject interleavings that
 // changed the ledger while dialing.
-func (l *routeLedger) navigationSelection(action ports.RouteNavigationAction) (routeNavigationSelection, bool) {
+func (l *routeLedger) navigationSelection(action protocol.RouteNavigationAction) (routeNavigationSelection, bool) {
 	if action.SnapshotGeneration == 0 || action.Key == 0 || action.Generation == 0 {
 		return routeNavigationSelection{}, false
 	}
-	identity := identityFromWire(ports.RouteRef{Key: action.Key, Generation: action.Generation})
+	identity := identityFromWire(protocol.RouteRef{Key: action.Key, Generation: action.Generation})
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if uint64(l.generation) != action.SnapshotGeneration {
@@ -680,7 +681,7 @@ func (l *routeLedger) navigationSelection(action ports.RouteNavigationAction) (r
 
 // navigationRecord validates that an action belongs to the latest complete
 // snapshot. The active route is metadata-only and selecting it is a no-op.
-func (l *routeLedger) navigationRecord(action ports.RouteNavigationAction) (routeRecord, bool, bool) {
+func (l *routeLedger) navigationRecord(action protocol.RouteNavigationAction) (routeRecord, bool, bool) {
 	selection, ok := l.navigationSelection(action)
 	return selection.selected, ok, selection.noOp
 }
@@ -688,7 +689,7 @@ func (l *routeLedger) navigationRecord(action ports.RouteNavigationAction) (rout
 // navigate resolves a captured key/generation, attempts resume before exact
 // attach, and commits only after the connector returns a matching identity.
 // A failed transition restores the prior live route and leaves history alone.
-func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigationAction, connector routeTransitionConnector) error {
+func (l *routeLedger) navigate(ctx context.Context, action protocol.RouteNavigationAction, connector routeTransitionConnector) error {
 	selection, ok := l.navigationSelection(action)
 	if !ok {
 		return errRouteStaleSelection
@@ -704,7 +705,7 @@ func (l *routeLedger) navigate(ctx context.Context, action ports.RouteNavigation
 	if ctx == nil {
 		return errors.New("route transition context is nil")
 	}
-	selected := ports.RouteRef{Key: action.Key, Generation: action.Generation}
+	selected := protocol.RouteRef{Key: action.Key, Generation: action.Generation}
 	plan := routeTransitionPlan{
 		identity:           identityFromWire(selected),
 		record:             record,

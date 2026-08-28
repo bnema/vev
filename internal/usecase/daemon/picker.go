@@ -10,6 +10,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -377,14 +378,14 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	committing := (result.action == '\r' || result.action == '\n') && ok
 	backNavigationSent := false
 	if result.exit && !committing {
-		back := ac.startupOverlay == ports.StartupOverlaySessionPicker && ac.navigationCapabilities&ports.NavigationCapabilityBack != 0
+		back := ac.startupOverlay == protocol.StartupOverlaySessionPicker && ac.navigationCapabilities&protocol.NavigationCapabilityBack != 0
 		if back {
 			if len(effects) == 0 || effects[0] == nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
 			}
 			effect := effects[0]
-			if err := d.sendNavigationActionForAttachment(effect, ports.NavigationBack); err != nil {
+			if err := d.sendNavigationActionForAttachment(effect, protocol.NavigationBack); err != nil {
 				d.reportAttachmentError(sess, err)
 				d.invalidateRender(sess, ac, true, "picker.go")
 				return
@@ -599,7 +600,7 @@ func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {
 	if width <= 0 || height <= 0 {
 		return 0, 0
 	}
-	return uint16(min(width, ports.RemotePreviewMaxWidth)), uint16(min(height, ports.RemotePreviewMaxHeight))
+	return uint16(min(width, protocol.RemotePreviewMaxWidth)), uint16(min(height, protocol.RemotePreviewMaxHeight))
 }
 
 func staticRemotePickerPreview(width, height uint16, message string) picker.Preview {
@@ -887,7 +888,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	d.mu.Lock()
 	var targetSess *session
 	var sessionName string
-	var exactTarget *ports.ExactSessionTarget
+	var exactTarget *protocol.ExactSessionTarget
 	var matches bool
 	if target.Name != "" {
 		var stopped inactiveSession
@@ -895,7 +896,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 		targetSess, stopped, stoppedTarget, matches = d.resolveNamedLifecycleTargetLocked(target)
 		if stoppedTarget && matches {
 			sessionName = stopped.name
-			exactTarget = &ports.ExactSessionTarget{LifecycleID: stopped.incarnation, SessionName: sessionName}
+			exactTarget = &protocol.ExactSessionTarget{LifecycleID: stopped.incarnation, SessionName: sessionName}
 		}
 	} else {
 		targetSess = d.sessions[target.Session]
@@ -904,7 +905,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	if matches && targetSess != nil {
 		targetSess.mu.Lock()
 		sessionName = targetSess.name
-		exactTarget = &ports.ExactSessionTarget{LifecycleID: targetSess.incarnation, SessionName: sessionName}
+		exactTarget = &protocol.ExactSessionTarget{LifecycleID: targetSess.incarnation, SessionName: sessionName}
 		targetSess.mu.Unlock()
 	}
 	d.mu.Unlock()

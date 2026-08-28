@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -25,8 +26,8 @@ import (
 // attachment-local state is also the ownership boundary for Kitty IDs: raw
 // scene IDs are never sent to the outer terminal.
 const (
-	maxGraphicsRecordBytes   = ports.MaxOutputDataLen
-	maxGraphicsOutputBytes   = ports.MaxOutputDataLen
+	maxGraphicsRecordBytes   = protocol.MaxOutputDataLen
+	maxGraphicsOutputBytes   = protocol.MaxOutputDataLen
 	graphicsUploadChunkBytes = 128 << 10
 )
 

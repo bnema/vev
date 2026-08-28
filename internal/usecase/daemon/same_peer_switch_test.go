@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestPaletteSessionSelectionCompletesSamePeerSwitch(t *testing.T) {
@@ -26,7 +27,7 @@ func TestPaletteSessionSelectionCompletesSamePeerSwitch(t *testing.T) {
 	d.mu.Lock()
 	d.sessions[target.id] = target
 	d.mu.Unlock()
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
 	token := beginRecentRoutePaletteEffect(t, d, source, ac)
 	d.handleInputForAttachment(token, []byte("\x1b "))
@@ -35,9 +36,9 @@ func TestPaletteSessionSelectionCompletesSamePeerSwitch(t *testing.T) {
 	targetFrame := awaitFrame(t, sends, ports.MsgAttachTarget)
 	attachTarget, err := ports.UnmarshalAttachTarget(targetFrame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, &ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, attachTarget.ExactTarget)
+	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, attachTarget.ExactTarget)
 
-	d.switchSamePeerForAttachment(token, ports.SamePeerSwitchRequest{
+	d.switchSamePeerForAttachment(token, protocol.SamePeerSwitchRequest{
 		RequestID: 1, Target: *attachTarget.ExactTarget,
 	})
 
@@ -68,16 +69,16 @@ func TestSamePeerSwitchTransitionsExactTargetAndPreferredTab(t *testing.T) {
 	d.mu.Lock()
 	d.sessions[target.id] = target
 	d.mu.Unlock()
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
 	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
-	requestTarget := ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
+	requestTarget := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
 	ac.offerSamePeerTarget(requestTarget)
 
-	d.switchSamePeerForAttachment(effect, ports.SamePeerSwitchRequest{
+	d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{
 		RequestID:      1,
 		Target:         requestTarget,
 		PreferredTabID: domain.TabStableID(target.tabs[1].stableID),
@@ -88,13 +89,13 @@ func TestSamePeerSwitchTransitionsExactTargetAndPreferredTab(t *testing.T) {
 	identityFrame := awaitFrame(t, sends, ports.MsgCommittedRouteIdentity)
 	identity, err := ports.UnmarshalCommittedRouteIdentity(identityFrame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, identity.Target)
+	require.Equal(t, protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}, identity.Target)
 }
 
 func TestFinishSendErrorDetachClearsSamePeerOffer(t *testing.T) {
 	d, sess, ac, _, releases := newManualTabSession(t, 1)
 	defer releaseAll(releases)
-	ac.offerSamePeerTarget(ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "target"})
+	ac.offerSamePeerTarget(protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "target"})
 
 	d.finishSendErrorDetach(sess, ac, ac.transport())
 
@@ -106,21 +107,21 @@ func TestFinishSendErrorDetachClearsSamePeerOffer(t *testing.T) {
 func TestSamePeerSwitchRejectsStaleTargetWithoutMutation(t *testing.T) {
 	d, source, ac, sends, releases := newManualTabSession(t, 1)
 	defer releaseAll(releases)
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
 	token := source.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
 	defer effect.End()
 
-	d.switchSamePeerForAttachment(effect, ports.SamePeerSwitchRequest{
+	d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{
 		RequestID: 1,
-		Target:    ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{9}, SessionName: "missing"},
+		Target:    protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{9}, SessionName: "missing"},
 	})
 
 	require.Same(t, source, ac.currentAttachmentSession())
 	failureFrame := awaitFrame(t, sends, ports.MsgSamePeerSwitchFailure)
 	failure, err := ports.UnmarshalSamePeerSwitchFailure(failureFrame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.SamePeerSwitchFailure{RequestID: 1, Code: ports.SamePeerSwitchStaleTarget}, failure)
+	require.Equal(t, protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchStaleTarget}, failure)
 }

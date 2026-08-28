@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/stretchr/testify/require"
 )
@@ -87,7 +87,7 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 		wantText          []string
 		wantKinds         []ResultKind
 		wantPositions     [][]int
-		wantActiveTargets map[int]ports.ExactSessionTarget
+		wantActiveTargets map[int]protocol.ExactSessionTarget
 	}{
 		{
 			name: "command shortcode precedes sessions and description matches",
@@ -128,7 +128,7 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 			wantText:      []string{"AX", "Resume session aAlpha", "Resume session aBravo", "Switch to session aEcho", "Switch to session aEcho", "Switch to session aZulu"},
 			wantKinds:     []ResultKind{ResultKindCommand, ResultKindStoppedSession, ResultKindStoppedSession, ResultKindActiveSession, ResultKindActiveSession, ResultKindActiveSession},
 			wantPositions: [][]int{{0}, {15}, {15}, {18}, {18}, {18}},
-			wantActiveTargets: map[int]ports.ExactSessionTarget{
+			wantActiveTargets: map[int]protocol.ExactSessionTarget{
 				3: testExactTarget("aEcho", 4), 4: testExactTarget("aEcho", 5), 5: testExactTarget("aZulu", 3),
 			},
 		},

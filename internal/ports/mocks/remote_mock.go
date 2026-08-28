@@ -10,6 +10,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -666,22 +667,22 @@ func (_m *MockRemotePreviewClient) EXPECT() *MockRemotePreviewClient_Expecter {
 }
 
 // Preview provides a mock function for the type MockRemotePreviewClient
-func (_mock *MockRemotePreviewClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width uint16, height uint16) (ports.RemotePreview, error) {
+func (_mock *MockRemotePreviewClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width uint16, height uint16) (protocol.RemotePreview, error) {
 	ret := _mock.Called(ctx, target, width, height)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Preview")
 	}
 
-	var r0 ports.RemotePreview
+	var r0 protocol.RemotePreview
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteSessionTarget, uint16, uint16) (ports.RemotePreview, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteSessionTarget, uint16, uint16) (protocol.RemotePreview, error)); ok {
 		return returnFunc(ctx, target, width, height)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteSessionTarget, uint16, uint16) ports.RemotePreview); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteSessionTarget, uint16, uint16) protocol.RemotePreview); ok {
 		r0 = returnFunc(ctx, target, width, height)
 	} else {
-		r0 = ret.Get(0).(ports.RemotePreview)
+		r0 = ret.Get(0).(protocol.RemotePreview)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, domain.RemoteSessionTarget, uint16, uint16) error); ok {
 		r1 = returnFunc(ctx, target, width, height)
@@ -733,12 +734,12 @@ func (_c *MockRemotePreviewClient_Preview_Call) Run(run func(ctx context.Context
 	return _c
 }
 
-func (_c *MockRemotePreviewClient_Preview_Call) Return(remotePreview ports.RemotePreview, err error) *MockRemotePreviewClient_Preview_Call {
+func (_c *MockRemotePreviewClient_Preview_Call) Return(remotePreview protocol.RemotePreview, err error) *MockRemotePreviewClient_Preview_Call {
 	_c.Call.Return(remotePreview, err)
 	return _c
 }
 
-func (_c *MockRemotePreviewClient_Preview_Call) RunAndReturn(run func(ctx context.Context, target domain.RemoteSessionTarget, width uint16, height uint16) (ports.RemotePreview, error)) *MockRemotePreviewClient_Preview_Call {
+func (_c *MockRemotePreviewClient_Preview_Call) RunAndReturn(run func(ctx context.Context, target domain.RemoteSessionTarget, width uint16, height uint16) (protocol.RemotePreview, error)) *MockRemotePreviewClient_Preview_Call {
 	_c.Call.Return(run)
 	return _c
 }

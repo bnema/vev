@@ -1,4 +1,4 @@
-package ports
+package protocol
 
 import (
 	"errors"
@@ -8,6 +8,10 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 )
+
+// ErrInvalidRouteWire preserves the public error classification used by
+// strict route codecs while route values live in the semantic protocol.
+var ErrInvalidRouteWire = errors.New("invalid route wire message")
 
 // RouteOrigin identifies how a client reached a daemon. The origin is client
 // composition metadata, not an authority granted to the daemon.
@@ -181,10 +185,10 @@ type RouteAttentionSubscription struct {
 	Targets []RouteAttentionTarget
 }
 
-func (r RouteRef) empty() bool { return r.Key == 0 && r.Generation == 0 }
+func (r RouteRef) IsZero() bool { return r.Key == 0 && r.Generation == 0 }
 
 func (r RouteRef) Validate() error {
-	if r.empty() {
+	if r.IsZero() {
 		return nil
 	}
 	if r.Key == 0 || r.Generation == 0 {
@@ -266,6 +270,13 @@ func (c SamePeerSwitchFailureCode) valid() bool {
 	return c == SamePeerSwitchStaleTarget || c == SamePeerSwitchUnavailable
 }
 
+func (c SamePeerSwitchFailureCode) Validate() error {
+	if !c.valid() {
+		return ErrInvalidRouteWire
+	}
+	return nil
+}
+
 // SamePeerSwitchFailure leaves the source attachment unchanged. RequestID
 // rejects a delayed failure after a later user selection.
 type SamePeerSwitchFailure struct {
@@ -305,6 +316,13 @@ func (c RouteFailureCode) valid() bool {
 	default:
 		return false
 	}
+}
+
+func (c RouteFailureCode) Validate() error {
+	if !c.valid() {
+		return ErrInvalidRouteWire
+	}
+	return nil
 }
 
 const (

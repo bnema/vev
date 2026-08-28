@@ -46,6 +46,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
@@ -892,10 +893,10 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	var remoteSelection *domain.RemoteSessionTarget
 	var remoteEnvironmentPolicy ports.EnvironmentPolicy
 	remoteDisplayOrigin := domain.RemoteDisplayOrigin(remoteTarget)
-	routeOrigin := ports.RouteOriginLocal
+	routeOrigin := protocol.RouteOriginLocal
 	routeOriginKey := "local"
 	if remoteTarget != "" {
-		routeOrigin = ports.RouteOriginRemote
+		routeOrigin = protocol.RouteOriginRemote
 		routeOriginKey = remoteTarget
 		if modeErr != nil {
 			return modeErr
@@ -939,7 +940,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			Intent:            target.Intent,
 			SessionName:       target.Session,
 			Remote:            true,
-			Origin:            ports.RouteOriginDiscovery,
+			Origin:            protocol.RouteOriginDiscovery,
 			OriginKey:         target.Endpoint,
 			RemoteTarget:      selection,
 			HostLabel:         displayOrigin,
@@ -968,7 +969,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
 				AttachHandoff:     handoff,
 				Remote:            true,
-				Origin:            ports.RouteOriginRemote,
+				Origin:            protocol.RouteOriginRemote,
 				OriginKey:         remoteTarget,
 			}, client.AttachRequest{
 				Intent:            intent,
@@ -992,9 +993,9 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				RuntimeObserver: deps.runtimeObserver,
 				AttachHandoff:   handoff,
 				Remote:          false,
-				Origin:          ports.RouteOriginLocal,
+				Origin:          protocol.RouteOriginLocal,
 				OriginKey:       "local",
-			}, client.AttachRequest{Intent: intent, SessionName: name, Origin: ports.RouteOriginLocal, OriginKey: "local"})
+			}, client.AttachRequest{Intent: intent, SessionName: name, Origin: protocol.RouteOriginLocal, OriginKey: "local"})
 		}
 
 		var handoffErr *client.AttachTargetError
@@ -1013,7 +1014,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		handoffAttempts++
 		remoteTarget = handoffErr.Target.Endpoint
 		remoteDisplayOrigin = domain.RemoteDisplayOrigin(remoteTarget)
-		routeOrigin = ports.RouteOriginDiscovery
+		routeOrigin = protocol.RouteOriginDiscovery
 		routeOriginKey = remoteTarget
 		name = handoffErr.Target.Session
 		intent = handoffErr.Target.Intent

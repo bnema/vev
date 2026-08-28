@@ -1,0 +1,323 @@
+package ports
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"time"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
+)
+
+// HandshakeTimeout bounds every transport handshake from connect through the
+// first committed publication.
+const HandshakeTimeout = 15 * time.Second
+
+// ProtocolVersion is the current vev IPC wire protocol version.
+const ProtocolVersion uint16 = 37
+
+// ConnectionCapabilities describes transport behavior relevant to session
+// flow without naming a concrete carriage.
+type ConnectionCapabilities struct {
+	OutputDataLimit       int
+	PreferredOutputWindow uint8
+	AsyncSend             bool
+	OwnedSynchronousSend  bool
+	LinkState             bool
+}
+
+var (
+	ErrInvalidHello             = errors.New("ports: invalid hello")
+	ErrInvalidAttachTarget      = errors.New("ports: invalid attach target")
+	ErrInvalidEnvironmentPolicy = errors.New("ports: invalid environment policy")
+	ErrInvalidClientNotice      = errors.New("ports: invalid client notice")
+	ErrInvalidDetached          = errors.New("ports: invalid detached reason")
+)
+
+const (
+	IntentEphemeral uint8 = 0
+	IntentNew       uint8 = 1
+	IntentAttach    uint8 = 2
+	IntentResume    uint8 = 3
+)
+
+type EnvironmentPolicy uint8
+
+const (
+	EnvironmentPolicyClientOwned EnvironmentPolicy = iota
+	EnvironmentPolicyDaemonOwned
+)
+
+const (
+	CapabilityResume  uint32 = 1 << 0
+	CapabilityUDP     uint32 = 1 << 1
+	CapabilityPredict uint32 = 1 << 2
+)
+
+const (
+	ErrVersionMismatch    uint16 = 1
+	ErrNoSuchSession      uint16 = 2
+	ErrNameTaken          uint16 = 3
+	ErrServerShutdown     uint16 = 4
+	ErrInvalidSessionName uint16 = 5
+	ErrUnknownCommand     uint16 = 6
+	ErrNotScriptable      uint16 = 7
+	ErrInvalidCommandArgs uint16 = 8
+	ErrNoSuchTarget       uint16 = 9
+	ErrAmbiguousTarget    uint16 = 10
+	ErrInternal           uint16 = 255
+)
+
+const (
+	ReasonDetach         uint8 = 0
+	ReasonSessionKilled  uint8 = 1
+	ReasonServerShutdown uint8 = 2
+	ReasonReplaced       uint8 = 3
+)
+
+// Hello is sent by the client immediately after connecting.
+type Hello struct {
+	Version     uint16
+	Intent      uint8
+	ClientID    [16]byte
+	ResumeToken uint64
+	Name        string
+	Size        domain.Size
+	PixelWidth  int
+	PixelHeight int
+	TermEnv     string
+	Cwd         string
+	TrueColor   bool
+	// KittyDirectGraphics is an explicit declaration that the client has
+	// probed its direct outer terminal and it accepts Kitty graphics output.
+	KittyDirectGraphics    bool
+	MaxOutputInFlight      uint8
+	Env                    []string
+	RemoteTarget           *domain.RemoteSessionTarget
+	ExactTarget            *protocol.ExactSessionTarget
+	PreferredTabID         domain.TabStableID
+	EnvironmentPolicy      EnvironmentPolicy
+	NavigationCapabilities protocol.NavigationCapabilities
+	StartupOverlay         protocol.StartupOverlay
+	Remote                 bool
+}
+
+func (h Hello) Geometry() domain.Geometry {
+	return domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}.NormalizePixels()
+}
+
+type Input struct {
+	InputSeq uint64
+	Data     []byte
+}
+
+type ClientNotice struct{ Action uint8 }
+
+const (
+	ClientNoticeClipboardFallback uint8 = 1
+	ClientNoticeClipboardTooLarge uint8 = 2
+	ClientNoticeLinkDegraded      uint8 = 3
+	ClientNoticeLinkConnected     uint8 = 4
+)
+
+type Detach struct{}
+type Ping struct{}
+type Pong struct{}
+
+type Welcome struct {
+	SessionID         string
+	SessionName       string
+	Ephemeral         bool
+	ResumeToken       uint64
+	Capabilities      uint32
+	CommittedIdentity *protocol.CommittedRouteIdentity
+}
+
+type ErrorMsg struct {
+	Code uint16
+	Text string
+}
+
+type AttachTarget struct {
+	Endpoint          string
+	Session           string
+	Intent            uint8
+	RemoteTarget      *domain.RemoteSessionTarget
+	ExactTarget       *protocol.ExactSessionTarget
+	EnvironmentPolicy EnvironmentPolicy
+	SamePeer          bool
+}
+
+type Detached struct{ Reason uint8 }
+type List struct{}
+
+type Kill struct {
+	Name string
+	All  bool
+}
+
+type SessionState uint8
+
+const (
+	SessionUp SessionState = iota
+	SessionDown
+	SessionBroken
+)
+
+type SessionInfo struct {
+	SessionID string
+	Name      string
+	State     SessionState
+	Ephemeral bool
+	Tabs      uint16
+	Attached  bool
+}
+
+type Sessions struct{ Sessions []SessionInfo }
+type OutputResetRequest struct{}
+
+func validEnvironmentPolicy(policy EnvironmentPolicy) bool {
+	return policy == EnvironmentPolicyClientOwned || policy == EnvironmentPolicyDaemonOwned
+}
+
+func validClientNoticeAction(action uint8) bool {
+	switch action {
+	case ClientNoticeClipboardFallback, ClientNoticeClipboardTooLarge, ClientNoticeLinkDegraded, ClientNoticeLinkConnected:
+		return true
+	default:
+		return false
+	}
+}
+
+func validDetachedReason(reason uint8) bool {
+	switch reason {
+	case ReasonDetach, ReasonSessionKilled, ReasonServerShutdown, ReasonReplaced:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidateEnvironmentPolicy(policy EnvironmentPolicy) error {
+	if !validEnvironmentPolicy(policy) {
+		return ErrInvalidEnvironmentPolicy
+	}
+	return nil
+}
+
+func ValidateClientNotice(m ClientNotice) error {
+	if !validClientNoticeAction(m.Action) {
+		return ErrInvalidClientNotice
+	}
+	return nil
+}
+
+func ValidateDetached(m Detached) error {
+	if !validDetachedReason(m.Reason) {
+		return ErrInvalidDetached
+	}
+	return nil
+}
+
+func validateHelloNavigation(h Hello) error {
+	if h.Intent != IntentAttach && h.Intent != IntentResume {
+		if h.NavigationCapabilities != 0 || h.StartupOverlay != protocol.StartupOverlayNone {
+			return protocol.ErrInvalidNavigation
+		}
+		return nil
+	}
+	return protocol.ValidateNavigation(h.NavigationCapabilities, h.StartupOverlay, h.RemoteTarget != nil || h.EnvironmentPolicy == EnvironmentPolicyDaemonOwned)
+}
+
+func ValidateHello(h Hello) error {
+	if h.Intent != IntentEphemeral && h.Intent != IntentNew && h.Intent != IntentAttach && h.Intent != IntentResume {
+		return ErrInvalidHello
+	}
+	if err := protocol.ValidateGeometry(domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}); err != nil {
+		return fmt.Errorf("%w: geometry", ErrInvalidHello)
+	}
+	if !validEnvironmentPolicy(h.EnvironmentPolicy) {
+		return ErrInvalidHello
+	}
+	if err := validateHelloNavigation(h); err != nil {
+		return fmt.Errorf("%w: navigation: %w", ErrInvalidHello, err)
+	}
+	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || len(h.Env) > math.MaxUint32 {
+		return ErrInvalidHello
+	}
+	for _, entry := range h.Env {
+		if uint64(len(entry)) > math.MaxUint32 {
+			return ErrInvalidHello
+		}
+	}
+	if h.PreferredTabID != "" {
+		if h.Intent != IntentAttach && h.Intent != IntentResume {
+			return ErrInvalidHello
+		}
+		if err := domain.ValidateTabStableID(h.PreferredTabID); err != nil {
+			return fmt.Errorf("%w: preferred tab: %v", ErrInvalidHello, err)
+		}
+	}
+	if h.ExactTarget != nil {
+		if h.Intent != IntentAttach && h.Intent != IntentResume {
+			return ErrInvalidHello
+		}
+		if err := h.ExactTarget.Validate(); err != nil {
+			return fmt.Errorf("%w: exact target: %v", ErrInvalidHello, err)
+		}
+		if h.Name != h.ExactTarget.SessionName {
+			return ErrInvalidHello
+		}
+		if h.RemoteTarget != nil && (h.RemoteTarget.LifecycleID != h.ExactTarget.LifecycleID || h.RemoteTarget.SessionName != h.ExactTarget.SessionName) {
+			return ErrInvalidHello
+		}
+	}
+	if h.RemoteTarget == nil {
+		return nil
+	}
+	if h.EnvironmentPolicy != EnvironmentPolicyDaemonOwned || (h.Intent != IntentAttach && h.Intent != IntentResume) {
+		return ErrInvalidHello
+	}
+	if err := validateWireRemoteTarget(*h.RemoteTarget); err != nil {
+		return fmt.Errorf("%w: remote target: %v", ErrInvalidHello, err)
+	}
+	if h.Name != h.RemoteTarget.SessionName {
+		return ErrInvalidHello
+	}
+	return nil
+}
+
+func ValidateAttachTarget(m AttachTarget) error {
+	if m.Session == "" || len(m.Endpoint) > math.MaxUint16 || len(m.Session) > math.MaxUint16 {
+		return ErrInvalidAttachTarget
+	}
+	if err := domain.ValidateSessionName(m.Session); err != nil {
+		return ErrInvalidAttachTarget
+	}
+	if m.Intent != IntentEphemeral && m.Intent != IntentNew && m.Intent != IntentAttach && m.Intent != IntentResume {
+		return ErrInvalidAttachTarget
+	}
+	if m.Intent == IntentResume || !validEnvironmentPolicy(m.EnvironmentPolicy) {
+		return ErrInvalidAttachTarget
+	}
+	if m.ExactTarget != nil && (m.ExactTarget.SessionName != m.Session || m.ExactTarget.Validate() != nil) {
+		return ErrInvalidAttachTarget
+	}
+	if m.SamePeer && (m.Endpoint != "" || m.RemoteTarget != nil || m.ExactTarget == nil) {
+		return ErrInvalidAttachTarget
+	}
+	if m.RemoteTarget == nil {
+		return nil
+	}
+	if m.EnvironmentPolicy != EnvironmentPolicyDaemonOwned || m.Intent != IntentAttach {
+		return ErrInvalidAttachTarget
+	}
+	if err := validateWireRemoteTarget(*m.RemoteTarget); err != nil {
+		return fmt.Errorf("%w: remote target: %v", ErrInvalidAttachTarget, err)
+	}
+	if m.Endpoint != m.RemoteTarget.Endpoint || m.Session != m.RemoteTarget.SessionName {
+		return ErrInvalidAttachTarget
+	}
+	return nil
+}

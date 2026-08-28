@@ -8,6 +8,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestRenamePublishesCommittedRouteIdentityToAttachedClients(t *testing.T) {
@@ -19,14 +20,14 @@ func TestRenamePublishesCommittedRouteIdentityToAttachedClients(t *testing.T) {
 	sess.mu.Unlock()
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	ac.installTestAttachmentCapability(token)
-	ac.setRouteSnapshot(ports.RecentRouteSnapshot{Generation: 1})
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
 	require.NoError(t, d.renameSession(sess, "vps-infra"))
 
 	frame := awaitFrame(t, sends, ports.MsgCommittedRouteIdentity)
 	identity, err := ports.UnmarshalCommittedRouteIdentity(frame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ExactSessionTarget{
+	require.Equal(t, protocol.ExactSessionTarget{
 		LifecycleID: domain.IncarnationID{1},
 		SessionName: "vps-infra",
 	}, identity.Target)
@@ -46,11 +47,11 @@ func TestRenameDefersCommittedRouteIdentityUntilFirstRouteSnapshot(t *testing.T)
 	require.NoError(t, d.renameSession(sess, "vps-infra"))
 	require.Empty(t, sends, "the route ledger must be published before its identity can be updated")
 
-	activeRef := ports.RouteRef{Key: 1, Generation: 1}
-	snapshot := ports.RecentRouteSnapshot{
+	activeRef := protocol.RouteRef{Key: 1, Generation: 1}
+	snapshot := protocol.RecentRouteSnapshot{
 		Generation:  1,
 		Active:      activeRef,
-		ActiveEntry: ports.RecentRouteEntry{Key: 1, Generation: 1, Target: testRouteTarget("0", 1), Name: "0", Kind: ports.RouteKindLocal},
+		ActiveEntry: protocol.RecentRouteEntry{Key: 1, Generation: 1, Target: testRouteTarget("0", 1), Name: "0", Kind: protocol.RouteKindLocal},
 		Home:        activeRef,
 	}
 	payload, err := ports.MarshalRecentRouteSnapshot(snapshot)
@@ -60,7 +61,7 @@ func TestRenameDefersCommittedRouteIdentityUntilFirstRouteSnapshot(t *testing.T)
 	frame := awaitFrame(t, sends, ports.MsgCommittedRouteIdentity)
 	identity, err := ports.UnmarshalCommittedRouteIdentity(frame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ExactSessionTarget{
+	require.Equal(t, protocol.ExactSessionTarget{
 		LifecycleID: domain.IncarnationID{1},
 		SessionName: "vps-infra",
 	}, identity.Target)

@@ -4,14 +4,15 @@ package daemon
 import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func frameWelcome(s *session, resumeToken uint64) (ports.Frame, error) {
 	s.mu.Lock()
-	var identity *ports.CommittedRouteIdentity
+	var identity *protocol.CommittedRouteIdentity
 	if s.incarnation != (domain.SessionLifecycleID{}) {
-		identity = &ports.CommittedRouteIdentity{
-			Target:    ports.ExactSessionTarget{LifecycleID: s.incarnation, SessionName: s.name},
+		identity = &protocol.CommittedRouteIdentity{
+			Target:    protocol.ExactSessionTarget{LifecycleID: s.incarnation, SessionName: s.name},
 			Ephemeral: s.ephemeral,
 		}
 	}
@@ -26,7 +27,7 @@ func frameWelcome(s *session, resumeToken uint64) (ports.Frame, error) {
 	w.ResumeToken = resumeToken
 	payload := ports.MarshalWelcome(w)
 	if payload == nil {
-		return ports.Frame{}, ports.ErrInvalidRouteWire
+		return ports.Frame{}, protocol.ErrInvalidRouteWire
 	}
 	return ports.Frame{Type: ports.MsgWelcome, Payload: payload}, nil
 }
@@ -36,7 +37,7 @@ func frameError(code uint16, text string) ports.Frame {
 }
 
 func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) (ports.Frame, error) {
-	payload, err := ports.MarshalOutput(ports.Output{
+	payload, err := ports.MarshalOutput(protocol.Output{
 		Epoch: 1, Base: baseState, New: state, Echo: echoAck,
 		Size: domain.Size{Cols: 1, Rows: 1}, Full: state != 0 && baseState == 0, Data: b,
 	})

@@ -11,6 +11,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -452,7 +453,7 @@ func TestTransportFloodClassification(t *testing.T) {
 			}
 		}
 		b.mu.Unlock()
-		primer := mustMarshalOutput(ports.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("primer")})
+		primer := mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("primer")})
 		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: primer}); err != nil {
 			t.Fatal(err)
 		}
@@ -529,7 +530,7 @@ func TestTransportFloodClassification(t *testing.T) {
 			}
 		})
 		for state := 1; state < outputCount; state++ {
-			payload := mustMarshalOutput(ports.Output{
+			payload := mustMarshalOutput(protocol.Output{
 				Epoch: 1,
 				Base:  uint64(state),
 				New:   uint64(state + 1),
@@ -854,7 +855,7 @@ func floodState(sender, receiver *Transport, link *simulatedLink) floodTransport
 }
 
 func floodOutputPayload(baseState, mtu int) []byte {
-	return mustMarshalOutput(ports.Output{
+	return mustMarshalOutput(protocol.Output{
 		Epoch: 1,
 		Base:  uint64(baseState),
 		New:   uint64(baseState + 1),

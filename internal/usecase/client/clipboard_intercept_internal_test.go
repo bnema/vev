@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // ciFakeReader is a directly-controllable ports.ClipboardReader for
@@ -26,17 +27,17 @@ func (r *ciFakeReader) ReadImage(context.Context) (string, []byte, error) {
 	return r.mime, r.data, r.err
 }
 
-func newTestClipboardIntercept(reader ports.ClipboardReader) (*clipboardIntercept, *pasteCoalescer, *pcFakeClock, *pcCollector, *[]ports.ImagePush) {
+func newTestClipboardIntercept(reader ports.ClipboardReader) (*clipboardIntercept, *pasteCoalescer, *pcFakeClock, *pcCollector, *[]protocol.ImagePush) {
 	clk := &pcFakeClock{}
 	col := &pcCollector{}
 	pc := newPasteCoalescer(clk, col.emit)
-	var images []ports.ImagePush
+	var images []protocol.ImagePush
 	ci := &clipboardIntercept{
 		coalescer: pc,
 		reader:    reader,
 		log:       slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelError + 1})),
 		sendImage: func(mime string, data []byte) {
-			images = append(images, ports.ImagePush{Mime: mime, Data: data})
+			images = append(images, protocol.ImagePush{Mime: mime, Data: data})
 		},
 		next: pc.Scan,
 	}
@@ -53,7 +54,7 @@ func TestClipboardInterceptCtrlVWithImageSendsNoPassthrough(t *testing.T) {
 	ci.Scan([]byte("b"))
 
 	require.Equal(t, 1, reader.n, "clipboard must be read exactly once per Ctrl+V")
-	require.Equal(t, []ports.ImagePush{{Mime: "image/png", Data: []byte("PNGDATA")}}, *images)
+	require.Equal(t, []protocol.ImagePush{{Mime: "image/png", Data: []byte("PNGDATA")}}, *images)
 	require.Equal(t, [][]byte{[]byte("a"), []byte("b")}, col.snapshot(), "0x16 itself must never reach the coalescer/pane")
 }
 

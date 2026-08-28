@@ -12,6 +12,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -38,7 +39,7 @@ type visualOutputState struct {
 	initialized  bool
 }
 
-func (s visualOutputState) next(output ports.Output) (visualOutputState, bool) {
+func (s visualOutputState) next(output protocol.Output) (visualOutputState, bool) {
 	if output.Epoch == 0 {
 		return visualOutputState{}, false
 	}
@@ -102,7 +103,7 @@ type visualCheckpoint struct {
 type visualOutputResult struct {
 	Accepted     bool
 	StateBearing bool
-	Ack          ports.Ack
+	Ack          protocol.Ack
 	event        *probeEvent
 }
 
@@ -180,13 +181,13 @@ func (p *visualProbe) recordControl(kind string) {
 	p.record(probeEvent{Kind: kind, Accepted: true})
 }
 
-func (p *visualProbe) apply(output ports.Output) visualOutputResult {
+func (p *visualProbe) apply(output protocol.Output) visualOutputResult {
 	if p == nil {
 		return visualOutputResult{}
 	}
 	p.outputFrames++
 	p.outputBytes += len(output.Data)
-	accepted := ports.ValidateOutput(output) == nil
+	accepted := protocol.ValidateOutput(output) == nil
 	next := visualOutputState{}
 	if accepted {
 		next, accepted = p.state.next(output)
@@ -220,7 +221,7 @@ func (p *visualProbe) apply(output ports.Output) visualOutputResult {
 	p.checkpoints = append(p.checkpoints, checkpoint)
 	result := visualOutputResult{Accepted: true, StateBearing: output.New != 0, event: event}
 	if result.StateBearing {
-		result.Ack = ports.Ack{Epoch: output.Epoch, State: output.New}
+		result.Ack = protocol.Ack{Epoch: output.Epoch, State: output.New}
 	}
 	return result
 }

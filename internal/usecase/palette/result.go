@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
@@ -32,7 +32,7 @@ type Result struct {
 type sessionPayload struct {
 	display   string
 	createdAt time.Time
-	target    ports.ExactSessionTarget
+	target    protocol.ExactSessionTarget
 }
 
 type remoteSessionPayload struct {
@@ -43,7 +43,7 @@ type remoteSessionPayload struct {
 
 type routePayload struct {
 	label  string
-	action ports.RouteNavigationAction
+	action protocol.RouteNavigationAction
 }
 
 // NewCommandResult creates a static command palette target.
@@ -52,13 +52,13 @@ func NewCommandResult(cmd command.Command) Result {
 }
 
 // NewActiveSessionResult creates an immutable active named-session target.
-func NewActiveSessionResult(target ports.ExactSessionTarget, createdAt time.Time) Result {
+func NewActiveSessionResult(target protocol.ExactSessionTarget, createdAt time.Time) Result {
 	return NewActiveSessionResultWithDisplayOrigin(target, createdAt, "")
 }
 
 // NewActiveSessionResultWithDisplayOrigin creates an active named-session target
 // qualified for presentation through a remote attachment origin.
-func NewActiveSessionResultWithDisplayOrigin(target ports.ExactSessionTarget, createdAt time.Time, displayOrigin string) Result {
+func NewActiveSessionResultWithDisplayOrigin(target protocol.ExactSessionTarget, createdAt time.Time, displayOrigin string) Result {
 	return Result{
 		kind:    ResultKindActiveSession,
 		session: newSessionPayload(target, createdAt, displayOrigin),
@@ -66,20 +66,20 @@ func NewActiveSessionResultWithDisplayOrigin(target ports.ExactSessionTarget, cr
 }
 
 // NewStoppedSessionResult creates an immutable stopped named-session target.
-func NewStoppedSessionResult(target ports.ExactSessionTarget, createdAt time.Time) Result {
+func NewStoppedSessionResult(target protocol.ExactSessionTarget, createdAt time.Time) Result {
 	return NewStoppedSessionResultWithDisplayOrigin(target, createdAt, "")
 }
 
 // NewStoppedSessionResultWithDisplayOrigin creates a stopped named-session target
 // qualified for presentation through a remote attachment origin.
-func NewStoppedSessionResultWithDisplayOrigin(target ports.ExactSessionTarget, createdAt time.Time, displayOrigin string) Result {
+func NewStoppedSessionResultWithDisplayOrigin(target protocol.ExactSessionTarget, createdAt time.Time, displayOrigin string) Result {
 	return Result{
 		kind:    ResultKindStoppedSession,
 		session: newSessionPayload(target, createdAt, displayOrigin),
 	}
 }
 
-func newSessionPayload(target ports.ExactSessionTarget, createdAt time.Time, displayOrigin string) sessionPayload {
+func newSessionPayload(target protocol.ExactSessionTarget, createdAt time.Time, displayOrigin string) sessionPayload {
 	display := target.SessionName
 	if displayOrigin != "" {
 		display = domain.RemoteSessionDisplay(target.SessionName, displayOrigin)
@@ -98,7 +98,7 @@ func NewRemoteSessionResult(key domain.RemoteSessionKey, target domain.RemoteSes
 }
 
 // NewRecentRouteResult creates an immutable client-ledger route target.
-func NewRecentRouteResult(label string, action ports.RouteNavigationAction) Result {
+func NewRecentRouteResult(label string, action protocol.RouteNavigationAction) Result {
 	return Result{kind: ResultKindRecentRoute, route: routePayload{label: label, action: action}}
 }
 
@@ -163,7 +163,7 @@ func (r Result) SessionCreatedAt() (time.Time, bool) {
 
 // SessionTarget returns the exact lifecycle UUID and name for local active and
 // stopped session results.
-func (r Result) SessionTarget() (ports.ExactSessionTarget, bool) {
+func (r Result) SessionTarget() (protocol.ExactSessionTarget, bool) {
 	return r.session.target, r.kind == ResultKindActiveSession || r.kind == ResultKindStoppedSession
 }
 
@@ -187,7 +187,7 @@ func (r Result) RemoteSessionUnavailableReason() (string, bool) {
 
 // RouteNavigationAction returns the exact client-ledger target only for a
 // recent-route result.
-func (r Result) RouteNavigationAction() (ports.RouteNavigationAction, bool) {
+func (r Result) RouteNavigationAction() (protocol.RouteNavigationAction, bool) {
 	return r.route.action, r.kind == ResultKindRecentRoute
 }
 

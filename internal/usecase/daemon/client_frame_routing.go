@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
@@ -169,15 +170,15 @@ func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f 
 		}
 		message := "route navigation failed"
 		switch failure.Code {
-		case ports.RouteFailureStaleSelection:
+		case protocol.RouteFailureStaleSelection:
 			message = "that recent route is no longer available"
-		case ports.RouteFailureTargetChanged:
+		case protocol.RouteFailureTargetChanged:
 			message = "that recent route changed before attach"
-		case ports.RouteFailureOriginUnavailable:
+		case protocol.RouteFailureOriginUnavailable:
 			message = "the original route is no longer available"
-		case ports.RouteFailureUnavailable:
+		case protocol.RouteFailureUnavailable:
 			message = "the selected route is unavailable"
-		case ports.RouteFailureNoSuchRoute:
+		case protocol.RouteFailureNoSuchRoute:
 			message = "that recent route no longer exists"
 		}
 		d.notify(effect.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)

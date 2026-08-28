@@ -5,6 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,13 +38,13 @@ func TestValidateAttachRequestNavigationTable(t *testing.T) {
 		valid   bool
 	}{
 		{name: "ordinary route", request: AttachRequest{}, valid: true},
-		{name: "home picker without remote route", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "work", NavigationCapabilities: ports.NavigationCapabilityHomePicker}, valid: false},
-		{name: "home picker on daemon-owned remote route", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "work", Remote: true, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned, NavigationCapabilities: ports.NavigationCapabilityHomePicker}, valid: true},
-		{name: "back on client-owned route", request: AttachRequest{StartupOverlay: ports.StartupOverlaySessionPicker, NavigationCapabilities: ports.NavigationCapabilityBack}, valid: true},
-		{name: "back on remote-target route", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "work", RemoteTarget: remoteRoute, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned, StartupOverlay: ports.StartupOverlaySessionPicker, NavigationCapabilities: ports.NavigationCapabilityBack}, valid: false},
+		{name: "home picker without remote route", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "work", NavigationCapabilities: protocol.NavigationCapabilityHomePicker}, valid: false},
+		{name: "home picker on daemon-owned remote route", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "work", Remote: true, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned, NavigationCapabilities: protocol.NavigationCapabilityHomePicker}, valid: true},
+		{name: "back on client-owned route", request: AttachRequest{StartupOverlay: protocol.StartupOverlaySessionPicker, NavigationCapabilities: protocol.NavigationCapabilityBack}, valid: true},
+		{name: "back on remote-target route", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "work", RemoteTarget: remoteRoute, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned, StartupOverlay: protocol.StartupOverlaySessionPicker, NavigationCapabilities: protocol.NavigationCapabilityBack}, valid: false},
 		{name: "unknown capability", request: AttachRequest{NavigationCapabilities: 4}, valid: false},
-		{name: "back without startup picker", request: AttachRequest{NavigationCapabilities: ports.NavigationCapabilityBack}, valid: false},
-		{name: "startup picker without back", request: AttachRequest{StartupOverlay: ports.StartupOverlaySessionPicker}, valid: false},
+		{name: "back without startup picker", request: AttachRequest{NavigationCapabilities: protocol.NavigationCapabilityBack}, valid: false},
+		{name: "startup picker without back", request: AttachRequest{StartupOverlay: protocol.StartupOverlaySessionPicker}, valid: false},
 	}
 
 	for _, tt := range tests {

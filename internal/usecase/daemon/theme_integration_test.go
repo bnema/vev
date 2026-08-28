@@ -7,12 +7,12 @@ import (
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
-func lifecycleTheme(foreground, background renderer.RGB, palette map[uint8]renderer.RGB) ports.Theme {
-	out := ports.Theme{
+func lifecycleTheme(foreground, background renderer.RGB, palette map[uint8]renderer.RGB) protocol.Theme {
+	out := protocol.Theme{
 		Foreground: foreground, Background: background,
 		HasForeground: true, HasBackground: true, TrueColor: true,
 		SchemeKnown: true,

@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // runRemotePreview is the hidden SSH-side carriage. The request is encoded in
@@ -27,7 +28,7 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		return writeRemotePreviewStatus(ports.RemotePreviewUnavailable)
+		return writeRemotePreviewStatus(protocol.RemotePreviewUnavailable)
 	}
 	defer func() { _ = transport.Close() }()
 	if err := transport.Send(ports.Frame{Type: ports.MsgRemotePreviewRequest, Payload: request}); err != nil {
@@ -63,8 +64,8 @@ func runRemotePreview(ctx context.Context, encoded string) error {
 	}
 }
 
-func writeRemotePreviewStatus(status ports.RemotePreviewStatus) error {
-	payload := ports.MarshalRemotePreview(ports.RemotePreview{Version: ports.RemotePreviewSchemaVersion, Status: status})
+func writeRemotePreviewStatus(status protocol.RemotePreviewStatus) error {
+	payload := ports.MarshalRemotePreview(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: status})
 	if payload == nil {
 		return errors.New("vev: failed to encode remote preview status")
 	}

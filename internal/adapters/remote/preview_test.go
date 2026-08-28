@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func previewClientTargetForTest() domain.RemoteSessionTarget {
@@ -31,8 +32,8 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 		Endpoint: "build@mule", DisplayOrigin: "mule", LifecycleID: lifecycle,
 		SessionName: "work", LiveTabID: "tab-1",
 	}
-	want := ports.RemotePreview{
-		Version: ports.RemotePreviewSchemaVersion, Status: ports.RemotePreviewOK,
+	want := protocol.RemotePreview{
+		Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK,
 		LifecycleID: lifecycle, TabID: target.LiveTabID, Revision: 7, Width: 1, Height: 1,
 		Cells: []renderer.Cell{{Rune: 'x', Style: renderer.DefaultStyle()}},
 	}
@@ -79,17 +80,17 @@ func TestRemotePreviewClientRejectsMismatchedResponseIdentity(t *testing.T) {
 	target := previewClientTargetForTest()
 	var otherLifecycle domain.SessionLifecycleID
 	otherLifecycle[0] = 2
-	valid := ports.RemotePreview{
-		Version: ports.RemotePreviewSchemaVersion, Status: ports.RemotePreviewOK,
+	valid := protocol.RemotePreview{
+		Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK,
 		LifecycleID: target.LifecycleID, TabID: target.LiveTabID, Revision: 1, Width: 1, Height: 1,
 		Cells: []renderer.Cell{{Rune: 'x', Style: renderer.DefaultStyle()}},
 	}
 	tests := []struct {
 		name   string
-		mutate func(*ports.RemotePreview)
+		mutate func(*protocol.RemotePreview)
 	}{
-		{name: "lifecycle ID", mutate: func(preview *ports.RemotePreview) { preview.LifecycleID = otherLifecycle }},
-		{name: "tab ID", mutate: func(preview *ports.RemotePreview) { preview.TabID = "tab-2" }},
+		{name: "lifecycle ID", mutate: func(preview *protocol.RemotePreview) { preview.LifecycleID = otherLifecycle }},
+		{name: "tab ID", mutate: func(preview *protocol.RemotePreview) { preview.TabID = "tab-2" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,7 +121,7 @@ func TestRemotePreviewClientRejectsMalformedResponse(t *testing.T) {
 
 func TestRemotePreviewClientRejectsOversizedOutput(t *testing.T) {
 	client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero", ports.RemotePreviewMaxBytes+1))
+		return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero", protocol.RemotePreviewMaxBytes+1))
 	}}
 	target := previewClientTargetForTest()
 	_, err := client.Preview(context.Background(), target, 1, 1)
@@ -145,7 +146,7 @@ func TestRemotePreviewClientReturnsInternalTimeoutSentinel(t *testing.T) {
 		},
 	}
 	_, err := client.Preview(context.Background(), previewClientTargetForTest(), 1, 1)
-	require.ErrorIs(t, err, ports.ErrRemotePreviewTimeout)
+	require.ErrorIs(t, err, protocol.ErrRemotePreviewTimeout)
 }
 
 func TestRemotePreviewClientReturnsCallerCancellation(t *testing.T) {

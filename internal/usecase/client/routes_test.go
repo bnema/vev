@@ -8,22 +8,23 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
-func routeTestTarget(index byte) ports.ExactSessionTarget {
-	return ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{index + 1}, SessionName: "session-" + string(rune('a'+index%26)) + string(rune('0'+index/26))}
+func routeTestTarget(index byte) protocol.ExactSessionTarget {
+	return protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{index + 1}, SessionName: "session-" + string(rune('a'+index%26)) + string(rune('0'+index/26))}
 }
 
-func routeTestCandidate(index byte, origin ports.RouteOrigin) routeCandidate {
+func routeTestCandidate(index byte, origin protocol.RouteOrigin) routeCandidate {
 	target := routeTestTarget(index)
 	return routeCandidate{
 		origin: origin,
 		target: target,
 		presentation: routePresentation{
 			name:         target.SessionName,
-			kind:         ports.RouteKindLocal,
-			reachability: ports.RouteReachabilityReachable,
+			kind:         protocol.RouteKindLocal,
+			reachability: protocol.RouteReachabilityReachable,
 		},
 		request: AttachRequest{
 			Intent:      ports.IntentAttach,
@@ -37,8 +38,8 @@ func TestRouteCandidateRetainsHostLabelWithoutDiscoveryTarget(t *testing.T) {
 	target := routeTestTarget(1)
 	candidate := routeCandidateForAttach(AttachRequest{
 		Intent: ports.IntentAttach, SessionName: target.SessionName, Remote: true,
-		Origin: ports.RouteOriginRemote, OriginKey: "user@remote", HostLabel: "remote",
-	}, ports.CommittedRouteIdentity{Target: target}, nil, 0)
+		Origin: protocol.RouteOriginRemote, OriginKey: "user@remote", HostLabel: "remote",
+	}, protocol.CommittedRouteIdentity{Target: target}, nil, 0)
 
 	require.Nil(t, candidate.request.RemoteTarget)
 	require.Equal(t, "remote", candidate.request.HostLabel)
@@ -49,7 +50,7 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	ledger := newRouteLedger()
 	var keys []routeKey
 	for i := byte(0); i < maxRouteLedgerEntries+8; i++ {
-		candidate := routeTestCandidate(i, ports.RouteOriginLocal)
+		candidate := routeTestCandidate(i, protocol.RouteOriginLocal)
 		candidate.home = i == 0
 		identity, err := ledger.commit(candidate)
 		require.NoError(t, err)
@@ -61,11 +62,11 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	require.Len(t, snapshot.Entries, maxRouteLedgerEntries-1)
 	require.Equal(t, uint64(keys[len(keys)-1]), snapshot.Active.Key)
 	require.Equal(t, routeTestTarget(maxRouteLedgerEntries+7), snapshot.ActiveEntry.Target)
-	require.Equal(t, snapshot.Active, ports.RouteRef{Key: snapshot.ActiveEntry.Key, Generation: snapshot.ActiveEntry.Generation})
+	require.Equal(t, snapshot.Active, protocol.RouteRef{Key: snapshot.ActiveEntry.Key, Generation: snapshot.ActiveEntry.Generation})
 	for _, entry := range snapshot.Entries {
 		require.NoError(t, entry.Target.Validate())
 		require.Equal(t, entry.Name, entry.Target.SessionName)
-		require.NotEqual(t, snapshot.Active, ports.RouteRef{Key: entry.Key, Generation: entry.Generation})
+		require.NotEqual(t, snapshot.Active, protocol.RouteRef{Key: entry.Key, Generation: entry.Generation})
 	}
 	require.Equal(t, uint64(keys[len(keys)-2]), snapshot.Previous.Key)
 	require.Equal(t, uint64(keys[0]), snapshot.Home.Key, "home is retained when older entries are evicted")
@@ -79,7 +80,7 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 	require.Equal(t, originalName, fresh.Entries[0].Name)
 
 	old := ledger.activeRef()
-	_, err := ledger.commit(routeTestCandidate(maxRouteLedgerEntries+9, ports.RouteOriginLocal))
+	_, err := ledger.commit(routeTestCandidate(maxRouteLedgerEntries+9, protocol.RouteOriginLocal))
 	require.NoError(t, err)
 	require.NotEqual(t, old, ledger.activeRef())
 	require.Equal(t, old, ledger.previousRef(), "the old active route becomes the previous route")
@@ -87,21 +88,21 @@ func TestRouteLedgerBoundsAndImmutableSnapshot(t *testing.T) {
 
 func TestRouteLedgerRemembersTabsIndependentlyPerExactRoute(t *testing.T) {
 	ledger := newRouteLedger()
-	first := routeTestCandidate(1, ports.RouteOriginLocal)
+	first := routeTestCandidate(1, protocol.RouteOriginLocal)
 	firstIdentity, err := ledger.commit(first)
 	require.NoError(t, err)
 	firstRef := ledger.activeRef()
 	firstSnapshotGeneration := ledger.snapshot().Generation
-	require.NoError(t, ledger.updateRoutePosition(ports.RoutePosition{Target: first.target, ActiveTabID: "tab-first"}))
+	require.NoError(t, ledger.updateRoutePosition(protocol.RoutePosition{Target: first.target, ActiveTabID: "tab-first"}))
 	require.Equal(t, firstRef, ledger.activeRef(), "tab memory must not rotate route identity")
 	require.Equal(t, firstSnapshotGeneration, ledger.snapshot().Generation, "tab memory must not stale navigation snapshots")
 
-	second := routeTestCandidate(2, ports.RouteOriginRemote)
+	second := routeTestCandidate(2, protocol.RouteOriginRemote)
 	secondIdentity, err := ledger.commit(second)
 	require.NoError(t, err)
 	secondRef := ledger.activeRef()
 	secondSnapshotGeneration := ledger.snapshot().Generation
-	require.NoError(t, ledger.updateRoutePosition(ports.RoutePosition{Target: second.target, ActiveTabID: "tab-second"}))
+	require.NoError(t, ledger.updateRoutePosition(protocol.RoutePosition{Target: second.target, ActiveTabID: "tab-second"}))
 	require.Equal(t, secondRef, ledger.activeRef(), "tab memory must not rotate route identity")
 	require.Equal(t, secondSnapshotGeneration, ledger.snapshot().Generation, "tab memory must not stale navigation snapshots")
 
@@ -115,13 +116,13 @@ func TestRouteLedgerRemembersTabsIndependentlyPerExactRoute(t *testing.T) {
 
 func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 	ledger := newRouteLedger()
-	first := routeTestCandidate(1, ports.RouteOriginLocal)
+	first := routeTestCandidate(1, protocol.RouteOriginLocal)
 	first.originKey = "local"
 	_, err := ledger.commit(first)
 	require.NoError(t, err)
-	require.NoError(t, ledger.updateRoutePosition(ports.RoutePosition{Target: first.target, ActiveTabID: "tab-first"}))
+	require.NoError(t, ledger.updateRoutePosition(protocol.RoutePosition{Target: first.target, ActiveTabID: "tab-first"}))
 
-	second := routeTestCandidate(2, ports.RouteOriginLocal)
+	second := routeTestCandidate(2, protocol.RouteOriginLocal)
 	second.originKey = "local"
 	_, err = ledger.commit(second)
 	require.NoError(t, err)
@@ -130,8 +131,8 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 	recreated.LifecycleID[0]++
 	for _, tt := range []struct {
 		name            string
-		target          ports.ExactSessionTarget
-		wantExactTarget *ports.ExactSessionTarget
+		target          protocol.ExactSessionTarget
+		wantExactTarget *protocol.ExactSessionTarget
 		wantTab         domain.TabStableID
 	}{
 		{name: "matching lifecycle restores remembered tab", target: first.target, wantExactTarget: &first.target, wantTab: "tab-first"},
@@ -153,11 +154,11 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 }
 
 func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *testing.T) {
-	active := routeTestCandidate(2, ports.RouteOriginLocal)
+	active := routeTestCandidate(2, protocol.RouteOriginLocal)
 	active.originKey = "local"
 	active.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
-	active.request.NavigationCapabilities = ports.NavigationCapabilityHomePicker
-	active.request.StartupOverlay = ports.StartupOverlaySessionPicker
+	active.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
+	active.request.StartupOverlay = protocol.StartupOverlaySessionPicker
 
 	for _, tt := range []struct {
 		name    string
@@ -170,11 +171,11 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 			ledger := newRouteLedger()
 			target := routeTestTarget(1)
 			if tt.matched {
-				stored := routeTestCandidate(1, ports.RouteOriginLocal)
+				stored := routeTestCandidate(1, protocol.RouteOriginLocal)
 				stored.originKey = "local"
 				stored.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
-				stored.request.NavigationCapabilities = ports.NavigationCapabilityHomePicker
-				stored.request.StartupOverlay = ports.StartupOverlaySessionPicker
+				stored.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
+				stored.request.StartupOverlay = protocol.StartupOverlaySessionPicker
 				_, err := ledger.commit(stored)
 				require.NoError(t, err)
 			}
@@ -186,7 +187,7 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 
 			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
 			require.Zero(t, request.NavigationCapabilities)
-			require.Equal(t, ports.StartupOverlayNone, request.StartupOverlay)
+			require.Equal(t, protocol.StartupOverlayNone, request.StartupOverlay)
 			require.NoError(t, validateAttachRequest(request))
 		})
 	}
@@ -194,7 +195,7 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 
 func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
 	ledger := newRouteLedger()
-	work := routeTestCandidate(1, ports.RouteOriginRemote)
+	work := routeTestCandidate(1, protocol.RouteOriginRemote)
 	work.originKey = "remote"
 	work.request.Remote = true
 	work.request.OriginKey = "remote"
@@ -206,7 +207,7 @@ func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
 	_, err := ledger.commit(work)
 	require.NoError(t, err)
 
-	agents := routeTestCandidate(2, ports.RouteOriginRemote)
+	agents := routeTestCandidate(2, protocol.RouteOriginRemote)
 	agents.originKey = "remote"
 	agents.request.Remote = true
 	agents.request.OriginKey = "remote"
@@ -220,32 +221,32 @@ func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
 	})
 
 	require.True(t, request.Remote)
-	require.Equal(t, ports.RouteOriginRemote, request.Origin)
+	require.Equal(t, protocol.RouteOriginRemote, request.Origin)
 	require.Equal(t, "remote", request.OriginKey)
 	require.Nil(t, request.RemoteTarget)
 }
 
 func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) {
 	ledger := newRouteLedger()
-	first := routeTestCandidate(0, ports.RouteOriginRemote)
+	first := routeTestCandidate(0, protocol.RouteOriginRemote)
 	first.originKey = "host-a"
 	firstIdentity, err := ledger.commit(first)
 	require.NoError(t, err)
-	other := routeTestCandidate(1, ports.RouteOriginLocal)
+	other := routeTestCandidate(1, protocol.RouteOriginLocal)
 	_, err = ledger.commit(other)
 	require.NoError(t, err)
-	otherRemote := routeTestCandidate(2, ports.RouteOriginRemote)
+	otherRemote := routeTestCandidate(2, protocol.RouteOriginRemote)
 	otherRemote.originKey = "host-b"
 	_, err = ledger.commit(otherRemote)
 	require.NoError(t, err)
-	active := routeTestCandidate(3, ports.RouteOriginRemote)
+	active := routeTestCandidate(3, protocol.RouteOriginRemote)
 	active.originKey = "host-a"
 	_, err = ledger.commit(active)
 	require.NoError(t, err)
 
 	subscription := ledger.attentionSubscription()
 
-	require.Equal(t, []ports.RouteAttentionTarget{{
+	require.Equal(t, []protocol.RouteAttentionTarget{{
 		Ref:    firstIdentity.wire(),
 		Target: first.target,
 	}}, subscription.Targets)
@@ -253,16 +254,16 @@ func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) 
 
 func TestCommittedIdentityRenamesActiveRouteInPlace(t *testing.T) {
 	ledger := newRouteLedger()
-	original := routeTestCandidate(0, ports.RouteOriginLocal)
-	original.target = ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "0"}
+	original := routeTestCandidate(0, protocol.RouteOriginLocal)
+	original.target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "0"}
 	original.presentation.name = "0"
 	original.request.SessionName = "0"
 	identity, err := ledger.commit(original)
 	require.NoError(t, err)
 	before := ledger.snapshot()
 
-	committed, err := ledger.commitCommittedIdentity(ports.CommittedRouteIdentity{
-		Target:    ports.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "vps-infra"},
+	committed, err := ledger.commitCommittedIdentity(protocol.CommittedRouteIdentity{
+		Target:    protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "vps-infra"},
 		Ephemeral: false,
 	})
 	require.NoError(t, err)
@@ -280,11 +281,11 @@ func TestCommittedIdentityRenamesActiveRouteInPlace(t *testing.T) {
 
 func TestCommittedIdentityDoesNotReassignHomeRoute(t *testing.T) {
 	ledger := newRouteLedger()
-	home := routeTestCandidate(1, ports.RouteOriginLocal)
+	home := routeTestCandidate(1, protocol.RouteOriginLocal)
 	home.home = true
 	homeIdentity, err := ledger.commit(home)
 	require.NoError(t, err)
-	committed, err := ledger.commitCommittedIdentity(ports.CommittedRouteIdentity{
+	committed, err := ledger.commitCommittedIdentity(protocol.CommittedRouteIdentity{
 		Target:    routeTestTarget(2),
 		Ephemeral: true,
 	})
@@ -295,7 +296,7 @@ func TestCommittedIdentityDoesNotReassignHomeRoute(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, committed, active.identity)
 
-	_, err = ledger.commit(routeTestCandidate(1, ports.RouteOriginLocal))
+	_, err = ledger.commit(routeTestCandidate(1, protocol.RouteOriginLocal))
 	require.NoError(t, err)
 	require.True(t, mustRouteRecord(t, ledger, ledger.activeRef()).home, "upserting the home route must retain its marker")
 }
@@ -309,7 +310,7 @@ func TestRouteLedgerConcurrentInitialAttachmentsKeepOneHome(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := ledger.commitAttach(routeTestCandidate(i, ports.RouteOriginLocal))
+			_, err := ledger.commitAttach(routeTestCandidate(i, protocol.RouteOriginLocal))
 			errs <- err
 		}()
 	}
@@ -333,22 +334,22 @@ func TestRouteLedgerConcurrentInitialAttachmentsKeepOneHome(t *testing.T) {
 
 func TestRouteLedgerTransitionRejectsConcurrentCommit(t *testing.T) {
 	ledger := newRouteLedger()
-	selected, err := ledger.commit(routeTestCandidate(1, ports.RouteOriginLocal))
+	selected, err := ledger.commit(routeTestCandidate(1, protocol.RouteOriginLocal))
 	require.NoError(t, err)
-	_, err = ledger.commit(routeTestCandidate(2, ports.RouteOriginLocal))
+	_, err = ledger.commit(routeTestCandidate(2, protocol.RouteOriginLocal))
 	require.NoError(t, err)
 	selection, ok := ledger.navigationSelection(selected.wireNavigationAction(routeGeneration(ledger.snapshot().Generation)))
 	require.True(t, ok)
 
-	_, err = ledger.commit(routeTestCandidate(3, ports.RouteOriginLocal))
+	_, err = ledger.commit(routeTestCandidate(3, protocol.RouteOriginLocal))
 	require.NoError(t, err)
-	candidate := routeTestCandidate(4, ports.RouteOriginLocal)
+	candidate := routeTestCandidate(4, protocol.RouteOriginLocal)
 	err = ledger.commitTransition(selected, selection.snapshotGeneration, selection.active, candidate)
 	require.ErrorIs(t, err, errRouteStaleSelection)
 	require.Equal(t, routeTestTarget(3), mustRouteRecord(t, ledger, ledger.activeRef()).target)
 }
 
-func mustRouteRecord(t *testing.T, ledger *routeLedger, ref ports.RouteRef) routeRecord {
+func mustRouteRecord(t *testing.T, ledger *routeLedger, ref protocol.RouteRef) routeRecord {
 	t.Helper()
 	record, ok := ledger.lookup(ref)
 	require.True(t, ok)
@@ -357,7 +358,7 @@ func mustRouteRecord(t *testing.T, ledger *routeLedger, ref ports.RouteRef) rout
 
 func TestRouteLedgerUpsertChangesGenerationWithoutChangingOpaqueKey(t *testing.T) {
 	ledger := newRouteLedger()
-	candidate := routeTestCandidate(1, ports.RouteOriginRemote)
+	candidate := routeTestCandidate(1, protocol.RouteOriginRemote)
 	first, err := ledger.commit(candidate)
 	require.NoError(t, err)
 
@@ -387,7 +388,7 @@ type routeTestConnector struct {
 	attachCalls   int
 	restoreCalls  int
 	restoreErr    error
-	restoreTarget ports.ExactSessionTarget
+	restoreTarget protocol.ExactSessionTarget
 }
 
 func (c *routeTestConnector) Resume(context.Context, routeRecord) (routeTransitionCommit, error) {
@@ -410,11 +411,11 @@ func (c *routeTestConnector) Attach(_ context.Context, record routeRecord) (rout
 		return routeTransitionCommit{}, c.attachErr
 	}
 	return routeTransitionCommit{
-		identity: ports.CommittedRouteIdentity{Target: record.target},
+		identity: protocol.CommittedRouteIdentity{Target: record.target},
 		presentation: routePresentation{
 			name:         record.presentation.name,
 			kind:         record.presentation.kind,
-			reachability: ports.RouteReachabilityReachable,
+			reachability: protocol.RouteReachabilityReachable,
 		},
 		resumeToken: 123,
 	}, nil
@@ -422,12 +423,12 @@ func (c *routeTestConnector) Attach(_ context.Context, record routeRecord) (rout
 
 func TestRouteLedgerNavigateResumesThenFallsBackAndRestoresOrigin(t *testing.T) {
 	ledger := newRouteLedger()
-	candidate := routeTestCandidate(2, ports.RouteOriginDiscovery)
+	candidate := routeTestCandidate(2, protocol.RouteOriginDiscovery)
 	candidate.originKey = "daemon-discovered"
 	candidate.resumeToken = 77
 	identity, err := ledger.commit(candidate)
 	require.NoError(t, err)
-	_, err = ledger.commit(routeTestCandidate(4, ports.RouteOriginLocal))
+	_, err = ledger.commit(routeTestCandidate(4, protocol.RouteOriginLocal))
 	require.NoError(t, err)
 
 	connector := &routeTestConnector{resumeErr: errRouteResumeUnavailable}
@@ -440,18 +441,18 @@ func TestRouteLedgerNavigateResumesThenFallsBackAndRestoresOrigin(t *testing.T) 
 
 	active, ok := ledger.lookup(ledger.activeRef())
 	require.True(t, ok)
-	require.Equal(t, ports.RouteOriginDiscovery, active.origin)
+	require.Equal(t, protocol.RouteOriginDiscovery, active.origin)
 	require.Equal(t, "daemon-discovered", active.originKey)
-	require.Equal(t, ports.RouteOriginDiscovery, active.request.Origin)
+	require.Equal(t, protocol.RouteOriginDiscovery, active.request.Origin)
 	require.Equal(t, candidate.target, active.target)
 	require.Greater(t, active.identity.generation, identity.generation)
 }
 
 func TestRouteLedgerNavigateIsTransactionalOnFailureOrTargetChange(t *testing.T) {
 	ledger := newRouteLedger()
-	identity, err := ledger.commit(routeTestCandidate(3, ports.RouteOriginLocal))
+	identity, err := ledger.commit(routeTestCandidate(3, protocol.RouteOriginLocal))
 	require.NoError(t, err)
-	_, err = ledger.commit(routeTestCandidate(5, ports.RouteOriginLocal))
+	_, err = ledger.commit(routeTestCandidate(5, protocol.RouteOriginLocal))
 	require.NoError(t, err)
 	before := ledger.snapshot()
 	action := identity.wireNavigationAction(routeGeneration(before.Generation))
@@ -475,7 +476,7 @@ func TestRouteLedgerNavigateIsTransactionalOnFailureOrTargetChange(t *testing.T)
 
 func TestRouteLedgerNavigationRejectsStaleActionsAndActiveNoOp(t *testing.T) {
 	ledger := newRouteLedger()
-	active, err := ledger.commit(routeTestCandidate(6, ports.RouteOriginLocal))
+	active, err := ledger.commit(routeTestCandidate(6, protocol.RouteOriginLocal))
 	require.NoError(t, err)
 	firstSnapshot := ledger.snapshot()
 	before := ledger.snapshot()
@@ -483,7 +484,7 @@ func TestRouteLedgerNavigationRejectsStaleActionsAndActiveNoOp(t *testing.T) {
 	require.NoError(t, ledger.navigate(context.Background(), active.wireNavigationAction(routeGeneration(firstSnapshot.Generation)), nil))
 	require.Equal(t, before, ledger.snapshot())
 
-	_, err = ledger.commit(routeTestCandidate(7, ports.RouteOriginLocal))
+	_, err = ledger.commit(routeTestCandidate(7, protocol.RouteOriginLocal))
 	require.NoError(t, err)
 	stale := active.wireNavigationAction(routeGeneration(firstSnapshot.Generation))
 	connector := &routeTestConnector{}
@@ -496,13 +497,13 @@ type mismatchingRouteConnector struct{ *routeTestConnector }
 
 func (c mismatchingRouteConnector) Attach(_ context.Context, record routeRecord) (routeTransitionCommit, error) {
 	return routeTransitionCommit{
-		identity:     ports.CommittedRouteIdentity{Target: routeTestTarget(99)},
+		identity:     protocol.CommittedRouteIdentity{Target: routeTestTarget(99)},
 		presentation: routePresentation{name: record.presentation.name, kind: record.presentation.kind},
 	}, nil
 }
 
-func (i routeIdentity) wireNavigationAction(snapshotGeneration routeGeneration) ports.RouteNavigationAction {
-	return ports.RouteNavigationAction{SnapshotGeneration: uint64(snapshotGeneration), Key: uint64(i.key), Generation: uint64(i.generation)}
+func (i routeIdentity) wireNavigationAction(snapshotGeneration routeGeneration) protocol.RouteNavigationAction {
+	return protocol.RouteNavigationAction{SnapshotGeneration: uint64(snapshotGeneration), Key: uint64(i.key), Generation: uint64(i.generation)}
 }
 
 func TestRouteLedgerConcurrentSnapshotsAndCommits(t *testing.T) {
@@ -513,7 +514,7 @@ func TestRouteLedgerConcurrentSnapshotsAndCommits(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := byte(0); i < 20; i++ {
-				_, _ = ledger.commit(routeTestCandidate(worker*20+i, ports.RouteOriginLocal))
+				_, _ = ledger.commit(routeTestCandidate(worker*20+i, protocol.RouteOriginLocal))
 				_ = ledger.snapshot()
 			}
 		}()
@@ -524,7 +525,7 @@ func TestRouteLedgerConcurrentSnapshotsAndCommits(t *testing.T) {
 
 func TestRouteLedgerSeparatesRemoteDaemonOrigins(t *testing.T) {
 	ledger := newRouteLedger()
-	firstCandidate := routeTestCandidate(40, ports.RouteOriginRemote)
+	firstCandidate := routeTestCandidate(40, protocol.RouteOriginRemote)
 	firstCandidate.originKey = "daemon-a"
 	secondCandidate := firstCandidate
 	secondCandidate.originKey = "daemon-b"

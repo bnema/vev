@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // manualPaletteClock applies only declarative coordinator timer actions. Its
@@ -52,8 +52,8 @@ func (c *manualPaletteClock) fireCompletion(g *paletteGenerationCoordinator, id 
 	return g.handle(paletteGenerationEvent{id: id, kind: paletteEventCompletionDeadline})
 }
 
-func generationTheme() ports.Theme {
-	return ports.Theme{
+func generationTheme() protocol.Theme {
+	return protocol.Theme{
 		TrueColor:     true,
 		HasForeground: true,
 		Foreground:    renderer.RGB{R: 1, G: 2, B: 3},

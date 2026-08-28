@@ -14,6 +14,7 @@ import (
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -126,14 +127,14 @@ func TestStatusSegmentsResolvesActiveLifecyclePresentation(t *testing.T) {
 
 			sess.name = "vive"
 			sess.incarnation = domain.SessionLifecycleID{1}
-			ref := ports.RouteRef{Key: 1, Generation: 1}
-			ac.setRouteSnapshot(ports.RecentRouteSnapshot{
+			ref := protocol.RouteRef{Key: 1, Generation: 1}
+			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
 				Generation: 1,
 				Active:     ref,
-				ActiveEntry: ports.RecentRouteEntry{
+				ActiveEntry: protocol.RecentRouteEntry{
 					Key: ref.Key, Generation: ref.Generation,
-					Target: ports.ExactSessionTarget{LifecycleID: tt.routeLifecycle, SessionName: sess.name},
-					Name:   "vive", HostLabel: "user@arch", Kind: ports.RouteKindRemote,
+					Target: protocol.ExactSessionTarget{LifecycleID: tt.routeLifecycle, SessionName: sess.name},
+					Name:   "vive", HostLabel: "user@arch", Kind: protocol.RouteKindRemote,
 				},
 			})
 
@@ -466,7 +467,7 @@ func TestStatusApplyThemeStoresClientAndPropagatesScreens(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
 	defer releasePTY2()
-	msg := ports.Theme{HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3}, HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6}, SchemeKnown: true, Light: true}
+	msg := protocol.Theme{HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3}, HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6}, SchemeKnown: true, Light: true}
 
 	d.applyTheme(sess, ac, msg)
 
@@ -484,7 +485,7 @@ func TestApplyThemePropagatesToFloatingPane(t *testing.T) {
 	tb := testAttachmentTab(sess)
 	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
 	installTestFloating(tb, floating, true)
-	clientTheme := ports.Theme{
+	clientTheme := protocol.Theme{
 		HasForeground: true,
 		Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true,
@@ -520,7 +521,7 @@ func TestApplyThemeForcedBuiltinThemePropagatesToChromeAndPanes(t *testing.T) {
 			defer releasePTY2()
 			d.ApplyConfig(domain.Config{Theme: tc.mode})
 
-			d.applyTheme(sess, ac, ports.Theme{
+			d.applyTheme(sess, ac, protocol.Theme{
 				HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 				HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 				TrueColor: true, SchemeKnown: true, Light: !tc.want.Light,
@@ -575,7 +576,7 @@ func TestAutoThemeDetachClearsPaneColorScheme(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeAuto})
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 		TrueColor: true, SchemeKnown: true, Light: true,
@@ -592,7 +593,7 @@ func TestAttachClientClearsStaleColorSchemeOnReplacement(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeAuto})
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 		TrueColor: true, SchemeKnown: true, Light: true,
@@ -611,7 +612,7 @@ func TestForcedThemeDetachPreservesBuiltinOnPanes(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark})
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 		TrueColor: true, SchemeKnown: true, Light: true,
@@ -628,12 +629,12 @@ func TestApplyThemeAutoUnknownDoesNotClobberPaneColorScheme(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 		TrueColor: true, SchemeKnown: true, Light: true,
 	})
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 7, G: 8, B: 9},
 		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
 		TrueColor: true,
@@ -703,7 +704,7 @@ func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer release()
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 	})
@@ -723,7 +724,7 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer release()
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
 	})
@@ -747,7 +748,7 @@ func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer release()
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 7, G: 8, B: 9},
 		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
 	})
@@ -766,7 +767,7 @@ func TestDetachOnSendErrorParkPreservesScreenDefaultColors(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	ac.resumeCapable = true
-	d.applyTheme(sess, ac, ports.Theme{
+	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 7, G: 8, B: 9},
 		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
 	})
@@ -988,9 +989,9 @@ func TestBarStateForContextualRecentUsesClientSnapshot(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 
-	snapshot := ports.RecentRouteSnapshot{
+	snapshot := protocol.RecentRouteSnapshot{
 		Generation: 1,
-		Entries:    []ports.RecentRouteEntry{{Key: 2, Generation: 1, Target: testRouteTarget("captured", 2), Name: "captured", Kind: ports.RouteKindLocal, Attention: true}},
+		Entries:    []protocol.RecentRouteEntry{{Key: 2, Generation: 1, Target: testRouteTarget("captured", 2), Name: "captured", Kind: protocol.RouteKindLocal, Attention: true}},
 	}
 	hints := palette.ContextualHints{
 		Kind:         command.ContextHintRecentSessions,
@@ -1444,7 +1445,7 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		frameInput([]byte("\x1b ")),
 		frameInput([]byte("CNT\r")),
 		frameInput([]byte("\x1b1")),
-		ports.Frame{Type: ports.MsgResize, Payload: mustMarshalResize(ports.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
+		ports.Frame{Type: ports.MsgResize, Payload: mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
 	)
 
 	var hg sync.WaitGroup

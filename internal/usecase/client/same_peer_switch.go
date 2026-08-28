@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // samePeerInputGate holds raw input behind a requested in-band switch. It does
@@ -20,7 +20,7 @@ type samePeerInputGate struct {
 
 type samePeerSwitchPending struct {
 	requestID uint64
-	target    ports.ExactSessionTarget
+	target    protocol.ExactSessionTarget
 }
 
 func newSamePeerInputGate() *samePeerInputGate {

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -34,14 +34,14 @@ type remotePreviewCacheKey struct {
 }
 
 type remotePreviewCacheEntry struct {
-	Preview ports.RemotePreview
+	Preview protocol.RemotePreview
 	Fetched time.Time
 	Used    time.Time
 }
 
 type remotePreviewFlight struct {
 	done    chan struct{}
-	preview ports.RemotePreview
+	preview protocol.RemotePreview
 	err     error
 }
 
@@ -53,7 +53,7 @@ type remotePreviewState struct {
 	slots     chan struct{}
 }
 
-func cloneRemotePreview(preview ports.RemotePreview) ports.RemotePreview {
+func cloneRemotePreview(preview protocol.RemotePreview) protocol.RemotePreview {
 	preview.Cells = slices.Clone(preview.Cells)
 	return preview
 }
@@ -82,24 +82,24 @@ func remotePreviewKeyFor(target domain.RemoteSessionTarget, width, height uint16
 	}
 }
 
-func (d *Daemon) fetchRemotePreview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (ports.RemotePreview, error) {
+func (d *Daemon) fetchRemotePreview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
 	if d == nil || d.remotePreviewClient == nil {
-		return ports.RemotePreview{}, errors.New("remote preview client unavailable")
+		return protocol.RemotePreview{}, errors.New("remote preview client unavailable")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return ports.RemotePreview{}, err
+		return protocol.RemotePreview{}, err
 	}
-	request := ports.RemotePreviewRequest{
-		Version: ports.RemotePreviewSchemaVersion,
+	request := protocol.RemotePreviewRequest{
+		Version: protocol.RemotePreviewSchemaVersion,
 		Target:  target,
 		Width:   width,
 		Height:  height,
 	}
-	if err := ports.ValidateRemotePreviewRequest(request); err != nil {
-		return ports.RemotePreview{}, err
+	if err := protocol.ValidateRemotePreviewRequest(request); err != nil {
+		return protocol.RemotePreview{}, err
 	}
 
 	key := remotePreviewKeyFor(target, width, height)
@@ -139,7 +139,7 @@ func (d *Daemon) fetchRemotePreview(ctx context.Context, target domain.RemoteSes
 
 	if until, cooling := d.remotePreview.cooldowns[key]; cooling && now.Before(until) {
 		d.remotePreview.mu.Unlock()
-		return ports.RemotePreview{}, errRemotePreviewCooldown
+		return protocol.RemotePreview{}, errRemotePreviewCooldown
 	}
 	if flight := d.remotePreview.flights[key]; flight != nil {
 		d.remotePreview.mu.Unlock()
@@ -160,12 +160,12 @@ func (d *Daemon) remotePreviewContext() context.Context {
 	return context.Background()
 }
 
-func waitRemotePreviewFlight(ctx context.Context, flight *remotePreviewFlight) (ports.RemotePreview, error) {
+func waitRemotePreviewFlight(ctx context.Context, flight *remotePreviewFlight) (protocol.RemotePreview, error) {
 	select {
 	case <-flight.done:
 		return cloneRemotePreview(flight.preview), flight.err
 	case <-ctx.Done():
-		return ports.RemotePreview{}, ctx.Err()
+		return protocol.RemotePreview{}, ctx.Err()
 	}
 }
 
@@ -173,7 +173,7 @@ func waitRemotePreviewFlight(ctx context.Context, flight *remotePreviewFlight) (
 // while still publishing the refreshed result once the same-key flight finishes.
 // A completed flight is read from the cache without starting a second remote
 // request.
-func (d *Daemon) awaitRemotePreviewRefresh(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (ports.RemotePreview, error) {
+func (d *Daemon) awaitRemotePreviewRefresh(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
 	key := remotePreviewKeyFor(target, width, height)
 	d.remotePreview.mu.Lock()
 	flight := d.remotePreview.flights[key]
@@ -188,20 +188,20 @@ func (d *Daemon) runRemotePreviewFlight(ctx context.Context, key remotePreviewCa
 	select {
 	case d.remotePreview.slots <- struct{}{}:
 	case <-ctx.Done():
-		d.finishRemotePreviewFlight(key, flight, ports.RemotePreview{}, ctx.Err())
+		d.finishRemotePreviewFlight(key, flight, protocol.RemotePreview{}, ctx.Err())
 		return
 	}
-	var preview ports.RemotePreview
+	var preview protocol.RemotePreview
 	var err error
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("remote preview flight panicked: %v", recovered)
-			preview = ports.RemotePreview{}
+			preview = protocol.RemotePreview{}
 			d.finishRemotePreviewFlight(key, flight, preview, err)
 			panic(recovered)
 		}
 		if err != nil {
-			preview = ports.RemotePreview{}
+			preview = protocol.RemotePreview{}
 		}
 		d.finishRemotePreviewFlight(key, flight, preview, err)
 	}()
@@ -209,9 +209,9 @@ func (d *Daemon) runRemotePreviewFlight(ctx context.Context, key remotePreviewCa
 
 	preview, err = d.remotePreviewClient.Preview(ctx, target, width, height)
 	if err == nil {
-		if validationErr := ports.ValidateRemotePreview(preview); validationErr != nil {
+		if validationErr := protocol.ValidateRemotePreview(preview); validationErr != nil {
 			err = validationErr
-		} else if preview.Status != ports.RemotePreviewOK {
+		} else if preview.Status != protocol.RemotePreviewOK {
 			err = fmt.Errorf("remote preview returned status %d", preview.Status)
 		} else if preview.LifecycleID != target.LifecycleID || preview.TabID != target.LiveTabID {
 			err = errors.New("remote preview identity changed")
@@ -219,7 +219,7 @@ func (d *Daemon) runRemotePreviewFlight(ctx context.Context, key remotePreviewCa
 	}
 }
 
-func (d *Daemon) finishRemotePreviewFlight(key remotePreviewCacheKey, flight *remotePreviewFlight, preview ports.RemotePreview, err error) {
+func (d *Daemon) finishRemotePreviewFlight(key remotePreviewCacheKey, flight *remotePreviewFlight, preview protocol.RemotePreview, err error) {
 	now := d.clock.Now()
 	d.remotePreview.mu.Lock()
 	for cooldownKey, until := range d.remotePreview.cooldowns {

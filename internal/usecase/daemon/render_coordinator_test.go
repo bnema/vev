@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -1164,7 +1165,7 @@ func TestProducerInvalidations(t *testing.T) {
 			file: "client.go",
 			name: "client theme application",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				d.applyTheme(sess, ac, ports.Theme{TrueColor: true})
+				d.applyTheme(sess, ac, protocol.Theme{TrueColor: true})
 			},
 		},
 		{

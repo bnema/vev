@@ -9,6 +9,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -243,15 +244,15 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 func TestImagePushGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  ImagePush
+		msg  protocol.ImagePush
 		want []byte
 	}{
 		{
 			name: "png data",
-			msg:  ImagePush{InputSeq: 7, Mime: "image/png", Data: []byte{0x01, 0x02, 0x03}},
+			msg:  protocol.ImagePush{InputSeq: 7, Mime: "image/png", Data: []byte{0x01, 0x02, 0x03}},
 			want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x09, 0x69, 0x6d, 0x61, 0x67, 0x65, 0x2f, 0x70, 0x6e, 0x67, 0x01, 0x02, 0x03},
 		},
-		{name: "empty", msg: ImagePush{}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+		{name: "empty", msg: protocol.ImagePush{}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
 	}
 
 	for _, tt := range tests {
@@ -288,17 +289,17 @@ func TestThemeGoldenAndRoundTrip(t *testing.T) {
 	zeroes := make([]byte, 57)
 	tests := []struct {
 		name string
-		msg  Theme
+		msg  protocol.Theme
 		want []byte
 	}{
 		{
 			name: "empty",
-			msg:  Theme{},
+			msg:  protocol.Theme{},
 			want: zeroes,
 		},
 		{
 			name: "foreground only",
-			msg: Theme{
+			msg: protocol.Theme{
 				HasForeground: true,
 				Foreground:    renderer.RGB{R: 10, G: 20, B: 30},
 				Background:    renderer.RGB{R: 40, G: 50, B: 60},
@@ -307,14 +308,14 @@ func TestThemeGoldenAndRoundTrip(t *testing.T) {
 		},
 		{
 			name: "light flag without known scheme",
-			msg: Theme{
+			msg: protocol.Theme{
 				Light: true,
 			},
 			want: append([]byte{0x10}, zeroes[1:]...),
 		},
 		{
 			name: "full palette",
-			msg: Theme{
+			msg: protocol.Theme{
 				HasForeground: true,
 				Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
 				HasBackground: true,
@@ -356,7 +357,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	// A generation clear retains defaults/capabilities but has no palette bits.
 	// This literal payload locks the existing 57-byte Theme layout while the
 	// full definitive-palette golden above locks the final publication.
-	cleared := Theme{
+	cleared := protocol.Theme{
 		HasForeground: true,
 		Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true,
@@ -370,7 +371,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
-	msg := Resize{Size: domain.Size{Cols: 100, Rows: 40}}
+	msg := protocol.Resize{Size: domain.Size{Cols: 100, Rows: 40}}
 	want := []byte{0x00, 0x64, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00}
 
 	got, err := MarshalResize(msg)
@@ -440,8 +441,8 @@ func TestPongGoldenAndRoundTrip(t *testing.T) {
 func TestMarshalWelcomeRejectsInvalidCommittedIdentity(t *testing.T) {
 	got := MarshalWelcome(Welcome{
 		SessionName: "work",
-		CommittedIdentity: &CommittedRouteIdentity{
-			Target: ExactSessionTarget{SessionName: "different"},
+		CommittedIdentity: &protocol.CommittedRouteIdentity{
+			Target: protocol.ExactSessionTarget{SessionName: "different"},
 		},
 	})
 	require.Nil(t, got)
@@ -452,8 +453,8 @@ func TestMarshalWelcomeRejectsCommittedIdentityMetadataMismatch(t *testing.T) {
 		SessionID:   "session",
 		SessionName: "work",
 		Ephemeral:   true,
-		CommittedIdentity: &CommittedRouteIdentity{
-			Target:    ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"},
+		CommittedIdentity: &protocol.CommittedRouteIdentity{
+			Target:    protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"},
 			Ephemeral: true,
 		},
 	}
@@ -675,7 +676,7 @@ func TestErrorMsgGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestOutputGoldenAndRoundTrip(t *testing.T) {
-	msg := Output{Epoch: 1, Base: 0, New: 2, Echo: 3, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("hello\n")}
+	msg := protocol.Output{Epoch: 1, Base: 0, New: 2, Echo: 3, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("hello\n")}
 	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x06, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a}
 
 	got, err := MarshalOutput(msg)
@@ -698,7 +699,7 @@ func TestOutputGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestAckGoldenAndRoundTrip(t *testing.T) {
-	msg := Ack{Epoch: 1, State: 0x0102030405060708}
+	msg := protocol.Ack{Epoch: 1, State: 0x0102030405060708}
 	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
 
 	got, err := MarshalAck(msg)

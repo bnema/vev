@@ -8,6 +8,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -61,7 +62,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 }
 
 type paletteSessionIdentity struct {
-	kind      ports.RouteKind
+	kind      protocol.RouteKind
 	endpoint  string
 	lifecycle domain.SessionLifecycleID
 }
@@ -73,11 +74,11 @@ type remotePalettePresentationIdentity struct {
 }
 
 func localPaletteSessionIdentity(lifecycle domain.SessionLifecycleID) paletteSessionIdentity {
-	return paletteSessionIdentity{kind: ports.RouteKindLocal, endpoint: "local", lifecycle: lifecycle}
+	return paletteSessionIdentity{kind: protocol.RouteKindLocal, endpoint: "local", lifecycle: lifecycle}
 }
 
 func remotePaletteSessionIdentity(endpoint string, lifecycle domain.SessionLifecycleID) paletteSessionIdentity {
-	return paletteSessionIdentity{kind: ports.RouteKindRemote, endpoint: endpoint, lifecycle: lifecycle}
+	return paletteSessionIdentity{kind: protocol.RouteKindRemote, endpoint: endpoint, lifecycle: lifecycle}
 }
 
 func paletteRemoteDisplayOrigin(hostLabel string) string {
@@ -88,19 +89,19 @@ func paletteRemoteDisplayOrigin(hostLabel string) string {
 	return origin
 }
 
-func paletteDaemonDisplayOrigin(snapshot ports.RecentRouteSnapshot, lifecycle domain.SessionLifecycleID) string {
+func paletteDaemonDisplayOrigin(snapshot protocol.RecentRouteSnapshot, lifecycle domain.SessionLifecycleID) string {
 	active, ok := activeRouteEntryForLifecycle(snapshot, lifecycle)
-	if !ok || active.Kind != ports.RouteKindRemote {
+	if !ok || active.Kind != protocol.RouteKindRemote {
 		return ""
 	}
 	return paletteRemoteDisplayOrigin(active.HostLabel)
 }
 
-func paletteRouteRepresentsDaemonSession(entry ports.RecentRouteEntry, daemonDisplayOrigin string) bool {
-	if entry.Kind == ports.RouteKindLocal {
+func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemonDisplayOrigin string) bool {
+	if entry.Kind == protocol.RouteKindLocal {
 		return true
 	}
-	return entry.Kind == ports.RouteKindRemote && daemonDisplayOrigin != "" &&
+	return entry.Kind == protocol.RouteKindRemote && daemonDisplayOrigin != "" &&
 		paletteRemoteDisplayOrigin(entry.HostLabel) == daemonDisplayOrigin
 }
 
@@ -113,7 +114,7 @@ func remotePaletteUnavailableReason(status remoteHostStatus, session ports.Remot
 
 // paletteResults captures eligible named sessions before paletteMu so the
 // palette has an immutable lifecycle target without violating lock ordering.
-func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot ports.RecentRouteSnapshot) []palette.Result {
+func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot protocol.RecentRouteSnapshot) []palette.Result {
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
 	stopped := make([]inactiveSession, 0, len(d.inactive))
@@ -154,7 +155,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		if candidate == current {
 			continue
 		}
-		target := ports.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
+		target := protocol.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
 		active = append(active, palette.NewActiveSessionResultWithDisplayOrigin(target, time.Unix(0, snap.createdAt), daemonDisplayOrigin))
 	}
 	sort.Slice(active, func(i, j int) bool {
@@ -165,7 +166,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 	results = append(results, active...)
 	for _, candidate := range stopped {
-		target := ports.ExactSessionTarget{LifecycleID: candidate.incarnation, SessionName: candidate.name}
+		target := protocol.ExactSessionTarget{LifecycleID: candidate.incarnation, SessionName: candidate.name}
 		results = append(results, palette.NewStoppedSessionResultWithDisplayOrigin(target, time.Unix(0, candidate.createdAt), daemonDisplayOrigin))
 		represented[localPaletteSessionIdentity(target.LifecycleID)] = struct{}{}
 	}
@@ -210,12 +211,12 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		if _, exists := represented[identity]; exists && paletteRouteRepresentsDaemonSession(entry, daemonDisplayOrigin) {
 			continue
 		}
-		results = append(results, palette.NewRecentRouteResult(label, ports.RouteNavigationAction{
+		results = append(results, palette.NewRecentRouteResult(label, protocol.RouteNavigationAction{
 			SnapshotGeneration: routeSnapshot.Generation,
 			Key:                entry.Key,
 			Generation:         entry.Generation,
 		}))
-		if entry.Kind == ports.RouteKindLocal {
+		if entry.Kind == protocol.RouteKindLocal {
 			represented[identity] = struct{}{}
 			continue
 		}
@@ -251,7 +252,7 @@ func (d *Daemon) refreshPalette(ac *attachedClient) {
 	model := rt.palette
 	generation := rt.paletteGeneration
 	routeSnapshot := rt.paletteRouteSnapshot
-	routeSnapshot.Entries = append([]ports.RecentRouteEntry(nil), routeSnapshot.Entries...)
+	routeSnapshot.Entries = append([]protocol.RecentRouteEntry(nil), routeSnapshot.Entries...)
 	rt.paletteMu.Unlock()
 	if model == nil {
 		return
@@ -266,7 +267,7 @@ func (d *Daemon) refreshPalette(ac *attachedClient) {
 	model.ReplaceResults(results)
 }
 
-func recentRouteHints(snapshot ports.RecentRouteSnapshot, args []string) palette.ContextualHints {
+func recentRouteHints(snapshot protocol.RecentRouteSnapshot, args []string) palette.ContextualHints {
 	formatted := formatRecentRouteSnapshot(snapshot)
 	names := make([]string, len(formatted))
 	for i, entry := range formatted {
@@ -342,10 +343,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var remoteKey domain.RemoteSessionKey
 	var remoteUnavailableReason string
 	var hasRemoteTarget bool
-	var routeTarget ports.RouteNavigationAction
+	var routeTarget protocol.RouteNavigationAction
 	var hasRouteTarget bool
 	var args []string
-	var routeSnapshot ports.RecentRouteSnapshot
+	var routeSnapshot protocol.RecentRouteSnapshot
 	var generation uint64
 	var rawQuery string
 	changed, cancel, execute := false, false, false
@@ -419,7 +420,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 				}
 				if cmd.ContextHint == command.ContextHintRecentSessions {
 					routeSnapshot = ac.overlays.paletteRouteSnapshot
-					routeSnapshot.Entries = append([]ports.RecentRouteEntry(nil), routeSnapshot.Entries...)
+					routeSnapshot.Entries = append([]protocol.RecentRouteEntry(nil), routeSnapshot.Entries...)
 				}
 			} else if target, ok := selected.RemoteSessionTarget(); ok {
 				key, keyOK := selected.RemoteSessionKey()
@@ -624,7 +625,7 @@ func (ac *attachedClient) clearPaletteLocked() remoteDiscoveryInstance {
 	model := ac.overlays.palette
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = nil
-	ac.overlays.paletteRouteSnapshot = ports.RecentRouteSnapshot{}
+	ac.overlays.paletteRouteSnapshot = protocol.RecentRouteSnapshot{}
 	ac.overlays.paletteHints = palette.ContextualHints{}
 	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
@@ -679,7 +680,7 @@ type paletteExec struct {
 	sess                *session
 	attachment          *session
 	ac                  *attachedClient
-	routeSnapshot       ports.RecentRouteSnapshot
+	routeSnapshot       protocol.RecentRouteSnapshot
 	actions             daemonActionRunner
 	effect              *attachmentEffect
 	redrawClosedPalette bool
@@ -911,8 +912,8 @@ func (e paletteExec) RenameTabTo(name string) error {
 }
 
 func (e paletteExec) OpenSessionPicker() error {
-	if e.ac != nil && e.ac.navigationCapabilities&ports.NavigationCapabilityHomePicker != 0 && e.effect != nil {
-		return e.d.sendNavigationActionForAttachment(e.effect, ports.NavigationOpenHomePicker)
+	if e.ac != nil && e.ac.navigationCapabilities&protocol.NavigationCapabilityHomePicker != 0 && e.effect != nil {
+		return e.d.sendNavigationActionForAttachment(e.effect, protocol.NavigationOpenHomePicker)
 	}
 	e.d.enterPicker(e.sess, e.ac)
 	return nil
@@ -945,14 +946,14 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 		return command.ErrInvalidArguments
 	}
 	entry := e.routeSnapshot.Entries[rank-1]
-	return e.NavigateRecentRoute(ports.RouteNavigationAction{
+	return e.NavigateRecentRoute(protocol.RouteNavigationAction{
 		SnapshotGeneration: e.routeSnapshot.Generation,
 		Key:                entry.Key,
 		Generation:         entry.Generation,
 	})
 }
 
-func (e paletteExec) NavigateRecentRoute(action ports.RouteNavigationAction) error {
+func (e paletteExec) NavigateRecentRoute(action protocol.RouteNavigationAction) error {
 	if e.d.beforeRecentSessionHandoff != nil {
 		e.d.beforeRecentSessionHandoff()
 	}

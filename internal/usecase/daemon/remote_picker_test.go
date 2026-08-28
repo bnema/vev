@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -842,18 +843,18 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 	tests := []struct {
 		name   string
-		action ports.NavigationAction
+		action protocol.NavigationAction
 	}{
-		{name: "home picker", action: ports.NavigationOpenHomePicker},
-		{name: "back", action: ports.NavigationBack},
+		{name: "home picker", action: protocol.NavigationOpenHomePicker},
+		{name: "back", action: protocol.NavigationBack},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newRemotePickerDaemon(nil)
 			sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-			if tt.action == ports.NavigationOpenHomePicker {
-				ac.navigationCapabilities = ports.NavigationCapabilityHomePicker
+			if tt.action == protocol.NavigationOpenHomePicker {
+				ac.navigationCapabilities = protocol.NavigationCapabilityHomePicker
 			}
 			token := sess.captureAttachmentCapability(ac, ac.transport())
 			effect, admitted := ac.beginAttachmentEffect(token)
@@ -865,7 +866,7 @@ func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 			directive, err := ports.UnmarshalNavigationDirective(frame.Payload)
 			require.NoError(t, err)
 			require.Equal(t, tt.action, directive.Action)
-			if tt.action == ports.NavigationOpenHomePicker {
+			if tt.action == protocol.NavigationOpenHomePicker {
 				require.False(t, directive.LeaseID.IsZero())
 			} else {
 				require.True(t, directive.LeaseID.IsZero())
