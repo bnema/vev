@@ -62,7 +62,7 @@ type routeCandidate struct {
 	originKey    string
 	target       protocol.ExactSessionTarget
 	presentation routePresentation
-	dialer       ports.Dialer
+	dialer       ports.ClientDialer
 	request      AttachRequest
 	resumeToken  uint64
 	home         bool
@@ -74,7 +74,7 @@ type routeRecord struct {
 	originKey    string
 	target       protocol.ExactSessionTarget
 	presentation routePresentation
-	dialer       ports.Dialer
+	dialer       ports.ClientDialer
 	request      AttachRequest
 	resumeToken  uint64
 	home         bool
@@ -115,7 +115,7 @@ func cloneRoutePosition(position *protocol.RoutePosition) *protocol.RoutePositio
 	return &clone
 }
 
-func routeCandidateForAttach(request AttachRequest, identity protocol.CommittedRouteIdentity, dialer ports.Dialer, resumeToken uint64) routeCandidate {
+func routeCandidateForAttach(request AttachRequest, identity protocol.CommittedRouteIdentity, dialer ports.ClientDialer, resumeToken uint64) routeCandidate {
 	origin := normalizeRouteOrigin(request.Origin, request.Remote)
 	originKey := normalizeRouteOriginKey(request.OriginKey, origin)
 	kind := protocol.RouteKindLocal
@@ -628,7 +628,7 @@ type routeTransitionPlan struct {
 type routeTransitionCommit struct {
 	identity     protocol.CommittedRouteIdentity
 	presentation routePresentation
-	dialer       ports.Dialer
+	dialer       ports.ClientDialer
 	resumeToken  uint64
 }
 

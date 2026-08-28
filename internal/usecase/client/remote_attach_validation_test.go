@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -24,7 +23,7 @@ func TestMalformedAttachRequestsNeverDial(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// No EXPECT: any Dial call fails the test.
-			dialer := portsmocks.NewMockDialer(t)
+			dialer := newMockClientDialer(t)
 			err := NewRunner(Dependencies{Dialer: dialer}).Run(context.Background(), tt.request)
 			require.Error(t, err)
 		})

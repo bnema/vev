@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
@@ -18,9 +20,9 @@ func (t *ackRecordingTransport) Recv() (wire.Frame, error) { return wire.Frame{}
 func (t *ackRecordingTransport) Close() error              { return nil }
 
 func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
-	normal := make(chan wire.Frame, sendQueueDepth)
+	normal := make(chan protocol.ClientMessage, sendQueueDepth)
 	for range cap(normal) {
-		normal <- wire.Frame{Type: wire.MsgInput}
+		normal <- protocol.Input{}
 	}
 	const epoch = 7
 	acks := newCumulativeAckQueue()
@@ -45,8 +47,8 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	normal := make(chan wire.Frame, 1)
-	control := make(chan wire.Frame, 1)
+	normal := make(chan protocol.ClientMessage, 1)
+	control := make(chan protocol.ClientMessage, 1)
 	gate := newSamePeerInputGate()
 	gate.setPaused(true)
 	held := make(chan struct{})
@@ -56,9 +58,9 @@ func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 	errs := make(chan error, 1)
 	go runSender(ctx, cancel, transport, control, nil, normal, gate, acks, errs, slog.Default())
 
-	normal <- wire.Frame{Type: wire.MsgInput, Payload: []byte("held")}
+	normal <- protocol.Input{Data: []byte("held")}
 	awaitSenderSignal(t, held)
-	control <- wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: []byte("switch")}
+	control <- protocol.SamePeerSwitchRequest{RequestID: 1, Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}}
 	if got := awaitSenderFrame(t, transport.sent); got.Type != wire.MsgSamePeerSwitchRequest {
 		t.Fatalf("first frame = %d, want same-peer switch request", got.Type)
 	}
@@ -76,14 +78,14 @@ func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 func TestSenderBarrierLeavesPausedInputQueued(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	normal := make(chan wire.Frame, 1)
+	normal := make(chan protocol.ClientMessage, 1)
 	barriers := make(chan chan struct{})
 	gate := newSamePeerInputGate()
 	gate.setPaused(true)
 	transport := &ackRecordingTransport{sent: make(chan wire.Frame, 1)}
 	go runSender(ctx, cancel, transport, nil, barriers, normal, gate, newCumulativeAckQueue(), make(chan error, 1), slog.Default())
 
-	normal <- wire.Frame{Type: wire.MsgInput, Payload: []byte("held")}
+	normal <- protocol.Input{Data: []byte("held")}
 	barrierDone := make(chan struct{})
 	barriers <- barrierDone
 	awaitSenderSignal(t, barrierDone)
@@ -106,7 +108,7 @@ func TestSenderBarrierFlushesPendingAck(t *testing.T) {
 	acks.offer(3, 9)
 	transport := &ackRecordingTransport{sent: make(chan wire.Frame, 1)}
 	barriers := make(chan chan struct{})
-	go runSender(ctx, cancel, transport, nil, barriers, make(chan wire.Frame, 1), newSamePeerInputGate(), acks, make(chan error, 1), slog.Default())
+	go runSender(ctx, cancel, transport, nil, barriers, make(chan protocol.ClientMessage, 1), newSamePeerInputGate(), acks, make(chan error, 1), slog.Default())
 
 	done := make(chan struct{})
 	barriers <- done

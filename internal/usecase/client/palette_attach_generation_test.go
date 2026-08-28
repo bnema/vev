@@ -438,7 +438,7 @@ func TestStdinPumpSameReadSchemeAndOldMarkerCannotAdvanceReplacement(t *testing.
 	// notification and publish its replacement generation before the scanner
 	// can deliver the old marker from the same terminal Read.
 	events := make(chan paletteGenerationEvent)
-	out := make(chan wire.Frame, 1)
+	out := make(chan protocol.ClientMessage, 1)
 	schemeHandled := make(chan struct{})
 	pump := &stdinPump{
 		ctx:              ctx,

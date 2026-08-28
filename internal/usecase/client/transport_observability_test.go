@@ -46,7 +46,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	reporter := ports.NewSerializedRuntimeObserver(observer, 1)
 	defer reporter.Close()
 	acked := make(chan struct{})
-	transport := portsmocks.NewMockTransport(t)
+	transport := newMockClientConnection(t)
 	transport.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	transport.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	transport.EXPECT().Send(isType(wire.MsgAck)).Run(func(wire.Frame) { close(acked) }).Return(nil).Once()
@@ -87,7 +87,7 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	observer := &clientRuntimeObserver{}
 	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
 	defer reporter.Close()
-	transport := portsmocks.NewMockTransport(t)
+	transport := newMockClientConnection(t)
 	transport.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	transport.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	unblock := scriptRecv(transport,

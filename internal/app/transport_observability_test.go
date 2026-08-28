@@ -236,13 +236,11 @@ func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
 	t.Cleanup(func() { newRemoteDialerFactoryWithRuntimeObserver = originalFactory })
 
 	originalRunClient := runClientWithDeps
-	runClientWithDeps = func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
+	runClientWithDeps = func(ctx context.Context, deps client.Dependencies, _ client.AttachRequest) error {
 		if deps.RuntimeObserver != observer {
 			t.Fatalf("client transport observer = %v, want process observer %v", deps.RuntimeObserver, observer)
 		}
-		if deps.Dialer != (namedDialer{name: "remote"}) {
-			t.Fatalf("remote transport dialer = %v, want configured factory dialer", deps.Dialer)
-		}
+		requireNamedClientDialer(t, ctx, deps.Dialer, "remote")
 		return nil
 	}
 	t.Cleanup(func() { runClientWithDeps = originalRunClient })

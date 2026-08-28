@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
@@ -575,7 +577,7 @@ func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd, err := parseArgs([]string{"attach", tt.arg})
 			require.NoError(t, err)
-			connection, err := client.NewSessionConnection(portsmocks.NewMockTransport(t), client.SessionTarget{
+			connection, err := client.NewSessionConnection(sessionwire.NewClientConnection(portsmocks.NewMockTransport(t)), client.SessionTarget{
 				Intent:      cmd.intent,
 				SessionName: cmd.name,
 			})
@@ -807,7 +809,13 @@ func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
 type namedDialer struct{ name string }
 
 func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
-	return nil, errors.New("not used")
+	return nil, fmt.Errorf("not used: %s", d.name)
+}
+
+func requireNamedClientDialer(t *testing.T, ctx context.Context, dialer ports.ClientDialer, name string) {
+	t.Helper()
+	_, err := dialer.Dial(ctx)
+	require.EqualError(t, err, "not used: "+name)
 }
 
 // fakeClipboardReader is a distinguishable ports.ClipboardReader used only to
@@ -838,12 +846,9 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 				remoteDialerFactory:     factory,
 				selectedRemoteTransport: tt.selectedTransport,
 				clipboard:               clip,
-				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-					nd, ok := deps.Dialer.(namedDialer)
-					if !ok {
-						t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
-					}
-					gotDialer = nd.name
+				runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
+					requireNamedClientDialer(t, ctx, deps.Dialer, "remote")
+					gotDialer = "remote"
 					gotRemote = deps.Remote
 					if !request.Remote || request.EnvironmentPolicy != protocol.EnvironmentPolicyClientOwned {
 						t.Fatal("direct CLI remote attach must preserve client-owned environment policy")
@@ -1064,12 +1069,9 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
 		remoteDialerFactory: factory,
 		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
-		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			nd, ok := deps.Dialer.(namedDialer)
-			if !ok {
-				t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
-			}
-			gotDialer = nd.name
+		runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			requireNamedClientDialer(t, ctx, deps.Dialer, "local")
+			gotDialer = "local"
 			gotRemote = deps.Remote
 			if request.Remote {
 				t.Fatal("local carriage metadata must not be in the attach request")

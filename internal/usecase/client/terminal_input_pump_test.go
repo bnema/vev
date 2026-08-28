@@ -13,6 +13,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
@@ -82,10 +83,12 @@ func requireSignal(t *testing.T, ch <-chan struct{}, message string) {
 	}
 }
 
-func requireFrame(t *testing.T, ch <-chan wire.Frame, message string) wire.Frame {
+func requireFrame(t *testing.T, ch <-chan protocol.ClientMessage, message string) wire.Frame {
 	t.Helper()
 	select {
-	case frame := <-ch:
+	case message := <-ch:
+		frame, err := testClientFrame(message)
+		require.NoError(t, err)
 		return frame
 	case <-time.After(time.Second):
 		t.Fatal(message)
@@ -182,7 +185,7 @@ func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) 
 	go func() {
 		(&stdinPump{
 			ctx: cancelledCtx, cancel: cancelCancelled, input: input,
-			out: make(chan wire.Frame, 1), clock: newAttachPaletteClock(),
+			out: make(chan protocol.ClientMessage, 1), clock: newAttachPaletteClock(),
 			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
 			activeGeneration: &activeGeneration,
 		}).run()
@@ -192,7 +195,7 @@ func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) 
 
 	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
 	defer cancelReplacement()
-	out := make(chan wire.Frame, len(want))
+	out := make(chan protocol.ClientMessage, len(want))
 	replacementDone := make(chan struct{})
 	go func() {
 		(&stdinPump{
@@ -206,9 +209,9 @@ func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) 
 
 	var got []byte
 	for len(got) < len(want) {
-		frame := <-out
-		input, err := wire.UnmarshalInput(frame.Payload)
-		require.NoError(t, err)
+		message := <-out
+		input, ok := message.(protocol.Input)
+		require.True(t, ok)
 		got = append(got, input.Data...)
 	}
 	require.Equal(t, want, got, "handoff must preserve every queued byte in order")
@@ -230,7 +233,7 @@ func TestTerminalInputPumpCancellationAfterTakeRequeuesRawRead(t *testing.T) {
 	go func() {
 		(&stdinPump{
 			ctx: ctx, cancel: cancel, input: input, consumer: consumer,
-			out: make(chan wire.Frame, 1), clock: newAttachPaletteClock(),
+			out: make(chan protocol.ClientMessage, 1), clock: newAttachPaletteClock(),
 			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
 			afterInputTake: func() {
 				close(taken)
@@ -264,7 +267,7 @@ func TestTerminalInputPumpCancellationPreservesStandaloneEscapeForReplacement(t 
 	oldDone := make(chan struct{})
 	go func() {
 		(&stdinPump{
-			ctx: oldCtx, cancel: cancelOld, input: input, out: make(chan wire.Frame, 1),
+			ctx: oldCtx, cancel: cancelOld, input: input, out: make(chan protocol.ClientMessage, 1),
 			clock: oldClock, logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
 			activeGeneration: &activeGeneration,
 		}).run()
@@ -279,7 +282,7 @@ func TestTerminalInputPumpCancellationPreservesStandaloneEscapeForReplacement(t 
 	newCtx, cancelNew := context.WithCancel(context.Background())
 	defer cancelNew()
 	newClock := newAttachPaletteClock()
-	out := make(chan wire.Frame, 1)
+	out := make(chan protocol.ClientMessage, 1)
 	newDone := make(chan struct{})
 	go func() {
 		(&stdinPump{
@@ -291,9 +294,9 @@ func TestTerminalInputPumpCancellationPreservesStandaloneEscapeForReplacement(t 
 	}()
 	(<-newClock.timers).fire() // marker ambiguity deadline
 	(<-newClock.timers).fire() // paste coalescer's lone-ESC deadline
-	frame := <-out
-	got, err := wire.UnmarshalInput(frame.Payload)
-	require.NoError(t, err)
+	message := <-out
+	got, ok := message.(protocol.Input)
+	require.True(t, ok)
 	require.Equal(t, []byte("\x1b"), got.Data)
 
 	cancelNew()
@@ -307,7 +310,7 @@ func TestTerminalInputPumpCancellationAfterInputBeforeOSCPreservesOnlyUndelivere
 	ctx, cancel := context.WithCancel(context.Background())
 	delivered := make(chan struct{})
 	done := make(chan struct{})
-	out := make(chan wire.Frame, 1)
+	out := make(chan protocol.ClientMessage, 1)
 	go func() {
 		(&stdinPump{
 			ctx: ctx, cancel: cancel, input: input, out: out, clock: newAttachPaletteClock(),
@@ -328,7 +331,7 @@ func TestTerminalInputPumpCancellationAfterInputBeforeOSCPreservesOnlyUndelivere
 	requireSignal(t, done, "timed out waiting for cancelled stdin pump")
 
 	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
-	replacementOut := make(chan wire.Frame, 1)
+	replacementOut := make(chan protocol.ClientMessage, 1)
 	replacementDone := make(chan struct{})
 	go func() {
 		(&stdinPump{
@@ -355,7 +358,7 @@ func TestTerminalInputPumpCancellationPreservesCoalescerHeldSuffix(t *testing.T)
 	input.enqueue(terminalReadResult{data: raw}, 1)
 	var activeGeneration atomic.Uint64
 	ctx, cancel := context.WithCancel(context.Background())
-	out := make(chan wire.Frame, 1)
+	out := make(chan protocol.ClientMessage, 1)
 	done := make(chan struct{})
 	go func() {
 		(&stdinPump{
@@ -374,7 +377,7 @@ func TestTerminalInputPumpCancellationPreservesCoalescerHeldSuffix(t *testing.T)
 
 	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
 	replacementClock := newAttachPaletteClock()
-	replacementOut := make(chan wire.Frame, 1)
+	replacementOut := make(chan protocol.ClientMessage, 1)
 	replacementDone := make(chan struct{})
 	go func() {
 		(&stdinPump{
@@ -425,7 +428,7 @@ func TestTerminalInputPumpCancellationAfterDeliveredCallbackDoesNotReplay(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	delivered := make(chan struct{})
 	done := make(chan struct{})
-	out := make(chan wire.Frame, 1)
+	out := make(chan protocol.ClientMessage, 1)
 	go func() {
 		(&stdinPump{
 			ctx: ctx, cancel: cancel, input: input, out: out, clock: newAttachPaletteClock(),
@@ -438,15 +441,15 @@ func TestTerminalInputPumpCancellationAfterDeliveredCallbackDoesNotReplay(t *tes
 		}).run()
 		close(done)
 	}()
-	frame := <-out
-	got, err := wire.UnmarshalInput(frame.Payload)
-	require.NoError(t, err)
+	message := <-out
+	got, ok := message.(protocol.Input)
+	require.True(t, ok)
 	require.Equal(t, []byte("x"), got.Data)
 	<-delivered
 	<-done
 
 	consumer := input.claim()
-	_, ok := input.take(context.Background(), consumer)
+	_, ok = input.take(context.Background(), consumer)
 	require.False(t, ok, "a callback already delivered to the sender must not replay after reconnect")
 	input.revoke(consumer)
 }
@@ -464,7 +467,7 @@ func TestTerminalInputPumpReusesOneReaderAcrossCancelledAttempts(t *testing.T) {
 	go func() {
 		(&stdinPump{
 			ctx: firstCtx, cancel: cancelFirst, input: input,
-			out: make(chan wire.Frame), clock: newAttachPaletteClock(),
+			out: make(chan protocol.ClientMessage), clock: newAttachPaletteClock(),
 			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
 			activeGeneration: &activeGeneration,
 		}).run()
@@ -475,7 +478,7 @@ func TestTerminalInputPumpReusesOneReaderAcrossCancelledAttempts(t *testing.T) {
 
 	secondCtx, cancelSecond := context.WithCancel(context.Background())
 	defer cancelSecond()
-	out := make(chan wire.Frame, 1)
+	out := make(chan protocol.ClientMessage, 1)
 	secondDone := make(chan struct{})
 	go func() {
 		(&stdinPump{
@@ -488,9 +491,9 @@ func TestTerminalInputPumpReusesOneReaderAcrossCancelledAttempts(t *testing.T) {
 	}()
 
 	reader.chunks <- []byte("x")
-	frame := <-out
-	got, err := wire.UnmarshalInput(frame.Payload)
-	require.NoError(t, err)
+	message := <-out
+	got, ok := message.(protocol.Input)
+	require.True(t, ok)
 	require.Equal(t, []byte("x"), got.Data)
 	require.Equal(t, 1, reader.maxActive(), "cancelled attempts must not leave competing reads")
 

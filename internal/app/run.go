@@ -914,7 +914,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 		return policy
 	}
-	handoff := func(target protocol.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+	handoff := func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
 		if err := validateRemoteAttachHandoff(target); err != nil {
 			return nil, client.AttachRequest{}, fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
@@ -938,7 +938,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if selection != nil {
 			displayOrigin = selection.DisplayOrigin
 		}
-		return dialer, client.AttachRequest{
+		return sessionwire.NewClientDialer(dialer), client.AttachRequest{
 			Intent:            target.Intent,
 			SessionName:       target.Session,
 			Remote:            true,
@@ -962,7 +962,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				return dialErr
 			}
 			err = runClient(ctx, client.Dependencies{
-				Dialer:            dialer,
+				Dialer:            sessionwire.NewClientDialer(dialer),
 				Terminal:          term.New(),
 				Clock:             clock.New(),
 				Clipboard:         deps.clipboard,
@@ -988,7 +988,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
 			err = runClient(ctx, client.Dependencies{
-				Dialer:          localDialer(),
+				Dialer:          sessionwire.NewClientDialer(localDialer()),
 				Terminal:        term.New(),
 				Clock:           clock.New(),
 				Logger:          log,
