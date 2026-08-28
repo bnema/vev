@@ -12,21 +12,21 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if ProtocolVersion != 37 {
-		t.Fatalf("ProtocolVersion = %d, want 37", ProtocolVersion)
+	if protocol.Version != 37 {
+		t.Fatalf("ProtocolVersion = %d, want 37", protocol.Version)
 	}
-	payload := MarshalHello(Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
+	payload := MarshalHello(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
 		t.Fatal("MarshalHello produced a truncated valid payload")
 	}
 	binary.BigEndian.PutUint16(payload, 21)
-	if _, err := UnmarshalHello(payload); !errors.Is(err, ErrInvalidHello) {
+	if _, err := UnmarshalHello(payload); !errors.Is(err, protocol.ErrInvalidHello) {
 		t.Fatalf("UnmarshalHello(v21) error = %v, want ErrInvalidHello", err)
 	}
 }
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
-	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
+	msg := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
 	want := append([]byte{0, 37, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	want = append(want, 0, 0)
@@ -46,7 +46,7 @@ func TestFinalHelloGoldenStrict(t *testing.T) {
 }
 
 func TestHelloDeclaresKittyDirectGraphicsAtWireTail(t *testing.T) {
-	msg := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, KittyDirectGraphics: true}
+	msg := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, KittyDirectGraphics: true}
 	payload := MarshalHello(msg)
 	if len(payload) == 0 || payload[len(payload)-1] != 1 {
 		t.Fatalf("Hello capability tail = %x, want trailing true declaration", payload)
@@ -61,20 +61,20 @@ func TestHelloDeclaresKittyDirectGraphicsAtWireTail(t *testing.T) {
 }
 
 func TestFinalHelloSemanticValidation(t *testing.T) {
-	valid := Hello{Version: ProtocolVersion, Intent: IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
+	valid := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
 	for _, tt := range []struct {
 		name   string
-		mutate func(*Hello)
+		mutate func(*protocol.Hello)
 	}{
-		{name: "intent", mutate: func(h *Hello) { h.Intent = 99 }},
-		{name: "zero columns", mutate: func(h *Hello) { h.Size.Cols = 0 }},
-		{name: "zero rows", mutate: func(h *Hello) { h.Size.Rows = 0 }},
-		{name: "area", mutate: func(h *Hello) { h.Size = domain.Size{Cols: 513, Rows: 512} }},
+		{name: "intent", mutate: func(h *protocol.Hello) { h.Intent = 99 }},
+		{name: "zero columns", mutate: func(h *protocol.Hello) { h.Size.Cols = 0 }},
+		{name: "zero rows", mutate: func(h *protocol.Hello) { h.Size.Rows = 0 }},
+		{name: "area", mutate: func(h *protocol.Hello) { h.Size = domain.Size{Cols: 513, Rows: 512} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := valid
 			tt.mutate(&msg)
-			if err := ValidateHello(msg); err == nil {
+			if err := protocol.ValidateHello(msg); err == nil {
 				t.Fatal("ValidateHello accepted malformed semantics")
 			}
 		})
@@ -195,7 +195,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 }
 
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
-	msg := AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach}
+	msg := protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach}
 	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0}
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
@@ -207,12 +207,12 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	}
 	assertAllPrefixesFail(t, got, UnmarshalAttachTarget)
 	assertTrailingGarbageFails(t, got, UnmarshalAttachTarget)
-	local := AttachTarget{Session: "work", Intent: IntentAttach}
+	local := protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}
 	localPayload := MarshalAttachTarget(local)
 	if localPayload == nil {
 		t.Fatal("MarshalAttachTarget rejected same-peer route handoff")
 	}
-	wantLocal := []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 0, 0}
+	wantLocal := []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0}
 	if !bytes.Equal(localPayload, wantLocal) {
 		t.Fatalf("same-peer bytes = %x, want %x", localPayload, wantLocal)
 	}
@@ -222,7 +222,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	}
 	assertAllPrefixesFail(t, localPayload, UnmarshalAttachTarget)
 	assertTrailingGarbageFails(t, localPayload, UnmarshalAttachTarget)
-	for _, bad := range []AttachTarget{{Endpoint: "host", Intent: IntentAttach}, {Endpoint: "host", Session: "work", Intent: 99}} {
+	for _, bad := range []protocol.AttachTarget{{Endpoint: "host", Intent: protocol.IntentAttach}, {Endpoint: "host", Session: "work", Intent: 99}} {
 		if got := MarshalAttachTarget(bad); got != nil {
 			t.Fatalf("MarshalAttachTarget(%+v) = %x, want nil", bad, got)
 		}
@@ -232,9 +232,9 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	var lifecycle domain.SessionLifecycleID
 	lifecycle[0] = 1
-	target := AttachTarget{Session: "work", Intent: IntentAttach, ExactTarget: &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, SamePeer: true}
+	target := protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach, ExactTarget: &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, SamePeer: true}
 	payload := MarshalAttachTarget(target)
-	want := append([]byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 1, 1}, make([]byte, 15)...)
+	want := append([]byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 1, 1}, make([]byte, 15)...)
 	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1)
 	if !bytes.Equal(payload, want) {
 		t.Fatalf("exact target bytes = %x, want %x", payload, want)
@@ -261,7 +261,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "hello boolean",
 			payload: func() []byte {
-				b := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
+				b := MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 1, Rows: 1}})
 				b[len(b)-8] = 2
 				return b
 			}(),
@@ -270,7 +270,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "hello remote boolean",
 			payload: func() []byte {
-				b := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
+				b := MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 1, Rows: 1}})
 				b[len(b)-2] = 2
 				return b
 			}(),
@@ -279,7 +279,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "hello Kitty graphics boolean",
 			payload: func() []byte {
-				b := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
+				b := MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 1, Rows: 1}})
 				b[len(b)-1] = 2
 				return b
 			}(),
@@ -288,7 +288,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "attach target same-peer boolean",
 			payload: func() []byte {
-				b := MarshalAttachTarget(AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach})
+				b := MarshalAttachTarget(protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach})
 				b[len(b)-1] = 2
 				return b
 			}(),
@@ -297,7 +297,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "welcome boolean",
 			payload: func() []byte {
-				b := MarshalWelcome(Welcome{SessionID: "id"})
+				b := MarshalWelcome(protocol.Welcome{SessionID: "id"})
 				b[6] = 2
 				return b
 			}(),
@@ -307,7 +307,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "kill boolean",
 			payload: func() []byte {
-				b := MarshalKill(Kill{All: true})
+				b := MarshalKill(protocol.Kill{All: true})
 				b[len(b)-1] = 2
 				return b
 			}(),
@@ -316,7 +316,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "sessions ephemeral boolean",
 			payload: func() []byte {
-				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionUp}}})
+				b := MarshalSessions(protocol.Sessions{Sessions: []protocol.SessionInfo{{State: protocol.SessionUp}}})
 				b[6] = 2
 				return b
 			}(),
@@ -325,7 +325,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		{
 			name: "sessions attached boolean",
 			payload: func() []byte {
-				b := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: SessionUp}}})
+				b := MarshalSessions(protocol.Sessions{Sessions: []protocol.SessionInfo{{State: protocol.SessionUp}}})
 				b[9] = 2
 				return b
 			}(),

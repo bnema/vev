@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -89,7 +89,7 @@ func TestMoveRejectionPresentationParity(t *testing.T) {
 			require.False(t, result.OK)
 			require.Equal(t, descriptor.CommandCode, result.Code)
 			require.Equal(t, descriptor.CommandText, result.Text)
-			require.Equal(t, ports.ErrNoSuchTarget, result.Code)
+			require.Equal(t, protocol.ErrNoSuchTarget, result.Code)
 			require.Equal(t, tt.commandText, result.Text)
 		})
 	}

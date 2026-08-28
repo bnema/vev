@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type commandTrackerTestTimer struct {
@@ -60,13 +61,13 @@ func TestCommandRequestTrackerTimeoutAndGenerationIsolation(t *testing.T) {
 	// old connection must not complete the new request.
 	secondOutcome, ok := tracker.Track(requestID, 8)
 	require.True(t, ok)
-	tracker.Complete(4, ports.CommandResult{RequestID: requestID, OK: true})
+	tracker.Complete(4, protocol.CommandResult{RequestID: requestID, OK: true})
 	select {
 	case <-secondOutcome:
 		t.Fatal("late result from the old generation completed a newer request")
 	default:
 	}
-	tracker.Complete(8, ports.CommandResult{RequestID: requestID, OK: true})
+	tracker.Complete(8, protocol.CommandResult{RequestID: requestID, OK: true})
 	result := <-secondOutcome
 	require.True(t, result.Result.OK)
 

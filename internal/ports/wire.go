@@ -114,7 +114,7 @@ func (w *payloadWriter) putLongBytes(b []byte) {
 // A target may be absent for direct local attaches, but its presence marker and
 // environment policy are never optional: v27 has no extension or legacy tail
 // inside this section; the exact-target section follows it.
-func marshalRemoteTargetSection(w *payloadWriter, target *domain.RemoteSessionTarget, policy EnvironmentPolicy) {
+func marshalRemoteTargetSection(w *payloadWriter, target *domain.RemoteSessionTarget, policy protocol.EnvironmentPolicy) {
 	if target == nil {
 		w.putBool(false)
 	} else {
@@ -190,7 +190,7 @@ func skipRemoteTargetSection(r *payloadReader) error {
 	if err != nil {
 		return err
 	}
-	if ValidateEnvironmentPolicy(EnvironmentPolicy(policy)) != nil {
+	if protocol.ValidateEnvironmentPolicy(protocol.EnvironmentPolicy(policy)) != nil {
 		return errInvalidEnum
 	}
 	return nil
@@ -256,7 +256,7 @@ func unmarshalRemoteTarget(r *payloadReader) (*domain.RemoteSessionTarget, error
 	return target, nil
 }
 
-func unmarshalRemoteTargetSection(r *payloadReader) (*domain.RemoteSessionTarget, EnvironmentPolicy, error) {
+func unmarshalRemoteTargetSection(r *payloadReader) (*domain.RemoteSessionTarget, protocol.EnvironmentPolicy, error) {
 	target, err := unmarshalRemoteTarget(r)
 	if err != nil {
 		return nil, 0, err
@@ -265,10 +265,10 @@ func unmarshalRemoteTargetSection(r *payloadReader) (*domain.RemoteSessionTarget
 	if err != nil {
 		return nil, 0, err
 	}
-	if ValidateEnvironmentPolicy(EnvironmentPolicy(policy)) != nil {
+	if protocol.ValidateEnvironmentPolicy(protocol.EnvironmentPolicy(policy)) != nil {
 		return nil, 0, errInvalidEnum
 	}
-	return target, EnvironmentPolicy(policy), nil
+	return target, protocol.EnvironmentPolicy(policy), nil
 }
 
 // payloadReader consumes a message payload field by field in wire order,
@@ -439,8 +439,8 @@ func validateWireRemoteTarget(target domain.RemoteSessionTarget) error {
 }
 
 // MarshalHello encodes h into a Hello message payload.
-func MarshalHello(h Hello) []byte {
-	if err := ValidateHello(h); err != nil {
+func MarshalHello(h protocol.Hello) []byte {
+	if err := protocol.ValidateHello(h); err != nil {
 		return nil
 	}
 	w := payloadWriter{}
@@ -478,7 +478,7 @@ func preflightHello(b []byte) error {
 		return err
 	}
 	if version == 21 {
-		return ErrInvalidHello
+		return protocol.ErrInvalidHello
 	}
 	if _, err := r.getUint8(); err != nil {
 		return err
@@ -554,122 +554,122 @@ func preflightHello(b []byte) error {
 }
 
 // UnmarshalHello decodes a Hello message payload.
-func UnmarshalHello(b []byte) (Hello, error) {
+func UnmarshalHello(b []byte) (protocol.Hello, error) {
 	if len(b) > MaxFrameLen-1 {
-		return Hello{}, ErrInvalidHello
+		return protocol.Hello{}, protocol.ErrInvalidHello
 	}
 	if err := preflightHello(b); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	r := payloadReader{b: b}
-	var h Hello
+	var h protocol.Hello
 	var err error
 
 	if h.Version, err = r.getUint16(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if h.Intent, err = r.getUint8(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	clientID, err := r.getBytes(len(h.ClientID))
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	copy(h.ClientID[:], clientID)
 	if h.ResumeToken, err = r.getUint64(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if h.Name, err = r.getString(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	cols, err := r.getUint16()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	rows, err := r.getUint16()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	pixelWidth, err := r.getUint16()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	pixelHeight, err := r.getUint16()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	h.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
 	h.PixelWidth = int(pixelWidth)
 	h.PixelHeight = int(pixelHeight)
 	if h.TermEnv, err = r.getString(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if h.Cwd, err = r.getString(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if h.TrueColor, err = r.getBool(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if h.MaxOutputInFlight, err = r.getUint8(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	envCount, err := r.getUint32()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	// Each entry has at least its uint32 byte length. Check that before
 	// allocating so a malformed count cannot force an excessive allocation.
 	if uint64(envCount) > uint64(len(r.b)/4) {
-		return Hello{}, errShortPayload
+		return protocol.Hello{}, errShortPayload
 	}
 	if envCount != 0 {
 		h.Env = make([]string, 0, int(envCount))
 		for range int(envCount) {
 			entry, err := r.getLongString()
 			if err != nil {
-				return Hello{}, err
+				return protocol.Hello{}, err
 			}
 			h.Env = append(h.Env, entry)
 		}
 	}
 	if h.RemoteTarget, h.EnvironmentPolicy, err = unmarshalRemoteTargetSection(&r); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if h.ExactTarget, err = unmarshalExactTargetSection(&r); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	preferredTabID, err := r.getString()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	h.PreferredTabID = domain.TabStableID(preferredTabID)
 	capabilities, err := r.getUint8()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	h.NavigationCapabilities = protocol.NavigationCapabilities(capabilities)
 	overlay, err := r.getUint8()
 	if err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	h.StartupOverlay = protocol.StartupOverlay(overlay)
 	if h.Remote, err = r.getBool(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if h.KittyDirectGraphics, err = r.getBool(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
 	if err := r.done(); err != nil {
-		return Hello{}, err
+		return protocol.Hello{}, err
 	}
-	if err := ValidateHello(h); err != nil {
-		return Hello{}, err
+	if err := protocol.ValidateHello(h); err != nil {
+		return protocol.Hello{}, err
 	}
 	return h, nil
 }
 
 // MarshalInput encodes m into an Input message payload.
-func MarshalInput(m Input) []byte {
+func MarshalInput(m protocol.Input) []byte {
 	w := payloadWriter{}
 	w.putUint64(m.InputSeq)
 	w.putBytes(m.Data)
@@ -678,13 +678,13 @@ func MarshalInput(m Input) []byte {
 
 // UnmarshalInput decodes an Input message payload. After the fixed input
 // sequence, the rest of the payload is data; there is no length prefix.
-func UnmarshalInput(b []byte) (Input, error) {
+func UnmarshalInput(b []byte) (protocol.Input, error) {
 	r := payloadReader{b: b}
 	seq, err := r.getUint64()
 	if err != nil {
-		return Input{}, err
+		return protocol.Input{}, err
 	}
-	return Input{InputSeq: seq, Data: r.rest()}, nil
+	return protocol.Input{InputSeq: seq, Data: r.rest()}, nil
 }
 
 // MarshalImagePush encodes m into an ImagePush message payload.
@@ -713,25 +713,25 @@ func UnmarshalImagePush(b []byte) (protocol.ImagePush, error) {
 }
 
 // MarshalClientNotice encodes a fixed one-byte client notice action.
-func MarshalClientNotice(m ClientNotice) []byte {
+func MarshalClientNotice(m protocol.ClientNotice) []byte {
 	return []byte{m.Action}
 }
 
 // UnmarshalClientNotice decodes a fixed client notice action and rejects both
 // unknown values and any trailing bytes.
-func UnmarshalClientNotice(b []byte) (ClientNotice, error) {
+func UnmarshalClientNotice(b []byte) (protocol.ClientNotice, error) {
 	r := payloadReader{b: b}
 	action, err := r.getUint8()
 	if err != nil {
-		return ClientNotice{}, err
+		return protocol.ClientNotice{}, err
 	}
-	if ValidateClientNotice(ClientNotice{Action: action}) != nil {
-		return ClientNotice{}, errors.New("ports: unknown client notice action")
+	if protocol.ValidateClientNotice(protocol.ClientNotice{Action: action}) != nil {
+		return protocol.ClientNotice{}, errors.New("ports: unknown client notice action")
 	}
 	if err := r.done(); err != nil {
-		return ClientNotice{}, err
+		return protocol.ClientNotice{}, err
 	}
-	return ClientNotice{Action: action}, nil
+	return protocol.ClientNotice{Action: action}, nil
 }
 
 // MarshalResize encodes m into a Resize message payload.
@@ -883,45 +883,45 @@ func UnmarshalResize(b []byte) (protocol.Resize, error) {
 }
 
 // MarshalDetach encodes a Detach message payload (always empty).
-func MarshalDetach(Detach) []byte {
+func MarshalDetach(protocol.Detach) []byte {
 	return nil
 }
 
 // UnmarshalDetach decodes a Detach message payload.
-func UnmarshalDetach(b []byte) (Detach, error) {
+func UnmarshalDetach(b []byte) (protocol.Detach, error) {
 	r := payloadReader{b: b}
 	if err := r.done(); err != nil {
-		return Detach{}, err
+		return protocol.Detach{}, err
 	}
-	return Detach{}, nil
+	return protocol.Detach{}, nil
 }
 
 // MarshalPing encodes a Ping message payload (always empty).
-func MarshalPing(Ping) []byte {
+func MarshalPing(protocol.Ping) []byte {
 	return nil
 }
 
 // UnmarshalPing decodes a Ping message payload.
-func UnmarshalPing(b []byte) (Ping, error) {
+func UnmarshalPing(b []byte) (protocol.Ping, error) {
 	r := payloadReader{b: b}
 	if err := r.done(); err != nil {
-		return Ping{}, err
+		return protocol.Ping{}, err
 	}
-	return Ping{}, nil
+	return protocol.Ping{}, nil
 }
 
 // MarshalPong encodes a Pong message payload (always empty).
-func MarshalPong(Pong) []byte {
+func MarshalPong(protocol.Pong) []byte {
 	return nil
 }
 
 // UnmarshalPong decodes a Pong message payload.
-func UnmarshalPong(b []byte) (Pong, error) {
+func UnmarshalPong(b []byte) (protocol.Pong, error) {
 	r := payloadReader{b: b}
 	if err := r.done(); err != nil {
-		return Pong{}, err
+		return protocol.Pong{}, err
 	}
-	return Pong{}, nil
+	return protocol.Pong{}, nil
 }
 
 // MarshalAck encodes m into an epoch/state Ack payload.
@@ -956,7 +956,7 @@ func UnmarshalAck(b []byte) (protocol.Ack, error) {
 }
 
 // MarshalWelcome encodes m into a Welcome message payload.
-func MarshalWelcome(m Welcome) []byte {
+func MarshalWelcome(m protocol.Welcome) []byte {
 	if m.CommittedIdentity != nil && (m.SessionName != m.CommittedIdentity.Target.SessionName || m.Ephemeral != m.CommittedIdentity.Ephemeral) {
 		return nil
 	}
@@ -977,42 +977,42 @@ func MarshalWelcome(m Welcome) []byte {
 }
 
 // UnmarshalWelcome decodes a Welcome message payload.
-func UnmarshalWelcome(b []byte) (Welcome, error) {
+func UnmarshalWelcome(b []byte) (protocol.Welcome, error) {
 	r := payloadReader{b: b}
-	var m Welcome
+	var m protocol.Welcome
 	var err error
 
 	if m.SessionID, err = r.getString(); err != nil {
-		return Welcome{}, err
+		return protocol.Welcome{}, err
 	}
 	if m.SessionName, err = r.getString(); err != nil {
-		return Welcome{}, err
+		return protocol.Welcome{}, err
 	}
 	var ephemeral bool
 	if ephemeral, err = r.getBool(); err != nil {
-		return Welcome{}, err
+		return protocol.Welcome{}, err
 	}
 	m.Ephemeral = ephemeral
 	if m.ResumeToken, err = r.getUint64(); err != nil {
-		return Welcome{}, err
+		return protocol.Welcome{}, err
 	}
 	if m.Capabilities, err = r.getUint32(); err != nil {
-		return Welcome{}, err
+		return protocol.Welcome{}, err
 	}
 	if m.CommittedIdentity, err = unmarshalCommittedIdentitySection(&r); err != nil {
-		return Welcome{}, err
+		return protocol.Welcome{}, err
 	}
 	if m.CommittedIdentity != nil && (m.CommittedIdentity.Target.SessionName != m.SessionName || m.CommittedIdentity.Ephemeral != m.Ephemeral) {
-		return Welcome{}, fmt.Errorf("%w: committed identity does not match welcome", protocol.ErrInvalidRouteWire)
+		return protocol.Welcome{}, fmt.Errorf("%w: committed identity does not match welcome", protocol.ErrInvalidRouteWire)
 	}
 	if err := r.done(); err != nil {
-		return Welcome{}, err
+		return protocol.Welcome{}, err
 	}
 	return m, nil
 }
 
 // MarshalErrorMsg encodes m into an ErrorMsg message payload.
-func MarshalErrorMsg(m ErrorMsg) []byte {
+func MarshalErrorMsg(m protocol.ErrorMsg) []byte {
 	w := payloadWriter{}
 	w.putUint16(m.Code)
 	w.putString(m.Text)
@@ -1020,19 +1020,19 @@ func MarshalErrorMsg(m ErrorMsg) []byte {
 }
 
 // UnmarshalErrorMsg decodes an ErrorMsg message payload.
-func UnmarshalErrorMsg(b []byte) (ErrorMsg, error) {
+func UnmarshalErrorMsg(b []byte) (protocol.ErrorMsg, error) {
 	r := payloadReader{b: b}
-	var m ErrorMsg
+	var m protocol.ErrorMsg
 	var err error
 
 	if m.Code, err = r.getUint16(); err != nil {
-		return ErrorMsg{}, err
+		return protocol.ErrorMsg{}, err
 	}
 	if m.Text, err = r.getString(); err != nil {
-		return ErrorMsg{}, err
+		return protocol.ErrorMsg{}, err
 	}
 	if err := r.done(); err != nil {
-		return ErrorMsg{}, err
+		return protocol.ErrorMsg{}, err
 	}
 	return m, nil
 }
@@ -1198,8 +1198,8 @@ func decompressOutputData(data []byte, decodedLen int) ([]byte, error) {
 }
 
 // MarshalAttachTarget encodes a strict server attach-target payload.
-func MarshalAttachTarget(m AttachTarget) []byte {
-	if err := ValidateAttachTarget(m); err != nil {
+func MarshalAttachTarget(m protocol.AttachTarget) []byte {
+	if err := protocol.ValidateAttachTarget(m); err != nil {
 		return nil
 	}
 	w := payloadWriter{}
@@ -1213,118 +1213,118 @@ func MarshalAttachTarget(m AttachTarget) []byte {
 }
 
 // UnmarshalAttachTarget decodes a strict server attach-target payload.
-func UnmarshalAttachTarget(b []byte) (AttachTarget, error) {
+func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 	// Preflight lengths and intent before getString can allocate either value.
 	probe := payloadReader{b: b}
 	endpointLen, err := probe.getUint16()
 	if err != nil || int(endpointLen) > len(probe.b) {
-		return AttachTarget{}, ErrInvalidAttachTarget
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 	probe.b = probe.b[endpointLen:]
 	sessionLen, err := probe.getUint16()
 	if err != nil || sessionLen == 0 || int(sessionLen) > len(probe.b) {
-		return AttachTarget{}, ErrInvalidAttachTarget
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 	probe.b = probe.b[sessionLen:]
 	intent, err := probe.getUint8()
-	if err != nil || (intent != IntentEphemeral && intent != IntentNew && intent != IntentAttach && intent != IntentResume) {
-		return AttachTarget{}, ErrInvalidAttachTarget
+	if err != nil || (intent != protocol.IntentEphemeral && intent != protocol.IntentNew && intent != protocol.IntentAttach && intent != protocol.IntentResume) {
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 	if err := skipRemoteTargetSection(&probe); err != nil {
-		return AttachTarget{}, ErrInvalidAttachTarget
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 	if err := skipExactTargetSection(&probe); err != nil {
-		return AttachTarget{}, ErrInvalidAttachTarget
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 	if _, err := probe.getBool(); err != nil {
-		return AttachTarget{}, ErrInvalidAttachTarget
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 	if err := probe.done(); err != nil {
-		return AttachTarget{}, ErrInvalidAttachTarget
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 
 	r := payloadReader{b: b}
-	var m AttachTarget
+	var m protocol.AttachTarget
 	if m.Endpoint, err = r.getString(); err != nil {
-		return AttachTarget{}, err
+		return protocol.AttachTarget{}, err
 	}
 	if m.Session, err = r.getString(); err != nil {
-		return AttachTarget{}, err
+		return protocol.AttachTarget{}, err
 	}
 	if m.Intent, err = r.getUint8(); err != nil {
-		return AttachTarget{}, err
+		return protocol.AttachTarget{}, err
 	}
 	if m.RemoteTarget, m.EnvironmentPolicy, err = unmarshalRemoteTargetSection(&r); err != nil {
-		return AttachTarget{}, err
+		return protocol.AttachTarget{}, err
 	}
 	if m.ExactTarget, err = unmarshalExactTargetSection(&r); err != nil {
-		return AttachTarget{}, err
+		return protocol.AttachTarget{}, err
 	}
 	if m.SamePeer, err = r.getBool(); err != nil {
-		return AttachTarget{}, err
+		return protocol.AttachTarget{}, err
 	}
 	if err := r.done(); err != nil {
-		return AttachTarget{}, err
+		return protocol.AttachTarget{}, err
 	}
-	if err := ValidateAttachTarget(m); err != nil {
-		return AttachTarget{}, err
+	if err := protocol.ValidateAttachTarget(m); err != nil {
+		return protocol.AttachTarget{}, err
 	}
 	return m, nil
 }
 
 // MarshalDetached encodes m into a Detached message payload.
-func MarshalDetached(m Detached) []byte {
+func MarshalDetached(m protocol.Detached) []byte {
 	return []byte{m.Reason}
 }
 
 // UnmarshalDetached decodes a Detached message payload.
-func UnmarshalDetached(b []byte) (Detached, error) {
+func UnmarshalDetached(b []byte) (protocol.Detached, error) {
 	r := payloadReader{b: b}
 	reason, err := r.getUint8()
 	if err != nil {
-		return Detached{}, err
+		return protocol.Detached{}, err
 	}
-	if ValidateDetached(Detached{Reason: reason}) != nil {
-		return Detached{}, errInvalidEnum
+	if protocol.ValidateDetached(protocol.Detached{Reason: reason}) != nil {
+		return protocol.Detached{}, errInvalidEnum
 	}
 	if err := r.done(); err != nil {
-		return Detached{}, err
+		return protocol.Detached{}, err
 	}
-	return Detached{Reason: reason}, nil
+	return protocol.Detached{Reason: reason}, nil
 }
 
 // MarshalList encodes a List message payload (always empty).
-func MarshalList(List) []byte {
+func MarshalList(protocol.List) []byte {
 	return nil
 }
 
 // UnmarshalList decodes a List message payload.
-func UnmarshalList(b []byte) (List, error) {
+func UnmarshalList(b []byte) (protocol.List, error) {
 	r := payloadReader{b: b}
 	if err := r.done(); err != nil {
-		return List{}, err
+		return protocol.List{}, err
 	}
-	return List{}, nil
+	return protocol.List{}, nil
 }
 
 // MarshalOutputResetRequest encodes an OutputResetRequest payload (always
 // empty).
-func MarshalOutputResetRequest(OutputResetRequest) []byte {
+func MarshalOutputResetRequest(protocol.OutputResetRequest) []byte {
 	return nil
 }
 
 // UnmarshalOutputResetRequest decodes a strict empty OutputResetRequest
 // payload.
-func UnmarshalOutputResetRequest(b []byte) (OutputResetRequest, error) {
+func UnmarshalOutputResetRequest(b []byte) (protocol.OutputResetRequest, error) {
 	r := payloadReader{b: b}
 	if err := r.done(); err != nil {
-		return OutputResetRequest{}, err
+		return protocol.OutputResetRequest{}, err
 	}
-	return OutputResetRequest{}, nil
+	return protocol.OutputResetRequest{}, nil
 }
 
 // MarshalKill encodes m into a Kill message payload.
-func MarshalKill(m Kill) []byte {
+func MarshalKill(m protocol.Kill) []byte {
 	w := payloadWriter{}
 	w.putString(m.Name)
 	if m.All {
@@ -1334,28 +1334,28 @@ func MarshalKill(m Kill) []byte {
 }
 
 // UnmarshalKill decodes a Kill message payload.
-func UnmarshalKill(b []byte) (Kill, error) {
+func UnmarshalKill(b []byte) (protocol.Kill, error) {
 	r := payloadReader{b: b}
 	name, err := r.getString()
 	if err != nil {
-		return Kill{}, err
+		return protocol.Kill{}, err
 	}
 	var all bool
 	if len(r.b) > 0 {
 		all, err = r.getBool()
 		if err != nil {
-			return Kill{}, err
+			return protocol.Kill{}, err
 		}
 	}
 	if err := r.done(); err != nil {
-		return Kill{}, err
+		return protocol.Kill{}, err
 	}
-	return Kill{Name: name, All: all}, nil
+	return protocol.Kill{Name: name, All: all}, nil
 }
 
 // MarshalSessions encodes m into a Sessions message payload: a uint16 count
 // followed by that many session records.
-func MarshalSessions(m Sessions) []byte {
+func MarshalSessions(m protocol.Sessions) []byte {
 	w := payloadWriter{}
 	w.putUint16(uint16(len(m.Sessions)))
 	for _, s := range m.Sessions {
@@ -1378,48 +1378,48 @@ func MarshalSessions(m Sessions) []byte {
 }
 
 // UnmarshalSessions decodes a Sessions message payload.
-func UnmarshalSessions(b []byte) (Sessions, error) {
+func UnmarshalSessions(b []byte) (protocol.Sessions, error) {
 	r := payloadReader{b: b}
 	count, err := r.getUint16()
 	if err != nil {
-		return Sessions{}, err
+		return protocol.Sessions{}, err
 	}
-	sessions := make([]SessionInfo, 0, count)
+	sessions := make([]protocol.SessionInfo, 0, count)
 	for range int(count) {
-		var s SessionInfo
+		var s protocol.SessionInfo
 		if s.SessionID, err = r.getString(); err != nil {
-			return Sessions{}, err
+			return protocol.Sessions{}, err
 		}
 		if s.Name, err = r.getString(); err != nil {
-			return Sessions{}, err
+			return protocol.Sessions{}, err
 		}
 		eph, err := r.getBool()
 		if err != nil {
-			return Sessions{}, err
+			return protocol.Sessions{}, err
 		}
 		s.Ephemeral = eph
 		if s.Tabs, err = r.getUint16(); err != nil {
-			return Sessions{}, err
+			return protocol.Sessions{}, err
 		}
 		att, err := r.getBool()
 		if err != nil {
-			return Sessions{}, err
+			return protocol.Sessions{}, err
 		}
 		s.Attached = att
 		state, err := r.getUint8()
 		if err != nil {
-			return Sessions{}, err
+			return protocol.Sessions{}, err
 		}
-		s.State = SessionState(state)
-		if s.State > SessionBroken {
-			return Sessions{}, errors.New("ports: invalid session state")
+		s.State = protocol.SessionState(state)
+		if s.State > protocol.SessionBroken {
+			return protocol.Sessions{}, errors.New("ports: invalid session state")
 		}
 		sessions = append(sessions, s)
 	}
 	if err := r.done(); err != nil {
-		return Sessions{}, err
+		return protocol.Sessions{}, err
 	}
-	return Sessions{Sessions: sessions}, nil
+	return protocol.Sessions{Sessions: sessions}, nil
 }
 func putInt16(w *payloadWriter, n int) { w.putUint16(uint16(int16(n))) }
 
@@ -1737,7 +1737,7 @@ func MarshalParkedRouteRequest(request protocol.ParkedRouteRequest) []byte {
 	w.putUint64(request.RequestID)
 	w.putBytes(request.LeaseID[:])
 	w.putUint8(uint8(request.Action))
-	marshalRemoteTargetSection(&w, request.Target, EnvironmentPolicyDaemonOwned)
+	marshalRemoteTargetSection(&w, request.Target, protocol.EnvironmentPolicyDaemonOwned)
 	return w.b
 }
 
@@ -1757,7 +1757,7 @@ func UnmarshalParkedRouteRequest(b []byte) (protocol.ParkedRouteRequest, error) 
 		return protocol.ParkedRouteRequest{}, protocol.ErrInvalidNavigation
 	}
 	target, policy, err := unmarshalRemoteTargetSection(&r)
-	if err != nil || policy != EnvironmentPolicyDaemonOwned || r.done() != nil {
+	if err != nil || policy != protocol.EnvironmentPolicyDaemonOwned || r.done() != nil {
 		return protocol.ParkedRouteRequest{}, protocol.ErrInvalidNavigation
 	}
 	request := protocol.ParkedRouteRequest{RequestID: requestID, Action: protocol.ParkedRouteAction(action), Target: target}

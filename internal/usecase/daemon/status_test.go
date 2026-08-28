@@ -1441,7 +1441,7 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	clock := newCoordinatorMockClock(t, 64)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), clock.clock)
 	tr, sends, releaseConn := newConn(t,
-		mustHello(ports.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
+		mustHello(protocol.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
 		frameInput([]byte("\x1b ")),
 		frameInput([]byte("CNT\r")),
 		frameInput([]byte("\x1b1")),

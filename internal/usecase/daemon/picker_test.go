@@ -734,7 +734,7 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 	d.mu.Lock()
 	entry := d.inactive[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, ports.SessionBroken, entry.state)
+	require.Equal(t, protocol.SessionBroken, entry.state)
 	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
 	select {
 	case <-entry.restoreDone:
@@ -747,10 +747,10 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 	tests := []struct {
 		name         string
 		broken       bool
-		runtimeState ports.SessionState
+		runtimeState protocol.SessionState
 	}{
-		{name: "broken", broken: true, runtimeState: ports.SessionBroken},
-		{name: "healthy without restored runtime", runtimeState: ports.SessionDown},
+		{name: "broken", broken: true, runtimeState: protocol.SessionBroken},
+		{name: "healthy without restored runtime", runtimeState: protocol.SessionDown},
 	}
 
 	for _, tt := range tests {
@@ -783,7 +783,7 @@ func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
 			require.Equal(t, domain.NoticeSessionUnavailable, userError.Code)
 			var protocolError *protoErr
 			require.ErrorAs(t, err, &protocolError)
-			require.Equal(t, ports.ErrInternal, protocolError.code)
+			require.Equal(t, protocol.ErrInternal, protocolError.code)
 			require.Zero(t, factory.calls.Load(), "unsafe target must not open a PTY")
 			require.Same(t, from, ac.currentSession())
 
@@ -809,7 +809,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	defer release3()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactorySeq(t, p2, p3)
-	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: ports.SessionDown}
+	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work"}, state: protocol.SessionDown}
 
 	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -1406,11 +1406,11 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 		return got.Size != normalSize && got.Size.Valid()
 	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})
-	d.inactive["old"] = inactiveSession{name: "old", cwd: t.TempDir(), createdAt: 1, state: ports.SessionDown}
+	d.inactive["old"] = inactiveSession{name: "old", cwd: t.TempDir(), createdAt: 1, state: protocol.SessionDown}
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
-	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
+	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
 	require.NoError(t, err)
 	d.resumeStoppedAndSwitch(sess, ac, picker.Target{Name: "old", Stopped: true})
 	got := ac.currentSession()
@@ -1428,7 +1428,7 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 		defer tb.mu.Unlock()
 		return tb.floating.pane != nil && tb.floating.pane.pty == floating
 	}, time.Second, 5*time.Millisecond)
-	_ = d.killSession(got, ports.ReasonSessionKilled, false)
+	_ = d.killSession(got, protocol.ReasonSessionKilled, false)
 	release1()
 	release2()
 	d.sessWg.Wait()
@@ -1448,7 +1448,7 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p)
-	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, state: ports.SessionDown}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7, state: protocol.SessionDown}
 	cause := errors.New("open failed")
 	ptys := portsmocks.NewMockPTYFactory(t)
 	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Once()

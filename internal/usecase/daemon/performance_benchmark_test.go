@@ -15,6 +15,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -1100,7 +1101,7 @@ func (f *performanceFixture) close() error {
 	sess.mu.Lock()
 	sess.ephemeral = true
 	sess.mu.Unlock()
-	killErr := f.killSession(sess, ports.ReasonServerShutdown, false)
+	killErr := f.killSession(sess, protocol.ReasonServerShutdown, false)
 	d.stopSnapshotEncodeWorker()
 	d.serveCancel()
 	d.hardCancel()

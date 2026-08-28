@@ -178,7 +178,7 @@ func TestRemoteTargetWireRejectsInvalidSelectorCombinations(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			target := *testRemoteTarget(false)
 			test.mutate(&target)
-			message := AttachTarget{Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach, RemoteTarget: &target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned}
+			message := protocol.AttachTarget{Endpoint: target.Endpoint, Session: target.SessionName, Intent: protocol.IntentAttach, RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
 			if MarshalAttachTarget(message) != nil {
 				t.Fatal("invalid target was marshaled")
 			}
@@ -188,13 +188,13 @@ func TestRemoteTargetWireRejectsInvalidSelectorCombinations(t *testing.T) {
 
 func TestRemoteTargetWireRichGoldenRoundTrip(t *testing.T) {
 	target := testRemoteTarget(false)
-	got := MarshalAttachTarget(AttachTarget{
-		Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
-		RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+	got := MarshalAttachTarget(protocol.AttachTarget{
+		Endpoint: target.Endpoint, Session: target.SessionName, Intent: protocol.IntentAttach,
+		RemoteTarget: target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	})
 	want := []byte{
 		0x00, 0x0f, 'b', 'u', 'i', 'l', 'd', '@', 'm', 'u', 'l', 'e', ':', '2', '2', '2', '2',
-		0x00, 0x04, 'w', 'o', 'r', 'k', IntentAttach,
+		0x00, 0x04, 'w', 'o', 'r', 'k', protocol.IntentAttach,
 		0x01,
 		0x00, 0x0f, 'b', 'u', 'i', 'l', 'd', '@', 'm', 'u', 'l', 'e', ':', '2', '2', '2', '2',
 		0x00, 0x09, 'm', 'u', 'l', 'e', ':', '2', '2', '2', '2',
@@ -210,7 +210,7 @@ func TestRemoteTargetWireRichGoldenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalAttachTarget() error = %v", err)
 	}
-	if decoded.RemoteTarget == nil || *decoded.RemoteTarget != *target || decoded.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
+	if decoded.RemoteTarget == nil || *decoded.RemoteTarget != *target || decoded.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 		t.Fatalf("decoded target = %#v, policy = %d", decoded.RemoteTarget, decoded.EnvironmentPolicy)
 	}
 }

@@ -50,7 +50,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	transport.EXPECT().Send(isType(ports.MsgAck)).Run(func(ports.Frame) { close(acked) }).Return(nil).Once()
 	unblock := scriptRecv(transport,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
 		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("flush-before-observe"), New: 3}))},
 	)
 	defer unblock()
@@ -59,7 +59,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- runTestClient(ctx, testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: ports.IntentEphemeral})
+		result <- runTestClient(ctx, testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: protocol.IntentEphemeral})
 	}()
 	awaitClientRuntime(t, observer.entered, "blocking observer")
 	awaitClientRuntime(t, flushed, "terminal flush")
@@ -90,15 +90,15 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	unblock := scriptRecv(transport,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
 		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("unchanged-by-observer"), New: 3}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	transport.EXPECT().Send(isType(ports.MsgAck)).Return(nil).Maybe()
 	transport.EXPECT().Close().Return(nil).Once()
 
-	err := runTestClient(context.Background(), testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: ports.IntentEphemeral})
+	err := runTestClient(context.Background(), testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: protocol.IntentEphemeral})
 	require.NoError(t, err)
 	reporter.Flush()
 	require.Equal(t, "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07\x1b[?2031$punchanged-by-observer", out.String(), "observer must not alter terminal bytes")

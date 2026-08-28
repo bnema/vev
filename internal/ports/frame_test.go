@@ -2,11 +2,13 @@ package ports
 
 import (
 	"testing"
+
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 37 {
-		t.Fatalf("ProtocolVersion = %d, want 37", ProtocolVersion)
+	if protocol.Version != 37 {
+		t.Fatalf("ProtocolVersion = %d, want 37", protocol.Version)
 	}
 }
 

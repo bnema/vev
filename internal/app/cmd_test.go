@@ -13,6 +13,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -140,7 +141,7 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 		t.Run(tt.slug, func(t *testing.T) {
 			parsed, err := parseArgs(append([]string{"cmd", tt.slug}, tt.args...))
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 			require.NoError(t, runCmdWithDeps(context.Background(), parsed.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
@@ -151,13 +152,13 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.slug, request.Slug)
 			require.Equal(t, tt.args, request.Args)
-			require.Equal(t, ports.ProtocolVersion, request.Version)
+			require.Equal(t, protocol.Version, request.Version)
 		})
 	}
 }
 
 func TestRemoteCatalogCommandEnsuresDaemon(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 	ensureCalls := 0
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "remote-catalog", jsonOut: true}, cmdDeps{
 		stdout: io.Discard,
@@ -183,8 +184,8 @@ func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
 		{slug: "move-tab", args: []string{"work", "extra"}},
 	} {
 		t.Run(invocation.slug+"/"+strconv.Itoa(len(invocation.args)), func(t *testing.T) {
-			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{
-				Code: ports.ErrInvalidCommandArgs, Text: "invalid command arguments",
+			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{
+				Code: protocol.ErrInvalidCommandArgs, Text: "invalid command arguments",
 			})}}
 			err := runCmdWithDeps(context.Background(), invocation, cmdDeps{
 				stdout: io.Discard,
@@ -206,7 +207,7 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 		t.Run(slug, func(t *testing.T) {
 			invocation, err := parseArgs([]string{"cmd", "--self", slug})
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 			require.NoError(t, runCmdWithDeps(context.Background(), invocation.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "session=work,tab=t_abc,pane=p_def" },
@@ -225,7 +226,7 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 }
 
 func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true, Output: "done"})}}
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true, Output: "done"})}}
 	out := new(strings.Builder)
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right", self: true}, cmdDeps{
 		stdout: out,
@@ -251,7 +252,7 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 }
 
 func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -270,7 +271,7 @@ func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
 }
 
 func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{OK: true})}}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "new-tab", session: "current"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -350,8 +351,8 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 
 func TestRunCmdZeroRequestIDReplyReturnsDaemonError(t *testing.T) {
 	const want = "daemon error"
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{
-		Code: ports.ErrInternal, Text: want,
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(protocol.CommandResult{
+		Code: protocol.ErrInternal, Text: want,
 	})}}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
@@ -388,27 +389,27 @@ func TestRunCmdDoesNotAutostartAndClassifiesDialFailure(t *testing.T) {
 func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 	tests := []struct {
 		name     string
-		result   ports.CommandResult
+		result   protocol.CommandResult
 		wantCode int
 	}{
 		{
 			name:     "invalid command arguments are usage errors",
-			result:   ports.CommandResult{Code: ports.ErrInvalidCommandArgs, Text: "usage: toast [-l level] <message>"},
+			result:   protocol.CommandResult{Code: protocol.ErrInvalidCommandArgs, Text: "usage: toast [-l level] <message>"},
 			wantCode: 2,
 		},
 		{
 			name:     "missing runtime target is a command failure",
-			result:   ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "no live sessions"},
+			result:   protocol.CommandResult{Code: protocol.ErrNoSuchTarget, Text: "no live sessions"},
 			wantCode: 1,
 		},
 		{
 			name:     "resize not in split remains an exit one failure",
-			result:   ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "pane is not in a split"},
+			result:   protocol.CommandResult{Code: protocol.ErrNoSuchTarget, Text: "pane is not in a split"},
 			wantCode: 1,
 		},
 		{
 			name:     "resize minimum remains an exit one failure",
-			result:   ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "pane cannot be resized further"},
+			result:   protocol.CommandResult{Code: protocol.ErrNoSuchTarget, Text: "pane cannot be resized further"},
 			wantCode: 1,
 		},
 	}

@@ -46,7 +46,7 @@ func newCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
 	}
 	clk.clock.EXPECT().Now().Return(time.Time{}).Maybe()
 	clk.clock.EXPECT().NewTimer(mock.MatchedBy(func(d time.Duration) bool {
-		return d == ports.HandshakeTimeout ||
+		return d == protocol.HandshakeTimeout ||
 			d == urgentRenderDeadline ||
 			(d >= minOutputRenderDeadline && d <= maxOutputRenderDeadline) ||
 			d == maxSyncUpdateDuration ||
@@ -66,7 +66,7 @@ func newCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
 		timer.mock.EXPECT().Stop().Run(func() {
 			timer.stopOnce.Do(func() { close(timer.stopped) })
 		}).Maybe().Return(true)
-		if d == ports.HandshakeTimeout {
+		if d == protocol.HandshakeTimeout {
 			clk.handshakeTimers <- timer
 		} else {
 			clk.timers <- timer

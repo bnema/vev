@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestReportAttachmentErrorPreservesLocalOrNilScope(t *testing.T) {
@@ -30,9 +31,9 @@ func TestReportAttachmentErrorPreservesLocalOrNilScope(t *testing.T) {
 
 func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
-	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeClipboardFallback})
-	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeClipboardTooLarge})
-	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeLinkDegraded})
+	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardFallback})
+	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardTooLarge})
+	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeLinkDegraded})
 
 	toasts, _ := visibleToasts(ac)
 	require.Len(t, toasts, 3)
@@ -42,7 +43,7 @@ func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.
 		{Code: domain.NoticeClipboard, Severity: domain.NoticeError, Message: "image paste failed; sent Ctrl+V", SessionID: sess.id, Count: 1},
 	}, stripNoticeTimes(toasts))
 
-	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeLinkConnected})
+	d.handleClientNotice(sess, ac, protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected})
 	toasts, _ = visibleToasts(ac)
 	require.Len(t, toasts, 2)
 	for _, toast := range toasts {
@@ -57,7 +58,7 @@ func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	require.True(t, ok, "attached client transport must be a MockTransport")
 	frames := []ports.Frame{
 		{Type: ports.MsgClientNotice, Payload: []byte{0xff}},
-		{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})},
+		{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})},
 	}
 	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
 		frame := frames[0]

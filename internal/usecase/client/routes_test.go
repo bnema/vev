@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +26,7 @@ func routeTestCandidate(index byte, origin protocol.RouteOrigin) routeCandidate 
 			reachability: protocol.RouteReachabilityReachable,
 		},
 		request: AttachRequest{
-			Intent:      ports.IntentAttach,
+			Intent:      protocol.IntentAttach,
 			SessionName: target.SessionName,
 			Origin:      origin,
 		},
@@ -37,7 +36,7 @@ func routeTestCandidate(index byte, origin protocol.RouteOrigin) routeCandidate 
 func TestRouteCandidateRetainsHostLabelWithoutDiscoveryTarget(t *testing.T) {
 	target := routeTestTarget(1)
 	candidate := routeCandidateForAttach(AttachRequest{
-		Intent: ports.IntentAttach, SessionName: target.SessionName, Remote: true,
+		Intent: protocol.IntentAttach, SessionName: target.SessionName, Remote: true,
 		Origin: protocol.RouteOriginRemote, OriginKey: "user@remote", HostLabel: "remote",
 	}, protocol.CommittedRouteIdentity{Target: target}, nil, 0)
 
@@ -139,16 +138,16 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 		{name: "recreated session does not reuse remembered tab", target: recreated, wantExactTarget: &recreated},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			request := ledger.samePeerHandoff(second.request, ports.AttachTarget{
+			request := ledger.samePeerHandoff(second.request, protocol.AttachTarget{
 				Session:           first.target.SessionName,
-				Intent:            ports.IntentAttach,
+				Intent:            protocol.IntentAttach,
 				ExactTarget:       &tt.target,
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			})
 			require.Equal(t, first.target.SessionName, request.SessionName)
 			require.Equal(t, tt.wantExactTarget, request.ExactTarget)
 			require.Equal(t, tt.wantTab, request.PreferredTabID)
-			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
+			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
 		})
 	}
 }
@@ -156,7 +155,7 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *testing.T) {
 	active := routeTestCandidate(2, protocol.RouteOriginLocal)
 	active.originKey = "local"
-	active.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	active.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
 	active.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
 	active.request.StartupOverlay = protocol.StartupOverlaySessionPicker
 
@@ -173,19 +172,19 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 			if tt.matched {
 				stored := routeTestCandidate(1, protocol.RouteOriginLocal)
 				stored.originKey = "local"
-				stored.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+				stored.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
 				stored.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
 				stored.request.StartupOverlay = protocol.StartupOverlaySessionPicker
 				_, err := ledger.commit(stored)
 				require.NoError(t, err)
 			}
 
-			request := ledger.samePeerHandoff(active.request, ports.AttachTarget{
-				Session: target.SessionName, Intent: ports.IntentAttach, ExactTarget: &target,
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			request := ledger.samePeerHandoff(active.request, protocol.AttachTarget{
+				Session: target.SessionName, Intent: protocol.IntentAttach, ExactTarget: &target,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			})
 
-			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
+			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
 			require.Zero(t, request.NavigationCapabilities)
 			require.Equal(t, protocol.StartupOverlayNone, request.StartupOverlay)
 			require.NoError(t, validateAttachRequest(request))
@@ -199,7 +198,7 @@ func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
 	work.originKey = "remote"
 	work.request.Remote = true
 	work.request.OriginKey = "remote"
-	work.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	work.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
 	work.request.RemoteTarget = &domain.RemoteSessionTarget{
 		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: work.target.LifecycleID,
 		SessionName: work.target.SessionName, LiveTabID: "tab-work",
@@ -211,13 +210,13 @@ func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
 	agents.originKey = "remote"
 	agents.request.Remote = true
 	agents.request.OriginKey = "remote"
-	agents.request.EnvironmentPolicy = ports.EnvironmentPolicyDaemonOwned
+	agents.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
 
-	request := ledger.samePeerHandoff(agents.request, ports.AttachTarget{
+	request := ledger.samePeerHandoff(agents.request, protocol.AttachTarget{
 		Session:           work.target.SessionName,
-		Intent:            ports.IntentAttach,
+		Intent:            protocol.IntentAttach,
 		ExactTarget:       &work.target,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	})
 
 	require.True(t, request.Remote)

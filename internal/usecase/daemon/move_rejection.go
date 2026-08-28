@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -70,7 +70,7 @@ func moveRejectionDescriptorByReason(reason moveRejectionReason) moveRejectionDe
 		PaletteCode:     domain.NoticeInternal,
 		PaletteSeverity: domain.NoticeError,
 		PaletteText:     "Move failed.",
-		CommandCode:     ports.ErrNoSuchTarget,
+		CommandCode:     protocol.ErrNoSuchTarget,
 		CommandText:     "move request is invalid",
 	}
 	switch reason {
@@ -129,7 +129,7 @@ func isMoveCommandError(err error) bool {
 	return ok
 }
 
-func moveCommandFailure(err error) ports.CommandResult {
+func moveCommandFailure(err error) protocol.CommandResult {
 	descriptor, ok := moveRejectionDescriptorFor(err)
 	if !ok {
 		descriptor = moveRejectionDescriptorByReason(moveRejectionInvalid)

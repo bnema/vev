@@ -234,52 +234,52 @@ func (d *Daemon) commandResultEffect(effect *attachmentEffect) (*attachmentEffec
 	return effect.ac.beginAttachmentEffect(capability)
 }
 
-func (d *Daemon) executeAttachedCommand(effect *attachmentEffect, request ports.CommandRequest) ports.CommandResult {
-	result := ports.CommandResult{RequestID: request.RequestID}
-	if request.Version != ports.ProtocolVersion {
-		result.Code = ports.ErrInvalidCommandArgs
+func (d *Daemon) executeAttachedCommand(effect *attachmentEffect, request protocol.CommandRequest) protocol.CommandResult {
+	result := protocol.CommandResult{RequestID: request.RequestID}
+	if request.Version != protocol.Version {
+		result.Code = protocol.ErrInvalidCommandArgs
 		result.Text = "unsupported command protocol version"
 		return result
 	}
 	if !request.Attached {
-		result.Code = ports.ErrInvalidCommandArgs
+		result.Code = protocol.ErrInvalidCommandArgs
 		result.Text = "attached command flag is required"
 		return result
 	}
 	if request.RequestID == 0 {
-		result.Code = ports.ErrInvalidCommandArgs
+		result.Code = protocol.ErrInvalidCommandArgs
 		result.Text = "command request id is required"
 		return result
 	}
 	if request.Self {
-		result.Code = ports.ErrInvalidCommandArgs
+		result.Code = protocol.ErrInvalidCommandArgs
 		result.Text = "attached commands cannot target themselves"
 		return result
 	}
 	if request.TargetSession != "" || request.TargetTab != "" || request.TargetPane != "" {
-		result.Code = ports.ErrInvalidCommandArgs
+		result.Code = protocol.ErrInvalidCommandArgs
 		result.Text = "attached commands cannot override their active session target"
 		return result
 	}
 	sess := effect.sess
 	if sess == nil || !effect.current() {
-		result.Code = ports.ErrNoSuchTarget
+		result.Code = protocol.ErrNoSuchTarget
 		result.Text = "attached session is no longer active"
 		return result
 	}
 	cmd, ok := command.BySlug(request.Slug)
 	if !ok {
-		result.Code = ports.ErrUnknownCommand
+		result.Code = protocol.ErrUnknownCommand
 		result.Text = "unknown command: " + request.Slug
 		return result
 	}
 	if !cmd.PaletteVisible {
-		result.Code = ports.ErrNotScriptable
+		result.Code = protocol.ErrNotScriptable
 		result.Text = request.Slug + " is not available in the palette"
 		return result
 	}
 	if cmd.Run == nil {
-		result.Code = ports.ErrNotScriptable
+		result.Code = protocol.ErrNotScriptable
 		result.Text = request.Slug + " is not scriptable"
 		return result
 	}
@@ -293,11 +293,11 @@ func (d *Daemon) executeAttachedCommand(effect *attachmentEffect, request ports.
 		return result
 	}
 	if errors.Is(err, command.ErrInvalidArguments) {
-		result.Code = ports.ErrInvalidCommandArgs
+		result.Code = protocol.ErrInvalidCommandArgs
 		result.Text = "usage: " + cmd.Usage
 		return result
 	}
-	result.Code = ports.ErrInternal
+	result.Code = protocol.ErrInternal
 	result.Text = err.Error()
 	return result
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -243,7 +244,7 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't read session catalogue", err)
 		}
 		if d.closing {
-			return nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+			return nil, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 		}
 		stopped, resuming = d.inactive[name]
 		if !inactiveResumeFenceAllows(stopped, resuming, expectedInactive, authoritative, authoritativeExists, validateInactive) {
@@ -498,7 +499,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		ready:             true,
 	})
 	if err != nil {
-		_ = d.killSession(newSess, ports.ReasonSessionKilled, true)
+		_ = d.killSession(newSess, protocol.ReasonSessionKilled, true)
 		return err
 	}
 
@@ -552,7 +553,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(effect *attachmentEffect, n
 	})
 	if err != nil {
 		if created != nil {
-			_ = d.killSession(created, ports.ReasonSessionKilled, true)
+			_ = d.killSession(created, protocol.ReasonSessionKilled, true)
 		}
 		return err
 	}
@@ -590,7 +591,7 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 		expectedTransport: ac.transportSnapshot(), ready: true,
 	})
 	if err != nil {
-		_ = d.killSession(newSess, ports.ReasonSessionKilled, true)
+		_ = d.killSession(newSess, protocol.ReasonSessionKilled, true)
 		return err
 	}
 	d.touchMRU(newSess)
@@ -629,7 +630,7 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(effect *attachment
 	})
 	if err != nil {
 		if created != nil {
-			_ = d.killSession(created, ports.ReasonSessionKilled, true)
+			_ = d.killSession(created, protocol.ReasonSessionKilled, true)
 		}
 		return err
 	}
@@ -1164,9 +1165,9 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 		var err error
 		if effect != nil {
 			effect.bindActionEnd(d, "close-tab")
-			err = d.killSessionForAttachment(sess, ports.ReasonSessionKilled, false, effect, "close-tab")
+			err = d.killSessionForAttachment(sess, protocol.ReasonSessionKilled, false, effect, "close-tab")
 		} else {
-			err = d.killSession(sess, ports.ReasonSessionKilled, false)
+			err = d.killSession(sess, protocol.ReasonSessionKilled, false)
 		}
 		if err != nil {
 			d.log.Warn("closing last tab failed", "session", name, "err", err)
@@ -1645,7 +1646,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 			name := sess.name
 			sess.mu.Unlock()
 			terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable, saturated, or timed out", name)
-			if reason != ports.ReasonServerShutdown {
+			if reason != protocol.ReasonServerShutdown {
 				return terminalSnapshotErr
 			}
 			// Preserve any already-queued routine capture until the blocked
@@ -1741,7 +1742,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	unlockSessions()
 	d.notices.routingMu.Unlock()
 	if !ephemeral {
-		stopped := inactiveSessionFromRecord(stoppedRecord, ports.SessionDown, nil)
+		stopped := inactiveSessionFromRecord(stoppedRecord, protocol.SessionDown, nil)
 		stopped.purging = purge
 		d.inactive[stoppedName] = stopped
 	}

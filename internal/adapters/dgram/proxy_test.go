@@ -89,7 +89,7 @@ func TestProxyRuntimeClampsDatagramHelloOutputWindowAndPreservesControl(t *testi
 			daemon := newFakeTransport()
 			errCh := make(chan error, 1)
 			go func() { errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context()) }()
-			hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: requested}
+			hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: requested}
 			client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}}
 
 			select {
@@ -490,7 +490,7 @@ func TestProxyCopierStopsRetryingWhenContextCanceled(t *testing.T) {
 
 func TestClampDatagramHelloOutputWindowPreservesProtocolValidation(t *testing.T) {
 	t.Run("malformed payload remains malformed", func(t *testing.T) {
-		payload := append(ports.MarshalHello(ports.Hello{Version: ports.ProtocolVersion, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 8}), 0xff)
+		payload := append(ports.MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 8}), 0xff)
 		frame := ports.Frame{Type: ports.MsgHello, Payload: payload}
 		got := clampDatagramHelloOutputWindow(frame)
 		if !reflect.DeepEqual(got, frame) {
@@ -502,8 +502,8 @@ func TestClampDatagramHelloOutputWindowPreservesProtocolValidation(t *testing.T)
 	})
 
 	t.Run("mismatched version remains mismatched", func(t *testing.T) {
-		wantVersion := ports.ProtocolVersion + 1
-		frame := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(ports.Hello{
+		wantVersion := protocol.Version + 1
+		frame := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{
 			Version: wantVersion, Size: domain.Size{Cols: 80, Rows: 24}, MaxOutputInFlight: 8,
 		})}
 		got, err := ports.UnmarshalHello(clampDatagramHelloOutputWindow(frame).Payload)

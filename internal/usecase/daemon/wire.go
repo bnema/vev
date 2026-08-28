@@ -16,11 +16,11 @@ func frameWelcome(s *session, resumeToken uint64) (ports.Frame, error) {
 			Ephemeral: s.ephemeral,
 		}
 	}
-	w := ports.Welcome{
+	w := protocol.Welcome{
 		SessionID:         string(s.id),
 		SessionName:       s.name,
 		Ephemeral:         s.ephemeral,
-		Capabilities:      ports.CapabilityResume,
+		Capabilities:      protocol.CapabilityResume,
 		CommittedIdentity: identity,
 	}
 	s.mu.Unlock()
@@ -33,7 +33,7 @@ func frameWelcome(s *session, resumeToken uint64) (ports.Frame, error) {
 }
 
 func frameError(code uint16, text string) ports.Frame {
-	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Code: code, Text: text})}
+	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(protocol.ErrorMsg{Code: code, Text: text})}
 }
 
 func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) (ports.Frame, error) {
@@ -48,13 +48,13 @@ func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) 
 }
 
 func frameDetached(reason uint8) ports.Frame {
-	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: reason})}
+	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: reason})}
 }
 
 func framePong() ports.Frame {
-	return ports.Frame{Type: ports.MsgPong, Payload: ports.MarshalPong(ports.Pong{})}
+	return ports.Frame{Type: ports.MsgPong, Payload: ports.MarshalPong(protocol.Pong{})}
 }
 
-func frameSessions(infos []ports.SessionInfo) ports.Frame {
-	return ports.Frame{Type: ports.MsgSessions, Payload: ports.MarshalSessions(ports.Sessions{Sessions: infos})}
+func frameSessions(infos []protocol.SessionInfo) ports.Frame {
+	return ports.Frame{Type: ports.MsgSessions, Payload: ports.MarshalSessions(protocol.Sessions{Sessions: infos})}
 }

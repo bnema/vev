@@ -250,7 +250,7 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	frozenByKill := make(chan *attachedClient, 3)
 	d.afterAttachmentEffectGateFrozen = func(_ string, ac *attachedClient) { frozenByKill <- ac }
 	killDone := make(chan error, 1)
-	go func() { killDone <- d.killSession(sess, ports.ReasonSessionKilled, false) }()
+	go func() { killDone <- d.killSession(sess, protocol.ReasonSessionKilled, false) }()
 
 	require.Same(t, first, awaitTestValue(t, frozenByKill, "teardown did not acquire the first attachment effect gate"))
 	deadline := awaitTestValue(t, clock.timers, "teardown did not arm the gate acquisition deadline")
@@ -343,7 +343,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	awaitTestCompletion(t, activeTransport.sendEntered, "active send did not block")
 
 	killDone := make(chan error, 1)
-	go func() { killDone <- d.killSession(sess, ports.ReasonSessionKilled, false) }()
+	go func() { killDone <- d.killSession(sess, protocol.ReasonSessionKilled, false) }()
 	select {
 	case err := <-killDone:
 		require.NoError(t, err)
@@ -380,7 +380,7 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 		ac.replaceTransport(fresh)
 	}
 
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
 	awaitTestCompletion(t, sendDone, "captured incarnation attachment effect ticket did not retire")
 	require.True(t, stale.Closed(), "exact captured in-flight transport was not interrupted")
 	require.False(t, fresh.Closed(), "newer transport incarnation was interrupted")
@@ -408,7 +408,7 @@ func TestShutdownSignalsServeWhenParticipantGateAcquisitionTimesOut(t *testing.T
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clock
 	shutdownDone := make(chan bool, 1)
-	go func() { shutdownDone <- d.shutdownAll(ports.ReasonServerShutdown) }()
+	go func() { shutdownDone <- d.shutdownAll(protocol.ReasonServerShutdown) }()
 
 	deadline := awaitTestValue(t, clock.timers, "shutdown did not arm the gate acquisition deadline")
 	deadline.ch <- clock.Now()
@@ -437,7 +437,7 @@ func TestShutdownInterruptsBlockedParticipantSend(t *testing.T) {
 	awaitTestCompletion(t, blocked.sendEntered, "active send did not block")
 
 	shutdownDone := make(chan bool, 1)
-	go func() { shutdownDone <- d.shutdownAll(ports.ReasonServerShutdown) }()
+	go func() { shutdownDone <- d.shutdownAll(protocol.ReasonServerShutdown) }()
 	select {
 	case incomplete := <-shutdownDone:
 		require.False(t, incomplete)
@@ -726,8 +726,8 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	token := source.captureAttachmentCapability(ac, transport)
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
-	payload, err := ports.MarshalCommandRequest(ports.CommandRequest{
-		Version: ports.ProtocolVersion, RequestID: 1, Slug: "back-session", Attached: true,
+	payload, err := ports.MarshalCommandRequest(protocol.CommandRequest{
+		Version: protocol.Version, RequestID: 1, Slug: "back-session", Attached: true,
 	})
 	require.NoError(t, err)
 
@@ -735,7 +735,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 	require.Same(t, source, ac.currentAttachmentSession())
 	frames := transport.Sends()
 	require.NotEmpty(t, frames)
-	var result ports.CommandResult
+	var result protocol.CommandResult
 	for _, frame := range frames {
 		if frame.Type != ports.MsgCommandResult {
 			continue

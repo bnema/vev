@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
@@ -17,9 +16,9 @@ func TestRouteExactSessionTargetSelectsLifecycle(t *testing.T) {
 	sess.incarnation = remoteLifecycleForTest()
 	tr, _ := newCapturingTransport(t)
 	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-	hello := ports.Hello{
-		Version:     ports.ProtocolVersion,
-		Intent:      ports.IntentAttach,
+	hello := protocol.Hello{
+		Version:     protocol.Version,
+		Intent:      protocol.IntentAttach,
 		Name:        target.SessionName,
 		Size:        domain.Size{Cols: 80, Rows: 24},
 		ExactTarget: &target,
@@ -38,9 +37,9 @@ func TestRouteExactSessionTargetRejectsNameMismatch(t *testing.T) {
 	sess.ephemeral = false
 	sess.incarnation = remoteLifecycleForTest()
 	tr, _ := newCapturingTransport(t)
-	hello := ports.Hello{
-		Version:     ports.ProtocolVersion,
-		Intent:      ports.IntentAttach,
+	hello := protocol.Hello{
+		Version:     protocol.Version,
+		Intent:      protocol.IntentAttach,
 		Name:        "other",
 		Size:        domain.Size{Cols: 80, Rows: 24},
 		ExactTarget: &protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name},
@@ -49,7 +48,7 @@ func TestRouteExactSessionTargetRejectsNameMismatch(t *testing.T) {
 	_, _, err := d.routeWithContext(context.Background(), hello, tr)
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchSession, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchSession, protocolErr.code)
 }
 
 func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
@@ -68,7 +67,7 @@ func TestLockedExactSessionTargetRejectsReplacement(t *testing.T) {
 
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchSession, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchSession, protocolErr.code)
 }
 
 func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
@@ -79,9 +78,9 @@ func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
 	tr, _ := newCapturingTransport(t)
 	wrong := sess.incarnation
 	wrong[0]++
-	hello := ports.Hello{
-		Version:     ports.ProtocolVersion,
-		Intent:      ports.IntentAttach,
+	hello := protocol.Hello{
+		Version:     protocol.Version,
+		Intent:      protocol.IntentAttach,
 		Name:        sess.name,
 		Size:        domain.Size{Cols: 80, Rows: 24},
 		ExactTarget: &protocol.ExactSessionTarget{LifecycleID: wrong, SessionName: sess.name},
@@ -90,5 +89,5 @@ func TestRouteExactSessionTargetRejectsLifecycleReplacement(t *testing.T) {
 	_, _, err := d.routeWithContext(context.Background(), hello, tr)
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchSession, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchSession, protocolErr.code)
 }

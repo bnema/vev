@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -416,7 +417,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	// relying on wall-clock debounce delivery.
 	clk := newCoordinatorMockClock(t, 16)
 	d := newTestDaemon(t, newFactory(t, p), clk.clock)
-	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 16, Rows: 5}))
+	tr, sends, releaseConn := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 16, Rows: 5}))
 	advanceRender := func() {
 		deadline := time.NewTimer(2 * time.Second)
 		defer deadline.Stop()
@@ -483,7 +484,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	releaseConn()
 	closeOnce.Do(func() { close(readDone) })
 	hg.Wait()
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
+	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
 	d.sessWg.Wait()
 }
 

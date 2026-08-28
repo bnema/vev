@@ -33,7 +33,7 @@ func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 	got, err := ports.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
 	require.Empty(t, got.Endpoint)
-	require.Equal(t, ports.IntentAttach, got.Intent)
+	require.Equal(t, protocol.IntentAttach, got.Intent)
 	require.True(t, got.SamePeer)
 	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: target.incarnation, SessionName: target.name}, got.ExactTarget)
 	require.Same(t, source, ac.currentAttachmentSession(), "the source remains attached until the client confirms the switch")
@@ -44,7 +44,7 @@ func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
 	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "source")
 	lifecycle := remoteLifecycleForTest()
 	d.inactive["stopped"] = inactiveSession{
-		name: "stopped", state: ports.SessionDown, incarnation: lifecycle,
+		name: "stopped", state: protocol.SessionDown, incarnation: lifecycle,
 	}
 	graphics := newGraphicsOutputState()
 	graphics.assets["asset"] = graphicsOutputAsset{id: graphics.namespaceBase}
@@ -97,7 +97,7 @@ func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.RemoteTarget)
 	require.Equal(t, remoteTarget, *got.RemoteTarget)
-	require.Equal(t, ports.EnvironmentPolicyDaemonOwned, got.EnvironmentPolicy)
+	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, got.EnvironmentPolicy)
 }
 
 func TestRemotePickerRichHandoffRejectsMismatchedRouteKey(t *testing.T) {

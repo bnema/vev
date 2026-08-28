@@ -168,7 +168,7 @@ func TestParkedRouteRestoresExactStoppedTargetWithDaemonEnvironment(t *testing.T
 	lifecycle := domain.SessionLifecycleID{8}
 	d.mu.Lock()
 	d.inactive["stopped"] = inactiveSession{
-		name: "stopped", cwd: "/remote/work", incarnation: lifecycle, state: ports.SessionDown,
+		name: "stopped", cwd: "/remote/work", incarnation: lifecycle, state: protocol.SessionDown,
 		tabNames: []string{"alpha", "beta"},
 		tabRecords: []domain.CatalogueTabRecord{
 			{StableID: "tab-a", Name: "alpha"},

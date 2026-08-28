@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const CommandRequestTimeout = 10 * time.Second
@@ -18,7 +19,7 @@ var (
 
 // CommandRequestOutcome is the result delivered for one tracked request.
 type CommandRequestOutcome struct {
-	Result ports.CommandResult
+	Result protocol.CommandResult
 	Err    error
 }
 
@@ -82,21 +83,21 @@ func (t *CommandRequestTracker) trackLocked(requestID, generation uint64) <-chan
 
 // Wait waits without holding the tracker or connection sender lock. Timeout
 // and cancellation remove only the matching request.
-func (t *CommandRequestTracker) Wait(ctx context.Context, clock ports.Clock, requestID, generation uint64, outcome <-chan CommandRequestOutcome) (ports.CommandResult, error) {
+func (t *CommandRequestTracker) Wait(ctx context.Context, clock ports.Clock, requestID, generation uint64, outcome <-chan CommandRequestOutcome) (protocol.CommandResult, error) {
 	if t == nil || clock == nil {
-		return ports.CommandResult{}, ErrCommandRequestUnavailable
+		return protocol.CommandResult{}, ErrCommandRequestUnavailable
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		t.Remove(requestID, generation)
-		return ports.CommandResult{}, err
+		return protocol.CommandResult{}, err
 	}
 	timer := clock.NewTimer(CommandRequestTimeout)
 	if timer == nil {
 		t.Remove(requestID, generation)
-		return ports.CommandResult{}, ErrCommandRequestTimeout
+		return protocol.CommandResult{}, ErrCommandRequestTimeout
 	}
 	defer timer.Stop()
 	select {
@@ -104,10 +105,10 @@ func (t *CommandRequestTracker) Wait(ctx context.Context, clock ports.Clock, req
 		return completed.Result, completed.Err
 	case <-ctx.Done():
 		t.Remove(requestID, generation)
-		return ports.CommandResult{}, ctx.Err()
+		return protocol.CommandResult{}, ctx.Err()
 	case <-timer.C():
 		t.Remove(requestID, generation)
-		return ports.CommandResult{}, ErrCommandRequestTimeout
+		return protocol.CommandResult{}, ErrCommandRequestTimeout
 	}
 }
 
@@ -126,7 +127,7 @@ func (t *CommandRequestTracker) Remove(requestID, generation uint64) {
 
 // Complete accepts only the exact request generation. Unknown, late, and old
 // generation results are safe no-ops.
-func (t *CommandRequestTracker) Complete(generation uint64, result ports.CommandResult) {
+func (t *CommandRequestTracker) Complete(generation uint64, result protocol.CommandResult) {
 	t.finish(result.RequestID, generation, CommandRequestOutcome{Result: result})
 }
 

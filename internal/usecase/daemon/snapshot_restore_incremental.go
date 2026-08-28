@@ -12,6 +12,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
@@ -19,11 +20,11 @@ const catalogueRestoreConcurrency = 8
 
 var errRetryableRestoreLoad = errors.New("snapshot: retryable checkpoint load")
 
-func initialSessionState(record domain.CatalogueRecord) (ports.SessionState, chan struct{}) {
+func initialSessionState(record domain.CatalogueRecord) (protocol.SessionState, chan struct{}) {
 	done := make(chan struct{})
-	state := ports.SessionDown
+	state := protocol.SessionDown
 	if record.DegradedReason != "" {
-		state = ports.SessionBroken
+		state = protocol.SessionBroken
 		close(done)
 	} else if record.Committed == nil {
 		close(done)
@@ -68,7 +69,7 @@ func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.Catalogu
 	wg.Wait()
 }
 
-func inactiveSessionFromRecord(record domain.CatalogueRecord, state ports.SessionState, done chan struct{}) inactiveSession {
+func inactiveSessionFromRecord(record domain.CatalogueRecord, state protocol.SessionState, done chan struct{}) inactiveSession {
 	tabRecords := append([]domain.CatalogueTabRecord(nil), record.TabRecords...)
 	tabNames := append([]string(nil), record.TabNames...)
 	if len(tabRecords) != 0 {
@@ -123,7 +124,7 @@ func closeRuntimeRestoreDoneLocked(done chan struct{}) {
 	}
 }
 
-func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state ports.SessionState) {
+func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state protocol.SessionState) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	entry, ok := d.inactive[record.Name]
@@ -156,7 +157,7 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 
 	d.mu.Lock()
 	if entry, ok := d.inactive[record.Name]; ok && degraded {
-		d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionBroken, entry.restoreDone)
+		d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionBroken, entry.restoreDone)
 	}
 	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
@@ -174,12 +175,12 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 
 func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecord) error {
 	if record.DegradedReason != "" {
-		d.setStoppedRecovery(record, ports.SessionBroken)
+		d.setStoppedRecovery(record, protocol.SessionBroken)
 		d.logSessionDegraded(record, "persisted-broken")
 		return nil
 	}
 	if record.Committed == nil {
-		d.setStoppedRecovery(record, ports.SessionDown)
+		d.setStoppedRecovery(record, protocol.SessionDown)
 		d.logSessionRestoreComplete(record, 0, false)
 		return nil
 	}
@@ -231,7 +232,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {
 		return err
 	}
-	d.setStoppedRecovery(record, ports.SessionDown)
+	d.setStoppedRecovery(record, protocol.SessionDown)
 	d.logSessionRestoreComplete(record, selected.Generation, false)
 	return nil
 }
@@ -252,7 +253,7 @@ func (d *Daemon) resetIncompatibleCheckpoint(ctx context.Context, record domain.
 
 	d.mu.Lock()
 	if entry, ok := d.inactive[record.Name]; ok {
-		d.inactive[record.Name] = inactiveSessionFromRecord(fresh, ports.SessionDown, entry.restoreDone)
+		d.inactive[record.Name] = inactiveSessionFromRecord(fresh, protocol.SessionDown, entry.restoreDone)
 	}
 	d.mu.Unlock()
 

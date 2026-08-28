@@ -9,6 +9,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestVersionRemainsWireCompatible(t *testing.T) {
+	require.Equal(t, uint16(37), Version)
+	require.Equal(t, (16<<20)-55, MaxOutputDataLen)
+}
+
+func TestHelloSemanticValidation(t *testing.T) {
+	base := Hello{Version: Version, Intent: IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}
+	tests := []struct {
+		name   string
+		mutate func(*Hello)
+		want   error
+	}{
+		{name: "valid", mutate: func(*Hello) {}},
+		{name: "unknown intent", mutate: func(h *Hello) { h.Intent = 99 }, want: ErrInvalidHello},
+		{name: "invalid geometry", mutate: func(h *Hello) { h.Size.Rows = 0 }, want: ErrInvalidHello},
+		{name: "unsafe navigation", mutate: func(h *Hello) { h.NavigationCapabilities = NavigationCapabilityBack }, want: ErrInvalidHello},
+		{name: "exact target name mismatch", mutate: func(h *Hello) {
+			h.ExactTarget = &ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "other"}
+		}, want: ErrInvalidHello},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hello := base
+			tt.mutate(&hello)
+			err := ValidateHello(hello)
+			if tt.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tt.want)
+		})
+	}
+}
+
 func TestOutputSemanticValidation(t *testing.T) {
 	valid := Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}
 	require.NoError(t, ValidateOutput(valid))
@@ -43,7 +77,8 @@ func TestRouteAndPreviewSemanticValidation(t *testing.T) {
 	require.ErrorIs(t, ValidateRemotePreview(preview), ErrInvalidRemotePreview)
 }
 
-func TestPresentationErrorsPreserveClassification(t *testing.T) {
+func TestSemanticErrorsPreserveClassification(t *testing.T) {
 	require.True(t, errors.Is(ValidateAck(Ack{}), ErrInvalidAck))
+	require.True(t, errors.Is(ValidateAttachTarget(AttachTarget{}), ErrInvalidAttachTarget))
 	require.True(t, errors.Is(ValidateParkedRouteRequest(ParkedRouteRequest{}), ErrInvalidNavigation))
 }

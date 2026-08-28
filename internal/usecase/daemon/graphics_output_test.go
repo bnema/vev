@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -149,7 +150,7 @@ func TestFreshCapabilityDowngradePreservesForeignTerminalGraphics(t *testing.T) 
 	ac.output.graphicsOutput = newGraphicsOutputState()
 	ac.output.graphicsUnsupportedWarned.Store(true)
 	d.mu.Lock()
-	d.reconfigureAttachmentOutput(sess, ac, ports.Hello{KittyDirectGraphics: false})
+	d.reconfigureAttachmentOutput(sess, ac, protocol.Hello{KittyDirectGraphics: false})
 	d.mu.Unlock()
 	require.False(t, ac.terminalCapabilities.SupportsKittyGraphics())
 	require.Nil(t, ac.output.graphicsOutput)
@@ -184,7 +185,7 @@ func TestReplacementKittyTerminalGetsFreshGraphicsState(t *testing.T) {
 	oldState.mayHaveEmitted = true
 	ac.output.graphicsOutput = oldState
 	ac.output.graphicsUnsupportedWarned.Store(true)
-	d.reconfigureAttachmentOutput(sess, ac, ports.Hello{KittyDirectGraphics: true})
+	d.reconfigureAttachmentOutput(sess, ac, protocol.Hello{KittyDirectGraphics: true})
 	d.mu.Unlock()
 
 	require.True(t, ac.terminalCapabilities.SupportsKittyGraphics())

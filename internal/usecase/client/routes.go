@@ -199,7 +199,7 @@ func routeFailureCode(err error) protocol.RouteFailureCode {
 	var protocolErr *ProtocolError
 	if errors.As(err, &protocolErr) {
 		switch protocolErr.Code {
-		case ports.ErrNoSuchSession, ports.ErrNoSuchTarget:
+		case protocol.ErrNoSuchSession, protocol.ErrNoSuchTarget:
 			return protocol.RouteFailureNoSuchRoute
 		}
 	}
@@ -545,12 +545,12 @@ func (l *routeLedger) snapshot() protocol.RecentRouteSnapshot {
 // samePeerHandoff restores a previously committed route on the daemon already
 // connected to by the client. The daemon deliberately sends no tab state: the
 // ledger is the sole owner of per-route view memory.
-func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachTarget) AttachRequest {
+func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.AttachTarget) AttachRequest {
 	origin := normalizeRouteOrigin(active.Origin, active.Remote)
 	originKey := normalizeRouteOriginKey(active.OriginKey, origin)
 	environmentPolicy := target.EnvironmentPolicy
 	if origin == protocol.RouteOriginLocal {
-		environmentPolicy = ports.EnvironmentPolicyClientOwned
+		environmentPolicy = protocol.EnvironmentPolicyClientOwned
 	}
 
 	l.mu.RLock()
@@ -568,7 +568,7 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 		// original discovery target would make its Hello request a second,
 		// incorrect remote handoff instead of a same-peer session switch.
 		request.RemoteTarget = nil
-		if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == ports.EnvironmentPolicyClientOwned {
+		if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == protocol.EnvironmentPolicyClientOwned {
 			request.NavigationCapabilities = 0
 			request.StartupOverlay = protocol.StartupOverlayNone
 		}
@@ -586,7 +586,7 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target ports.AttachT
 	request.ExactTarget = target.ExactTarget
 	request.PreferredTabID = ""
 	request.RemoteTarget = nil
-	if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == ports.EnvironmentPolicyClientOwned {
+	if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == protocol.EnvironmentPolicyClientOwned {
 		request.NavigationCapabilities = 0
 		request.StartupOverlay = protocol.StartupOverlayNone
 	}

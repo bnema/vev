@@ -11,15 +11,16 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestTransitionMessageDescribesSwitchAndStoppedRestore(t *testing.T) {
-	live := ports.AttachTarget{Endpoint: "remote", Session: "work"}
+	live := protocol.AttachTarget{Endpoint: "remote", Session: "work"}
 	stoppedTarget := domain.RemoteSessionTarget{
 		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: domain.SessionLifecycleID{1},
 		SessionName: "work", Stopped: true, StoppedTab: domain.NewStableTabSelector("tab-1"),
 	}
-	stopped := ports.AttachTarget{Endpoint: "remote", Session: "work", RemoteTarget: &stoppedTarget}
+	stopped := protocol.AttachTarget{Endpoint: "remote", Session: "work", RemoteTarget: &stoppedTarget}
 
 	require.Equal(t, "Switching to work@remote…", transitionMessage(live))
 	require.Equal(t, "Starting work@remote…", transitionMessage(stopped))
@@ -94,7 +95,7 @@ func TestTransitionUIStartsAfterDelayTicksResizesAndStops(t *testing.T) {
 			term := &transitionTestTerminal{}
 			raw := tt.raw
 			ui := newTransitionUI(term, clock, &raw)
-			ui.start(ports.AttachTarget{Endpoint: "remote", Session: "work"})
+			ui.start(protocol.AttachTarget{Endpoint: "remote", Session: "work"})
 
 			require.Equal(t, []time.Duration{transitionSpinnerDelay}, clock.delays)
 			require.NotNil(t, ui.tickC())

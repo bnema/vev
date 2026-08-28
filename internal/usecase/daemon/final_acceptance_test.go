@@ -6,6 +6,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -150,7 +151,7 @@ func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing
 
 	d.handleAttachmentClientFrame(secondToken, ports.Frame{
 		Type:    ports.MsgOutputResetRequest,
-		Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{}),
+		Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{}),
 	})
 	require.Greater(t, second.output.currentEpoch(), secondEpoch)
 	require.Equal(t, firstEpoch, first.output.currentEpoch(), "peer output reset crossed attachment boundary")

@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -57,7 +58,7 @@ func TestDecodeSessionListErrorReply(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		_, err := decodeSessionListReply(ports.Frame{
 			Type:    ports.MsgError,
-			Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Text: "denied"}),
+			Payload: ports.MarshalErrorMsg(protocol.ErrorMsg{Text: "denied"}),
 		})
 		require.EqualError(t, err, "vev: denied")
 	})
@@ -193,8 +194,8 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				localErr := errors.New("local release failed")
 				var out bytes.Buffer
 				err := listAllSessions(context.Background(), remoteHostDeps{
-					localList: func(context.Context) ([]ports.SessionInfo, error) {
-						return []ports.SessionInfo{{Name: "local", State: ports.SessionUp}}, localErr
+					localList: func(context.Context) ([]protocol.SessionInfo, error) {
+						return []protocol.SessionInfo{{Name: "local", State: protocol.SessionUp}}, localErr
 					},
 					stdout: &out,
 				}, nil)
@@ -215,8 +216,8 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				var out bytes.Buffer
 				err := listAllSessions(ctx, remoteHostDeps{
 					catalog: catalog,
-					localList: func(context.Context) ([]ports.SessionInfo, error) {
-						return []ports.SessionInfo{{Name: "local", State: ports.SessionUp}}, nil
+					localList: func(context.Context) ([]protocol.SessionInfo, error) {
+						return []protocol.SessionInfo{{Name: "local", State: protocol.SessionUp}}, nil
 					},
 					stdout: &out,
 				}, []domain.RemoteHost{{Target: "arch"}, {Target: "mule"}})
@@ -240,8 +241,8 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				var out bytes.Buffer
 				err := listAllSessions(context.Background(), remoteHostDeps{
 					catalog: catalog,
-					localList: func(context.Context) ([]ports.SessionInfo, error) {
-						return []ports.SessionInfo{{Name: "local", State: ports.SessionUp}}, nil
+					localList: func(context.Context) ([]protocol.SessionInfo, error) {
+						return []protocol.SessionInfo{{Name: "local", State: protocol.SessionUp}}, nil
 					},
 					stdout: &out,
 				}, []domain.RemoteHost{{Target: "arch"}, {Target: "mule"}})
@@ -262,13 +263,13 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 	tests := []struct {
 		name      string
 		session   ports.RemoteCatalogSession
-		wantState ports.SessionState
+		wantState protocol.SessionState
 		wantTabs  uint16
 	}{
-		{name: "up", session: ports.RemoteCatalogSession{Name: "dev", State: "up", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionUp, wantTabs: 2},
-		{name: "down", session: ports.RemoteCatalogSession{Name: "dev", State: "down", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionDown, wantTabs: 2},
-		{name: "broken", session: ports.RemoteCatalogSession{Name: "dev", State: "broken", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionBroken, wantTabs: 2},
-		{name: "unknown fails closed", session: ports.RemoteCatalogSession{Name: "dev", State: "unknown", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: ports.SessionBroken, wantTabs: 2},
+		{name: "up", session: ports.RemoteCatalogSession{Name: "dev", State: "up", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionUp, wantTabs: 2},
+		{name: "down", session: ports.RemoteCatalogSession{Name: "dev", State: "down", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionDown, wantTabs: 2},
+		{name: "broken", session: ports.RemoteCatalogSession{Name: "dev", State: "broken", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionBroken, wantTabs: 2},
+		{name: "unknown fails closed", session: ports.RemoteCatalogSession{Name: "dev", State: "unknown", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionBroken, wantTabs: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -288,7 +289,7 @@ func TestRunAttachWithDepsRemoteLearning(t *testing.T) {
 	factory.EXPECT().DialerForRemote("build@mule", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	var learner ports.RemoteHostLearner
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "build@mule", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "build@mule", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
 		hostStore:           store,
 		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
@@ -307,7 +308,7 @@ func TestRunAttachWithDepsAlwaysLearnsRemoteHost(t *testing.T) {
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	factory.EXPECT().DialerForRemote("arch", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 	var learner ports.RemoteHostLearner
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "arch", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "arch", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
 		hostStore:           store,
 		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {

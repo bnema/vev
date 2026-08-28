@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
@@ -69,7 +70,7 @@ func TestConsumeOrExpelControlSelfTargetsNonFocusedPane(t *testing.T) {
 	targetStableID := h.panes["pane-3"].stableID
 	h.tab.mu.Unlock()
 
-	result := sendCommand(t, h.daemon, ports.CommandRequest{
+	result := sendCommand(t, h.daemon, protocol.CommandRequest{
 		Slug:          "consume-or-expel-pane-left",
 		Self:          true,
 		TargetSession: "work",
@@ -100,7 +101,7 @@ func TestConsumeOrExpelControlEdgeNoopReturnsOKAndPreservesFocus(t *testing.T) {
 	h.session.installRenderCoordinator(rc)
 	before := h.snapshot()
 
-	result := sendCommand(t, h.daemon, ports.CommandRequest{
+	result := sendCommand(t, h.daemon, protocol.CommandRequest{
 		Slug:          "consume-or-expel-pane-left",
 		Self:          true,
 		TargetSession: "work",
@@ -130,7 +131,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, factory, clock)
 	addControlSession(d, "work", "t_work", "p_work")
-	frame := commandFrame(t, ports.CommandRequest{
+	frame := commandFrame(t, protocol.CommandRequest{
 		RequestID: 17, Slug: "new-tab", TargetSession: "work",
 	})
 	tr, sends, releaseConn := newConn(t, frame)
@@ -145,7 +146,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	timer.ch <- time.Time{}
 	result := awaitCommandResult(t, sends)
 	require.Equal(t, uint64(17), result.RequestID)
-	require.Equal(t, ports.ErrInternal, result.Code)
+	require.Equal(t, protocol.ErrInternal, result.Code)
 	require.Equal(t, ErrCommandRequestTimeout.Error(), result.Text)
 	require.NoError(t, <-done)
 	close(factory.release)
@@ -155,7 +156,7 @@ func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
 	d := newTestDaemon(t, nil, clock)
 	tr := newBlockingControlSendTransport()
-	frame := commandFrame(t, ports.CommandRequest{RequestID: 41, Attached: true})
+	frame := commandFrame(t, protocol.CommandRequest{RequestID: 41, Attached: true})
 	done := make(chan error, 1)
 	go func() { done <- d.handleCommand(tr, frame) }()
 
@@ -182,7 +183,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 	sendErr := errors.New("command result send failed")
 	tr := &commandSendErrorTransport{err: sendErr}
 
-	err := d.handleCommand(tr, commandFrame(t, ports.CommandRequest{
+	err := d.handleCommand(tr, commandFrame(t, protocol.CommandRequest{
 		RequestID: 41,
 		Attached:  true,
 	}))
@@ -195,7 +196,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
 	// The version prefix is valid and mismatched, while the remainder is not a
 	// decodable request. The daemon must still return ErrVersionMismatch.
-	frame := ports.Frame{Type: ports.MsgCommand, Payload: []byte{0, byte(ports.ProtocolVersion + 1)}}
+	frame := ports.Frame{Type: ports.MsgCommand, Payload: []byte{0, byte(protocol.Version + 1)}}
 	tr, sends, _ := newConn(t, frame)
 
 	d := newTestDaemon(t, nil, stubClock{})
@@ -203,12 +204,12 @@ func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
 
 	result := awaitCommandResult(t, sends)
 	require.False(t, result.OK)
-	require.Equal(t, ports.ErrVersionMismatch, result.Code)
+	require.Equal(t, protocol.ErrVersionMismatch, result.Code)
 }
 
 func TestHandleConnRoutesCommand(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	request := ports.CommandRequest{Version: ports.ProtocolVersion, Slug: "list-sessions"}
+	request := protocol.CommandRequest{Version: protocol.Version, Slug: "list-sessions"}
 	payload, err := ports.MarshalCommandRequest(request)
 	require.NoError(t, err)
 	frame := ports.Frame{Type: ports.MsgCommand, Payload: payload}
@@ -224,35 +225,35 @@ func TestHandleCommandDispatchAndTargetErrors(t *testing.T) {
 	tests := []struct {
 		name    string
 		arrange func(*Daemon)
-		request ports.CommandRequest
+		request protocol.CommandRequest
 		code    uint16
 	}{
-		{name: "unknown slug", request: ports.CommandRequest{Slug: "no-such"}, code: ports.ErrUnknownCommand},
-		{name: "non-scriptable command", request: ports.CommandRequest{Slug: "session-picker"}, code: ports.ErrNotScriptable},
-		{name: "no sessions", request: ports.CommandRequest{Slug: "split-right"}, code: ports.ErrNoSuchTarget},
+		{name: "unknown slug", request: protocol.CommandRequest{Slug: "no-such"}, code: protocol.ErrUnknownCommand},
+		{name: "non-scriptable command", request: protocol.CommandRequest{Slug: "session-picker"}, code: protocol.ErrNotScriptable},
+		{name: "no sessions", request: protocol.CommandRequest{Slug: "split-right"}, code: protocol.ErrNoSuchTarget},
 		{name: "ambiguous sessions", arrange: func(d *Daemon) {
 			addControlSession(d, "one", "t_one", "p_one")
 			addControlSession(d, "two", "t_two", "p_two")
-		}, request: ports.CommandRequest{Slug: "split-right"}, code: ports.ErrAmbiguousTarget},
+		}, request: protocol.CommandRequest{Slug: "split-right"}, code: protocol.ErrAmbiguousTarget},
 		{name: "missing explicit session", arrange: func(d *Daemon) {
 			addControlSession(d, "work", "t_work", "p_work")
-		}, request: ports.CommandRequest{Slug: "new-tab", TargetSession: "missing"}, code: ports.ErrNoSuchTarget},
+		}, request: protocol.CommandRequest{Slug: "new-tab", TargetSession: "missing"}, code: protocol.ErrNoSuchTarget},
 		{name: "missing stable IDs", arrange: func(d *Daemon) {
 			addControlSession(d, "work", "t_work", "p_work")
-		}, request: ports.CommandRequest{Slug: "split-right", TargetTab: "t_nope", TargetPane: "p_nope"}, code: ports.ErrNoSuchTarget},
+		}, request: protocol.CommandRequest{Slug: "split-right", TargetTab: "t_nope", TargetPane: "p_nope"}, code: protocol.ErrNoSuchTarget},
 		{name: "duplicate stable IDs are ambiguous", arrange: func(d *Daemon) {
 			addControlSession(d, "one", "t_shared", "p_shared")
 			addControlSession(d, "two", "t_shared", "p_shared")
-		}, request: ports.CommandRequest{Slug: "toast", Args: []string{"hello"}, TargetTab: "t_shared", TargetPane: "p_shared"}, code: ports.ErrAmbiguousTarget},
+		}, request: protocol.CommandRequest{Slug: "toast", Args: []string{"hello"}, TargetTab: "t_shared", TargetPane: "p_shared"}, code: protocol.ErrAmbiguousTarget},
 		{name: "self requires both IDs", arrange: func(d *Daemon) {
 			addControlSession(d, "work", "t_work", "p_work")
-		}, request: ports.CommandRequest{Slug: "split-right", Self: true, TargetSession: "work", TargetTab: "t_work"}, code: ports.ErrNoSuchTarget},
+		}, request: protocol.CommandRequest{Slug: "split-right", Self: true, TargetSession: "work", TargetTab: "t_work"}, code: protocol.ErrNoSuchTarget},
 		{name: "self rejects pane from another tab", arrange: func(d *Daemon) {
 			sess := addControlSession(d, "work", "t_work", "p_work")
 			other := newTabWithStableID("t_other", "p_other", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 			other.ctx, other.cancel = context.WithCancel(d.serveCtx)
 			sess.tabs = append(sess.tabs, other)
-		}, request: ports.CommandRequest{Slug: "split-right", Self: true, TargetSession: "work", TargetTab: "t_work", TargetPane: "p_other"}, code: ports.ErrNoSuchTarget},
+		}, request: protocol.CommandRequest{Slug: "split-right", Self: true, TargetSession: "work", TargetTab: "t_work", TargetPane: "p_other"}, code: protocol.ErrNoSuchTarget},
 	}
 
 	for _, tt := range tests {
@@ -272,7 +273,7 @@ func TestHandleCommandResolvesStaleSessionNameByStableIDs(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "renamed", "t_work", "p_work")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "toast", Args: []string{"hello"},
 		TargetSession: "old-name", TargetTab: "t_work", TargetPane: "p_work",
 	})
@@ -292,7 +293,7 @@ func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
 	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "rename-tab", Args: []string{"targeted"}, TargetSession: "work",
 		TargetTab: "t_second", TargetPane: "p_second",
 	})
@@ -324,7 +325,7 @@ func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) 
 	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "split-right", TargetSession: "work",
 		TargetTab: "t_origin", TargetPane: "p_origin",
 	})
@@ -361,7 +362,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
-	rename := sendCommand(t, d, ports.CommandRequest{
+	rename := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "rename-tab", Args: []string{"invoking"}, Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -373,7 +374,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	require.Equal(t, "invoking", invoking.name)
 	invoking.mu.Unlock()
 
-	split := sendCommand(t, d, ports.CommandRequest{
+	split := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "split-right", Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -387,7 +388,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	beforeGeneration := invoking.layoutGeneration
 	invoking.mu.Unlock()
 
-	grow := sendCommand(t, d, ports.CommandRequest{
+	grow := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "grow-pane-width", Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -401,7 +402,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	require.Len(t, active.panes, 1, "--self resize must not mutate the active tab")
 	active.mu.Unlock()
 
-	equalize := sendCommand(t, d, ports.CommandRequest{
+	equalize := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "equalize-panes", Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -417,10 +418,10 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 	targets := []struct {
 		name    string
-		request func() ports.CommandRequest
+		request func() protocol.CommandRequest
 	}{
-		{"named", func() ports.CommandRequest { return ports.CommandRequest{TargetSession: "work"} }},
-		{"unique", func() ports.CommandRequest { return ports.CommandRequest{} }},
+		{"named", func() protocol.CommandRequest { return protocol.CommandRequest{TargetSession: "work"} }},
+		{"unique", func() protocol.CommandRequest { return protocol.CommandRequest{} }},
 	}
 	for _, target := range targets {
 		t.Run(target.name, func(t *testing.T) {
@@ -430,8 +431,8 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 					d := newTestDaemon(t, factory, stubClock{})
 					t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 					sess := addControlSession(d, "work", "t_work", "p_work")
-					require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
-					require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-down", TargetSession: "work"}).OK)
+					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-down", TargetSession: "work"}).OK)
 					tb := testAttachmentTab(sess)
 					tb.mu.Lock()
 					generation := tb.layoutGeneration
@@ -465,7 +466,7 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_active", "p_active")
-	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
 	active := sess.tabs[0]
 	locator := newTabWithStableID("t_locator", "p_locator", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	locator.ctx, locator.cancel = context.WithCancel(d.serveCtx)
@@ -477,7 +478,7 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 	before := active.layoutGeneration
 	active.mu.Unlock()
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "grow-pane-width", TargetSession: "work", TargetTab: "t_locator", TargetPane: "p_locator",
 	})
 	require.True(t, result.OK, result.Text)
@@ -497,16 +498,16 @@ func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_work", "p_work")
-	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
 	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	tb.size.Cols = 41
 	tb.bumpLayoutGenerationLocked()
 	tb.mu.Unlock()
 
-	result := sendCommand(t, d, ports.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
 	require.False(t, result.OK)
-	require.Equal(t, ports.ErrNoSuchTarget, result.Code)
+	require.Equal(t, protocol.ErrNoSuchTarget, result.Code)
 	require.Equal(t, "pane cannot be resized further", result.Text)
 }
 
@@ -520,7 +521,7 @@ func TestHandleCommandSelfListPanesUsesInvokingTab(t *testing.T) {
 	selectTestAttachmentTabLocked(sess, 0)
 	sess.mu.Unlock()
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "list-panes", Self: true, JSON: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -533,12 +534,12 @@ func TestHandleCommandRenameSessionRejectsInvalidNameAsCommandArgs(t *testing.T)
 	d := newTestDaemon(t, nil, stubClock{})
 	addControlSession(d, "work", "t_work", "p_work")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "rename-session", Args: []string{"invalid name"}, TargetSession: "work",
 	})
 
 	require.False(t, result.OK)
-	require.Equal(t, ports.ErrInvalidCommandArgs, result.Code)
+	require.Equal(t, protocol.ErrInvalidCommandArgs, result.Code)
 }
 
 func TestCloseCommandsReportMutationOutcome(t *testing.T) {
@@ -552,10 +553,10 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 		result := d.runControl(cmd, controlExec{
 			d: d, sess: sess, tab: stale,
 			target: daemonActionTarget{session: sess, tab: stale},
-		}, ports.CommandRequest{Slug: "close-tab"})
+		}, protocol.CommandRequest{Slug: "close-tab"})
 
 		require.False(t, result.OK)
-		require.Equal(t, ports.ErrInternal, result.Code)
+		require.Equal(t, protocol.ErrInternal, result.Code)
 		require.Len(t, sess.tabs, 1, "a stale close must retain the live tab")
 	})
 
@@ -569,10 +570,10 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 		sess.mu.Unlock()
 		sess.snapEligible.Store(true)
 
-		result := sendCommand(t, d, ports.CommandRequest{Slug: "close-pane", TargetSession: "work"})
+		result := sendCommand(t, d, protocol.CommandRequest{Slug: "close-pane", TargetSession: "work"})
 
 		require.False(t, result.OK)
-		require.Equal(t, ports.ErrInternal, result.Code)
+		require.Equal(t, protocol.ErrInternal, result.Code)
 		d.mu.Lock()
 		require.Same(t, sess, d.sessions[sess.id], "failed final-pane close must retain the session")
 		d.mu.Unlock()
@@ -591,7 +592,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 		selectTestAttachmentTabLocked(sess, 1)
 		sess.mu.Unlock()
 
-		result := sendCommand(t, d, ports.CommandRequest{Slug: "close-tab", TargetSession: "work"})
+		result := sendCommand(t, d, protocol.CommandRequest{Slug: "close-tab", TargetSession: "work"})
 
 		require.True(t, result.OK, result.Text)
 		sess.mu.Lock()
@@ -634,7 +635,7 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 			t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 			sess := addControlSession(d, "work", "t_work", "p_work")
 
-			result := sendCommand(t, d, ports.CommandRequest{Slug: tt.slug, Args: tt.args, TargetSession: "work"})
+			result := sendCommand(t, d, protocol.CommandRequest{Slug: tt.slug, Args: tt.args, TargetSession: "work"})
 
 			require.True(t, result.OK, result.Text)
 			tt.verify(t, d, sess)
@@ -653,7 +654,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	source.tabs[0].size = domain.Size{Cols: 118, Rows: 38}
 	source.mu.Unlock()
 
-	result := sendCommand(t, d, ports.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
 
 	require.True(t, result.OK, result.Text)
 	d.mu.Lock()
@@ -671,9 +672,9 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	tb.mu.Unlock()
 	require.Empty(t, source.snapshotAttachments())
 
-	taken := sendCommand(t, d, ports.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
+	taken := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
 	require.False(t, taken.OK)
-	require.Equal(t, ports.ErrNameTaken, taken.Code)
+	require.Equal(t, protocol.ErrNameTaken, taken.Code)
 }
 
 func TestHandleCommandNewSessionPreservesSourceGeometry(t *testing.T) {
@@ -687,7 +688,7 @@ func TestHandleCommandNewSessionPreservesSourceGeometry(t *testing.T) {
 	})
 	require.True(t, source.registerAttachment(client))
 
-	result := sendCommand(t, d, ports.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
 
 	require.True(t, result.OK, result.Text)
 	d.mu.Lock()
@@ -710,11 +711,11 @@ func TestHandleCommandValidatesToastAndQueuesForDetachedSession(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_work", "p_work")
 
-	bad := sendCommand(t, d, ports.CommandRequest{Slug: "toast", Args: []string{"-l", "loud", "hello"}, TargetSession: "work"})
+	bad := sendCommand(t, d, protocol.CommandRequest{Slug: "toast", Args: []string{"-l", "loud", "hello"}, TargetSession: "work"})
 	require.False(t, bad.OK)
-	require.Equal(t, ports.ErrInvalidCommandArgs, bad.Code)
+	require.Equal(t, protocol.ErrInvalidCommandArgs, bad.Code)
 
-	good := sendCommand(t, d, ports.CommandRequest{Slug: "toast", Args: []string{"-l", "warn", "hello"}, TargetSession: "work"})
+	good := sendCommand(t, d, protocol.CommandRequest{Slug: "toast", Args: []string{"-l", "warn", "hello"}, TargetSession: "work"})
 	require.True(t, good.OK, good.Text)
 	d.notices.mu.Lock()
 	require.Len(t, d.notices.pending, 1)
@@ -728,16 +729,16 @@ func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	sess.tabs[0].name = "shell"
 
-	sessions := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
+	sessions := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
 	require.True(t, sessions.OK, sessions.Text)
 	require.Contains(t, sessions.Output, "NAME\tSTATE\tTABS\tATTACHED\tACTIVE")
 	require.Contains(t, sessions.Output, "work\tephemeral\t1\tfalse\ttrue")
 
-	tabs := sendCommand(t, d, ports.CommandRequest{Slug: "list-tabs", TargetSession: "work"})
+	tabs := sendCommand(t, d, protocol.CommandRequest{Slug: "list-tabs", TargetSession: "work"})
 	require.True(t, tabs.OK, tabs.Text)
 	require.Contains(t, tabs.Output, "0\tt_work\tshell\t1\ttrue")
 
-	panes := sendCommand(t, d, ports.CommandRequest{Slug: "list-panes", TargetSession: "work", JSON: true})
+	panes := sendCommand(t, d, protocol.CommandRequest{Slug: "list-panes", TargetSession: "work", JSON: true})
 	require.True(t, panes.OK, panes.Text)
 	var decoded []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(panes.Output), &decoded))
@@ -766,29 +767,29 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	build.mruAt.Store(1)
 
 	d.mu.Lock()
-	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp/old", createdAt: 1, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
+	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp/old", createdAt: 1, incarnation: domain.IncarnationID{3}, state: protocol.SessionDown}
 	// Live runtime authority wins if both registries contain the same name.
-	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 1, incarnation: domain.IncarnationID{4}, state: ports.SessionDown}
+	d.inactive["work"] = inactiveSession{name: "work", cwd: "/tmp/work", createdAt: 1, incarnation: domain.IncarnationID{4}, state: protocol.SessionDown}
 	d.mu.Unlock()
 
-	listBefore := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
+	listBefore := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
 	require.True(t, listBefore.OK, listBefore.Text)
 
-	missingJSON := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog"})
+	missingJSON := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog"})
 	require.False(t, missingJSON.OK)
-	require.Equal(t, ports.ErrInvalidCommandArgs, missingJSON.Code)
+	require.Equal(t, protocol.ErrInvalidCommandArgs, missingJSON.Code)
 
-	withArgs := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", Args: []string{"extra"}, JSON: true})
+	withArgs := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", Args: []string{"extra"}, JSON: true})
 	require.False(t, withArgs.OK)
-	require.Equal(t, ports.ErrInvalidCommandArgs, withArgs.Code)
+	require.Equal(t, protocol.ErrInvalidCommandArgs, withArgs.Code)
 
-	result := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", JSON: true})
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
 	require.True(t, result.OK, result.Text)
 	require.True(t, strings.HasSuffix(result.Output, "\n"), "catalog output must be newline-terminated")
 
 	var catalog ports.RemoteCatalog
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
-	require.Equal(t, ports.ProtocolVersion, catalog.ProtocolVersion)
+	require.Equal(t, protocol.Version, catalog.ProtocolVersion)
 
 	raw := map[string]json.RawMessage{}
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &raw))
@@ -806,7 +807,7 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 
 	require.Equal(t, ports.RemoteCatalogSessionDown, catalog.Sessions[1].State)
 
-	listAfter := sendCommand(t, d, ports.CommandRequest{Slug: "list-sessions"})
+	listAfter := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
 	require.True(t, listAfter.OK, listAfter.Text)
 	require.Equal(t, listBefore.Output, listAfter.Output)
 	require.Contains(t, listAfter.Output, "work\tnamed\t2\ttrue\t")
@@ -828,7 +829,7 @@ func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
 		return "fish", nil
 	}
 
-	result := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", JSON: true})
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
 	require.True(t, result.OK, result.Text)
 	var catalog ports.RemoteCatalog
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
@@ -860,7 +861,7 @@ func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
 	}
 	sess.mu.Unlock()
 
-	result := sendCommand(t, d, ports.CommandRequest{Slug: "remote-catalog", JSON: true})
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
 	require.False(t, result.OK)
 	require.Contains(t, result.Text, "too many tabs")
 }
@@ -878,7 +879,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	sess.mu.Unlock()
 	original := target.tree.Focus
 
-	firstFrame := commandFrame(t, ports.CommandRequest{
+	firstFrame := commandFrame(t, protocol.CommandRequest{
 		Slug: "split-right", Self: true, TargetSession: "work",
 		TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -896,7 +897,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 		t.Fatal("first command did not enter its blocked action")
 	}
 
-	secondFrame := commandFrame(t, ports.CommandRequest{
+	secondFrame := commandFrame(t, protocol.CommandRequest{
 		Slug: "focus-pane-right", Self: true, TargetSession: "work",
 		TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -961,7 +962,7 @@ func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "work",
 	})
 	require.True(t, result.OK, result.Text)
@@ -996,7 +997,7 @@ func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "work", TargetTab: "t_inactive", TargetPane: "p_inactive",
 	})
@@ -1034,7 +1035,7 @@ func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work", Self: false,
 		TargetTab: "t_second", TargetPane: "p_second",
 	})
@@ -1062,7 +1063,7 @@ func TestHandleCommandMoveTabSelfUsesStableTab(t *testing.T) {
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-tab", Args: []string{"dest"}, Self: true,
 		TargetSession: "work", TargetTab: "t_second", TargetPane: "p_second",
 	})
@@ -1081,101 +1082,101 @@ func TestHandleCommandMoveTabSelfUsesStableTab(t *testing.T) {
 func TestHandleCommandMoveCommandsRejectInvalidArgsAndTargets(t *testing.T) {
 	tests := []struct {
 		name    string
-		arrange func(*Daemon) ports.CommandRequest
+		arrange func(*Daemon) protocol.CommandRequest
 		code    uint16
 		text    string
 	}{
 		{
 			name: "move-pane missing destination session",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
-				return ports.CommandRequest{Slug: "move-pane", Args: []string{"work", "t_work"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-pane", Args: []string{"work", "t_work"}, TargetSession: "work"}
 			},
-			code: ports.ErrNoSuchTarget,
+			code: protocol.ErrNoSuchTarget,
 			text: "move request is invalid",
 		},
 		{
 			name: "move-pane unknown destination session",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
-				return ports.CommandRequest{Slug: "move-pane", Args: []string{"missing", "t_dest"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-pane", Args: []string{"missing", "t_dest"}, TargetSession: "work"}
 			},
-			code: ports.ErrNoSuchTarget,
+			code: protocol.ErrNoSuchTarget,
 			text: "move target is no longer available",
 		},
 		{
 			name: "move-pane destination tab not in session",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
 				addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
-				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_other"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_other"}, TargetSession: "work"}
 			},
-			code: ports.ErrNoSuchTarget,
+			code: protocol.ErrNoSuchTarget,
 			text: "move target is no longer available",
 		},
 		{
 			name: "move-pane same source tab",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
-				return ports.CommandRequest{Slug: "move-pane", Args: []string{"work", "t_work"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-pane", Args: []string{"work", "t_work"}, TargetSession: "work"}
 			},
-			code: ports.ErrNoSuchTarget,
+			code: protocol.ErrNoSuchTarget,
 			text: "move request is invalid",
 		},
 		{
 			name: "move-tab same session",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
-				return ports.CommandRequest{Slug: "move-tab", Args: []string{"work"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-tab", Args: []string{"work"}, TargetSession: "work"}
 			},
-			code: ports.ErrNoSuchTarget,
+			code: protocol.ErrNoSuchTarget,
 			text: "move request is invalid",
 		},
 		{
 			name: "move-tab stopping destination",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
 				destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 				destination.teardownMu.Lock()
 				destination.teardownActive = true
 				destination.teardownMu.Unlock()
-				return ports.CommandRequest{Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work"}
 			},
-			code: ports.ErrNoSuchTarget,
+			code: protocol.ErrNoSuchTarget,
 			text: "move target is no longer available",
 		},
 		{
 			name: "move-pane too few args",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
-				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-pane", Args: []string{"dest"}, TargetSession: "work"}
 			},
-			code: ports.ErrInvalidCommandArgs,
+			code: protocol.ErrInvalidCommandArgs,
 		},
 		{
 			name: "move-pane too many args",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
-				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_dest", "extra"}, TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_dest", "extra"}, TargetSession: "work"}
 			},
-			code: ports.ErrInvalidCommandArgs,
+			code: protocol.ErrInvalidCommandArgs,
 		},
 		{
 			name: "move-tab missing destination",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "work", "t_work", "p_work")
-				return ports.CommandRequest{Slug: "move-tab", TargetSession: "work"}
+				return protocol.CommandRequest{Slug: "move-tab", TargetSession: "work"}
 			},
-			code: ports.ErrInvalidCommandArgs,
+			code: protocol.ErrInvalidCommandArgs,
 		},
 		{
 			name: "explicit session name without IDs remains authoritative",
-			arrange: func(d *Daemon) ports.CommandRequest {
+			arrange: func(d *Daemon) protocol.CommandRequest {
 				addControlSession(d, "renamed", "t_work", "p_work")
 				addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
-				return ports.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "old-name"}
+				return protocol.CommandRequest{Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "old-name"}
 			},
-			code: ports.ErrNoSuchTarget,
+			code: protocol.ErrNoSuchTarget,
 			text: "no such session: old-name",
 		},
 	}
@@ -1200,7 +1201,7 @@ func TestHandleCommandMovePaneRelocatedStableIDsOverrideAdvisorySessionName(t *t
 	source := addControlSession(d, "renamed", "t_work", "p_work")
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "old-name", TargetTab: "t_work", TargetPane: "p_work",
 	})
@@ -1232,7 +1233,7 @@ func TestHandleCommandMovePaneStableIDsLocateSessionWithoutSelfRedirect(t *testi
 	source.mu.Unlock()
 	destination := addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
 
-	result := sendCommand(t, d, ports.CommandRequest{
+	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "old-name", TargetTab: "t_inactive", TargetPane: "p_inactive",
 	})
@@ -1273,10 +1274,10 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 	selectTestAttachmentTabLocked(right, 1)
 	right.mu.Unlock()
 
-	leftFrame := commandFrame(t, ports.CommandRequest{
+	leftFrame := commandFrame(t, protocol.CommandRequest{
 		Slug: "move-tab", Args: []string{"right"}, TargetSession: "left",
 	})
-	rightFrame := commandFrame(t, ports.CommandRequest{
+	rightFrame := commandFrame(t, protocol.CommandRequest{
 		Slug: "move-tab", Args: []string{"left"}, TargetSession: "right",
 	})
 	leftTransport, leftSends, _ := newConn(t, leftFrame)
@@ -1323,17 +1324,17 @@ func addNamedMoveDestination(d *Daemon, name, tabID, paneID string) *session {
 	return sess
 }
 
-func commandFrame(t *testing.T, request ports.CommandRequest) ports.Frame {
+func commandFrame(t *testing.T, request protocol.CommandRequest) ports.Frame {
 	t.Helper()
 	if request.Version == 0 {
-		request.Version = ports.ProtocolVersion
+		request.Version = protocol.Version
 	}
 	payload, err := ports.MarshalCommandRequest(request)
 	require.NoError(t, err)
 	return ports.Frame{Type: ports.MsgCommand, Payload: payload}
 }
 
-func sendCommand(t *testing.T, d *Daemon, request ports.CommandRequest) ports.CommandResult {
+func sendCommand(t *testing.T, d *Daemon, request protocol.CommandRequest) protocol.CommandResult {
 	t.Helper()
 	frame := commandFrame(t, request)
 	tr, sends, _ := newConn(t, frame)
@@ -1341,7 +1342,7 @@ func sendCommand(t *testing.T, d *Daemon, request ports.CommandRequest) ports.Co
 	return awaitCommandResult(t, sends)
 }
 
-func awaitCommandResult(t *testing.T, sends chan ports.Frame) ports.CommandResult {
+func awaitCommandResult(t *testing.T, sends chan ports.Frame) protocol.CommandResult {
 	t.Helper()
 	reply := awaitFrame(t, sends, ports.MsgCommandResult)
 	result, err := ports.UnmarshalCommandResult(reply.Payload)

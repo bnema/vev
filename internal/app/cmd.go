@@ -13,6 +13,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	commandusecase "github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/daemon"
 )
@@ -149,8 +150,8 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		_, err := fmt.Fprintln(deps.stdout, cmdHelp(invocation))
 		return err
 	}
-	request := ports.CommandRequest{
-		Version:       ports.ProtocolVersion,
+	request := protocol.CommandRequest{
+		Version:       protocol.Version,
 		Self:          invocation.self,
 		Slug:          invocation.slug,
 		Args:          invocation.args,
@@ -225,7 +226,7 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return &exitCoded{code: 3, err: err}
 	}
 	if !result.OK {
-		if result.Code == ports.ErrInvalidCommandArgs {
+		if result.Code == protocol.ErrInvalidCommandArgs {
 			return &exitCoded{code: 2, err: errors.New(result.Text)}
 		}
 		return errors.New(result.Text)

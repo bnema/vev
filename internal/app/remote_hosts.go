@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -27,7 +28,7 @@ type remoteHostDeps struct {
 	stateDir  func() string
 	store     ports.RemoteHostStore
 	catalog   ports.RemoteCatalogClient
-	localList func(context.Context) ([]ports.SessionInfo, error)
+	localList func(context.Context) ([]protocol.SessionInfo, error)
 	stdout    io.Writer
 }
 
@@ -174,7 +175,7 @@ func listAllSessions(ctx context.Context, deps remoteHostDeps, hosts []domain.Re
 		}
 		return err
 	}
-	all := append([]ports.SessionInfo(nil), local...)
+	all := append([]protocol.SessionInfo(nil), local...)
 	var hostErrs []error
 	for _, host := range hosts {
 		if err := ctx.Err(); err != nil {
@@ -195,10 +196,10 @@ func listAllSessions(ctx context.Context, deps remoteHostDeps, hosts []domain.Re
 	return nil
 }
 
-func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) []ports.SessionInfo {
-	out := make([]ports.SessionInfo, 0, len(sessions))
+func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) []protocol.SessionInfo {
+	out := make([]protocol.SessionInfo, 0, len(sessions))
 	for _, session := range sessions {
-		info := ports.SessionInfo{
+		info := protocol.SessionInfo{
 			Name:      domain.RemoteSessionDisplay(session.Name, host),
 			Ephemeral: session.Ephemeral,
 			Tabs:      ports.SaturateUint16(ports.CatalogTabCount(session)),
@@ -206,14 +207,14 @@ func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) [
 		}
 		switch session.State {
 		case ports.RemoteCatalogSessionUp:
-			info.State = ports.SessionUp
+			info.State = protocol.SessionUp
 		case ports.RemoteCatalogSessionDown:
-			info.State = ports.SessionDown
+			info.State = protocol.SessionDown
 		case ports.RemoteCatalogSessionBroken:
-			info.State = ports.SessionBroken
+			info.State = protocol.SessionBroken
 		default:
 			slog.Debug("remote catalog session has unknown state", "host", host, "session", session.Name, "state", session.State)
-			info.State = ports.SessionBroken
+			info.State = protocol.SessionBroken
 		}
 		out = append(out, info)
 	}

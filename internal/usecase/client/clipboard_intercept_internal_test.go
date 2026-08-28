@@ -86,8 +86,8 @@ func TestClipboardInterceptFailureNotifiesDaemonAndForwardsCtrlV(t *testing.T) {
 		reader ports.ClipboardReader
 		want   uint8
 	}{
-		{name: "image read failure", reader: &ciFakeReader{err: errors.New("boom")}, want: ports.ClientNoticeClipboardFallback},
-		{name: "oversized image", reader: &ciFakeReader{mime: "image/png", data: make([]byte, maxClipboardImagePush+1)}, want: ports.ClientNoticeClipboardTooLarge},
+		{name: "image read failure", reader: &ciFakeReader{err: errors.New("boom")}, want: protocol.ClientNoticeClipboardFallback},
+		{name: "oversized image", reader: &ciFakeReader{mime: "image/png", data: make([]byte, maxClipboardImagePush+1)}, want: protocol.ClientNoticeClipboardTooLarge},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

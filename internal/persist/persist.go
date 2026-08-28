@@ -10,6 +10,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/pkg/kv"
 )
 
@@ -454,7 +455,7 @@ func (p *Persister) loadIncompatibleRecords() ([]domain.CatalogueRecord, error) 
 			decodeErr = err
 			return false
 		}
-		if stored.protocolVersion != ports.ProtocolVersion {
+		if stored.protocolVersion != protocol.Version {
 			records = append(records, stored.record)
 		}
 		return true

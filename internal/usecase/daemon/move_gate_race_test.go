@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func newMoveGateRaceFixture(t *testing.T) (*Daemon, *session, *tab, *pane, *session, *tab, func()) {
@@ -93,7 +93,7 @@ func TestMovePaneGateReservationRaceKillWinsWithoutDeadlock(t *testing.T) {
 	waitMoveRace(t, moveReserved, "move reservation")
 
 	killDone := make(chan error, 1)
-	go func() { killDone <- d.killSession(source, ports.ReasonSessionKilled, false) }()
+	go func() { killDone <- d.killSession(source, protocol.ReasonSessionKilled, false) }()
 	waitMoveRace(t, killFrozen, "kill gate freeze")
 	close(releaseMoveAdmission)
 	moveErr := waitMoveRace(t, moveDone, "move abort after kill gate acquisition")
@@ -277,7 +277,7 @@ func TestMovePaneGateReservationRaceMoveWinsWithoutDeadlock(t *testing.T) {
 	waitMoveRace(t, moveGateFrozen, "move gate freeze")
 
 	killDone := make(chan error, 1)
-	go func() { killDone <- d.killSession(source, ports.ReasonSessionKilled, false) }()
+	go func() { killDone <- d.killSession(source, protocol.ReasonSessionKilled, false) }()
 	waitMoveRace(t, killSnapshotted, "kill participant snapshot")
 	close(releaseMove)
 

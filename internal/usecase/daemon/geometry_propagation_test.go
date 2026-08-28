@@ -10,6 +10,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -200,14 +201,14 @@ func TestResumeReappliesClaimingPixelGeometryBeforeReturn(t *testing.T) {
 	pty := &blockingRecordingGeometryPTY{done: make(chan struct{})}
 	t.Cleanup(func() { _ = pty.Close() })
 	d := newTestDaemon(t, &recordingPTYFactory{pty: pty}, stubClock{})
-	firstHello := helloResumeCapable(ports.IntentNew, "pixels", 0)
+	firstHello := helloResumeCapable(protocol.IntentNew, "pixels", 0)
 	firstHello.PixelWidth, firstHello.PixelHeight = 800, 480
 	firstTransport := &closeTrackingTransport{}
 	sess, ac, err := d.route(firstHello, firstTransport)
 	require.NoError(t, err)
 	d.clientGone(sess, ac, firstTransport, false)
 
-	resumeHello := helloResumeCapable(ports.IntentResume, "pixels", ac.resumeToken)
+	resumeHello := helloResumeCapable(protocol.IntentResume, "pixels", ac.resumeToken)
 	resumeHello.PixelWidth, resumeHello.PixelHeight = 1000, 600
 	resumed, same, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, resumeHello.Size)
 	require.NoError(t, err)

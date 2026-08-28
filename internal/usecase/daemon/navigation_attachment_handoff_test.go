@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
@@ -51,7 +51,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffect) error {
 				d.mu.Lock()
 				delete(d.sessions, target.id)
-				d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 9, incarnation: domain.IncarnationID{2}, state: ports.SessionDown}
+				d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 9, incarnation: domain.IncarnationID{2}, state: protocol.SessionDown}
 				d.mu.Unlock()
 				expectedCreatedAt := int64(9)
 				return d.switchToTargetForAttachment(effect, picker.Target{Name: "stopped", Stopped: true, ExpectedCreatedAt: &expectedCreatedAt}, sessionHandoffGuard{}, "stopped-session")
@@ -149,7 +149,7 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.T) {
 	d, source, old, _ := newManualSessionWithPTYs(t, nil)
 	d.mu.Lock()
-	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 7, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 7, incarnation: domain.IncarnationID{3}, state: protocol.SessionDown}
 	d.mu.Unlock()
 
 	rc := d.attachCoordinator(source, nil, old, true)

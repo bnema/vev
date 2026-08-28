@@ -63,14 +63,14 @@ func appendNoNavigationTail(payload []byte) []byte {
 func TestHelloGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  Hello
+		msg  protocol.Hello
 		want []byte
 	}{
 		{
 			name: "typical",
-			msg: Hello{
+			msg: protocol.Hello{
 				Version:           1,
-				Intent:            IntentNew,
+				Intent:            protocol.IntentNew,
 				ClientID:          [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
 				ResumeToken:       0x0102030405060708,
 				Name:              "w0",
@@ -84,9 +84,9 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 		},
 		{
 			name: "empty strings",
-			msg: Hello{
+			msg: protocol.Hello{
 				Version:   1,
-				Intent:    IntentEphemeral,
+				Intent:    protocol.IntentEphemeral,
 				Name:      "",
 				Size:      domain.Size{Cols: 1, Rows: 1},
 				TermEnv:   "",
@@ -129,8 +129,8 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 
 func TestHelloEnvironmentCodec(t *testing.T) {
 	t.Run("literal wire layout", func(t *testing.T) {
-		msg := Hello{
-			Version: ProtocolVersion,
+		msg := protocol.Hello{
+			Version: protocol.Version,
 			Size:    domain.Size{Cols: 1, Rows: 1},
 			Env:     []string{"A=B", "XY=123"},
 		}
@@ -163,20 +163,20 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 	t.Run("lossless order and values", func(t *testing.T) {
 		entryOverUint16 := "LARGE=" + string(bytes.Repeat([]byte("x"), 65536))
 		want := []string{"A=first", "TOKEN=a=b=c", "EMPTY=", entryOverUint16, "A=second"}
-		payload := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}, Env: want})
+		payload := MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 1, Rows: 1}, Env: want})
 		got, err := UnmarshalHello(payload)
 		require.NoError(t, err)
 		require.Equal(t, want, got.Env)
 	})
 
 	t.Run("empty", func(t *testing.T) {
-		payload := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}, Env: []string{}})
+		payload := MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 1, Rows: 1}, Env: []string{}})
 		got, err := UnmarshalHello(payload)
 		require.NoError(t, err)
 		require.Empty(t, got.Env)
 	})
 
-	base := MarshalHello(Hello{Version: ProtocolVersion, Size: domain.Size{Cols: 1, Rows: 1}})
+	base := MarshalHello(protocol.Hello{Version: protocol.Version, Size: domain.Size{Cols: 1, Rows: 1}})
 	withCount := func(count byte) []byte {
 		payload := append([]byte(nil), base...)
 		// The uint32 environment count occupies bytes len-13 through len-10.
@@ -214,11 +214,11 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 func TestInputGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  Input
+		msg  protocol.Input
 		want []byte
 	}{
-		{name: "data", msg: Input{InputSeq: 0x0102030405060708, Data: []byte("hi")}, want: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x68, 0x69}},
-		{name: "empty", msg: Input{InputSeq: 0, Data: nil}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+		{name: "data", msg: protocol.Input{InputSeq: 0x0102030405060708, Data: []byte("hi")}, want: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x68, 0x69}},
+		{name: "empty", msg: protocol.Input{InputSeq: 0, Data: nil}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
 	}
 
 	for _, tt := range tests {
@@ -367,7 +367,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(37), ProtocolVersion)
+	require.Equal(t, uint16(37), protocol.Version)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -394,7 +394,7 @@ func TestResizeGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestDetachGoldenAndRoundTrip(t *testing.T) {
-	got := MarshalDetach(Detach{})
+	got := MarshalDetach(protocol.Detach{})
 	if len(got) != 0 {
 		t.Fatalf("MarshalDetach() = %#v, want empty", got)
 	}
@@ -402,14 +402,14 @@ func TestDetachGoldenAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalDetach() error = %v", err)
 	}
-	if back != (Detach{}) {
-		t.Fatalf("round trip = %#v, want %#v", back, Detach{})
+	if back != (protocol.Detach{}) {
+		t.Fatalf("round trip = %#v, want %#v", back, protocol.Detach{})
 	}
 	assertTrailingGarbageFails(t, got, UnmarshalDetach)
 }
 
 func TestPingGoldenAndRoundTrip(t *testing.T) {
-	got := MarshalPing(Ping{})
+	got := MarshalPing(protocol.Ping{})
 	if len(got) != 0 {
 		t.Fatalf("MarshalPing() = %#v, want empty", got)
 	}
@@ -417,14 +417,14 @@ func TestPingGoldenAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalPing() error = %v", err)
 	}
-	if back != (Ping{}) {
-		t.Fatalf("round trip = %#v, want %#v", back, Ping{})
+	if back != (protocol.Ping{}) {
+		t.Fatalf("round trip = %#v, want %#v", back, protocol.Ping{})
 	}
 	assertTrailingGarbageFails(t, got, UnmarshalPing)
 }
 
 func TestPongGoldenAndRoundTrip(t *testing.T) {
-	got := MarshalPong(Pong{})
+	got := MarshalPong(protocol.Pong{})
 	if len(got) != 0 {
 		t.Fatalf("MarshalPong() = %#v, want empty", got)
 	}
@@ -432,14 +432,14 @@ func TestPongGoldenAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalPong() error = %v", err)
 	}
-	if back != (Pong{}) {
-		t.Fatalf("round trip = %#v, want %#v", back, Pong{})
+	if back != (protocol.Pong{}) {
+		t.Fatalf("round trip = %#v, want %#v", back, protocol.Pong{})
 	}
 	assertTrailingGarbageFails(t, got, UnmarshalPong)
 }
 
 func TestMarshalWelcomeRejectsInvalidCommittedIdentity(t *testing.T) {
-	got := MarshalWelcome(Welcome{
+	got := MarshalWelcome(protocol.Welcome{
 		SessionName: "work",
 		CommittedIdentity: &protocol.CommittedRouteIdentity{
 			Target: protocol.ExactSessionTarget{SessionName: "different"},
@@ -449,7 +449,7 @@ func TestMarshalWelcomeRejectsInvalidCommittedIdentity(t *testing.T) {
 }
 
 func TestMarshalWelcomeRejectsCommittedIdentityMetadataMismatch(t *testing.T) {
-	base := Welcome{
+	base := protocol.Welcome{
 		SessionID:   "session",
 		SessionName: "work",
 		Ephemeral:   true,
@@ -458,9 +458,9 @@ func TestMarshalWelcomeRejectsCommittedIdentityMetadataMismatch(t *testing.T) {
 			Ephemeral: true,
 		},
 	}
-	for name, mutate := range map[string]func(*Welcome){
-		"session name": func(w *Welcome) { w.SessionName = "other" },
-		"ephemeral":    func(w *Welcome) { w.Ephemeral = false },
+	for name, mutate := range map[string]func(*protocol.Welcome){
+		"session name": func(w *protocol.Welcome) { w.SessionName = "other" },
+		"ephemeral":    func(w *protocol.Welcome) { w.Ephemeral = false },
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := base
@@ -474,17 +474,17 @@ func TestMarshalWelcomeRejectsCommittedIdentityMetadataMismatch(t *testing.T) {
 func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  Welcome
+		msg  protocol.Welcome
 		want []byte
 	}{
 		{
 			name: "ephemeral",
-			msg:  Welcome{SessionID: "sess-1", SessionName: "main", Ephemeral: true, ResumeToken: 0x0102030405060708, Capabilities: CapabilityResume | CapabilityPredict},
+			msg:  protocol.Welcome{SessionID: "sess-1", SessionName: "main", Ephemeral: true, ResumeToken: 0x0102030405060708, Capabilities: protocol.CapabilityResume | protocol.CapabilityPredict},
 			want: []byte{0x00, 0x06, 0x73, 0x65, 0x73, 0x73, 0x2d, 0x31, 0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x05, 0x00},
 		},
 		{
 			name: "non-ephemeral empty name",
-			msg:  Welcome{SessionID: "abc", SessionName: "", Ephemeral: false},
+			msg:  protocol.Welcome{SessionID: "abc", SessionName: "", Ephemeral: false},
 			want: []byte{0x00, 0x03, 0x61, 0x62, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 	}
@@ -511,22 +511,22 @@ func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestCommandErrorCodes(t *testing.T) {
-	require.Equal(t, uint16(6), ErrUnknownCommand)
-	require.Equal(t, uint16(7), ErrNotScriptable)
-	require.Equal(t, uint16(8), ErrInvalidCommandArgs)
-	require.Equal(t, uint16(9), ErrNoSuchTarget)
-	require.Equal(t, uint16(10), ErrAmbiguousTarget)
+	require.Equal(t, uint16(6), protocol.ErrUnknownCommand)
+	require.Equal(t, uint16(7), protocol.ErrNotScriptable)
+	require.Equal(t, uint16(8), protocol.ErrInvalidCommandArgs)
+	require.Equal(t, uint16(9), protocol.ErrNoSuchTarget)
+	require.Equal(t, uint16(10), protocol.ErrAmbiguousTarget)
 }
 
 func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  CommandRequest
+		msg  protocol.CommandRequest
 		want []byte
 	}{
 		{
 			name: "minimal",
-			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
+			msg:  protocol.CommandRequest{Version: protocol.Version, Slug: "split-right"},
 			want: []byte{
 				0x00, 0x25,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
@@ -540,8 +540,8 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 		},
 		{
 			name: "full",
-			msg: CommandRequest{
-				Version:       ProtocolVersion,
+			msg: protocol.CommandRequest{
+				Version:       protocol.Version,
 				Self:          true,
 				Slug:          "toast",
 				Args:          []string{"-l", "warn", "tests KO"},
@@ -590,8 +590,8 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestMarshalCommandRequestRejectsTooManyArguments(t *testing.T) {
-	payload, err := MarshalCommandRequest(CommandRequest{
-		Version: ProtocolVersion,
+	payload, err := MarshalCommandRequest(protocol.CommandRequest{
+		Version: protocol.Version,
 		Slug:    "toast",
 		Args:    make([]string, math.MaxUint16+1),
 	})
@@ -601,7 +601,7 @@ func TestMarshalCommandRequestRejectsTooManyArguments(t *testing.T) {
 }
 
 func TestCommandRequestRejectsImpossibleArgumentCount(t *testing.T) {
-	payload, err := MarshalCommandRequest(CommandRequest{Version: ProtocolVersion, Slug: "toast"})
+	payload, err := MarshalCommandRequest(protocol.CommandRequest{Version: protocol.Version, Slug: "toast"})
 	require.NoError(t, err)
 	argCountOffset := 2 + 8 + 1 + 1 + 2 + len("toast")
 	payload[argCountOffset] = 0xff
@@ -615,12 +615,12 @@ func TestCommandRequestRejectsImpossibleArgumentCount(t *testing.T) {
 func TestCommandResultGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  CommandResult
+		msg  protocol.CommandResult
 		want []byte
 	}{
 		{
 			name: "error",
-			msg:  CommandResult{Code: ErrNoSuchTarget, Text: "no such session"},
+			msg:  protocol.CommandResult{Code: protocol.ErrNoSuchTarget, Text: "no such session"},
 			want: []byte{
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00,
@@ -631,7 +631,7 @@ func TestCommandResultGoldenAndRoundTrip(t *testing.T) {
 		},
 		{
 			name: "success with output",
-			msg:  CommandResult{OK: true, Text: "listed", Output: "ID\tFOCUSED\n"},
+			msg:  protocol.CommandResult{OK: true, Text: "listed", Output: "ID\tFOCUSED\n"},
 			want: []byte{
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x01,
@@ -656,7 +656,7 @@ func TestCommandResultGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestErrorMsgGoldenAndRoundTrip(t *testing.T) {
-	msg := ErrorMsg{Code: ErrNameTaken, Text: "name taken"}
+	msg := protocol.ErrorMsg{Code: protocol.ErrNameTaken, Text: "name taken"}
 	want := []byte{0x00, 0x03, 0x00, 0x0a, 0x6e, 0x61, 0x6d, 0x65, 0x20, 0x74, 0x61, 0x6b, 0x65, 0x6e}
 
 	got := MarshalErrorMsg(msg)
@@ -722,7 +722,7 @@ func TestAckGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestDetachedGoldenAndRoundTrip(t *testing.T) {
-	msg := Detached{Reason: ReasonReplaced}
+	msg := protocol.Detached{Reason: protocol.ReasonReplaced}
 	want := []byte{0x03}
 
 	got := MarshalDetached(msg)
@@ -744,13 +744,13 @@ func TestDetachedGoldenAndRoundTrip(t *testing.T) {
 func TestClientNoticeGoldenAndStrict(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  ClientNotice
+		msg  protocol.ClientNotice
 		want []byte
 	}{
-		{name: "clipboard fallback", msg: ClientNotice{Action: ClientNoticeClipboardFallback}, want: []byte{0x01}},
-		{name: "clipboard too large", msg: ClientNotice{Action: ClientNoticeClipboardTooLarge}, want: []byte{0x02}},
-		{name: "link degraded", msg: ClientNotice{Action: ClientNoticeLinkDegraded}, want: []byte{0x03}},
-		{name: "link connected", msg: ClientNotice{Action: ClientNoticeLinkConnected}, want: []byte{0x04}},
+		{name: "clipboard fallback", msg: protocol.ClientNotice{Action: protocol.ClientNoticeClipboardFallback}, want: []byte{0x01}},
+		{name: "clipboard too large", msg: protocol.ClientNotice{Action: protocol.ClientNoticeClipboardTooLarge}, want: []byte{0x02}},
+		{name: "link degraded", msg: protocol.ClientNotice{Action: protocol.ClientNoticeLinkDegraded}, want: []byte{0x03}},
+		{name: "link connected", msg: protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected}, want: []byte{0x04}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -768,7 +768,7 @@ func TestClientNoticeGoldenAndStrict(t *testing.T) {
 }
 
 func TestListGoldenAndRoundTrip(t *testing.T) {
-	got := MarshalList(List{})
+	got := MarshalList(protocol.List{})
 	if len(got) != 0 {
 		t.Fatalf("MarshalList() = %#v, want empty", got)
 	}
@@ -776,8 +776,8 @@ func TestListGoldenAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalList() error = %v", err)
 	}
-	if back != (List{}) {
-		t.Fatalf("round trip = %#v, want %#v", back, List{})
+	if back != (protocol.List{}) {
+		t.Fatalf("round trip = %#v, want %#v", back, protocol.List{})
 	}
 	assertTrailingGarbageFails(t, got, UnmarshalList)
 }
@@ -785,12 +785,12 @@ func TestListGoldenAndRoundTrip(t *testing.T) {
 func TestKillGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  Kill
+		msg  protocol.Kill
 		want []byte
 	}{
-		{name: "named", msg: Kill{Name: "main"}, want: []byte{0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e}},
-		{name: "empty", msg: Kill{Name: ""}, want: []byte{0x00, 0x00}},
-		{name: "all", msg: Kill{All: true}, want: []byte{0x00, 0x00, 0x01}},
+		{name: "named", msg: protocol.Kill{Name: "main"}, want: []byte{0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e}},
+		{name: "empty", msg: protocol.Kill{Name: ""}, want: []byte{0x00, 0x00}},
+		{name: "all", msg: protocol.Kill{All: true}, want: []byte{0x00, 0x00, 0x01}},
 	}
 
 	for _, tt := range tests {
@@ -814,7 +814,7 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalKill(legacy) error = %v", err)
 	}
-	if !reflect.DeepEqual(back, Kill{Name: "main"}) {
+	if !reflect.DeepEqual(back, protocol.Kill{Name: "main"}) {
 		t.Fatalf("legacy round trip = %#v, want named kill", back)
 	}
 	assertAllPrefixesFail(t, legacy, UnmarshalKill)
@@ -824,16 +824,16 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 func TestSessionInfoRecoveryState(t *testing.T) {
 	tests := []struct {
 		name  string
-		state SessionState
+		state protocol.SessionState
 		want  []byte
 	}{
-		{name: "up", state: SessionUp, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-		{name: "down", state: SessionDown, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
-		{name: "broken", state: SessionBroken, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
+		{name: "up", state: protocol.SessionUp, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{name: "down", state: protocol.SessionDown, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
+		{name: "broken", state: protocol.SessionBroken, want: []byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			payload := MarshalSessions(Sessions{Sessions: []SessionInfo{{State: tt.state}}})
+			payload := MarshalSessions(protocol.Sessions{Sessions: []protocol.SessionInfo{{State: tt.state}}})
 			require.Equal(t, tt.want, payload)
 			got, err := UnmarshalSessions(payload)
 			require.NoError(t, err)
@@ -853,19 +853,19 @@ func TestSessionInfoRecoveryState(t *testing.T) {
 func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  Sessions
+		msg  protocol.Sessions
 		want []byte
 	}{
 		{
 			name: "empty",
-			msg:  Sessions{},
+			msg:  protocol.Sessions{},
 			want: []byte{0x00, 0x00},
 		},
 		{
 			name: "two",
-			msg: Sessions{Sessions: []SessionInfo{
-				{SessionID: "0", Name: "0", State: SessionUp, Ephemeral: true, Tabs: 1, Attached: false},
-				{SessionID: "work", Name: "proj", State: SessionDown, Ephemeral: false, Tabs: 5, Attached: true},
+			msg: protocol.Sessions{Sessions: []protocol.SessionInfo{
+				{SessionID: "0", Name: "0", State: protocol.SessionUp, Ephemeral: true, Tabs: 1, Attached: false},
+				{SessionID: "work", Name: "proj", State: protocol.SessionDown, Ephemeral: false, Tabs: 5, Attached: true},
 			}},
 			want: []byte{
 				0x00, 0x02,
@@ -907,10 +907,10 @@ func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 func TestMsgTypeConstantsDistinct(t *testing.T) {
 	t.Run("intents", func(t *testing.T) {
 		vals := map[uint8]string{
-			IntentEphemeral: "IntentEphemeral",
-			IntentNew:       "IntentNew",
-			IntentAttach:    "IntentAttach",
-			IntentResume:    "IntentResume",
+			protocol.IntentEphemeral: "IntentEphemeral",
+			protocol.IntentNew:       "IntentNew",
+			protocol.IntentAttach:    "IntentAttach",
+			protocol.IntentResume:    "IntentResume",
 		}
 		if len(vals) != 4 {
 			t.Fatalf("expected 4 distinct intent values, got %d", len(vals))
@@ -919,12 +919,12 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 
 	t.Run("error codes", func(t *testing.T) {
 		vals := map[uint16]string{
-			ErrVersionMismatch:    "ErrVersionMismatch",
-			ErrNoSuchSession:      "ErrNoSuchSession",
-			ErrNameTaken:          "ErrNameTaken",
-			ErrServerShutdown:     "ErrServerShutdown",
-			ErrInvalidSessionName: "ErrInvalidSessionName",
-			ErrInternal:           "ErrInternal",
+			protocol.ErrVersionMismatch:    "ErrVersionMismatch",
+			protocol.ErrNoSuchSession:      "ErrNoSuchSession",
+			protocol.ErrNameTaken:          "ErrNameTaken",
+			protocol.ErrServerShutdown:     "ErrServerShutdown",
+			protocol.ErrInvalidSessionName: "ErrInvalidSessionName",
+			protocol.ErrInternal:           "ErrInternal",
 		}
 		if len(vals) != 6 {
 			t.Fatalf("expected 6 distinct error codes, got %d", len(vals))
@@ -933,10 +933,10 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 
 	t.Run("detached reasons", func(t *testing.T) {
 		vals := map[uint8]string{
-			ReasonDetach:         "ReasonDetach",
-			ReasonSessionKilled:  "ReasonSessionKilled",
-			ReasonServerShutdown: "ReasonServerShutdown",
-			ReasonReplaced:       "ReasonReplaced",
+			protocol.ReasonDetach:         "ReasonDetach",
+			protocol.ReasonSessionKilled:  "ReasonSessionKilled",
+			protocol.ReasonServerShutdown: "ReasonServerShutdown",
+			protocol.ReasonReplaced:       "ReasonReplaced",
 		}
 		if len(vals) != 4 {
 			t.Fatalf("expected 4 distinct detached reasons, got %d", len(vals))
@@ -947,7 +947,7 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 func TestHelloOutputWindowByteExactValues(t *testing.T) {
 	for _, window := range []uint8{0, 1, 8} {
 		t.Run(fmt.Sprintf("window_%d", window), func(t *testing.T) {
-			hello := Hello{Version: 14, Size: domain.Size{Cols: 1, Rows: 1}, MaxOutputInFlight: window}
+			hello := protocol.Hello{Version: 14, Size: domain.Size{Cols: 1, Rows: 1}, MaxOutputInFlight: window}
 			// The empty Hello has a fixed 1x1 size and zero pixel geometry before the negotiated output window.
 			want := append(make([]byte, 42), window, 0, 0, 0, 0, 0, 0)
 			want = appendNoNavigationTail(want)
@@ -973,12 +973,12 @@ func requireBytesEqual(t *testing.T, want, got []byte) {
 func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  CommandRequest
+		msg  protocol.CommandRequest
 		want []byte
 	}{
 		{
 			name: "attached",
-			msg:  CommandRequest{Version: ProtocolVersion, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
+			msg:  protocol.CommandRequest{Version: protocol.Version, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
 			want: []byte{
 				0x00, 0x25, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
@@ -988,7 +988,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 		},
 		{
 			name: "control",
-			msg:  CommandRequest{Version: ProtocolVersion, Slug: "ls"},
+			msg:  protocol.CommandRequest{Version: protocol.Version, Slug: "ls"},
 			want: []byte{
 				0x00, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x02, 'l', 's', 0x00, 0x00,
@@ -1020,7 +1020,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 }
 
 func TestCommandResultCorrelationGoldenAndStrict(t *testing.T) {
-	msg := CommandResult{RequestID: 0x0102030405060708, OK: true, Code: 7, Text: "ok", Output: "result"}
+	msg := protocol.CommandResult{RequestID: 0x0102030405060708, OK: true, Code: 7, Text: "ok", Output: "result"}
 	want := []byte{
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x01, 0x00, 0x07, 0x00, 0x02, 'o', 'k', 0x00, 0x00, 0x00, 0x06, 'r', 'e', 's', 'u', 'l', 't',
@@ -1040,10 +1040,10 @@ func TestCommandResultCorrelationGoldenAndStrict(t *testing.T) {
 }
 
 func TestOutputResetRequestStrict(t *testing.T) {
-	got := MarshalOutputResetRequest(OutputResetRequest{})
+	got := MarshalOutputResetRequest(protocol.OutputResetRequest{})
 	require.Empty(t, got)
 	back, err := UnmarshalOutputResetRequest(got)
 	require.NoError(t, err)
-	require.Equal(t, OutputResetRequest{}, back)
+	require.Equal(t, protocol.OutputResetRequest{}, back)
 	assertTrailingGarbageFails(t, got, UnmarshalOutputResetRequest)
 }

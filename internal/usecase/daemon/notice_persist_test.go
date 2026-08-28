@@ -6,8 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // TestKillSessionServerShutdownSaturatedAppendsNotice proves that when the
@@ -37,9 +37,9 @@ func TestStartupClaimRecordsAndToastsPendingNotices(t *testing.T) {
 	require.Len(t, d.notices.history(), 2, "each drained notice is recorded individually")
 
 	tr, _ := newCapturingTransport(t)
-	sess, ac, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  ports.IntentEphemeral,
+	sess, ac, err := d.route(protocol.Hello{
+		Version: protocol.Version,
+		Intent:  protocol.IntentEphemeral,
 		Size:    domain.Size{Cols: 80, Rows: 24},
 	}, tr)
 	require.NoError(t, err)

@@ -33,9 +33,9 @@ func TestExactSessionTargetCodecIsStrict(t *testing.T) {
 
 func TestHelloExactTargetRoundTrip(t *testing.T) {
 	target := testExactTarget()
-	msg := Hello{
-		Version:        ProtocolVersion,
-		Intent:         IntentAttach,
+	msg := protocol.Hello{
+		Version:        protocol.Version,
+		Intent:         protocol.IntentAttach,
 		Name:           target.SessionName,
 		Size:           domain.Size{Cols: 80, Rows: 24},
 		ExactTarget:    &target,
@@ -49,12 +49,12 @@ func TestHelloExactTargetRoundTrip(t *testing.T) {
 	require.Equal(t, msg, got)
 
 	invalid := msg
-	invalid.Intent = IntentNew
-	require.Error(t, ValidateHello(invalid))
+	invalid.Intent = protocol.IntentNew
+	require.Error(t, protocol.ValidateHello(invalid))
 
 	invalid = msg
 	invalid.PreferredTabID = "bad tab"
-	require.Error(t, ValidateHello(invalid))
+	require.Error(t, protocol.ValidateHello(invalid))
 }
 
 func TestRoutePositionCodecIsStrict(t *testing.T) {
@@ -78,7 +78,7 @@ func TestRoutePositionCodecIsStrict(t *testing.T) {
 
 func TestWelcomeCarriesCommittedRouteIdentity(t *testing.T) {
 	identity := &protocol.CommittedRouteIdentity{Target: testExactTarget(), Ephemeral: true}
-	want := Welcome{SessionID: "daemon-session", SessionName: "work", Ephemeral: true, CommittedIdentity: identity}
+	want := protocol.Welcome{SessionID: "daemon-session", SessionName: "work", Ephemeral: true, CommittedIdentity: identity}
 
 	got, err := UnmarshalWelcome(MarshalWelcome(want))
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestWelcomeCarriesCommittedRouteIdentity(t *testing.T) {
 
 func TestWelcomeRejectsMismatchedCommittedIdentity(t *testing.T) {
 	identity := &protocol.CommittedRouteIdentity{Target: testExactTarget()}
-	payload := MarshalWelcome(Welcome{SessionID: "daemon-session", SessionName: "other", CommittedIdentity: identity})
+	payload := MarshalWelcome(protocol.Welcome{SessionID: "daemon-session", SessionName: "other", CommittedIdentity: identity})
 
 	require.Nil(t, payload)
 }

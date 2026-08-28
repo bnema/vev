@@ -15,6 +15,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestBuildCommandUsesExecArgs(t *testing.T) {
@@ -158,7 +159,7 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
 
-	hello := ports.Hello{Version: ports.ProtocolVersion + 1, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}
+	hello := protocol.Hello{Version: protocol.Version + 1, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}
 	go func() {
 		f, err := server.Recv()
 		if err != nil {
@@ -170,10 +171,10 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 			t.Errorf("UnmarshalHello: %v", err)
 			return
 		}
-		if got.Version == ports.ProtocolVersion {
+		if got.Version == protocol.Version {
 			t.Errorf("test did not send a mismatched version")
 		}
-		_ = server.Send(ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"})})
+		_ = server.Send(ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})})
 	}()
 
 	if err := client.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
@@ -190,7 +191,7 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalErrorMsg: %v", err)
 	}
-	if em.Code != ports.ErrVersionMismatch {
+	if em.Code != protocol.ErrVersionMismatch {
 		t.Fatalf("error code = %d, want ErrVersionMismatch", em.Code)
 	}
 }

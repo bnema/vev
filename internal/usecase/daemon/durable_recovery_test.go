@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -304,8 +305,8 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 		healthyEntry := d.inactive[healthy.Name]
 		brokenEntry := d.inactive[broken.Name]
 		d.mu.Unlock()
-		require.Equal(t, ports.SessionDown, healthyEntry.state)
-		require.Equal(t, ports.SessionBroken, brokenEntry.state)
+		require.Equal(t, protocol.SessionDown, healthyEntry.state)
+		require.Equal(t, protocol.SessionBroken, brokenEntry.state)
 		for name, done := range map[string]<-chan struct{}{healthy.Name: healthyEntry.restoreDone, broken.Name: brokenEntry.restoreDone} {
 			select {
 			case <-done:
@@ -344,14 +345,14 @@ func TestCatalogueRestoreResetsOnlyIncompatibleCheckpoint(t *testing.T) {
 	require.Empty(t, fresh.DegradedReason)
 	require.Empty(t, fresh.TabNames)
 	require.Equal(t, []domain.IncarnationID{incompatible.IncarnationID}, repository.deleted)
-	require.Equal(t, ports.SessionDown, d.inactive[incompatible.Name].state)
+	require.Equal(t, protocol.SessionDown, d.inactive[incompatible.Name].state)
 	require.Equal(t, fresh, d.inactive[incompatible.Name].record)
 
 	restoredSibling, ok, err := catalogue.Record(healthy.Name)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, healthy, restoredSibling)
-	require.Equal(t, ports.SessionDown, d.inactive[healthy.Name].state)
+	require.Equal(t, protocol.SessionDown, d.inactive[healthy.Name].state)
 	require.Equal(t, 1, repository.loads[healthy.Name])
 }
 
@@ -381,7 +382,7 @@ func TestIncompatibleCheckpointDeleteFailurePublishesFreshStoppedAuthority(t *te
 	d.mu.Lock()
 	entry := d.inactive[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, ports.SessionDown, entry.state)
+	require.Equal(t, protocol.SessionDown, entry.state)
 	require.Equal(t, fresh, entry.record)
 	require.Equal(t, restoreDone, entry.restoreDone)
 	select {
@@ -394,7 +395,7 @@ func TestIncompatibleCheckpointDeleteFailurePublishesFreshStoppedAuthority(t *te
 	d.mu.Lock()
 	entry = d.inactive[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, ports.SessionDown, entry.state)
+	require.Equal(t, protocol.SessionDown, entry.state)
 	require.Equal(t, fresh, entry.record)
 	select {
 	case <-entry.restoreDone:
@@ -452,7 +453,7 @@ func TestRestoreLoadFailuresRetainCheckpointWithoutDeletion(t *testing.T) {
 			require.Equal(t, record.IncarnationID, persisted.IncarnationID)
 			require.Equal(t, record.Committed, persisted.Committed)
 			require.Equal(t, "checkpoint validation failed", persisted.DegradedReason)
-			require.Equal(t, ports.SessionBroken, d.inactive[record.Name].state)
+			require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
 			require.Empty(t, repository.deleted)
 		})
 	}
@@ -472,7 +473,7 @@ func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
 
 	require.Len(t, d.inactive, count)
 	for _, record := range records {
-		require.Equal(t, ports.SessionDown, d.inactive[record.Name].state)
+		require.Equal(t, protocol.SessionDown, d.inactive[record.Name].state)
 		require.Equal(t, 1, repository.loads[record.Name])
 	}
 }
@@ -486,7 +487,7 @@ func TestCatalogueRestoreSingleSessionOver4096(t *testing.T) {
 	// discovery API and therefore performs exactly one direct catalogue lookup.
 	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-	require.Equal(t, ports.SessionDown, d.inactive[record.Name].state)
+	require.Equal(t, protocol.SessionDown, d.inactive[record.Name].state)
 	require.Equal(t, 1, repository.loads[record.Name])
 }
 
@@ -499,7 +500,7 @@ func TestCatalogueRestoreIncarnationMismatch(t *testing.T) {
 
 	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-	require.Equal(t, ports.SessionBroken, d.inactive[record.Name].state)
+	require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
 	got, _, _ := catalogue.Record(record.Name)
 	require.Equal(t, "checkpoint validation failed", got.DegradedReason)
 }
@@ -709,7 +710,7 @@ func TestCreateNamedSessionRegistrationFailureRollsBackDurableState(t *testing.T
 					name: record.Name, cwd: record.Cwd, createdAt: record.CreatedAt,
 					incarnation: record.IncarnationID, lastUsedSeq: record.LastUsedSeq,
 					tabNames: append([]string(nil), record.TabNames...), record: record,
-					state: ports.SessionDown, restoreDone: make(chan struct{}),
+					state: protocol.SessionDown, restoreDone: make(chan struct{}),
 				}
 			}
 			beforeStopped, hadStopped := d.inactive[tc.sessName]
@@ -769,7 +770,7 @@ func TestSessionRecoveryCommand(t *testing.T) {
 
 	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard")
 	require.NoError(t, err)
-	require.Equal(t, ports.SessionDown, d.inactive[degraded.Name].state)
+	require.Equal(t, protocol.SessionDown, d.inactive[degraded.Name].state)
 	require.Equal(t, fresh, d.inactive[degraded.Name].record)
 }
 
@@ -782,10 +783,10 @@ func TestListShowsDegraded(t *testing.T) {
 	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fresh, restoring, degraded}, &durableRecoveryRepository{})
 
 	listed := listSessions(t, d)
-	require.Equal(t, []ports.SessionInfo{
-		{Name: fresh.Name, State: ports.SessionDown},
-		{Name: restoring.Name, State: ports.SessionDown},
-		{Name: degraded.Name, State: ports.SessionBroken},
+	require.Equal(t, []protocol.SessionInfo{
+		{Name: fresh.Name, State: protocol.SessionDown},
+		{Name: restoring.Name, State: protocol.SessionDown},
+		{Name: degraded.Name, State: protocol.SessionBroken},
 	}, listed.Sessions)
 }
 
@@ -795,7 +796,7 @@ func TestListHidesPurgingInactiveSession(t *testing.T) {
 	d.mu.Lock()
 	entry := d.inactive[record.Name]
 	entry.purging = true
-	entry.state = ports.SessionDown
+	entry.state = protocol.SessionDown
 	d.inactive[record.Name] = entry
 	d.mu.Unlock()
 
@@ -812,7 +813,7 @@ func TestAttachWaitsForRestore(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
+		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
 		result <- err
 	}()
 
@@ -823,13 +824,13 @@ func TestAttachWaitsForRestore(t *testing.T) {
 	}
 	require.Zero(t, factory.calls.Load())
 
-	d.setStoppedRecovery(record, ports.SessionBroken)
+	d.setStoppedRecovery(record, protocol.SessionBroken)
 	d.mu.Lock()
 	closeRuntimeRestoreDoneLocked(d.inactive[record.Name].restoreDone)
 	d.mu.Unlock()
 	var protocolError *protoErr
 	require.ErrorAs(t, <-result, &protocolError)
-	require.Equal(t, ports.ErrInternal, protocolError.code)
+	require.Equal(t, protocol.ErrInternal, protocolError.code)
 	require.Zero(t, factory.calls.Load())
 }
 
@@ -885,17 +886,17 @@ func TestRestoreCancellationTransitionsBeforeAttachCompletion(t *testing.T) {
 
 	attached := make(chan error, 1)
 	go func() {
-		_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name}, nil)
+		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name}, nil)
 		attached <- err
 	}()
 	cancelRestore()
 
 	var protocolError *protoErr
 	require.ErrorAs(t, <-attached, &protocolError)
-	require.Equal(t, ports.ErrInternal, protocolError.code)
+	require.Equal(t, protocol.ErrInternal, protocolError.code)
 	<-restored
 	entry := d.inactive[record.Name]
-	require.Equal(t, ports.SessionBroken, entry.state)
+	require.Equal(t, protocol.SessionBroken, entry.state)
 	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
 	select {
 	case <-entry.restoreDone:
@@ -920,7 +921,7 @@ func TestWaitForTargetRestoreRejectsClosedRestoringChannel(t *testing.T) {
 	case err := <-result:
 		var protocolError *protoErr
 		require.ErrorAs(t, err, &protocolError)
-		require.Equal(t, ports.ErrInternal, protocolError.code)
+		require.Equal(t, protocol.ErrInternal, protocolError.code)
 	case <-time.After(time.Second):
 		t.Fatal("waiter spun on a closed restore channel")
 	}
@@ -932,11 +933,11 @@ func TestWaitForTargetRestoreDistinguishesHealthyRuntime(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	tests := []struct {
 		name    string
-		state   ports.SessionState
+		state   protocol.SessionState
 		message string
 	}{
-		{name: "healthy record without runtime", state: ports.SessionDown, message: "session was not restored into this daemon: " + record.Name},
-		{name: "broken durable state", state: ports.SessionBroken, message: "session durable state is broken: " + record.Name},
+		{name: "healthy record without runtime", state: protocol.SessionDown, message: "session was not restored into this daemon: " + record.Name},
+		{name: "broken durable state", state: protocol.SessionBroken, message: "session durable state is broken: " + record.Name},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -948,7 +949,7 @@ func TestWaitForTargetRestoreDistinguishesHealthyRuntime(t *testing.T) {
 
 			var protocolError *protoErr
 			require.ErrorAs(t, d.waitForTargetRestore(context.Background(), record.Name), &protocolError)
-			require.Equal(t, ports.ErrInternal, protocolError.code)
+			require.Equal(t, protocol.ErrInternal, protocolError.code)
 			require.Equal(t, tt.message, protocolError.Error())
 		})
 	}
@@ -962,10 +963,10 @@ func TestAttachRejectsDegraded(t *testing.T) {
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	defer d.serveCancel()
 
-	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name}, nil)
+	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name}, nil)
 	var protocolError *protoErr
 	require.ErrorAs(t, err, &protocolError)
-	require.Equal(t, ports.ErrInternal, protocolError.code)
+	require.Equal(t, protocol.ErrInternal, protocolError.code)
 	require.Zero(t, factory.calls.Load())
 }
 
@@ -977,7 +978,7 @@ func TestRestoreUnavailableReleasesPerRecordWaiters(t *testing.T) {
 	d.mu.Lock()
 	entry := d.inactive[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, ports.SessionBroken, entry.state)
+	require.Equal(t, protocol.SessionBroken, entry.state)
 	select {
 	case <-entry.restoreDone:
 	default:
@@ -993,6 +994,6 @@ func TestCatalogueRestoreDegradedVisible(t *testing.T) {
 
 	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
 
-	require.Equal(t, ports.SessionBroken, d.inactive[record.Name].state)
+	require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
 	require.Zero(t, repository.loads[record.Name])
 }

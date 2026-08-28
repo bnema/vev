@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type reconnectBackoff struct {
@@ -54,7 +55,7 @@ func resumeNeedsExactAttach(err error) bool {
 		return true
 	}
 	protocolErr, ok := errors.AsType[*ProtocolError](err)
-	return ok && (protocolErr.Code == ports.ErrNoSuchSession || protocolErr.Code == ports.ErrNoSuchTarget)
+	return ok && (protocolErr.Code == protocol.ErrNoSuchSession || protocolErr.Code == protocol.ErrNoSuchTarget)
 }
 
 func shouldReconnect(err error) bool {

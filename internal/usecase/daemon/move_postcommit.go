@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // movePostcommitPlan is captured while the move's architecture and owner
@@ -148,7 +148,7 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 		if err := d.cleanupAttachmentOutput(attachment.ac); err != nil {
 			d.log.Warn("move attachment output cleanup failed", "err", err, "operation", p.operation, "source_session", p.sourceName)
 		}
-		d.notifyDetachedSnapshotAsync(attachment, ports.ReasonSessionKilled)
+		d.notifyDetachedSnapshotAsync(attachment, protocol.ReasonSessionKilled)
 	}
 	for _, retirement := range p.retiredParked {
 		if retirement.parked == nil || retirement.parked.ac == nil {

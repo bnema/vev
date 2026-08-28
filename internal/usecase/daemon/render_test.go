@@ -21,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -591,7 +592,7 @@ func TestAltXClosesFinalTabAndDetaches(t *testing.T) {
 	f := awaitFrame(t, sends, ports.MsgDetached)
 	det, err := ports.UnmarshalDetached(f.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ReasonSessionKilled, det.Reason)
+	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
 }
 
 func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
@@ -657,7 +658,7 @@ func TestPTYEOFFinalTabKillsSessionAndDetaches(t *testing.T) {
 	f := awaitFrame(t, sends, ports.MsgDetached)
 	det, err := ports.UnmarshalDetached(f.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ReasonSessionKilled, det.Reason)
+	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
 
 	d.sessWg.Wait()
 }
@@ -986,7 +987,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	require.Empty(t, sess.snapshotAttachmentsLocked())
 	sess.mu.Unlock()
 
-	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
 	cancel()
 	d.waitNotifies()
 }

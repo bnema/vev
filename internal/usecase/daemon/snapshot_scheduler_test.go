@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.T) {
@@ -247,7 +248,7 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	require.True(t, d.scheduleSnapshot(sess), "routine capture should occupy the bounded queue")
 
 	killed := make(chan error, 1)
-	go func() { killed <- d.killSession(sess, ports.ReasonServerShutdown, false) }()
+	go func() { killed <- d.killSession(sess, protocol.ReasonServerShutdown, false) }()
 	timer := clock.nextTimer(t)
 	timer.fire()
 	require.Error(t, <-killed)
@@ -303,7 +304,7 @@ func TestServeShutdownDeadlineStillJoinsPaneExitWriter(t *testing.T) {
 		return nil
 	}).Once()
 
-	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	listener := serveSnapshotListener(t, tr)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -402,7 +403,7 @@ func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
 	d.sessions[sess.id] = sess
 
 	first := make(chan error, 1)
-	go func() { first <- d.killSession(sess, ports.ReasonSessionKilled, false) }()
+	go func() { first <- d.killSession(sess, protocol.ReasonSessionKilled, false) }()
 	select {
 	case <-publicationStarted:
 	case <-time.After(testWaitTimeout):
@@ -418,7 +419,7 @@ func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
 	duplicates := make(chan error, duplicateCallers)
 	for range duplicateCallers {
 		go func() {
-			duplicates <- d.killSession(sess, ports.ReasonSessionKilled, false)
+			duplicates <- d.killSession(sess, protocol.ReasonSessionKilled, false)
 		}()
 	}
 	// Synchronize on the ownership state itself: every duplicate is waiting
@@ -468,7 +469,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 		return nil
 	}).Twice()
 
-	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	l := serveSnapshotListener(t, tr)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -525,7 +526,7 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 		return nil
 	}).Twice()
 
-	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 	l := serveSnapshotListener(t, tr)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

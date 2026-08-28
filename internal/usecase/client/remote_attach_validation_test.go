@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -17,10 +16,10 @@ func TestMalformedAttachRequestsNeverDial(t *testing.T) {
 		name    string
 		request AttachRequest
 	}{
-		{name: "missing session name", request: AttachRequest{Intent: ports.IntentAttach}},
-		{name: "unsafe session name", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "bad name"}},
-		{name: "daemon-owned without remote", request: AttachRequest{Intent: ports.IntentAttach, SessionName: "main", EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}},
-		{name: "ephemeral with navigation capability", request: AttachRequest{Intent: ports.IntentEphemeral, NavigationCapabilities: protocol.NavigationCapabilityHomePicker}},
+		{name: "missing session name", request: AttachRequest{Intent: protocol.IntentAttach}},
+		{name: "unsafe session name", request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "bad name"}},
+		{name: "daemon-owned without remote", request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}},
+		{name: "ephemeral with navigation capability", request: AttachRequest{Intent: protocol.IntentEphemeral, NavigationCapabilities: protocol.NavigationCapabilityHomePicker}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -42,17 +41,17 @@ func TestValidateAttachRequestRequiresDaemonOwnedEnvironmentForRemoteTarget(t *t
 
 	tests := []struct {
 		name   string
-		policy ports.EnvironmentPolicy
+		policy protocol.EnvironmentPolicy
 		wantOK bool
 	}{
-		{name: "daemon owned", policy: ports.EnvironmentPolicyDaemonOwned, wantOK: true},
-		{name: "client owned", policy: ports.EnvironmentPolicyClientOwned},
-		{name: "unknown", policy: ports.EnvironmentPolicy(99)},
+		{name: "daemon owned", policy: protocol.EnvironmentPolicyDaemonOwned, wantOK: true},
+		{name: "client owned", policy: protocol.EnvironmentPolicyClientOwned},
+		{name: "unknown", policy: protocol.EnvironmentPolicy(99)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err := validateAttachRequest(AttachRequest{
-				Intent: ports.IntentAttach, SessionName: target.SessionName,
+				Intent: protocol.IntentAttach, SessionName: target.SessionName,
 				RemoteTarget: target, EnvironmentPolicy: test.policy,
 			})
 			if test.wantOK {

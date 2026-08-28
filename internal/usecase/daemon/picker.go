@@ -923,11 +923,11 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	// Explicit tab rows already take the direct transition path above, while
 	// stopped sessions have no active target session and retain the fallback.
 	samePeerEligible := guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
-	payload := ports.MarshalAttachTarget(ports.AttachTarget{
+	payload := ports.MarshalAttachTarget(protocol.AttachTarget{
 		Session:           sessionName,
-		Intent:            ports.IntentAttach,
+		Intent:            protocol.IntentAttach,
 		ExactTarget:       exactTarget,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		SamePeer:          samePeerEligible,
 	})
 	if payload == nil || exactTarget == nil {
@@ -982,12 +982,12 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 	if err := remoteTarget.Validate(); err != nil || key.Validate() != nil || target.Session != key.ID() || key.Host != remoteTarget.Endpoint || key.Name != remoteTarget.SessionName || key.LifecycleID != remoteTarget.LifecycleID || !d.remoteCatalogTargetReady(remoteTarget) {
 		return failUnavailable()
 	}
-	handoff := ports.AttachTarget{
+	handoff := protocol.AttachTarget{
 		Endpoint:          remoteTarget.Endpoint,
 		Session:           remoteTarget.SessionName,
-		Intent:            ports.IntentAttach,
+		Intent:            protocol.IntentAttach,
 		RemoteTarget:      &remoteTarget,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	payload := ports.MarshalAttachTarget(handoff)
 	if payload == nil {
@@ -1252,7 +1252,7 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // and stopped record untouched.
 func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped inactiveSession, sourceEffect *attachmentEffect, guard sessionHandoffGuard, action string) (*session, attachmentTransitionResult, bool, error) {
 	if stopped.broken() {
-		return nil, attachmentTransitionResult{}, false, &protoErr{ports.ErrInternal, "session durable state is broken: " + target.Name}
+		return nil, attachmentTransitionResult{}, false, &protoErr{protocol.ErrInternal, "session durable state is broken: " + target.Name}
 	}
 	if !stopped.canResume() {
 		return nil, attachmentTransitionResult{}, false, errAttachmentTransition
@@ -1283,7 +1283,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		if err != nil {
 			if targetSess != nil {
 				d.mu.Unlock()
-				_ = d.killSession(targetSess, ports.ReasonSessionKilled, true)
+				_ = d.killSession(targetSess, protocol.ReasonSessionKilled, true)
 				d.mu.Lock()
 			}
 			return targetSess, attachmentTransitionResult{}, false, err
@@ -1390,7 +1390,7 @@ func (d *Daemon) killPickerTargetForAttachment(target picker.Target, effect *att
 	if targetSess == nil {
 		return nil
 	}
-	return d.killSessionForAttachment(targetSess, ports.ReasonSessionKilled, true, effect, "picker-delete")
+	return d.killSessionForAttachment(targetSess, protocol.ReasonSessionKilled, true, effect, "picker-delete")
 }
 
 func (d *Daemon) killPickerTarget(target picker.Target) error {
@@ -1405,7 +1405,7 @@ func (d *Daemon) killPickerTarget(target picker.Target) error {
 	targetSess := d.sessions[target.Session]
 	d.mu.Unlock()
 	if targetSess != nil {
-		return d.killSession(targetSess, ports.ReasonSessionKilled, true)
+		return d.killSession(targetSess, protocol.ReasonSessionKilled, true)
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // ctrlV is the byte a Ctrl+V keypress sends on the wire.
@@ -101,7 +102,7 @@ func (c *clipboardIntercept) handleCtrlV() {
 		if !errors.Is(err, ports.ErrNoClipboardImage) {
 			c.log.Warn("clipboard image read failed", "err", err)
 			if c.sendNotice != nil {
-				c.sendNotice(ports.ClientNoticeClipboardFallback)
+				c.sendNotice(protocol.ClientNoticeClipboardFallback)
 			}
 		}
 		c.next([]byte{ctrlV})
@@ -110,7 +111,7 @@ func (c *clipboardIntercept) handleCtrlV() {
 	if len(data) > maxClipboardImagePush {
 		c.log.Warn("clipboard image too large to send, forwarding Ctrl+V instead", "size", len(data), "cap", maxClipboardImagePush)
 		if c.sendNotice != nil {
-			c.sendNotice(ports.ClientNoticeClipboardTooLarge)
+			c.sendNotice(protocol.ClientNoticeClipboardTooLarge)
 		}
 		c.next([]byte{ctrlV})
 		return

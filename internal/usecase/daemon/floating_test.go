@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -324,7 +325,7 @@ func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("floating reader did not start")
 	}
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
 	select {
 	case <-waitGroupDone(&d.sessWg):
 	case <-time.After(time.Second):

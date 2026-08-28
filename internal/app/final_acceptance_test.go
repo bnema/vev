@@ -15,7 +15,7 @@ import (
 
 func sendAcceptanceInput(t *testing.T, tr ports.Transport, data string) {
 	t.Helper()
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(data)})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(data)})}))
 }
 
 func awaitAcceptanceFrame(t *testing.T, p *pump, typ ports.MsgType, predicate func(ports.Frame) bool) ports.Frame {
@@ -35,7 +35,7 @@ func awaitAcceptanceFrame(t *testing.T, p *pump, typ ports.MsgType, predicate fu
 	}
 }
 
-func awaitAcceptanceCommand(t *testing.T, p *pump, requestID uint64) ports.CommandResult {
+func awaitAcceptanceCommand(t *testing.T, p *pump, requestID uint64) protocol.CommandResult {
 	t.Helper()
 	frame := awaitAcceptanceFrame(t, p, ports.MsgCommandResult, func(frame ports.Frame) bool {
 		result, err := ports.UnmarshalCommandResult(frame.Payload)
@@ -59,10 +59,10 @@ func awaitAcceptanceOutput(t *testing.T, p *pump, predicate func(protocol.Output
 	return output
 }
 
-func awaitAcceptanceCommandResult(t *testing.T, tr ports.Transport, p *pump, requestID uint64, slug string) ports.CommandResult {
+func awaitAcceptanceCommandResult(t *testing.T, tr ports.Transport, p *pump, requestID uint64, slug string) protocol.CommandResult {
 	t.Helper()
-	payload, err := ports.MarshalCommandRequest(ports.CommandRequest{
-		Version: ports.ProtocolVersion, RequestID: requestID, Attached: true, Slug: slug,
+	payload, err := ports.MarshalCommandRequest(protocol.CommandRequest{
+		Version: protocol.Version, RequestID: requestID, Attached: true, Slug: slug,
 	})
 	require.NoError(t, err)
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgCommand, Payload: payload}))
@@ -72,8 +72,8 @@ func awaitAcceptanceCommandResult(t *testing.T, tr ports.Transport, p *pump, req
 func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	size := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))
-	first, firstPump := attach(t, dir, ports.IntentNew, "shared", size)
-	second, secondPump := attach(t, dir, ports.IntentAttach, "shared", size)
+	first, firstPump := attach(t, dir, protocol.IntentNew, "shared", size)
+	second, secondPump := attach(t, dir, protocol.IntentAttach, "shared", size)
 	t.Cleanup(func() { _ = first.Close() })
 	t.Cleanup(func() { _ = second.Close() })
 
@@ -121,12 +121,12 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, resized.Size)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}))
+	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
 	reset := awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Base == 0 && output.Full })
 	require.True(t, reset.Full)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}))
+	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})}))
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
@@ -149,8 +149,8 @@ detached:
 func TestAcceptanceAttachedCommandUsesItsConnectionOnly(t *testing.T) {
 	size := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))
-	first, firstPump := attach(t, dir, ports.IntentNew, "commands", size)
-	second, secondPump := attach(t, dir, ports.IntentAttach, "commands", size)
+	first, firstPump := attach(t, dir, protocol.IntentNew, "commands", size)
+	second, secondPump := attach(t, dir, protocol.IntentAttach, "commands", size)
 	t.Cleanup(func() { _ = first.Close() })
 	t.Cleanup(func() { _ = second.Close() })
 
@@ -173,7 +173,7 @@ func TestAcceptanceAttachedCommandUsesItsConnectionOnly(t *testing.T) {
 	}
 
 drained:
-	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}))
+	require.NoError(t, first.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
 	awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Full && output.Base == 0 })
 	assertNoTextAfterInput(t, secondPump, size, "Commands")
 }

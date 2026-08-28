@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // clientGone detaches ac if it is still the session's current client. The
@@ -110,7 +111,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		// (the client is actively awaiting it), but deadline-bounded so a
 		// wedged client cannot pin this conn handler and hang Serve's
 		// connWg.Wait.
-		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
+		d.boundedSend(ac, frameDetached(protocol.ReasonDetach))
 	}
 	_ = ac.closeCapturedTransport(oldTr)
 	d.log.Info("client detached", "session", name, "explicit", explicit)

@@ -3,6 +3,7 @@ package ports
 import (
 	"testing"
 
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -12,7 +13,7 @@ func TestRemoteCatalogStateContract(t *testing.T) {
 	for _, state := range []RemoteCatalogSessionState{RemoteCatalogSessionUp, RemoteCatalogSessionDown, RemoteCatalogSessionBroken} {
 		t.Run(string(state), func(t *testing.T) {
 			err := ValidateRemoteCatalog(RemoteCatalog{
-				ProtocolVersion: ProtocolVersion,
+				ProtocolVersion: protocol.Version,
 				SchemaVersion:   RemoteCatalogSchemaVersion,
 				Sessions: []RemoteCatalogSession{{
 					LifecycleID: [16]byte{1}, Name: "work", State: state,
@@ -24,7 +25,7 @@ func TestRemoteCatalogStateContract(t *testing.T) {
 	}
 
 	err := ValidateRemoteCatalog(RemoteCatalog{
-		ProtocolVersion: ProtocolVersion,
+		ProtocolVersion: protocol.Version,
 		SchemaVersion:   RemoteCatalogSchemaVersion,
 		Sessions: []RemoteCatalogSession{{
 			LifecycleID: [16]byte{1}, Name: "work", State: RemoteCatalogSessionState("running"),
@@ -33,7 +34,7 @@ func TestRemoteCatalogStateContract(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrRemoteCatalogUnknownState)
 
-	err = ValidateRemoteCatalog(RemoteCatalog{ProtocolVersion: ProtocolVersion, Sessions: []RemoteCatalogSession{}})
+	err = ValidateRemoteCatalog(RemoteCatalog{ProtocolVersion: protocol.Version, Sessions: []RemoteCatalogSession{}})
 	var mismatch *RemoteCatalogVersionMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	require.Equal(t, "catalog", mismatch.Kind)
@@ -42,7 +43,7 @@ func TestRemoteCatalogStateContract(t *testing.T) {
 
 func TestValidateRemoteCatalogRejectsDuplicateSessionNames(t *testing.T) {
 	err := ValidateRemoteCatalog(RemoteCatalog{
-		ProtocolVersion: ProtocolVersion,
+		ProtocolVersion: protocol.Version,
 		SchemaVersion:   RemoteCatalogSchemaVersion,
 		Sessions: []RemoteCatalogSession{
 			{LifecycleID: [16]byte{1}, Name: "work", State: RemoteCatalogSessionUp, Tabs: []RemoteCatalogTab{}},

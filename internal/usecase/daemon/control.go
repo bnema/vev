@@ -12,6 +12,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -21,17 +22,17 @@ import (
 func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 	defer func() { _ = tr.Close() }()
 
-	if version, ok := ports.PeekCommandVersion(f.Payload); !ok || version != ports.ProtocolVersion {
-		return d.sendCommandResult(tr, ports.CommandResult{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"})
+	if version, ok := ports.PeekCommandVersion(f.Payload); !ok || version != protocol.Version {
+		return d.sendCommandResult(tr, protocol.CommandResult{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})
 	}
 	request, err := ports.UnmarshalCommandRequest(f.Payload)
 	if err != nil {
-		return d.sendCommandResult(tr, ports.CommandResult{Code: ports.ErrInternal, Text: "malformed command request"})
+		return d.sendCommandResult(tr, protocol.CommandResult{Code: protocol.ErrInternal, Text: "malformed command request"})
 	}
 	if request.Attached {
-		return d.sendCommandResult(tr, ports.CommandResult{
+		return d.sendCommandResult(tr, protocol.CommandResult{
 			RequestID: request.RequestID,
-			Code:      ports.ErrNotScriptable,
+			Code:      protocol.ErrNotScriptable,
 			Text:      "attached command relay is not enabled",
 		})
 	}
@@ -56,9 +57,9 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 	}
 	result, waitErr := tracker.Wait(commandCtx, commandClock, request.RequestID, generation, outcome)
 	if waitErr != nil {
-		return d.sendCommandResult(tr, ports.CommandResult{
+		return d.sendCommandResult(tr, protocol.CommandResult{
 			RequestID: request.RequestID,
-			Code:      ports.ErrInternal,
+			Code:      protocol.ErrInternal,
 			Text:      waitErr.Error(),
 		})
 	}
@@ -67,7 +68,7 @@ func (d *Daemon) handleCommand(tr ports.Transport, f ports.Frame) error {
 
 // sendCommandResult gives one-shot control responses the same observable
 // transport-failure behavior regardless of which validation path produced it.
-func (d *Daemon) sendCommandResult(tr ports.Transport, result ports.CommandResult) error {
+func (d *Daemon) sendCommandResult(tr ports.Transport, result protocol.CommandResult) error {
 	if err := d.boundedControlSend(tr, frameCommandResult(result)); err != nil {
 		d.log.Warn("command response send failed", "err", err)
 		return err
@@ -86,17 +87,17 @@ func (d *Daemon) boundedControlSend(tr ports.Transport, frame ports.Frame) error
 	return err
 }
 
-func frameCommandResult(result ports.CommandResult) ports.Frame {
+func frameCommandResult(result protocol.CommandResult) ports.Frame {
 	return ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(result)}
 }
 
-func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandRequest) ports.CommandResult {
+func (d *Daemon) dispatchCommand(ctx context.Context, request protocol.CommandRequest) protocol.CommandResult {
 	cmd, ok := command.BySlug(request.Slug)
 	if !ok {
-		return commandFailure(ports.ErrUnknownCommand, "unknown command: "+request.Slug)
+		return commandFailure(protocol.ErrUnknownCommand, "unknown command: "+request.Slug)
 	}
 	if !cmd.Scriptable || cmd.Control == nil {
-		return commandFailure(ports.ErrNotScriptable, request.Slug+" requires an attached client")
+		return commandFailure(protocol.ErrNotScriptable, request.Slug+" requires an attached client")
 	}
 	if cmd.Target == command.TargetNone && !request.Self {
 		return d.runControl(cmd, controlExec{ctx: ctx, d: d, recoveryName: request.TargetSession}, request)
@@ -122,7 +123,7 @@ func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandReque
 	for {
 		select {
 		case <-ctx.Done():
-			return commandFailure(ports.ErrInternal, ctx.Err().Error())
+			return commandFailure(protocol.ErrInternal, ctx.Err().Error())
 		default:
 		}
 		if sess.dispatchMu.TryLock() {
@@ -139,51 +140,51 @@ func (d *Daemon) dispatchCommand(ctx context.Context, request ports.CommandReque
 	return d.runControl(cmd, controlExec{ctx: ctx, d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
 }
 
-func (d *Daemon) runControl(cmd command.Command, exec controlExec, request ports.CommandRequest) ports.CommandResult {
+func (d *Daemon) runControl(cmd command.Command, exec controlExec, request protocol.CommandRequest) protocol.CommandResult {
 	result, err := cmd.Control(exec, request.Args, command.ControlOptions{JSON: request.JSON})
 	if err == nil {
-		return ports.CommandResult{OK: true, Output: result.Output}
+		return protocol.CommandResult{OK: true, Output: result.Output}
 	}
 	switch {
 	case errors.Is(err, command.ErrInvalidArguments), errors.Is(err, errSessionNameRequired), errors.Is(err, domain.ErrInvalidSessionName):
-		return commandFailure(ports.ErrInvalidCommandArgs, "usage: "+cmd.Usage)
+		return commandFailure(protocol.ErrInvalidCommandArgs, "usage: "+cmd.Usage)
 	case errors.Is(err, errSessionNameInUse):
-		return commandFailure(ports.ErrNameTaken, err.Error())
+		return commandFailure(protocol.ErrNameTaken, err.Error())
 	case isMoveCommandError(err):
 		return moveCommandFailure(err)
 	case errors.Is(err, layout.ErrNotInSplit):
-		return commandFailure(ports.ErrNoSuchTarget, "pane is not in a split")
+		return commandFailure(protocol.ErrNoSuchTarget, "pane is not in a split")
 	case errors.Is(err, layout.ErrTooSmall):
-		return commandFailure(ports.ErrNoSuchTarget, "pane cannot be resized further")
+		return commandFailure(protocol.ErrNoSuchTarget, "pane cannot be resized further")
 	default:
-		return commandFailure(ports.ErrInternal, err.Error())
+		return commandFailure(protocol.ErrInternal, err.Error())
 	}
 }
 
-func commandFailure(code uint16, text string) ports.CommandResult {
-	return ports.CommandResult{Code: code, Text: text}
+func commandFailure(code uint16, text string) protocol.CommandResult {
+	return protocol.CommandResult{Code: code, Text: text}
 }
 
 // resolveTargetSession applies explicit-name, stable-ID, then unique-session
 // resolution. A name paired with complete stable IDs is always advisory because
 // a process keeps its original VEV session component after relocation.
-func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, uint16, string) {
+func (d *Daemon) resolveTargetSession(request protocol.CommandRequest) (*session, uint16, string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	named := d.findByNameLocked(request.TargetSession)
 	if request.Self && (request.TargetTab == "" || request.TargetPane == "") {
-		return nil, ports.ErrNoSuchTarget, "--self requires target tab and pane IDs"
+		return nil, protocol.ErrNoSuchTarget, "--self requires target tab and pane IDs"
 	}
 	if request.TargetSession != "" && request.TargetTab == "" && request.TargetPane == "" {
 		if named == nil {
-			return nil, ports.ErrNoSuchTarget, "no such session: " + request.TargetSession
+			return nil, protocol.ErrNoSuchTarget, "no such session: " + request.TargetSession
 		}
 		return named, 0, ""
 	}
 	if request.TargetTab != "" || request.TargetPane != "" {
 		if request.TargetTab == "" || request.TargetPane == "" {
-			return nil, ports.ErrNoSuchTarget, "target tab and pane IDs must be provided together"
+			return nil, protocol.ErrNoSuchTarget, "target tab and pane IDs must be provided together"
 		}
 		var match *session
 		for _, sess := range d.sessions {
@@ -191,21 +192,21 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 				continue
 			}
 			if match != nil {
-				return nil, ports.ErrAmbiguousTarget, "target tab and pane IDs are ambiguous"
+				return nil, protocol.ErrAmbiguousTarget, "target tab and pane IDs are ambiguous"
 			}
 			match = sess
 		}
 		if match != nil {
 			return match, 0, ""
 		}
-		return nil, ports.ErrNoSuchTarget, "no live session contains the target tab/pane"
+		return nil, protocol.ErrNoSuchTarget, "no live session contains the target tab/pane"
 	}
 	locals := sessionsSnapshot(d.sessions)
 	if len(locals) == 0 {
-		return nil, ports.ErrNoSuchTarget, "no live sessions"
+		return nil, protocol.ErrNoSuchTarget, "no live sessions"
 	}
 	if len(locals) != 1 {
-		return nil, ports.ErrAmbiguousTarget, "several sessions are live; use -s <session> or run from inside a pane"
+		return nil, protocol.ErrAmbiguousTarget, "several sessions are live; use -s <session> or run from inside a pane"
 	}
 	return locals[0], 0, ""
 }
@@ -226,7 +227,7 @@ func (s *session) containsStableIDs(tabID, paneID string) bool {
 	return false
 }
 
-func resolveControlTarget(sess *session, kind command.TargetKind, request ports.CommandRequest) (*tab, *pane, uint16, string) {
+func resolveControlTarget(sess *session, kind command.TargetKind, request protocol.CommandRequest) (*tab, *pane, uint16, string) {
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
@@ -240,14 +241,14 @@ func resolveControlTarget(sess *session, kind command.TargetKind, request ports.
 			target := paneByStableIDLocked(tb, request.TargetPane)
 			tb.mu.Unlock()
 			if target == nil {
-				return nil, nil, ports.ErrNoSuchTarget, "target pane does not belong to target tab"
+				return nil, nil, protocol.ErrNoSuchTarget, "target pane does not belong to target tab"
 			}
 			return tb, target, 0, ""
 		}
-		return nil, nil, ports.ErrNoSuchTarget, "no such target tab"
+		return nil, nil, protocol.ErrNoSuchTarget, "no such target tab"
 	}
 	if len(tabs) == 0 {
-		return nil, nil, ports.ErrNoSuchTarget, "target session has no tabs"
+		return nil, nil, protocol.ErrNoSuchTarget, "target session has no tabs"
 	}
 	tb := tabs[0]
 	if kind != command.TargetPane {
@@ -257,7 +258,7 @@ func resolveControlTarget(sess *session, kind command.TargetKind, request ports.
 	target := tb.focusedPane()
 	tb.mu.Unlock()
 	if target == nil {
-		return nil, nil, ports.ErrNoSuchTarget, "no such target pane"
+		return nil, nil, protocol.ErrNoSuchTarget, "no such target pane"
 	}
 	return tb, target, 0, ""
 }
@@ -657,7 +658,7 @@ func (e controlExec) SessionRecovery(action string) (string, error) {
 		return "", err
 	}
 	if ok {
-		e.d.setStoppedRecovery(record, ports.SessionDown)
+		e.d.setStoppedRecovery(record, protocol.SessionDown)
 	}
 	return "", nil
 }
@@ -772,7 +773,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		return rows[i].LifecycleID.String() < rows[j].LifecycleID.String()
 	})
 	catalog := ports.RemoteCatalog{
-		ProtocolVersion: ports.ProtocolVersion,
+		ProtocolVersion: protocol.Version,
 		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
 		Sessions:        rows,
 	}

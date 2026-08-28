@@ -13,24 +13,24 @@ import (
 // It is deliberately separate from legacy name routing: a lifecycle mismatch,
 // missing tab, broken record, or stopped-record race is a no-such-target error,
 // never an invitation to attach a same-name replacement.
-func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.Hello, tr ports.Transport) (*session, *attachedClient, error) {
 	if h.RemoteTarget == nil {
 		return nil, nil, errors.New("daemon: missing remote target")
 	}
 	target := *h.RemoteTarget
 	if err := target.Validate(); err != nil {
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "invalid remote target"}
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "invalid remote target"}
 	}
-	if h.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote target requires daemon-owned environment"}
+	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote target requires daemon-owned environment"}
 	}
-	if h.Intent != ports.IntentAttach && h.Intent != ports.IntentResume {
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote target requires attach or resume"}
+	if h.Intent != protocol.IntentAttach && h.Intent != protocol.IntentResume {
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote target requires attach or resume"}
 	}
 	if err := d.waitForTargetRestore(ctx, target.SessionName); err != nil {
 		var protocolErr *protoErr
-		if errors.As(err, &protocolErr) && protocolErr.code == ports.ErrInternal {
-			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session is unavailable"}
+		if errors.As(err, &protocolErr) && protocolErr.code == protocol.ErrInternal {
+			return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote session is unavailable"}
 		}
 		return nil, nil, remoteTargetError(err)
 	}
@@ -38,20 +38,20 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		return nil, nil, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 	}
 	if live := d.findByNameLocked(target.SessionName); live != nil {
 		if live.incarnation != target.LifecycleID {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session lifecycle has changed"}
+			return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote session lifecycle has changed"}
 		}
 		if target.Stopped && target.LiveTabID != "" {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "stopped target has a live tab selector"}
+			return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "stopped target has a live tab selector"}
 		}
 		if _, ok := remoteTargetTabIndexLocked(live, target); !ok {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote tab no longer exists"}
+			return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote tab no longer exists"}
 		}
 		ac, err := d.finishRouteAttach(live, tr, h.Size, h, false, false)
 		return live, ac, err
@@ -59,20 +59,20 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h ports.Hello
 
 	if !target.Stopped {
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "live remote target has no active runtime"}
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "live remote target has no active runtime"}
 	}
 	inactive, ok := d.inactive[target.SessionName]
 	if !ok || inactive.incarnation != target.LifecycleID {
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session lifecycle no longer exists"}
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote session lifecycle no longer exists"}
 	}
 	if !inactive.canResume() {
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote session is unavailable"}
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote session is unavailable"}
 	}
 	if _, ok := remoteTargetTabIndexInactive(inactive, target); !ok {
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "remote stopped tab no longer exists"}
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote stopped tab no longer exists"}
 	}
 
 	// Picker handoffs use the daemon's own environment and persisted CWD. The
@@ -156,10 +156,10 @@ func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffec
 	return effect.sendControl(ports.Frame{Type: ports.MsgCommittedRouteIdentity, Payload: payload})
 }
 
-func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, h ports.Hello, routeCreated, purge bool) (*attachedClient, error) {
+func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, h protocol.Hello, routeCreated, purge bool) (*attachedClient, error) {
 	ac, err := d.finishAttach(sess, tr, sz, h)
 	if err != nil && routeCreated {
-		if cleanupErr := d.killSessionIfEmpty(sess, ports.ReasonSessionKilled, purge); cleanupErr != nil {
+		if cleanupErr := d.killSessionIfEmpty(sess, protocol.ReasonSessionKilled, purge); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
 		return nil, err
@@ -196,7 +196,7 @@ func remoteTargetError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return &protoErr{ports.ErrNoSuchTarget, "remote target is unavailable"}
+	return &protoErr{protocol.ErrNoSuchTarget, "remote target is unavailable"}
 }
 
 func stoppedTabMetadata(stopped inactiveSession) []domain.TabSelectorTab {
