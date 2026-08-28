@@ -167,6 +167,7 @@ func TestRecentRouteSnapshotCodecRoundTripAndBounds(t *testing.T) {
 	for _, tc := range invalidCases {
 		t.Run(tc.name, func(t *testing.T) {
 			invalid := want
+			invalid.Entries = append([]protocol.RecentRouteEntry(nil), want.Entries...)
 			tc.mutate(&invalid)
 			_, err := MarshalRecentRouteSnapshot(invalid)
 			require.ErrorIs(t, err, protocol.ErrInvalidRouteWire)
