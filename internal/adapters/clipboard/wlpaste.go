@@ -1,11 +1,8 @@
 //go:build linux
 
 // Package clipboard implements ports.ClipboardReader over Wayland's
-// wl-clipboard CLI (wl-paste). It is the client-side seam that lets a remote
-// attach forward a locally clipped image to the daemon (see
-// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md); an
-// xclip or OSC-52 backend could implement the same interface later without
-// touching the wire protocol.
+// wl-clipboard CLI (wl-paste). It lets a remote attach forward a locally
+// clipped image to the daemon.
 package clipboard
 
 import (

@@ -811,10 +811,9 @@ type runAttachDeps struct {
 	runClient               runClientFunc
 	createDetached          func(context.Context, string) error
 	runtimeObserver         ports.SerializedRuntimeObserver
-	// clipboard reads a clipboard image on a remote attach's Ctrl+V (see
-	// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
-	// Only used for the remote-dialer branch below; local attaches never
-	// intercept Ctrl+V regardless of this field.
+	// clipboard reads a clipboard image on a remote route's Ctrl+V.
+	// The client retains it across local-to-remote handoffs and only enables
+	// interception while the active route is remote.
 	clipboard ports.ClipboardReader
 	// Optional remote-learning seams.
 	stateDir  func() string
@@ -991,6 +990,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Dialer:          sessionwire.NewClientDialer(localDialer()),
 				Terminal:        term.New(),
 				Clock:           clock.New(),
+				Clipboard:       deps.clipboard,
 				Logger:          log,
 				RuntimeObserver: deps.runtimeObserver,
 				AttachHandoff:   handoff,

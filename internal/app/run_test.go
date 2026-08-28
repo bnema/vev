@@ -1065,12 +1065,13 @@ func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
 func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
 	gotRemote := true
-	gotClipboard := ports.ClipboardReader(&fakeClipboardReader{})
+	var gotClipboard ports.ClipboardReader
+	clip := &fakeClipboardReader{}
 	factory := newRemoteDialerFactoryMock(t)
 	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "", nil, runAttachDeps{
 		localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
 		remoteDialerFactory: factory.DialerForRemote,
-		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
+		clipboard:           clip,
 		runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			requireNamedClientDialer(t, ctx, deps.Dialer, "local")
 			gotDialer = "local"
@@ -1094,8 +1095,8 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	if gotRemote {
 		t.Fatal("local attach must pass remote=false to runClient")
 	}
-	if gotClipboard != nil {
-		t.Fatalf("local attach must not thread a ClipboardReader through, got %#v", gotClipboard)
+	if gotClipboard != ports.ClipboardReader(clip) {
+		t.Fatalf("local attach must retain the ClipboardReader for later remote handoffs, got %#v", gotClipboard)
 	}
 }
 
