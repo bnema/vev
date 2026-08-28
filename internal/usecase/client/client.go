@@ -22,6 +22,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/protocol/terminalquery"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/theme"
@@ -1119,9 +1120,9 @@ func paletteSlot(slot int) (uint8, bool) {
 	return uint8(slot), true
 }
 
-// DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
-func DetectTrueColor(termEnv, colorTerm string) bool {
-	return ports.DetectTrueColor(termEnv, colorTerm)
+// DetectTrueColor reports whether the client environment advertises direct color support.
+func DetectTrueColor(termEnv, colorTerm string, env []string) bool {
+	return terminalcap.DetectTrueColor(termEnv, colorTerm, env)
 }
 
 func requestedOutputWindow(connection ports.ClientConnection) uint8 {
@@ -1211,7 +1212,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}
 	termEnv := os.Getenv("TERM")
 	colorTerm := os.Getenv("COLORTERM")
-	trueColor := DetectTrueColor(termEnv, colorTerm)
+	trueColor := DetectTrueColor(termEnv, colorTerm, os.Environ())
 	themeState.setTrueColor(trueColor)
 	exactTarget := request.ExactTarget
 	if exactTarget == nil && request.RemoteTarget != nil {
@@ -2121,6 +2122,7 @@ func runRecv(ctx context.Context, transport ports.ClientConnection, out chan<- r
 					"type", failure.Type,
 					"version", failure.Version,
 					"request", failure.RequestID,
+					"has_request", failure.HasRequestID,
 				)
 				continue
 			}

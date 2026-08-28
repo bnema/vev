@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -253,7 +252,7 @@ func TestTransportAsyncEgressPreservesWelcomeBeforeOutput(t *testing.T) {
 	defer closeTransport(t, server)
 	client := NewTransport(clientConn)
 	defer closeTransport(t, client)
-	async, ok := server.(ports.AsyncTransport)
+	async, ok := server.(wire.AsyncTransport)
 	if !ok {
 		t.Fatal("IPC transport does not implement AsyncTransport")
 	}
@@ -317,7 +316,7 @@ func TestTransportSendWaitsForEgressCapacity(t *testing.T) {
 	}
 	client := NewTransport(clientConn)
 	defer closeTransport(t, client)
-	async, ok := server.(ports.AsyncTransport)
+	async, ok := server.(wire.AsyncTransport)
 	if !ok {
 		t.Fatal("IPC transport does not implement AsyncTransport")
 	}
@@ -365,7 +364,7 @@ func TestTransportCloseInterruptsSendWaitingForEgressCapacity(t *testing.T) {
 	if !ok {
 		t.Fatal("IPC transport is not a unixTransport")
 	}
-	async, ok := server.(ports.AsyncTransport)
+	async, ok := server.(wire.AsyncTransport)
 	if !ok {
 		t.Fatal("IPC transport does not implement AsyncTransport")
 	}
@@ -407,7 +406,7 @@ func waitForEgressSender(t *testing.T, transport *unixTransport, timeout time.Du
 	}
 }
 
-func closeTransport(t *testing.T, transport ports.Transport) {
+func closeTransport(t *testing.T, transport wire.Transport) {
 	t.Helper()
 
 	closed := make(chan error, 1)
@@ -422,7 +421,7 @@ func closeTransport(t *testing.T, transport ports.Transport) {
 	}
 }
 
-func fillAsyncEgress(t *testing.T, transport *unixTransport, async ports.AsyncTransport, timeout time.Duration) []wire.Frame {
+func fillAsyncEgress(t *testing.T, transport *unixTransport, async wire.AsyncTransport, timeout time.Duration) []wire.Frame {
 	t.Helper()
 
 	first := wire.Frame{Type: wire.MsgOutput, Payload: []byte{0}}
@@ -474,7 +473,7 @@ func TestTransportAsyncEgressIsBoundedAndCloseInterruptsWorkers(t *testing.T) {
 	if !ok {
 		t.Fatal("IPC transport is not a unixTransport")
 	}
-	async, ok := tr.(ports.AsyncTransport)
+	async, ok := tr.(wire.AsyncTransport)
 	if !ok {
 		t.Fatal("IPC transport does not implement AsyncTransport")
 	}

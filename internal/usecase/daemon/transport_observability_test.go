@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -233,7 +234,7 @@ func TestTransportObservabilityBlockedACKEndDoesNotDelayNotifyAck(t *testing.T) 
 		endEntered:    make(chan struct{}),
 		releaseEnd:    make(chan struct{}),
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 	d := New(nil, nil, nil, WithRuntimeObserver(reporter))
 	wakes := make(chan renderWake, 1)

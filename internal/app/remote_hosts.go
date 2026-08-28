@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
 const (
@@ -196,21 +197,21 @@ func listAllSessions(ctx context.Context, deps remoteHostDeps, hosts []domain.Re
 	return nil
 }
 
-func catalogSessionsAsInfo(host string, sessions []ports.RemoteCatalogSession) []protocol.SessionInfo {
+func catalogSessionsAsInfo(host string, sessions []catalogue.RemoteCatalogSession) []protocol.SessionInfo {
 	out := make([]protocol.SessionInfo, 0, len(sessions))
 	for _, session := range sessions {
 		info := protocol.SessionInfo{
 			Name:      domain.RemoteSessionDisplay(session.Name, host),
 			Ephemeral: session.Ephemeral,
-			Tabs:      ports.SaturateUint16(ports.CatalogTabCount(session)),
+			Tabs:      catalogue.SaturateUint16(catalogue.CatalogTabCount(session)),
 			Attached:  session.Attached,
 		}
 		switch session.State {
-		case ports.RemoteCatalogSessionUp:
+		case catalogue.RemoteCatalogSessionUp:
 			info.State = protocol.SessionUp
-		case ports.RemoteCatalogSessionDown:
+		case catalogue.RemoteCatalogSessionDown:
 			info.State = protocol.SessionDown
-		case ports.RemoteCatalogSessionBroken:
+		case catalogue.RemoteCatalogSessionBroken:
 			info.State = protocol.SessionBroken
 		default:
 			slog.Debug("remote catalog session has unknown state", "host", host, "session", session.Name, "state", session.State)

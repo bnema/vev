@@ -226,14 +226,15 @@ func TestRouteLabelBoundsMatchRemoteDisplayOrigin(t *testing.T) {
 func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {
 	values := []string{"line\nfeed", "\u2028line-separator", "\u2029paragraph-separator", "\x1b[31mred", "\u202eoverride", string([]byte{0xff, 0xfe})}
 	for _, value := range values {
-		t.Run("name/"+value, func(t *testing.T) {
+		encodedName := hex.EncodeToString([]byte(value))
+		t.Run("name/"+encodedName, func(t *testing.T) {
 			_, err := MarshalRecentRouteSnapshot(protocol.RecentRouteSnapshot{
 				Generation: 1,
 				Entries:    []protocol.RecentRouteEntry{{Key: 1, Generation: 1, Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: value}, Name: value, Kind: protocol.RouteKindLocal}},
 			})
 			require.Error(t, err)
 		})
-		t.Run("host/"+value, func(t *testing.T) {
+		t.Run("host/"+encodedName, func(t *testing.T) {
 			_, err := MarshalRecentRouteSnapshot(protocol.RecentRouteSnapshot{
 				Generation: 1,
 				Entries:    []protocol.RecentRouteEntry{{Key: 1, Generation: 1, Target: testExactTarget(), Name: "work", HostLabel: value, Kind: protocol.RouteKindRemote}},

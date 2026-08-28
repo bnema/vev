@@ -131,10 +131,10 @@ func TestClientDialerWrapsEachConnectionAndPreservesErrors(t *testing.T) {
 }
 
 type scriptedDialer struct {
-	transport ports.Transport
+	transport wire.Transport
 	err       error
 }
 
-func (d *scriptedDialer) Dial(context.Context) (ports.Transport, error) {
+func (d *scriptedDialer) Dial(context.Context) (wire.Transport, error) {
 	return d.transport, d.err
 }

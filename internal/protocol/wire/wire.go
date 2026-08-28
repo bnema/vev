@@ -1374,12 +1374,19 @@ func MarshalSessions(m protocol.Sessions) []byte {
 	return w.b
 }
 
+// A session record needs two empty length-prefixed strings, two flags, a tab
+// count, and a state byte before either string contributes data.
+const sessionRecordMinLen = 9
+
 // UnmarshalSessions decodes a Sessions message payload.
 func UnmarshalSessions(b []byte) (protocol.Sessions, error) {
 	r := payloadReader{b: b}
 	count, err := r.getUint16()
 	if err != nil {
 		return protocol.Sessions{}, err
+	}
+	if int(count) > len(r.b)/sessionRecordMinLen {
+		return protocol.Sessions{}, errShortPayload
 	}
 	sessions := make([]protocol.SessionInfo, 0, count)
 	for range int(count) {

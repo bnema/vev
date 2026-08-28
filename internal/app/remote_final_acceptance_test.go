@@ -11,9 +11,9 @@ import (
 	"sync"
 	"testing"
 
+	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -28,7 +28,7 @@ type acceptanceRemoteFactory struct {
 	outputs chan string
 }
 
-func (f *acceptanceRemoteFactory) DialerForRemote(target string, _ string, _ ports.RemoteTransportMode, _ *slog.Logger) (ports.Dialer, error) {
+func (f *acceptanceRemoteFactory) DialerForRemote(target string, _ string, _ remoteadapter.TransportMode, _ *slog.Logger) (wire.Dialer, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, target)
 	targetHandoff := f.handoff[target]
@@ -42,7 +42,7 @@ type acceptanceRemoteDialer struct {
 	outputs chan<- string
 }
 
-func (d acceptanceRemoteDialer) Dial(context.Context) (ports.Transport, error) {
+func (d acceptanceRemoteDialer) Dial(context.Context) (wire.Transport, error) {
 	clientConn, serverConn := net.Pipe()
 	clientTransport := sshstdio.NewTransport(clientConn, clientConn, clientConn.Close)
 	serverTransport := sshstdio.NewTransport(serverConn, serverConn, serverConn.Close)
@@ -50,7 +50,7 @@ func (d acceptanceRemoteDialer) Dial(context.Context) (ports.Transport, error) {
 	return clientTransport, nil
 }
 
-func serveAcceptanceRemote(tr ports.Transport, target string, handoff protocol.AttachTarget, outputs chan<- string) {
+func serveAcceptanceRemote(tr wire.Transport, target string, handoff protocol.AttachTarget, outputs chan<- string) {
 	defer func() { _ = tr.Close() }()
 	welcomed := false
 	for {
@@ -125,12 +125,12 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 	terminals := make([]*acceptanceRemoteTerminal, 0, 3)
 	deps := runAttachDeps{
 		hostStore: hostStore,
-		localDialer: func() ports.Dialer {
+		localDialer: func() wire.Dialer {
 			localCalls++
 			return acceptanceRemoteDialer{}
 		},
-		remoteDialerFactory:     factory,
-		selectedRemoteTransport: string(ports.RemoteTransportStdio),
+		remoteDialerFactory:     factory.DialerForRemote,
+		selectedRemoteTransport: string(remoteadapter.TransportStdio),
 		runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			term := &acceptanceRemoteTerminal{in: bytes.NewReader(nil)}
 			terminals = append(terminals, term)

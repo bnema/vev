@@ -28,7 +28,7 @@ func TestTransportObservabilityDgramFailedCloseEndsReceiveAndSend(t *testing.T) 
 	}
 	receiveStarted := make(chan struct{})
 	signalingObserver := &dgramStartObserver{RuntimeObserver: observer, receiveStarted: receiveStarted}
-	reporter := ports.NewSerializedRuntimeObserver(signalingObserver, 64)
+	reporter := observability.NewSerialized(signalingObserver, 64)
 	defer reporter.Close()
 	transport, err := NewTransportWithOptions(&dgramCloseFailPC{fakePC: aPC, err: closeErr}, testAddr("b"), key(), 1, 2, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(reporter))
 	if err != nil {
@@ -142,7 +142,7 @@ func TestTransportObservabilityDgramKeepsBehaviorClockSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 
 	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(reporter))

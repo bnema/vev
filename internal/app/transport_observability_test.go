@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/observability"
+	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -182,7 +184,7 @@ func TestRunAttachJoinsTraceCloseError(t *testing.T) {
 	traceCloseErr := errors.New("trace close failed")
 	original := newPerformanceTrace
 	newPerformanceTrace = func(ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
-		return ports.NewSerializedRuntimeObserver(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1), errorCloser{err: traceCloseErr}, nil
+		return observability.NewSerialized(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1), errorCloser{err: traceCloseErr}, nil
 	}
 	t.Cleanup(func() { newPerformanceTrace = original })
 	t.Setenv("VEV", "")
@@ -211,9 +213,9 @@ func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
 	t.Setenv("VEV", "")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv(envRemoteTransport, string(ports.RemoteTransportStdio))
+	t.Setenv(envRemoteTransport, string(remoteadapter.TransportStdio))
 
-	observer := ports.NewSerializedRuntimeObserver(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1)
+	observer := observability.NewSerialized(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1)
 	originalTrace := newPerformanceTrace
 	traceCalls := 0
 	newPerformanceTrace = func(ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
@@ -222,16 +224,16 @@ func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
 	}
 	t.Cleanup(func() { newPerformanceTrace = originalTrace })
 
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportStdio, mock.Anything).Return(namedDialer{name: "remote"}, nil)
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportStdio, mock.Anything).Return(namedDialer{name: "remote"}, nil)
 	originalFactory := newRemoteDialerFactoryWithRuntimeObserver
 	factoryCalls := 0
-	newRemoteDialerFactoryWithRuntimeObserver = func(got ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
+	newRemoteDialerFactoryWithRuntimeObserver = func(got ports.SerializedRuntimeObserver) remoteDialerForTarget {
 		factoryCalls++
 		if got != observer {
 			t.Fatalf("remote transport observer = %v, want process observer %v", got, observer)
 		}
-		return factory
+		return factory.DialerForRemote
 	}
 	t.Cleanup(func() { newRemoteDialerFactoryWithRuntimeObserver = originalFactory })
 

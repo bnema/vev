@@ -8,23 +8,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/stretchr/testify/require"
 )
 
 type catalogCacheStub struct {
-	load  func() ([]ports.RemoteCatalogCacheEntry, error)
-	store func([]ports.RemoteCatalogCacheEntry) error
+	load  func() ([]catalogue.RemoteCatalogCacheEntry, error)
+	store func([]catalogue.RemoteCatalogCacheEntry) error
 }
 
-func (s catalogCacheStub) Load() ([]ports.RemoteCatalogCacheEntry, error) {
+func (s catalogCacheStub) Load() ([]catalogue.RemoteCatalogCacheEntry, error) {
 	if s.load == nil {
 		return nil, nil
 	}
 	return s.load()
 }
 
-func (s catalogCacheStub) Store(entries []ports.RemoteCatalogCacheEntry) error {
+func (s catalogCacheStub) Store(entries []catalogue.RemoteCatalogCacheEntry) error {
 	if s.store == nil {
 		return nil
 	}
@@ -35,31 +35,31 @@ func TestRemoteCatalogCacheStartup(t *testing.T) {
 	now := time.Unix(0, 42)
 	tests := []struct {
 		name       string
-		load       func() ([]ports.RemoteCatalogCacheEntry, error)
-		wantCache  map[string]ports.RemoteCatalogCacheEntry
+		load       func() ([]catalogue.RemoteCatalogCacheEntry, error)
+		wantCache  map[string]catalogue.RemoteCatalogCacheEntry
 		wantStatus map[string]remoteHostStatus
 	}{
 		{
 			name: "loads cached entries",
-			load: func() ([]ports.RemoteCatalogCacheEntry, error) {
-				return []ports.RemoteCatalogCacheEntry{{Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}}}}, nil
+			load: func() ([]catalogue.RemoteCatalogCacheEntry, error) {
+				return []catalogue.RemoteCatalogCacheEntry{{Host: "arch", FetchedAt: now, Sessions: []catalogue.RemoteCatalogSession{{Name: "work", State: "up"}}}}, nil
 			},
-			wantCache:  map[string]ports.RemoteCatalogCacheEntry{"arch": {Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}}}},
+			wantCache:  map[string]catalogue.RemoteCatalogCacheEntry{"arch": {Host: "arch", FetchedAt: now, Sessions: []catalogue.RemoteCatalogSession{{Name: "work", State: "up"}}}},
 			wantStatus: map[string]remoteHostStatus{"arch": remoteHostCached},
 		},
 		{
 			name: "invalid cache starts empty",
-			load: func() ([]ports.RemoteCatalogCacheEntry, error) {
+			load: func() ([]catalogue.RemoteCatalogCacheEntry, error) {
 				return nil, errors.New("invalid cache")
 			},
-			wantCache:  map[string]ports.RemoteCatalogCacheEntry{},
+			wantCache:  map[string]catalogue.RemoteCatalogCacheEntry{},
 			wantStatus: map[string]remoteHostStatus{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(nil, nil, catalogCacheStub{load: tt.load}, nil, ports.RemoteTransportUDP))
+			d := New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(nil, nil, catalogCacheStub{load: tt.load}))
 
 			d.remoteCatalog.mu.Lock()
 			defer d.remoteCatalog.mu.Unlock()
@@ -76,7 +76,7 @@ func TestRemoteCatalogCacheStoreSerializesLockFreeIO(t *testing.T) {
 	var active, maxActive int
 	var activeMu sync.Mutex
 
-	cache := catalogCacheStub{store: func(entries []ports.RemoteCatalogCacheEntry) error {
+	cache := catalogCacheStub{store: func(entries []catalogue.RemoteCatalogCacheEntry) error {
 		if !d.mu.TryLock() {
 			return errors.New("daemon lock held during cache I/O")
 		}
@@ -99,16 +99,16 @@ func TestRemoteCatalogCacheStoreSerializesLockFreeIO(t *testing.T) {
 		activeMu.Unlock()
 		return nil
 	}}
-	d = New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(nil, nil, cache, nil, ports.RemoteTransportUDP))
+	d = New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(nil, nil, cache))
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 1), Sessions: []ports.RemoteCatalogSession{{Name: "one", State: "up"}}}
+	d.remoteCatalog.cache["arch"] = catalogue.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 1), Sessions: []catalogue.RemoteCatalogSession{{Name: "one", State: "up"}}}
 	d.remoteCatalog.mu.Unlock()
 
 	done := make(chan struct{}, 2)
 	go func() { d.persistRemoteCatalogCache(); done <- struct{}{} }()
 	<-entered
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 2), Sessions: []ports.RemoteCatalogSession{{Name: "two", State: "up"}}}
+	d.remoteCatalog.cache["arch"] = catalogue.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(0, 2), Sessions: []catalogue.RemoteCatalogSession{{Name: "two", State: "up"}}}
 	d.remoteCatalog.mu.Unlock()
 	go func() { d.persistRemoteCatalogCache(); done <- struct{}{} }()
 

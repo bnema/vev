@@ -16,7 +16,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/platform"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -35,7 +35,7 @@ const staleLockAge = 10 * time.Second
 
 // dialFunc dials the daemon socket in dir. Injected so tests can drive the
 // spawn/backoff logic without a real socket.
-type dialFunc func(ctx context.Context, dir string) (ports.Transport, error)
+type dialFunc func(ctx context.Context, dir string) (wire.Transport, error)
 
 // spawnFunc launches a detached daemon process. Injected so tests never
 // re-exec a real binary.
@@ -115,11 +115,11 @@ func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg ba
 }
 
 type daemonOrLifecycle struct {
-	transport ports.Transport
+	transport wire.Transport
 	owner     lifecycleOwnership
 }
 
-func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, lifecycleOwnership, error) {
+func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (wire.Transport, lifecycleOwnership, error) {
 	result, err := retryAttempts(ctx, cfg, func() (daemonOrLifecycle, bool, error) {
 		if transport, err := dial(ctx, dir); err == nil {
 			return daemonOrLifecycle{transport: transport}, true, nil
@@ -149,7 +149,7 @@ func waitBackoff(ctx context.Context, duration time.Duration) error {
 
 // ensureDaemonWithLifecycle never elects a spawner while another lifecycle
 // owner may still be initializing or tearing down durable state.
-func ensureDaemonWithLifecycle(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (ports.Transport, error) {
+func ensureDaemonWithLifecycle(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (wire.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func ensureDaemonWithLifecycle(ctx context.Context, dir string, dial dialFunc, s
 // ensureDaemon returns a transport to a running daemon, spawning one if
 // necessary after ensureDaemonWithLifecycle has established lifecycle
 // availability. Tests also exercise this lower-level spawn election directly.
-func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (ports.Transport, error) {
+func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (wire.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -237,8 +237,8 @@ func acquireSpawnLock(dir string) (release func(), acquired bool, err error) {
 
 // retryDial dials repeatedly with exponential backoff until the daemon
 // answers, the context is cancelled, or the total budget is exhausted.
-func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, error) {
-	transport, err := retryAttempts(ctx, cfg, func() (ports.Transport, bool, error) {
+func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (wire.Transport, error) {
+	transport, err := retryAttempts(ctx, cfg, func() (wire.Transport, bool, error) {
 		transport, err := dial(ctx, dir)
 		return transport, err == nil, nil
 	})
@@ -249,7 +249,7 @@ func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig
 }
 
 // realDial is the production dialer.
-func realDial(ctx context.Context, dir string) (ports.Transport, error) {
+func realDial(ctx context.Context, dir string) (wire.Transport, error) {
 	return ipc.DialContext(ctx, dir)
 }
 

@@ -8,10 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
@@ -173,7 +175,7 @@ func TestRemoteHostListingUsesUnifiedStore(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
 	store.EXPECT().Hosts().Return([]string{"arch"}, []string{"beta"}, nil).Once()
 	catalog := portsmocks.NewMockRemoteCatalogClient(t)
-	catalog.EXPECT().List(mock.Anything, "arch").Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "build", State: "up"}}}, nil).Once()
+	catalog.EXPECT().List(mock.Anything, "arch").Return(catalogue.RemoteCatalog{Sessions: []catalogue.RemoteCatalogSession{{Name: "build", State: "up"}}}, nil).Once()
 	var out bytes.Buffer
 	err := runRemoteList(context.Background(), command{listHost: "arch"}, remoteHostDeps{
 		store:   store,
@@ -210,9 +212,9 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				catalog := portsmocks.NewMockRemoteCatalogClient(t)
-				catalog.EXPECT().List(mock.Anything, "arch").RunAndReturn(func(context.Context, string) (ports.RemoteCatalog, error) {
+				catalog.EXPECT().List(mock.Anything, "arch").RunAndReturn(func(context.Context, string) (catalogue.RemoteCatalog, error) {
 					cancel()
-					return ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "dev", State: "up"}}}, nil
+					return catalogue.RemoteCatalog{Sessions: []catalogue.RemoteCatalogSession{{Name: "dev", State: "up"}}}, nil
 				}).Once()
 				var out bytes.Buffer
 				err := listAllSessions(ctx, remoteHostDeps{
@@ -235,10 +237,10 @@ func TestListAllSessionsInvariants(t *testing.T) {
 				var calls []string
 				catalog.EXPECT().List(mock.Anything, "arch").Run(func(_ context.Context, target string) {
 					calls = append(calls, target)
-				}).Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "dev", State: "up"}}}, nil).Once()
+				}).Return(catalogue.RemoteCatalog{Sessions: []catalogue.RemoteCatalogSession{{Name: "dev", State: "up"}}}, nil).Once()
 				catalog.EXPECT().List(mock.Anything, "mule").Run(func(_ context.Context, target string) {
 					calls = append(calls, target)
-				}).Return(ports.RemoteCatalog{Sessions: []ports.RemoteCatalogSession{{Name: "ops", State: "up"}}}, nil).Once()
+				}).Return(catalogue.RemoteCatalog{Sessions: []catalogue.RemoteCatalogSession{{Name: "ops", State: "up"}}}, nil).Once()
 				var out bytes.Buffer
 				err := listAllSessions(context.Background(), remoteHostDeps{
 					catalog: catalog,
@@ -263,18 +265,18 @@ func TestListAllSessionsInvariants(t *testing.T) {
 func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 	tests := []struct {
 		name      string
-		session   ports.RemoteCatalogSession
+		session   catalogue.RemoteCatalogSession
 		wantState protocol.SessionState
 		wantTabs  uint16
 	}{
-		{name: "up", session: ports.RemoteCatalogSession{Name: "dev", State: "up", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionUp, wantTabs: 2},
-		{name: "down", session: ports.RemoteCatalogSession{Name: "dev", State: "down", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionDown, wantTabs: 2},
-		{name: "broken", session: ports.RemoteCatalogSession{Name: "dev", State: "broken", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionBroken, wantTabs: 2},
-		{name: "unknown fails closed", session: ports.RemoteCatalogSession{Name: "dev", State: "unknown", Tabs: []ports.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionBroken, wantTabs: 2},
+		{name: "up", session: catalogue.RemoteCatalogSession{Name: "dev", State: "up", Tabs: []catalogue.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionUp, wantTabs: 2},
+		{name: "down", session: catalogue.RemoteCatalogSession{Name: "dev", State: "down", Tabs: []catalogue.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionDown, wantTabs: 2},
+		{name: "broken", session: catalogue.RemoteCatalogSession{Name: "dev", State: "broken", Tabs: []catalogue.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionBroken, wantTabs: 2},
+		{name: "unknown fails closed", session: catalogue.RemoteCatalogSession{Name: "dev", State: "unknown", Tabs: []catalogue.RemoteCatalogTab{{}, {}}}, wantState: protocol.SessionBroken, wantTabs: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infos := catalogSessionsAsInfo("user@arch", []ports.RemoteCatalogSession{tt.session})
+			infos := catalogSessionsAsInfo("user@arch", []catalogue.RemoteCatalogSession{tt.session})
 			require.Len(t, infos, 1)
 			require.Equal(t, "dev@arch", infos[0].Name)
 			require.Equal(t, tt.wantState, infos[0].State)
@@ -286,12 +288,12 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 func TestRunAttachWithDepsRemoteLearning(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
 	store.EXPECT().Remember("build@mule").Return(nil).Once()
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("build@mule", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("build@mule", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	var learner ports.RemoteHostLearner
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "build@mule", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
+		remoteDialerFactory: factory.DialerForRemote,
 		hostStore:           store,
 		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
 			learner = deps.RemoteHostLearner
@@ -306,11 +308,11 @@ func TestRunAttachWithDepsRemoteLearning(t *testing.T) {
 func TestRunAttachWithDepsAlwaysLearnsRemoteHost(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
 	store.EXPECT().Remember("arch").Return(nil).Once()
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("arch", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("arch", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 	var learner ports.RemoteHostLearner
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "arch", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
+		remoteDialerFactory: factory.DialerForRemote,
 		hostStore:           store,
 		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
 			learner = deps.RemoteHostLearner

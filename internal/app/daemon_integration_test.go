@@ -66,10 +66,10 @@ func startDaemonInDir(t *testing.T, dir string, opts ...daemon.Option) (string, 
 }
 
 // pump wires a background Recv pump to a transport so tests can await frames
-// with a timeout (ports.Transport has no read deadline).
+// with a timeout (wire.Transport has no read deadline).
 type pump struct{ ch chan wire.Frame }
 
-func recvPump(tr ports.Transport) *pump {
+func recvPump(tr wire.Transport) *pump {
 	p := &pump{ch: make(chan wire.Frame, 128)}
 	go func() {
 		for {
@@ -85,12 +85,12 @@ func recvPump(tr ports.Transport) *pump {
 }
 
 // attach dials, handshakes, and returns the transport plus its frame pump.
-func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size) (ports.Transport, *pump) {
+func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size) (wire.Transport, *pump) {
 	t.Helper()
 	return attachWithEnvironment(t, dir, intent, name, sz, nil)
 }
 
-func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, sz domain.Size, env []string) (ports.Transport, *pump) {
+func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, sz domain.Size, env []string) (wire.Transport, *pump) {
 	t.Helper()
 	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
@@ -149,22 +149,21 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 	tests := []struct {
 		name    string
 		payload []byte
-		want    protocol.CommandResult
+		want    *protocol.CommandResult
 	}{
 		{
 			name:    "incompatible version",
 			payload: incompatibleVersion,
-			want:    protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
+			want:    &protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
 		},
 		{
 			name:    "truncated version prefix",
 			payload: []byte{0},
-			want:    protocol.CommandResult{Code: protocol.ErrInternal, Text: "malformed command request"},
 		},
 		{
 			name:    "trailing garbage",
 			payload: append(append([]byte(nil), valid...), 0xff),
-			want:    protocol.CommandResult{RequestID: 43, Code: protocol.ErrInternal, Text: "malformed command request"},
+			want:    &protocol.CommandResult{RequestID: 43, Code: protocol.ErrInternal, Text: "malformed command request"},
 		},
 	}
 	for _, tt := range tests {
@@ -176,12 +175,16 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 
 			require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: tt.payload}))
 			frame, err := tr.Recv()
+			if tt.want == nil {
+				require.ErrorIs(t, err, io.EOF)
+				return
+			}
 			require.NoError(t, err)
 			require.Equal(t, wire.MsgCommandResult, frame.Type)
-			require.Equal(t, wire.MarshalCommandResult(tt.want), frame.Payload)
+			require.Equal(t, wire.MarshalCommandResult(*tt.want), frame.Payload)
 			result, err := wire.UnmarshalCommandResult(frame.Payload)
 			require.NoError(t, err)
-			require.Equal(t, tt.want, result)
+			require.Equal(t, *tt.want, result)
 		})
 	}
 }
@@ -263,7 +266,7 @@ func shellFixture(t *testing.T, label string) string {
 	return path
 }
 
-func assertChildEnvironment(t *testing.T, tr ports.Transport, p *pump, sz domain.Size, wantTestEnv, wantShell, wantRuntimeDir, wantWayland string) {
+func assertChildEnvironment(t *testing.T, tr wire.Transport, p *pump, sz domain.Size, wantTestEnv, wantShell, wantRuntimeDir, wantWayland string) {
 	t.Helper()
 	command := "printf '\\033[2J\\033[H'; printf 'VEV_TEST_ENV=%s SHELL=%s XDG_RUNTIME_DIR=%s WAYLAND_DISPLAY=%s TERM=%s COLORTERM=%s TERM_PROGRAM=%s VEV_PREFIX=%.24s\\n' \"$VEV_TEST_ENV\" \"${SHELL##*/}\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$TERM\" \"$COLORTERM\" \"$TERM_PROGRAM\" \"$VEV\"\n"
 	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(command)})}))
@@ -531,7 +534,7 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 
 	ready := make(chan struct{})
 	transport := &integrationTransport{}
-	dial := func(context.Context, string) (ports.Transport, error) {
+	dial := func(context.Context, string) (wire.Transport, error) {
 		select {
 		case <-ready:
 			return transport, nil
@@ -1075,7 +1078,7 @@ func TestLifecycleManualTimerRepeatedFireIsNonBlocking(t *testing.T) {
 }
 
 type lifecycleObservedListener struct {
-	ports.Listener
+	wire.Listener
 	closed chan struct{}
 	once   sync.Once
 }
@@ -1249,7 +1252,7 @@ func assertNewDaemonStartupPending(t *testing.T, durableOpen, listen <-chan stru
 }
 
 type lifecycleControlledListener struct {
-	ports.Listener
+	wire.Listener
 	entered chan struct{}
 	proceed chan struct{}
 	closed  chan struct{}

@@ -14,9 +14,10 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	appports "github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -774,7 +775,7 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	require.True(t, result.OK, result.Text)
 	require.True(t, strings.HasSuffix(result.Output, "\n"), "catalog output must be newline-terminated")
 
-	var catalog ports.RemoteCatalog
+	var catalog catalogue.RemoteCatalog
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
 	require.Equal(t, protocol.Version, catalog.ProtocolVersion)
 
@@ -786,13 +787,13 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	_, hasSessions := raw["sessions"]
 	require.True(t, hasProtocol && hasSchema && hasSessions)
 
-	require.Equal(t, []ports.RemoteCatalogSession{
-		{LifecycleID: build.incarnation, Name: "build", State: "up", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "t_build", Name: "1", Detail: " (sh)"}}, ActiveTabID: "t_build", LastUsedSeq: 1},
-		{LifecycleID: domain.IncarnationID{3}, Name: "old", State: "down", Tabs: []ports.RemoteCatalogTab{}},
-		{LifecycleID: work.incarnation, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "t_work", Name: "1", Detail: " (sh)"}, {ID: "t_work_2", Index: 1, Name: "2", Detail: " (sh)"}}, Attached: true, ActiveTabID: "t_work", LastUsedSeq: 2},
+	require.Equal(t, []catalogue.RemoteCatalogSession{
+		{LifecycleID: build.incarnation, Name: "build", State: "up", Ephemeral: true, Tabs: []catalogue.RemoteCatalogTab{{ID: "t_build", Name: "1", Detail: " (sh)"}}, ActiveTabID: "t_build", LastUsedSeq: 1},
+		{LifecycleID: domain.IncarnationID{3}, Name: "old", State: "down", Tabs: []catalogue.RemoteCatalogTab{}},
+		{LifecycleID: work.incarnation, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "t_work", Name: "1", Detail: " (sh)"}, {ID: "t_work_2", Index: 1, Name: "2", Detail: " (sh)"}}, Attached: true, ActiveTabID: "t_work", LastUsedSeq: 2},
 	}, catalog.Sessions)
 
-	require.Equal(t, ports.RemoteCatalogSessionDown, catalog.Sessions[1].State)
+	require.Equal(t, catalogue.RemoteCatalogSessionDown, catalog.Sessions[1].State)
 
 	listAfter := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
 	require.True(t, listAfter.OK, listAfter.Text)
@@ -818,14 +819,14 @@ func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
 	require.True(t, result.OK, result.Text)
-	var catalog ports.RemoteCatalog
+	var catalog catalogue.RemoteCatalog
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
-	require.Equal(t, []ports.RemoteCatalogSession{{
+	require.Equal(t, []catalogue.RemoteCatalogSession{{
 		LifecycleID: sess.incarnation,
 		Name:        "work",
 		State:       "up",
 		Ephemeral:   true,
-		Tabs: []ports.RemoteCatalogTab{{
+		Tabs: []catalogue.RemoteCatalogTab{{
 			ID:     "t_work",
 			Index:  0,
 			Name:   "shell",
@@ -840,7 +841,7 @@ func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_work", "p_work")
 	sess.mu.Lock()
-	sess.tabs = make([]*tab, ports.RemoteCatalogMaxTabsPerSess+1)
+	sess.tabs = make([]*tab, catalogue.RemoteCatalogMaxTabsPerSess+1)
 	for i := range sess.tabs {
 		sess.tabs[i] = newTabWithStableID(
 			fmt.Sprintf("tab-%d", i), fmt.Sprintf("pane-%d", i), newQuietPTY(), domain.Size{Cols: 80, Rows: 22},
@@ -1345,7 +1346,7 @@ type controlPTYFactory struct {
 	once    sync.Once
 }
 
-func (f *controlPTYFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+func (f *controlPTYFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (appports.PTY, error) {
 	f.once.Do(func() {
 		if f.entered != nil {
 			close(f.entered)

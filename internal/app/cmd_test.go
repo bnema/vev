@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -91,7 +90,7 @@ func TestCmdHelpUsesRegistryWithoutDialing(t *testing.T) {
 	err := runCmdWithDeps(context.Background(), cmdInvocation{help: true}, cmdDeps{
 		stdout: out,
 		getenv: func(string) string { return "" },
-		dial: func(context.Context, string) (ports.Transport, error) {
+		dial: func(context.Context, string) (wire.Transport, error) {
 			called = true
 			return nil, errors.New("must not dial")
 		},
@@ -146,7 +145,7 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 			require.NoError(t, runCmdWithDeps(context.Background(), parsed.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
-				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+				dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 			}))
 			require.Len(t, transport.sent, 1)
 			request, err := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
@@ -164,11 +163,11 @@ func TestRemoteCatalogCommandEnsuresDaemon(t *testing.T) {
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "remote-catalog", jsonOut: true}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
-		dial: func(context.Context, string) (ports.Transport, error) {
+		dial: func(context.Context, string) (wire.Transport, error) {
 			t.Fatal("remote catalog used non-starting daemon dial")
 			return nil, errors.New("unexpected dial")
 		},
-		ensure: func(context.Context, string) (ports.Transport, error) {
+		ensure: func(context.Context, string) (wire.Transport, error) {
 			ensureCalls++
 			return transport, nil
 		},
@@ -191,7 +190,7 @@ func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
 			err := runCmdWithDeps(context.Background(), invocation, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
-				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+				dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 			})
 			if ExitCode(err) != 2 {
 				t.Fatalf("ExitCode(%v) = %d, want 2", err, ExitCode(err))
@@ -212,7 +211,7 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 			require.NoError(t, runCmdWithDeps(context.Background(), invocation.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "session=work,tab=t_abc,pane=p_def" },
-				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+				dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 			}))
 			require.Len(t, transport.sent, 1)
 			request, err := wire.UnmarshalCommandRequest(transport.sent[0].Payload)
@@ -232,7 +231,7 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right", self: true}, cmdDeps{
 		stdout: out,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
-		dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+		dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 	})
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
@@ -257,7 +256,7 @@ func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
-		dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+		dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 	})
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
@@ -276,7 +275,7 @@ func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "new-tab", session: "current"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
-		dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+		dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 	})
 	if err != nil {
 		t.Fatalf("runCmdWithDeps: %v", err)
@@ -298,7 +297,7 @@ func TestRunCmdRejectsTooManyArgumentsBeforeDialing(t *testing.T) {
 	}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
-		dial: func(context.Context, string) (ports.Transport, error) {
+		dial: func(context.Context, string) (wire.Transport, error) {
 			dialed = true
 			return nil, errors.New("must not dial")
 		},
@@ -330,7 +329,7 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 		done <- runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 			stdout: io.Discard,
 			getenv: func(string) string { return "" },
-			dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+			dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 			clock:  clock,
 		})
 	}()
@@ -358,7 +357,7 @@ func TestRunCmdZeroRequestIDReplyReturnsDaemonError(t *testing.T) {
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
-		dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+		dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 	})
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want daemon error %q", err, want)
@@ -374,7 +373,7 @@ func TestRunCmdDoesNotAutostartAndClassifiesDialFailure(t *testing.T) {
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
-		dial: func(context.Context, string) (ports.Transport, error) {
+		dial: func(context.Context, string) (wire.Transport, error) {
 			dials++
 			return nil, dialErr
 		},
@@ -420,7 +419,7 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 			err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
-				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+				dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 			})
 			if err == nil || ExitCode(err) != tt.wantCode || err.Error() != tt.result.Text {
 				t.Fatalf("error=%v code=%d, want message %q and code %d", err, ExitCode(err), tt.result.Text, tt.wantCode)

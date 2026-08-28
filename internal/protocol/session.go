@@ -290,7 +290,7 @@ func ValidateHello(h Hello) error {
 	if err := validateHelloNavigation(h); err != nil {
 		return fmt.Errorf("%w: navigation: %w", ErrInvalidHello, err)
 	}
-	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || len(h.Env) > math.MaxUint32 {
+	if len(h.Name) > math.MaxUint16 || len(h.TermEnv) > math.MaxUint16 || len(h.Cwd) > math.MaxUint16 || uint64(len(h.Env)) > math.MaxUint32 {
 		return ErrInvalidHello
 	}
 	for _, entry := range h.Env {

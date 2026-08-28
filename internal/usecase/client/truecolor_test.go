@@ -11,6 +11,7 @@ func TestDetectTrueColor(t *testing.T) {
 		name      string
 		termEnv   string
 		colorTerm string
+		env       []string
 		want      bool
 	}{
 		{name: "COLORTERM truecolor", termEnv: "screen", colorTerm: "truecolor", want: true},
@@ -19,13 +20,14 @@ func TestDetectTrueColor(t *testing.T) {
 		{name: "xterm-direct", termEnv: "xterm-direct", colorTerm: "", want: true},
 		{name: "direct suffix", termEnv: "foot-direct", colorTerm: "", want: true},
 		{name: "direct suffix ignores case and space", termEnv: " FOOT-DIRECT ", colorTerm: "", want: true},
+		{name: "kitty without COLORTERM", termEnv: "xterm-kitty", env: []string{"KITTY_WINDOW_ID=1"}, want: true},
 		{name: "xterm 256 only", termEnv: "xterm-256color", colorTerm: "", want: false},
 		{name: "empty", termEnv: "", colorTerm: "", want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, DetectTrueColor(tt.termEnv, tt.colorTerm))
+			require.Equal(t, tt.want, DetectTrueColor(tt.termEnv, tt.colorTerm, tt.env))
 		})
 	}
 }

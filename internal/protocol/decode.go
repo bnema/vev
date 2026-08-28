@@ -25,12 +25,13 @@ const (
 
 // DecodeFailure describes rejected encoded input without retaining payload bytes.
 type DecodeFailure struct {
-	Category  DecodeCategory
-	Kind      DecodeMessageKind
-	Type      uint8
-	Version   uint16
-	RequestID uint64
-	Err       error
+	Category     DecodeCategory
+	Kind         DecodeMessageKind
+	Type         uint8
+	Version      uint16
+	RequestID    uint64
+	HasRequestID bool
+	Err          error
 }
 
 func (e *DecodeFailure) Error() string {

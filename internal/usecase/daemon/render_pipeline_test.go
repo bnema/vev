@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// scriptedReplayTransport is intentionally a ports.Transport only: replay
+// scriptedReplayTransport is intentionally a wire.Transport only: replay
 // assertions must not depend on any adapter's framing implementation.
 type scriptedReplayTransport struct {
 	t      *testing.T

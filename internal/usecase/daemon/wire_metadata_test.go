@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestFrameWelcomeSnapshotsSessionMetadataUnderLock(t *testing.T) {
+func TestServerWelcomeSnapshotsSessionMetadataUnderLock(t *testing.T) {
 	sess := &session{sessionCore: sessionCore{id: "session", name: "initial"}}
 	ac := &attachedClient{resumeToken: 42}
 

@@ -35,7 +35,7 @@ var errClosed = errors.New("ipc: closed")
 // peer into an unbounded memory commitment.
 const sendQueueCapacity = 8
 
-// unixTransport implements ports.Transport over a net.Conn (in practice an
+// unixTransport implements wire.Transport over a net.Conn (in practice an
 // AF_UNIX SOCK_STREAM connection, but any net.Conn works — this also lets
 // tests exercise it over net.Pipe).
 //
@@ -79,9 +79,9 @@ type unixTransport struct {
 	readBuf []byte
 }
 
-// NewTransport wraps conn as a ports.Transport speaking vev's framed
+// NewTransport wraps conn as a wire.Transport speaking vev's framed
 // binary protocol.
-func NewTransport(conn net.Conn, opts ...Option) ports.Transport {
+func NewTransport(conn net.Conn, opts ...Option) wire.Transport {
 	t := &unixTransport{
 		conn:       conn,
 		egress:     make(chan sendRequest, sendQueueCapacity),

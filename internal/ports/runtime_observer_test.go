@@ -2,9 +2,7 @@ package ports
 
 import (
 	"reflect"
-	"sync"
 	"testing"
-	"time"
 )
 
 func TestRuntimeObserverContract(t *testing.T) {
@@ -42,70 +40,6 @@ func TestRuntimeObserverContract(t *testing.T) {
 	}
 
 	var _ RuntimeObserver = runtimeObserverFunc(func(RuntimeMark) {})
-}
-
-func TestSerializedRuntimeObserverFlushesInOrderAndCloses(t *testing.T) {
-	var mu sync.Mutex
-	var got []RuntimeMark
-	observer := NewSerializedRuntimeObserver(runtimeObserverFunc(func(mark RuntimeMark) {
-		mu.Lock()
-		got = append(got, mark)
-		mu.Unlock()
-	}), 2)
-	observer.ObserveRuntime(NewRuntimeMark("client", RuntimeEmitStart, 1, true))
-	observer.ObserveRuntime(NewRuntimeMark("client", RuntimeEmitEnd, 1, true))
-	observer.Flush()
-	observer.Close()
-	observer.Close()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(got) != 2 || got[0].Kind != RuntimeEmitStart || got[1].Kind != RuntimeEmitEnd {
-		t.Fatalf("serialized marks = %#v", got)
-	}
-}
-
-func TestEnsureSerializedRuntimeObserverReusesExistingOwner(t *testing.T) {
-	existing := NewSerializedRuntimeObserver(runtimeObserverFunc(func(RuntimeMark) {}), 1)
-	reporter, owned := EnsureSerializedRuntimeObserver(existing, 1)
-	if owned || reporter != existing {
-		t.Fatalf("EnsureSerializedRuntimeObserver() = (%T, %t), want existing unowned reporter", reporter, owned)
-	}
-	existing.Close()
-}
-
-func TestSerializedRuntimeObserverReportsBoundedQueueLoss(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var mu sync.Mutex
-	var got []RuntimeMark
-	observer := NewSerializedRuntimeObserver(runtimeObserverFunc(func(mark RuntimeMark) {
-		if mark.Kind == RuntimeEmitStart {
-			close(entered)
-			<-release
-		}
-		mu.Lock()
-		got = append(got, mark)
-		mu.Unlock()
-	}), 2)
-	observer.ObserveRuntime(NewRuntimeMark("client", RuntimeEmitStart, 1, true))
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("observer did not start")
-	}
-	observer.ObserveRuntime(NewRuntimeMark("client", RuntimeComposeStart, 1, true))
-	observer.ObserveRuntime(NewRuntimeMark("client", RuntimeComposeEnd, 1, true))
-	observer.ObserveRuntime(NewRuntimeMark("client", RuntimeEmitEnd, 1, true)) // bounded loss
-	close(release)
-	observer.Flush()
-	observer.Close()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(got) != 4 || got[0].Kind != RuntimeEmitStart || got[1].Kind != RuntimeComposeStart || got[2].Kind != RuntimeComposeEnd || got[3].Kind != RuntimeTransportDiagnostic || got[3].Bytes != 1 || got[3].Valid {
-		t.Fatalf("bounded-loss marks = %#v", got)
-	}
 }
 
 func TestP4RuntimeScreenMarkKindsValidateSchema1(t *testing.T) {

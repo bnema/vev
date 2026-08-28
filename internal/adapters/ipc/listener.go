@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -20,7 +20,7 @@ const socketFileName = "daemon.sock"
 // bound by a live daemon (a dial-probe against it succeeded).
 var ErrDaemonRunning = errors.New("ipc: a daemon is already listening on this socket")
 
-// unixListener implements ports.Listener over an AF_UNIX SOCK_STREAM
+// unixListener implements wire.Listener over an AF_UNIX SOCK_STREAM
 // listener.
 type unixListener struct {
 	ln   *net.UnixListener
@@ -36,7 +36,7 @@ type unixListener struct {
 // the previous owner died without cleaning up, so the stale socket file is
 // unlinked and bind is retried once. A successful dial means a live daemon
 // owns the socket, and Listen returns ErrDaemonRunning.
-func Listen(dir string, opts ...Option) (ports.Listener, error) {
+func Listen(dir string, opts ...Option) (wire.Listener, error) {
 	if err := safedir.EnsurePrivate(dir); err != nil {
 		return nil, fmt.Errorf("ipc: securing socket directory: %w", err)
 	}
@@ -99,8 +99,8 @@ func probeLiveDaemon(sockPath string) error {
 }
 
 // Accept waits for and returns the next connection, wrapped as a
-// ports.Transport.
-func (l *unixListener) Accept() (ports.Transport, error) {
+// wire.Transport.
+func (l *unixListener) Accept() (wire.Transport, error) {
 	conn, err := l.ln.Accept()
 	if err != nil {
 		return nil, err

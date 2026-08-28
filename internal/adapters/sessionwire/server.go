@@ -2,7 +2,6 @@
 package sessionwire
 
 import (
-	"encoding/binary"
 	"errors"
 
 	"github.com/bnema/vev/internal/ports"
@@ -17,12 +16,12 @@ var (
 	ErrUnsupportedSend    = errors.New("sessionwire: send mode is unsupported")
 )
 
-type serverConnection struct{ raw ports.Transport }
+type serverConnection struct{ raw wire.Transport }
 
 var _ ports.ServerConnection = (*serverConnection)(nil)
 
 // NewServerConnection wraps one raw connection incarnation exactly once.
-func NewServerConnection(raw ports.Transport) ports.ServerConnection {
+func NewServerConnection(raw wire.Transport) ports.ServerConnection {
 	if raw == nil {
 		return nil
 	}
@@ -51,9 +50,7 @@ func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
 	case wire.MsgCommand:
 		failure.Kind = protocol.DecodeMessageCommand
 		failure.Version, _ = wire.PeekCommandVersion(frame.Payload)
-		if len(frame.Payload) >= 10 {
-			failure.RequestID = binary.BigEndian.Uint64(frame.Payload[2:10])
-		}
+		failure.RequestID, failure.HasRequestID = wire.PeekCommandRequestID(frame.Payload)
 	case wire.MsgKill:
 		failure.Kind = protocol.DecodeMessageKill
 	case wire.MsgRemotePreviewRequest:
@@ -71,7 +68,7 @@ func (c *serverConnection) SendServer(message protocol.ServerMessage) error {
 }
 
 func (c *serverConnection) SendServerAsync(message protocol.ServerMessage) error {
-	transport, ok := c.raw.(ports.AsyncTransport)
+	transport, ok := c.raw.(wire.AsyncTransport)
 	if !ok {
 		return ErrUnsupportedSend
 	}
@@ -83,7 +80,7 @@ func (c *serverConnection) SendServerAsync(message protocol.ServerMessage) error
 }
 
 func (c *serverConnection) SendServerSynchronous(message protocol.ServerMessage) error {
-	transport, ok := c.raw.(ports.OwnedSynchronousTransport)
+	transport, ok := c.raw.(wire.OwnedSynchronousTransport)
 	if !ok {
 		return ErrUnsupportedSend
 	}
@@ -103,7 +100,7 @@ func (c *serverConnection) SendOutput(output protocol.Output) error {
 }
 
 func (c *serverConnection) SendOutputAsync(output protocol.Output) error {
-	transport, ok := c.raw.(ports.AsyncTransport)
+	transport, ok := c.raw.(wire.AsyncTransport)
 	if !ok {
 		return ErrUnsupportedSend
 	}
@@ -115,7 +112,7 @@ func (c *serverConnection) SendOutputAsync(output protocol.Output) error {
 }
 
 func (c *serverConnection) SendOutputSynchronous(output protocol.Output) error {
-	transport, ok := c.raw.(ports.OwnedSynchronousTransport)
+	transport, ok := c.raw.(wire.OwnedSynchronousTransport)
 	if !ok {
 		return ErrUnsupportedSend
 	}
@@ -138,10 +135,10 @@ func (c *serverConnection) Capabilities() protocol.ConnectionCapabilities {
 func (c *serverConnection) LinkState() ports.LinkState         { return rawLinkState(c.raw) }
 func (c *serverConnection) LinkEvents() <-chan ports.LinkEvent { return rawLinkEvents(c.raw) }
 
-func rawCapabilities(raw ports.Transport) protocol.ConnectionCapabilities {
-	_, datagram := raw.(ports.DatagramTransport)
-	_, async := raw.(ports.AsyncTransport)
-	_, synchronous := raw.(ports.OwnedSynchronousTransport)
+func rawCapabilities(raw wire.Transport) protocol.ConnectionCapabilities {
+	_, datagram := raw.(wire.DatagramTransport)
+	_, async := raw.(wire.AsyncTransport)
+	_, synchronous := raw.(wire.OwnedSynchronousTransport)
 	_, linkState := raw.(ports.LinkStateReporter)
 	window := uint8(protocol.MaxOutputWindow)
 	if datagram {
@@ -156,14 +153,14 @@ func rawCapabilities(raw ports.Transport) protocol.ConnectionCapabilities {
 	}
 }
 
-func rawLinkState(raw ports.Transport) ports.LinkState {
+func rawLinkState(raw wire.Transport) ports.LinkState {
 	if reporter, ok := raw.(ports.LinkStateReporter); ok {
 		return reporter.LinkState()
 	}
 	return ports.LinkStateConnected
 }
 
-func rawLinkEvents(raw ports.Transport) <-chan ports.LinkEvent {
+func rawLinkEvents(raw wire.Transport) <-chan ports.LinkEvent {
 	if reporter, ok := raw.(ports.LinkStateReporter); ok {
 		return reporter.LinkEvents()
 	}
@@ -172,12 +169,12 @@ func rawLinkEvents(raw ports.Transport) <-chan ports.LinkEvent {
 
 func (c *serverConnection) Close() error { return c.raw.Close() }
 
-type serverListener struct{ raw ports.Listener }
+type serverListener struct{ raw wire.Listener }
 
 var _ ports.ServerListener = (*serverListener)(nil)
 
 // NewServerListener wraps every accepted raw connection in a stable typed adapter.
-func NewServerListener(raw ports.Listener) ports.ServerListener {
+func NewServerListener(raw wire.Listener) ports.ServerListener {
 	if raw == nil {
 		return nil
 	}

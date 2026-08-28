@@ -129,8 +129,8 @@ var errDaemonUnreachable = errors.New("daemon not running")
 type cmdDeps struct {
 	stdout io.Writer
 	getenv func(string) string
-	dial   func(context.Context, string) (ports.Transport, error)
-	ensure func(context.Context, string) (ports.Transport, error)
+	dial   func(context.Context, string) (wire.Transport, error)
+	ensure func(context.Context, string) (wire.Transport, error)
 	clock  ports.Clock
 }
 
@@ -139,7 +139,7 @@ func runCmd(ctx context.Context, invocation cmdInvocation) error {
 		stdout: os.Stdout,
 		getenv: os.Getenv,
 		dial:   realDial,
-		ensure: func(ctx context.Context, dir string) (ports.Transport, error) {
+		ensure: func(ctx context.Context, dir string) (wire.Transport, error) {
 			return ensureDaemonWithLifecycle(ctx, dir, realDial, realSpawn, defaultBackoff)
 		},
 		clock: clock.New(),

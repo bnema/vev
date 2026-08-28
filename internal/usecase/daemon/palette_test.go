@@ -11,9 +11,9 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -439,11 +439,11 @@ func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *te
 	local.ephemeral = false
 	remoteLifecycle := domain.SessionLifecycleID{21}
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["user@arch"] = ports.RemoteCatalogCacheEntry{
+	d.remoteCatalog.cache["user@arch"] = catalogue.RemoteCatalogCacheEntry{
 		Host: "user@arch", FetchedAt: now,
-		Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: remoteLifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
-			Tabs: []ports.RemoteCatalogTab{{ID: "tab-remote", Index: 0, Name: "shell"}}, ActiveTabID: "tab-remote",
+		Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: remoteLifecycle, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
+			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-remote", Index: 0, Name: "shell"}}, ActiveTabID: "tab-remote",
 		}},
 	}
 	d.remoteCatalog.status["user@arch"] = remoteHostFresh
@@ -527,11 +527,11 @@ func TestPaletteMatchesRecentRemoteRouteToCatalog(t *testing.T) {
 			lifecycle := domain.SessionLifecycleID{22}
 			d.remoteCatalog.mu.Lock()
 			for _, endpoint := range test.catalogEndpoints {
-				d.remoteCatalog.cache[endpoint] = ports.RemoteCatalogCacheEntry{
+				d.remoteCatalog.cache[endpoint] = catalogue.RemoteCatalogCacheEntry{
 					Host: endpoint, FetchedAt: now,
-					Sessions: []ports.RemoteCatalogSession{{
-						LifecycleID: lifecycle, Name: "vev", State: ports.RemoteCatalogSessionUp,
-						Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
+					Sessions: []catalogue.RemoteCatalogSession{{
+						LifecycleID: lifecycle, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
+						Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
 					}},
 				}
 				d.remoteCatalog.status[endpoint] = remoteHostFresh
@@ -577,11 +577,11 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 	d.clock = fixedRemoteRefreshClock{now: now}
 	remoteLifecycle := domain.SessionLifecycleID{31}
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["user@arch"] = ports.RemoteCatalogCacheEntry{
+	d.remoteCatalog.cache["user@arch"] = catalogue.RemoteCatalogCacheEntry{
 		Host: "user@arch", FetchedAt: now,
-		Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: remoteLifecycle, Name: "work", State: ports.RemoteCatalogSessionUp,
-			Tabs: []ports.RemoteCatalogTab{{ID: "tab-work", Index: 0, Name: "shell"}}, ActiveTabID: "tab-work",
+		Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: remoteLifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-work", Index: 0, Name: "shell"}}, ActiveTabID: "tab-work",
 		}},
 	}
 	d.remoteCatalog.status["user@arch"] = remoteHostFresh
@@ -616,11 +616,11 @@ func TestPaletteCachedRemoteSelectionFailsClosed(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	d.clock = fixedRemoteRefreshClock{now: now}
 	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["arch"] = ports.RemoteCatalogCacheEntry{
+	d.remoteCatalog.cache["arch"] = catalogue.RemoteCatalogCacheEntry{
 		Host: "arch", FetchedAt: now,
-		Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: domain.SessionLifecycleID{32}, Name: "cached", State: ports.RemoteCatalogSessionUp,
-			Tabs: []ports.RemoteCatalogTab{{ID: "tab-cached", Index: 0}}, ActiveTabID: "tab-cached",
+		Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: domain.SessionLifecycleID{32}, Name: "cached", State: catalogue.RemoteCatalogSessionUp,
+			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-cached", Index: 0}}, ActiveTabID: "tab-cached",
 		}},
 	}
 	d.remoteCatalog.status["arch"] = remoteHostCached
@@ -660,9 +660,9 @@ func TestRemoteRefreshUpdatesOpenPaletteAndPreservesQuery(t *testing.T) {
 		model.Insert(r)
 	}
 	ac.overlays.paletteMu.Unlock()
-	request.result <- remoteRefreshResult{catalog: remoteCatalogForTest(ports.RemoteCatalogSession{
-		LifecycleID: domain.SessionLifecycleID{41}, Name: "vev", State: ports.RemoteCatalogSessionUp,
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
+	request.result <- remoteRefreshResult{catalog: remoteCatalogForTest(catalogue.RemoteCatalogSession{
+		LifecycleID: domain.SessionLifecycleID{41}, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
 	})}
 	receiveRemotePicker(t, cache.stores, "palette catalog cache store")
 	d.sessWg.Wait()

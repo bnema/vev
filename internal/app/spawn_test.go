@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 var errDialFailed = errors.New("dial failed")
@@ -305,9 +305,9 @@ func TestRetryAttemptsClampsNonPositiveInitialDelay(t *testing.T) {
 }
 
 func TestRetryDialSucceedsAfterTransientFailures(t *testing.T) {
-	want := portsmocks.NewMockTransport(t)
+	want := wiremocks.NewMockTransport(t)
 	var calls atomic.Int32
-	dial := func(context.Context, string) (ports.Transport, error) {
+	dial := func(context.Context, string) (wire.Transport, error) {
 		if calls.Add(1) <= 3 {
 			return nil, errDialFailed
 		}
@@ -327,7 +327,7 @@ func TestRetryDialSucceedsAfterTransientFailures(t *testing.T) {
 }
 
 func TestRetryDialPermanentFailure(t *testing.T) {
-	dial := func(context.Context, string) (ports.Transport, error) { return nil, errDialFailed }
+	dial := func(context.Context, string) (wire.Transport, error) { return nil, errDialFailed }
 	_, err := retryDial(context.Background(), t.TempDir(), dial, fastBackoff)
 	if !errors.Is(err, ErrDaemonUnreachable) {
 		t.Fatalf("retryDial error = %v, want ErrDaemonUnreachable", err)
@@ -338,7 +338,7 @@ func TestRetryDialContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var calls atomic.Int32
-	dial := func(context.Context, string) (ports.Transport, error) {
+	dial := func(context.Context, string) (wire.Transport, error) {
 		calls.Add(1)
 		return nil, errDialFailed
 	}
@@ -354,7 +354,7 @@ func TestRetryDialContextCancelled(t *testing.T) {
 func TestEnsureDaemonContextCancelledDoesNotDialOrSpawn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	dial := func(context.Context, string) (ports.Transport, error) {
+	dial := func(context.Context, string) (wire.Transport, error) {
 		t.Fatal("ensureDaemon dialed with a canceled context")
 		return nil, nil
 	}
@@ -373,7 +373,7 @@ func TestEnsureDaemonDoesNotSpawnWhenContextCancelsAfterFailedDial(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var spawnCalls atomic.Int32
-	dial := func(context.Context, string) (ports.Transport, error) {
+	dial := func(context.Context, string) (wire.Transport, error) {
 		cancel()
 		return nil, errDialFailed
 	}
@@ -393,9 +393,9 @@ func TestEnsureDaemonDoesNotSpawnWhenContextCancelsAfterFailedDial(t *testing.T)
 
 func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")
-	want := portsmocks.NewMockTransport(t)
+	want := wiremocks.NewMockTransport(t)
 	var dialCalls, spawnCalls atomic.Int32
-	dial := func(context.Context, string) (ports.Transport, error) {
+	dial := func(context.Context, string) (wire.Transport, error) {
 		// First (pre-spawn) dial fails; the post-spawn retry succeeds.
 		if dialCalls.Add(1) == 1 {
 			return nil, errDialFailed
@@ -424,9 +424,9 @@ func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
 }
 
 func TestEnsureDaemonReturnsExistingDaemon(t *testing.T) {
-	want := portsmocks.NewMockTransport(t)
+	want := wiremocks.NewMockTransport(t)
 	var spawnCalls atomic.Int32
-	dial := func(context.Context, string) (ports.Transport, error) { return want, nil }
+	dial := func(context.Context, string) (wire.Transport, error) { return want, nil }
 	spawn := func() error { spawnCalls.Add(1); return nil }
 
 	got, err := ensureDaemon(context.Background(), t.TempDir(), dial, spawn, fastBackoff)
@@ -443,7 +443,7 @@ func TestEnsureDaemonReturnsExistingDaemon(t *testing.T) {
 
 func TestEnsureDaemonSpawnFailure(t *testing.T) {
 	spawnErr := errors.New("exec boom")
-	dial := func(context.Context, string) (ports.Transport, error) { return nil, errDialFailed }
+	dial := func(context.Context, string) (wire.Transport, error) { return nil, errDialFailed }
 	spawn := func() error { return spawnErr }
 
 	_, err := ensureDaemon(context.Background(), filepath.Join(t.TempDir(), "vev"), dial, spawn, fastBackoff)

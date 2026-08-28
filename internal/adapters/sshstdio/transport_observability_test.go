@@ -22,7 +22,7 @@ func TestTransportObservabilitySSHStdioEOFEndsReceive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 	if _, err := NewTransport(bytes.NewReader(nil), &bytes.Buffer{}, nil, WithRuntimeObserver(reporter)).Recv(); err == nil {
 		t.Fatal("Recv() error = nil at EOF")
@@ -40,7 +40,7 @@ func TestTransportObservabilitySSHStdioCloseEndsBlockedReceive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 	reader := &sshShutdownReader{entered: make(chan struct{}), done: make(chan struct{})}
 	shutdownErr := errors.New("ssh shutdown failed")
@@ -152,7 +152,7 @@ func TestTransportObservabilitySSHStdioCloseDoesNotWaitForUnownedReceive(t *test
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 	reader := &sshUnownedBlockedReader{entered: make(chan struct{}), release: make(chan struct{})}
 	t.Cleanup(reader.unblock)
@@ -210,7 +210,7 @@ func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 
 	frame := wire.Frame{Type: wire.MsgOutput, Payload: []byte("stdio bytes stay exact")}

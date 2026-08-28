@@ -613,14 +613,14 @@ func (c *serveShutdownClock) nextFinalTimer(t *testing.T) *snapshotDeadlineTimer
 	}
 }
 
-func serveSnapshotListener(t *testing.T, tr ports.Transport) *mockServerListener {
+func serveSnapshotListener(t *testing.T, tr wire.Transport) *mockServerListener {
 	t.Helper()
 	l := newMockServerListener(t)
-	connections := make(chan ports.Transport, 1)
+	connections := make(chan wire.Transport, 1)
 	connections <- tr
 	closed := make(chan struct{})
 	var once sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (ports.Transport, error) {
+	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
 		select {
 		case conn := <-connections:
 			return conn, nil

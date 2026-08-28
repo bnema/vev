@@ -10,7 +10,6 @@ import (
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/testutil/replaytest"
@@ -68,11 +67,11 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 
 	tests := []struct {
 		name string
-		pair func(*testing.T) (ports.Transport, ports.Transport)
+		pair func(*testing.T) (wire.Transport, wire.Transport)
 	}{
 		{
 			name: "local ipc socket",
-			pair: func(t *testing.T) (ports.Transport, ports.Transport) {
+			pair: func(t *testing.T) (wire.Transport, wire.Transport) {
 				left, right := net.Pipe()
 				t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
 				return ipc.NewTransport(left), ipc.NewTransport(right)
@@ -80,7 +79,7 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 		},
 		{
 			name: "remote ssh stdio",
-			pair: func(t *testing.T) (ports.Transport, ports.Transport) {
+			pair: func(t *testing.T) (wire.Transport, wire.Transport) {
 				clientRead, serverWrite := io.Pipe()
 				serverRead, clientWrite := io.Pipe()
 				closeClient := func() error {

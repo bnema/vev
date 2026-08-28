@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 type mockTestingT interface {
@@ -17,10 +17,10 @@ type mockTestingT interface {
 	Cleanup(func())
 }
 
-type mockServerConnection struct{ *portsmocks.MockTransport }
+type mockServerConnection struct{ *wiremocks.MockTransport }
 
 func newMockServerConnection(t mockTestingT) *mockServerConnection {
-	return &mockServerConnection{MockTransport: portsmocks.NewMockTransport(t)}
+	return &mockServerConnection{MockTransport: wiremocks.NewMockTransport(t)}
 }
 
 func (c *mockServerConnection) ReceiveClient() (protocol.ClientMessage, error) {
@@ -52,7 +52,7 @@ func (c *mockServerConnection) LinkEvents() <-chan ports.LinkEvent {
 	return testLinkEvents(c.MockTransport)
 }
 
-type rawServerConnection struct{ raw ports.Transport }
+type rawServerConnection struct{ raw wire.Transport }
 
 func (c *rawServerConnection) ReceiveClient() (protocol.ClientMessage, error) {
 	return testReceiveClient(c.raw)
@@ -82,10 +82,10 @@ func (c *rawServerConnection) LinkState() ports.LinkState         { return testL
 func (c *rawServerConnection) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(c.raw) }
 func (c *rawServerConnection) Close() error                       { return c.raw.Close() }
 
-type mockServerListener struct{ *portsmocks.MockListener }
+type mockServerListener struct{ *wiremocks.MockListener }
 
 func newMockServerListener(t mockTestingT) *mockServerListener {
-	return &mockServerListener{MockListener: portsmocks.NewMockListener(t)}
+	return &mockServerListener{MockListener: wiremocks.NewMockListener(t)}
 }
 
 func (l *mockServerListener) Accept() (ports.ServerConnection, error) {
@@ -96,7 +96,7 @@ func (l *mockServerListener) Accept() (ports.ServerConnection, error) {
 	return &rawServerConnection{raw: raw}, nil
 }
 
-func testReceiveClient(raw ports.Transport) (protocol.ClientMessage, error) {
+func testReceiveClient(raw wire.Transport) (protocol.ClientMessage, error) {
 	frame, err := raw.Recv()
 	if err != nil {
 		return nil, err
@@ -113,6 +113,7 @@ func testReceiveClient(raw ports.Transport) (protocol.ClientMessage, error) {
 	case wire.MsgCommand:
 		failure.Kind = protocol.DecodeMessageCommand
 		failure.Version, _ = wire.PeekCommandVersion(frame.Payload)
+		failure.RequestID, failure.HasRequestID = wire.PeekCommandRequestID(frame.Payload)
 	case wire.MsgKill:
 		failure.Kind = protocol.DecodeMessageKill
 	case wire.MsgRemotePreviewRequest:
@@ -166,7 +167,7 @@ func testDecodeClientFrame(frame wire.Frame) (protocol.ClientMessage, error) {
 	}
 }
 
-func testSendServer(raw ports.Transport, message protocol.ServerMessage) error {
+func testSendServer(raw wire.Transport, message protocol.ServerMessage) error {
 	frame, err := testServerFrame(message)
 	if err != nil {
 		return err
@@ -174,8 +175,8 @@ func testSendServer(raw ports.Transport, message protocol.ServerMessage) error {
 	return raw.Send(frame)
 }
 
-func testSendServerAsync(raw ports.Transport, message protocol.ServerMessage) error {
-	transport, ok := raw.(ports.AsyncTransport)
+func testSendServerAsync(raw wire.Transport, message protocol.ServerMessage) error {
+	transport, ok := raw.(wire.AsyncTransport)
 	if !ok {
 		return errors.New("test server connection: async unsupported")
 	}
@@ -186,8 +187,8 @@ func testSendServerAsync(raw ports.Transport, message protocol.ServerMessage) er
 	return transport.SendAsync(frame)
 }
 
-func testSendServerSynchronous(raw ports.Transport, message protocol.ServerMessage) error {
-	transport, ok := raw.(ports.OwnedSynchronousTransport)
+func testSendServerSynchronous(raw wire.Transport, message protocol.ServerMessage) error {
+	transport, ok := raw.(wire.OwnedSynchronousTransport)
 	if !ok {
 		return errors.New("test server connection: synchronous unsupported")
 	}
@@ -198,7 +199,7 @@ func testSendServerSynchronous(raw ports.Transport, message protocol.ServerMessa
 	return transport.SendSynchronous(frame)
 }
 
-func testSendOutput(raw ports.Transport, output protocol.Output) error {
+func testSendOutput(raw wire.Transport, output protocol.Output) error {
 	frame, err := testServerFrame(output)
 	if err != nil {
 		return err
@@ -206,8 +207,8 @@ func testSendOutput(raw ports.Transport, output protocol.Output) error {
 	return raw.Send(frame)
 }
 
-func testSendOutputAsync(raw ports.Transport, output protocol.Output) error {
-	transport, ok := raw.(ports.AsyncTransport)
+func testSendOutputAsync(raw wire.Transport, output protocol.Output) error {
+	transport, ok := raw.(wire.AsyncTransport)
 	if !ok {
 		return errors.New("test server connection: async unsupported")
 	}
@@ -218,8 +219,8 @@ func testSendOutputAsync(raw ports.Transport, output protocol.Output) error {
 	return transport.SendAsync(frame)
 }
 
-func testSendOutputSynchronous(raw ports.Transport, output protocol.Output) error {
-	transport, ok := raw.(ports.OwnedSynchronousTransport)
+func testSendOutputSynchronous(raw wire.Transport, output protocol.Output) error {
+	transport, ok := raw.(wire.OwnedSynchronousTransport)
 	if !ok {
 		return errors.New("test server connection: synchronous unsupported")
 	}
@@ -230,10 +231,10 @@ func testSendOutputSynchronous(raw ports.Transport, output protocol.Output) erro
 	return transport.SendSynchronous(frame)
 }
 
-func testServerCapabilities(raw ports.Transport) protocol.ConnectionCapabilities {
-	_, datagram := raw.(ports.DatagramTransport)
-	_, async := raw.(ports.AsyncTransport)
-	_, synchronous := raw.(ports.OwnedSynchronousTransport)
+func testServerCapabilities(raw wire.Transport) protocol.ConnectionCapabilities {
+	_, datagram := raw.(wire.DatagramTransport)
+	_, async := raw.(wire.AsyncTransport)
+	_, synchronous := raw.(wire.OwnedSynchronousTransport)
 	_, link := raw.(ports.LinkStateReporter)
 	window := uint8(protocol.MaxOutputWindow)
 	if datagram {
@@ -242,14 +243,14 @@ func testServerCapabilities(raw ports.Transport) protocol.ConnectionCapabilities
 	return protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen, PreferredOutputWindow: window, AsyncSend: async, OwnedSynchronousSend: synchronous, LinkState: link}
 }
 
-func testLinkState(raw ports.Transport) ports.LinkState {
+func testLinkState(raw wire.Transport) ports.LinkState {
 	if reporter, ok := raw.(ports.LinkStateReporter); ok {
 		return reporter.LinkState()
 	}
 	return ports.LinkStateConnected
 }
 
-func testLinkEvents(raw ports.Transport) <-chan ports.LinkEvent {
+func testLinkEvents(raw wire.Transport) <-chan ports.LinkEvent {
 	if reporter, ok := raw.(ports.LinkStateReporter); ok {
 		return reporter.LinkEvents()
 	}

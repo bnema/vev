@@ -7,8 +7,8 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -105,8 +105,8 @@ func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemon
 		paletteRemoteDisplayOrigin(entry.HostLabel) == daemonDisplayOrigin
 }
 
-func remotePaletteUnavailableReason(status remoteHostStatus, session ports.RemoteCatalogSession) string {
-	if session.State == ports.RemoteCatalogSessionBroken {
+func remotePaletteUnavailableReason(status remoteHostStatus, session catalogue.RemoteCatalogSession) string {
+	if session.State == catalogue.RemoteCatalogSessionBroken {
 		return "session_broken"
 	}
 	return remoteReasonForStatus(status)

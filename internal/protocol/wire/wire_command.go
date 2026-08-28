@@ -20,6 +20,15 @@ func PeekCommandVersion(b []byte) (uint16, bool) {
 	return binary.BigEndian.Uint16(b), true
 }
 
+// PeekCommandRequestID returns the request ID that follows the leading
+// protocol version in a CommandRequest payload.
+func PeekCommandRequestID(b []byte) (uint64, bool) {
+	if len(b) < 10 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(b[2:10]), true
+}
+
 // MarshalCommandRequest encodes m into a CommandRequest payload.
 func MarshalCommandRequest(m protocol.CommandRequest) ([]byte, error) {
 	if len(m.Args) > math.MaxUint16 {
