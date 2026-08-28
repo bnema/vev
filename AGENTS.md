@@ -37,7 +37,9 @@ Hexagonal boundaries are enforced by `boundary_test.go`.
 Layer map:
 
 - `main.go` → `internal/app`: CLI parsing, wiring, daemon startup, hidden subcommands.
-- `internal/ports`: interfaces and wire protocol.
+- `internal/ports`: application and raw carriage interfaces.
+- `internal/protocol`: typed transport-neutral messages and negotiated session policy.
+- `internal/protocol/wire`: message IDs, frames, strict binary codecs, compression, and encoded bounds.
 - `internal/usecase/daemon`: sessions, tabs, panes, VT screens, renderer shadows, daemon features.
 - `internal/usecase/client`: raw-mode thin client; writes output bytes verbatim and interprets nothing.
 - `internal/adapters`: IPC, SSH stdio, PTY, terminal, and clock implementations.
