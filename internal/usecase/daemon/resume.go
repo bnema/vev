@@ -480,7 +480,7 @@ func (d *Daemon) finishParkedAttachmentRetirements(retirements []parkedAttachmen
 // to the named session's active attachment because transport teardown has not
 // parked it yet. Only the exact live owner (same session, token, and client ID)
 // is accepted; arbitrary unknown tokens stay fail-closed.
-func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.ServerConnection, sz domain.Size) (*session, *attachedClient, bool, error) {
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
@@ -583,7 +583,7 @@ func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.Transport, sz d
 // registry lock, preserving the global sendMu > Daemon.mu ordering. The parked
 // entry is revalidated after both locks are held because it may expire between
 // the initial lookup and lock acquisition.
-func (d *Daemon) resumeParked(h protocol.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+func (d *Daemon) resumeParked(h protocol.Hello, tr ports.ServerConnection, sz domain.Size) (*session, *attachedClient, bool, error) {
 	d.mu.Lock()
 	parked := d.parked[h.ResumeToken]
 	d.mu.Unlock()
@@ -632,7 +632,7 @@ func (d *Daemon) resumeParked(h protocol.Hello, tr ports.Transport, sz domain.Si
 
 // resumeParkedLocked completes a validated resume. Caller holds both ac.sendMu
 // and d.mu in that order.
-func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection, sz domain.Size) (*session, *attachedClient, bool, error) {
 	parked := d.parked[h.ResumeToken]
 	if parked == nil || h.ResumeToken == 0 {
 		return nil, nil, false, nil

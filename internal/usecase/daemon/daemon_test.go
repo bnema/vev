@@ -237,9 +237,9 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 // newConn scripts a MockTransport: Recv yields first then more (in order),
 // then blocks until the connection is released or Closed (returning io.EOF).
 // Every Send is captured on the returned channel.
-func newConn(t *testing.T, first wire.Frame, more ...wire.Frame) (*portsmocks.MockTransport, chan wire.Frame, func()) {
+func newConn(t *testing.T, first wire.Frame, more ...wire.Frame) (*mockServerConnection, chan wire.Frame, func()) {
 	t.Helper()
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	sends := make(chan wire.Frame, 64)
 	recvCh := make(chan wire.Frame, 1+len(more))
 	recvCh <- first
@@ -331,7 +331,7 @@ func listSessions(t *testing.T, d *Daemon) protocol.Sessions {
 // attachment publication and Welcome acceptance. It uses the generated
 // transport mock while channels make both sides of the wire deterministic.
 type welcomeBlockingTransport struct {
-	tr             *portsmocks.MockTransport
+	tr             *mockServerConnection
 	sends          chan wire.Frame
 	welcomeEntered chan struct{}
 	releaseWelcome chan struct{}
@@ -348,7 +348,7 @@ func newWelcomeBlockingTransport(t *testing.T) *welcomeBlockingTransport {
 		releaseWelcome: make(chan struct{}),
 		recvDone:       make(chan struct{}),
 	}
-	b.tr = portsmocks.NewMockTransport(t)
+	b.tr = newMockServerConnection(t)
 	b.tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
 		b.sends <- f
 		if f.Type == wire.MsgWelcome {
@@ -375,9 +375,9 @@ func (b *welcomeBlockingTransport) finish() {
 	b.closeOnce.Do(func() { close(b.recvDone) })
 }
 
-func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan wire.Frame) {
+func newCapturingTransport(t testing.TB) (*mockServerConnection, chan wire.Frame) {
 	t.Helper()
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	sends := make(chan wire.Frame, 64)
 	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
 		sends <- f
@@ -666,7 +666,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	tr := newWelcomeBlockingTransport(t)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr.tr, mustHello(protocol.IntentNew, "welcome-gate", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHelloFrame(tr.tr, mustHello(protocol.IntentNew, "welcome-gate", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 

@@ -9,7 +9,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const parkedRouteLeaseTTL = 15 * time.Minute
@@ -238,33 +237,17 @@ func (ac *attachedClient) consumePublishedParkedRoute(previous, published attach
 	return 0
 }
 
-func parkedRouteResponseFrame(response protocol.ParkedRouteResponse) (wire.Frame, error) {
-	payload := wire.MarshalParkedRouteResponse(response)
-	if payload == nil {
-		return wire.Frame{}, errAttachmentTransition
-	}
-	return wire.Frame{Type: wire.MsgParkedRouteResponse, Payload: payload}, nil
-}
-
 func (d *Daemon) sendParkedRouteResponse(effect *attachmentEffect, response protocol.ParkedRouteResponse) error {
-	frame, err := parkedRouteResponseFrame(response)
-	if err != nil {
-		return err
-	}
-	return effect.sendControl(frame)
+	return effect.sendControl(response)
 }
 
 // sendParkedRouteResponseLocked preserves response -> full-output ordering.
 // Caller holds ac.sendMu and keeps parkedRouteOutput set through this send.
 func (d *Daemon) sendParkedRouteResponseLocked(ac *attachedClient, expected transportSnapshot, response protocol.ParkedRouteResponse) error {
-	frame, err := parkedRouteResponseFrame(response)
-	if err != nil {
-		return err
-	}
 	if ac == nil || !ac.transportSnapshotCurrent(expected) || expected.transport == nil {
 		return errAttachmentTransition
 	}
-	return expected.transport.Send(frame)
+	return expected.transport.SendServer(response)
 }
 
 func (ac *attachedClient) releaseParkedOutputLocked() {

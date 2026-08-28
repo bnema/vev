@@ -92,11 +92,11 @@ func TestAttachmentOutputCapacityProbeDoesNotRaceWithSend(t *testing.T) {
 	release := make(chan struct{})
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- prepared.send(prepared.data, 0, func(wire.Frame) error {
+		sendDone <- prepared.send(prepared.data, 0, outputFrameSender(func(wire.Frame) error {
 			close(entered)
 			<-release
 			return nil
-		})
+		}))
 	}()
 	<-entered
 
@@ -134,10 +134,10 @@ func TestAttachmentOutputEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *t
 	firstPrepared, err := first.prepare(frame, nil, true)
 	require.NoError(t, err)
 	var firstFrame wire.Frame
-	require.NoError(t, firstPrepared.send(firstPrepared.data, 0, func(frame wire.Frame) error {
+	require.NoError(t, firstPrepared.send(firstPrepared.data, 0, outputFrameSender(func(frame wire.Frame) error {
 		firstFrame = frame
 		return nil
-	}))
+	})))
 	firstOutput, err := wire.UnmarshalOutput(firstFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), firstOutput.Epoch)
@@ -147,7 +147,7 @@ func TestAttachmentOutputEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *t
 
 	secondPrepared, err := second.prepare(frame, nil, true)
 	require.NoError(t, err)
-	require.NoError(t, secondPrepared.send(secondPrepared.data, 0, func(wire.Frame) error { return nil }))
+	require.NoError(t, secondPrepared.send(secondPrepared.data, 0, outputFrameSender(func(wire.Frame) error { return nil })))
 	require.Equal(t, uint64(1), second.epoch)
 	require.Equal(t, uint64(1), second.next)
 	require.Equal(t, uint64(1), first.next)
@@ -161,10 +161,10 @@ func TestAttachmentOutputEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *t
 	require.Zero(t, first.next)
 	require.Zero(t, first.acked)
 	var staleSent bool
-	require.NoError(t, pending.send(pending.data, 0, func(wire.Frame) error {
+	require.NoError(t, pending.send(pending.data, 0, outputFrameSender(func(wire.Frame) error {
 		staleSent = true
 		return nil
-	}))
+	})))
 	require.False(t, staleSent)
 	require.Zero(t, first.next)
 	first.ack(1, 1)
@@ -173,10 +173,10 @@ func TestAttachmentOutputEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *t
 	reset, err := first.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
 	require.NoError(t, err)
 	var resetFrame wire.Frame
-	require.NoError(t, reset.send(reset.data, 0, func(frame wire.Frame) error {
+	require.NoError(t, reset.send(reset.data, 0, outputFrameSender(func(frame wire.Frame) error {
 		resetFrame = frame
 		return nil
-	}))
+	})))
 	resetOutput, err := wire.UnmarshalOutput(resetFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), resetOutput.Epoch)
@@ -205,23 +205,23 @@ func TestPreparedOutputDropsReplacedConnectionAndView(t *testing.T) {
 			fillOutputStateRows(frame, []string{"abc"})
 			initial, err := stream.prepare(frame, nil, true)
 			require.NoError(t, err)
-			require.NoError(t, initial.send(initial.data, 0, func(wire.Frame) error { return nil }))
+			require.NoError(t, initial.send(initial.data, 0, outputFrameSender(func(wire.Frame) error { return nil })))
 			changed := frame.Clone()
 			changed.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
 			pending, err := stream.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
 			require.NoError(t, err)
 			tt.change(ac)
 			var sent bool
-			require.NoError(t, pending.send(pending.data, 0, func(wire.Frame) error {
+			require.NoError(t, pending.send(pending.data, 0, outputFrameSender(func(wire.Frame) error {
 				sent = true
 				return nil
-			}))
+			})))
 			require.False(t, sent)
 			require.Equal(t, uint64(1), stream.next)
 
 			retry, err := stream.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
 			require.NoError(t, err)
-			require.NoError(t, retry.send(retry.data, 0, func(wire.Frame) error { return nil }))
+			require.NoError(t, retry.send(retry.data, 0, outputFrameSender(func(wire.Frame) error { return nil })))
 			require.Equal(t, uint64(2), stream.next)
 		})
 	}
@@ -242,9 +242,7 @@ func TestOutputStateSideEffectsDoNotAdvanceEpochStateOrACK(t *testing.T) {
 	stream := newOutputStateStream()
 	stream.ack(1, 0)
 	beforeEpoch, beforeNext, beforeAck := stream.epoch, stream.next, stream.acked
-	frame, err := stream.sideEffect([]byte("pty"), 9)
-	require.NoError(t, err)
-	out, err := wire.UnmarshalOutput(frame.Payload)
+	out, err := stream.sideEffect([]byte("pty"), 9)
 	require.NoError(t, err)
 	require.Equal(t, beforeEpoch, out.Epoch)
 	require.Zero(t, out.Base)
@@ -261,7 +259,7 @@ func TestAttachmentOutputFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T)
 	fillOutputStateRows(initial, []string{"abc"})
 	first, err := stream.prepare(initial, nil, true)
 	require.NoError(t, err)
-	require.NoError(t, first.send(first.data, 0, func(wire.Frame) error { return nil }))
+	require.NoError(t, first.send(first.data, 0, outputFrameSender(func(wire.Frame) error { return nil })))
 	require.Equal(t, uint64(1), stream.next)
 
 	changed := initial.Clone()
@@ -273,7 +271,7 @@ func TestAttachmentOutputFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T)
 	require.Empty(t, probe.Bytes(), "preparation must not advance the renderer shadow")
 
 	sendErr := errors.New("send failed")
-	require.ErrorIs(t, pending.send(pending.data, 0, func(wire.Frame) error { return sendErr }), sendErr)
+	require.ErrorIs(t, pending.send(pending.data, 0, outputFrameSender(func(wire.Frame) error { return sendErr })), sendErr)
 	require.Equal(t, uint64(1), stream.next, "failed send must not advance the state chain")
 	pending.commitNoSend()
 	probe, err = stream.renderer.Prepare(initial, nil, false)
@@ -283,19 +281,19 @@ func TestAttachmentOutputFailedSendRetriesSnapshotWithoutAdvancing(t *testing.T)
 	retry, err := stream.prepare(changed, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false)
 	require.NoError(t, err)
 	var sent wire.Frame
-	require.NoError(t, retry.send(retry.data, 0, func(frame wire.Frame) error {
+	require.NoError(t, retry.send(retry.data, 0, outputFrameSender(func(frame wire.Frame) error {
 		sent = frame
 		return nil
-	}))
+	})))
 	out, err := wire.UnmarshalOutput(sent.Payload)
 	require.NoError(t, err)
 	require.Zero(t, out.Base, "retry after ambiguous send failure must be dependency-free")
 	require.Equal(t, uint64(2), out.New, "state numbers remain monotonic across rebases")
 	require.Equal(t, uint64(2), stream.next, "successful retry advances the chain exactly once")
-	require.NoError(t, retry.send(retry.data, 0, func(wire.Frame) error {
+	require.NoError(t, retry.send(retry.data, 0, outputFrameSender(func(wire.Frame) error {
 		t.Fatal("completed output sent twice")
 		return nil
-	}))
+	})))
 	require.Equal(t, uint64(2), stream.next)
 	probe, err = stream.renderer.Prepare(changed, nil, false)
 	require.NoError(t, err)
@@ -308,7 +306,7 @@ func TestAttachmentOutputNoByteCommitAdvancesShadowWithoutState(t *testing.T) {
 	fillOutputStateRows(frame, []string{"abc"})
 	initial, err := stream.prepare(frame, nil, true)
 	require.NoError(t, err)
-	require.NoError(t, initial.send(initial.data, 0, func(wire.Frame) error { return nil }))
+	require.NoError(t, initial.send(initial.data, 0, outputFrameSender(func(wire.Frame) error { return nil })))
 
 	noOp, err := stream.prepare(frame, nil, false)
 	require.NoError(t, err)
@@ -378,7 +376,11 @@ func outputStateFrame(stream *attachmentOutput, data []byte, reset bool, echoAck
 	if reset {
 		base = 0
 	}
-	frame, err := frameOutputState(data, base, stream.next, echoAck)
+	output, err := serverOutputState(data, base, stream.next, echoAck)
+	if err != nil {
+		panic(err)
+	}
+	frame, err := testServerFrame(output)
 	if err != nil {
 		panic(err)
 	}
@@ -395,10 +397,10 @@ func drawOutputState(t *testing.T, stream *attachmentOutput, frame renderer.Fram
 		return wire.Frame{}, false, err
 	}
 	var output wire.Frame
-	err = prepared.send(prepared.data, echoAck, func(frame wire.Frame) error {
+	err = prepared.send(prepared.data, echoAck, outputFrameSender(func(frame wire.Frame) error {
 		output = frame
 		return nil
-	})
+	}))
 	if err != nil {
 		return wire.Frame{}, false, err
 	}
@@ -456,7 +458,7 @@ func TestAttachmentOutputFailedSendKeepsTextCursorAndGraphicsSpeculative(t *test
 	require.NoError(t, err)
 
 	sendErr := errors.New("send failed")
-	require.ErrorIs(t, prepared.send(0, func(wire.Frame) error { return sendErr }), sendErr)
+	require.ErrorIs(t, prepared.send(0, outputFrameSender(func(wire.Frame) error { return sendErr })), sendErr)
 
 	require.Equal(t, cursorOut{valid: true, row: 1, col: 1}, output.lastCursor)
 	require.Empty(t, graphicsState.assets)

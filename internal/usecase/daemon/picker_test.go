@@ -1011,7 +1011,7 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	d := newTestDaemon(t, nil, stubClock{})
 	enteredSend := make(chan struct{})
 	releaseSend := make(chan struct{})
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Frame) error {
 		close(enteredSend)
 		<-releaseSend
@@ -1408,7 +1408,7 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})
 	d.inactive["old"] = inactiveSession{name: "old", cwd: t.TempDir(), createdAt: 1, state: protocol.SessionDown}
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)

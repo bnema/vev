@@ -7,7 +7,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -475,7 +474,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
 		return true
 	}
-	var sendTr ports.Transport
+	var sendTr ports.ServerConnection
 	var sendErr error
 	suppressedGraphics := state.suppressedGraphics && !ac.terminalCapabilities.SupportsKittyGraphics()
 	if len(data) > 0 {
@@ -485,9 +484,9 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		if sendTr == nil {
 			sendErr = errors.New("client transport is nil")
 		} else {
-			send := sendTr.Send
-			if async, ok := sendTr.(ports.AsyncTransport); ok {
-				send = async.SendAsync
+			send := sendTr.SendOutput
+			if sendTr.Capabilities().AsyncSend {
+				send = sendTr.SendOutputAsync
 			}
 			interruptible := false
 			if marks.attachmentEffect != nil {
@@ -540,9 +539,8 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		}
 
 		if position.ActiveTabID != "" && position != ac.output.lastRoutePosition {
-			payload, positionMarshalErr := wire.MarshalRoutePosition(position)
-			if positionMarshalErr != nil {
-				d.log.Error("marshal route position", "err", positionMarshalErr)
+			if positionValidateErr := position.Validate(); positionValidateErr != nil {
+				d.log.Error("validate route position", "err", positionValidateErr)
 			} else {
 				sendTransport := ac.transportSnapshot()
 				sendTr = sendTransport.transport
@@ -556,12 +554,10 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				if sendErr == nil {
 					if sendTr == nil {
 						sendErr = errors.New("client transport is nil")
+					} else if sendTr.Capabilities().AsyncSend {
+						sendErr = sendTr.SendServerAsync(position)
 					} else {
-						send := sendTr.Send
-						if async, ok := sendTr.(ports.AsyncTransport); ok {
-							send = async.SendAsync
-						}
-						sendErr = send(wire.Frame{Type: wire.MsgRoutePosition, Payload: payload})
+						sendErr = sendTr.SendServer(position)
 					}
 				}
 				if marks.attachmentEffect != nil && interruptible {

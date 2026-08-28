@@ -108,7 +108,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 	for _, tt := range []struct {
 		name    string
 		fail    func(*composedRenderFrame, *attachedClient)
-		restore func(*session, *attachedClient, ports.Transport)
+		restore func(*session, *attachedClient, ports.ServerConnection)
 	}{
 		{
 			name: "prepare failure",
@@ -116,12 +116,12 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 				// An invalid frame makes the real output.prepare reject after capture.
 				c.frame = renderer.Frame{Width: 1}
 			},
-			restore: func(_ *session, _ *attachedClient, _ ports.Transport) {},
+			restore: func(_ *session, _ *attachedClient, _ ports.ServerConnection) {},
 		},
 		{
 			name: "send failure",
 			fail: func(_ *composedRenderFrame, ac *attachedClient) { ac.replaceTransport(cacheFailTransport{}) },
-			restore: func(sess *session, ac *attachedClient, healthy ports.Transport) {
+			restore: func(sess *session, ac *attachedClient, healthy ports.ServerConnection) {
 				sess.mu.Lock()
 				sess.registerAttachmentLocked(ac)
 				sess.mu.Unlock()

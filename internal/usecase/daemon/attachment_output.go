@@ -10,7 +10,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // attachmentOutput owns the terminal-output dependency chain and emitted
@@ -154,18 +153,18 @@ func (o *attachmentOutput) prepareFrame(d *Daemon, state *capturedRenderState, f
 	return &preparedAttachmentOutput{output: o, ansi: ansi, graphics: preparedGraphics, cursor: cursor, data: data}, nil
 }
 
-func (p *preparedAttachmentOutput) send(echoAck uint64, send func(wire.Frame) error) error {
+func (p *preparedAttachmentOutput) send(echoAck uint64, send func(protocol.Output) error) error {
 	if p == nil || p.ansi == nil {
 		return nil
 	}
-	sendFrame := send
+	sendOutput := send
 	if p.graphics != nil {
-		sendFrame = func(frame wire.Frame) error {
+		sendOutput = func(output protocol.Output) error {
 			p.graphics.markSendAttempted()
-			return send(frame)
+			return send(output)
 		}
 	}
-	if err := p.ansi.send(p.data, echoAck, sendFrame); err != nil {
+	if err := p.ansi.send(p.data, echoAck, sendOutput); err != nil {
 		p.abortGraphics()
 		return err
 	}
@@ -286,7 +285,7 @@ func (s *attachmentOutput) prepare(frame renderer.Frame, damage []renderer.Damag
 	}, nil
 }
 
-func (p *preparedOutput) send(data []byte, echoAck uint64, send func(wire.Frame) error) error {
+func (p *preparedOutput) send(data []byte, echoAck uint64, send func(protocol.Output) error) error {
 	if p == nil || p.stream == nil || p.attempted {
 		return nil
 	}
@@ -380,30 +379,30 @@ func (p *preparedOutput) currentLocked() bool {
 		(p.stream.attachment == nil || p.stream.attachment.lifecycle.generationValue() == p.connectionGeneration)
 }
 
-func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool) (wire.Frame, error) {
-	payload, err := wire.MarshalOutput(protocol.Output{
+func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool) (protocol.Output, error) {
+	output := protocol.Output{
 		Epoch: epoch, Base: base, New: next, Echo: echoAck, ViewRevision: viewRevision,
 		Size: size, Full: full, Data: data,
-	})
-	if err != nil {
-		return wire.Frame{}, err
 	}
-	return wire.Frame{Type: wire.MsgOutput, Payload: payload}, nil
+	if err := protocol.ValidateOutput(output); err != nil {
+		return protocol.Output{}, err
+	}
+	return output, nil
 }
 
-// sideEffect builds an output frame without advancing the state stream. When
-// an attachment is present, callers must hold its sendMu; attachment-bound
-// sends use sideEffectLocked after validating their transport incarnation.
-func (s *attachmentOutput) sideEffect(data []byte, echoAck uint64) (wire.Frame, error) {
+// sideEffect builds output without advancing the state stream. When an
+// attachment is present, callers must hold its sendMu; attachment-bound sends
+// use sideEffectLocked after validating their connection incarnation.
+func (s *attachmentOutput) sideEffect(data []byte, echoAck uint64) (protocol.Output, error) {
 	s.lockView()
 	defer s.unlockView()
 	return s.sideEffectLocked(data, echoAck)
 }
 
-// sideEffectLocked requires the attachment view lock for both frame creation
-// and transport emission. Keeping that lock across the send prevents a view
-// publication from overtaking a frame that was fenced just before it.
-func (s *attachmentOutput) sideEffectLocked(data []byte, echoAck uint64) (wire.Frame, error) {
+// sideEffectLocked requires the attachment view lock for both output creation
+// and connection emission. Keeping that lock across the send prevents a view
+// publication from overtaking output fenced just before it.
+func (s *attachmentOutput) sideEffectLocked(data []byte, echoAck uint64) (protocol.Output, error) {
 	_, epoch, viewRevision := s.fenceLocked()
 	size := domain.Size{Cols: 1, Rows: 1}
 	if s != nil && s.attachment != nil {

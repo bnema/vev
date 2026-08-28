@@ -142,7 +142,7 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	d.clientGone(sess, ac, oldTransport, false)
 
 	resumedTransport := &closeTrackingTransport{}
-	d.handleHello(resumedTransport, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, "work", oldToken))})
+	d.handleHello(resumedTransport, helloResumeCapable(protocol.IntentResume, "work", oldToken))
 	newToken := ac.resumeToken
 	require.NotEqual(t, oldToken, newToken)
 	d.mu.Lock()
@@ -166,7 +166,7 @@ func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 	d.clientGone(sess, ac, oldTransport, false)
 
 	failed := &resumeWelcomeFailureTransport{}
-	d.handleHello(failed, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, "work", token))})
+	d.handleHello(failed, helloResumeCapable(protocol.IntentResume, "work", token))
 	require.Nil(t, ac.transport())
 	d.mu.Lock()
 	parked := d.parked[token]

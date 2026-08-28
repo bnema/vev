@@ -14,14 +14,13 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
 type transportSnapshot struct {
-	transport   ports.Transport
+	transport   ports.ServerConnection
 	incarnation uint64
 }
 
@@ -35,7 +34,7 @@ type appliedTheme struct {
 }
 
 type attachedClient struct {
-	tr                     ports.Transport
+	tr                     ports.ServerConnection
 	transportIncarnation   uint64
 	output                 *attachmentOutput
 	overlays               *overlayRuntime
@@ -274,13 +273,13 @@ func (ac *attachedClient) setClientTheme(t themeui.Theme) {
 	ac.themeMu.Unlock()
 }
 
-func (ac *attachedClient) transport() ports.Transport {
+func (ac *attachedClient) transport() ports.ServerConnection {
 	ac.linkMu.Lock()
 	defer ac.linkMu.Unlock()
 	return ac.tr
 }
 
-func (ac *attachedClient) replaceTransport(tr ports.Transport) {
+func (ac *attachedClient) replaceTransport(tr ports.ServerConnection) {
 	ac.linkMu.Lock()
 	ac.tr = tr
 	ac.transportIncarnation++
@@ -290,7 +289,7 @@ func (ac *attachedClient) replaceTransport(tr ports.Transport) {
 // revokeTransport removes tr only if it is still this attachment's current
 // link. It returns the revoked transport, so asynchronous retirement can
 // close exactly that link without touching a later connection incarnation.
-func (ac *attachedClient) revokeTransport(tr ports.Transport) ports.Transport {
+func (ac *attachedClient) revokeTransport(tr ports.ServerConnection) ports.ServerConnection {
 	if tr == nil {
 		return nil
 	}
@@ -319,20 +318,20 @@ func (ac *attachedClient) transportSnapshotCurrent(expected transportSnapshot) b
 	return ac.tr == expected.transport && ac.transportIncarnation == expected.incarnation
 }
 
-func (ac *attachedClient) closeCapturedTransport(tr ports.Transport) error {
+func (ac *attachedClient) closeCapturedTransport(tr ports.ServerConnection) error {
 	if tr == nil {
 		return nil
 	}
 	return tr.Close()
 }
 
-func (ac *attachedClient) transportIs(tr ports.Transport) bool {
+func (ac *attachedClient) transportIs(tr ports.ServerConnection) bool {
 	ac.linkMu.Lock()
 	defer ac.linkMu.Unlock()
 	return ac.tr == tr
 }
 
-func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
+func (ac *attachedClient) currentTransportIs(tr ports.ServerConnection) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
@@ -410,7 +409,7 @@ var errTransportReplaced = errors.New("client transport was replaced")
 
 // sendExpectedTransport writes only when expected is still the attachment's
 // current transport incarnation. It preserves sendMu -> linkMu lock ordering.
-func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f wire.Frame) error {
+func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, message protocol.ServerMessage) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	if !ac.transportSnapshotCurrent(expected) {
@@ -419,7 +418,7 @@ func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f wi
 	if expected.transport == nil {
 		return errors.New("client transport is nil")
 	}
-	return expected.transport.Send(f)
+	return expected.transport.SendServer(message)
 }
 
 // beginExpectedTransportSendLocked validates that expected is still the
@@ -436,7 +435,7 @@ func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSna
 	return nil
 }
 
-func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportSnapshot, f wire.Frame, ticket *attachmentEffect) error {
+func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportSnapshot, message protocol.ServerMessage, ticket *attachmentEffect) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	// A attachment-bound send requires a live ticket, and reports every rejection,
@@ -447,7 +446,7 @@ func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportS
 	if err := ac.beginExpectedTransportSendLocked(expected, ticket); err != nil {
 		return errAttachmentTransition
 	}
-	err := expected.transport.Send(f)
+	err := expected.transport.SendServer(message)
 	if err != nil {
 		ticket.reportTransportFailure(expected)
 	}
@@ -460,17 +459,17 @@ func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportS
 // detachNotifyTimeout, the transport is force-closed, failing the in-flight
 // write. Detach/kill/shutdown paths use this so they are never gated on a
 // client that has stopped draining its socket.
-func (d *Daemon) boundedSend(ac *attachedClient, f wire.Frame) {
-	_ = d.boundedSendErr(ac, f)
+func (d *Daemon) boundedSend(ac *attachedClient, message protocol.ServerMessage) {
+	_ = d.boundedSendErr(ac, message)
 }
 
-func (d *Daemon) boundedSendErr(ac *attachedClient, f wire.Frame) error {
+func (d *Daemon) boundedSendErr(ac *attachedClient, message protocol.ServerMessage) error {
 	expected := ac.transportSnapshot()
 	if expected.transport == nil {
 		return errors.New("client transport is nil")
 	}
 	tr, err := d.boundedSendWith(expected.transport, func() error {
-		return ac.sendExpectedTransport(expected, f)
+		return ac.sendExpectedTransport(expected, message)
 	})
 	if err != nil && errors.Is(err, errSendTimedOut) {
 		_ = ac.closeCapturedTransport(tr)
@@ -483,12 +482,12 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 	return err
 }
 
-func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
+func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.ServerConnection, error) {
 	expected := ac.transportSnapshot()
 	if expected.transport == nil {
 		return nil, errors.New("client transport is nil")
 	}
-	if owned, ok := expected.transport.(ports.OwnedSynchronousTransport); ok {
+	if expected.transport.Capabilities().OwnedSynchronousSend {
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
 		if !ac.transportSnapshotCurrent(expected) {
@@ -499,9 +498,9 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		}
 		ac.output.lockView()
 		defer ac.output.unlockView()
-		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
+		output, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
 		if err == nil {
-			err = owned.SendSynchronous(frame)
+			err = expected.transport.SendOutputSynchronous(output)
 		}
 		return expected.transport, err
 	}
@@ -516,21 +515,21 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		}
 		ac.output.lockView()
 		defer ac.output.unlockView()
-		frame, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
+		output, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
 		if err != nil {
 			return err
 		}
-		return expected.transport.Send(frame)
+		return expected.transport.SendOutput(output)
 	})
 }
 
 var errSendTimedOut = errors.New("send timed out")
 
-func (d *Daemon) boundedSendWith(tr ports.Transport, send func() error) (ports.Transport, error) {
+func (d *Daemon) boundedSendWith(tr ports.ServerConnection, send func() error) (ports.ServerConnection, error) {
 	return d.boundedSendWithTimeout(detachNotifyTimeout, tr, send)
 }
 
-func (d *Daemon) boundedSendWithTimeout(timeout time.Duration, tr ports.Transport, send func() error) (ports.Transport, error) {
+func (d *Daemon) boundedSendWithTimeout(timeout time.Duration, tr ports.ServerConnection, send func() error) (ports.ServerConnection, error) {
 	timer := d.clock.NewTimer(timeout)
 	result := make(chan error, 1)
 	go func() {
@@ -581,7 +580,7 @@ func (d *Daemon) notifyDetachedSnapshotAsync(snapshot detachedAttachmentSnapshot
 	go func() {
 		defer close(done)
 		_, _ = d.boundedSendWith(snapshot.transport.transport, func() error {
-			return snapshot.ac.sendExpectedTransport(snapshot.transport, frameDetached(reason))
+			return snapshot.ac.sendExpectedTransport(snapshot.transport, serverDetached(reason))
 		})
 		revoked := snapshot.ac.revokeTransport(snapshot.transport.transport)
 		if revoked == nil {
@@ -619,7 +618,7 @@ type attachClientOptions struct {
 	startupOverlay         protocol.StartupOverlay
 }
 
-func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
+func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
 	d.mu.Lock()
 	ac := d.prepareAttachedClientLocked(sess, tr, domain.Geometry{Size: sz}, opts)
 	d.mu.Unlock()
@@ -664,7 +663,7 @@ func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts at
 // prepareAttachedClientLocked allocates one detached attachment. Caller holds
 // d.mu only to allocate its resume token; attachment publication happens later after
 // the caller releases every architecture lock.
-func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.Transport, geometry domain.Geometry, opts attachClientOptions) *attachedClient {
+func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConnection, geometry domain.Geometry, opts attachClientOptions) *attachedClient {
 	resumeToken := uint64(0)
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()

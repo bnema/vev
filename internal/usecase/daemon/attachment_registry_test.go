@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,9 +96,7 @@ func TestTabForAttachmentRepairRebasesOutputBeforePublishingRevision(t *testing.
 	after := ac.viewSnapshot()
 	require.Greater(t, after.revision, before.revision)
 	require.Greater(t, ac.output.currentEpoch(), beforeEpoch)
-	frame, err := ac.output.sideEffect([]byte("x"), 0)
-	require.NoError(t, err)
-	output, err := wire.UnmarshalOutput(frame.Payload)
+	output, err := ac.output.sideEffect([]byte("x"), 0)
 	require.NoError(t, err)
 	require.Equal(t, after.revision, output.ViewRevision)
 	require.Equal(t, ac.output.currentEpoch(), output.Epoch)
@@ -127,9 +124,7 @@ func TestPrepareRemovedTabViewRebasesOutputBeforeSideEffect(t *testing.T) {
 	require.Equal(t, before.revision+1, after.revision)
 	require.Greater(t, ac.output.currentEpoch(), beforeEpoch)
 
-	frame, err := ac.output.sideEffect([]byte("replacement"), 0)
-	require.NoError(t, err)
-	output, err := wire.UnmarshalOutput(frame.Payload)
+	output, err := ac.output.sideEffect([]byte("replacement"), 0)
 	require.NoError(t, err)
 	require.Equal(t, after.revision, output.ViewRevision)
 	require.NotEqual(t, beforeEpoch, output.Epoch)

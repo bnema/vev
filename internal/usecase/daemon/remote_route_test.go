@@ -183,7 +183,7 @@ func TestFailedHandshakeCleanupPreservesConcurrentAttachment(t *testing.T) {
 	d.clientGone(sess, winner(), winnerTransport, false)
 }
 
-func attachWhenRouteCleanupSnapshots(t *testing.T, d *Daemon, sess *session) (func() *attachedClient, ports.Transport) {
+func attachWhenRouteCleanupSnapshots(t *testing.T, d *Daemon, sess *session) (func() *attachedClient, ports.ServerConnection) {
 	t.Helper()
 	winnerTransport, _ := newCapturingTransport(t)
 	var winner *attachedClient

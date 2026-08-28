@@ -3,7 +3,6 @@ package daemon
 import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func (ac *attachedClient) offerSamePeerTarget(target protocol.ExactSessionTarget) {
@@ -122,11 +121,11 @@ func (d *Daemon) sendSamePeerSwitchFailure(effect *attachmentEffect, requestID u
 		}
 		defer sender.End()
 	}
-	payload, err := wire.MarshalSamePeerSwitchFailure(protocol.SamePeerSwitchFailure{RequestID: requestID, Code: code})
-	if err != nil {
+	failure := protocol.SamePeerSwitchFailure{RequestID: requestID, Code: code}
+	if failure.Validate() != nil {
 		return
 	}
-	if err := sender.sendControl(wire.Frame{Type: wire.MsgSamePeerSwitchFailure, Payload: payload}); err != nil {
+	if err := sender.sendControl(failure); err != nil {
 		d.detachOnAttachmentSendError(sender.capability(), sender.transport.transport)
 	}
 }

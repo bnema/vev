@@ -24,6 +24,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
@@ -58,7 +59,7 @@ func startDaemonInDir(t *testing.T, dir string, opts ...daemon.Option) (string, 
 	d := daemon.New(pty.NewFactory(), clock.New(), discardLog(), opts...)
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan error, 1)
-	go func() { ch <- d.Serve(ctx, ln) }()
+	go func() { ch <- d.Serve(ctx, sessionwire.NewServerListener(ln)) }()
 	t.Cleanup(cancel)
 	return dir, ch
 }
@@ -611,7 +612,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return d.Serve(ctx, listener)
+			return d.Serve(ctx, sessionwire.NewServerListener(listener))
 		})
 	}()
 
@@ -746,7 +747,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 				daemon.WithCatalogue(opened.Catalogue, opened.Records),
 				daemon.WithSnapshotRepository(blocking),
 			)
-			return d.Serve(ctx, listener)
+			return d.Serve(ctx, sessionwire.NewServerListener(listener))
 		})
 	}()
 
@@ -800,7 +801,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 		daemon.WithRecoveryCoordinator(coordinator),
 	)
 	served := make(chan error, 1)
-	go func() { served <- d.Serve(ctx, listener) }()
+	go func() { served <- d.Serve(ctx, sessionwire.NewServerListener(listener)) }()
 
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("checkpoint me\n")})}))
@@ -883,7 +884,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 				daemon.WithShell("/bin/cat", nil),
 				daemon.WithSnapshotRepository(repository),
 			)
-			return d.Serve(ctx, observed)
+			return d.Serve(ctx, sessionwire.NewServerListener(observed))
 		})
 	}()
 
@@ -1074,7 +1075,7 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	oldCtx, stopOld := context.WithCancel(context.Background())
 	oldDone := make(chan error, 1)
 	go func() {
-		serveErr := oldDaemon.Serve(oldCtx, controlledListener)
+		serveErr := oldDaemon.Serve(oldCtx, sessionwire.NewServerListener(controlledListener))
 		teardownEvents <- "owner-release"
 		close(ownerReleaseEntered)
 		<-allowOwnerRelease

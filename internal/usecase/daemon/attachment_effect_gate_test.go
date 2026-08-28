@@ -127,7 +127,7 @@ func startBlockedAttachmentSend(t *testing.T, token attachmentCapability) <-chan
 	go func() {
 		defer close(done)
 		defer ticket.End()
-		_ = token.ac.sendExpectedTransportForAttachment(token.transport, framePong(), ticket)
+		_ = token.ac.sendExpectedTransportForAttachment(token.transport, serverPong(), ticket)
 	}()
 	return done
 }

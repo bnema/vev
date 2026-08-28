@@ -15,7 +15,6 @@ import (
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -55,8 +54,8 @@ func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
 	d.attachCoordinator(sess, nil, ac, true)
-	tr, ok := ac.tr.(*portsmocks.MockTransport)
-	require.True(t, ok, "attached client transport must be a MockTransport")
+	tr, ok := ac.tr.(*mockServerConnection)
+	require.True(t, ok, "attached client connection must use the test wrapper")
 	frames := []wire.Frame{
 		{Type: wire.MsgClientNotice, Payload: []byte{0xff}},
 		{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})},

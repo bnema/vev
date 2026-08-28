@@ -15,7 +15,6 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -1008,23 +1007,23 @@ func (d *Daemon) cleanupAttachmentOutput(ac *attachedClient) error {
 		return errors.New("client transport is nil")
 	}
 	ac.output.lockView()
-	frame, frameErr := ac.output.sideEffectLocked(prepared.data, ac.echoAck.Load())
-	if frameErr != nil {
+	output, outputErr := ac.output.sideEffectLocked(prepared.data, ac.echoAck.Load())
+	if outputErr != nil {
 		ac.output.unlockView()
 		prepared.abort()
 		d.retireGraphicsOutput(ac, state)
-		return frameErr
+		return outputErr
 	}
 	prepared.markSendAttempted()
 	var sendErr error
-	if owned, ok := expected.transport.(ports.OwnedSynchronousTransport); ok {
-		sendErr = owned.SendSynchronous(frame)
+	if expected.transport.Capabilities().OwnedSynchronousSend {
+		sendErr = expected.transport.SendOutputSynchronous(output)
 	} else {
 		_, sendErr = d.boundedSendWith(expected.transport, func() error {
 			if !ac.transportSnapshotCurrent(expected) {
 				return errTransportReplaced
 			}
-			return expected.transport.Send(frame)
+			return expected.transport.SendOutput(output)
 		})
 		if errors.Is(sendErr, errSendTimedOut) {
 			_ = ac.closeCapturedTransport(expected.transport)

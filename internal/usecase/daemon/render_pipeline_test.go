@@ -333,10 +333,10 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 	prepared, err := stream.prepareFrame(nil, &state, composed.frame, composed.damage, composed.reset, composed.cursor)
 	require.NoError(t, err)
 	var outputFrame wire.Frame
-	require.NoError(t, prepared.send(0, func(frame wire.Frame) error {
+	require.NoError(t, prepared.send(0, outputFrameSender(func(frame wire.Frame) error {
 		outputFrame = frame
 		return nil
-	}))
+	})))
 	output, err := wire.UnmarshalOutput(outputFrame.Payload)
 	require.NoError(t, err)
 	terminalBytes := output.Data
