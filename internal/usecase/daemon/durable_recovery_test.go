@@ -886,7 +886,7 @@ func TestRestoreCancellationTransitionsBeforeAttachCompletion(t *testing.T) {
 
 	attached := make(chan error, 1)
 	go func() {
-		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name}, nil)
+		_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
 		attached <- err
 	}()
 	cancelRestore()
@@ -963,7 +963,7 @@ func TestAttachRejectsDegraded(t *testing.T) {
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	defer d.serveCancel()
 
-	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name}, nil)
+	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name, Size: domain.Size{Cols: 80, Rows: 24}}, nil)
 	var protocolError *protoErr
 	require.ErrorAs(t, err, &protocolError)
 	require.Equal(t, protocol.ErrInternal, protocolError.code)

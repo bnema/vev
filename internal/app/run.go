@@ -1612,7 +1612,10 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 		return fmt.Errorf("vev: reading kill reply: %w", err)
 	}
 	if reply.Type == wire.MsgError {
-		em, _ := wire.UnmarshalErrorMsg(reply.Payload)
+		em, err := wire.UnmarshalErrorMsg(reply.Payload)
+		if err != nil {
+			return fmt.Errorf("vev: decoding error reply: %w", err)
+		}
 		return fmt.Errorf("vev: %s", em.Text)
 	}
 	printKillSuccess(name, all, daemon)
