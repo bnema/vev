@@ -165,7 +165,7 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 		if session.Tabs == nil {
 			return fmt.Errorf("%w: missing tab list", ErrInvalidRemoteCatalog)
 		}
-		tabs := CatalogTabs(session)
+		tabs := session.Tabs
 		if len(tabs) == 0 {
 			if session.ActiveTabID != "" {
 				return fmt.Errorf("%w: active tab is absent", ErrInvalidRemoteCatalog)

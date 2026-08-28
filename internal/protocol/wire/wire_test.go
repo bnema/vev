@@ -579,6 +579,9 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			version, ok := PeekCommandVersion(got)
 			require.True(t, ok)
 			require.Equal(t, tt.msg.Version, version)
+			requestID, ok := PeekCommandRequestID(got)
+			require.True(t, ok)
+			require.Equal(t, tt.msg.RequestID, requestID)
 			assertAllPrefixesFail(t, got, UnmarshalCommandRequest)
 			assertTrailingGarbageFails(t, got, UnmarshalCommandRequest)
 		})
@@ -586,6 +589,9 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 
 	if _, ok := PeekCommandVersion([]byte{0x00}); ok {
 		t.Fatal("PeekCommandVersion accepted a one-byte payload")
+	}
+	if _, ok := PeekCommandRequestID(make([]byte, 9)); ok {
+		t.Fatal("PeekCommandRequestID accepted a nine-byte payload")
 	}
 }
 
@@ -897,6 +903,8 @@ func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 
 	full := MarshalSessions(tests[1].msg)
 	assertAllPrefixesFail(t, full, UnmarshalSessions)
+	_, err := UnmarshalSessions([]byte{0xff, 0xff})
+	require.ErrorIs(t, err, errShortPayload)
 	assertTrailingGarbageFails(t, full, UnmarshalSessions)
 }
 

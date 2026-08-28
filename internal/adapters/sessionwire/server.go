@@ -2,7 +2,6 @@
 package sessionwire
 
 import (
-	"encoding/binary"
 	"errors"
 
 	"github.com/bnema/vev/internal/ports"
@@ -51,9 +50,7 @@ func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
 	case wire.MsgCommand:
 		failure.Kind = protocol.DecodeMessageCommand
 		failure.Version, _ = wire.PeekCommandVersion(frame.Payload)
-		if len(frame.Payload) >= 10 {
-			failure.RequestID = binary.BigEndian.Uint64(frame.Payload[2:10])
-		}
+		failure.RequestID, _ = wire.PeekCommandRequestID(frame.Payload)
 	case wire.MsgKill:
 		failure.Kind = protocol.DecodeMessageKill
 	case wire.MsgRemotePreviewRequest:

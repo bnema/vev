@@ -16,6 +16,8 @@ func TestDetect(t *testing.T) {
 		wantGraphics bool
 	}{
 		{name: "declared truecolor", env: []string{"TERM=xterm-256color", "COLORTERM=truecolor"}, wantMode: TrueColor, wantSource: SourceDeclared},
+		{name: "declared 24bit", env: []string{"TERM=xterm-256color", "COLORTERM=24bit"}, wantMode: TrueColor, wantSource: SourceDeclared},
+		{name: "direct terminfo entry", env: []string{"TERM=foot-direct"}, wantMode: TrueColor, wantSource: SourceDeclared},
 		{name: "kitty signals infer truecolor", env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, wantMode: TrueColor, wantSource: SourceHeuristic, wantApp: ApplicationKitty},
 		{name: "kitty environment with declared truecolor remains color-only", env: []string{"TERM=xterm-kitty", "COLORTERM=truecolor", "KITTY_WINDOW_ID=1"}, wantMode: TrueColor, wantSource: SourceDeclared, wantApp: ApplicationKitty},
 		{name: "256 color terminal remains a constrained attachment", env: []string{"TERM=xterm-256color"}, wantMode: Indexed256, wantSource: SourceDeclared},

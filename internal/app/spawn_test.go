@@ -14,15 +14,10 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 var errDialFailed = errors.New("dial failed")
-
-type spawnTestTransport struct{}
-
-func (spawnTestTransport) Send(wire.Frame) error     { return nil }
-func (spawnTestTransport) Recv() (wire.Frame, error) { return wire.Frame{}, nil }
-func (spawnTestTransport) Close() error              { return nil }
 
 const (
 	spawnTestChildFileEnv    = "VEV_SPAWN_TEST_CHILD_FILE"
@@ -310,7 +305,7 @@ func TestRetryAttemptsClampsNonPositiveInitialDelay(t *testing.T) {
 }
 
 func TestRetryDialSucceedsAfterTransientFailures(t *testing.T) {
-	want := spawnTestTransport{}
+	want := wiremocks.NewMockTransport(t)
 	var calls atomic.Int32
 	dial := func(context.Context, string) (wire.Transport, error) {
 		if calls.Add(1) <= 3 {
@@ -398,7 +393,7 @@ func TestEnsureDaemonDoesNotSpawnWhenContextCancelsAfterFailedDial(t *testing.T)
 
 func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")
-	want := spawnTestTransport{}
+	want := wiremocks.NewMockTransport(t)
 	var dialCalls, spawnCalls atomic.Int32
 	dial := func(context.Context, string) (wire.Transport, error) {
 		// First (pre-spawn) dial fails; the post-spawn retry succeeds.
@@ -429,7 +424,7 @@ func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
 }
 
 func TestEnsureDaemonReturnsExistingDaemon(t *testing.T) {
-	want := spawnTestTransport{}
+	want := wiremocks.NewMockTransport(t)
 	var spawnCalls atomic.Int32
 	dial := func(context.Context, string) (wire.Transport, error) { return want, nil }
 	spawn := func() error { spawnCalls.Add(1); return nil }

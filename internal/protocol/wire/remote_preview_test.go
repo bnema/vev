@@ -6,6 +6,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/stretchr/testify/require"
 )
 
 func previewTargetForTest() domain.RemoteSessionTarget {
@@ -41,6 +42,7 @@ func TestRemotePreviewCodecPreservesWideStyledCells(t *testing.T) {
 func TestRemotePreviewCodecRejectsMalformedBoundsAndGarbage(t *testing.T) {
 	preview := protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK, LifecycleID: previewTargetForTest().LifecycleID, TabID: "tab-1", Revision: 1, Width: 1, Height: 1, Cells: []renderer.Cell{{Rune: 'x'}}}
 	payload := MarshalRemotePreview(preview)
+	require.NotNil(t, payload)
 	for i := 0; i < len(payload); i++ {
 		if _, err := UnmarshalRemotePreview(payload[:i]); err == nil {
 			t.Fatalf("prefix %d unexpectedly decoded", i)
