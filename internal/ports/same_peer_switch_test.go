@@ -34,7 +34,11 @@ func TestSamePeerSwitchWireStrict(t *testing.T) {
 			decode:  func(payload []byte) (any, error) { return UnmarshalSamePeerSwitchRequest(payload) },
 			assert: func(t *testing.T, decoded any) {
 				t.Helper()
-				if got := decoded.(protocol.SamePeerSwitchRequest); got != request {
+				got, ok := decoded.(protocol.SamePeerSwitchRequest)
+				if !ok {
+					t.Fatalf("decoded type = %T, want protocol.SamePeerSwitchRequest", decoded)
+				}
+				if got != request {
 					t.Fatalf("request = %+v, want %+v", got, request)
 				}
 			},
@@ -46,7 +50,11 @@ func TestSamePeerSwitchWireStrict(t *testing.T) {
 			decode:  func(payload []byte) (any, error) { return UnmarshalSamePeerSwitchFailure(payload) },
 			assert: func(t *testing.T, decoded any) {
 				t.Helper()
-				if got := decoded.(protocol.SamePeerSwitchFailure); got != failure {
+				got, ok := decoded.(protocol.SamePeerSwitchFailure)
+				if !ok {
+					t.Fatalf("decoded type = %T, want protocol.SamePeerSwitchFailure", decoded)
+				}
+				if got != failure {
 					t.Fatalf("failure = %+v, want %+v", got, failure)
 				}
 			},
