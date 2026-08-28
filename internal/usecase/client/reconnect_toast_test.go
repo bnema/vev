@@ -148,7 +148,7 @@ type reconnectToastRecv struct {
 }
 
 type reconnectToastSequenceDialer struct {
-	transports []ports.Transport
+	transports []wire.Transport
 	calls      int
 }
 
@@ -1375,7 +1375,7 @@ func TestReconnectRetryFailuresPreserveAttachError(t *testing.T) {
 				reconnectToastRecv{frame: reconnectToastWelcome(44)},
 				reconnectToastRecv{err: attachErr},
 			)
-			dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
+			dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr}}
 
 			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 			require.ErrorIs(t, err, attachErr)
@@ -1462,7 +1462,7 @@ func TestRemoteReconnectToastFailedDrawDoesNotBlankBounds(t *testing.T) {
 		{frame: reconnectToastWelcome(44)},
 		{err: io.EOF},
 	}}
-	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
+	dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr}}
 
 	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 	require.ErrorContains(t, err, "reconnect toast write failed")
@@ -1484,12 +1484,12 @@ func (w *reconnectStatusClearFailWriter) Write(p []byte) (int, error) {
 func TestReconnectCancellationPreservesContextWhenStatusClearFails(t *testing.T) {
 	tests := []struct {
 		name      string
-		configure func(*mockClientDialer, ports.Transport)
+		configure func(*mockClientDialer, wire.Transport)
 		sleep     func(context.CancelFunc) bool
 	}{
 		{
 			name: "after attach failure",
-			configure: func(dialer *mockClientDialer, tr ports.Transport) {
+			configure: func(dialer *mockClientDialer, tr wire.Transport) {
 				dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 			},
 			sleep: func(cancel context.CancelFunc) bool {
@@ -1499,7 +1499,7 @@ func TestReconnectCancellationPreservesContextWhenStatusClearFails(t *testing.T)
 		},
 		{
 			name: "after reconnect dial failure",
-			configure: func(dialer *mockClientDialer, tr ports.Transport) {
+			configure: func(dialer *mockClientDialer, tr wire.Transport) {
 				dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 				dialer.EXPECT().Dial(mock.Anything).Return(nil, errors.New("redial failed")).Once()
 			},
@@ -1575,7 +1575,7 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 		{frame: reconnectToastWelcome(55)},
 		{frame: reconnectToastDetach(protocol.ReasonDetach)},
 	}}
-	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
+	dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr1, tr2}}
 
 	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 	require.NoError(t, err)
@@ -1619,7 +1619,7 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 		{frame: reconnectToastWelcomeNamed("0", 55)},
 		{frame: reconnectToastDetach(protocol.ReasonDetach)},
 	}}
-	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
+	dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr1, tr2}}
 
 	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: protocol.IntentEphemeral, SessionName: "", Remote: true})
 	require.NoError(t, err)

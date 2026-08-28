@@ -1,4 +1,4 @@
-// Package dgram adapts authenticated UDP-style packet connections to ports.Transport.
+// Package dgram adapts authenticated UDP-style packet connections to wire.Transport.
 package dgram
 
 import (
@@ -136,7 +136,7 @@ func normalizeOptions(opts Options) Options {
 	return opts
 }
 
-var _ ports.DatagramTransport = (*Transport)(nil)
+var _ wire.DatagramTransport = (*Transport)(nil)
 
 type Transport struct {
 	pc               net.PacketConn

@@ -9,12 +9,12 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-type clientConnection struct{ raw ports.Transport }
+type clientConnection struct{ raw wire.Transport }
 
 var _ ports.ClientConnection = (*clientConnection)(nil)
 
 // NewClientConnection wraps one raw client connection incarnation.
-func NewClientConnection(raw ports.Transport) ports.ClientConnection {
+func NewClientConnection(raw wire.Transport) ports.ClientConnection {
 	if raw == nil {
 		return nil
 	}
@@ -55,12 +55,12 @@ func (c *clientConnection) LinkState() ports.LinkState         { return rawLinkS
 func (c *clientConnection) LinkEvents() <-chan ports.LinkEvent { return rawLinkEvents(c.raw) }
 func (c *clientConnection) Close() error                       { return c.raw.Close() }
 
-type clientDialer struct{ raw ports.Dialer }
+type clientDialer struct{ raw wire.Dialer }
 
 var _ ports.ClientDialer = (*clientDialer)(nil)
 
 // NewClientDialer wraps every dialed raw connection in a stable typed adapter.
-func NewClientDialer(raw ports.Dialer) ports.ClientDialer {
+func NewClientDialer(raw wire.Dialer) ports.ClientDialer {
 	if raw == nil {
 		return nil
 	}

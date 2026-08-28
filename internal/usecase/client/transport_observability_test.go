@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -43,7 +44,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	term.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
 
 	observer := &blockingClientRuntimeObserver{entered: make(chan struct{}), release: make(chan struct{})}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 1)
+	reporter := observability.NewSerialized(observer, 1)
 	defer reporter.Close()
 	acked := make(chan struct{})
 	transport := newMockClientConnection(t)
@@ -85,7 +86,7 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	defer in.unblock()
 
 	observer := &clientRuntimeObserver{}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 	transport := newMockClientConnection(t)
 	transport.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()

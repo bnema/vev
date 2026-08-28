@@ -16,8 +16,9 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	appports "github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
 const (
@@ -42,10 +43,10 @@ type CatalogClient struct {
 	timeout time.Duration
 }
 
-var _ ports.RemoteCatalogClient = (*CatalogClient)(nil)
+var _ appports.RemoteCatalogClient = (*CatalogClient)(nil)
 
 // NewCatalogClient returns a RemoteCatalogClient that shells out to ssh.
-func NewCatalogClient() ports.RemoteCatalogClient {
+func NewCatalogClient() appports.RemoteCatalogClient {
 	return &CatalogClient{command: exec.CommandContext}
 }
 
@@ -60,13 +61,13 @@ func (c *CatalogClient) listTimeout() time.Duration {
 // exactly one versioned catalog envelope from stdout. List always applies a
 // bounded command timeout derived from ctx so a caller with no deadline cannot
 // hang indefinitely, while still honoring caller cancellation.
-func (c *CatalogClient) List(ctx context.Context, target string) (ports.RemoteCatalog, error) {
+func (c *CatalogClient) List(ctx context.Context, target string) (catalogue.RemoteCatalog, error) {
 	if err := ctx.Err(); err != nil {
-		return ports.RemoteCatalog{}, err
+		return catalogue.RemoteCatalog{}, err
 	}
 	if err := domain.ValidateRemoteHostTarget(target); err != nil {
 		slog.Debug("remote catalog rejected target", "target", target, "err", err)
-		return ports.RemoteCatalog{}, err
+		return catalogue.RemoteCatalog{}, err
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, c.listTimeout())
@@ -85,29 +86,29 @@ func (c *CatalogClient) List(ctx context.Context, target string) (ports.RemoteCa
 	cmd.WaitDelay = catalogCommandWaitDelay
 	err := cmd.Run()
 	if ctxErr := runCtx.Err(); ctxErr != nil {
-		return ports.RemoteCatalog{}, ctxErr
+		return catalogue.RemoteCatalog{}, ctxErr
 	}
 	if err != nil {
 		if stdout.overflow || stderr.overflow {
 			slog.Debug("remote catalog output too large", "target", target, "stdout_limit", maxCatalogBytes, "stderr_limit", maxCatalogDiagnosticBytes)
-			return ports.RemoteCatalog{}, errCatalogTooLarge
+			return catalogue.RemoteCatalog{}, errCatalogTooLarge
 		}
 		stderrText := sanitizeCatalogDiagnostic(string(stderr.Bytes()))
 		slog.Debug("remote catalog ssh failed", "target", target, "err", err, "stderr", stderrText)
 		if stderrText != "" {
-			return ports.RemoteCatalog{}, fmt.Errorf("%w: %w: %s", errCatalogSSH, err, stderrText)
+			return catalogue.RemoteCatalog{}, fmt.Errorf("%w: %w: %s", errCatalogSSH, err, stderrText)
 		}
-		return ports.RemoteCatalog{}, fmt.Errorf("%w: %w", errCatalogSSH, err)
+		return catalogue.RemoteCatalog{}, fmt.Errorf("%w: %w", errCatalogSSH, err)
 	}
 	if stdout.overflow || stderr.overflow {
 		slog.Debug("remote catalog output too large", "target", target, "stdout_limit", maxCatalogBytes, "stderr_limit", maxCatalogDiagnosticBytes)
-		return ports.RemoteCatalog{}, errCatalogTooLarge
+		return catalogue.RemoteCatalog{}, errCatalogTooLarge
 	}
 
 	catalog, err := decodeRemoteCatalog(stdout.Bytes())
 	if err != nil {
 		slog.Debug("remote catalog decode failed", "target", target, "err", err)
-		return ports.RemoteCatalog{}, err
+		return catalogue.RemoteCatalog{}, err
 	}
 	return catalog, nil
 }
@@ -125,15 +126,15 @@ type catalogEnvelope struct {
 }
 
 type catalogSessionEnvelope struct {
-	LifecycleID *domain.SessionLifecycleID       `json:"lifecycle_id"`
-	Name        *string                          `json:"name"`
-	State       *ports.RemoteCatalogSessionState `json:"state"`
-	Ephemeral   *bool                            `json:"ephemeral"`
-	Tabs        *[]catalogTabEnvelope            `json:"tabs"`
-	Attached    *bool                            `json:"attached"`
-	LastUsedSeq uint64                           `json:"last_used_seq,omitempty"`
-	ActiveTabID string                           `json:"active_tab_id,omitempty"`
-	Reason      string                           `json:"reason,omitempty"`
+	LifecycleID *domain.SessionLifecycleID           `json:"lifecycle_id"`
+	Name        *string                              `json:"name"`
+	State       *catalogue.RemoteCatalogSessionState `json:"state"`
+	Ephemeral   *bool                                `json:"ephemeral"`
+	Tabs        *[]catalogTabEnvelope                `json:"tabs"`
+	Attached    *bool                                `json:"attached"`
+	LastUsedSeq uint64                               `json:"last_used_seq,omitempty"`
+	ActiveTabID string                               `json:"active_tab_id,omitempty"`
+	Reason      string                               `json:"reason,omitempty"`
 }
 
 type catalogTabEnvelope struct {
@@ -144,71 +145,71 @@ type catalogTabEnvelope struct {
 	Attention bool    `json:"attention,omitempty"`
 }
 
-func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
+func decodeRemoteCatalog(raw []byte) (catalogue.RemoteCatalog, error) {
 	var version catalogVersionEnvelope
 	if err := decodeCatalogEnvelope(raw, false, &version); err != nil {
-		return ports.RemoteCatalog{}, err
+		return catalogue.RemoteCatalog{}, err
 	}
 	if version.ProtocolVersion == nil {
-		return ports.RemoteCatalog{}, errCatalogRequired
+		return catalogue.RemoteCatalog{}, errCatalogRequired
 	}
 	if version.SchemaVersion == nil {
-		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
+		return catalogue.RemoteCatalog{}, &catalogue.RemoteCatalogVersionMismatchError{
 			Got:  0,
-			Want: ports.RemoteCatalogSchemaVersion,
+			Want: catalogue.RemoteCatalogSchemaVersion,
 			Kind: "catalog",
 		}
 	}
 	if *version.ProtocolVersion != protocol.Version {
-		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
+		return catalogue.RemoteCatalog{}, &catalogue.RemoteCatalogVersionMismatchError{
 			Got:  *version.ProtocolVersion,
 			Want: protocol.Version,
 			Kind: "protocol",
 		}
 	}
-	if *version.SchemaVersion != ports.RemoteCatalogSchemaVersion {
-		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
+	if *version.SchemaVersion != catalogue.RemoteCatalogSchemaVersion {
+		return catalogue.RemoteCatalog{}, &catalogue.RemoteCatalogVersionMismatchError{
 			Got:  *version.SchemaVersion,
-			Want: ports.RemoteCatalogSchemaVersion,
+			Want: catalogue.RemoteCatalogSchemaVersion,
 			Kind: "catalog",
 		}
 	}
 
 	var envelope catalogEnvelope
 	if err := decodeCatalogEnvelope(raw, true, &envelope); err != nil {
-		return ports.RemoteCatalog{}, err
+		return catalogue.RemoteCatalog{}, err
 	}
 	if envelope.ProtocolVersion == nil || envelope.SchemaVersion == nil || envelope.Sessions == nil {
-		return ports.RemoteCatalog{}, errCatalogRequired
+		return catalogue.RemoteCatalog{}, errCatalogRequired
 	}
-	sessions := make([]ports.RemoteCatalogSession, 0, len(*envelope.Sessions))
+	sessions := make([]catalogue.RemoteCatalogSession, 0, len(*envelope.Sessions))
 	for _, session := range *envelope.Sessions {
 		if session.LifecycleID == nil || session.Name == nil || session.State == nil || session.Ephemeral == nil || session.Tabs == nil || session.Attached == nil {
-			return ports.RemoteCatalog{}, errCatalogRequired
+			return catalogue.RemoteCatalog{}, errCatalogRequired
 		}
-		tabs := make([]ports.RemoteCatalogTab, 0, len(*session.Tabs))
+		tabs := make([]catalogue.RemoteCatalogTab, 0, len(*session.Tabs))
 		for _, tab := range *session.Tabs {
 			if tab.ID == nil || tab.Index == nil || tab.Name == nil {
-				return ports.RemoteCatalog{}, errCatalogRequired
+				return catalogue.RemoteCatalog{}, errCatalogRequired
 			}
-			tabs = append(tabs, ports.RemoteCatalogTab{
+			tabs = append(tabs, catalogue.RemoteCatalogTab{
 				ID: *tab.ID, Index: *tab.Index, Name: *tab.Name,
 				Detail: tab.Detail, Attention: tab.Attention,
 			})
 		}
-		sessions = append(sessions, ports.RemoteCatalogSession{
+		sessions = append(sessions, catalogue.RemoteCatalogSession{
 			LifecycleID: *session.LifecycleID, Name: *session.Name, State: *session.State,
 			Ephemeral: *session.Ephemeral, Tabs: tabs, Attached: *session.Attached,
 			LastUsedSeq: session.LastUsedSeq, ActiveTabID: session.ActiveTabID, Reason: session.Reason,
 		})
 	}
-	catalog := ports.RemoteCatalog{
+	catalog := catalogue.RemoteCatalog{
 		ProtocolVersion: *envelope.ProtocolVersion,
 		SchemaVersion:   *envelope.SchemaVersion,
 		Sessions:        sessions,
 	}
-	if err := ports.ValidateRemoteCatalog(catalog); err != nil {
-		return ports.RemoteCatalog{}, err
+	if err := catalogue.ValidateRemoteCatalog(catalog); err != nil {
+		return catalogue.RemoteCatalog{}, err
 	}
 	return catalog, nil
 }

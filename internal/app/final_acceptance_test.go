@@ -7,14 +7,13 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/require"
 )
 
-func sendAcceptanceInput(t *testing.T, tr ports.Transport, data string) {
+func sendAcceptanceInput(t *testing.T, tr wire.Transport, data string) {
 	t.Helper()
 	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(data)})}))
 }
@@ -60,7 +59,7 @@ func awaitAcceptanceOutput(t *testing.T, p *pump, predicate func(protocol.Output
 	return output
 }
 
-func awaitAcceptanceCommandResult(t *testing.T, tr ports.Transport, p *pump, requestID uint64, slug string) protocol.CommandResult {
+func awaitAcceptanceCommandResult(t *testing.T, tr wire.Transport, p *pump, requestID uint64, slug string) protocol.CommandResult {
 	t.Helper()
 	payload, err := wire.MarshalCommandRequest(protocol.CommandRequest{
 		Version: protocol.Version, RequestID: requestID, Attached: true, Slug: slug,

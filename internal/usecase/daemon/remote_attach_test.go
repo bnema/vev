@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
@@ -76,9 +76,9 @@ func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
 func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	lifecycle := remoteLifecycleForTest()
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 		}},
 	}})
 	d.remoteCatalog.mu.Lock()
@@ -117,10 +117,10 @@ func TestRemotePickerRichHandoffRejectsMismatchedRouteKey(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			d := newRemotePickerDaemon(nil)
 			lifecycle := remoteLifecycleForTest()
-			d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
-					LifecycleID: lifecycle, Name: "work", State: ports.RemoteCatalogSessionUp,
-					Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+			d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
+					LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+					Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}},
 				}},
 			}})
 			d.remoteCatalog.mu.Lock()
@@ -155,9 +155,9 @@ func TestRemotePickerRichHandoffRejectsReplacedLifecycle(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
 	cachedLifecycle := lifecycle
 	cachedLifecycle[0]++
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: cachedLifecycle, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: cachedLifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 		}},
 	}})
 	d.remoteCatalog.mu.Lock()

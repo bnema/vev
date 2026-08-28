@@ -13,7 +13,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -295,7 +295,7 @@ func TestGraphicsOutputDefersCleanupThatDoesNotFitFrameBudget(t *testing.T) {
 	seed.commit()
 	ac := &attachedClient{
 		output:               attachmentOutputWithGraphics(graphicsState),
-		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+		terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true},
 	}
 
 	deferred, err := graphicsOutputDataWithDaemonLimit(nil, &capturedRenderState{}, ac, false, 0)
@@ -512,7 +512,7 @@ func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
 		domain.Geometry{Size: defaultSize},
 		attachClientOptions{
 			capabilitiesSet:      true,
-			terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true, ColorMode: ports.TerminalColorTrueColor},
+			terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true, ColorMode: terminalcap.TrueColor},
 		},
 	)
 	d.mu.Unlock()
@@ -624,7 +624,7 @@ func TestGraphicsOutputOversizeSuppressesGraphicsWithoutCompositionError(t *test
 	}}}
 	ac := &attachedClient{
 		output:               attachmentOutputWithGraphics(newGraphicsOutputState()),
-		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+		terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true},
 	}
 	prepared, err := graphicsOutputData(state, ac, true)
 	require.NoError(t, err, "ANSI composition must continue when optional graphics exceed the bound")
@@ -644,7 +644,7 @@ func TestGraphicsOutputClipsPlacementToPaneContent(t *testing.T) {
 	}}}
 	ac := &attachedClient{
 		output:               attachmentOutputWithGraphics(newGraphicsOutputState()),
-		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+		terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true},
 	}
 	prepared, err := graphicsOutputData(state, ac, true)
 	require.NoError(t, err)
@@ -825,7 +825,7 @@ func graphicsPaneTestState(tab domain.TabStableID, panes ...capturedPaneRenderSt
 func graphicsPaneTestClient() *attachedClient {
 	return &attachedClient{
 		output:               attachmentOutputWithGraphics(newGraphicsOutputState()),
-		terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true},
+		terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true},
 	}
 }
 

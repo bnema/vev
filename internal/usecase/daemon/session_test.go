@@ -399,11 +399,11 @@ func TestServeReturnsWhenLastSessionExits(t *testing.T) {
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
 	l := newMockServerListener(t)
-	connCh := make(chan ports.Transport, 1)
+	connCh := make(chan wire.Transport, 1)
 	connCh <- tr
 	closed := make(chan struct{})
 	var once sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (ports.Transport, error) {
+	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
 		select {
 		case c := <-connCh:
 			return c, nil
@@ -439,11 +439,11 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "long", domain.Size{Cols: 80, Rows: 24}))
 
 	l := newMockServerListener(t)
-	connCh := make(chan ports.Transport, 1)
+	connCh := make(chan wire.Transport, 1)
 	connCh <- tr
 	closed := make(chan struct{})
 	var once sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (ports.Transport, error) {
+	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
 		select {
 		case c := <-connCh:
 			return c, nil
@@ -601,11 +601,11 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 	tr.EXPECT().Close().RunAndReturn(func() error { closeConn(); return nil }).Maybe()
 
 	l := newMockServerListener(t)
-	connCh := make(chan ports.Transport, 1)
+	connCh := make(chan wire.Transport, 1)
 	connCh <- tr
 	lnClosed := make(chan struct{})
 	var lnOnce sync.Once
-	l.EXPECT().Accept().RunAndReturn(func() (ports.Transport, error) {
+	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
 		select {
 		case c := <-connCh:
 			return c, nil

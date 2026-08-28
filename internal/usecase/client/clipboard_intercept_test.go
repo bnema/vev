@@ -155,7 +155,7 @@ func (t *clipboardToastLifecycleTransport) Send(f wire.Frame) error {
 func (t *clipboardToastLifecycleTransport) Recv() (wire.Frame, error) { return <-t.recv, nil }
 func (*clipboardToastLifecycleTransport) Close() error                { return nil }
 
-type clipboardToastLifecycleDialer struct{ transport ports.Transport }
+type clipboardToastLifecycleDialer struct{ transport wire.Transport }
 
 func (d clipboardToastLifecycleDialer) Dial(context.Context) (ports.ClientConnection, error) {
 	return &rawClientConnection{raw: d.transport}, nil

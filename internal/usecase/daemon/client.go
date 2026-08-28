@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
@@ -40,7 +41,7 @@ type attachedClient struct {
 	overlays               *overlayRuntime
 	overlayOnce            sync.Once
 	clientID               [16]byte
-	terminalCapabilities   ports.TerminalCapabilities
+	terminalCapabilities   terminalcap.Capabilities
 	navigationCapabilities protocol.NavigationCapabilities
 	startupOverlay         protocol.StartupOverlay
 	// lifecycle is the sole authority for attachment capability publication,
@@ -612,7 +613,7 @@ type attachClientOptions struct {
 	clientID               [16]byte
 	resumeCapable          bool
 	maxOutputInFlight      uint8
-	terminalCapabilities   ports.TerminalCapabilities
+	terminalCapabilities   terminalcap.Capabilities
 	capabilitiesSet        bool
 	navigationCapabilities protocol.NavigationCapabilities
 	startupOverlay         protocol.StartupOverlay
@@ -644,7 +645,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domai
 func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", sess.name, "resume", opts.resumeCapable)
-	if ac.terminalCapabilities.ColorSource == ports.TerminalCapabilityDeclared && !ac.terminalCapabilities.TrueColor() {
+	if ac.terminalCapabilities.ColorSource == terminalcap.SourceDeclared && !ac.terminalCapabilities.TrueColor() {
 		d.publishToast(ac, domain.Notification{
 			Code:      domain.NoticeUser,
 			Severity:  domain.NoticeWarn,
@@ -669,7 +670,7 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 		resumeToken = d.nextResumeTokenLocked()
 	}
 	if !opts.capabilitiesSet {
-		opts.terminalCapabilities = ports.TerminalCapabilities{ColorMode: ports.TerminalColorTrueColor}
+		opts.terminalCapabilities = terminalcap.Capabilities{ColorMode: terminalcap.TrueColor}
 	}
 	output := newOutputStateStreamForCapabilities(opts.terminalCapabilities, opts.maxOutputInFlight)
 	geometry = geometry.NormalizePixels()

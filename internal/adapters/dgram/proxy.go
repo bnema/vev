@@ -17,8 +17,8 @@ const (
 )
 
 type ProxyRuntime struct {
-	Client       ports.Transport
-	Daemon       ports.Transport
+	Client       wire.Transport
+	Daemon       wire.Transport
 	Log          *slog.Logger
 	IdleTTL      time.Duration
 	RetryBackoff time.Duration
@@ -47,8 +47,8 @@ type proxyCopier struct {
 }
 
 type proxyCopyDirection struct {
-	src              ports.Transport
-	dst              ports.Transport
+	src              wire.Transport
+	dst              wire.Transport
 	recvKind         proxyCopyErrKind
 	sendKind         proxyCopyErrKind
 	transform        func(wire.Frame) wire.Frame
@@ -191,7 +191,7 @@ func (c proxyCopier) copyFrames(dir proxyCopyDirection) {
 	}
 }
 
-func recoverableClientLink(t ports.Transport, err error) bool {
+func recoverableClientLink(t wire.Transport, err error) bool {
 	if errors.Is(err, ErrLinkDead) {
 		return false
 	}

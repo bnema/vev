@@ -57,7 +57,7 @@ func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 }
 
 // NewTransport wraps separate reader/writer streams as a framed Transport.
-func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc, opts ...Option) ports.Transport {
+func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc, opts ...Option) wire.Transport {
 	t := newTransport(r, w, closeFn, nil)
 	for _, opt := range opts {
 		if opt != nil {
@@ -533,12 +533,12 @@ func shellQuote(s string) string {
 // Dial starts ssh target vev _stdio and returns a Transport over the child
 // process' stdio. Session selection is carried in Hello. The subprocess is
 // started with exec.Command argv, never through a shell.
-func Dial(target, session string) (ports.Transport, error) {
+func Dial(target, session string) (wire.Transport, error) {
 	return DialContext(context.Background(), target, session)
 }
 
 // DialContextWithRuntimeObserver is the option-bearing production constructor.
-func DialContextWithRuntimeObserver(ctx context.Context, target, session string, logger *slog.Logger, opts ...Option) (ports.Transport, error) {
+func DialContextWithRuntimeObserver(ctx context.Context, target, session string, logger *slog.Logger, opts ...Option) (wire.Transport, error) {
 	return dialContext(ctx, target, session, logger, opts...)
 }
 
@@ -547,7 +547,7 @@ func DialContextWithRuntimeObserver(ctx context.Context, target, session string,
 // handshake context must not kill an already-established carriage. Callers may
 // pass a logger to record ssh start failures and non-clean exits without logging
 // the generated command line.
-func DialContext(ctx context.Context, target, session string, logger ...*slog.Logger) (ports.Transport, error) {
+func DialContext(ctx context.Context, target, session string, logger ...*slog.Logger) (wire.Transport, error) {
 	var log *slog.Logger
 	if len(logger) > 0 {
 		log = logger[0]
@@ -555,7 +555,7 @@ func DialContext(ctx context.Context, target, session string, logger ...*slog.Lo
 	return dialContext(ctx, target, session, log)
 }
 
-func dialContext(ctx context.Context, target, session string, log *slog.Logger, opts ...Option) (ports.Transport, error) {
+func dialContext(ctx context.Context, target, session string, log *slog.Logger, opts ...Option) (wire.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

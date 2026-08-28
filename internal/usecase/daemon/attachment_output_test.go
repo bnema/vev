@@ -9,7 +9,7 @@ import (
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -56,17 +56,17 @@ func TestAttachmentOutputUsesTerminalColorProfile(t *testing.T) {
 
 	cases := []struct {
 		name         string
-		capabilities ports.TerminalCapabilities
+		capabilities terminalcap.Capabilities
 		want         string
 	}{
 		{
 			name:         "truecolor",
-			capabilities: ports.TerminalCapabilities{ColorMode: ports.TerminalColorTrueColor},
+			capabilities: terminalcap.Capabilities{ColorMode: terminalcap.TrueColor},
 			want:         "\x1b[1;1H\x1b[0;38;2;255;0;0;48;2;0;0;255;58;2;0;255;0mX\x1b[0m",
 		},
 		{
 			name:         "indexed 256",
-			capabilities: ports.TerminalCapabilities{ColorMode: ports.TerminalColorIndexed256},
+			capabilities: terminalcap.Capabilities{ColorMode: terminalcap.Indexed256},
 			want:         "\x1b[1;1H\x1b[0;38;5;196;48;5;21;58;5;46mX\x1b[0m",
 		},
 	}
@@ -451,7 +451,7 @@ func TestAttachmentOutputFailedSendKeepsTextCursorAndGraphicsSpeculative(t *test
 	graphicsState := newGraphicsOutputState()
 	output := attachmentOutputWithGraphics(graphicsState)
 	output.lastCursor = cursorOut{valid: true, row: 1, col: 1}
-	ac := &attachedClient{output: output, terminalCapabilities: ports.TerminalCapabilities{KittyGraphics: true}}
+	ac := &attachedClient{output: output, terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true}}
 	output.attachment = ac
 	frame := renderer.NewFrame(1, 1)
 	prepared, err := output.prepareFrame(nil, state, frame, []renderer.Damage{renderer.FullRedraw()}, true, cursorOut{row: 2, col: 3})

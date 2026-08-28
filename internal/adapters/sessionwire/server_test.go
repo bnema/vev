@@ -279,8 +279,8 @@ func TestServerListenerWrapsEachAcceptedIncarnation(t *testing.T) {
 	require.NoError(t, wrapped.Close())
 }
 
-type scriptedListener struct{ transport ports.Transport }
+type scriptedListener struct{ transport wire.Transport }
 
-func (l *scriptedListener) Accept() (ports.Transport, error) { return l.transport, nil }
-func (*scriptedListener) Close() error                       { return nil }
-func (*scriptedListener) Addr() string                       { return "test" }
+func (l *scriptedListener) Accept() (wire.Transport, error) { return l.transport, nil }
+func (*scriptedListener) Close() error                      { return nil }
+func (*scriptedListener) Addr() string                      { return "test" }

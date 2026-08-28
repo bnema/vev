@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/adapters/dgram"
-	"github.com/bnema/vev/internal/ports"
 )
 
 func TestDialerFactorySelectsExplicitModes(t *testing.T) {
@@ -14,11 +13,11 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		mode     ports.RemoteTransportMode
+		mode     TransportMode
 		wantType any
 	}{
-		{name: "udp", mode: ports.RemoteTransportUDP, wantType: dgram.RemoteDialer{}},
-		{name: "stdio", mode: ports.RemoteTransportStdio, wantType: stdioDialer{}},
+		{name: "udp", mode: TransportUDP, wantType: dgram.RemoteDialer{}},
+		{name: "stdio", mode: TransportStdio, wantType: stdioDialer{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -51,7 +50,7 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 func TestDialerFactoryRejectsUnsupportedMode(t *testing.T) {
 	factory := NewDialerFactory()
 
-	dialer, err := factory.DialerForRemote("remote.example", "work", ports.RemoteTransportMode("serial"), nil)
+	dialer, err := factory.DialerForRemote("remote.example", "work", TransportMode("serial"), nil)
 	if err == nil {
 		t.Fatal("DialerForRemote() error = nil, want unsupported mode error")
 	}

@@ -15,9 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	appports "github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
@@ -56,16 +57,16 @@ func receiveRemotePickerClose(t *testing.T, ch <-chan struct{}, what string) {
 	require.NoError(t, waitRemotePickerClose(ch, what))
 }
 
-func newRemotePickerDaemon(store ports.RemoteHostStore) *Daemon {
-	return New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(store, nil, nil, nil, ports.RemoteTransportUDP))
+func newRemotePickerDaemon(store appports.RemoteHostStore) *Daemon {
+	return New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(store, nil, nil))
 }
 
 func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle}
-	session := ports.RemoteCatalogSession{
-		LifecycleID: lifecycle, Name: "work", State: ports.RemoteCatalogSessionDown,
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	session := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionDown,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 	}
 	view := remotePickerView(key, session, remoteHostFresh, time.Unix(100, 0))
 	require.True(t, view.Stopped)
@@ -77,9 +78,9 @@ func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) 
 }
 
 func TestRemotePickerClampsStoppedOrdinalTabCount(t *testing.T) {
-	tabs := make([]ports.RemoteCatalogTab, math.MaxUint16+1)
-	tabs[0] = ports.RemoteCatalogTab{Name: "main"}
-	view := remotePickerView(domain.RemoteSessionKey{Host: "arch", Name: "work"}, ports.RemoteCatalogSession{
+	tabs := make([]catalogue.RemoteCatalogTab, math.MaxUint16+1)
+	tabs[0] = catalogue.RemoteCatalogTab{Name: "main"}
+	view := remotePickerView(domain.RemoteSessionKey{Host: "arch", Name: "work"}, catalogue.RemoteCatalogSession{
 		LifecycleID: remoteLifecycleForTest(), Name: "work", State: "down", Tabs: tabs,
 	}, remoteHostFresh, time.Unix(100, 0))
 
@@ -89,9 +90,9 @@ func TestRemotePickerClampsStoppedOrdinalTabCount(t *testing.T) {
 
 func TestRemotePickerUsesCompactUpDetailRegardlessOfAttachment(t *testing.T) {
 	for _, attached := range []bool{false, true} {
-		view := remotePickerView(domain.RemoteSessionKey{Host: "remote", Name: "work"}, ports.RemoteCatalogSession{
+		view := remotePickerView(domain.RemoteSessionKey{Host: "remote", Name: "work"}, catalogue.RemoteCatalogSession{
 			LifecycleID: remoteLifecycleForTest(), Name: "work", State: "up", Attached: attached,
-			Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0}},
+			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0}},
 		}, remoteHostFresh, time.Now())
 		require.Equal(t, "up", view.RemoteDetail)
 	}
@@ -101,13 +102,13 @@ func TestRemotePickerScopesSameLifecycleBytesToEachEndpoint(t *testing.T) {
 	store := &remoteRefreshHostStore{hosts: []string{"remote", "vev@remote"}}
 	d := newRemotePickerDaemon(store)
 	lifecycle := remoteLifecycleForTest()
-	session := ports.RemoteCatalogSession{
+	session := catalogue.RemoteCatalogSession{
 		LifecycleID: lifecycle, Name: "work", State: "up",
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 	}
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{
-		{Host: "remote", FetchedAt: time.Unix(100, 0), Sessions: []ports.RemoteCatalogSession{session}},
-		{Host: "vev@remote", FetchedAt: time.Unix(100, 0), Sessions: []ports.RemoteCatalogSession{session}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{
+		{Host: "remote", FetchedAt: time.Unix(100, 0), Sessions: []catalogue.RemoteCatalogSession{session}},
+		{Host: "vev@remote", FetchedAt: time.Unix(100, 0), Sessions: []catalogue.RemoteCatalogSession{session}},
 	})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.status["remote"] = remoteHostFresh
@@ -131,9 +132,9 @@ func TestRemotePickerCatalogExpiresAtAttachTTL(t *testing.T) {
 	clock := &remotePickerClock{now: now}
 	d := newTestDaemon(t, nil, clock)
 	lifecycle := remoteLifecycleForTest()
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: now.Add(-remoteCatalogAttachTTL), Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: now.Add(-remoteCatalogAttachTTL), Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 		}},
 	}})
 	d.remoteCatalog.mu.Lock()
@@ -152,9 +153,9 @@ func TestRemotePickerTargetReadyExpiresAfterPickerBuildWithoutSnapshot(t *testin
 	clock := &remotePickerClock{now: now}
 	d := newTestDaemon(t, nil, clock)
 	lifecycle := remoteLifecycleForTest()
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{{
-			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: now, Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 		}},
 	}})
 	d.remoteCatalog.mu.Lock()
@@ -177,14 +178,14 @@ func TestRemotePickerTargetReadyExpiresAfterPickerBuildWithoutSnapshot(t *testin
 func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
 	tests := []struct {
 		name        string
-		tabs        []ports.RemoteCatalogTab
+		tabs        []catalogue.RemoteCatalogTab
 		activeTabID string
 		wantActive  int
 		wantTabID   domain.TabStableID
 	}{
 		{
 			name: "active first",
-			tabs: []ports.RemoteCatalogTab{
+			tabs: []catalogue.RemoteCatalogTab{
 				{ID: "tab-active", Index: 0, Name: "active"},
 				{ID: "tab-last", Index: 1, Name: "last"},
 			},
@@ -194,7 +195,7 @@ func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
 		},
 		{
 			name: "active last",
-			tabs: []ports.RemoteCatalogTab{
+			tabs: []catalogue.RemoteCatalogTab{
 				{ID: "tab-first", Index: 0, Name: "first"},
 				{ID: "tab-active", Index: 1, Name: "active"},
 			},
@@ -204,7 +205,7 @@ func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
 		},
 		{
 			name: "empty active tab ID falls back to first stable tab",
-			tabs: []ports.RemoteCatalogTab{
+			tabs: []catalogue.RemoteCatalogTab{
 				{ID: "tab-first", Index: 0, Name: "first"},
 				{ID: "", Index: 1, Name: "malformed"},
 			},
@@ -217,8 +218,8 @@ func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			d := newRemotePickerDaemon(nil)
 			lifecycle := remoteLifecycleForTest()
-			d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
+			d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
 					LifecycleID: lifecycle,
 					Name:        "vive",
 					State:       "up",
@@ -259,8 +260,8 @@ func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			d := newRemotePickerDaemon(nil)
-			d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}},
+			d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{Name: "work", State: "up"}},
 			}})
 			d.remoteCatalog.mu.Lock()
 			d.remoteCatalog.status["arch"] = test.status
@@ -278,8 +279,8 @@ func TestRemotePickerStaleDetailUsesLastSuccessfulFetch(t *testing.T) {
 	d := newRemotePickerDaemon(nil)
 	fetchedAt := time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC)
 	failedAt := fetchedAt.Add(6 * time.Hour)
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: fetchedAt, Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: fetchedAt, Sessions: []catalogue.RemoteCatalogSession{{Name: "work", State: "up"}},
 	}})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.status["arch"] = remoteHostUnreachable
@@ -355,7 +356,7 @@ type remoteRefreshRequest struct {
 }
 
 type remoteRefreshResult struct {
-	catalog ports.RemoteCatalog
+	catalog catalogue.RemoteCatalog
 	err     error
 }
 
@@ -367,7 +368,7 @@ type channelRemoteCatalog struct {
 	violations []string
 }
 
-func (c *channelRemoteCatalog) List(ctx context.Context, host string) (ports.RemoteCatalog, error) {
+func (c *channelRemoteCatalog) List(ctx context.Context, host string) (catalogue.RemoteCatalog, error) {
 	c.probeMu.Lock()
 	if c.probes && !c.d.mu.TryLock() {
 		c.violations = append(c.violations, "daemon lock held during remote catalog I/O")
@@ -386,21 +387,21 @@ func (c *channelRemoteCatalog) List(ctx context.Context, host string) (ports.Rem
 	case result := <-request.result:
 		return result.catalog, result.err
 	case <-ctx.Done():
-		return ports.RemoteCatalog{}, ctx.Err()
+		return catalogue.RemoteCatalog{}, ctx.Err()
 	}
 }
 
 type recordingRemoteCache struct {
 	d          *Daemon
-	stores     chan []ports.RemoteCatalogCacheEntry
+	stores     chan []catalogue.RemoteCatalogCacheEntry
 	probeMu    sync.Mutex
 	probes     bool
 	violations []string
 }
 
-func (*recordingRemoteCache) Load() ([]ports.RemoteCatalogCacheEntry, error) { return nil, nil }
+func (*recordingRemoteCache) Load() ([]catalogue.RemoteCatalogCacheEntry, error) { return nil, nil }
 
-func (c *recordingRemoteCache) Store(entries []ports.RemoteCatalogCacheEntry) error {
+func (c *recordingRemoteCache) Store(entries []catalogue.RemoteCatalogCacheEntry) error {
 	c.probeMu.Lock()
 	if c.probes && !c.d.mu.TryLock() {
 		c.violations = append(c.violations, "daemon lock held during remote cache write")
@@ -413,7 +414,7 @@ func (c *recordingRemoteCache) Store(entries []ports.RemoteCatalogCacheEntry) er
 		c.d.remoteCatalog.mu.Unlock()
 	}
 	c.probeMu.Unlock()
-	copyEntries := make([]ports.RemoteCatalogCacheEntry, len(entries))
+	copyEntries := make([]catalogue.RemoteCatalogCacheEntry, len(entries))
 	for i, entry := range entries {
 		copyEntries[i] = cloneRemoteCatalogEntry(entry)
 	}
@@ -423,8 +424,8 @@ func (c *recordingRemoteCache) Store(entries []ports.RemoteCatalogCacheEntry) er
 
 type fixedRemoteRefreshClock struct{ now time.Time }
 
-func (c fixedRemoteRefreshClock) Now() time.Time                   { return c.now }
-func (fixedRemoteRefreshClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+func (c fixedRemoteRefreshClock) Now() time.Time                      { return c.now }
+func (fixedRemoteRefreshClock) NewTimer(time.Duration) appports.Timer { return stubTimer{} }
 
 type remotePickerClock struct {
 	mu  sync.Mutex
@@ -436,7 +437,7 @@ func (c *remotePickerClock) Now() time.Time {
 	defer c.mu.Unlock()
 	return c.now
 }
-func (*remotePickerClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+func (*remotePickerClock) NewTimer(time.Duration) appports.Timer { return stubTimer{} }
 func (c *remotePickerClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	c.now = c.now.Add(d)
@@ -457,19 +458,19 @@ func requireNoRemoteLockViolations(t *testing.T, catalog *channelRemoteCatalog, 
 	}
 }
 
-func remoteCatalogForTest(sessions ...ports.RemoteCatalogSession) ports.RemoteCatalog {
-	return ports.RemoteCatalog{
+func remoteCatalogForTest(sessions ...catalogue.RemoteCatalogSession) catalogue.RemoteCatalog {
+	return catalogue.RemoteCatalog{
 		ProtocolVersion: protocol.Version,
-		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
-		Sessions:        append([]ports.RemoteCatalogSession{}, sessions...),
+		SchemaVersion:   catalogue.RemoteCatalogSchemaVersion,
+		Sessions:        append([]catalogue.RemoteCatalogSession{}, sessions...),
 	}
 }
 
 func newRemoteRefreshDaemon(t *testing.T, hosts *remoteRefreshHostStore, now time.Time) (*Daemon, *channelRemoteCatalog, *recordingRemoteCache) {
 	t.Helper()
 	catalog := &channelRemoteCatalog{requests: make(chan remoteRefreshRequest, 8)}
-	cache := &recordingRemoteCache{stores: make(chan []ports.RemoteCatalogCacheEntry, 8)}
-	d := New(nil, fixedRemoteRefreshClock{now: now}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(hosts, catalog, cache, nil, ports.RemoteTransportUDP))
+	cache := &recordingRemoteCache{stores: make(chan []catalogue.RemoteCatalogCacheEntry, 8)}
+	d := New(nil, fixedRemoteRefreshClock{now: now}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithRemoteDiscovery(hosts, catalog, cache))
 	catalog.d, cache.d = d, d
 	return d, catalog, cache
 }
@@ -487,10 +488,10 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	ac.overlays.pickerMu.Unlock()
 	require.True(t, d.registerRemoteDiscoveryConsumer(instance.discoveryInstance()))
 	lifecycle := remoteLifecycleForTest()
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
 			LifecycleID: lifecycle, Name: "cached", State: "up",
-			Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 		}},
 	}})
 
@@ -504,9 +505,9 @@ func TestRemoteRefreshStartsPerHostAndCancelsSupersededGeneration(t *testing.T) 
 	require.Contains(t, first, "mule")
 	requireNoRemoteLockViolations(t, catalog, nil)
 	d.remoteCatalog.mu.Lock()
-	require.Equal(t, []ports.RemoteCatalogSession{{
+	require.Equal(t, []catalogue.RemoteCatalogSession{{
 		LifecycleID: lifecycle, Name: "cached", State: "up",
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
 	}}, d.remoteCatalog.cache["arch"].Sessions, "cached rows publish before any remote completion")
 	require.Equal(t, remoteHostRefreshing, d.remoteCatalog.status["arch"])
 	d.remoteCatalog.mu.Unlock()
@@ -581,26 +582,26 @@ func TestRemoteRefreshResultPreservesFailuresAndEvictsSuccessfulOmissions(t *tes
 	now := time.Unix(200, 0)
 	hosts := &remoteRefreshHostStore{hosts: []string{"arch", "mule"}}
 	d, _, cache := newRemoteRefreshDaemon(t, hosts, now)
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{
-		{Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "old", State: "up"}}},
-		{Host: "mule", FetchedAt: time.Unix(20, 0), Sessions: []ports.RemoteCatalogSession{{Name: "stale", State: "up"}}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{
+		{Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{Name: "old", State: "up"}}},
+		{Host: "mule", FetchedAt: time.Unix(20, 0), Sessions: []catalogue.RemoteCatalogSession{{Name: "stale", State: "up"}}},
 	})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.refresh = 7
 	d.remoteCatalog.mu.Unlock()
 
-	require.False(t, d.applyRemoteRefreshResult(7, "mule", ports.RemoteCatalog{}, errors.New("offline")))
+	require.False(t, d.applyRemoteRefreshResult(7, "mule", catalogue.RemoteCatalog{}, errors.New("offline")))
 	d.remoteCatalog.mu.Lock()
-	require.Equal(t, []ports.RemoteCatalogSession{{Name: "stale", State: "up"}}, d.remoteCatalog.cache["mule"].Sessions)
+	require.Equal(t, []catalogue.RemoteCatalogSession{{Name: "stale", State: "up"}}, d.remoteCatalog.cache["mule"].Sessions)
 	require.Equal(t, time.Unix(20, 0), d.remoteCatalog.cache["mule"].FetchedAt)
 	require.Equal(t, remoteHostUnreachable, d.remoteCatalog.status["mule"])
 	d.remoteCatalog.mu.Unlock()
 
 	require.True(t, d.applyRemoteRefreshResult(7, "arch", remoteCatalogForTest(), nil))
 	stored := receiveRemotePicker(t, cache.stores, "remote cache store")
-	require.Equal(t, []ports.RemoteCatalogCacheEntry{
-		{Host: "arch", FetchedAt: now, Sessions: []ports.RemoteCatalogSession{}},
-		{Host: "mule", FetchedAt: time.Unix(20, 0), Sessions: []ports.RemoteCatalogSession{{Name: "stale", State: "up"}}},
+	require.Equal(t, []catalogue.RemoteCatalogCacheEntry{
+		{Host: "arch", FetchedAt: now, Sessions: []catalogue.RemoteCatalogSession{}},
+		{Host: "mule", FetchedAt: time.Unix(20, 0), Sessions: []catalogue.RemoteCatalogSession{{Name: "stale", State: "up"}}},
 	}, stored, "every successful write persists the newest full cache atomically")
 	requireNoRemoteLockViolations(t, nil, cache)
 	d.remoteCatalog.mu.Lock()
@@ -612,21 +613,21 @@ func TestRemoteRefreshResultPreservesFailuresAndEvictsSuccessfulOmissions(t *tes
 func TestRemoteRefreshRejectsRemovedHostAndLateGeneration(t *testing.T) {
 	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
 	d, _, cache := newRemoteRefreshDaemon(t, hosts, time.Unix(300, 0))
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "old", State: "up"}},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{Name: "old", State: "up"}},
 	}})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.refresh = 9
 	d.remoteCatalog.mu.Unlock()
 
-	require.False(t, d.applyRemoteRefreshResult(8, "arch", remoteCatalogForTest(ports.RemoteCatalogSession{
-		LifecycleID: remoteLifecycleForTest(), Name: "late", State: ports.RemoteCatalogSessionUp,
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	require.False(t, d.applyRemoteRefreshResult(8, "arch", remoteCatalogForTest(catalogue.RemoteCatalogSession{
+		LifecycleID: remoteLifecycleForTest(), Name: "late", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}},
 	}), nil))
 	hosts.set()
-	require.True(t, d.applyRemoteRefreshResult(9, "arch", remoteCatalogForTest(ports.RemoteCatalogSession{
-		LifecycleID: remoteLifecycleForTest(), Name: "removed", State: ports.RemoteCatalogSessionUp,
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	require.True(t, d.applyRemoteRefreshResult(9, "arch", remoteCatalogForTest(catalogue.RemoteCatalogSession{
+		LifecycleID: remoteLifecycleForTest(), Name: "removed", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}},
 	}), nil))
 	require.Empty(t, receiveRemotePicker(t, cache.stores, "remote cache store"))
 	requireNoRemoteLockViolations(t, nil, cache)
@@ -640,16 +641,16 @@ func TestRemoteRefreshValidationSentinelsRemainMalformed(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
 	for _, test := range []struct {
 		name    string
-		session ports.RemoteCatalogSession
+		session catalogue.RemoteCatalogSession
 	}{
-		{name: "unknown state", session: ports.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: "unknown"}},
-		{name: "invalid reason", session: ports.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: "up", Reason: "bogus"}},
+		{name: "unknown state", session: catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: "unknown"}},
+		{name: "invalid reason", session: catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: "up", Reason: "bogus"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
 			d, _, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(400, 0))
 			d.remoteCatalog.refresh = 1
-			catalog := ports.RemoteCatalog{ProtocolVersion: protocol.Version, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{test.session}}
+			catalog := catalogue.RemoteCatalog{ProtocolVersion: protocol.Version, SchemaVersion: catalogue.RemoteCatalogSchemaVersion, Sessions: []catalogue.RemoteCatalogSession{test.session}}
 			require.False(t, d.applyRemoteRefreshResult(1, "arch", catalog, nil))
 			d.remoteCatalog.mu.Lock()
 			require.Equal(t, remoteHostMalformed, d.remoteCatalog.status["arch"])
@@ -661,13 +662,13 @@ func TestRemoteRefreshValidationSentinelsRemainMalformed(t *testing.T) {
 func TestRemoteRefreshVersionMismatchPreservesStaleRows(t *testing.T) {
 	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
 	d, _, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(400, 0))
-	old := ports.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{{Name: "work", State: "up"}}}
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{old})
+	old := catalogue.RemoteCatalogCacheEntry{Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{Name: "work", State: "up"}}}
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{old})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.refresh = 3
 	d.remoteCatalog.mu.Unlock()
 
-	require.False(t, d.applyRemoteRefreshResult(3, "arch", ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{Got: 19, Want: protocol.Version}))
+	require.False(t, d.applyRemoteRefreshResult(3, "arch", catalogue.RemoteCatalog{}, &catalogue.RemoteCatalogVersionMismatchError{Got: 19, Want: protocol.Version}))
 	d.remoteCatalog.mu.Lock()
 	require.Equal(t, old, d.remoteCatalog.cache["arch"])
 	require.Equal(t, remoteHostVersionMismatch, d.remoteCatalog.status["arch"])
@@ -676,13 +677,13 @@ func TestRemoteRefreshVersionMismatchPreservesStaleRows(t *testing.T) {
 
 func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
-	remoteSession := ports.RemoteCatalogSession{
-		LifecycleID: lifecycle, Name: "work", State: ports.RemoteCatalogSessionUp,
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	remoteSession := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}},
 	}
 	d := newRemotePickerDaemon(nil)
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{remoteSession},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{remoteSession},
 	}})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.status["arch"] = remoteHostFresh
@@ -709,11 +710,11 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 
 func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
-	remoteSession := ports.RemoteCatalogSession{
+	remoteSession := catalogue.RemoteCatalogSession{
 		LifecycleID: lifecycle,
 		Name:        "work",
 		State:       "down",
-		Tabs: []ports.RemoteCatalogTab{
+		Tabs: []catalogue.RemoteCatalogTab{
 			{ID: "tab-a", Name: "alpha", Index: 0},
 			{ID: "tab-b", Name: "beta", Index: 1},
 		},
@@ -738,7 +739,7 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	require.Equal(t, domain.NewStableTabSelector("tab-b"), selected.RemoteTarget.StoppedTab)
 
 	local := newRemotePickerDaemon(nil)
-	local.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{remoteSession}}})
+	local.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{remoteSession}}})
 	local.remoteCatalog.mu.Lock()
 	local.remoteCatalog.status["arch"] = remoteHostFresh
 	local.remoteCatalog.mu.Unlock()
@@ -779,11 +780,11 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 
 func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
-	remoteSession := ports.RemoteCatalogSession{
+	remoteSession := catalogue.RemoteCatalogSession{
 		LifecycleID: lifecycle,
 		Name:        "work",
 		State:       "down",
-		Tabs:        []ports.RemoteCatalogTab{},
+		Tabs:        []catalogue.RemoteCatalogTab{},
 	}
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteView := remotePickerView(key, remoteSession, remoteHostFresh, time.Unix(10, 0))
@@ -807,8 +808,8 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	require.Equal(t, domain.TabSelector{}, selected.RemoteTarget.StoppedTab)
 
 	local := newRemotePickerDaemon(nil)
-	local.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{remoteSession},
+	local.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{remoteSession},
 	}})
 	local.remoteCatalog.mu.Lock()
 	local.remoteCatalog.status["arch"] = remoteHostFresh
@@ -878,13 +879,13 @@ func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
 
 func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
-	remoteSession := ports.RemoteCatalogSession{
-		LifecycleID: lifecycle, Name: "work", State: ports.RemoteCatalogSessionUp,
-		Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}},
+	remoteSession := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}},
 	}
 	d := newRemotePickerDaemon(nil)
-	d.remoteCatalog.replaceCache([]ports.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []ports.RemoteCatalogSession{remoteSession},
+	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
+		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{remoteSession},
 	}})
 	d.remoteCatalog.mu.Lock()
 	d.remoteCatalog.status["arch"] = remoteHostFresh
@@ -921,9 +922,9 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	require.Same(t, sess, ac.currentAttachmentSession())
 }
 
-func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...ports.ServerConnection) (*session, *attachedClient, chan wire.Frame) {
+func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...appports.ServerConnection) (*session, *attachedClient, chan wire.Frame) {
 	t.Helper()
-	var tr ports.ServerConnection
+	var tr appports.ServerConnection
 	var sends chan wire.Frame
 	if len(transports) != 0 {
 		tr = transports[0]
@@ -962,12 +963,12 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 	d.remoteCatalog.refresh = 4
 	d.remoteCatalog.mu.Unlock()
 
-	require.True(t, d.applyRemoteRefreshResult(4, "arch", ports.RemoteCatalog{
+	require.True(t, d.applyRemoteRefreshResult(4, "arch", catalogue.RemoteCatalog{
 		ProtocolVersion: protocol.Version,
-		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
-		Sessions: []ports.RemoteCatalogSession{{
+		SchemaVersion:   catalogue.RemoteCatalogSchemaVersion,
+		Sessions: []catalogue.RemoteCatalogSession{{
 			LifecycleID: remoteLifecycleForTest(), Name: "work", State: "up",
-			Tabs: []ports.RemoteCatalogTab{{ID: "tab-1"}, {ID: "tab-2", Index: 1}},
+			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}, {ID: "tab-2", Index: 1}},
 		}},
 	}, nil))
 	receiveRemotePicker(t, cache.stores, "remote cache store")

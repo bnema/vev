@@ -13,6 +13,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -711,7 +712,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 	}
 	e.d.mu.Unlock()
 
-	rows := make([]ports.RemoteCatalogSession, 0, len(sessions)+len(stopped))
+	rows := make([]catalogue.RemoteCatalogSession, 0, len(sessions)+len(stopped))
 	liveNames := make(map[string]struct{}, len(sessions))
 	for _, sess := range sessions {
 		e.d.refreshSessionFocusedTitles(sess)
@@ -720,10 +721,10 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		row := ports.RemoteCatalogSession{
+		row := catalogue.RemoteCatalogSession{
 			LifecycleID: snap.incarnation,
 			Name:        snap.name,
-			State:       ports.RemoteCatalogSessionUp,
+			State:       catalogue.RemoteCatalogSessionUp,
 			Ephemeral:   snap.ephemeral,
 			Tabs:        tabs,
 			Attached:    snap.attached,
@@ -743,13 +744,13 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		state := ports.RemoteCatalogSessionDown
+		state := catalogue.RemoteCatalogSessionDown
 		reason := ""
 		if entry.broken() {
-			state = ports.RemoteCatalogSessionBroken
+			state = catalogue.RemoteCatalogSessionBroken
 			reason = "session_broken"
 		}
-		rows = append(rows, ports.RemoteCatalogSession{
+		rows = append(rows, catalogue.RemoteCatalogSession{
 			LifecycleID: entry.incarnation,
 			Name:        entry.name,
 			State:       state,
@@ -765,24 +766,24 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		}
 		return rows[i].LifecycleID.String() < rows[j].LifecycleID.String()
 	})
-	catalog := ports.RemoteCatalog{
+	catalog := catalogue.RemoteCatalog{
 		ProtocolVersion: protocol.Version,
-		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
+		SchemaVersion:   catalogue.RemoteCatalogSchemaVersion,
 		Sessions:        rows,
 	}
-	if err := ports.ValidateRemoteCatalog(catalog); err != nil {
+	if err := catalogue.ValidateRemoteCatalog(catalog); err != nil {
 		return "", err
 	}
 	return marshalListing(catalog)
 }
 
-func remoteCatalogTabs(view sessionView) ([]ports.RemoteCatalogTab, error) {
-	if len(view.tabs) > ports.RemoteCatalogMaxTabsPerSess {
+func remoteCatalogTabs(view sessionView) ([]catalogue.RemoteCatalogTab, error) {
+	if len(view.tabs) > catalogue.RemoteCatalogMaxTabsPerSess {
 		return nil, fmt.Errorf("remote catalog: session %q has too many tabs", view.name)
 	}
-	tabs := make([]ports.RemoteCatalogTab, 0, len(view.tabs))
+	tabs := make([]catalogue.RemoteCatalogTab, 0, len(view.tabs))
 	for i, tab := range view.tabs {
-		tabs = append(tabs, ports.RemoteCatalogTab{
+		tabs = append(tabs, catalogue.RemoteCatalogTab{
 			ID:        string(tab.id),
 			Index:     uint16(i),
 			Name:      tab.name,
@@ -793,7 +794,7 @@ func remoteCatalogTabs(view sessionView) ([]ports.RemoteCatalogTab, error) {
 	return tabs, nil
 }
 
-func remoteCatalogStoppedTabs(entry inactiveSession) ([]ports.RemoteCatalogTab, error) {
+func remoteCatalogStoppedTabs(entry inactiveSession) ([]catalogue.RemoteCatalogTab, error) {
 	records := entry.tabRecords
 	if len(records) == 0 && len(entry.tabNames) != 0 {
 		records = make([]domain.CatalogueTabRecord, len(entry.tabNames))
@@ -801,12 +802,12 @@ func remoteCatalogStoppedTabs(entry inactiveSession) ([]ports.RemoteCatalogTab, 
 			records[i].Name = name
 		}
 	}
-	if len(records) > ports.RemoteCatalogMaxTabsPerSess {
+	if len(records) > catalogue.RemoteCatalogMaxTabsPerSess {
 		return nil, fmt.Errorf("remote catalog: session %q has too many tabs", entry.name)
 	}
-	tabs := make([]ports.RemoteCatalogTab, 0, len(records))
+	tabs := make([]catalogue.RemoteCatalogTab, 0, len(records))
 	for i, record := range records {
-		tabs = append(tabs, ports.RemoteCatalogTab{ID: string(record.StableID), Index: uint16(i), Name: record.Name})
+		tabs = append(tabs, catalogue.RemoteCatalogTab{ID: string(record.StableID), Index: uint16(i), Name: record.Name})
 	}
 	return tabs, nil
 }

@@ -1,4 +1,4 @@
-package ports
+package catalogue
 
 import (
 	"testing"

@@ -132,7 +132,7 @@ var (
 	date    = "unknown"
 
 	openCatalogue = persist.OpenOrCreate
-	listenDaemon  = func(dir string, observer ports.SerializedRuntimeObserver) (ports.Listener, error) {
+	listenDaemon  = func(dir string, observer ports.SerializedRuntimeObserver) (wire.Listener, error) {
 		return ipc.Listen(dir, ipc.WithRuntimeObserver(observer))
 	}
 )
@@ -343,6 +343,8 @@ func parseHostArgs(args []string) (command, error) {
 	}
 }
 
+type remoteDialerForTarget func(target, session string, mode remoteadapter.TransportMode, log *slog.Logger) (wire.Dialer, error)
+
 // performanceTrace creates one serialized timestamp owner for this process.
 // An empty trace environment leaves all production behavior and wire bytes
 // unchanged.
@@ -354,8 +356,8 @@ var (
 	newRemoteCatalogCache                     = remoteadapter.NewFileCatalogCache
 	newRemoteCatalogClient                    = remoteadapter.NewCatalogClient
 	newRemotePreviewClient                    = remoteadapter.NewPreviewClient
-	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
-		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer)
+	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) remoteDialerForTarget {
+		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer).DialerForRemote
 	}
 	runClientWithDeps runClientFunc = func(
 		ctx context.Context,
@@ -408,7 +410,7 @@ func performanceTraceWithFactories(
 		setupErr := fmt.Errorf("configure runtime trace correlation: %w", err)
 		return nil, nil, closeTraceAfterSetupFailure(closer, setupErr)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, runtimeTraceQueueDepth)
+	reporter := observability.NewSerialized(observer, runtimeTraceQueueDepth)
 	return reporter, &runtimeTraceCloser{reporter: reporter, closer: closer}, nil
 }
 
@@ -620,8 +622,8 @@ func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord
 func constructDaemonBeforeSocketPublication(
 	construct func() *daemon.Daemon,
 	prepare func(*daemon.Daemon) error,
-	listen func() (ports.Listener, error),
-) (*daemon.Daemon, ports.Listener, error) {
+	listen func() (wire.Listener, error),
+) (*daemon.Daemon, wire.Listener, error) {
 	d := construct()
 	if err := prepare(d); err != nil {
 		return d, nil, err
@@ -648,7 +650,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	remoteDiscoveryOpt, err := remoteDiscoveryDaemonOption(platform.StateDir(), observer, os.Getenv(envRemoteTransport))
+	remoteDiscoveryOpt, err := remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport))
 	if err != nil {
 		return err
 	}
@@ -723,7 +725,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 			}
 			return nil
 		},
-		func() (ports.Listener, error) { return listenDaemon(ipc.SocketDir(), observer) },
+		func() (wire.Listener, error) { return listenDaemon(ipc.SocketDir(), observer) },
 	)
 	if err != nil {
 		closeErr := opened.Catalogue.Close()
@@ -779,7 +781,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
-		localDialer: func() ports.Dialer {
+		localDialer: func() wire.Dialer {
 			return localDaemonDialer{dir: ipc.SocketDir(), observer: observer}
 		},
 		remoteDialerFactory:     newRemoteDialerFactoryWithRuntimeObserver(observer),
@@ -794,17 +796,17 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 
 const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
 
-func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
+func defaultLocalDialer() wire.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
-func defaultRemoteDialerFactory() ports.RemoteDialerFactory {
-	return remoteadapter.NewDialerFactory()
+func defaultRemoteDialerFactory() remoteDialerForTarget {
+	return remoteadapter.NewDialerFactory().DialerForRemote
 }
 
 type runClientFunc func(context.Context, client.Dependencies, client.AttachRequest) error
 
 type runAttachDeps struct {
-	localDialer             func() ports.Dialer
-	remoteDialerFactory     ports.RemoteDialerFactory
+	localDialer             func() wire.Dialer
+	remoteDialerFactory     remoteDialerForTarget
 	selectedRemoteTransport string
 	runClient               runClientFunc
 	createDetached          func(context.Context, string) error
@@ -819,14 +821,14 @@ type runAttachDeps struct {
 	hostStore ports.RemoteHostStore
 }
 
-func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error) {
+func remoteTransportModeFromEnv(value string) (remoteadapter.TransportMode, error) {
 	switch value {
-	case "", string(ports.RemoteTransportUDP):
-		return ports.RemoteTransportUDP, nil
-	case string(ports.RemoteTransportStdio):
-		return ports.RemoteTransportStdio, nil
+	case "", string(remoteadapter.TransportUDP):
+		return remoteadapter.TransportUDP, nil
+	case string(remoteadapter.TransportStdio):
+		return remoteadapter.TransportStdio, nil
 	default:
-		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, ports.RemoteTransportUDP, ports.RemoteTransportStdio)
+		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, remoteadapter.TransportUDP, remoteadapter.TransportStdio)
 	}
 }
 
@@ -853,8 +855,8 @@ func validateRemoteAttachHandoff(target protocol.AttachTarget) error {
 
 // remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
 // the same validated transport selection used by direct remote attach.
-func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRuntimeObserver, transport string) (daemon.Option, error) {
-	mode, err := remoteTransportModeFromEnv(transport)
+func remoteDiscoveryDaemonOption(stateDir, transport string) (daemon.Option, error) {
+	_, err := remoteTransportModeFromEnv(transport)
 	if err != nil {
 		return nil, err
 	}
@@ -862,8 +864,6 @@ func remoteDiscoveryDaemonOption(stateDir string, observer ports.SerializedRunti
 		newRemoteHostStore(remoteadapter.HostStorePath(stateDir)),
 		newRemoteCatalogClient(),
 		newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)),
-		newRemoteDialerFactoryWithRuntimeObserver(observer),
-		mode,
 	)
 	preview := daemon.WithRemotePreview(newRemotePreviewClient())
 	return func(d *daemon.Daemon) {
@@ -929,7 +929,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			copyTarget := *target.RemoteTarget
 			selection = &copyTarget
 		}
-		dialer, err := factory.DialerForRemote(target.Endpoint, target.Session, mode, log)
+		dialer, err := factory(target.Endpoint, target.Session, mode, log)
 		if err != nil {
 			return nil, client.AttachRequest{}, err
 		}
@@ -957,7 +957,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			if log != nil {
 				log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
 			}
-			dialer, dialErr := factory.DialerForRemote(remoteTarget, name, mode, log)
+			dialer, dialErr := factory(remoteTarget, name, mode, log)
 			if dialErr != nil {
 				return dialErr
 			}
@@ -1043,10 +1043,10 @@ type localDaemonDialer struct {
 	observer ports.SerializedRuntimeObserver
 }
 
-func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
+func (d localDaemonDialer) Dial(ctx context.Context) (wire.Transport, error) {
 	dial := realDial
 	if d.observer != nil {
-		dial = func(ctx context.Context, dir string) (ports.Transport, error) {
+		dial = func(ctx context.Context, dir string) (wire.Transport, error) {
 			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
 		}
 	}
@@ -1161,7 +1161,7 @@ func runStdio(ctx context.Context) (retErr error) {
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (wire.Transport, error) {
 		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
@@ -1293,7 +1293,7 @@ func runUDPProxy(ctx context.Context, ready io.Writer) (retErr error) {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	daemonTr, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+	daemonTr, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (wire.Transport, error) {
 		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
@@ -1429,15 +1429,15 @@ func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, erro
 
 // runStdioProxy forwards the framed transport without interpreting protocol
 // messages. Session selection remains in the Hello sent by the thin client.
-func runStdioProxy(ctx context.Context, client, daemon ports.Transport, log *slog.Logger) error {
+func runStdioProxy(ctx context.Context, client, daemon wire.Transport, log *slog.Logger) error {
 	return proxyTransports(ctx, client, daemon, log)
 }
 
-func runUDPProxyRuntime(ctx context.Context, client, daemon ports.Transport, log *slog.Logger) error {
+func runUDPProxyRuntime(ctx context.Context, client, daemon wire.Transport, log *slog.Logger) error {
 	return dgram.ProxyRuntime{Client: client, Daemon: daemon, Log: log, IdleTTL: udpProxyIdleTTL}.Run(ctx)
 }
 
-func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger) error {
+func proxyTransports(ctx context.Context, a, b wire.Transport, log *slog.Logger) error {
 	return dgram.ProxyRuntime{Client: a, Daemon: b, Log: log}.Run(ctx)
 }
 

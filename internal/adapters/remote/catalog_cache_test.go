@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -27,22 +27,22 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vev", "remote-catalog-cache.json")
 	cache := NewFileCatalogCache(path)
 	fetchedAt := time.Unix(0, 1780000000000000000)
-	entries := []ports.RemoteCatalogCacheEntry{
+	entries := []catalogue.RemoteCatalogCacheEntry{
 		{
 			Host:      "zebra",
 			FetchedAt: fetchedAt,
-			Sessions: []ports.RemoteCatalogSession{
+			Sessions: []catalogue.RemoteCatalogSession{
 				{
 					LifecycleID: [16]byte{1}, Name: "work", State: "up", LastUsedSeq: 42, ActiveTabID: "work-2",
-					Tabs: []ports.RemoteCatalogTab{{ID: "work-1", Detail: "dynamic", Attention: true}, {ID: "work-2", Index: 1}},
+					Tabs: []catalogue.RemoteCatalogTab{{ID: "work-1", Detail: "dynamic", Attention: true}, {ID: "work-2", Index: 1}},
 				},
-				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
+				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []catalogue.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
 			},
 		},
 		{
 			Host:      "arch",
 			FetchedAt: fetchedAt.Add(time.Second),
-			Sessions:  []ports.RemoteCatalogSession{},
+			Sessions:  []catalogue.RemoteCatalogSession{},
 		},
 	}
 
@@ -73,18 +73,18 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	want := []ports.RemoteCatalogCacheEntry{
+	want := []catalogue.RemoteCatalogCacheEntry{
 		{
 			Host:      "arch",
 			FetchedAt: fetchedAt.Add(time.Second),
-			Sessions:  []ports.RemoteCatalogSession{},
+			Sessions:  []catalogue.RemoteCatalogSession{},
 		},
 		{
 			Host:      "zebra",
 			FetchedAt: fetchedAt,
-			Sessions: []ports.RemoteCatalogSession{
-				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []ports.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
-				{LifecycleID: [16]byte{1}, Name: "work", State: "up", LastUsedSeq: 42, ActiveTabID: "work-2", Tabs: []ports.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
+			Sessions: []catalogue.RemoteCatalogSession{
+				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []catalogue.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
+				{LifecycleID: [16]byte{1}, Name: "work", State: "up", LastUsedSeq: 42, ActiveTabID: "work-2", Tabs: []catalogue.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
 			},
 		},
 	}
@@ -133,14 +133,14 @@ func TestCatalogCacheLoadMigratesExactV2TabList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	want := []ports.RemoteCatalogCacheEntry{{
+	want := []catalogue.RemoteCatalogCacheEntry{{
 		Host:      "user@arch",
 		FetchedAt: time.Unix(0, 1780000000000000000),
-		Sessions: []ports.RemoteCatalogSession{
-			{LifecycleID: [16]byte{2}, Name: "dumber", State: ports.RemoteCatalogSessionDown, Tabs: []ports.RemoteCatalogTab{}},
+		Sessions: []catalogue.RemoteCatalogSession{
+			{LifecycleID: [16]byte{2}, Name: "dumber", State: catalogue.RemoteCatalogSessionDown, Tabs: []catalogue.RemoteCatalogTab{}},
 			{
-				LifecycleID: [16]byte{1}, Name: "work", State: ports.RemoteCatalogSessionUp,
-				LastUsedSeq: 42, Tabs: []ports.RemoteCatalogTab{{ID: "t_work", Name: "shell"}}, ActiveTabID: "t_work",
+				LifecycleID: [16]byte{1}, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+				LastUsedSeq: 42, Tabs: []catalogue.RemoteCatalogTab{{ID: "t_work", Name: "shell"}}, ActiveTabID: "t_work",
 			},
 		},
 	}}
@@ -208,10 +208,10 @@ func TestCatalogCacheStoreFailurePreservesExistingFile(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "vev", "remote-catalog-cache.json")
 	cache := NewFileCatalogCache(path)
-	valid := []ports.RemoteCatalogCacheEntry{{
+	valid := []catalogue.RemoteCatalogCacheEntry{{
 		Host:      "arch",
 		FetchedAt: time.Unix(0, 1),
-		Sessions:  []ports.RemoteCatalogSession{},
+		Sessions:  []catalogue.RemoteCatalogSession{},
 	}}
 	if err := cache.Store(valid); err != nil {
 		t.Fatalf("initial Store() error = %v", err)
@@ -221,10 +221,10 @@ func TestCatalogCacheStoreFailurePreservesExistingFile(t *testing.T) {
 		t.Fatalf("read initial cache: %v", err)
 	}
 
-	invalid := []ports.RemoteCatalogCacheEntry{{
+	invalid := []catalogue.RemoteCatalogCacheEntry{{
 		Host:      "arch",
 		FetchedAt: time.Time{},
-		Sessions:  []ports.RemoteCatalogSession{},
+		Sessions:  []catalogue.RemoteCatalogSession{},
 	}}
 	if err := cache.Store(invalid); err == nil {
 		t.Fatal("Store() error = nil, want validation error")
@@ -251,10 +251,10 @@ func TestCatalogCacheStoreRejectsNonPositiveFetchedTimes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "remote-catalog-cache.json")
-			entries := []ports.RemoteCatalogCacheEntry{{
+			entries := []catalogue.RemoteCatalogCacheEntry{{
 				Host:      "arch",
 				FetchedAt: tc.fetchedAt,
-				Sessions:  []ports.RemoteCatalogSession{},
+				Sessions:  []catalogue.RemoteCatalogSession{},
 			}}
 
 			err := NewFileCatalogCache(path).Store(entries)
@@ -281,7 +281,7 @@ func TestCatalogCacheStoreHardensExistingFilePermissions(t *testing.T) {
 	}
 
 	cache := NewFileCatalogCache(path)
-	if err := cache.Store([]ports.RemoteCatalogCacheEntry{}); err != nil {
+	if err := cache.Store([]catalogue.RemoteCatalogCacheEntry{}); err != nil {
 		t.Fatalf("Store() error = %v", err)
 	}
 	info, err := os.Stat(path)
@@ -306,7 +306,7 @@ func TestCatalogCacheStoreRenameFailureCleansTemporaryFile(t *testing.T) {
 	}
 
 	cache := NewFileCatalogCache(path)
-	if err := cache.Store([]ports.RemoteCatalogCacheEntry{}); err == nil {
+	if err := cache.Store([]catalogue.RemoteCatalogCacheEntry{}); err == nil {
 		t.Fatal("Store() error = nil, want rename error")
 	}
 	entries, err := os.ReadDir(dir)
@@ -320,6 +320,6 @@ func TestCatalogCacheStoreRenameFailureCleansTemporaryFile(t *testing.T) {
 	}
 }
 
-func equalRemoteCatalogCacheEntry(a, b ports.RemoteCatalogCacheEntry) bool {
+func equalRemoteCatalogCacheEntry(a, b catalogue.RemoteCatalogCacheEntry) bool {
 	return a.Host == b.Host && a.FetchedAt.Equal(b.FetchedAt) && reflect.DeepEqual(a.Sessions, b.Sessions)
 }

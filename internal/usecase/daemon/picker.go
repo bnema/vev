@@ -9,8 +9,8 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -1005,14 +1005,14 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 	return nil
 }
 
-func (d *Daemon) remoteCatalogEntryLocked(host string) (ports.RemoteCatalogCacheEntry, bool) {
+func (d *Daemon) remoteCatalogEntryLocked(host string) (catalogue.RemoteCatalogCacheEntry, bool) {
 	if d.remoteCatalog.status[host] != remoteHostFresh {
-		return ports.RemoteCatalogCacheEntry{}, false
+		return catalogue.RemoteCatalogCacheEntry{}, false
 	}
 	entry, ok := d.remoteCatalog.cache[host]
 	if !ok || remoteCatalogExpired(entry.FetchedAt, d.clock.Now()) {
 		d.remoteCatalog.status[host] = remoteHostStale
-		return ports.RemoteCatalogCacheEntry{}, false
+		return catalogue.RemoteCatalogCacheEntry{}, false
 	}
 	return entry, true
 }
@@ -1031,10 +1031,10 @@ func (d *Daemon) remoteCatalogTargetReady(target domain.RemoteSessionTarget) boo
 		if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
 			continue
 		}
-		if target.Stopped != remoteSessionStateStopped(session.State) || session.State == ports.RemoteCatalogSessionBroken {
+		if target.Stopped != remoteSessionStateStopped(session.State) || session.State == catalogue.RemoteCatalogSessionBroken {
 			return false
 		}
-		tabs := ports.CatalogTabs(session)
+		tabs := catalogue.CatalogTabs(session)
 		metadata := make([]domain.TabSelectorTab, 0, len(tabs))
 		for _, tab := range tabs {
 			metadata = append(metadata, domain.TabSelectorTab{ID: domain.TabStableID(tab.ID), Name: tab.Name})

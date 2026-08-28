@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 type remoteCatalogPresentationEntry struct {
-	entry  ports.RemoteCatalogCacheEntry
+	entry  catalogue.RemoteCatalogCacheEntry
 	status remoteHostStatus
 }
 
@@ -72,7 +72,7 @@ func (d *Daemon) remoteCatalogSnapshot() []remoteCatalogPresentationEntry {
 			continue
 		}
 		entries = append(entries, remoteCatalogPresentationEntry{
-			entry:  ports.RemoteCatalogCacheEntry{Host: host},
+			entry:  catalogue.RemoteCatalogCacheEntry{Host: host},
 			status: status,
 		})
 	}
@@ -138,11 +138,11 @@ func remotePickerStatusDetail(status remoteHostStatus, fetchedAt time.Time) stri
 	}
 }
 
-func remoteSessionStateStopped(state ports.RemoteCatalogSessionState) bool {
-	return state == ports.RemoteCatalogSessionDown
+func remoteSessionStateStopped(state catalogue.RemoteCatalogSessionState) bool {
+	return state == catalogue.RemoteCatalogSessionDown
 }
 
-func remoteCatalogSessionTarget(key domain.RemoteSessionKey, session ports.RemoteCatalogSession) (domain.RemoteSessionKey, domain.RemoteSessionTarget) {
+func remoteCatalogSessionTarget(key domain.RemoteSessionKey, session catalogue.RemoteCatalogSession) (domain.RemoteSessionKey, domain.RemoteSessionTarget) {
 	key.LifecycleID = session.LifecycleID
 	key.DisplayOrigin = domain.RemoteDisplayOrigin(key.Host)
 	target := domain.RemoteSessionTarget{
@@ -152,7 +152,7 @@ func remoteCatalogSessionTarget(key domain.RemoteSessionKey, session ports.Remot
 		SessionName:   session.Name,
 		Stopped:       remoteSessionStateStopped(session.State),
 	}
-	tabs := ports.CatalogTabs(session)
+	tabs := catalogue.CatalogTabs(session)
 	if len(tabs) == 0 {
 		return key, target
 	}
@@ -177,12 +177,12 @@ func remoteCatalogSessionTarget(key domain.RemoteSessionKey, session ports.Remot
 	return key, target
 }
 
-func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
+func remotePickerView(key domain.RemoteSessionKey, session catalogue.RemoteCatalogSession, status remoteHostStatus, fetchedAt time.Time) picker.SessionView {
 	key, target := remoteCatalogSessionTarget(key, session)
 	availability := remotePickerAvailability(status)
 	stopped := remoteSessionStateStopped(session.State)
-	broken := session.State == ports.RemoteCatalogSessionBroken
-	tabs := ports.CatalogTabs(session)
+	broken := session.State == catalogue.RemoteCatalogSessionBroken
+	tabs := catalogue.CatalogTabs(session)
 	viewTabs := make([]picker.TabEntry, 0, len(tabs))
 	active := 0
 	for i, tab := range tabs {
@@ -236,7 +236,7 @@ func remotePickerView(key domain.RemoteSessionKey, session ports.RemoteCatalogSe
 			detail = "identity changed"
 		case activation == picker.RemoteRestart:
 			detail = "stopped — Enter to restart"
-		case session.State == ports.RemoteCatalogSessionUp:
+		case session.State == catalogue.RemoteCatalogSessionUp:
 			detail = "up"
 		case stopped:
 			detail = "stopped"
@@ -573,7 +573,7 @@ func containsRemoteDiscoveryHost(hosts []string, target string) bool {
 // applyRemoteRefreshResult publishes one host completion only if both its
 // refresh generation and current host-registry membership remain authoritative.
 // Its return reports whether durable cache state changed.
-func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalog ports.RemoteCatalog, listErr error) bool {
+func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalog catalogue.RemoteCatalog, listErr error) bool {
 	if d == nil {
 		return false
 	}
@@ -592,7 +592,7 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 	stillKnown := containsRemoteDiscoveryHost(hosts, host)
 	now := d.clock.Now()
 	if listErr == nil {
-		if err := ports.ValidateRemoteCatalog(catalog); err != nil {
+		if err := catalogue.ValidateRemoteCatalog(catalog); err != nil {
 			listErr = err
 		}
 	}
@@ -616,13 +616,13 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 	}
 	if listErr != nil {
 		status := remoteHostMalformed
-		var mismatch *ports.RemoteCatalogVersionMismatchError
+		var mismatch *catalogue.RemoteCatalogVersionMismatchError
 		if errors.As(listErr, &mismatch) {
 			status = remoteHostVersionMismatch
-		} else if !errors.Is(listErr, ports.ErrInvalidRemoteCatalog) &&
-			!errors.Is(listErr, ports.ErrRemoteCatalogTooLarge) &&
-			!errors.Is(listErr, ports.ErrRemoteCatalogUnknownState) &&
-			!errors.Is(listErr, ports.ErrRemoteCatalogInvalidReason) {
+		} else if !errors.Is(listErr, catalogue.ErrInvalidRemoteCatalog) &&
+			!errors.Is(listErr, catalogue.ErrRemoteCatalogTooLarge) &&
+			!errors.Is(listErr, catalogue.ErrRemoteCatalogUnknownState) &&
+			!errors.Is(listErr, catalogue.ErrRemoteCatalogInvalidReason) {
 			status = remoteHostUnreachable
 		}
 		d.remoteCatalog.status[host] = status
@@ -631,7 +631,7 @@ func (d *Daemon) applyRemoteRefreshResult(generation uint64, host string, catalo
 		d.refreshRemoteDiscoveryConsumers()
 		return false
 	}
-	d.remoteCatalog.cache[host] = cloneRemoteCatalogEntry(ports.RemoteCatalogCacheEntry{
+	d.remoteCatalog.cache[host] = cloneRemoteCatalogEntry(catalogue.RemoteCatalogCacheEntry{
 		Host:      host,
 		FetchedAt: now,
 		Sessions:  catalog.Sessions,

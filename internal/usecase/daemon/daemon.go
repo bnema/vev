@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
@@ -304,8 +305,6 @@ type Daemon struct {
 	remoteCatalogClient ports.RemoteCatalogClient
 	remoteCatalogCache  ports.RemoteCatalogCache
 	remotePreviewClient ports.RemotePreviewClient
-	remoteDialerFactory ports.RemoteDialerFactory
-	remoteTransportMode ports.RemoteTransportMode
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -416,14 +415,11 @@ func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 }
 
 // WithRemoteDiscovery installs the remote discovery ports used by the daemon.
-// The composition root validates mode before constructing the daemon.
-func WithRemoteDiscovery(store ports.RemoteHostStore, catalog ports.RemoteCatalogClient, cache ports.RemoteCatalogCache, dialer ports.RemoteDialerFactory, mode ports.RemoteTransportMode) Option {
+func WithRemoteDiscovery(store ports.RemoteHostStore, catalog ports.RemoteCatalogClient, cache ports.RemoteCatalogCache) Option {
 	return func(d *Daemon) {
 		d.remoteHostStore = store
 		d.remoteCatalogClient = catalog
 		d.remoteCatalogCache = cache
-		d.remoteDialerFactory = dialer
-		d.remoteTransportMode = mode
 	}
 }
 
@@ -1351,14 +1347,14 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		sess.env = copyEnvironment(h.Env)
 	}
 	sess.mu.Unlock()
-	terminalCapabilities := ports.DetectTerminalCapabilities(h.Env)
+	terminalCapabilities := terminalcap.Detect(h.Env)
 	// Kitty graphics are enabled only by the explicit direct-terminal
 	// declaration in Hello. Environment values remain useful for color and
 	// diagnostics, but cannot authorize terminal-global graphics side effects.
 	terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
 	if h.TrueColor && !terminalCapabilities.TrueColor() {
-		terminalCapabilities.ColorMode = ports.TerminalColorTrueColor
-		terminalCapabilities.ColorSource = ports.TerminalCapabilityDeclared
+		terminalCapabilities.ColorMode = terminalcap.TrueColor
+		terminalCapabilities.ColorSource = terminalcap.SourceDeclared
 	}
 	opts := attachClientOptions{
 		clientID:               h.ClientID,

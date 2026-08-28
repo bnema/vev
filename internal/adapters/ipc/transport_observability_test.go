@@ -21,7 +21,7 @@ func TestTransportObservabilityIPCEOFAndCloseEndFailedSpans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 
 	// EOF from the peer and a locally closed blocked receive are distinct
@@ -145,7 +145,7 @@ func TestTransportObservabilityIPCMarksCarriageWithoutChangingBytes(t *testing.T
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 
 	left, right := net.Pipe()

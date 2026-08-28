@@ -21,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
@@ -82,7 +83,7 @@ func run() (runErr error) {
 }
 
 func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteCatalogClient, preview ports.RemotePreviewClient) error {
-	stdio, err := openTransport(ctx, ports.RemoteTransportStdio, target)
+	stdio, err := openTransport(ctx, remoteadapter.TransportStdio, target)
 	if err != nil {
 		return fmt.Errorf("open stdio transport: %w", err)
 	}
@@ -114,7 +115,7 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 	if err != nil {
 		return fmt.Errorf("multi-tab catalog: %w", err)
 	}
-	beforeTabs := ports.CatalogTabs(liveWithTabs)
+	beforeTabs := catalogue.CatalogTabs(liveWithTabs)
 	if err := sendCommand(ctx, stdio, "close-tab"); err != nil {
 		return fmt.Errorf("remove tab: %w", err)
 	}
@@ -122,7 +123,7 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 	if err != nil {
 		return fmt.Errorf("removed-tab catalog: %w", err)
 	}
-	removedID, ok := removedCatalogTabID(beforeTabs, ports.CatalogTabs(after))
+	removedID, ok := removedCatalogTabID(beforeTabs, catalogue.CatalogTabs(after))
 	if !ok {
 		return errors.New("removed-tab catalog did not identify exactly one removed tab")
 	}
@@ -161,7 +162,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 		inputMarker   = "VEV_REMOTE_PICKER_INPUT_OK"
 	)
 
-	remote, err := openTransport(ctx, ports.RemoteTransportStdio, target)
+	remote, err := openTransport(ctx, remoteadapter.TransportStdio, target)
 	if err != nil {
 		return fmt.Errorf("open remote picker source: %w", err)
 	}
@@ -201,7 +202,7 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	if remoteCatalog.ActiveTabID == "" {
 		return errors.New("remote picker catalog omitted active tab")
 	}
-	tabs := ports.CatalogTabs(remoteCatalog)
+	tabs := catalogue.CatalogTabs(remoteCatalog)
 	if len(tabs) != 2 {
 		return errors.New("remote picker catalog did not retain both tabs")
 	}
@@ -347,7 +348,7 @@ func runRestartResumePhase(ctx context.Context, target string, catalog ports.Rem
 	if err != nil {
 		return domain.RemoteSessionTarget{}, fmt.Errorf("resumed target: %w", err)
 	}
-	resumed, err := openTransport(ctx, ports.RemoteTransportStdio, target)
+	resumed, err := openTransport(ctx, remoteadapter.TransportStdio, target)
 	if err != nil {
 		return domain.RemoteSessionTarget{}, fmt.Errorf("open restart stdio transport: %w", err)
 	}
@@ -381,7 +382,7 @@ func runRestartResumePhase(ctx context.Context, target string, catalog ports.Rem
 }
 
 func runUDPPhase(ctx context.Context, target string) error {
-	udp, err := openTransport(ctx, ports.RemoteTransportUDP, target)
+	udp, err := openTransport(ctx, remoteadapter.TransportUDP, target)
 	if err != nil {
 		return fmt.Errorf("open UDP transport: %w", err)
 	}
@@ -418,7 +419,7 @@ func runStaleTargetPhase(ctx context.Context, target string, catalog ports.Remot
 	if err := waitForMissingSession(ctx, catalog, target, sessionName); err != nil {
 		return fmt.Errorf("wait for destroyed session: %w", err)
 	}
-	stale, err := openTransport(ctx, ports.RemoteTransportStdio, target)
+	stale, err := openTransport(ctx, remoteadapter.TransportStdio, target)
 	if err != nil {
 		return fmt.Errorf("open stale-target transport: %w", err)
 	}
@@ -429,7 +430,7 @@ func runStaleTargetPhase(ctx context.Context, target string, catalog ports.Remot
 	return nil
 }
 
-func removedCatalogTabID(before, after []ports.RemoteCatalogTab) (string, bool) {
+func removedCatalogTabID(before, after []catalogue.RemoteCatalogTab) (string, bool) {
 	remaining := make(map[string]struct{}, len(after))
 	for _, tab := range after {
 		remaining[tab.ID] = struct{}{}
@@ -464,7 +465,7 @@ type harnessFrame struct {
 }
 
 type harnessTransport struct {
-	ports.Transport
+	wire.Transport
 	probe     *visualProbe
 	frames    chan harnessFrame
 	queued    []harnessFrame
@@ -473,7 +474,7 @@ type harnessTransport struct {
 	closeErr  error
 }
 
-func newHarnessTransport(transport ports.Transport) *harnessTransport {
+func newHarnessTransport(transport wire.Transport) *harnessTransport {
 	h := &harnessTransport{
 		Transport: transport,
 		probe:     newVisualProbe(domain.Size{Cols: defaultProbeCols, Rows: defaultProbeRows}),
@@ -506,13 +507,13 @@ func (h *harnessTransport) Close() error {
 	return h.closeErr
 }
 
-func openTransport(ctx context.Context, mode ports.RemoteTransportMode, target string) (*harnessTransport, error) {
-	var transport ports.Transport
+func openTransport(ctx context.Context, mode remoteadapter.TransportMode, target string) (*harnessTransport, error) {
+	var transport wire.Transport
 	var err error
 	switch mode {
-	case ports.RemoteTransportStdio:
+	case remoteadapter.TransportStdio:
 		transport, err = sshstdio.DialContext(ctx, target, "", slog.New(slog.DiscardHandler))
-	case ports.RemoteTransportUDP:
+	case remoteadapter.TransportUDP:
 		dialer := dgram.NewRemoteDialerWithLogger(target, "", slog.New(slog.DiscardHandler))
 		dialer.BootstrapTimeout = 8 * time.Second
 		dialer.ProbeTimeout = 3 * time.Second
@@ -893,8 +894,8 @@ func expectNoSuchTarget(ctx context.Context, tr *harnessTransport, target domain
 	return nil
 }
 
-func targetForSession(endpoint string, session ports.RemoteCatalogSession, stopped bool) (domain.RemoteSessionTarget, error) {
-	tabs := ports.CatalogTabs(session)
+func targetForSession(endpoint string, session catalogue.RemoteCatalogSession, stopped bool) (domain.RemoteSessionTarget, error) {
+	tabs := catalogue.CatalogTabs(session)
 	if len(tabs) == 0 {
 		return domain.RemoteSessionTarget{}, errors.New("catalog session has no tabs")
 	}
@@ -932,18 +933,18 @@ func targetEndpoint(endpoint string) string {
 	return endpoint
 }
 
-func waitForSession(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name string, state ports.RemoteCatalogSessionState) (ports.RemoteCatalogSession, error) {
+func waitForSession(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name string, state catalogue.RemoteCatalogSessionState) (catalogue.RemoteCatalogSession, error) {
 	return waitForSessionWithTabCount(ctx, catalog, endpoint, name, state, 0)
 }
 
-func waitForSessionWithTabCount(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name string, state ports.RemoteCatalogSessionState, tabs int) (ports.RemoteCatalogSession, error) {
+func waitForSessionWithTabCount(ctx context.Context, catalog ports.RemoteCatalogClient, endpoint, name string, state catalogue.RemoteCatalogSessionState, tabs int) (catalogue.RemoteCatalogSession, error) {
 	deadline, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	for {
 		result, err := catalog.List(deadline, endpoint)
 		if err == nil {
 			for _, session := range result.Sessions {
-				if session.Name == name && session.State == state && (tabs == 0 || len(ports.CatalogTabs(session)) == tabs) {
+				if session.Name == name && session.State == state && (tabs == 0 || len(catalogue.CatalogTabs(session)) == tabs) {
 					return session, nil
 				}
 			}
@@ -951,9 +952,9 @@ func waitForSessionWithTabCount(ctx context.Context, catalog ports.RemoteCatalog
 		select {
 		case <-deadline.Done():
 			if err != nil {
-				return ports.RemoteCatalogSession{}, err
+				return catalogue.RemoteCatalogSession{}, err
 			}
-			return ports.RemoteCatalogSession{}, fmt.Errorf("session %q did not reach state %q", name, state)
+			return catalogue.RemoteCatalogSession{}, fmt.Errorf("session %q did not reach state %q", name, state)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

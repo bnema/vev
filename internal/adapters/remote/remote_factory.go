@@ -8,33 +8,38 @@ import (
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// DialerFactory selects the requested remote transport adapter.
+// TransportMode selects a concrete remote carriage after app validation.
+type TransportMode string
+
+const (
+	TransportUDP   TransportMode = "udp"
+	TransportStdio TransportMode = "stdio"
+)
+
+// DialerFactory constructs target-specific raw carriage dialers.
 type DialerFactory struct {
 	observer ports.SerializedRuntimeObserver
 }
 
-var _ ports.RemoteDialerFactory = DialerFactory{}
-
 func NewDialerFactory() DialerFactory { return DialerFactory{} }
 
-// NewDialerFactoryWithRuntimeObserver wires the one process-local sink into
-// whichever concrete remote carriage adapter is selected.
 func NewDialerFactoryWithRuntimeObserver(observer ports.SerializedRuntimeObserver) DialerFactory {
 	return DialerFactory{observer: observer}
 }
 
-func (f DialerFactory) DialerForRemote(target string, session string, mode ports.RemoteTransportMode, log *slog.Logger) (ports.Dialer, error) {
+func (f DialerFactory) DialerForRemote(target, session string, mode TransportMode, log *slog.Logger) (wire.Dialer, error) {
 	switch mode {
-	case ports.RemoteTransportUDP:
+	case TransportUDP:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
 		}
 		dialer := dgram.NewRemoteDialerWithLogger(target, "", log)
 		dialer.RuntimeObserver = f.observer
 		return dialer, nil
-	case ports.RemoteTransportStdio:
+	case TransportStdio:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
 		}
@@ -50,6 +55,6 @@ type stdioDialer struct {
 	observer ports.SerializedRuntimeObserver
 }
 
-func (d stdioDialer) Dial(ctx context.Context) (ports.Transport, error) {
+func (d stdioDialer) Dial(ctx context.Context) (wire.Transport, error) {
 	return sshstdio.DialContextWithRuntimeObserver(ctx, d.target, "", d.log, sshstdio.WithRuntimeObserver(d.observer))
 }

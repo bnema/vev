@@ -8,7 +8,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -95,7 +95,7 @@ func newOutputStateStream(windowSize ...uint8) *attachmentOutput {
 	return newOutputStateStreamForProfile(renderer.ColorProfileTrueColor, windowSize...)
 }
 
-func newOutputStateStreamForCapabilities(capabilities ports.TerminalCapabilities, windowSize ...uint8) *attachmentOutput {
+func newOutputStateStreamForCapabilities(capabilities terminalcap.Capabilities, windowSize ...uint8) *attachmentOutput {
 	profile := renderer.ColorProfileANSI256
 	if capabilities.TrueColor() {
 		profile = renderer.ColorProfileTrueColor

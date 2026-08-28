@@ -22,6 +22,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev-vt/protocol/terminalquery"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/theme"
@@ -1121,7 +1122,7 @@ func paletteSlot(slot int) (uint8, bool) {
 
 // DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
 func DetectTrueColor(termEnv, colorTerm string) bool {
-	return ports.DetectTrueColor(termEnv, colorTerm)
+	return terminalcap.DetectTrueColor(termEnv, colorTerm)
 }
 
 func requestedOutputWindow(connection ports.ClientConnection) uint8 {

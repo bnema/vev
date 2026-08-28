@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -61,7 +62,7 @@ func TestDialContextPreservesOptions(t *testing.T) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	observer := ports.NewSerializedRuntimeObserver(dialTestObserver{}, 1)
+	observer := observability.NewSerialized(dialTestObserver{}, 1)
 	defer observer.Close()
 	transport, err := DialContext(context.Background(), dir, WithRuntimeObserver(observer))
 	if err != nil {

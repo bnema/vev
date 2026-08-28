@@ -15,6 +15,7 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
 
 type mockTestingT interface {
@@ -22,10 +23,10 @@ type mockTestingT interface {
 	Cleanup(func())
 }
 
-type mockClientConnection struct{ *portsmocks.MockTransport }
+type mockClientConnection struct{ *wiremocks.MockTransport }
 
 func newMockClientConnection(t mockTestingT) *mockClientConnection {
-	return &mockClientConnection{MockTransport: portsmocks.NewMockTransport(t)}
+	return &mockClientConnection{MockTransport: wiremocks.NewMockTransport(t)}
 }
 
 func (c *mockClientConnection) SendClient(message protocol.ClientMessage) error {
@@ -52,7 +53,7 @@ func (c *mockClientConnection) LinkEvents() <-chan ports.LinkEvent {
 	return testClientLinkEvents(c.MockTransport)
 }
 
-type rawClientConnection struct{ raw ports.Transport }
+type rawClientConnection struct{ raw wire.Transport }
 
 func (c *rawClientConnection) SendClient(message protocol.ClientMessage) error {
 	frame, err := testClientFrame(message)
@@ -75,10 +76,10 @@ func (c *rawClientConnection) LinkState() ports.LinkState         { return testC
 func (c *rawClientConnection) LinkEvents() <-chan ports.LinkEvent { return testClientLinkEvents(c.raw) }
 func (c *rawClientConnection) Close() error                       { return c.raw.Close() }
 
-type mockClientDialer struct{ *portsmocks.MockDialer }
+type mockClientDialer struct{ *wiremocks.MockDialer }
 
 func newMockClientDialer(t mockTestingT) *mockClientDialer {
-	return &mockClientDialer{MockDialer: portsmocks.NewMockDialer(t)}
+	return &mockClientDialer{MockDialer: wiremocks.NewMockDialer(t)}
 }
 func (d *mockClientDialer) Dial(ctx context.Context) (ports.ClientConnection, error) {
 	raw, err := d.MockDialer.Dial(ctx)
@@ -179,8 +180,8 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 	}
 }
 
-func testClientCapabilities(raw ports.Transport) protocol.ConnectionCapabilities {
-	_, dgram := raw.(ports.DatagramTransport)
+func testClientCapabilities(raw wire.Transport) protocol.ConnectionCapabilities {
+	_, dgram := raw.(wire.DatagramTransport)
 	_, link := raw.(ports.LinkStateReporter)
 	window := uint8(protocol.MaxOutputWindow)
 	if dgram {
@@ -188,13 +189,13 @@ func testClientCapabilities(raw ports.Transport) protocol.ConnectionCapabilities
 	}
 	return protocol.ConnectionCapabilities{OutputDataLimit: protocol.MaxOutputDataLen, PreferredOutputWindow: window, LinkState: link}
 }
-func testClientLinkState(raw ports.Transport) ports.LinkState {
+func testClientLinkState(raw wire.Transport) ports.LinkState {
 	if r, ok := raw.(ports.LinkStateReporter); ok {
 		return r.LinkState()
 	}
 	return ports.LinkStateConnected
 }
-func testClientLinkEvents(raw ports.Transport) <-chan ports.LinkEvent {
+func testClientLinkEvents(raw wire.Transport) <-chan ports.LinkEvent {
 	if r, ok := raw.(ports.LinkStateReporter); ok {
 		return r.LinkEvents()
 	}

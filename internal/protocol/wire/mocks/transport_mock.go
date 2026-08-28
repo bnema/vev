@@ -2,12 +2,11 @@
 // github.com/vektra/mockery
 // template: testify
 
-package portsmocks
+package wiremocks
 
 import (
 	"context"
 
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -579,27 +578,27 @@ func (_m *MockDialer) EXPECT() *MockDialer_Expecter {
 }
 
 // Dial provides a mock function for the type MockDialer
-func (_mock *MockDialer) Dial(ctx context.Context) (ports.Transport, error) {
-	ret := _mock.Called(ctx)
+func (_mock *MockDialer) Dial(context1 context.Context) (wire.Transport, error) {
+	ret := _mock.Called(context1)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Dial")
 	}
 
-	var r0 ports.Transport
+	var r0 wire.Transport
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) (ports.Transport, error)); ok {
-		return returnFunc(ctx)
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (wire.Transport, error)); ok {
+		return returnFunc(context1)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context) ports.Transport); ok {
-		r0 = returnFunc(ctx)
+	if returnFunc, ok := ret.Get(0).(func(context.Context) wire.Transport); ok {
+		r0 = returnFunc(context1)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(ports.Transport)
+			r0 = ret.Get(0).(wire.Transport)
 		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
-		r1 = returnFunc(ctx)
+		r1 = returnFunc(context1)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -612,12 +611,12 @@ type MockDialer_Dial_Call struct {
 }
 
 // Dial is a helper method to define mock.On call
-//   - ctx context.Context
-func (_e *MockDialer_Expecter) Dial(ctx any) *MockDialer_Dial_Call {
-	return &MockDialer_Dial_Call{Call: _e.mock.On("Dial", ctx)}
+//   - context1 context.Context
+func (_e *MockDialer_Expecter) Dial(context1 any) *MockDialer_Dial_Call {
+	return &MockDialer_Dial_Call{Call: _e.mock.On("Dial", context1)}
 }
 
-func (_c *MockDialer_Dial_Call) Run(run func(ctx context.Context)) *MockDialer_Dial_Call {
+func (_c *MockDialer_Dial_Call) Run(run func(context1 context.Context)) *MockDialer_Dial_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -630,12 +629,12 @@ func (_c *MockDialer_Dial_Call) Run(run func(ctx context.Context)) *MockDialer_D
 	return _c
 }
 
-func (_c *MockDialer_Dial_Call) Return(transport ports.Transport, err error) *MockDialer_Dial_Call {
+func (_c *MockDialer_Dial_Call) Return(transport wire.Transport, err error) *MockDialer_Dial_Call {
 	_c.Call.Return(transport, err)
 	return _c
 }
 
-func (_c *MockDialer_Dial_Call) RunAndReturn(run func(ctx context.Context) (ports.Transport, error)) *MockDialer_Dial_Call {
+func (_c *MockDialer_Dial_Call) RunAndReturn(run func(context1 context.Context) (wire.Transport, error)) *MockDialer_Dial_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -668,23 +667,23 @@ func (_m *MockListener) EXPECT() *MockListener_Expecter {
 }
 
 // Accept provides a mock function for the type MockListener
-func (_mock *MockListener) Accept() (ports.Transport, error) {
+func (_mock *MockListener) Accept() (wire.Transport, error) {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for Accept")
 	}
 
-	var r0 ports.Transport
+	var r0 wire.Transport
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() (ports.Transport, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func() (wire.Transport, error)); ok {
 		return returnFunc()
 	}
-	if returnFunc, ok := ret.Get(0).(func() ports.Transport); ok {
+	if returnFunc, ok := ret.Get(0).(func() wire.Transport); ok {
 		r0 = returnFunc()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(ports.Transport)
+			r0 = ret.Get(0).(wire.Transport)
 		}
 	}
 	if returnFunc, ok := ret.Get(1).(func() error); ok {
@@ -712,12 +711,12 @@ func (_c *MockListener_Accept_Call) Run(run func()) *MockListener_Accept_Call {
 	return _c
 }
 
-func (_c *MockListener_Accept_Call) Return(transport ports.Transport, err error) *MockListener_Accept_Call {
+func (_c *MockListener_Accept_Call) Return(transport wire.Transport, err error) *MockListener_Accept_Call {
 	_c.Call.Return(transport, err)
 	return _c
 }
 
-func (_c *MockListener_Accept_Call) RunAndReturn(run func() (ports.Transport, error)) *MockListener_Accept_Call {
+func (_c *MockListener_Accept_Call) RunAndReturn(run func() (wire.Transport, error)) *MockListener_Accept_Call {
 	_c.Call.Return(run)
 	return _c
 }

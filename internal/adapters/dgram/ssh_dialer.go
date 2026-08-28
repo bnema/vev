@@ -15,6 +15,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -112,7 +113,7 @@ func NewRemoteDialerWithLogger(target, _ string, log *slog.Logger) RemoteDialer 
 	return RemoteDialer{Target: target, ProbeTimeout: defaultProbeTimeout, Log: log}
 }
 
-func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
+func (d RemoteDialer) Dial(ctx context.Context) (wire.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

@@ -23,8 +23,10 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/bnema/vev/internal/protocol/wire"
+	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/kv"
@@ -220,7 +222,7 @@ func TestCatalogueFailureDoesNotListen(t *testing.T) {
 				require.Equal(t, stateDir, gotStateDir)
 				return persist.OpenResult{}, catalogueErr
 			}
-			listenDaemon = func(string, ports.SerializedRuntimeObserver) (ports.Listener, error) {
+			listenDaemon = func(string, ports.SerializedRuntimeObserver) (wire.Listener, error) {
 				listenCalls++
 				return nil, errors.New("IPC listen must not run after catalogue failure")
 			}
@@ -251,7 +253,7 @@ func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
 			events = append(events, "startup-garbage-collection")
 			return nil
 		},
-		func() (ports.Listener, error) {
+		func() (wire.Listener, error) {
 			require.Equal(t, []string{"catalogue-registry", "startup-garbage-collection"}, events)
 			events = append(events, "socket-publication")
 			return nil, nil
@@ -577,7 +579,7 @@ func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd, err := parseArgs([]string{"attach", tt.arg})
 			require.NoError(t, err)
-			connection, err := client.NewSessionConnection(sessionwire.NewClientConnection(portsmocks.NewMockTransport(t)), client.SessionTarget{
+			connection, err := client.NewSessionConnection(sessionwire.NewClientConnection(wiremocks.NewMockTransport(t)), client.SessionTarget{
 				Intent:      cmd.intent,
 				SessionName: cmd.name,
 			})
@@ -808,7 +810,7 @@ func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
 
 type namedDialer struct{ name string }
 
-func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
+func (d namedDialer) Dial(context.Context) (wire.Transport, error) {
 	return nil, fmt.Errorf("not used: %s", d.name)
 }
 
@@ -827,10 +829,10 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 	tests := []struct {
 		name              string
 		selectedTransport string
-		wantMode          ports.RemoteTransportMode
+		wantMode          remoteadapter.TransportMode
 	}{
-		{name: "default remote mode is udp", selectedTransport: "", wantMode: ports.RemoteTransportUDP},
-		{name: "explicit stdio mode", selectedTransport: "stdio", wantMode: ports.RemoteTransportStdio},
+		{name: "default remote mode is udp", selectedTransport: "", wantMode: remoteadapter.TransportUDP},
+		{name: "explicit stdio mode", selectedTransport: "stdio", wantMode: remoteadapter.TransportStdio},
 	}
 
 	for _, tt := range tests {
@@ -839,11 +841,11 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 			var gotRemote bool
 			var gotClipboard ports.ClipboardReader
 			clip := &fakeClipboardReader{}
-			factory := portsmocks.NewMockRemoteDialerFactory(t)
+			factory := newRemoteDialerFactoryMock(t)
 			factory.EXPECT().DialerForRemote("remote.example", "work", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
 
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-				remoteDialerFactory:     factory,
+				remoteDialerFactory:     factory.DialerForRemote,
 				selectedRemoteTransport: tt.selectedTransport,
 				clipboard:               clip,
 				runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
@@ -877,12 +879,12 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 }
 
 func TestRunAttachWithDepsDirectLegacyCallbackPreservesClientOwnership(t *testing.T) {
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
+	factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
 
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
+		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			require.True(t, request.Remote)
 			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
@@ -900,12 +902,12 @@ func TestRunAttachWithDepsDirectLegacyCallbackPreservesClientOwnership(t *testin
 }
 
 func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.T) {
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
+	factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
 	var calls int
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
+		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			calls++
 			require.NotNil(t, deps.Dialer)
@@ -922,12 +924,12 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 }
 
 func TestRunAttachWithDepsAllowsRevisitingRemoteHandoff(t *testing.T) {
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-revisit"}, nil).Once()
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-revisit"}, nil).Once()
 
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
+		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
 			dialer, request, err := deps.AttachHandoff(protocol.AttachTarget{
 				Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach,
@@ -942,12 +944,12 @@ func TestRunAttachWithDepsAllowsRevisitingRemoteHandoff(t *testing.T) {
 }
 
 func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(maxAttachTargetHandoffs + 1)
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(maxAttachTargetHandoffs + 1)
 
 	calls := 0
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
+		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
 			calls++
 			return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach}}
@@ -958,13 +960,13 @@ func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
 }
 
 func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	localCalls, remoteCalls := 0, 0
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "", "", nil, runAttachDeps{
-		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
-		remoteDialerFactory: factory,
+		localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
+		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			if deps.Remote {
 				remoteCalls++
@@ -1003,11 +1005,11 @@ func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			factory := portsmocks.NewMockRemoteDialerFactory(t)
-			factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+			factory := newRemoteDialerFactoryMock(t)
+			factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 			calls := 0
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-				remoteDialerFactory: factory,
+				remoteDialerFactory: factory.DialerForRemote,
 				runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
 					calls++
 					return &client.AttachTargetError{Target: tt.target}
@@ -1020,11 +1022,11 @@ func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
 }
 
 func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.T) {
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory := newRemoteDialerFactoryMock(t)
 	runClientCalled := false
 
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory:     factory,
+		remoteDialerFactory:     factory.DialerForRemote,
 		selectedRemoteTransport: "serial",
 		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
 			runClientCalled = true
@@ -1041,12 +1043,12 @@ func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.
 
 func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
 	factoryErr := errors.New("factory failed")
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(nil, factoryErr)
+	factory := newRemoteDialerFactoryMock(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(nil, factoryErr)
 	runClientCalled := false
 
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory,
+		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
 			runClientCalled = true
 			return nil
@@ -1064,10 +1066,10 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
 	gotRemote := true
 	gotClipboard := ports.ClipboardReader(&fakeClipboardReader{})
-	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory := newRemoteDialerFactoryMock(t)
 	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "", nil, runAttachDeps{
-		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
-		remoteDialerFactory: factory,
+		localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
+		remoteDialerFactory: factory.DialerForRemote,
 		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
 		runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			requireNamedClientDialer(t, ctx, deps.Dialer, "local")
@@ -1287,12 +1289,12 @@ type appCatalogCacheStub struct {
 	loads int
 }
 
-func (s *appCatalogCacheStub) Load() ([]ports.RemoteCatalogCacheEntry, error) {
+func (s *appCatalogCacheStub) Load() ([]catalogue.RemoteCatalogCacheEntry, error) {
 	s.loads++
 	return nil, nil
 }
 
-func (s *appCatalogCacheStub) Store([]ports.RemoteCatalogCacheEntry) error { return nil }
+func (s *appCatalogCacheStub) Store([]catalogue.RemoteCatalogCacheEntry) error { return nil }
 
 func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
 	oldHostStore := newRemoteHostStore
@@ -1318,9 +1320,9 @@ func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
 		return cache
 	}
 	newRemoteCatalogClient = func() ports.RemoteCatalogClient { return nil }
-	newRemoteDialerFactoryWithRuntimeObserver = func(ports.SerializedRuntimeObserver) ports.RemoteDialerFactory { return nil }
+	newRemoteDialerFactoryWithRuntimeObserver = func(ports.SerializedRuntimeObserver) remoteDialerForTarget { return nil }
 
-	option, err := remoteDiscoveryDaemonOption(stateDir, nil, "stdio")
+	option, err := remoteDiscoveryDaemonOption(stateDir, "stdio")
 	require.NoError(t, err)
 	_ = daemon.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), option)
 	require.Equal(t, remoteadapter.HostStorePath(stateDir), hostPath)
@@ -1329,6 +1331,6 @@ func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
 }
 
 func TestRemoteDiscoveryDaemonOptionRejectsInvalidTransport(t *testing.T) {
-	_, err := remoteDiscoveryDaemonOption(t.TempDir(), nil, "serial")
+	_, err := remoteDiscoveryDaemonOption(t.TempDir(), "serial")
 	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "udp" or "stdio")`)
 }

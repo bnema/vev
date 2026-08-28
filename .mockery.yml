@@ -28,6 +28,18 @@ packages:
       dir: internal/ports/mocks
       filename: '{{.InterfaceFile | base | trimSuffix ".go"}}_mock.go'
       pkgname: portsmocks
+  github.com/bnema/vev/internal/protocol/wire:
+    config:
+      dir: internal/protocol/wire/mocks
+      filename: transport_mock.go
+      pkgname: wiremocks
+    interfaces:
+      Transport:
+      DatagramTransport:
+      AsyncTransport:
+      OwnedSynchronousTransport:
+      Dialer:
+      Listener:
   github.com/bnema/vev/internal/usecase/command:
     interfaces:
       Context:

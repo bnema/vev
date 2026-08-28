@@ -123,7 +123,7 @@ type recvItem struct {
 	wait <-chan struct{}
 }
 
-type markedDatagramTransport struct{ ports.Transport }
+type markedDatagramTransport struct{ wire.Transport }
 
 func (markedDatagramTransport) DatagramTransport() {}
 
@@ -240,7 +240,7 @@ func isType(typ wire.MsgType) any {
 }
 
 // transportDialer adapts one already-open test transport to the Runner API.
-type transportDialer struct{ transport ports.Transport }
+type transportDialer struct{ transport wire.Transport }
 
 func (d transportDialer) Dial(context.Context) (ports.ClientConnection, error) {
 	return &rawClientConnection{raw: d.transport}, nil
@@ -262,7 +262,7 @@ func testDependencies(dialer ports.ClientDialer, terminal ports.Terminal, clock 
 	}
 }
 
-func attachTestDependencies(transport ports.Transport, terminal ports.Terminal, clock ports.Clock) client.Dependencies {
+func attachTestDependencies(transport wire.Transport, terminal ports.Terminal, clock ports.Clock) client.Dependencies {
 	return testDependencies(transportDialer{transport: transport}, terminal, clock, nil, nil)
 }
 
@@ -287,7 +287,7 @@ func TestRunBoundsBlockedDial(t *testing.T) {
 	clk, createdTimers := newHandshakeClock(t, 1)
 	started := make(chan struct{})
 	dialer := newMockClientDialer(t)
-	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(ctx context.Context) (ports.Transport, error) {
+	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(ctx context.Context) (wire.Transport, error) {
 		close(started)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -503,7 +503,7 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: secondTarget}))},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	dialer := &sequenceDialer{trs: []ports.Transport{first}}
+	dialer := &sequenceDialer{trs: []wire.Transport{first}}
 
 	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
 		Intent: protocol.IntentAttach, SessionName: "first",
@@ -570,7 +570,7 @@ func TestStoppedLocalHandoffDialsReplacementTransport(t *testing.T) {
 		{f: welcome("stopped", targetLifecycle)},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	dialer := &sequenceDialer{trs: []ports.Transport{first, second}}
+	dialer := &sequenceDialer{trs: []wire.Transport{first, second}}
 
 	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
 		Intent: protocol.IntentAttach, SessionName: "source",
@@ -613,8 +613,8 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 		{f: welcome("local", localLifecycle)},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	localDialer := &sequenceDialer{trs: []ports.Transport{local1, local2}}
-	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote}}
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
 	deps.AttachHandoff = func(protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
 		target := protocol.ExactSessionTarget{LifecycleID: remoteLifecycle, SessionName: "work"}
@@ -741,8 +741,8 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 			resizeOnce.Do(func() { term.setSize(domain.Size{Cols: 100, Rows: 40}) })
 		}
 	}
-	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
-	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{markedDatagramTransport{Transport: remote}}}
 	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
 
 	err := runTestClient(context.Background(), deps, client.AttachRequest{
@@ -822,8 +822,8 @@ func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
 		{f: hybridWelcomeFrame("target", targetLifecycle)},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
-	remoteDialer := &sequenceDialer{trs: []ports.Transport{
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{
 		markedDatagramTransport{Transport: sourceRemote}, targetRemote,
 	}}
 	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
@@ -888,8 +888,8 @@ func TestHybridPickerPrepareResponseTimeoutClosesRetainedTransport(t *testing.T)
 		protocol.ParkedRoutePrepare: prepareSent,
 	})
 
-	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial}}
-	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{markedDatagramTransport{Transport: remote}}}
 	deps := hybridPickerDependencies(localDialer, term, clock, map[string]ports.ClientDialer{"remote": remoteDialer})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -965,8 +965,8 @@ func TestHybridPickerBackResumesRetainedRemoteTransport(t *testing.T) {
 		{f: hybridWelcomeFrame("local", localLifecycle)},
 		{f: navigationDirectiveFrame(protocol.NavigationBack)},
 	}}
-	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
-	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{markedDatagramTransport{Transport: remote}}}
 	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
 
 	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
@@ -1020,9 +1020,9 @@ func TestHybridPickerDifferentHostFallsBackToNewRemoteDial(t *testing.T) {
 		{f: hybridWelcomeFrame("target", targetLifecycle)},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
-	sourceDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: sourceRemote}}}
-	targetDialer := &sequenceDialer{trs: []ports.Transport{targetRemote}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial, localPicker}}
+	sourceDialer := &sequenceDialer{trs: []wire.Transport{markedDatagramTransport{Transport: sourceRemote}}}
+	targetDialer := &sequenceDialer{trs: []wire.Transport{targetRemote}}
 	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{
 		sourceTarget.Endpoint: sourceDialer,
 		targetTarget.Endpoint: targetDialer,
@@ -1105,8 +1105,8 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 		{f: welcome("remote-new", remoteNewLifecycle, 22)},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	localDialer := &sequenceDialer{trs: []ports.Transport{local1, local2, local3}}
-	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote1, remote2, remote3}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2, local3}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote1, remote2, remote3}}
 
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
 	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
@@ -1586,7 +1586,7 @@ func TestRunPhaseASingleAttempt(t *testing.T) {
 }
 
 type sequenceDialer struct {
-	trs   []ports.Transport
+	trs   []wire.Transport
 	errs  []error
 	calls atomic.Int32
 }
@@ -1709,7 +1709,7 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
 	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
 	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
-	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
+	d := &sequenceDialer{trs: []wire.Transport{tr1, tr2, tr3}}
 	clock := &reconnectTestClock{}
 	result := make(chan error, 1)
 	go func() {
@@ -1757,7 +1757,7 @@ func TestReconnectRestoresLastPublishedRouteTab(t *testing.T) {
 		{f: welcome(22)},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	dialer := &sequenceDialer{trs: []ports.Transport{tr1, tr2}}
+	dialer := &sequenceDialer{trs: []wire.Transport{tr1, tr2}}
 	clock := &reconnectTestClock{}
 	result := make(chan error, 1)
 	go func() {
@@ -1800,7 +1800,7 @@ func TestRemoteReconnectDropsStalePickerTargetAfterDaemonSessionSwitch(t *testin
 		{f: welcome("new", newLifecycle, 22)},
 		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
-	dialer := &sequenceDialer{trs: []ports.Transport{tr1, tr2}}
+	dialer := &sequenceDialer{trs: []wire.Transport{tr1, tr2}}
 	clock := &reconnectTestClock{}
 	result := make(chan error, 1)
 	go func() {
@@ -1986,7 +1986,7 @@ func TestRunRememberRemoteHostAtMostOnceAcrossReconnects(t *testing.T) {
 
 	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
 	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
-	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2}}
+	d := &sequenceDialer{trs: []wire.Transport{tr1, tr2}}
 
 	deps := testDependencies(d, term, realClock{}, nil, nil)
 	learner := portsmocks.NewMockRemoteHostLearner(t)
@@ -2269,7 +2269,7 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
 	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonSessionKilled}))}}}
-	d := &sequenceDialer{trs: []ports.Transport{tr}}
+	d := &sequenceDialer{trs: []wire.Transport{tr}}
 
 	err := runTestClient(context.Background(), testDependencies(d, term, realClock{}, nil, nil), client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: false})
 	require.Error(t, err)
