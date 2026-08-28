@@ -203,6 +203,19 @@ type attachRoute struct {
 	resumeToken uint64
 }
 
+// attachHandoff binds a picker selection to the route that produced it. The
+// connection-relative SamePeer hint is consumed before a target crosses this
+// boundary; the bound source route is the sole transport authority afterward.
+type attachHandoff struct {
+	target protocol.AttachTarget
+	source attachRoute
+}
+
+func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attachHandoff {
+	target.SamePeer = false
+	return &attachHandoff{target: target, source: source}
+}
+
 type Runner struct {
 	dialer            ports.ClientDialer
 	term              ports.Terminal
@@ -595,6 +608,14 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if !result.transportClosed {
 			_ = connection.Close()
 		}
+		if result.target != nil {
+			result.handoff = bindAttachHandoff(*result.target, attachRoute{
+				dialer:      homeRoute.dialer,
+				request:     cloneAttachRequest(homeRoute.request),
+				resumeToken: homeRoute.resumeToken,
+			})
+			result.target = nil
+		}
 		return result
 	}
 
@@ -789,8 +810,14 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return errors.New("vev: unsupported navigation action")
 			}
 		}
-		if result.target != nil {
-			if result.target.RemoteTarget != nil || result.target.Endpoint != "" {
+		if result.target != nil || result.handoff != nil {
+			target := result.target
+			source := attachRoute{dialer: dialer, request: attemptRequest, resumeToken: resumeToken}
+			if result.handoff != nil {
+				target = &result.handoff.target
+				source = result.handoff.source
+			}
+			if target.RemoteTarget != nil || target.Endpoint != "" {
 				if homeRoute == nil && attemptRequest.RemoteTarget == nil {
 					routeRequest := attemptRequest
 					if result.sessionName != "" {
@@ -807,31 +834,23 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				nextRequest AttachRequest
 				handoffErr  error
 			)
-			if result.target.Endpoint == "" {
+			if target.Endpoint == "" {
 				if r.ledger == nil {
 					return errors.New("vev: route ledger unavailable")
 				}
-				baseRequest := attemptRequest
-				nextDialer = dialer
-				if result.homePickerTarget {
-					if homeRoute == nil {
-						return errors.New("vev: home route unavailable for picker target")
-					}
-					nextDialer = homeRoute.dialer
-					baseRequest = homeRoute.request
-				}
-				nextRequest = r.ledger.samePeerHandoff(baseRequest, *result.target)
+				nextDialer = source.dialer
+				nextRequest = r.ledger.samePeerHandoff(source.request, *target)
 			} else {
 				if r.attachHandoff == nil {
-					return &AttachTargetError{Target: *result.target}
+					return &AttachTargetError{Target: *target}
 				}
-				nextDialer, nextRequest, handoffErr = r.attachHandoff(*result.target)
+				nextDialer, nextRequest, handoffErr = r.attachHandoff(*target)
 				if handoffErr != nil {
 					return handoffErr
 				}
 			}
-			if result.target.ExactTarget != nil {
-				nextRequest.ExactTarget = result.target.ExactTarget
+			if target.ExactTarget != nil {
+				nextRequest.ExactTarget = target.ExactTarget
 			}
 			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned) {
 				nextRequest.NavigationCapabilities |= protocol.NavigationCapabilityHomePicker
@@ -1091,8 +1110,8 @@ type attachResult struct {
 	welcomed          bool
 	transportClosed   bool
 	target            *protocol.AttachTarget
+	handoff           *attachHandoff
 	action            protocol.NavigationAction
-	homePickerTarget  bool
 	routeAction       *protocol.RouteNavigationAction
 	err               error
 }
@@ -1472,11 +1491,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	var samePeerSwitch *samePeerSwitchPending
 	var nextSamePeerRequestID uint64
 	type parkedRoutePending struct {
-		requestID      uint64
-		action         protocol.ParkedRouteAction
-		leaseID        protocol.ParkedRouteLeaseID
-		fallbackTarget *protocol.AttachTarget
-		timer          ports.Timer
+		requestID uint64
+		action    protocol.ParkedRouteAction
+		leaseID   protocol.ParkedRouteLeaseID
+		fallback  *attachHandoff
+		timer     ports.Timer
 	}
 	var parkedPending *parkedRoutePending
 	var nextParkedRequestID uint64
@@ -1663,24 +1682,23 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return welcomedResult(errLinkOffline), true
 		default:
 		}
-		if selection.target != nil && transition != nil {
+		if selection.handoff != nil && transition != nil {
 			transitionWaitingFull = false
-			transition.start(*selection.target)
+			transition.start(selection.handoff.target)
 		}
-		if selection.target != nil && request.Remote && request.OriginKey != "" && selection.target.Endpoint == request.OriginKey && selection.target.RemoteTarget != nil {
-			target := *selection.target.RemoteTarget
+		if selection.handoff != nil && request.Remote && request.OriginKey != "" && selection.handoff.target.Endpoint == request.OriginKey && selection.handoff.target.RemoteTarget != nil {
+			target := *selection.handoff.target.RemoteTarget
 			if err := sendParkedRouteSize(); err != nil {
 				return welcomedResult(err), true
 			}
 			if err := sendParkedRouteRequest(protocol.ParkedRouteSwitch, leaseID, &target); err != nil {
 				return welcomedResult(fmt.Errorf("vev: switching parked route: %w", err)), true
 			}
-			fallback := *selection.target
-			parkedPending.fallbackTarget = &fallback
+			fallback := *selection.handoff
+			parkedPending.fallback = &fallback
 			return attachResult{}, false
 		}
-		if selection.target != nil {
-			selection.homePickerTarget = true
+		if selection.handoff != nil {
 			return selection, true
 		}
 		if selection.err != nil {
@@ -1988,12 +2006,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 							return selection
 						}
 					default:
-						if pending.fallbackTarget == nil {
+						if pending.fallback == nil {
 							return welcomedResult(errors.New("vev: parked route switch failed"))
 						}
 						fallback := welcomedResult(nil)
-						fallback.target = pending.fallbackTarget
-						fallback.homePickerTarget = true
+						fallback.handoff = pending.fallback
 						return fallback
 					}
 				}
