@@ -398,7 +398,7 @@ func TestServeReturnsWhenLastSessionExits(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
-	l := portsmocks.NewMockListener(t)
+	l := newMockServerListener(t)
 	connCh := make(chan ports.Transport, 1)
 	connCh <- tr
 	closed := make(chan struct{})
@@ -438,7 +438,7 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 	defer releasePTY()
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentNew, "long", domain.Size{Cols: 80, Rows: 24}))
 
-	l := portsmocks.NewMockListener(t)
+	l := newMockServerListener(t)
 	connCh := make(chan ports.Transport, 1)
 	connCh <- tr
 	closed := make(chan struct{})
@@ -573,7 +573,7 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 	p, _ := newBlockingPTY(t) // Close unblocks the parked reader
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	sends := make(chan wire.Frame, 64)
 	recvCh := make(chan wire.Frame, 1)
 	recvCh <- mustHello(protocol.IntentNew, "wedge", domain.Size{Cols: 80, Rows: 24})
@@ -600,7 +600,7 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().RunAndReturn(func() error { closeConn(); return nil }).Maybe()
 
-	l := portsmocks.NewMockListener(t)
+	l := newMockServerListener(t)
 	connCh := make(chan ports.Transport, 1)
 	connCh <- tr
 	lnClosed := make(chan struct{})
@@ -1021,7 +1021,7 @@ func TestAttachRestoresPersistedTabNames(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	d.inactive["work"] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 
@@ -1195,7 +1195,7 @@ func TestAttachResumesStoppedSessionFromStoredCwd(t *testing.T) {
 	WithStore(t, store)(d)
 	cwd := t.TempDir()
 	d.inactive["work"] = inactiveSession{name: "work", cwd: cwd, createdAt: 1, state: protocol.SessionDown}
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 
@@ -1218,7 +1218,7 @@ func TestAttachStoppedMissingCwdFallsBackToHome(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(t, store)(d)
 	d.inactive["work"] = inactiveSession{name: "work", cwd: "/definitely/missing/vev", createdAt: 1, state: protocol.SessionDown}
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 
@@ -1299,14 +1299,14 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 func TestIntentNewStoppedNameRejected(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	d.inactive["taken"] = inactiveSession{name: "taken", cwd: "/tmp", createdAt: 1}
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "taken", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
 	require.ErrorContains(t, err, "name already in use")
 }
 
 func TestIntentNewUnsafeNameRejected(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	_, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "my work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
 	require.ErrorContains(t, err, domain.ErrInvalidSessionName.Error())
 }
@@ -1446,7 +1446,7 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 
 	d := newTestDaemon(t, f, stubClock{})
 	d.baseEnv = []string{"KEEP=1", "COLORTERM=old"}
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
@@ -1488,10 +1488,10 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 
 	d := newTestDaemon(t, f, stubClock{})
-	tr1 := portsmocks.NewMockTransport(t)
+	tr1 := newMockServerConnection(t)
 	tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr1.EXPECT().Close().Return(nil).Maybe()
-	tr2 := portsmocks.NewMockTransport(t)
+	tr2 := newMockServerConnection(t)
 	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr2.EXPECT().Close().Return(nil).Maybe()
 	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: false}, tr1)
@@ -1532,7 +1532,7 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	floating := newQuietPTY()
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 	d := newTestDaemon(t, f, stubClock{})
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
@@ -1601,10 +1601,10 @@ func TestAttachEnvironmentReplacesFuturePTYInputs(t *testing.T) {
 	floating := newQuietPTY()
 	expectFloatingPrewarmOpen(f, normalSize, floating)
 	d := newTestDaemon(t, f, stubClock{})
-	tr1 := portsmocks.NewMockTransport(t)
+	tr1 := newMockServerConnection(t)
 	tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr1.EXPECT().Close().Return(nil).Maybe()
-	tr2 := portsmocks.NewMockTransport(t)
+	tr2 := newMockServerConnection(t)
 	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr2.EXPECT().Close().Return(nil).Maybe()
 

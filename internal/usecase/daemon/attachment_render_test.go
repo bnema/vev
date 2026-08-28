@@ -283,7 +283,7 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	secondLease := rc.attachmentLease(second)
 	require.True(t, rc.markAttachmentReady(firstLease))
 	require.True(t, rc.markAttachmentReady(secondLease))
-	resize := func(ac *attachedClient, tr ports.Transport, size domain.Size) {
+	resize := func(ac *attachedClient, tr ports.ServerConnection, size domain.Size) {
 		token := sess.captureAttachmentCapability(ac, tr)
 		d.handleAttachmentClientFrame(token, wire.Frame{
 			Type:    wire.MsgResize,

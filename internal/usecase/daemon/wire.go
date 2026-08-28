@@ -4,10 +4,9 @@ package daemon
 import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-func frameWelcome(s *session, resumeToken uint64) (wire.Frame, error) {
+func serverWelcome(s *session, resumeToken uint64) (protocol.Welcome, error) {
 	s.mu.Lock()
 	var identity *protocol.CommittedRouteIdentity
 	if s.incarnation != (domain.SessionLifecycleID{}) {
@@ -16,7 +15,7 @@ func frameWelcome(s *session, resumeToken uint64) (wire.Frame, error) {
 			Ephemeral: s.ephemeral,
 		}
 	}
-	w := protocol.Welcome{
+	message := protocol.Welcome{
 		SessionID:         string(s.id),
 		SessionName:       s.name,
 		Ephemeral:         s.ephemeral,
@@ -24,37 +23,32 @@ func frameWelcome(s *session, resumeToken uint64) (wire.Frame, error) {
 		CommittedIdentity: identity,
 	}
 	s.mu.Unlock()
-	w.ResumeToken = resumeToken
-	payload := wire.MarshalWelcome(w)
-	if payload == nil {
-		return wire.Frame{}, protocol.ErrInvalidRouteWire
+	message.ResumeToken = resumeToken
+	if identity != nil {
+		if err := identity.Validate(); err != nil {
+			return protocol.Welcome{}, err
+		}
 	}
-	return wire.Frame{Type: wire.MsgWelcome, Payload: payload}, nil
+	return message, nil
 }
 
-func frameError(code uint16, text string) wire.Frame {
-	return wire.Frame{Type: wire.MsgError, Payload: wire.MarshalErrorMsg(protocol.ErrorMsg{Code: code, Text: text})}
+func serverError(code uint16, text string) protocol.ErrorMsg {
+	return protocol.ErrorMsg{Code: code, Text: text}
 }
 
-func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) (wire.Frame, error) {
-	payload, err := wire.MarshalOutput(protocol.Output{
+func serverOutputState(data []byte, baseState, state, echoAck uint64) (protocol.Output, error) {
+	message := protocol.Output{
 		Epoch: 1, Base: baseState, New: state, Echo: echoAck,
-		Size: domain.Size{Cols: 1, Rows: 1}, Full: state != 0 && baseState == 0, Data: b,
-	})
-	if err != nil {
-		return wire.Frame{}, err
+		Size: domain.Size{Cols: 1, Rows: 1}, Full: state != 0 && baseState == 0, Data: data,
 	}
-	return wire.Frame{Type: wire.MsgOutput, Payload: payload}, nil
+	if err := protocol.ValidateOutput(message); err != nil {
+		return protocol.Output{}, err
+	}
+	return message, nil
 }
 
-func frameDetached(reason uint8) wire.Frame {
-	return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: reason})}
-}
-
-func framePong() wire.Frame {
-	return wire.Frame{Type: wire.MsgPong, Payload: wire.MarshalPong(protocol.Pong{})}
-}
-
-func frameSessions(infos []protocol.SessionInfo) wire.Frame {
-	return wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(protocol.Sessions{Sessions: infos})}
+func serverDetached(reason uint8) protocol.Detached { return protocol.Detached{Reason: reason} }
+func serverPong() protocol.Pong                     { return protocol.Pong{} }
+func serverSessions(infos []protocol.SessionInfo) protocol.Sessions {
+	return protocol.Sessions{Sessions: infos}
 }

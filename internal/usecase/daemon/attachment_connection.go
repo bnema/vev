@@ -16,7 +16,7 @@ type attachmentCapability struct {
 	rebase bool
 }
 
-func captureAttachmentCapability(entry *session, ac *attachedClient, tr ports.Transport) attachmentCapability {
+func captureAttachmentCapability(entry *session, ac *attachedClient, tr ports.ServerConnection) attachmentCapability {
 	if entry == nil || entry.core() == nil || ac == nil || tr == nil {
 		return attachmentCapability{}
 	}
@@ -54,7 +54,7 @@ func captureAttachmentCapability(entry *session, ac *attachedClient, tr ports.Tr
 	return token
 }
 
-func (s *session) captureAttachmentCapability(ac *attachedClient, tr ports.Transport) attachmentCapability {
+func (s *session) captureAttachmentCapability(ac *attachedClient, tr ports.ServerConnection) attachmentCapability {
 	return captureAttachmentCapability(s, ac, tr)
 }
 

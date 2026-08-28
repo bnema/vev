@@ -128,7 +128,7 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 	tr := newHandshakeBlockingTransport(false)
 	handshakeDone := make(chan struct{})
 	go func() {
-		d.handleHelloWithContext(ctx, make(chan struct{}), func() {}, func() {}, tr,
+		d.handleHelloFrameWithContext(ctx, make(chan struct{}), func() {}, func() {}, tr,
 			mustHello(protocol.IntentNew, "paint-cancel", domain.Size{Cols: 80, Rows: 24}))
 		close(handshakeDone)
 	}()
@@ -183,7 +183,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	resumeTransport := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(resumeTransport, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, sess.name, token))})
+		d.handleHelloFrame(resumeTransport, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, sess.name, token))})
 		close(done)
 	}()
 
@@ -211,7 +211,7 @@ func TestHandshakeTimeoutClosesBlockedWelcomeSend(t *testing.T) {
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(protocol.IntentNew, "timeout-send", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHelloFrame(tr, mustHello(protocol.IntentNew, "timeout-send", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
@@ -247,7 +247,7 @@ func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
 	tr := newHandshakeBlockingTransport(false)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(protocol.IntentAttach, "restoring", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHelloFrame(tr, mustHello(protocol.IntentAttach, "restoring", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
@@ -275,7 +275,7 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(protocol.IntentAttach, "restored", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHelloFrame(tr, mustHello(protocol.IntentAttach, "restored", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
@@ -305,7 +305,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(protocol.IntentAttach, "shared", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHelloFrame(tr, mustHello(protocol.IntentAttach, "shared", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 

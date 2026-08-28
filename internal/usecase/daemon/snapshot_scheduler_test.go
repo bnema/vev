@@ -613,9 +613,9 @@ func (c *serveShutdownClock) nextFinalTimer(t *testing.T) *snapshotDeadlineTimer
 	}
 }
 
-func serveSnapshotListener(t *testing.T, tr ports.Transport) *portsmocks.MockListener {
+func serveSnapshotListener(t *testing.T, tr ports.Transport) *mockServerListener {
 	t.Helper()
-	l := portsmocks.NewMockListener(t)
+	l := newMockServerListener(t)
 	connections := make(chan ports.Transport, 1)
 	connections <- tr
 	closed := make(chan struct{})

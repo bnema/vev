@@ -18,7 +18,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
@@ -55,7 +54,7 @@ const detachNotifyTimeout = time.Second
 // heavy output degrades to lower fps on a slow link instead of overflowing the
 // transport. It must stay well under the datagram carriage's 32-frame client
 // window so its reliable queue never fills from painting alone.
-const maxUnackedOutputStates = 8
+const maxUnackedOutputStates = protocol.MaxOutputWindow
 
 // normalizeOutputWindow bounds the untrusted Hello value. Zero deliberately
 // means the legacy/default window, so malformed or absent values remain safe.
@@ -739,7 +738,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 // Serve runs the accept loop over l, owning it for the loop's lifetime. It
 // returns when the last session is removed or ctx is cancelled; on the latter
 // path attached clients are detached with ReasonServerShutdown.
-func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
+func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	d.serveCtx, d.serveCancel = context.WithCancel(ctx)
 	defer d.serveCancel()
 	d.hardCtx, d.hardCancel = context.WithCancel(context.Background())
@@ -1012,54 +1011,58 @@ func (d *Daemon) sessionsSnapshotLocked() []*session {
 	return sessionsSnapshot(d.sessions)
 }
 
-// handleConn reads the first frame off a fresh connection and routes it. A
-// context watcher closes the transport on serve-context cancel or handshake
-// timeout so blocked transport operations unwind.
-func (d *Daemon) handleConn(tr ports.Transport) {
+// handleConn reads the first typed message off a fresh connection and routes it.
+// A context watcher closes the connection on cancellation or handshake timeout.
+func (d *Daemon) handleConn(tr ports.ServerConnection) {
 	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(d.hardCtx)
 	stopTransport := watchHandshakeTransport(handshakeCtx, tr)
 	defer finishHandshake()
 	defer stopTransport()
 
-	var first wire.Frame
+	var first protocol.ClientMessage
 	err := boundedHandshakeOperation(handshakeCtx, tr, func() error {
-		var recvErr error
-		first, recvErr = tr.Recv()
-		return recvErr
+		var receiveErr error
+		first, receiveErr = tr.ReceiveClient()
+		return receiveErr
 	})
 	if err != nil {
-		err = handshakeContextError(d.hardCtx, timedOut, err)
-		d.log.Warn("connection closed before hello", "err", err)
+		var failure *protocol.DecodeFailure
+		if errors.As(err, &failure) {
+			d.handleInitialDecodeFailure(handshakeCtx, tr, failure)
+		} else {
+			err = handshakeContextError(d.hardCtx, timedOut, err)
+			d.log.Warn("connection closed before hello", "err", err)
+		}
 		_ = tr.Close()
 		return
 	}
-	switch first.Type {
-	case wire.MsgList:
+	switch message := first.(type) {
+	case protocol.List:
 		stopTransport()
 		finishHandshake()
 		d.handleList(tr)
-	case wire.MsgCommand:
+	case protocol.CommandRequest:
 		stopTransport()
 		finishHandshake()
-		if err := d.handleCommand(tr, first); err != nil {
+		if err := d.handleCommand(tr, message); err != nil {
 			d.log.Warn("command handler failed", "err", err)
 		}
-	case wire.MsgRemotePreviewRequest:
+	case protocol.RemotePreviewRequest:
 		stopTransport()
 		finishHandshake()
-		if err := d.handleRemotePreview(tr, first); err != nil {
+		if err := d.handleRemotePreview(tr, message); err != nil {
 			d.log.Warn("remote preview handler failed", "err", err)
 		}
-	case wire.MsgKill:
+	case protocol.Kill:
 		stopTransport()
 		finishHandshake()
-		d.handleKill(tr, first)
-	case wire.MsgHello:
-		d.handleHelloWithContext(handshakeCtx, timedOut, stopTransport, finishHandshake, tr, first)
+		d.handleKill(tr, message)
+	case protocol.Hello:
+		d.handleHelloWithContext(handshakeCtx, timedOut, stopTransport, finishHandshake, tr, message)
 	default:
-		d.log.Warn("hello rejected", "err", "expected hello", "type", first.Type)
+		d.log.Warn("hello rejected", "err", "expected hello")
 		_ = boundedHandshakeOperation(handshakeCtx, tr, func() error {
-			return tr.Send(frameError(protocol.ErrInternal, "expected hello"))
+			return tr.SendServer(serverError(protocol.ErrInternal, "expected hello"))
 		})
 		stopTransport()
 		finishHandshake()
@@ -1067,9 +1070,35 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	}
 }
 
+func (d *Daemon) handleInitialDecodeFailure(ctx context.Context, tr ports.ServerConnection, failure *protocol.DecodeFailure) {
+	send := func(message protocol.ServerMessage) {
+		_ = boundedHandshakeOperation(ctx, tr, func() error { return tr.SendServer(message) })
+	}
+	switch failure.Kind {
+	case protocol.DecodeMessageHello:
+		if failure.Version != 0 && failure.Version != protocol.Version {
+			send(serverError(protocol.ErrVersionMismatch, "protocol version mismatch"))
+			return
+		}
+		send(serverError(protocol.ErrInternal, "malformed hello"))
+	case protocol.DecodeMessageCommand:
+		code, text := protocol.ErrInternal, "malformed command request"
+		if failure.Version != 0 && failure.Version != protocol.Version {
+			code, text = protocol.ErrVersionMismatch, "protocol version mismatch"
+		}
+		send(protocol.CommandResult{RequestID: failure.RequestID, Code: code, Text: text})
+	case protocol.DecodeMessageKill:
+		send(serverError(protocol.ErrInternal, "malformed kill request"))
+	case protocol.DecodeMessageRemotePreview:
+		send(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewMalformed})
+	default:
+		send(serverError(protocol.ErrInternal, "expected hello"))
+	}
+}
+
 // handleList replies with the current session listing and closes the (one-shot
 // control) connection.
-func (d *Daemon) handleList(tr ports.Transport) {
+func (d *Daemon) handleList(tr ports.ServerConnection) {
 	defer func() { _ = tr.Close() }()
 
 	d.mu.Lock()
@@ -1105,35 +1134,30 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	d.mu.Unlock()
 
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-	_ = d.boundedControlSend(tr, frameSessions(infos))
+	_ = d.boundedControlSend(tr, serverSessions(infos))
 }
 
 // handleKill terminates the requested live session or stopped named session,
 // or all sessions, and closes the control connection; the resulting EOF is the
 // client's success signal.
-func (d *Daemon) handleKill(tr ports.Transport, f wire.Frame) {
+func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 	defer func() { _ = tr.Close() }()
 
-	k, err := wire.UnmarshalKill(f.Payload)
-	if err != nil {
-		_ = d.boundedControlSend(tr, frameError(protocol.ErrInternal, "malformed kill request"))
-		return
-	}
-	if k.All {
+	if request.All {
 		d.shutdownAll(protocol.ReasonServerShutdown)
 		return
 	}
 
 	d.mu.Lock()
-	target := d.findByNameLocked(k.Name)
+	target := d.findByNameLocked(request.Name)
 	if target == nil {
-		if _, ok := d.inactive[k.Name]; ok {
+		if _, ok := d.inactive[request.Name]; ok {
 			d.mu.Unlock()
 			// Stopped sessions use the same catalogue-first, incarnation-second
 			// deletion order as live and offline purges.
-			if err := d.retryStoppedPurge(k.Name); err != nil {
-				d.log.Warn("deleting stopped session failed", "err", err, "session", k.Name)
-				_ = d.boundedControlSend(tr, frameError(protocol.ErrInternal, "deleting stopped session failed"))
+			if err := d.retryStoppedPurge(request.Name); err != nil {
+				d.log.Warn("deleting stopped session failed", "err", err, "session", request.Name)
+				_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting stopped session failed"))
 			}
 			return
 		}
@@ -1141,54 +1165,42 @@ func (d *Daemon) handleKill(tr ports.Transport, f wire.Frame) {
 	d.mu.Unlock()
 
 	if target == nil {
-		_ = d.boundedControlSend(tr, frameError(protocol.ErrNoSuchSession, "no such session: "+k.Name))
+		_ = d.boundedControlSend(tr, serverError(protocol.ErrNoSuchSession, "no such session: "+request.Name))
 		return
 	}
 	if err := d.killSession(target, protocol.ReasonSessionKilled, true); err != nil {
-		_ = d.boundedControlSend(tr, frameError(protocol.ErrInternal, "deleting persisted session failed"))
+		_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting persisted session failed"))
 	}
 }
 
 // handleHello runs the attach handshake for direct package callers. Accepted
 // connections use handleHelloWithContext so the deadline also covers the first
 // frame read in handleConn.
-func (d *Daemon) handleHello(tr ports.Transport, f wire.Frame) {
+func (d *Daemon) handleHello(tr ports.ServerConnection, hello protocol.Hello) {
 	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(context.Background())
 	stopTransport := watchHandshakeTransport(handshakeCtx, tr)
 	defer finishHandshake()
 	defer stopTransport()
-	d.handleHelloWithContext(handshakeCtx, timedOut, stopTransport, finishHandshake, tr, f)
+	d.handleHelloWithContext(handshakeCtx, timedOut, stopTransport, finishHandshake, tr, hello)
 }
 
 // handleHelloWithContext runs the attach handshake: version check, intent
 // routing, Welcome, guaranteed first paint, then the per-connection input loop.
-func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <-chan struct{}, stopHandshakeTransport, finishHandshake func(), tr ports.Transport, f wire.Frame) {
-	if err := handshakeContextError(context.Background(), timedOut, handshakeCtx.Err()); err != nil {
+func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <-chan struct{}, stopHandshakeTransport, finishHandshake func(), tr ports.ServerConnection, h protocol.Hello) {
+	if err := handshakeContextError(d.hardCtx, timedOut, handshakeCtx.Err()); err != nil {
 		_ = tr.Close()
 		return
 	}
-	sendHandshake := func(frame wire.Frame) error {
-		err := boundedHandshakeOperation(handshakeCtx, tr, func() error { return tr.Send(frame) })
+	sendHandshake := func(message protocol.ServerMessage) error {
+		err := boundedHandshakeOperation(handshakeCtx, tr, func() error { return tr.SendServer(message) })
 		if err != nil {
-			return handshakeContextError(context.Background(), timedOut, err)
+			return handshakeContextError(d.hardCtx, timedOut, err)
 		}
 		return nil
 	}
-	h, err := wire.UnmarshalHello(f.Payload)
-	if err != nil {
-		if version, ok := wire.PeekHelloVersion(f.Payload); ok && version != protocol.Version {
-			d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", version, "expected", protocol.Version)
-			_ = sendHandshake(frameError(protocol.ErrVersionMismatch, "protocol version mismatch"))
-		} else {
-			d.log.Warn("hello rejected", "err", err)
-			_ = sendHandshake(frameError(protocol.ErrInternal, "malformed hello"))
-		}
-		_ = tr.Close()
-		return
-	}
 	if h.Version != protocol.Version {
 		d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", h.Version, "expected", protocol.Version, "intent", h.Intent, "session", h.Name)
-		_ = sendHandshake(frameError(protocol.ErrVersionMismatch, "protocol version mismatch"))
+		_ = sendHandshake(serverError(protocol.ErrVersionMismatch, "protocol version mismatch"))
 		_ = tr.Close()
 		return
 	}
@@ -1197,9 +1209,9 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 	if rerr != nil {
 		d.log.Warn("hello rejected", "err", rerr, "intent", h.Intent, "session", h.Name)
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
-			_ = sendHandshake(frameError(pe.code, pe.text))
+			_ = sendHandshake(serverError(pe.code, pe.text))
 		} else {
-			_ = sendHandshake(frameError(protocol.ErrInternal, rerr.Error()))
+			_ = sendHandshake(serverError(protocol.ErrInternal, rerr.Error()))
 		}
 		_ = tr.Close()
 		return
@@ -1230,7 +1242,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		return
 	}
 	welcomeDone, welcomeErr := boundedHandshakeOperationTracked(handshakeCtx, tr, func() error {
-		frame, err := frameWelcome(sess, d.resumeTokenSnapshot(ac))
+		frame, err := serverWelcome(sess, d.resumeTokenSnapshot(ac))
 		if err != nil {
 			return err
 		}
@@ -1311,7 +1323,7 @@ func (e *protoErr) Error() string { return e.text }
 // unlocking d.mu before returning, including every error path. It publishes
 // terminal and role state before releasing d.mu, then defers coordinator
 // cleanup so obsolete workers never delay the new handshake.
-func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, h protocol.Hello) (*attachedClient, error) {
+func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domain.Size, h protocol.Hello) (*attachedClient, error) {
 	initialTabIndex := -1
 	if h.RemoteTarget != nil {
 		var ok bool
@@ -1478,7 +1490,7 @@ func (d *Daemon) validateExactSessionTarget(ctx context.Context, target protocol
 	return d.validateExactSessionTargetLocked(target)
 }
 
-func (d *Daemon) route(h protocol.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+func (d *Daemon) route(h protocol.Hello, tr ports.ServerConnection) (*session, *attachedClient, error) {
 	ctx := d.serveCtx
 	if ctx == nil {
 		ctx = context.Background()
@@ -1486,7 +1498,7 @@ func (d *Daemon) route(h protocol.Hello, tr ports.Transport) (*session, *attache
 	return d.routeWithContext(ctx, h, tr)
 }
 
-func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr ports.ServerConnection) (*session, *attachedClient, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}

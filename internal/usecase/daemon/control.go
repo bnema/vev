@@ -13,22 +13,16 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
-// handleCommand serves one one-shot control request. The leading version is
-// checked before decoding the versioned body so newer layouts fail cleanly.
-func (d *Daemon) handleCommand(tr ports.Transport, f wire.Frame) error {
+// handleCommand serves one typed one-shot control request.
+func (d *Daemon) handleCommand(tr ports.ServerConnection, request protocol.CommandRequest) error {
 	defer func() { _ = tr.Close() }()
 
-	if version, ok := wire.PeekCommandVersion(f.Payload); !ok || version != protocol.Version {
-		return d.sendCommandResult(tr, protocol.CommandResult{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})
-	}
-	request, err := wire.UnmarshalCommandRequest(f.Payload)
-	if err != nil {
-		return d.sendCommandResult(tr, protocol.CommandResult{Code: protocol.ErrInternal, Text: "malformed command request"})
+	if request.Version != protocol.Version {
+		return d.sendCommandResult(tr, protocol.CommandResult{RequestID: request.RequestID, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})
 	}
 	if request.Attached {
 		return d.sendCommandResult(tr, protocol.CommandResult{
@@ -69,8 +63,8 @@ func (d *Daemon) handleCommand(tr ports.Transport, f wire.Frame) error {
 
 // sendCommandResult gives one-shot control responses the same observable
 // transport-failure behavior regardless of which validation path produced it.
-func (d *Daemon) sendCommandResult(tr ports.Transport, result protocol.CommandResult) error {
-	if err := d.boundedControlSend(tr, frameCommandResult(result)); err != nil {
+func (d *Daemon) sendCommandResult(tr ports.ServerConnection, result protocol.CommandResult) error {
+	if err := d.boundedControlSend(tr, serverCommandResult(result)); err != nil {
 		d.log.Warn("command response send failed", "err", err)
 		return err
 	}
@@ -80,17 +74,15 @@ func (d *Daemon) sendCommandResult(tr ports.Transport, result protocol.CommandRe
 // boundedControlSend keeps one-shot control handlers from waiting forever on a
 // client that stopped reading. A timeout closes the exact transport so a
 // blocked Send can unwind before the handler returns.
-func (d *Daemon) boundedControlSend(tr ports.Transport, frame wire.Frame) error {
-	_, err := d.boundedSendWith(tr, func() error { return tr.Send(frame) })
+func (d *Daemon) boundedControlSend(tr ports.ServerConnection, message protocol.ServerMessage) error {
+	_, err := d.boundedSendWith(tr, func() error { return tr.SendServer(message) })
 	if errors.Is(err, errSendTimedOut) {
 		_ = tr.Close()
 	}
 	return err
 }
 
-func frameCommandResult(result protocol.CommandResult) wire.Frame {
-	return wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(result)}
-}
+func serverCommandResult(result protocol.CommandResult) protocol.CommandResult { return result }
 
 func (d *Daemon) dispatchCommand(ctx context.Context, request protocol.CommandRequest) protocol.CommandResult {
 	cmd, ok := command.BySlug(request.Slug)

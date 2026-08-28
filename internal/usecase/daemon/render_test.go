@@ -676,7 +676,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	}
 	win.focusedPane().screen.Row = 3
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Close().Return(nil).Maybe()
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 
@@ -931,7 +931,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	win.focusedPane().pty = p
 
 	var gotOutput atomic.Bool
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Close().Return(nil).Maybe()
 	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
 		if f.Type == wire.MsgOutput {
@@ -963,7 +963,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)
 	p.EXPECT().Close().Return(nil).Maybe()
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(io.ErrClosedPipe).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 

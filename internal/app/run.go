@@ -37,6 +37,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
@@ -742,7 +743,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 			log.Warn("config watcher stopped", "path", configPath, "err", err)
 		}
 	}()
-	if err := d.Serve(ctx, ln); err != nil {
+	if err := d.Serve(ctx, sessionwire.NewServerListener(ln)); err != nil {
 		log.Error("daemon exited", "err", err)
 		return err
 	}

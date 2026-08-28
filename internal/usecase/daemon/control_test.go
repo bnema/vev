@@ -139,7 +139,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	defer releaseConn()
 	done := make(chan error, 1)
 	go func() {
-		done <- d.handleCommand(tr, frame)
+		done <- d.handleCommandFrame(tr, frame)
 	}()
 	<-factory.entered
 	timer := <-clock.timers
@@ -159,7 +159,7 @@ func TestHandleCommandResponseSendTimeoutClosesTransport(t *testing.T) {
 	tr := newBlockingControlSendTransport()
 	frame := commandFrame(t, protocol.CommandRequest{RequestID: 41, Attached: true})
 	done := make(chan error, 1)
-	go func() { done <- d.handleCommand(tr, frame) }()
+	go func() { done <- d.handleCommandFrame(tr, frame) }()
 
 	<-tr.started
 	timer := <-clock.timers
@@ -184,7 +184,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 	sendErr := errors.New("command result send failed")
 	tr := &commandSendErrorTransport{err: sendErr}
 
-	err := d.handleCommand(tr, commandFrame(t, protocol.CommandRequest{
+	err := d.handleCommandFrame(tr, commandFrame(t, protocol.CommandRequest{
 		RequestID: 41,
 		Attached:  true,
 	}))
@@ -192,20 +192,6 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 	require.ErrorIs(t, err, sendErr)
 	require.Contains(t, logs.String(), "command response send failed")
 	require.True(t, tr.closed, "the failed one-shot transport must still close")
-}
-
-func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
-	// The version prefix is valid and mismatched, while the remainder is not a
-	// decodable request. The daemon must still return ErrVersionMismatch.
-	frame := wire.Frame{Type: wire.MsgCommand, Payload: []byte{0, byte(protocol.Version + 1)}}
-	tr, sends, _ := newConn(t, frame)
-
-	d := newTestDaemon(t, nil, stubClock{})
-	require.NoError(t, d.handleCommand(tr, frame))
-
-	result := awaitCommandResult(t, sends)
-	require.False(t, result.OK)
-	require.Equal(t, protocol.ErrVersionMismatch, result.Code)
 }
 
 func TestHandleConnRoutesCommand(t *testing.T) {
@@ -887,7 +873,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	firstTransport, firstSends, _ := newConn(t, firstFrame)
 	firstDone := make(chan struct{})
 	go func() {
-		if err := d.handleCommand(firstTransport, firstFrame); err != nil {
+		if err := d.handleCommandFrame(firstTransport, firstFrame); err != nil {
 			t.Errorf("handle first command: %v", err)
 		}
 		close(firstDone)
@@ -905,7 +891,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	secondTransport, secondSends, _ := newConn(t, secondFrame)
 	secondDone := make(chan struct{})
 	go func() {
-		if err := d.handleCommand(secondTransport, secondFrame); err != nil {
+		if err := d.handleCommandFrame(secondTransport, secondFrame); err != nil {
 			t.Errorf("handle second command: %v", err)
 		}
 		close(secondDone)
@@ -1287,14 +1273,14 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 	done := make(chan struct{}, 2)
 	go func() {
 		<-start
-		if err := d.handleCommand(leftTransport, leftFrame); err != nil {
+		if err := d.handleCommandFrame(leftTransport, leftFrame); err != nil {
 			t.Errorf("handle left command: %v", err)
 		}
 		done <- struct{}{}
 	}()
 	go func() {
 		<-start
-		if err := d.handleCommand(rightTransport, rightFrame); err != nil {
+		if err := d.handleCommandFrame(rightTransport, rightFrame); err != nil {
 			t.Errorf("handle right command: %v", err)
 		}
 		done <- struct{}{}
@@ -1339,7 +1325,7 @@ func sendCommand(t *testing.T, d *Daemon, request protocol.CommandRequest) proto
 	t.Helper()
 	frame := commandFrame(t, request)
 	tr, sends, _ := newConn(t, frame)
-	require.NoError(t, d.handleCommand(tr, frame))
+	require.NoError(t, d.handleCommandFrame(tr, frame))
 	return awaitCommandResult(t, sends)
 }
 

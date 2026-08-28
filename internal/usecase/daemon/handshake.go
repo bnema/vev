@@ -52,7 +52,7 @@ func (d *Daemon) newHandshakeContext(parent context.Context) (context.Context, <
 
 // watchHandshakeTransport closes a transport when the handshake context ends.
 // Transport.Close is required to interrupt blocked Send and Recv operations.
-func watchHandshakeTransport(ctx context.Context, transport ports.Transport) func() {
+func watchHandshakeTransport(ctx context.Context, transport ports.ServerConnection) func() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -74,8 +74,8 @@ func watchHandshakeTransport(ctx context.Context, transport ports.Transport) fun
 
 // boundedHandshakeOperation waits for one transport operation while the shared
 // handshake context remains live. Closing the transport is the interruption
-// mechanism because ports.Transport methods do not accept contexts.
-func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, operation func() error) error {
+// mechanism because ServerConnection methods do not accept contexts.
+func boundedHandshakeOperation(ctx context.Context, transport ports.ServerConnection, operation func() error) error {
 	_, err := boundedHandshakeOperationTracked(ctx, transport, operation)
 	return err
 }
@@ -84,7 +84,7 @@ func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, o
 // operation worker. Callers that own an effect gate must wait for this signal
 // before releasing the gate after cancellation; the transport operation itself
 // may still be unwinding after Close interrupts it.
-func boundedHandshakeOperationTracked(ctx context.Context, transport ports.Transport, operation func() error) (<-chan struct{}, error) {
+func boundedHandshakeOperationTracked(ctx context.Context, transport ports.ServerConnection, operation func() error) (<-chan struct{}, error) {
 	done := make(chan struct{})
 	if err := ctx.Err(); err != nil {
 		close(done)
@@ -129,7 +129,7 @@ func handshakeContextError(parent context.Context, timedOut <-chan struct{}, fal
 // failHandshakeAttachment synchronously retires the exact connection admitted
 // by route. A fresh route-owned session is purged only after its attachment is
 // removed; existing sessions and their unrelated attachments are preserved.
-func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.Transport, welcomed bool) {
+func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr ports.ServerConnection, welcomed bool) {
 	if sess == nil || ac == nil {
 		if tr != nil {
 			_ = tr.Close()

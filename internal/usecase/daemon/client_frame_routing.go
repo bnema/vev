@@ -7,7 +7,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
@@ -16,7 +15,7 @@ const connectionSnapshotAttempts = 8
 // currentAttachmentConnection retries the lock-free session-to-role snapshot when a
 // handoff lands between those reads. The attachment gate still performs the final
 // mutation admission after this function returns.
-func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.Transport) (*session, attachmentCapability, bool) {
+func (d *Daemon) currentAttachmentConnection(ac *attachedClient, tr ports.ServerConnection) (*session, attachmentCapability, bool) {
 	for range connectionSnapshotAttempts {
 		if !ac.currentTransportIs(tr) {
 			break
@@ -50,8 +49,19 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		if !ac.currentTransportIs(tr) || ac.currentAttachmentSession() == nil {
 			return
 		}
-		f, err := tr.Recv()
+		message, err := tr.ReceiveClient()
 		if err != nil {
+			var failure *protocol.DecodeFailure
+			if errors.As(err, &failure) {
+				d.log.Warn("rejected client message",
+					"category", failure.Category,
+					"kind", failure.Kind,
+					"type", failure.Type,
+					"version", failure.Version,
+					"request", failure.RequestID,
+				)
+				continue
+			}
 			for range connectionSnapshotAttempts {
 				sess, _, ok := d.currentAttachmentConnection(ac, tr)
 				if !ok {
@@ -69,14 +79,14 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		if !ok {
 			return
 		}
-		if d.handleAttachmentClientFrame(token, f) {
+		if d.handleAttachmentClientMessage(token, message) {
 			return
 		}
 	}
 }
 
-// handleAttachmentClientFrame owns the attached-client protocol.
-func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f wire.Frame) bool {
+// handleAttachmentClientMessage owns the attached-client protocol.
+func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, message protocol.ClientMessage) bool {
 	if !capability.current() {
 		return false
 	}
@@ -91,63 +101,34 @@ func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f 
 	if d.afterAttachmentEffectAdmitted != nil {
 		d.afterAttachmentEffectAdmitted(effect.capability())
 	}
-	switch f.Type {
-	case wire.MsgInput:
-		if in, derr := wire.UnmarshalInput(f.Payload); derr == nil {
-			d.handleSequencedInputForAttachment(effect, in.InputSeq, in.Data)
+	switch message := message.(type) {
+	case protocol.Input:
+		d.handleSequencedInputForAttachment(effect, message.InputSeq, message.Data)
+	case protocol.Resize:
+		if effect.current() {
+			d.resizeAttachmentGeometryForLease(effect, message.Geometry())
 		}
-	case wire.MsgResize:
-		if rz, derr := wire.UnmarshalResize(f.Payload); derr == nil && effect.current() {
-			d.resizeAttachmentGeometryForLease(effect, rz.Geometry())
-		}
-	case wire.MsgTheme:
-		if th, derr := wire.UnmarshalTheme(f.Payload); derr == nil {
-			d.applyThemeForAttachment(effect, th)
-		}
-	case wire.MsgImagePush:
-		if ip, derr := wire.UnmarshalImagePush(f.Payload); derr == nil {
-			d.handleSequencedImagePushForAttachment(effect, ip.InputSeq, ip)
-		}
-	case wire.MsgClientNotice:
-		if notice, derr := wire.UnmarshalClientNotice(f.Payload); derr == nil {
-			d.handleClientNoticeForAttachment(effect, notice)
-		} else {
-			d.log.Warn("malformed client notice", "err", derr)
-		}
-	case wire.MsgDetach:
+	case protocol.Theme:
+		d.applyThemeForAttachment(effect, message)
+	case protocol.ImagePush:
+		d.handleSequencedImagePushForAttachment(effect, message.InputSeq, message)
+	case protocol.ClientNotice:
+		d.handleClientNoticeForAttachment(effect, message)
+	case protocol.Detach:
 		if effect.current() {
 			d.clientGoneForAttachment(effect, true)
 			return true
 		}
-	case wire.MsgAck:
-		if ack, derr := wire.UnmarshalAck(f.Payload); derr == nil {
-			d.ackOutput(effect, ack.Epoch, ack.State)
-		}
-	case wire.MsgOutputResetRequest:
-		if _, derr := wire.UnmarshalOutputResetRequest(f.Payload); derr == nil {
-			d.resetOutput(effect)
-		}
-	case wire.MsgSamePeerSwitchRequest:
-		request, derr := wire.UnmarshalSamePeerSwitchRequest(f.Payload)
-		if derr != nil {
-			d.log.Warn("malformed same-peer switch request", "err", derr)
-			break
-		}
-		d.switchSamePeerForAttachment(effect, request)
-	case wire.MsgParkedRouteRequest:
-		request, derr := wire.UnmarshalParkedRouteRequest(f.Payload)
-		if derr != nil {
-			d.log.Warn("malformed parked-route request", "err", derr)
-			break
-		}
-		d.handleParkedRouteRequest(effect, request)
-	case wire.MsgRecentRouteSnapshot:
-		snapshot, derr := wire.UnmarshalRecentRouteSnapshot(f.Payload)
-		if derr != nil {
-			d.log.Warn("malformed recent route snapshot", "err", derr)
-			break
-		}
-		replayIdentity := effect.ac.setRouteSnapshot(snapshot)
+	case protocol.Ack:
+		d.ackOutput(effect, message.Epoch, message.State)
+	case protocol.OutputResetRequest:
+		d.resetOutput(effect)
+	case protocol.SamePeerSwitchRequest:
+		d.switchSamePeerForAttachment(effect, message)
+	case protocol.ParkedRouteRequest:
+		d.handleParkedRouteRequest(effect, message)
+	case protocol.RecentRouteSnapshot:
+		replayIdentity := effect.ac.setRouteSnapshot(message)
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-snapshot")
 		if !replayIdentity {
 			break
@@ -155,61 +136,44 @@ func (d *Daemon) handleAttachmentClientFrame(capability attachmentCapability, f 
 		if err := d.sendCommittedRouteIdentityForAttachment(effect); err != nil {
 			d.detachOnAttachmentSendError(effect.capability(), effect.transport.transport)
 		}
-	case wire.MsgRouteAttentionSubscription:
-		subscription, derr := wire.UnmarshalRouteAttentionSubscription(f.Payload)
-		if derr != nil {
-			d.log.Warn("malformed route attention subscription", "err", derr)
-			break
-		}
-		effect.ac.setRouteAttentionSubscription(subscription)
+	case protocol.RouteAttentionSubscription:
+		effect.ac.setRouteAttentionSubscription(message)
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-attention")
-	case wire.MsgRouteNavigationFailure:
-		failure, derr := wire.UnmarshalRouteNavigationFailure(f.Payload)
-		if derr != nil {
-			d.log.Warn("malformed route navigation failure", "err", derr)
-			break
-		}
-		message := "route navigation failed"
-		switch failure.Code {
+	case protocol.RouteNavigationFailure:
+		notice := "route navigation failed"
+		switch message.Code {
 		case protocol.RouteFailureStaleSelection:
-			message = "that recent route is no longer available"
+			notice = "that recent route is no longer available"
 		case protocol.RouteFailureTargetChanged:
-			message = "that recent route changed before attach"
+			notice = "that recent route changed before attach"
 		case protocol.RouteFailureOriginUnavailable:
-			message = "the original route is no longer available"
+			notice = "the original route is no longer available"
 		case protocol.RouteFailureUnavailable:
-			message = "the selected route is unavailable"
+			notice = "the selected route is unavailable"
 		case protocol.RouteFailureNoSuchRoute:
-			message = "that recent route no longer exists"
+			notice = "that recent route no longer exists"
 		}
-		d.notify(effect.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)
-	case wire.MsgCommand:
-		request, derr := wire.UnmarshalCommandRequest(f.Payload)
-		if derr != nil {
-			return false
-		}
-		result := d.executeAttachedCommand(effect, request)
+		d.notify(effect.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, notice, nil)
+	case protocol.CommandRequest:
+		result := d.executeAttachedCommand(effect, message)
 		resultEffect, ok := d.commandResultEffect(effect)
 		if !ok {
 			// A remote handoff or explicit detach deliberately retired the old
 			// attachment; it must not be treated as a stale-result send error.
 			return true
 		}
-		if err := resultEffect.sendControl(frameCommandResult(result)); err != nil {
+		if err := resultEffect.sendControl(serverCommandResult(result)); err != nil {
 			resultEffect.End()
 			d.detachOnAttachmentSendError(resultEffect.capability(), resultEffect.transport.transport)
 			return true
 		}
 		resultEffect.End()
-	case wire.MsgPing:
-		if err := effect.sendControl(framePong()); err != nil {
+	case protocol.Ping:
+		if err := effect.sendControl(serverPong()); err != nil {
 			effect.End()
 			d.detachOnAttachmentSendError(effect.capability(), effect.transport.transport)
 			return true
 		}
-	default:
-		// Unknown/out-of-band client messages are ignored so a newer
-		// client can add message types without breaking an older daemon.
 	}
 	return false
 }

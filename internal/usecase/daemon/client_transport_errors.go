@@ -7,15 +7,15 @@ import (
 
 // clientGone detaches ac if it is still the session's current client. The
 // session remains registered and headless after the client is gone.
-func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit bool) {
 	d.clientGoneWithNotice(sess, ac, failed, explicit, true)
 }
 
-func (d *Daemon) clientGoneWithoutNotice(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+func (d *Daemon) clientGoneWithoutNotice(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit bool) {
 	d.clientGoneWithNotice(sess, ac, failed, explicit, false)
 }
 
-func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed ports.Transport, explicit, notice bool) {
+func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit, notice bool) {
 	if sess == nil || ac == nil {
 		return
 	}
@@ -65,7 +65,7 @@ func (d *Daemon) clientGoneForAttachment(effect *attachmentEffect, explicit bool
 	return true
 }
 
-func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit, notice bool) {
+func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit, notice bool) {
 	if sess == nil || ac == nil {
 		return
 	}
@@ -111,7 +111,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		// (the client is actively awaiting it), but deadline-bounded so a
 		// wedged client cannot pin this conn handler and hang Serve's
 		// connWg.Wait.
-		d.boundedSend(ac, frameDetached(protocol.ReasonDetach))
+		d.boundedSend(ac, serverDetached(protocol.ReasonDetach))
 	}
 	_ = ac.closeCapturedTransport(oldTr)
 	d.log.Info("client detached", "session", name, "explicit", explicit)
@@ -119,7 +119,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 
 // detachOnSendError drops a client whose transport failed, leaving the session
 // registered and headless.
-func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed ports.Transport) {
+func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed ports.ServerConnection) {
 	expected := transportSnapshot{}
 	if failed != nil {
 		expected = ac.transportSnapshot()
@@ -135,11 +135,11 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
 }
 
-func (d *Daemon) detachOnAttachmentSendError(token attachmentCapability, failed ports.Transport) {
+func (d *Daemon) detachOnAttachmentSendError(token attachmentCapability, failed ports.ServerConnection) {
 	d.detachOnAttachmentSendErrorUntil(token, failed, nil)
 }
 
-func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentCapability, failed ports.Transport, done func() <-chan struct{}) {
+func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentCapability, failed ports.ServerConnection, done func() <-chan struct{}) {
 	// A delayed sender may report after the client has rebound. Only the exact
 	// transport captured by this attachment is allowed to detach either lifecycle.
 	if failed == nil || failed != token.transport.transport {
@@ -160,7 +160,7 @@ func (d *Daemon) detachOnAttachmentSendErrorUntil(token attachmentCapability, fa
 // reserveAttachmentSendErrorCleanup accounts for cleanup before End releases the
 // attachment gate. This closes the WaitGroup Add/Wait race with terminal teardown;
 // the returned launch function must be invoked immediately after ticket End.
-func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentCapability, failed ports.Transport) func() {
+func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentCapability, failed ports.ServerConnection) func() {
 	d.attachmentCleanupWg.Add(1)
 	return func() {
 		go func() {
@@ -178,7 +178,7 @@ func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentCapability, f
 	}
 }
 
-func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed ports.Transport) {
+func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed ports.ServerConnection) {
 	ac.clearSamePeerOffer()
 	ac.clearParkedRoute()
 	name := sess.nameSnapshot()

@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
@@ -58,7 +60,7 @@ func startDaemonInDir(t *testing.T, dir string, opts ...daemon.Option) (string, 
 	d := daemon.New(pty.NewFactory(), clock.New(), discardLog(), opts...)
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan error, 1)
-	go func() { ch <- d.Serve(ctx, ln) }()
+	go func() { ch <- d.Serve(ctx, sessionwire.NewServerListener(ln)) }()
 	t.Cleanup(cancel)
 	return dir, ch
 }
@@ -133,6 +135,55 @@ func killAll(dir string) error {
 		return nil
 	}
 	return err
+}
+
+func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
+	incompatibleVersion := make([]byte, 10)
+	binary.BigEndian.PutUint16(incompatibleVersion[:2], protocol.Version+1)
+	binary.BigEndian.PutUint64(incompatibleVersion[2:], 42)
+	valid, err := wire.MarshalCommandRequest(protocol.CommandRequest{
+		Version: protocol.Version, RequestID: 43, Slug: "list-sessions",
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		payload []byte
+		want    protocol.CommandResult
+	}{
+		{
+			name:    "incompatible version",
+			payload: incompatibleVersion,
+			want:    protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
+		},
+		{
+			name:    "truncated version prefix",
+			payload: []byte{0},
+			want:    protocol.CommandResult{Code: protocol.ErrInternal, Text: "malformed command request"},
+		},
+		{
+			name:    "trailing garbage",
+			payload: append(append([]byte(nil), valid...), 0xff),
+			want:    protocol.CommandResult{RequestID: 43, Code: protocol.ErrInternal, Text: "malformed command request"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, _ := startDaemon(t)
+			tr, err := ipc.DialContext(context.Background(), dir)
+			require.NoError(t, err)
+			defer func() { _ = tr.Close() }()
+
+			require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: tt.payload}))
+			frame, err := tr.Recv()
+			require.NoError(t, err)
+			require.Equal(t, wire.MsgCommandResult, frame.Type)
+			require.Equal(t, wire.MarshalCommandResult(tt.want), frame.Payload)
+			result, err := wire.UnmarshalCommandResult(frame.Payload)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, result)
+		})
+	}
 }
 
 // awaitText decodes MsgOutput frames into a fresh VT screen and returns once
@@ -611,7 +662,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return d.Serve(ctx, listener)
+			return d.Serve(ctx, sessionwire.NewServerListener(listener))
 		})
 	}()
 
@@ -746,7 +797,7 @@ func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
 				daemon.WithCatalogue(opened.Catalogue, opened.Records),
 				daemon.WithSnapshotRepository(blocking),
 			)
-			return d.Serve(ctx, listener)
+			return d.Serve(ctx, sessionwire.NewServerListener(listener))
 		})
 	}()
 
@@ -800,7 +851,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 		daemon.WithRecoveryCoordinator(coordinator),
 	)
 	served := make(chan error, 1)
-	go func() { served <- d.Serve(ctx, listener) }()
+	go func() { served <- d.Serve(ctx, sessionwire.NewServerListener(listener)) }()
 
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("checkpoint me\n")})}))
@@ -883,7 +934,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 				daemon.WithShell("/bin/cat", nil),
 				daemon.WithSnapshotRepository(repository),
 			)
-			return d.Serve(ctx, observed)
+			return d.Serve(ctx, sessionwire.NewServerListener(observed))
 		})
 	}()
 
@@ -1074,7 +1125,7 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 	oldCtx, stopOld := context.WithCancel(context.Background())
 	oldDone := make(chan error, 1)
 	go func() {
-		serveErr := oldDaemon.Serve(oldCtx, controlledListener)
+		serveErr := oldDaemon.Serve(oldCtx, sessionwire.NewServerListener(controlledListener))
 		teardownEvents <- "owner-release"
 		close(ownerReleaseEntered)
 		<-allowOwnerRelease

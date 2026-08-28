@@ -255,13 +255,13 @@ func (d *Daemon) forwardClipboardAsync(owner paneEffectLease, b64 string) {
 	sess.mu.Unlock()
 }
 
-func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *attachmentEffect) (ports.Transport, error) {
+func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *attachmentEffect) (ports.ServerConnection, error) {
 	token := item.token
 	if token.ac == nil || ticket == nil || ticket.ended.Load() || token.transport.transport == nil {
 		return token.transport.transport, errAttachmentTransition
 	}
 	expected := token.transport
-	ownedTransport, owned := expected.transport.(ports.OwnedSynchronousTransport)
+	owned := expected.transport.Capabilities().OwnedSynchronousSend
 	send := func() error {
 		ac := token.ac
 		ac.sendMu.Lock()
@@ -277,12 +277,12 @@ func (d *Daemon) boundedSendClipboardForward(item clipboardForward, ticket *atta
 		}
 		ac.output.lockView()
 		defer ac.output.unlockView()
-		frame, err := ac.output.sideEffectLocked(item.seq, ac.echoAck.Load())
+		output, err := ac.output.sideEffectLocked(item.seq, ac.echoAck.Load())
 		if err == nil {
 			if owned {
-				err = ownedTransport.SendSynchronous(frame)
+				err = expected.transport.SendOutputSynchronous(output)
 			} else {
-				err = expected.transport.Send(frame)
+				err = expected.transport.SendOutput(output)
 			}
 		}
 		if err != nil {

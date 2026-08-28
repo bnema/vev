@@ -7,14 +7,13 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // routeRemoteTargetWithContext is the exact-target branch for picker handoffs.
 // It is deliberately separate from legacy name routing: a lifecycle mismatch,
 // missing tab, broken record, or stopped-record race is a no-such-target error,
 // never an invitation to attach a same-name replacement.
-func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.Hello, tr ports.ServerConnection) (*session, *attachedClient, error) {
 	if h.RemoteTarget == nil {
 		return nil, nil, errors.New("daemon: missing remote target")
 	}
@@ -120,12 +119,7 @@ func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, act
 			effect.ac.clearParkedRoute()
 		}
 	}
-	payload := wire.MarshalNavigationDirective(directive)
-	if payload == nil {
-		rollback()
-		return errAttachmentTransition
-	}
-	if err := effect.sendControl(wire.Frame{Type: wire.MsgNavigationAction, Payload: payload}); err != nil {
+	if err := effect.sendControl(directive); err != nil {
 		rollback()
 		return err
 	}
@@ -133,11 +127,10 @@ func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, act
 }
 
 func (d *Daemon) sendRecentRouteNavigationActionForAttachment(effect *attachmentEffect, action protocol.RouteNavigationAction) error {
-	payload, err := wire.MarshalRouteNavigationAction(action)
-	if err != nil {
+	if action.SnapshotGeneration == 0 || action.Key == 0 || action.Generation == 0 {
 		return errAttachmentTransition
 	}
-	return effect.sendControl(wire.Frame{Type: wire.MsgNavigateRecentRoute, Payload: payload})
+	return effect.sendControl(action)
 }
 
 func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffect) error {
@@ -150,14 +143,13 @@ func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffec
 		Ephemeral: effect.sess.ephemeral,
 	}
 	effect.sess.mu.Unlock()
-	payload, err := wire.MarshalCommittedRouteIdentity(identity)
-	if err != nil {
+	if err := identity.Validate(); err != nil {
 		return errAttachmentTransition
 	}
-	return effect.sendControl(wire.Frame{Type: wire.MsgCommittedRouteIdentity, Payload: payload})
+	return effect.sendControl(identity)
 }
 
-func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, h protocol.Hello, routeCreated, purge bool) (*attachedClient, error) {
+func (d *Daemon) finishRouteAttach(sess *session, tr ports.ServerConnection, sz domain.Size, h protocol.Hello, routeCreated, purge bool) (*attachedClient, error) {
 	ac, err := d.finishAttach(sess, tr, sz, h)
 	if err != nil && routeCreated {
 		if cleanupErr := d.killSessionIfEmpty(sess, protocol.ReasonSessionKilled, purge); cleanupErr != nil {

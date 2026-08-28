@@ -204,7 +204,7 @@ func chunkReadPTY(t *testing.T, chunks ...[]byte) *portsmocks.MockPTY {
 	return p
 }
 
-func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClient, tr ports.Transport) {
+func publishActiveClipboardCapability(d *Daemon, sess *session, ac *attachedClient, tr ports.ServerConnection) {
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, tr)
 	token.lease = rc.attachmentLease(ac)

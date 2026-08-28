@@ -254,14 +254,14 @@ func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
 	expected := ac.transportSnapshot()
 	orphanDone := make(chan struct{})
 	type boundedResult struct {
-		transport ports.Transport
+		transport ports.ServerConnection
 		err       error
 	}
 	result := make(chan boundedResult, 1)
 	go func() {
 		transport, sendErr := d.boundedSendWithTimeout(time.Second, expected.transport, func() error {
 			defer close(orphanDone)
-			return ac.sendExpectedTransport(expected, frameDetached(protocol.ReasonDetach))
+			return ac.sendExpectedTransport(expected, serverDetached(protocol.ReasonDetach))
 		})
 		result <- boundedResult{transport: transport, err: sendErr}
 	}()
@@ -327,7 +327,7 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	done := make(chan struct{})
 	resumeHello := helloResumeCapable(protocol.IntentResume, sess.name, token)
 	go func() {
-		d.handleHello(tr.tr, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(resumeHello)})
+		d.handleHelloFrame(tr.tr, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(resumeHello)})
 		close(done)
 	}()
 

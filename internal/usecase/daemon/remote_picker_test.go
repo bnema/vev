@@ -890,8 +890,8 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	d.remoteCatalog.status["arch"] = remoteHostFresh
 	d.remoteCatalog.mu.Unlock()
 	cause := errors.New("remote attach send failed")
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(mock.Anything).Return(cause)
+	tr := portsmocks.NewMockServerConnection(t)
+	tr.EXPECT().SendServer(mock.Anything).Return(cause)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "local", tr)
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
@@ -921,9 +921,9 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	require.Same(t, sess, ac.currentAttachmentSession())
 }
 
-func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...ports.Transport) (*session, *attachedClient, chan wire.Frame) {
+func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...ports.ServerConnection) (*session, *attachedClient, chan wire.Frame) {
 	t.Helper()
-	var tr ports.Transport
+	var tr ports.ServerConnection
 	var sends chan wire.Frame
 	if len(transports) != 0 {
 		tr = transports[0]

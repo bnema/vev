@@ -68,7 +68,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 
 type swapErrorTransport struct {
 	ac          *attachedClient
-	replacement ports.Transport
+	replacement ports.ServerConnection
 	err         error
 }
 
@@ -82,7 +82,7 @@ func (t *swapErrorTransport) Close() error              { return nil }
 
 type ownedSwapErrorTransport struct {
 	ac          *attachedClient
-	replacement ports.Transport
+	replacement ports.ServerConnection
 	err         error
 	sent        chan wire.Frame
 }

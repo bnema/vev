@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type attachmentEffectPhase uint8
@@ -189,7 +189,7 @@ func (t *attachmentEffect) endTransportSend() {
 	g.mu.Unlock()
 }
 
-func (t *attachmentEffect) sendControl(frame wire.Frame) error {
+func (t *attachmentEffect) sendControl(message protocol.ServerMessage) error {
 	if !t.current() || t.ac == nil || t.transport.transport == nil {
 		return errAttachmentTransition
 	}
@@ -198,7 +198,7 @@ func (t *attachmentEffect) sendControl(frame wire.Frame) error {
 	if !t.current() || !t.ac.transportSnapshotCurrent(t.transport) || !t.beginTransportSend(t.transport) {
 		return errAttachmentTransition
 	}
-	err := t.transport.transport.Send(frame)
+	err := t.transport.transport.SendServer(message)
 	if err != nil {
 		t.reportTransportFailure(t.transport)
 	}
@@ -229,12 +229,12 @@ func (ac *attachedClient) beginAttachmentEffect(token attachmentCapability) (*at
 // admits the capability derived from the session registry. Handshakes use it
 // after Welcome has completed so a replacement blocked behind that send can
 // publish before readiness or first paint.
-func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.Transport) (attachmentCapability, *attachmentEffect, bool) {
+func (ac *attachedClient) beginCurrentAttachmentEffect(sess *session, tr ports.ServerConnection) (attachmentCapability, *attachmentEffect, bool) {
 	//nolint:contextcheck // This compatibility wrapper deliberately delegates with a fresh context; cancellable callers use the context variant below.
 	return ac.beginCurrentAttachmentEffectContext(context.Background(), sess, tr)
 }
 
-func (ac *attachedClient) beginCurrentAttachmentEffectContext(ctx context.Context, sess *session, tr ports.Transport) (attachmentCapability, *attachmentEffect, bool) {
+func (ac *attachedClient) beginCurrentAttachmentEffectContext(ctx context.Context, sess *session, tr ports.ServerConnection) (attachmentCapability, *attachmentEffect, bool) {
 	if ctx == nil || ac == nil || sess == nil || tr == nil {
 		return attachmentCapability{}, nil, false
 	}
