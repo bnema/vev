@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -158,10 +159,10 @@ func decodeRemoteCatalog(raw []byte) (ports.RemoteCatalog, error) {
 			Kind: "catalog",
 		}
 	}
-	if *version.ProtocolVersion != ports.ProtocolVersion {
+	if *version.ProtocolVersion != protocol.Version {
 		return ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{
 			Got:  *version.ProtocolVersion,
-			Want: ports.ProtocolVersion,
+			Want: protocol.Version,
 			Kind: "protocol",
 		}
 	}

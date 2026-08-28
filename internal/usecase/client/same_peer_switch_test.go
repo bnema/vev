@@ -24,7 +24,7 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 		term.term,
 		transport,
 		newReconnectHandshakeClock(t),
-		AttachRequest{Intent: ports.IntentAttach, SessionName: "source"},
+		AttachRequest{Intent: protocol.IntentAttach, SessionName: "source"},
 		0,
 		&terminalThemeState{},
 		nil,
@@ -35,9 +35,9 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 	go func() { resultCh <- attempt.run(ctx) }()
 
 	exact := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{7}, SessionName: "stopped"}
-	target := ports.AttachTarget{
-		Session: "stopped", Intent: ports.IntentAttach, ExactTarget: &exact,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	target := protocol.AttachTarget{
+		Session: "stopped", Intent: protocol.IntentAttach, ExactTarget: &exact,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	transport.recvCh <- reconnectToastRecv{frame: ports.Frame{
 		Type: ports.MsgAttachTarget, Payload: ports.MarshalAttachTarget(target),

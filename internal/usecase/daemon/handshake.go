@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 var errHandshakeTimeout = errors.New("handshake timed out")
@@ -22,9 +23,9 @@ func (d *Daemon) newHandshakeContext(parent context.Context) (context.Context, <
 	if d != nil && d.clock != nil {
 		clock = d.clock
 	}
-	timer := clock.NewTimer(ports.HandshakeTimeout)
+	timer := clock.NewTimer(protocol.HandshakeTimeout)
 	if timer == nil {
-		timer = systemClock{}.NewTimer(ports.HandshakeTimeout)
+		timer = systemClock{}.NewTimer(protocol.HandshakeTimeout)
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -153,6 +154,6 @@ func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr p
 		_ = tr.Close()
 	}
 	if ac.routeCreatedSession {
-		_ = d.killSessionIfEmpty(sess, ports.ReasonSessionKilled, ac.routeSessionPurge)
+		_ = d.killSessionIfEmpty(sess, protocol.ReasonSessionKilled, ac.routeSessionPurge)
 	}
 }

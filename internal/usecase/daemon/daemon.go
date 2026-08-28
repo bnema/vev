@@ -374,7 +374,7 @@ type inactiveSession struct {
 	tabRecords  []domain.CatalogueTabRecord
 	purging     bool
 	record      domain.CatalogueRecord
-	state       ports.SessionState
+	state       protocol.SessionState
 	restoreDone chan struct{}
 }
 
@@ -391,7 +391,7 @@ func (s inactiveSession) restorePending() bool {
 }
 
 func (s inactiveSession) broken() bool {
-	return s.state == ports.SessionBroken || s.record.DegradedReason != ""
+	return s.state == protocol.SessionBroken || s.record.DegradedReason != ""
 }
 
 func (s inactiveSession) visible() bool {
@@ -399,7 +399,7 @@ func (s inactiveSession) visible() bool {
 }
 
 func (s inactiveSession) canResume() bool {
-	return s.visible() && s.state == ports.SessionDown && !s.broken()
+	return s.visible() && s.state == protocol.SessionDown && !s.broken()
 }
 
 func (s inactiveSession) sameLifecycle(other inactiveSession) bool {
@@ -717,7 +717,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			state, done := initialSessionState(r)
 			d.inactive[r.Name] = inactiveSessionFromRecord(r, state, done)
 		} else {
-			d.inactive[r.Name] = inactiveSessionFromRecord(r, ports.SessionDown, nil)
+			d.inactive[r.Name] = inactiveSessionFromRecord(r, protocol.SessionDown, nil)
 		}
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 			maxCreatedAt = r.CreatedAt
@@ -806,7 +806,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		snapshotDeadline = newSnapshotShutdownDeadline(d.clock)
 		defer snapshotDeadline.stop()
 	}
-	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
+	d.shutdownAllWithSnapshotDeadline(protocol.ReasonServerShutdown, snapshotDeadline)
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
@@ -826,7 +826,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		d.persistShutdownSnapshotFailure(name, context.DeadlineExceeded)
 	}
 	d.WaitDurableWriters()
-	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
+	d.shutdownAllWithSnapshotDeadline(protocol.ReasonServerShutdown, snapshotDeadline)
 	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
 	d.waitNotifies()
 	if err := d.flushCatalogue(); err != nil {
@@ -1058,7 +1058,7 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	default:
 		d.log.Warn("hello rejected", "err", "expected hello", "type", first.Type)
 		_ = boundedHandshakeOperation(handshakeCtx, tr, func() error {
-			return tr.Send(frameError(ports.ErrInternal, "expected hello"))
+			return tr.Send(frameError(protocol.ErrInternal, "expected hello"))
 		})
 		stopTransport()
 		finishHandshake()
@@ -1072,17 +1072,17 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	defer func() { _ = tr.Close() }()
 
 	d.mu.Lock()
-	infos := make([]ports.SessionInfo, 0, len(d.sessions)+len(d.inactive))
+	infos := make([]protocol.SessionInfo, 0, len(d.sessions)+len(d.inactive))
 	liveNames := make(map[string]struct{}, len(d.sessions))
 	for _, s := range d.sessions {
 		if s == nil {
 			continue
 		}
 		s.mu.Lock()
-		info := ports.SessionInfo{
+		info := protocol.SessionInfo{
 			SessionID: string(s.id),
 			Name:      s.name,
-			State:     ports.SessionUp,
+			State:     protocol.SessionUp,
 			Ephemeral: s.ephemeral,
 			Tabs:      uint16(len(s.tabs)),
 			Attached:  len(s.attachments) != 0,
@@ -1095,11 +1095,11 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		if _, live := liveNames[name]; live || !inactive.visible() {
 			continue
 		}
-		state := ports.SessionDown
+		state := protocol.SessionDown
 		if inactive.broken() {
-			state = ports.SessionBroken
+			state = protocol.SessionBroken
 		}
-		infos = append(infos, ports.SessionInfo{Name: name, State: state})
+		infos = append(infos, protocol.SessionInfo{Name: name, State: state})
 	}
 	d.mu.Unlock()
 
@@ -1115,11 +1115,11 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 
 	k, err := ports.UnmarshalKill(f.Payload)
 	if err != nil {
-		_ = d.boundedControlSend(tr, frameError(ports.ErrInternal, "malformed kill request"))
+		_ = d.boundedControlSend(tr, frameError(protocol.ErrInternal, "malformed kill request"))
 		return
 	}
 	if k.All {
-		d.shutdownAll(ports.ReasonServerShutdown)
+		d.shutdownAll(protocol.ReasonServerShutdown)
 		return
 	}
 
@@ -1132,7 +1132,7 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 			// deletion order as live and offline purges.
 			if err := d.retryStoppedPurge(k.Name); err != nil {
 				d.log.Warn("deleting stopped session failed", "err", err, "session", k.Name)
-				_ = d.boundedControlSend(tr, frameError(ports.ErrInternal, "deleting stopped session failed"))
+				_ = d.boundedControlSend(tr, frameError(protocol.ErrInternal, "deleting stopped session failed"))
 			}
 			return
 		}
@@ -1140,11 +1140,11 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	d.mu.Unlock()
 
 	if target == nil {
-		_ = d.boundedControlSend(tr, frameError(ports.ErrNoSuchSession, "no such session: "+k.Name))
+		_ = d.boundedControlSend(tr, frameError(protocol.ErrNoSuchSession, "no such session: "+k.Name))
 		return
 	}
-	if err := d.killSession(target, ports.ReasonSessionKilled, true); err != nil {
-		_ = d.boundedControlSend(tr, frameError(ports.ErrInternal, "deleting persisted session failed"))
+	if err := d.killSession(target, protocol.ReasonSessionKilled, true); err != nil {
+		_ = d.boundedControlSend(tr, frameError(protocol.ErrInternal, "deleting persisted session failed"))
 	}
 }
 
@@ -1175,19 +1175,19 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 	}
 	h, err := ports.UnmarshalHello(f.Payload)
 	if err != nil {
-		if version, ok := ports.PeekHelloVersion(f.Payload); ok && version != ports.ProtocolVersion {
-			d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", version, "expected", ports.ProtocolVersion)
-			_ = sendHandshake(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
+		if version, ok := ports.PeekHelloVersion(f.Payload); ok && version != protocol.Version {
+			d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", version, "expected", protocol.Version)
+			_ = sendHandshake(frameError(protocol.ErrVersionMismatch, "protocol version mismatch"))
 		} else {
 			d.log.Warn("hello rejected", "err", err)
-			_ = sendHandshake(frameError(ports.ErrInternal, "malformed hello"))
+			_ = sendHandshake(frameError(protocol.ErrInternal, "malformed hello"))
 		}
 		_ = tr.Close()
 		return
 	}
-	if h.Version != ports.ProtocolVersion {
-		d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", h.Version, "expected", ports.ProtocolVersion, "intent", h.Intent, "session", h.Name)
-		_ = sendHandshake(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
+	if h.Version != protocol.Version {
+		d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", h.Version, "expected", protocol.Version, "intent", h.Intent, "session", h.Name)
+		_ = sendHandshake(frameError(protocol.ErrVersionMismatch, "protocol version mismatch"))
 		_ = tr.Close()
 		return
 	}
@@ -1198,7 +1198,7 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
 			_ = sendHandshake(frameError(pe.code, pe.text))
 		} else {
-			_ = sendHandshake(frameError(ports.ErrInternal, rerr.Error()))
+			_ = sendHandshake(frameError(protocol.ErrInternal, rerr.Error()))
 		}
 		_ = tr.Close()
 		return
@@ -1310,7 +1310,7 @@ func (e *protoErr) Error() string { return e.text }
 // unlocking d.mu before returning, including every error path. It publishes
 // terminal and role state before releasing d.mu, then defers coordinator
 // cleanup so obsolete workers never delay the new handshake.
-func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, h ports.Hello) (*attachedClient, error) {
+func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, h protocol.Hello) (*attachedClient, error) {
 	initialTabIndex := -1
 	if h.RemoteTarget != nil {
 		var ok bool
@@ -1320,7 +1320,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 				_ = tr.Close()
 			}
 			d.mu.Unlock()
-			return nil, &protoErr{ports.ErrNoSuchTarget, "remote tab no longer exists"}
+			return nil, &protoErr{protocol.ErrNoSuchTarget, "remote tab no longer exists"}
 		}
 	}
 	if h.PreferredTabID != "" {
@@ -1334,7 +1334,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	// A picker handoff deliberately leaves the daemon-owned environment and CWD
 	// untouched, even though Hello retains those fields for direct CLI clients.
 	sess.mu.Lock()
-	if h.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 		sess.env = copyEnvironment(h.Env)
 	}
 	sess.mu.Unlock()
@@ -1439,12 +1439,12 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 		return nil
 	}
 	if stopped.broken() {
-		return &protoErr{ports.ErrInternal, "session durable state is broken: " + name}
+		return &protoErr{protocol.ErrInternal, "session durable state is broken: " + name}
 	}
 	if stopped.record.Committed == nil {
 		return nil
 	}
-	return &protoErr{ports.ErrInternal, "session was not restored into this daemon: " + name}
+	return &protoErr{protocol.ErrInternal, "session was not restored into this daemon: " + name}
 }
 
 // route resolves a Hello to a session and a freshly attached client, creating
@@ -1453,20 +1453,20 @@ func (d *Daemon) waitForTargetRestore(ctx context.Context, name string) error {
 func (d *Daemon) validateExactSessionTargetLocked(target protocol.ExactSessionTarget) error {
 	if sess := d.findByNameLocked(target.SessionName); sess != nil {
 		if sess.incarnation != target.LifecycleID {
-			return &protoErr{ports.ErrNoSuchSession, "session lifecycle has changed: " + target.SessionName}
+			return &protoErr{protocol.ErrNoSuchSession, "session lifecycle has changed: " + target.SessionName}
 		}
 		return nil
 	}
 	stopped, ok := d.inactive[target.SessionName]
 	if !ok || !stopped.visible() || stopped.incarnation != target.LifecycleID {
-		return &protoErr{ports.ErrNoSuchSession, "no such session lifecycle: " + target.SessionName}
+		return &protoErr{protocol.ErrNoSuchSession, "no such session lifecycle: " + target.SessionName}
 	}
 	return nil
 }
 
 func (d *Daemon) validateExactSessionTarget(ctx context.Context, target protocol.ExactSessionTarget) error {
 	if err := target.Validate(); err != nil {
-		return &protoErr{ports.ErrNoSuchSession, "invalid exact session target"}
+		return &protoErr{protocol.ErrNoSuchSession, "invalid exact session target"}
 	}
 	if err := d.waitForTargetRestore(ctx, target.SessionName); err != nil {
 		return err
@@ -1477,7 +1477,7 @@ func (d *Daemon) validateExactSessionTarget(ctx context.Context, target protocol
 	return d.validateExactSessionTargetLocked(target)
 }
 
-func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+func (d *Daemon) route(h protocol.Hello, tr ports.Transport) (*session, *attachedClient, error) {
 	ctx := d.serveCtx
 	if ctx == nil {
 		ctx = context.Background()
@@ -1485,7 +1485,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	return d.routeWithContext(ctx, h, tr)
 }
 
-func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
+func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr ports.Transport) (*session, *attachedClient, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1494,13 +1494,13 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	}
 	sz := h.Size
 	if !sz.Valid() {
-		return nil, nil, &protoErr{ports.ErrInternal, "invalid terminal size"}
+		return nil, nil, &protoErr{protocol.ErrInternal, "invalid terminal size"}
 	}
-	if h.Intent == ports.IntentResume && h.ResumeToken == 0 {
-		return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is required"}
+	if h.Intent == protocol.IntentResume && h.ResumeToken == 0 {
+		return nil, nil, &protoErr{protocol.ErrNoSuchSession, "resume token is required"}
 	}
 	if h.ExactTarget != nil && h.ResumeToken == 0 && h.Name != h.ExactTarget.SessionName {
-		return nil, nil, &protoErr{ports.ErrNoSuchSession, "exact session target name mismatch"}
+		return nil, nil, &protoErr{protocol.ErrNoSuchSession, "exact session target name mismatch"}
 	}
 	if h.RemoteTarget != nil && h.ResumeToken == 0 {
 		return d.routeRemoteTargetWithContext(ctx, h, tr)
@@ -1526,36 +1526,36 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 					// Live recovery parked then lost a competing resumeParked
 					// race; keep the fail-closed wire response instead of
 					// leaking the internal sentinel to handleHello as ErrInternal.
-					return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+					return nil, nil, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 				}
 				return nil, nil, err
 			} else if ok {
 				return sess, ac, nil
 			}
-			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+			return nil, nil, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 		}
 		if sess, ac, ok, err := d.resumeParked(h, tr, sz); err == nil {
 			if ok {
 				return sess, ac, nil
 			}
-			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+			return nil, nil, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 		} else if errors.Is(err, errResumeTokenLifecycleRace) {
 			// The parked entry was replaced while this handshake waited for
 			// its send lock. Fail closed on the original credential rather
 			// than falling through to ordinary attach/create routing.
-			return nil, nil, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+			return nil, nil, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 		} else {
 			return nil, nil, err
 		}
 	}
-	if h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach {
+	if h.Intent == protocol.IntentResume || h.Intent == protocol.IntentAttach {
 		if err := d.waitForTargetRestore(ctx, h.Name); err != nil {
 			return nil, nil, err
 		}
 	}
-	if h.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned && h.RemoteTarget == nil &&
-		(h.Intent == ports.IntentNew || h.Intent == ports.IntentEphemeral) {
-		return nil, nil, &protoErr{ports.ErrNoSuchTarget, "daemon-owned environment requires an exact remote target"}
+	if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned && h.RemoteTarget == nil &&
+		(h.Intent == protocol.IntentNew || h.Intent == protocol.IntentEphemeral) {
+		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "daemon-owned environment requires an exact remote target"}
 	}
 	d.mu.Lock()
 	// Shutdown/create interlock: once shutdown has begun (last session removed,
@@ -1564,7 +1564,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 	// anything inserted now would leak its PTY and hang Serve.
 	if d.closing {
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		return nil, nil, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 	}
 	// The first exact-target check happens before restore I/O. Recheck while
 	// holding d.mu so a same-name lifecycle replacement cannot slip between
@@ -1576,7 +1576,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 		}
 	}
 	switch h.Intent {
-	case ports.IntentEphemeral:
+	case protocol.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
 		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, h.Geometry(), h.Env)
 		if err != nil {
@@ -1586,18 +1586,18 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 		ac, err := d.finishRouteAttach(sess, tr, sz, h, true, true)
 		return sess, ac, err
 
-	case ports.IntentNew:
+	case protocol.IntentNew:
 		if h.Name == "" {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrInvalidSessionName, "empty session name"}
+			return nil, nil, &protoErr{protocol.ErrInvalidSessionName, "empty session name"}
 		}
 		if err := domain.ValidateSessionName(h.Name); err != nil {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrInvalidSessionName, err.Error()}
+			return nil, nil, &protoErr{protocol.ErrInvalidSessionName, err.Error()}
 		}
 		if d.nameLiveOrStoppedLocked(h.Name) {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
+			return nil, nil, &protoErr{protocol.ErrNameTaken, "session name already in use: " + h.Name}
 		}
 		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, h.Geometry(), h.Env)
 		if err != nil {
@@ -1607,18 +1607,18 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 		ac, err := d.finishRouteAttach(sess, tr, sz, h, true, true)
 		return sess, ac, err
 
-	case ports.IntentAttach:
+	case protocol.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
 		created := false
 		if sess == nil {
 			stopped, ok := d.inactive[h.Name]
 			if !ok || !stopped.canResume() {
 				d.mu.Unlock()
-				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such resumable session: " + h.Name}
+				return nil, nil, &protoErr{protocol.ErrNoSuchSession, "no such resumable session: " + h.Name}
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			env := h.Env
-			if h.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned {
+			if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned {
 				env = copyEnvironment(d.baseEnv)
 			}
 			var err error
@@ -1634,6 +1634,6 @@ func (d *Daemon) routeWithContext(ctx context.Context, h ports.Hello, tr ports.T
 
 	default:
 		d.mu.Unlock()
-		return nil, nil, &protoErr{ports.ErrInternal, "unknown intent"}
+		return nil, nil, &protoErr{protocol.ErrInternal, "unknown intent"}
 	}
 }

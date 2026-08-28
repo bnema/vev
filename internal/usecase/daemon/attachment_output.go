@@ -42,7 +42,7 @@ type attachmentOutput struct {
 
 // reconfigureAttachmentOutput applies a replacement terminal's declared
 // capabilities to attachment-owned output state. Caller holds d.mu.
-func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, h ports.Hello) {
+func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, h protocol.Hello) {
 	if d == nil || ac == nil || ac.output == nil {
 		return
 	}

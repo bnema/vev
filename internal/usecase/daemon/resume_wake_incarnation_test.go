@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // A wake can have passed coordinator scheduling before a link loss parks its
@@ -19,7 +19,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
 
 	oldTransport := &closeTrackingTransport{}
-	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	token := ac.resumeToken
 	rc := sess.renderCoordinator()
@@ -45,7 +45,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 
 	d.clientGone(sess, ac, oldTransport, false)
 	newTransport := &closeTrackingTransport{}
-	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, sess.name, token), newTransport, domain.Size{Cols: 80, Rows: 24})
+	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, sess.name, token), newTransport, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Same(t, sess, resumedSess)

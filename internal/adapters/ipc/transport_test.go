@@ -24,8 +24,8 @@ func TestTransportSendRecvBothDirections(t *testing.T) {
 	client := NewTransport(c1)
 	server := NewTransport(c2)
 
-	clientToServer := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(ports.Hello{Version: 1, Intent: ports.IntentNew, Name: "w0"})}
-	serverToClient := ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: "main"})}
+	clientToServer := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{Version: 1, Intent: protocol.IntentNew, Name: "w0"})}
+	serverToClient := ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main"})}
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -140,7 +140,7 @@ func TestTransportManySmallFramesBackToBack(t *testing.T) {
 		frames[i] = ports.Frame{Type: ports.MsgPing, Payload: nil}
 	}
 	// Vary a couple to prove ordering and content are both preserved.
-	frames[7] = ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("hop")})}
+	frames[7] = ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("hop")})}
 	frames[150] = ports.Frame{Type: ports.MsgResize, Payload: mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 5, Rows: 6}})}
 
 	var wg sync.WaitGroup

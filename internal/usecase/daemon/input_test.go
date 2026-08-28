@@ -884,7 +884,7 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 	f := awaitFrame(t, sends, ports.MsgDetached)
 	det, err := ports.UnmarshalDetached(f.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ReasonDetach, det.Reason)
+	require.Equal(t, protocol.ReasonDetach, det.Reason)
 }
 
 func TestRNSOpensPromptAndEnterPromotesEphemeralSession(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -16,7 +17,7 @@ const (
 
 var transitionSpinnerFrames = [...]rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
 
-func transitionMessage(target ports.AttachTarget) string {
+func transitionMessage(target protocol.AttachTarget) string {
 	origin := target.Endpoint
 	if target.RemoteTarget != nil && target.RemoteTarget.DisplayOrigin != "" {
 		origin = target.RemoteTarget.DisplayOrigin
@@ -55,7 +56,7 @@ func newTransitionUI(term ports.Terminal, clock ports.Clock, rawEntered *bool) *
 	return &transitionUI{term: term, clock: clock, rawEntered: rawEntered}
 }
 
-func (u *transitionUI) start(target ports.AttachTarget) {
+func (u *transitionUI) start(target protocol.AttachTarget) {
 	if u == nil {
 		return
 	}

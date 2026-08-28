@@ -30,10 +30,10 @@ func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
 			sess.mu.Unlock()
 			tr := &closeTrackingTransport{}
 			target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-			hello := ports.Hello{
-				Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: sess.name,
+			hello := protocol.Hello{
+				Version: protocol.Version, Intent: protocol.IntentAttach, Name: sess.name,
 				Size: defaultSize, ExactTarget: &target, PreferredTabID: test.preferred,
-				EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
+				EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
 			}
 
 			_, ac, err := d.routeWithContext(context.Background(), hello, tr)
@@ -50,7 +50,7 @@ func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	oldTransport := &closeTrackingTransport{}
-	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
 	require.NoError(t, err)
 	second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	sess.mu.Lock()
@@ -60,7 +60,7 @@ func TestResumeAppliesPreferredTabToParkedAttachment(t *testing.T) {
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
 
-	hello := helloResumeCapable(ports.IntentResume, "work", token)
+	hello := helloResumeCapable(protocol.IntentResume, "work", token)
 	hello.PreferredTabID = "tab-2"
 	newTransport := &closeTrackingTransport{}
 	resumedSession, resumed, err := d.route(hello, newTransport)
@@ -80,9 +80,9 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	sess.mu.Unlock()
 	tr := &closeTrackingTransport{}
 	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: sess.name,
-		Size: defaultSize, ExactTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
+	hello := protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: sess.name,
+		Size: defaultSize, ExactTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
 	}
 	_, ac, err := d.routeWithContext(context.Background(), hello, tr)
 	require.NoError(t, err)

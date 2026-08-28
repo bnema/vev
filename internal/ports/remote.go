@@ -193,8 +193,8 @@ var (
 // ValidateRemoteCatalog applies the exact current schema and all bounds before
 // a catalogue is cached or rendered.
 func ValidateRemoteCatalog(c RemoteCatalog) error {
-	if c.ProtocolVersion != ProtocolVersion {
-		return &RemoteCatalogVersionMismatchError{Got: c.ProtocolVersion, Want: ProtocolVersion, Kind: "protocol"}
+	if c.ProtocolVersion != protocol.Version {
+		return &RemoteCatalogVersionMismatchError{Got: c.ProtocolVersion, Want: protocol.Version, Kind: "protocol"}
 	}
 	if c.SchemaVersion != RemoteCatalogSchemaVersion {
 		return &RemoteCatalogVersionMismatchError{Got: c.SchemaVersion, Want: RemoteCatalogSchemaVersion, Kind: "catalog"}
@@ -309,7 +309,7 @@ func ValidateRemoteCatalogCacheEntries(entries []RemoteCatalogCacheEntry) error 
 			return fmt.Errorf("%w: duplicate host", ErrInvalidRemoteCatalog)
 		}
 		seenHosts[entry.Host] = struct{}{}
-		catalog := RemoteCatalog{ProtocolVersion: ProtocolVersion, SchemaVersion: RemoteCatalogSchemaVersion, Sessions: entry.Sessions}
+		catalog := RemoteCatalog{ProtocolVersion: protocol.Version, SchemaVersion: RemoteCatalogSchemaVersion, Sessions: entry.Sessions}
 		if err := ValidateRemoteCatalog(catalog); err != nil {
 			return fmt.Errorf("%w: host %q: %v", ErrInvalidRemoteCatalog, entry.Host, err)
 		}

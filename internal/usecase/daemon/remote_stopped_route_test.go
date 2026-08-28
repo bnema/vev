@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
@@ -19,20 +19,20 @@ func TestDaemonOwnedNoExactTargetRejectsNewAndEphemeral(t *testing.T) {
 		name   string
 		intent uint8
 	}{
-		{name: "new", intent: ports.IntentNew},
-		{name: "ephemeral", intent: ports.IntentEphemeral},
+		{name: "new", intent: protocol.IntentNew},
+		{name: "ephemeral", intent: protocol.IntentEphemeral},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
-			hello := ports.Hello{
-				Version: ports.ProtocolVersion, Intent: tt.intent, Name: "work",
+			hello := protocol.Hello{
+				Version: protocol.Version, Intent: tt.intent, Name: "work",
 				Size: domain.Size{Cols: 80, Rows: 24}, Cwd: "/untrusted/cwd",
-				Env: []string{"UNTRUSTED=client"}, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+				Env: []string{"UNTRUSTED=client"}, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			}
 			_, _, err := d.route(hello, &closeTrackingTransport{})
 			var protocolErr *protoErr
 			require.ErrorAs(t, err, &protocolErr)
-			require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+			require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 			d.mu.Lock()
 			sessions := len(d.sessions)
 			d.mu.Unlock()
@@ -45,13 +45,13 @@ func TestDaemonOwnedStoppedAttachUsesDaemonEnvironment(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	d.baseEnv = []string{"DAEMON=owned"}
 	d.mu.Lock()
-	d.inactive["work"] = inactiveSession{name: "work", cwd: "/remote/work", tabNames: []string{"main"}, state: ports.SessionDown}
+	d.inactive["work"] = inactiveSession{name: "work", cwd: "/remote/work", tabNames: []string{"main"}, state: protocol.SessionDown}
 	d.mu.Unlock()
 
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+	hello := protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 		Size: domain.Size{Cols: 80, Rows: 24}, Cwd: "/untrusted/cwd",
-		Env: []string{"UNTRUSTED=client"}, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		Env: []string{"UNTRUSTED=client"}, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	sess, ac, err := d.routeWithContext(context.Background(), hello, &closeTrackingTransport{})
 	require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestDaemonOwnedStoppedAttachUsesDaemonEnvironment(t *testing.T) {
 	sess.mu.Lock()
 	require.Equal(t, []string{"DAEMON=owned"}, sess.env)
 	sess.mu.Unlock()
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
+	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
 }
 
 func TestRouteRemoteTargetRejectsLiveIntentForInactiveSession(t *testing.T) {
@@ -67,7 +67,7 @@ func TestRouteRemoteTargetRejectsLiveIntentForInactiveSession(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
 	d.mu.Lock()
 	d.inactive["work"] = inactiveSession{
-		name: "work", incarnation: lifecycle, state: ports.SessionDown,
+		name: "work", incarnation: lifecycle, state: protocol.SessionDown,
 		tabNames:   []string{"main"},
 		tabRecords: []domain.CatalogueTabRecord{{StableID: "tab-1", Name: "main"}},
 	}
@@ -77,15 +77,15 @@ func TestRouteRemoteTargetRejectsLiveIntentForInactiveSession(t *testing.T) {
 		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
 		SessionName: "work", LiveTabID: "tab-1",
 	}
-	_, _, err := d.routeWithContext(context.Background(), ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+	_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, &closeTrackingTransport{})
 
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	require.Empty(t, d.sessions)
@@ -98,9 +98,9 @@ func TestRouteRemoteTargetMapsUnavailableInactiveStatesToNoSuchTarget(t *testing
 		name  string
 		entry inactiveSession
 	}{
-		{name: "broken", entry: inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionBroken}},
-		{name: "degraded", entry: inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionDown, record: domain.CatalogueRecord{Name: "work", DegradedReason: "checkpoint unavailable"}}},
-		{name: "purging", entry: inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionDown, purging: true}},
+		{name: "broken", entry: inactiveSession{name: "work", incarnation: lifecycle, state: protocol.SessionBroken}},
+		{name: "degraded", entry: inactiveSession{name: "work", incarnation: lifecycle, state: protocol.SessionDown, record: domain.CatalogueRecord{Name: "work", DegradedReason: "checkpoint unavailable"}}},
+		{name: "purging", entry: inactiveSession{name: "work", incarnation: lifecycle, state: protocol.SessionDown, purging: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
@@ -109,15 +109,15 @@ func TestRouteRemoteTargetMapsUnavailableInactiveStatesToNoSuchTarget(t *testing
 				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
 				SessionName: "work", Stopped: true,
 			}
-			_, _, err := d.routeWithContext(context.Background(), ports.Hello{
-				Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+			_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
+				Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 				Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			}, &closeTrackingTransport{})
 
 			var protocolErr *protoErr
 			require.ErrorAs(t, err, &protocolErr)
-			require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+			require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 		})
 	}
 }
@@ -125,22 +125,22 @@ func TestRouteRemoteTargetMapsUnavailableInactiveStatesToNoSuchTarget(t *testing
 func TestRouteRemoteTargetMapsConcurrentInactiveResumeToNoSuchTarget(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	lifecycle := remoteLifecycleForTest()
-	d.inactive["work"] = inactiveSession{name: "work", incarnation: lifecycle, state: ports.SessionDown}
+	d.inactive["work"] = inactiveSession{name: "work", incarnation: lifecycle, state: protocol.SessionDown}
 	d.creating["work"] = struct{}{}
 	target := domain.RemoteSessionTarget{
 		Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle,
 		SessionName: "work", Stopped: true,
 	}
 
-	_, _, err := d.routeWithContext(context.Background(), ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+	_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, &closeTrackingTransport{})
 
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 }
 
 func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
@@ -151,10 +151,10 @@ func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
 		}
 	}
 	route := func(d *Daemon, target domain.RemoteSessionTarget) error {
-		_, _, err := d.routeWithContext(context.Background(), ports.Hello{
-			Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: target.SessionName,
+		_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentAttach, Name: target.SessionName,
 			Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}, &closeTrackingTransport{})
 		return err
 	}
@@ -168,7 +168,7 @@ func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
 		record.Committed = nil
 		record.TabNames = nil
 		record.TabRecords = nil
-		d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionDown, nil)
+		d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
 		err := route(d, newTarget(record))
 		require.ErrorIs(t, err, cause)
@@ -187,7 +187,7 @@ func TestRouteRemoteTargetPreservesInactiveResumeFailures(t *testing.T) {
 		d.catalogue = recordErrorCatalogue{durableRecoveryCatalogue: catalogue, err: cause}
 		d.persistEnabled = true
 		d.recovery = recoveryusecase.NewCoordinator(d.catalogue, noOpSnapshotRepository{}, nil)
-		d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionDown, nil)
+		d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
 		err := route(d, newTarget(record))
 		require.ErrorIs(t, err, cause)
@@ -224,17 +224,17 @@ func TestRouteRemoteTargetResumesCanonicalPersistedTabMetadata(t *testing.T) {
 			d.catalogue = catalogue
 			d.persistEnabled = true
 			d.recovery = recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil)
-			d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionDown, nil)
+			d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
 			target := domain.RemoteSessionTarget{
 				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: record.IncarnationID,
 				SessionName: record.Name, Stopped: true, StoppedTab: test.selector,
 			}
 			transport, _ := newCapturingTransport(t)
-			sess, attachment, err := d.routeWithContext(context.Background(), ports.Hello{
-				Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name,
+			sess, attachment, err := d.routeWithContext(context.Background(), protocol.Hello{
+				Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name,
 				Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			}, transport)
 			require.NoError(t, err)
 			t.Cleanup(func() { d.clientGone(sess, attachment, transport, false) })
@@ -249,7 +249,7 @@ func TestRouteRemoteTargetRestoresStoppedStableTabAndOwnsEnvironment(t *testing.
 	lifecycle := remoteLifecycleForTest()
 	d.mu.Lock()
 	d.inactive["work"] = inactiveSession{
-		name: "work", cwd: "/remote/work", incarnation: lifecycle, state: ports.SessionDown,
+		name: "work", cwd: "/remote/work", incarnation: lifecycle, state: protocol.SessionDown,
 		tabNames: []string{"alpha", "beta"},
 		tabRecords: []domain.CatalogueTabRecord{
 			{StableID: "tab-a", Name: "alpha"},
@@ -264,10 +264,10 @@ func TestRouteRemoteTargetRestoresStoppedStableTabAndOwnsEnvironment(t *testing.
 		StoppedTab: domain.NewStableTabSelector("tab-b"),
 	}
 	tr, _ := newCapturingTransport(t)
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+	hello := protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		Env:               []string{"VEV_REMOTE_PICKER_SENTINEL=untrusted"},
 	}
 	sess, ac, err := d.routeWithContext(context.Background(), hello, tr)

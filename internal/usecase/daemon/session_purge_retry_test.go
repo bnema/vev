@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type retryablePurgeRepository struct {
@@ -40,7 +40,7 @@ func TestLivePurgeLeavesFailedDirectoryDeletionForStartupGarbageCollection(t *te
 	pty.EXPECT().Close().Return(nil).Once()
 	d.sessions = map[domain.SessionID]*session{sess.id: sess}
 
-	require.Error(t, d.killSession(sess, ports.ReasonSessionKilled, true))
+	require.Error(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
 	require.Equal(t, []string{"delete incarnation"}, repository.calls)
 	_, exists, err := d.catalogue.Record("work")
 	require.NoError(t, err)

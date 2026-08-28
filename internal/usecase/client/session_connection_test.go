@@ -3,14 +3,14 @@ package client_test
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/require"
 )
 
 func TestSessionConnectionUsesOneAttachShapeForLocalAndRemoteTransports(t *testing.T) {
-	target := client.SessionTarget{Intent: ports.IntentAttach, SessionName: "work"}
+	target := client.SessionTarget{Intent: protocol.IntentAttach, SessionName: "work"}
 	local := portsmocks.NewMockTransport(t)
 	remote := portsmocks.NewMockTransport(t)
 
@@ -20,7 +20,7 @@ func TestSessionConnectionUsesOneAttachShapeForLocalAndRemoteTransports(t *testi
 	require.NoError(t, err)
 
 	require.Equal(t, localConnection.AttachRequest(), remoteConnection.AttachRequest())
-	require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}, localConnection.AttachRequest())
+	require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}, localConnection.AttachRequest())
 	require.Same(t, local, localConnection.Transport())
 	require.Same(t, remote, remoteConnection.Transport())
 }
@@ -32,13 +32,13 @@ func TestSessionTargetValidation(t *testing.T) {
 		wantErr   bool
 		wantErrIs error
 	}{
-		{name: "ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral}},
-		{name: "named ephemeral", target: client.SessionTarget{Intent: ports.IntentEphemeral, SessionName: "work"}, wantErr: true, wantErrIs: client.ErrEphemeralSessionName},
-		{name: "new", target: client.SessionTarget{Intent: ports.IntentNew, SessionName: "work"}},
-		{name: "attach", target: client.SessionTarget{Intent: ports.IntentAttach, SessionName: "work"}},
-		{name: "resume", target: client.SessionTarget{Intent: ports.IntentResume, SessionName: "work"}},
-		{name: "missing named session", target: client.SessionTarget{Intent: ports.IntentAttach}, wantErr: true},
-		{name: "unsafe session", target: client.SessionTarget{Intent: ports.IntentAttach, SessionName: "my work"}, wantErr: true},
+		{name: "ephemeral", target: client.SessionTarget{Intent: protocol.IntentEphemeral}},
+		{name: "named ephemeral", target: client.SessionTarget{Intent: protocol.IntentEphemeral, SessionName: "work"}, wantErr: true, wantErrIs: client.ErrEphemeralSessionName},
+		{name: "new", target: client.SessionTarget{Intent: protocol.IntentNew, SessionName: "work"}},
+		{name: "attach", target: client.SessionTarget{Intent: protocol.IntentAttach, SessionName: "work"}},
+		{name: "resume", target: client.SessionTarget{Intent: protocol.IntentResume, SessionName: "work"}},
+		{name: "missing named session", target: client.SessionTarget{Intent: protocol.IntentAttach}, wantErr: true},
+		{name: "unsafe session", target: client.SessionTarget{Intent: protocol.IntentAttach, SessionName: "my work"}, wantErr: true},
 		{name: "unknown intent", target: client.SessionTarget{Intent: 99, SessionName: "work"}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -58,6 +58,6 @@ func TestSessionTargetValidation(t *testing.T) {
 }
 
 func TestSessionConnectionRequiresTransport(t *testing.T) {
-	_, err := client.NewSessionConnection(nil, client.SessionTarget{Intent: ports.IntentEphemeral})
+	_, err := client.NewSessionConnection(nil, client.SessionTarget{Intent: protocol.IntentEphemeral})
 	require.Error(t, err)
 }

@@ -229,10 +229,10 @@ func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	d, current, ac, _ := newManualSessionWithPTYs(t, p)
 	d.sessions["active"] = &session{sessionCore: sessionCore{id: "active", name: "active", createdAt: 10}}
 	d.sessions["ephemeral"] = &session{sessionCore: sessionCore{id: "ephemeral", name: "ephemeral", ephemeral: true, createdAt: 11}}
-	d.inactive["stopped"] = inactiveSession{name: "stopped", createdAt: 12, incarnation: domain.IncarnationID{3}, state: ports.SessionDown}
-	d.inactive["purging"] = inactiveSession{name: "purging", createdAt: 13, incarnation: domain.IncarnationID{4}, state: ports.SessionDown, purging: true}
-	d.inactive["broken"] = inactiveSession{name: "broken", createdAt: 14, incarnation: domain.IncarnationID{5}, state: ports.SessionBroken}
-	d.inactive["degraded"] = inactiveSession{name: "degraded", createdAt: 15, incarnation: domain.IncarnationID{6}, state: ports.SessionDown, record: domain.CatalogueRecord{DegradedReason: "checkpoint unavailable"}}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", createdAt: 12, incarnation: domain.IncarnationID{3}, state: protocol.SessionDown}
+	d.inactive["purging"] = inactiveSession{name: "purging", createdAt: 13, incarnation: domain.IncarnationID{4}, state: protocol.SessionDown, purging: true}
+	d.inactive["broken"] = inactiveSession{name: "broken", createdAt: 14, incarnation: domain.IncarnationID{5}, state: protocol.SessionBroken}
+	d.inactive["degraded"] = inactiveSession{name: "degraded", createdAt: 15, incarnation: domain.IncarnationID{6}, state: protocol.SessionDown, record: domain.CatalogueRecord{DegradedReason: "checkpoint unavailable"}}
 	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1, Entries: []protocol.RecentRouteEntry{
 		testRouteEntry(1, 1, "purging", 4, protocol.RouteKindLocal),
 		testRouteEntry(2, 1, "broken", 5, protocol.RouteKindLocal),
@@ -322,7 +322,7 @@ func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *te
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, sends := newManualSessionWithPTYs(t, p)
-	stopped := inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 42, lastUsedSeq: 7, tabNames: []string{"shell", "logs"}, state: ports.SessionDown}
+	stopped := inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 42, lastUsedSeq: 7, tabNames: []string{"shell", "logs"}, state: protocol.SessionDown}
 	d.inactive[stopped.name] = stopped
 	ptys := portsmocks.NewMockPTYFactory(t)
 	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed")).Once()
@@ -351,7 +351,7 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 	defer release2()
 	d, current, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactory(t, p2)
-	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 42, state: ports.SessionDown}
+	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 42, state: protocol.SessionDown}
 
 	d.handleInput(current, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -598,9 +598,9 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 		Endpoint: "user@arch", DisplayOrigin: "arch", LifecycleID: remoteLifecycle,
 		SessionName: "work", LiveTabID: "tab-work",
 	}
-	require.Equal(t, ports.AttachTarget{
-		Endpoint: "user@arch", Session: "work", Intent: ports.IntentAttach,
-		RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	require.Equal(t, protocol.AttachTarget{
+		Endpoint: "user@arch", Session: "work", Intent: protocol.IntentAttach,
+		RemoteTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, target)
 	require.False(t, ac.overlays.paletteActive())
 	d.remoteCatalog.mu.Lock()

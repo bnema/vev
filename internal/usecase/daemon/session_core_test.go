@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -103,7 +103,7 @@ func TestLocalCreateThenKillRemovesLiveRegistryEntry(t *testing.T) {
 	d.mu.Unlock()
 	require.Same(t, sess, registered)
 
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
 	d.mu.Lock()
 	_, live := d.sessions[sess.id]
 	d.mu.Unlock()

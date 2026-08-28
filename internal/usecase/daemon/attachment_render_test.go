@@ -103,14 +103,14 @@ func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 	defer releasePTY()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	firstTransport, _ := newCapturingTransport(t)
-	sess, first, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work",
+	sess, first, err := d.route(protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
 		Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
 	}, firstTransport)
 	require.NoError(t, err)
 	secondTransport, _ := newCapturingTransport(t)
-	_, second, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+	_, second, err := d.route(protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 		Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
 	}, secondTransport)
 	require.NoError(t, err)
@@ -147,10 +147,10 @@ func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 16)}
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
-	sess, old, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
+	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
 	require.NoError(t, err)
 	newTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
-	_, fresh, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, newTransport)
+	_, fresh, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, newTransport)
 	require.NoError(t, err)
 
 	rc := sess.renderCoordinator()
@@ -183,7 +183,7 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	clock := &signalClock{timers: make(chan *signalTimer, 16)}
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
-	sess, old, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
+	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
 	require.NoError(t, err)
 	rc := sess.renderCoordinator()
 	require.True(t, rc.markAttachmentReady(rc.attachmentLease(old)))
@@ -201,7 +201,7 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	}()
 	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
 
-	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}
+	hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}
 	tr, sends, releaseConn := newConn(t, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
 	defer releaseConn()
 	handshakeDone := make(chan struct{})
@@ -223,10 +223,10 @@ func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	defer releasePTY()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	firstTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
-	sess, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, firstTransport)
+	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, firstTransport)
 	require.NoError(t, err)
 	secondTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan ports.Frame, 8)}
-	_, _, err = d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, secondTransport)
+	_, _, err = d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, secondTransport)
 	require.NoError(t, err)
 	rc := sess.renderCoordinator()
 	for _, ac := range sess.snapshotAttachments() {
@@ -259,14 +259,14 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	defer releasePTY()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	firstTransport, _ := newCapturingTransport(t)
-	sess, first, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work",
+	sess, first, err := d.route(protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
 		Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
 	}, firstTransport)
 	require.NoError(t, err)
 	secondTransport, _ := newCapturingTransport(t)
-	_, second, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+	_, second, err := d.route(protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 		Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
 	}, secondTransport)
 	require.NoError(t, err)

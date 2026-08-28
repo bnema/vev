@@ -28,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 )
@@ -90,7 +91,7 @@ func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, 
 	t.Helper()
 	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
-	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", TrueColor: true, Env: env}
+	hello := protocol.Hello{Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", TrueColor: true, Env: env}
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}))
 	p := recvPump(tr)
 	select {
@@ -103,12 +104,12 @@ func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, 
 	return tr, p
 }
 
-func listRemoteSessions(t *testing.T, dir string) ports.Sessions {
+func listRemoteSessions(t *testing.T, dir string) protocol.Sessions {
 	t.Helper()
 	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = tr.Close() }()
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})}))
 	f, err := tr.Recv()
 	require.NoError(t, err)
 	require.Equal(t, ports.MsgSessions, f.Type)
@@ -123,7 +124,7 @@ func killAll(dir string) error {
 		return err
 	}
 	defer func() { _ = tr.Close() }()
-	if err := tr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+	if err := tr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{All: true})}); err != nil {
 		return err
 	}
 	_, err = tr.Recv()
@@ -213,7 +214,7 @@ func shellFixture(t *testing.T, label string) string {
 func assertChildEnvironment(t *testing.T, tr ports.Transport, p *pump, sz domain.Size, wantTestEnv, wantShell, wantRuntimeDir, wantWayland string) {
 	t.Helper()
 	command := "printf '\\033[2J\\033[H'; printf 'VEV_TEST_ENV=%s SHELL=%s XDG_RUNTIME_DIR=%s WAYLAND_DISPLAY=%s TERM=%s COLORTERM=%s TERM_PROGRAM=%s VEV_PREFIX=%.24s\\n' \"$VEV_TEST_ENV\" \"${SHELL##*/}\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$TERM\" \"$COLORTERM\" \"$TERM_PROGRAM\" \"$VEV\"\n"
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(command)})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(command)})}))
 	text := awaitScreenText(t, p, sz, "TERM_PROGRAM=vev")
 	for _, want := range []string{
 		"VEV_TEST_ENV=" + wantTestEnv,
@@ -239,7 +240,7 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
 	}
 
-	tr1, p1 := attachWithEnvironment(t, dir, ports.IntentNew, "environment", sz, firstEnv)
+	tr1, p1 := attachWithEnvironment(t, dir, protocol.IntentNew, "environment", sz, firstEnv)
 	defer func() { _ = tr1.Close() }()
 	awaitText(t, p1, sz, "SHELL_COMMAND=first")
 	assertChildEnvironment(t, tr1, p1, sz, "first", firstShell, "/run/first", "wayland-first")
@@ -248,15 +249,15 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 		"VEV_TEST_ENV=second", "SHELL=" + secondShell, "XDG_RUNTIME_DIR=/run/second", "WAYLAND_DISPLAY=wayland-second",
 		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
 	}
-	tr2, p2 := attachWithEnvironment(t, dir, ports.IntentAttach, "environment", sz, secondEnv)
+	tr2, p2 := attachWithEnvironment(t, dir, protocol.IntentAttach, "environment", sz, secondEnv)
 	defer func() { _ = tr2.Close() }()
 
 	// The first shell was already running, so it retains its original environment.
 	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/first", "wayland-first")
 
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p2, sz, "Commands")
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
 	assertChildEnvironment(t, tr2, p2, sz, "second", secondShell, "/run/second", "wayland-second")
 }
@@ -272,7 +273,7 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 		"VEV_TEST_ENV=first", "SHELL=" + firstShell, "XDG_RUNTIME_DIR=/run/first", "WAYLAND_DISPLAY=wayland-first",
 		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
 	}
-	tr1, p1 := attachWithEnvironment(t, dir, ports.IntentNew, "environment", sz, firstEnv)
+	tr1, p1 := attachWithEnvironment(t, dir, protocol.IntentNew, "environment", sz, firstEnv)
 	defer func() { _ = tr1.Close() }()
 	awaitText(t, p1, sz, "SHELL_COMMAND=first")
 	assertChildEnvironment(t, tr1, p1, sz, "first", firstShell, "/run/first", "wayland-first")
@@ -281,23 +282,23 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 		"VEV_TEST_ENV=second", "SHELL=" + secondShell, "XDG_RUNTIME_DIR=/run/second", "WAYLAND_DISPLAY=wayland-second",
 		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
 	}
-	tr2, p2 := attachWithEnvironment(t, dir, ports.IntentAttach, "environment", sz, secondEnv)
+	tr2, p2 := attachWithEnvironment(t, dir, protocol.IntentAttach, "environment", sz, secondEnv)
 	defer func() { _ = tr2.Close() }()
 	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/first", "wayland-first")
 
 	// The second attachment mutates shared tab state. Its newly opened PTY must
 	// also be rendered to that attachment, not only to the coordinator primary.
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p2, sz, "Commands")
-	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
 
 	// Each attachment owns its selected tab. Move the first attachment to the
 	// new PTY before releasing its gate, so the fresh PTY output must reach both
 	// views rather than only being recovered by a later first paint.
-	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b2")})}))
+	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b2")})}))
 	awaitText(t, p1, sz, "SHELL_COMMAND=second")
-	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("go\n")})}))
+	require.NoError(t, tr1.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("go\n")})}))
 	awaitText(t, p2, sz, sharedOutput)
 	awaitText(t, p1, sz, sharedOutput)
 }
@@ -306,7 +307,7 @@ func TestIntegration_AttachFirstOutput(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf HELLO; sleep 30"}))
 
-	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	defer func() { _ = tr.Close() }()
 
 	awaitText(t, p, sz, "HELLO")
@@ -316,10 +317,10 @@ func TestIntegration_InputRoundtrip(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))
 
-	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	defer func() { _ = tr.Close() }()
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("PINGPONG\n")})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("PINGPONG\n")})}))
 	awaitText(t, p, sz, "PINGPONG")
 }
 
@@ -327,14 +328,14 @@ func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
 
-	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	defer func() { _ = tr.Close() }()
 	awaitText(t, p, sz, "READY")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p, sz, "Commands")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
 	// Tab labels are enriched with the focused pane's title; with no process
 	// inspector wired in this test, that title falls back to the shell's
 	// basename ("sh").
@@ -346,25 +347,25 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
 
-	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	defer func() { _ = tr.Close() }()
 	text := awaitScreenText(t, p, sz, "READY")
 	require.Contains(t, text, " 0* ")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
 	awaitText(t, p, sz, "Commands")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("RNS\r")})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("RNS\r")})}))
 	awaitText(t, p, sz, "Rename session")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x7fwork\r")})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x7fwork\r")})}))
 	text = awaitScreenText(t, p, sz, " work ")
 	require.NotContains(t, text, "work*")
 
 	listTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = listTr.Close() }()
-	require.NoError(t, listTr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}))
+	require.NoError(t, listTr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})}))
 	f, err := listTr.Recv()
 	require.NoError(t, err)
 	require.Equal(t, ports.MsgSessions, f.Type)
@@ -379,12 +380,12 @@ func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
 
-	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	defer func() { _ = tr.Close() }()
 	text := awaitScreenText(t, p, sz, "READY")
 	require.NotContains(t, text, " 1  2 ")
 
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1bc")})}))
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("\x1bc")})}))
 	assertNoTextAfterInput(t, p, sz, " 1  2 ")
 }
 
@@ -392,7 +393,7 @@ func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf MARKER; sleep 30"}))
 
-	tr1, p1 := attach(t, dir, ports.IntentEphemeral, "", sz)
+	tr1, p1 := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	awaitText(t, p1, sz, "MARKER")
 	require.NoError(t, tr1.Close())
 
@@ -402,7 +403,7 @@ func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	tr2, p2 := attach(t, dir, ports.IntentAttach, "0", sz)
+	tr2, p2 := attach(t, dir, protocol.IntentAttach, "0", sz)
 	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
 
@@ -423,7 +424,7 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	dir := ipc.SocketDir()
 
 	_, served := startDaemonInDir(t, dir, daemon.WithShell("/bin/sh", []string{"-c", "printf TEMP; sleep 30"}))
-	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	awaitText(t, p, sz, "TEMP")
 	require.NoError(t, tr.Close())
 
@@ -452,7 +453,7 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf MARKER; sleep 30"}))
 
-	tr1, p1 := attach(t, dir, ports.IntentNew, "work", sz)
+	tr1, p1 := attach(t, dir, protocol.IntentNew, "work", sz)
 	awaitText(t, p1, sz, "MARKER")
 
 	// Detach: a named session must survive.
@@ -466,7 +467,7 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	}
 
 	// Re-attach: the first paint must reproduce the retained screen state.
-	tr2, p2 := attach(t, dir, ports.IntentAttach, "work", sz)
+	tr2, p2 := attach(t, dir, protocol.IntentAttach, "work", sz)
 	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
 }
@@ -800,8 +801,8 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, listener) }()
 
-	tr, _ := attach(t, runtimeDir, ports.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("checkpoint me\n")})}))
+	tr, _ := attach(t, runtimeDir, protocol.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("checkpoint me\n")})}))
 	require.Eventually(t, func() bool {
 		record, ok, _ := opened.Catalogue.Record(name)
 		return ok && record.Committed != nil && record.DegradedReason == ""
@@ -886,8 +887,8 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 	}()
 
 	awaitLifecycleStage(t, listenerReady, "daemon listener")
-	tr, _ := attach(t, runtimeDir, ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("dirty state\n")})}))
+	tr, _ := attach(t, runtimeDir, protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("dirty state\n")})}))
 	awaitLifecycleStage(t, repository.entered, "snapshot publication")
 	require.NoError(t, tr.Close())
 	require.Eventually(t, func() bool {
@@ -1249,15 +1250,15 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "sleep 30"}))
 
-	tr1, _ := attach(t, dir, ports.IntentNew, "one", sz)
+	tr1, _ := attach(t, dir, protocol.IntentNew, "one", sz)
 	require.NoError(t, tr1.Close())
-	tr2, _ := attach(t, dir, ports.IntentNew, "two", sz)
+	tr2, _ := attach(t, dir, protocol.IntentNew, "two", sz)
 	require.NoError(t, tr2.Close())
 
 	killTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = killTr.Close() }()
-	require.NoError(t, killTr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}))
+	require.NoError(t, killTr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{All: true})}))
 
 	_, err = killTr.Recv()
 	require.ErrorIs(t, err, io.EOF)

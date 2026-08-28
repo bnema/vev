@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,14 +45,14 @@ func TestSharedPTYGeometryCharacterization(t *testing.T) {
 				t.Cleanup(releasePTY)
 				d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 				firstTransport, _ := newCapturingTransport(t)
-				sess, first, err := d.route(ports.Hello{
-					Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work",
+				sess, first, err := d.route(protocol.Hello{
+					Version: protocol.Version, Intent: protocol.IntentNew, Name: "work",
 					Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1},
 				}, firstTransport)
 				require.NoError(t, err)
 				secondTransport, _ := newCapturingTransport(t)
-				_, second, err := d.route(ports.Hello{
-					Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work",
+				_, second, err := d.route(protocol.Hello{
+					Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work",
 					Size: domain.Size{Cols: 100, Rows: 40}, ClientID: [16]byte{2},
 				}, secondTransport)
 				require.NoError(t, err)

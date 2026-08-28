@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -56,12 +56,12 @@ func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_work", "p_work")
 
-	tooEarly := sendCommand(t, d, ports.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
+	tooEarly := sendCommand(t, d, protocol.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
 	require.False(t, tooEarly.OK)
-	require.Equal(t, ports.ErrNoSuchTarget, tooEarly.Code)
+	require.Equal(t, protocol.ErrNoSuchTarget, tooEarly.Code)
 	require.Equal(t, "pane is not in a split", tooEarly.Text)
 
-	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
 	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	beforeFocus := tb.tree.Focus
@@ -87,7 +87,7 @@ func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	require.Equal(t, beforeGeneration+1, tb.layoutGeneration)
 	tb.mu.Unlock()
 
-	equalized := sendCommand(t, d, ports.CommandRequest{Slug: "equalize-panes", TargetSession: "work"})
+	equalized := sendCommand(t, d, protocol.CommandRequest{Slug: "equalize-panes", TargetSession: "work"})
 	require.True(t, equalized.OK, equalized.Text)
 	require.Empty(t, equalized.Output)
 }

@@ -155,7 +155,7 @@ func Run(args []string) error {
 // I/O.
 func parseArgs(args []string) (command, error) {
 	if len(args) == 0 {
-		return command{kind: kindAttach, intent: ports.IntentEphemeral}, nil
+		return command{kind: kindAttach, intent: protocol.IntentEphemeral}, nil
 	}
 
 	switch args[0] {
@@ -193,7 +193,7 @@ func parseArgs(args []string) (command, error) {
 		if err := domain.ValidateSessionName(args[1]); err != nil {
 			return command{}, err
 		}
-		return command{kind: kindAttach, intent: ports.IntentNew, name: args[1]}, nil
+		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1]}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
@@ -201,7 +201,7 @@ func parseArgs(args []string) (command, error) {
 		if len(args) > 2 {
 			return command{}, usagef("`attach` accepts exactly one session name or remote target")
 		}
-		cmd := command{kind: kindAttach, intent: ports.IntentAttach, name: args[1]}
+		cmd := command{kind: kindAttach, intent: protocol.IntentAttach, name: args[1]}
 		if target, session, ok := parseRemoteAttachTarget(args[1]); ok {
 			if err := domain.ValidateRemoteHostTarget(target); err != nil {
 				return command{}, err
@@ -214,7 +214,7 @@ func parseArgs(args []string) (command, error) {
 			cmd.remoteTarget = target
 			cmd.name = session
 			if session == "" {
-				cmd.intent = ports.IntentEphemeral
+				cmd.intent = protocol.IntentEphemeral
 			}
 		}
 		return cmd, nil
@@ -828,8 +828,8 @@ func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error)
 	}
 }
 
-func validateRemoteAttachHandoff(target ports.AttachTarget) error {
-	if err := ports.ValidateAttachTarget(target); err != nil {
+func validateRemoteAttachHandoff(target protocol.AttachTarget) error {
+	if err := protocol.ValidateAttachTarget(target); err != nil {
 		return err
 	}
 	if err := domain.ValidateRemoteHostTarget(target.Endpoint); err != nil {
@@ -839,7 +839,7 @@ func validateRemoteAttachHandoff(target ports.AttachTarget) error {
 		return err
 	}
 	if target.RemoteTarget != nil {
-		if target.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+		if target.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 			return errors.New("remote picker handoff must use daemon-owned environment")
 		}
 		if target.RemoteTarget.Endpoint != target.Endpoint || target.RemoteTarget.SessionName != target.Session {
@@ -874,7 +874,7 @@ const maxAttachTargetHandoffs = 32
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
-		if remoteTarget == "" && intent == ports.IntentNew {
+		if remoteTarget == "" && intent == protocol.IntentNew {
 			return deps.createDetached(ctx, name)
 		}
 		return errors.New("vev: sessions should be nested with care; unset VEV to force")
@@ -891,7 +891,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	mode, modeErr := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
 	factory := deps.remoteDialerFactory
 	var remoteSelection *domain.RemoteSessionTarget
-	var remoteEnvironmentPolicy ports.EnvironmentPolicy
+	var remoteEnvironmentPolicy protocol.EnvironmentPolicy
 	remoteDisplayOrigin := domain.RemoteDisplayOrigin(remoteTarget)
 	routeOrigin := protocol.RouteOriginLocal
 	routeOriginKey := "local"
@@ -906,13 +906,13 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 	}
 	pickerHandoff := remoteTarget == ""
-	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, policy ports.EnvironmentPolicy) ports.EnvironmentPolicy {
+	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, policy protocol.EnvironmentPolicy) protocol.EnvironmentPolicy {
 		if pickerHandoff && target == nil {
-			return ports.EnvironmentPolicyDaemonOwned
+			return protocol.EnvironmentPolicyDaemonOwned
 		}
 		return policy
 	}
-	handoff := func(target ports.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+	handoff := func(target protocol.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
 		if err := validateRemoteAttachHandoff(target); err != nil {
 			return nil, client.AttachRequest{}, fmt.Errorf("vev: invalid remote attach handoff: %w", err)
 		}
@@ -1051,11 +1051,11 @@ func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	return ensureDaemonWithLifecycle(ctx, d.dir, dial, realSpawn, defaultBackoff)
 }
 
-func detachedLocalHello(name, cwd string) ports.Hello {
+func detachedLocalHello(name, cwd string) protocol.Hello {
 	termEnv := os.Getenv("TERM")
-	return ports.Hello{
-		Version:   ports.ProtocolVersion,
-		Intent:    ports.IntentNew,
+	return protocol.Hello{
+		Version:   protocol.Version,
+		Intent:    protocol.IntentNew,
 		Name:      name,
 		Size:      domain.Size{Cols: 80, Rows: 24},
 		TermEnv:   termEnv,
@@ -1126,7 +1126,7 @@ func requestDaemonStop(ctx context.Context) error {
 		return errors.Join(errors.New("vev: no daemon running"), owner.Release())
 	}
 	defer func() { _ = transport.Close() }()
-	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{All: true})}); err != nil {
 		return fmt.Errorf("vev: requesting daemon stop: %w", err)
 	}
 	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
@@ -1456,7 +1456,7 @@ func runList(ctx context.Context, cmd command) (retErr error) {
 	return nil
 }
 
-func listLocalSessions(ctx context.Context) (_ []ports.SessionInfo, retErr error) {
+func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
 		return nil, fmt.Errorf("vev: waiting for durable session state: %w", err)
@@ -1470,19 +1470,19 @@ func listLocalSessions(ctx context.Context) (_ []ports.SessionInfo, retErr error
 			}
 			return nil, fmt.Errorf("vev: reading stored sessions: %w", loadErr)
 		}
-		infos := make([]ports.SessionInfo, 0, len(records))
+		infos := make([]protocol.SessionInfo, 0, len(records))
 		for _, r := range records {
-			state := ports.SessionDown
+			state := protocol.SessionDown
 			if r.DegradedReason != "" {
-				state = ports.SessionBroken
+				state = protocol.SessionBroken
 			}
-			infos = append(infos, ports.SessionInfo{Name: r.Name, State: state})
+			infos = append(infos, protocol.SessionInfo{Name: r.Name, State: state})
 		}
 		return infos, nil
 	}
 	defer func() { _ = transport.Close() }()
 
-	if err := transport.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}); err != nil {
+	if err := transport.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})}); err != nil {
 		return nil, fmt.Errorf("vev: requesting session list: %w", err)
 	}
 	reply, err := transport.Recv()
@@ -1492,7 +1492,7 @@ func listLocalSessions(ctx context.Context) (_ []ports.SessionInfo, retErr error
 	return decodeSessionListReply(reply)
 }
 
-func decodeSessionListReply(reply ports.Frame) ([]ports.SessionInfo, error) {
+func decodeSessionListReply(reply ports.Frame) ([]protocol.SessionInfo, error) {
 	if reply.Type == ports.MsgError {
 		em, err := ports.UnmarshalErrorMsg(reply.Payload)
 		if err != nil {
@@ -1511,7 +1511,7 @@ func decodeSessionListReply(reply ports.Frame) ([]ports.SessionInfo, error) {
 }
 
 // printSessions renders a session table (or a friendly note when empty).
-func printSessions(w io.Writer, sessions []ports.SessionInfo) {
+func printSessions(w io.Writer, sessions []protocol.SessionInfo) {
 	if len(sessions) == 0 {
 		_, _ = fmt.Fprintln(w, "no sessions")
 		return
@@ -1523,10 +1523,10 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		tabs := fmt.Sprintf("%d", s.Tabs)
 		attached := "no"
 		switch s.State {
-		case ports.SessionDown:
+		case protocol.SessionDown:
 			state = "down"
 			tabs = "-"
-		case ports.SessionBroken:
+		case protocol.SessionBroken:
 			state = "broken"
 			tabs = "-"
 		default:
@@ -1596,7 +1596,7 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 	}
 	defer func() { _ = transport.Close() }()
 
-	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{Name: name, All: all || daemon})}); err != nil {
+	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{Name: name, All: all || daemon})}); err != nil {
 		return fmt.Errorf("vev: requesting kill: %w", err)
 	}
 	reply, err := transport.Recv()

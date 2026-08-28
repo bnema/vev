@@ -417,7 +417,7 @@ func (d *Daemon) switchParkedRoute(effect *attachmentEffect, request protocol.Pa
 
 func (d *Daemon) waitForParkedTargetRestore(parent context.Context, name string) error {
 	ctx, cancel := context.WithCancel(parent)
-	timer := d.clock.NewTimer(ports.HandshakeTimeout)
+	timer := d.clock.NewTimer(protocol.HandshakeTimeout)
 	stop := make(chan struct{})
 	go func() {
 		select {
@@ -501,7 +501,7 @@ func (d *Daemon) transitionParkedRouteTarget(effect *attachmentEffect, target do
 		},
 	})
 	if err != nil && created != nil {
-		_ = d.killSession(created, ports.ReasonSessionKilled, true)
+		_ = d.killSession(created, protocol.ReasonSessionKilled, true)
 	}
 	if err != nil {
 		return attachmentTransitionResult{}, created, err

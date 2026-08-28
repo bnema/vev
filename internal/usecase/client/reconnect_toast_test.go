@@ -134,11 +134,11 @@ func reconnectToastWelcome(token uint64) ports.Frame {
 }
 
 func reconnectToastWelcomeNamed(name string, token uint64) ports.Frame {
-	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: name, ResumeToken: token, Capabilities: ports.CapabilityResume})}
+	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: name, ResumeToken: token, Capabilities: protocol.CapabilityResume})}
 }
 
 func reconnectToastDetach(reason uint8) ports.Frame {
-	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: reason})}
+	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: reason})}
 }
 
 type reconnectToastRecv struct {
@@ -205,7 +205,7 @@ func (s *reconnectToastSentFrames) find(match func(ports.Frame) bool) (ports.Fra
 type reconnectToastLinkTransport struct {
 	recvCh        chan reconnectToastRecv
 	sends         *reconnectToastSentFrames
-	clientNotices chan ports.ClientNotice
+	clientNotices chan protocol.ClientNotice
 	events        chan ports.LinkEvent
 	state         ports.LinkState
 }
@@ -214,7 +214,7 @@ func newReconnectToastLinkTransport() *reconnectToastLinkTransport {
 	return &reconnectToastLinkTransport{
 		recvCh:        make(chan reconnectToastRecv, 4),
 		sends:         newReconnectToastSentFrames(),
-		clientNotices: make(chan ports.ClientNotice, 2),
+		clientNotices: make(chan protocol.ClientNotice, 2),
 		events:        make(chan ports.LinkEvent, 4),
 		state:         ports.LinkStateConnected,
 	}
@@ -298,7 +298,7 @@ func assertReconnectToastAttemptPublishesOnlyClearedTheme(t *testing.T, tr *reco
 	require.True(t, tr.wasClosed())
 }
 
-func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransport) ports.Hello {
+func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransport) protocol.Hello {
 	t.Helper()
 	frames := tr.sentFrames()
 	require.NotEmpty(t, frames)
@@ -362,9 +362,9 @@ func TestResumeNeedsExactAttach(t *testing.T) {
 		want bool
 	}{
 		{name: "moved resume token", err: errRouteTargetChanged, want: true},
-		{name: "missing target", err: &ProtocolError{Code: ports.ErrNoSuchTarget}, want: true},
-		{name: "missing session", err: &ProtocolError{Code: ports.ErrNoSuchSession}, want: true},
-		{name: "internal", err: &ProtocolError{Code: ports.ErrInternal}},
+		{name: "missing target", err: &ProtocolError{Code: protocol.ErrNoSuchTarget}, want: true},
+		{name: "missing session", err: &ProtocolError{Code: protocol.ErrNoSuchSession}, want: true},
+		{name: "internal", err: &ProtocolError{Code: protocol.ErrInternal}},
 		{name: "transport", err: io.EOF},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -386,7 +386,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
@@ -408,7 +408,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.Contains(t, redrawn, "probing UDP path")
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateConnected}
-	require.Equal(t, ports.ClientNoticeLinkConnected, (<-tr.clientNotices).Action)
+	require.Equal(t, protocol.ClientNoticeLinkConnected, (<-tr.clientNotices).Action)
 	require.Equal(t, term.size, requireResize(t, tr.sends).Size)
 
 	beforeAwaitingReset := out.String()
@@ -461,7 +461,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	requireAckedState(t, tr.sends, 2, 5)
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
 	require.NoError(t, result.err)
 }
@@ -479,7 +479,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
@@ -547,7 +547,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	require.Eventually(t, func() bool { return flushes.Load() > beforeIncrementFlushes }, time.Second, time.Millisecond)
 	requireAckedState(t, tr.sends, 2, 5)
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
 	require.NoError(t, result.err)
 }
@@ -693,7 +693,7 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main"}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main"}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	attempt.runner.runtimeObserver = observer
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
@@ -725,7 +725,7 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	requireAckedState(t, tr.sends, 1, 2)
 	require.Greater(t, flushes.Load(), beforeOutput, "daemon output must be flushed before ACK")
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
 	require.NoError(t, requireAttachResult(t, resultCh).err)
 }
 
@@ -748,14 +748,14 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 
 			resultCh := make(chan attachResult, 1)
 			ms := milestones{}
-			attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main"}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+			attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main"}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 			go func() { resultCh <- attempt.run(context.Background()) }()
 
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 			require.Eventually(t, func() bool { return strings.Contains(out.String(), statusReconnect) }, time.Second, time.Millisecond)
 			tr.events <- ports.LinkEvent{State: tt.transition}
 			if tt.transition == ports.LinkStateConnected {
-				require.Equal(t, ports.ClientNoticeLinkConnected, (<-tr.clientNotices).Action)
+				require.Equal(t, protocol.ClientNoticeLinkConnected, (<-tr.clientNotices).Action)
 			}
 
 			const output = "local status output remains visible"
@@ -772,7 +772,7 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 			_, sentResize := tr.sends.find(func(frame ports.Frame) bool { return frame.Type == ports.MsgResize })
 			require.False(t, sentResize, "local reconnect status must not request a daemon reset")
 
-			tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
+			tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
 			require.NoError(t, requireAttachResult(t, resultCh).err)
 		})
 	}
@@ -820,7 +820,7 @@ func TestReconnectOverlayRedrawFailureDoesNotObserveOrAckOutput(t *testing.T) {
 
 			resultCh := make(chan attachResult, 1)
 			ms := milestones{}
-			attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+			attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 			attempt.runner.runtimeObserver = observer
 			go func() { resultCh <- attempt.run(context.Background()) }()
 
@@ -852,20 +852,20 @@ func TestReconnectLinkEventsNotifyDaemonWithoutLocalTerminalWrites(t *testing.T)
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
 	tr.events <- ports.LinkEvent{State: ports.LinkStateConnected}
-	require.Equal(t, ports.ClientNoticeLinkDegraded, (<-tr.clientNotices).Action)
-	require.Equal(t, ports.ClientNoticeLinkConnected, (<-tr.clientNotices).Action)
+	require.Equal(t, protocol.ClientNoticeLinkDegraded, (<-tr.clientNotices).Action)
+	require.Equal(t, protocol.ClientNoticeLinkConnected, (<-tr.clientNotices).Action)
 	select {
 	case bytes := <-out.completed:
 		t.Fatalf("link notices wrote client-local terminal bytes: %q", bytes)
 	default:
 	}
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
 	require.NoError(t, result.err)
 	require.True(t, result.welcomed)
@@ -879,7 +879,7 @@ func TestAttachAttemptOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateOffline}
@@ -988,7 +988,7 @@ func TestPreSenderReconnectResetIsBounded(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			ms := milestones{}
-			attempt := newReconnectAttachAttempt(term.term, tr, clock, AttachRequest{Intent: ports.IntentResume, SessionName: "requested", Remote: true}, 12, &terminalThemeState{}, nil, &ms)
+			attempt := newReconnectAttachAttempt(term.term, tr, clock, AttachRequest{Intent: protocol.IntentResume, SessionName: "requested", Remote: true}, 12, &terminalThemeState{}, nil, &ms)
 			attempt.reconnect.showing = true
 			resultCh := make(chan attachResult, 1)
 			go func() { resultCh <- attempt.run(ctx) }()
@@ -1078,7 +1078,7 @@ func TestReconnectResetEnqueueCancellationExitsCleanly(t *testing.T) {
 
 			resultCh := make(chan attachResult, 1)
 			ms := milestones{}
-			attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+			attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 			go func() { resultCh <- attempt.run(ctx) }()
 
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
@@ -1118,7 +1118,7 @@ func TestReconnectResetCancellationPreservesQueuedSenderError(t *testing.T) {
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
@@ -1157,7 +1157,7 @@ func TestAttachAttemptReturnsWhileSenderSendIsBlockedAfterCancellation(t *testin
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
 	tr.armed.Store(true)
@@ -1188,8 +1188,8 @@ func TestDetachedResultLegacyReplacementCompatibilityAndCleanDetach(t *testing.T
 		reason   uint8
 		wantText string
 	}{
-		{name: "clean detach", reason: ports.ReasonDetach},
-		{name: "legacy replacement", reason: ports.ReasonReplaced, wantText: "session taken over by another client"},
+		{name: "clean detach", reason: protocol.ReasonDetach},
+		{name: "legacy replacement", reason: protocol.ReasonReplaced, wantText: "session taken over by another client"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := detachedResult(tt.reason)
@@ -1376,7 +1376,7 @@ func TestReconnectRetryFailuresPreserveAttachError(t *testing.T) {
 			)
 			dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 			require.ErrorIs(t, err, attachErr)
 			require.ErrorIs(t, err, retryErr)
 		})
@@ -1433,7 +1433,7 @@ func TestReconnectRetrySleepFailuresPreserveDialError(t *testing.T) {
 			dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 			dialer.EXPECT().Dial(mock.Anything).Run(func(context.Context) { armed.Store(true) }).Return(nil, dialErr).Once()
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 			require.ErrorIs(t, err, dialErr)
 			require.ErrorIs(t, err, retryErr)
 		})
@@ -1463,7 +1463,7 @@ func TestRemoteReconnectToastFailedDrawDoesNotBlankBounds(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
 
-	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 	require.ErrorContains(t, err, "reconnect toast write failed")
 	require.True(t, out.failed)
 	require.NotContains(t, out.String(), strings.Repeat(" ", reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageSSH)).Width))
@@ -1540,7 +1540,7 @@ func TestReconnectCancellationPreservesContextWhenStatusClearFails(t *testing.T)
 			dialer := portsmocks.NewMockDialer(t)
 			tt.configure(dialer, tr)
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main"})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: protocol.IntentAttach, SessionName: "main"})
 			require.ErrorIs(t, err, context.Canceled)
 			require.ErrorIs(t, err, clearErr)
 		})
@@ -1572,11 +1572,11 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	}}
 	tr2 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
 		{frame: reconnectToastWelcome(55)},
-		{frame: reconnectToastDetach(ports.ReasonDetach)},
+		{frame: reconnectToastDetach(protocol.ReasonDetach)},
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 	require.NoError(t, err)
 	require.True(t, tr1.wasClosed())
 	require.True(t, tr2.wasClosed())
@@ -1584,9 +1584,9 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 
 	firstHello := reconnectToastHelloFromSend(t, tr1)
 	resumeHello := reconnectToastHelloFromSend(t, tr2)
-	require.Equal(t, ports.IntentAttach, firstHello.Intent)
+	require.Equal(t, protocol.IntentAttach, firstHello.Intent)
 	require.Zero(t, firstHello.ResumeToken)
-	require.Equal(t, ports.IntentResume, resumeHello.Intent)
+	require.Equal(t, protocol.IntentResume, resumeHello.Intent)
 	require.Equal(t, uint64(44), resumeHello.ResumeToken)
 	require.Equal(t, firstHello.ClientID, resumeHello.ClientID)
 
@@ -1616,20 +1616,20 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 	}}
 	tr2 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
 		{frame: reconnectToastWelcomeNamed("0", 55)},
-		{frame: reconnectToastDetach(ports.ReasonDetach)},
+		{frame: reconnectToastDetach(protocol.ReasonDetach)},
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentEphemeral, SessionName: "", Remote: true})
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: protocol.IntentEphemeral, SessionName: "", Remote: true})
 	require.NoError(t, err)
 	require.Equal(t, 2, dialer.calls)
 
 	firstHello := reconnectToastHelloFromSend(t, tr1)
 	resumeHello := reconnectToastHelloFromSend(t, tr2)
-	require.Equal(t, ports.IntentEphemeral, firstHello.Intent)
+	require.Equal(t, protocol.IntentEphemeral, firstHello.Intent)
 	require.Empty(t, firstHello.Name)
 	require.Zero(t, firstHello.ResumeToken)
-	require.Equal(t, ports.IntentResume, resumeHello.Intent)
+	require.Equal(t, protocol.IntentResume, resumeHello.Intent)
 	require.Equal(t, "0", resumeHello.Name)
 	require.Equal(t, uint64(44), resumeHello.ResumeToken)
 	require.Equal(t, firstHello.ClientID, resumeHello.ClientID)
@@ -1647,7 +1647,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			name: "clears on successful reconnect",
 			configure: func(t *testing.T, dialer *portsmocks.MockDialer) []*reconnectToastRecordingTransport {
 				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
-				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)})
+				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr1, nil).Once()
 				dialer.EXPECT().Dial(mock.Anything).Return(tr2, nil).Once()
 				return []*reconnectToastRecordingTransport{tr1, tr2}
@@ -1672,7 +1672,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			name: "clears on final exit",
 			configure: func(t *testing.T, dialer *portsmocks.MockDialer) []*reconnectToastRecordingTransport {
 				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
-				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonSessionKilled)})
+				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonSessionKilled)})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr1, nil).Once()
 				dialer.EXPECT().Dial(mock.Anything).Return(tr2, nil).Once()
 				return []*reconnectToastRecordingTransport{tr1, tr2}
@@ -1704,7 +1704,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			dialer := portsmocks.NewMockDialer(t)
 			transports := tt.configure(t, dialer)
 
-			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), DisableCapabilityProbe: true, Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: true})
 			tt.wantErr(t, err)
 			for _, transport := range transports {
 				assertReconnectToastAttemptPublishesOnlyClearedTheme(t, transport)

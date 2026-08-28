@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -230,7 +230,7 @@ func TestDaemonShutdownDrainsMoveBeforePaneLifetimeCancellation(t *testing.T) {
 	require.NotNil(t, paneLifetime)
 
 	shutdown := make(chan bool, 1)
-	go func() { shutdown <- d.shutdownAll(ports.ReasonServerShutdown) }()
+	go func() { shutdown <- d.shutdownAll(protocol.ReasonServerShutdown) }()
 	awaitDaemonMoveClosing(t, d)
 	select {
 	case <-paneLifetime.Done():

@@ -133,7 +133,7 @@ const sendQueueDepth = 64
 
 // preWelcomeTimeout remains the focused-test name for the shared handshake
 // budget, which now also covers connect and initial publication.
-const preWelcomeTimeout = ports.HandshakeTimeout
+const preWelcomeTimeout = protocol.HandshakeTimeout
 
 // remoteHostLearnerShutdownTimeout bounds how long Run waits for async remote
 // host learning after terminal restoration. Learning is best-effort; a stalled
@@ -151,7 +151,7 @@ const (
 )
 
 // Dependencies supplies the collaborators required by a Runner.
-type AttachHandoffFunc func(ports.AttachTarget) (ports.Dialer, AttachRequest, error)
+type AttachHandoffFunc func(protocol.AttachTarget) (ports.Dialer, AttachRequest, error)
 
 type Dependencies struct {
 	Dialer   ports.Dialer
@@ -189,7 +189,7 @@ type AttachRequest struct {
 	ExactTarget            *protocol.ExactSessionTarget
 	PreferredTabID         domain.TabStableID
 	HostLabel              string
-	EnvironmentPolicy      ports.EnvironmentPolicy
+	EnvironmentPolicy      protocol.EnvironmentPolicy
 	NavigationCapabilities protocol.NavigationCapabilities
 	StartupOverlay         protocol.StartupOverlay
 }
@@ -379,14 +379,14 @@ func validateAttachRequest(request AttachRequest) error {
 	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
 		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
-	if err := protocol.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned); err != nil {
+	if err := protocol.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
-		if request.EnvironmentPolicy == ports.EnvironmentPolicyClientOwned {
+		if request.EnvironmentPolicy == protocol.EnvironmentPolicyClientOwned {
 			return nil
 		}
-		if request.Remote && request.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned {
+		if request.Remote && request.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned {
 			return nil
 		}
 		return errors.New("vev: attach without remote target requires a matching environment policy")
@@ -397,10 +397,10 @@ func validateAttachRequest(request AttachRequest) error {
 	if request.SessionName != request.RemoteTarget.SessionName {
 		return errors.New("vev: remote attach target session mismatch")
 	}
-	if request.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+	if request.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 		return errors.New("vev: remote attach target requires daemon-owned environment")
 	}
-	if request.Intent != ports.IntentAttach && request.Intent != ports.IntentResume {
+	if request.Intent != protocol.IntentAttach && request.Intent != protocol.IntentResume {
 		return errors.New("vev: remote attach target requires attach or resume")
 	}
 	return nil
@@ -510,9 +510,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		dialer = route.dialer
 		attemptRequest = route.request
 		if route.resumeToken != 0 {
-			attemptRequest.Intent = ports.IntentResume
+			attemptRequest.Intent = protocol.IntentResume
 		} else {
-			attemptRequest.Intent = ports.IntentAttach
+			attemptRequest.Intent = protocol.IntentAttach
 		}
 		attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 		attemptRequest.NavigationCapabilities &^= protocol.NavigationCapabilityBack | protocol.NavigationCapabilityHomePicker
@@ -524,11 +524,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	enterHomePicker := func() {
 		dialer = homeRoute.dialer
 		attemptRequest = homeRoute.request
-		attemptRequest.Intent = ports.IntentAttach
+		attemptRequest.Intent = protocol.IntentAttach
 		attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityBack
 		attemptRequest.StartupOverlay = protocol.StartupOverlaySessionPicker
 		attemptRequest.RemoteTarget = nil
-		attemptRequest.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
+		attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 		attemptRequest.Remote = homeRoute.request.Remote || r.remote
 		resumeToken = 0
 		remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
@@ -556,11 +556,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return attachResult{err: errors.New("vev: home route unavailable")}
 		}
 		request := cloneAttachRequest(homeRoute.request)
-		request.Intent = ports.IntentAttach
+		request.Intent = protocol.IntentAttach
 		request.NavigationCapabilities = protocol.NavigationCapabilityBack
 		request.StartupOverlay = protocol.StartupOverlaySessionPicker
 		request.RemoteTarget = nil
-		request.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
+		request.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 		request.Remote = false
 		if err := validateAttachRequest(request); err != nil {
 			return attachResult{err: err}
@@ -627,7 +627,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return ctx.Err()
 			}
 			backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
-			attemptRequest.Intent = ports.IntentResume
+			attemptRequest.Intent = protocol.IntentResume
 			continue
 		}
 		ms.dialed = true
@@ -733,9 +733,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
 			if selection.selected.resumeToken != 0 {
-				attemptRequest.Intent = ports.IntentResume
+				attemptRequest.Intent = protocol.IntentResume
 			} else {
-				attemptRequest.Intent = ports.IntentAttach
+				attemptRequest.Intent = protocol.IntentAttach
 			}
 			// Back is transient to the picker overlay. Re-derive the home-picker
 			// capability from the selected route instead of trusting request
@@ -795,7 +795,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 					if result.sessionName != "" {
 						routeRequest.SessionName = result.sessionName
 					}
-					routeRequest.Intent = ports.IntentAttach
+					routeRequest.Intent = protocol.IntentAttach
 					routeRequest.NavigationCapabilities = 0
 					routeRequest.StartupOverlay = protocol.StartupOverlayNone
 					homeRoute = &attachRoute{dialer: dialer, request: routeRequest}
@@ -832,7 +832,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if result.target.ExactTarget != nil {
 				nextRequest.ExactTarget = result.target.ExactTarget
 			}
-			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == ports.EnvironmentPolicyDaemonOwned) {
+			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned) {
 				nextRequest.NavigationCapabilities |= protocol.NavigationCapabilityHomePicker
 			}
 			if attemptRequest.StartupOverlay == protocol.StartupOverlaySessionPicker {
@@ -875,7 +875,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			continue
 		}
 		if routeNavigationPending && routeNavigationResumeFallback && resumeNeedsExactAttach(result.err) {
-			attemptRequest.Intent = ports.IntentAttach
+			attemptRequest.Intent = protocol.IntentAttach
 			resumeToken = 0
 			routeNavigationResumeFallback = false
 			continue
@@ -896,7 +896,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			continue
 		}
 		if returnResumeFallback && resumeNeedsExactAttach(result.err) {
-			attemptRequest.Intent = ports.IntentAttach
+			attemptRequest.Intent = protocol.IntentAttach
 			resumeToken = 0
 			returnResumeFallback = false
 			continue
@@ -928,7 +928,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return ctx.Err()
 		}
 		backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
-		attemptRequest.Intent = ports.IntentResume
+		attemptRequest.Intent = protocol.IntentResume
 	}
 }
 
@@ -1089,7 +1089,7 @@ type attachResult struct {
 	routePosition     *protocol.RoutePosition
 	welcomed          bool
 	transportClosed   bool
-	target            *ports.AttachTarget
+	target            *protocol.AttachTarget
 	action            protocol.NavigationAction
 	homePickerTarget  bool
 	routeAction       *protocol.RouteNavigationAction
@@ -1099,7 +1099,7 @@ type attachResult struct {
 // AttachTargetError requests that the composition root replace the current
 // transport with the selected endpoint. The daemon never opens that endpoint.
 type AttachTargetError struct {
-	Target ports.AttachTarget
+	Target protocol.AttachTarget
 }
 
 func (e *AttachTargetError) Error() string {
@@ -1219,8 +1219,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			SessionName: request.RemoteTarget.SessionName,
 		}
 	}
-	hello := ports.Hello{
-		Version:                ports.ProtocolVersion,
+	hello := protocol.Hello{
+		Version:                protocol.Version,
 		Intent:                 intent,
 		ClientID:               clientID,
 		ResumeToken:            resumeToken,
@@ -1490,7 +1490,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		requestID      uint64
 		action         protocol.ParkedRouteAction
 		leaseID        protocol.ParkedRouteLeaseID
-		fallbackTarget *ports.AttachTarget
+		fallbackTarget *protocol.AttachTarget
 		timer          ports.Timer
 	}
 	var parkedPending *parkedRoutePending
@@ -1600,7 +1600,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	awaitParkedFull := func() {
 		clearParkedFull()
 		parkedWaitingFull = true
-		parkedFullTimer = clk.NewTimer(ports.HandshakeTimeout)
+		parkedFullTimer = clk.NewTimer(protocol.HandshakeTimeout)
 	}
 	parkedFullC := func() <-chan time.Time {
 		if parkedFullTimer == nil {
@@ -1654,7 +1654,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		case controlCh <- ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: payload}:
 			parkedPending = &parkedRoutePending{
 				requestID: request.RequestID, action: action, leaseID: leaseID,
-				timer: clk.NewTimer(ports.HandshakeTimeout),
+				timer: clk.NewTimer(protocol.HandshakeTimeout),
 			}
 			return nil
 		case <-loopCtx.Done():
@@ -1827,7 +1827,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("dismissing reconnect toast: %w", err))
 				}
 				select {
-				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(ports.ClientNotice{Action: ports.ClientNoticeLinkConnected})}:
+				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected})}:
 				case <-loopCtx.Done():
 					return welcomedResult(nil)
 				}
@@ -1836,7 +1836,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if ev.State == ports.LinkStateDegraded {
 				log.Warn("UDP link degraded")
 				select {
-				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(ports.ClientNotice{Action: ports.ClientNoticeLinkDegraded})}:
+				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(protocol.ClientNotice{Action: protocol.ClientNoticeLinkDegraded})}:
 				case <-loopCtx.Done():
 					return welcomedResult(nil)
 				}
@@ -1896,7 +1896,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					// repeated gaps while that reset is in flight.
 					if !outputResetRequested {
 						select {
-						case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}:
+						case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}:
 							outputResetRequested = true
 						case <-loopCtx.Done():
 							return loopCanceledResult()
@@ -2111,7 +2111,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						transitionWaitingFull = true
 						if !outputResetRequested {
 							select {
-							case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}:
+							case sendCh <- ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}:
 								outputResetRequested = true
 							case <-loopCtx.Done():
 								return loopCanceledResult()
@@ -2145,7 +2145,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("vev: decoding detached: %w", derr))
 				}
 				ms.detached = true
-				if d.Reason == ports.ReasonDetach {
+				if d.Reason == protocol.ReasonDetach {
 					log.Info("detached cleanly", "reason", d.Reason)
 				} else {
 					log.Warn("detached by daemon", "reason", d.Reason)
@@ -2785,7 +2785,7 @@ func (p *stdinPump) run() {
 			return
 		}
 		inputSeq++
-		if !send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})}) {
+		if !send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})}) {
 			undeliveredMu.Lock()
 			undelivered = append(undelivered, data...)
 			undeliveredMu.Unlock()
@@ -2799,7 +2799,7 @@ func (p *stdinPump) run() {
 			reader:    p.clipboard,
 			log:       p.logger,
 			sendNotice: func(action uint8) {
-				send(ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(ports.ClientNotice{Action: action})})
+				send(ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(protocol.ClientNotice{Action: action})})
 			},
 			sendImage: func(mime string, data []byte) {
 				inputSeq++
@@ -2945,7 +2945,7 @@ func (p *stdinPump) run() {
 				disarmMarkerDeadline()
 				markers.flush(sink)
 				select {
-				case p.out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
+				case p.out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})}:
 				case <-p.ctx.Done():
 				}
 				p.cancel()
@@ -3002,13 +3002,13 @@ func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- po
 // the user learns why the session went away.
 func detachedResult(reason uint8) error {
 	switch reason {
-	case ports.ReasonDetach:
+	case protocol.ReasonDetach:
 		return nil
-	case ports.ReasonSessionKilled:
+	case protocol.ReasonSessionKilled:
 		return &DetachedError{Reason: reason, Text: "session was killed"}
-	case ports.ReasonServerShutdown:
+	case protocol.ReasonServerShutdown:
 		return &DetachedError{Reason: reason, Text: "daemon shut down"}
-	case ports.ReasonReplaced:
+	case protocol.ReasonReplaced:
 		return &DetachedError{Reason: reason, Text: "session taken over by another client"}
 	default:
 		return &DetachedError{Reason: reason, Text: "detached by daemon"}

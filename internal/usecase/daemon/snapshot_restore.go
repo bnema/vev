@@ -9,7 +9,7 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -25,7 +25,7 @@ func (d *Daemon) closeRestoreDone() {
 			continue
 		default:
 		}
-		entry.state = ports.SessionBroken
+		entry.state = protocol.SessionBroken
 		if entry.record.DegradedReason == "" {
 			entry.record.DegradedReason = "restore unavailable"
 		}

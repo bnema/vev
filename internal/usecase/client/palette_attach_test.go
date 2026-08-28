@@ -109,10 +109,10 @@ func (t *paletteAttachTransport) Recv() (ports.Frame, error) {
 	first := len(t.sent) == 1
 	t.mu.Unlock()
 	if first {
-		return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: "s"})}, nil
+		return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
 	}
 	<-t.finalSet
-	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})}, nil
+	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
 }
 func (*paletteAttachTransport) Close() error { return nil }
 
@@ -142,7 +142,7 @@ func TestAttachPublishesOnlyClearedAndDefinitiveInitialPalette(t *testing.T) {
 	ms := &milestones{}
 	runner := &Runner{term: term, clock: paletteAttachClock{}, logger: slog.New(slog.DiscardHandler)}
 	attempt := &attachAttempt{
-		runner: runner, transport: transport, request: AttachRequest{Intent: ports.IntentAttach},
+		runner: runner, transport: transport, request: AttachRequest{Intent: protocol.IntentAttach},
 		milestones: ms, themeState: &terminalThemeState{},
 		enterRaw:  func() error { ms.rawEntered = true; return nil },
 		reconnect: &reconnectUI{term: term, rawEntered: new(bool)},

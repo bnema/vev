@@ -7,7 +7,7 @@ import (
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
@@ -24,7 +24,7 @@ var catalogueMagic = [4]byte{'V', 'E', 'V', 'C'}
 type Record = domain.CatalogueRecord
 
 func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
-	return encodeRecordValueForProtocol(record, ports.ProtocolVersion)
+	return encodeRecordValueForProtocol(record, protocol.Version)
 }
 
 func encodeRecordValueForProtocol(record domain.CatalogueRecord, protocolVersion uint16) ([]byte, error) {

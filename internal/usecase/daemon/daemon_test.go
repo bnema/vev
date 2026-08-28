@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
 
@@ -265,13 +266,13 @@ func newConn(t *testing.T, first ports.Frame, more ...ports.Frame) (*portsmocks.
 }
 
 func mustHello(intent uint8, name string, sz domain.Size) ports.Frame {
-	return ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color",
+	return ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{
+		Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color",
 	})}
 }
 
 func frameInput(data []byte) ports.Frame {
-	return ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: data})}
+	return ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: data})}
 }
 
 func screenLineText(s *vt.Screen, y int) string {
@@ -315,9 +316,9 @@ func sessionCount(d *Daemon) int {
 	return len(d.sessions)
 }
 
-func listSessions(t *testing.T, d *Daemon) ports.Sessions {
+func listSessions(t *testing.T, d *Daemon) protocol.Sessions {
 	t.Helper()
-	tr, sends, _ := newConn(t, ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})})
+	tr, sends, _ := newConn(t, ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})})
 	d.handleList(tr)
 	f := awaitFrame(t, sends, ports.MsgSessions)
 	sessions, err := ports.UnmarshalSessions(f.Payload)
@@ -594,7 +595,7 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 
 			transport := &closeTrackingTransport{}
-			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), transport)
+			sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), transport)
 			require.NoError(t, err)
 			token := ac.resumeToken
 			d.clientGone(sess, ac, transport, false)
@@ -604,12 +605,12 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 			d.mu.Unlock()
 			require.NotNil(t, parked)
 
-			invalid := helloResumeCapable(ports.IntentResume, "work", token)
+			invalid := helloResumeCapable(protocol.IntentResume, "work", token)
 			invalid.Size = tt.size
 			_, _, err = d.route(invalid, &closeTrackingTransport{})
 			var protocolErr *protoErr
 			require.ErrorAs(t, err, &protocolErr)
-			require.Equal(t, ports.ErrInternal, protocolErr.code)
+			require.Equal(t, protocol.ErrInternal, protocolErr.code)
 
 			d.mu.Lock()
 			require.Same(t, parked, d.parked[token], "invalid resume must not consume the parked attachment")
@@ -664,7 +665,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	tr := newWelcomeBlockingTransport(t)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr.tr, mustHello(ports.IntentNew, "welcome-gate", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHello(tr.tr, mustHello(protocol.IntentNew, "welcome-gate", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 

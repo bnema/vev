@@ -64,8 +64,8 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	}).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgClientNotice)).Return(nil).Maybe()
 
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
 	recvCh := make(chan recvItem, 1)
 	recvCh <- recvItem{f: welcome}
 	closed := make(chan struct{})
@@ -90,7 +90,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	d := portsmocks.NewMockDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
-	err := runTestClient(context.Background(), testDependencies(d, tm, realClock{}, clip, nil), client.AttachRequest{Intent: ports.IntentEphemeral, Remote: remote})
+	err := runTestClient(context.Background(), testDependencies(d, tm, realClock{}, clip, nil), client.AttachRequest{Intent: protocol.IntentEphemeral, Remote: remote})
 	require.NoError(t, err)
 	return gotInput, gotImage
 }
@@ -176,11 +176,11 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 	clipboard := portsmocks.NewMockClipboardReader(t)
 	clipboard.EXPECT().ReadImage(mock.Anything).Return("", nil, errors.New("read failed")).Once()
 	transport := &clipboardToastLifecycleTransport{recv: make(chan ports.Frame, 8), sends: make(chan ports.Frame, 16)}
-	transport.recv <- frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	transport.recv <- frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
 
 	result := make(chan error, 1)
 	go func() {
-		result <- client.NewRunner(client.Dependencies{Dialer: clipboardToastLifecycleDialer{transport: transport}, Terminal: term, Clock: realClock{}, DisableCapabilityProbe: true, Clipboard: clipboard}).Run(context.Background(), client.AttachRequest{Intent: ports.IntentEphemeral, Remote: true})
+		result <- client.NewRunner(client.Dependencies{Dialer: clipboardToastLifecycleDialer{transport: transport}, Terminal: term, Clock: realClock{}, DisableCapabilityProbe: true, Clipboard: clipboard}).Run(context.Background(), client.AttachRequest{Intent: protocol.IntentEphemeral, Remote: true})
 	}()
 
 	var gotNotice bool
@@ -192,7 +192,7 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 			}
 			notice, err := ports.UnmarshalClientNotice(sent.Payload)
 			require.NoError(t, err)
-			require.Equal(t, ports.ClientNoticeClipboardFallback, notice.Action)
+			require.Equal(t, protocol.ClientNoticeClipboardFallback, notice.Action)
 			gotNotice = true
 		case <-time.After(time.Second):
 			t.Fatal("client did not notify daemon of clipboard failure")
@@ -200,7 +200,7 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 	}
 	beforeOutput := out.String()
 	transport.recv <- frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("incremental")}))
-	transport.recv <- frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	transport.recv <- frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
 
 	select {
 	case err := <-result:

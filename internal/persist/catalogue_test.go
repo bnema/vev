@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/bnema/vev/pkg/safedir"
 )
@@ -57,7 +57,7 @@ func TestOpenOrCreateReportsRecordsFromOlderProtocol(t *testing.T) {
 		TabNames:  []string{"shell", "logs"},
 		Committed: &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
 	}
-	olderProtocol, err := encodeRecordValueForProtocol(record, ports.ProtocolVersion-1)
+	olderProtocol, err := encodeRecordValueForProtocol(record, protocol.Version-1)
 	require.NoError(t, err)
 	protocolLess, err := encodeRecordValue(record)
 	require.NoError(t, err)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func testRemoteTarget(stopped bool) *domain.RemoteSessionTarget {
@@ -36,13 +37,13 @@ func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			target := testRemoteTarget(stopped)
-			msg := Hello{
-				Version:           ProtocolVersion,
-				Intent:            IntentAttach,
+			msg := protocol.Hello{
+				Version:           protocol.Version,
+				Intent:            protocol.IntentAttach,
 				Name:              target.SessionName,
 				Size:              domain.Size{Cols: 80, Rows: 24},
 				RemoteTarget:      target,
-				EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			}
 			payload := MarshalHello(msg)
 			if payload == nil {
@@ -55,16 +56,16 @@ func TestRemoteTargetWireRoundTripPreservesExactSelector(t *testing.T) {
 			if got.RemoteTarget == nil || *got.RemoteTarget != *target {
 				t.Fatalf("remote target = %#v, want %#v", got.RemoteTarget, target)
 			}
-			if got.EnvironmentPolicy != EnvironmentPolicyDaemonOwned {
+			if got.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 				t.Fatalf("environment policy = %d, want daemon-owned", got.EnvironmentPolicy)
 			}
 
-			attachPayload := MarshalAttachTarget(AttachTarget{
+			attachPayload := MarshalAttachTarget(protocol.AttachTarget{
 				Endpoint:          target.Endpoint,
 				Session:           target.SessionName,
-				Intent:            IntentAttach,
+				Intent:            protocol.IntentAttach,
 				RemoteTarget:      target,
-				EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			})
 			if attachPayload == nil {
 				t.Fatal("MarshalAttachTarget returned nil")
@@ -94,53 +95,53 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 		{
 			name: "hello",
 			validate: func() error {
-				return ValidateHello(Hello{
-					Version: ProtocolVersion, Intent: IntentAttach,
+				return protocol.ValidateHello(protocol.Hello{
+					Version: protocol.Version, Intent: protocol.IntentAttach,
 					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
-					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+					RemoteTarget: target, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
 				})
 			},
 			marshalBad: func() []byte {
-				return MarshalHello(Hello{
-					Version: ProtocolVersion, Intent: IntentAttach,
+				return MarshalHello(protocol.Hello{
+					Version: protocol.Version, Intent: protocol.IntentAttach,
 					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
-					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+					RemoteTarget: target, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
 				})
 			},
 			marshalGood: func() []byte {
-				return MarshalHello(Hello{
-					Version: ProtocolVersion, Intent: IntentAttach,
+				return MarshalHello(protocol.Hello{
+					Version: protocol.Version, Intent: protocol.IntentAttach,
 					Name: target.SessionName, Size: domain.Size{Cols: 80, Rows: 24},
-					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+					RemoteTarget: target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 				})
 			},
 			unmarshal:    func(payload []byte) error { _, err := UnmarshalHello(payload); return err },
 			policyOffset: 10,
-			wantErr:      ErrInvalidHello,
+			wantErr:      protocol.ErrInvalidHello,
 		},
 		{
 			name: "attach target",
 			validate: func() error {
-				return ValidateAttachTarget(AttachTarget{
-					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
-					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+				return protocol.ValidateAttachTarget(protocol.AttachTarget{
+					Endpoint: target.Endpoint, Session: target.SessionName, Intent: protocol.IntentAttach,
+					RemoteTarget: target, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
 				})
 			},
 			marshalBad: func() []byte {
-				return MarshalAttachTarget(AttachTarget{
-					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
-					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyClientOwned,
+				return MarshalAttachTarget(protocol.AttachTarget{
+					Endpoint: target.Endpoint, Session: target.SessionName, Intent: protocol.IntentAttach,
+					RemoteTarget: target, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
 				})
 			},
 			marshalGood: func() []byte {
-				return MarshalAttachTarget(AttachTarget{
-					Endpoint: target.Endpoint, Session: target.SessionName, Intent: IntentAttach,
-					RemoteTarget: target, EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+				return MarshalAttachTarget(protocol.AttachTarget{
+					Endpoint: target.Endpoint, Session: target.SessionName, Intent: protocol.IntentAttach,
+					RemoteTarget: target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 				})
 			},
 			unmarshal:    func(payload []byte) error { _, err := UnmarshalAttachTarget(payload); return err },
 			policyOffset: 3,
-			wantErr:      ErrInvalidAttachTarget,
+			wantErr:      protocol.ErrInvalidAttachTarget,
 		},
 	}
 
@@ -165,7 +166,7 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 			if err := tt.unmarshal(trailing); err == nil {
 				t.Fatal("trailing garbage unexpectedly decoded")
 			}
-			payload[len(payload)-tt.policyOffset] = byte(EnvironmentPolicyClientOwned)
+			payload[len(payload)-tt.policyOffset] = byte(protocol.EnvironmentPolicyClientOwned)
 			if err := tt.unmarshal(payload); !errors.Is(err, tt.wantErr) {
 				t.Fatalf("mutated policy error = %v, want %v", err, tt.wantErr)
 			}
@@ -174,19 +175,19 @@ func TestRemoteTargetWireRejectsClientOwnedEnvironmentPolicy(t *testing.T) {
 }
 
 func TestAttachTargetRejectsResumeIntent(t *testing.T) {
-	tests := []AttachTarget{
-		{Endpoint: "host", Session: "work", Intent: IntentResume},
+	tests := []protocol.AttachTarget{
+		{Endpoint: "host", Session: "work", Intent: protocol.IntentResume},
 		{
 			Endpoint:          "build@mule:2222",
 			Session:           "work",
-			Intent:            IntentResume,
+			Intent:            protocol.IntentResume,
 			RemoteTarget:      testRemoteTarget(false),
-			EnvironmentPolicy: EnvironmentPolicyDaemonOwned,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		},
 	}
 	for _, target := range tests {
-		if err := ValidateAttachTarget(target); !errors.Is(err, ErrInvalidAttachTarget) {
-			t.Fatalf("ValidateAttachTarget(%#v) error = %v, want %v", target, err, ErrInvalidAttachTarget)
+		if err := protocol.ValidateAttachTarget(target); !errors.Is(err, protocol.ErrInvalidAttachTarget) {
+			t.Fatalf("ValidateAttachTarget(%#v) error = %v, want %v", target, err, protocol.ErrInvalidAttachTarget)
 		}
 		if got := MarshalAttachTarget(target); got != nil {
 			t.Fatalf("MarshalAttachTarget(%#v) = %x, want nil", target, got)
@@ -195,8 +196,8 @@ func TestAttachTargetRejectsResumeIntent(t *testing.T) {
 }
 
 func TestTargetWireIncludesRequiredV27Section(t *testing.T) {
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', IntentAttach, 0, 0, 0, 0}
-	got := MarshalAttachTarget(AttachTarget{Endpoint: "host", Session: "work", Intent: IntentAttach})
+	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0}
+	got := MarshalAttachTarget(protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach})
 	if !bytes.Equal(got, want) {
 		t.Fatalf("target bytes = %x, want %x", got, want)
 	}

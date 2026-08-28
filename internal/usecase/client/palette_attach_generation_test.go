@@ -43,7 +43,7 @@ func newAttachPaletteClock() *attachPaletteClock {
 func (*attachPaletteClock) Now() time.Time { return time.Time{} }
 func (c *attachPaletteClock) NewTimer(delay time.Duration) ports.Timer {
 	timer := &attachPaletteTimer{ch: make(chan time.Time, 1), stopped: make(chan struct{}), duration: delay}
-	if delay == ports.HandshakeTimeout {
+	if delay == protocol.HandshakeTimeout {
 		select {
 		case c.handshakeTimers <- timer:
 		default:
@@ -118,7 +118,7 @@ type attachPaletteTransport struct {
 	frames       []ports.Frame
 	themes       []protocol.Theme
 	themeCh      chan protocol.Theme
-	inputCh      chan ports.Input
+	inputCh      chan protocol.Input
 	detached     chan ports.Frame
 	themeSendErr error
 	welcomed     bool
@@ -127,7 +127,7 @@ type attachPaletteTransport struct {
 func newAttachPaletteTransport() *attachPaletteTransport {
 	return &attachPaletteTransport{
 		themeCh:  make(chan protocol.Theme, 16),
-		inputCh:  make(chan ports.Input, 16),
+		inputCh:  make(chan protocol.Input, 16),
 		detached: make(chan ports.Frame, 1),
 	}
 }
@@ -163,7 +163,7 @@ func (t *attachPaletteTransport) Recv() (ports.Frame, error) {
 	if !t.welcomed {
 		t.welcomed = true
 		t.mu.Unlock()
-		return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: "s"})}, nil
+		return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
 	}
 	t.mu.Unlock()
 	return <-t.detached, nil
@@ -205,7 +205,7 @@ func startAttachPaletteHarnessWithInputAndWriteError(state *terminalThemeState, 
 	ms := &milestones{}
 	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
 	attempt := &attachAttempt{
-		runner: runner, transport: transport, request: AttachRequest{Intent: ports.IntentAttach},
+		runner: runner, transport: transport, request: AttachRequest{Intent: protocol.IntentAttach},
 		milestones: ms, themeState: state,
 		enterRaw:  func() error { ms.rawEntered = true; return nil },
 		reconnect: &reconnectUI{term: term, rawEntered: new(bool)},
@@ -239,7 +239,7 @@ func (h *attachPaletteHarness) nextTimer(t *testing.T) *attachPaletteTimer {
 }
 func (h *attachPaletteHarness) detach(t *testing.T) {
 	t.Helper()
-	h.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})}
+	h.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
 	result := <-h.done
 	require.NoError(t, result.err)
 	select {
@@ -325,7 +325,7 @@ func TestAttachReconnectPreservesStandaloneEscapeBeforeClaimRevocation(t *testin
 
 	// Detach starts reconnect teardown. The residual must already be owned by
 	// the lifecycle reader at the precise point the old claim is revoked.
-	first.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})}
+	first.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
 	require.Equal(t, []byte("\x1b"), <-revoked)
 	release()
 	require.NoError(t, (<-first.done).err)

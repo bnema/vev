@@ -1016,7 +1016,7 @@ func (d *Daemon) resizeAttachmentGeometryForLease(effect *attachmentEffect, geom
 // attachment-routing operation: attachment publication also takes routingMu
 // before changing membership. Never retain sess.mu while touching notice or overlay
 // state, and retain the routingMu -> sess.mu order used by attachment paths.
-func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) {
+func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice protocol.ClientNotice) {
 	if sess == nil || ac == nil {
 		return
 	}
@@ -1036,7 +1036,7 @@ func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice po
 	d.handleClientNoticeForAttachment(effect, notice)
 }
 
-func (d *Daemon) handleClientNoticeForAttachment(effect *attachmentEffect, notice ports.ClientNotice) {
+func (d *Daemon) handleClientNoticeForAttachment(effect *attachmentEffect, notice protocol.ClientNotice) {
 	d.notices.routingMu.Lock()
 	if !effect.current() {
 		d.notices.routingMu.Unlock()
@@ -1060,7 +1060,7 @@ func (d *Daemon) handleClientNoticeForAttachment(effect *attachmentEffect, notic
 	}
 }
 
-func (d *Daemon) handleClientNoticeDirect(sess *session, ac *attachedClient, notice ports.ClientNotice) {
+func (d *Daemon) handleClientNoticeDirect(sess *session, ac *attachedClient, notice protocol.ClientNotice) {
 	d.notices.routingMu.Lock()
 	sess.mu.Lock()
 	_, current := sess.attachments[ac]
@@ -1079,15 +1079,15 @@ func (d *Daemon) handleClientNoticeDirect(sess *session, ac *attachedClient, not
 	}
 }
 
-func (d *Daemon) mutateClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) bool {
+func (d *Daemon) mutateClientNotice(sess *session, ac *attachedClient, notice protocol.ClientNotice) bool {
 	switch notice.Action {
-	case ports.ClientNoticeClipboardFallback:
+	case protocol.ClientNoticeClipboardFallback:
 		return d.recordClientNotice(sess, ac, domain.NoticeError, domain.NoticeClipboard, "image paste failed; sent Ctrl+V")
-	case ports.ClientNoticeClipboardTooLarge:
+	case protocol.ClientNoticeClipboardTooLarge:
 		return d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeClipboardTooLarge, "image too large to paste")
-	case ports.ClientNoticeLinkDegraded:
+	case protocol.ClientNoticeLinkDegraded:
 		return d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeConnection, "connection degraded")
-	case ports.ClientNoticeLinkConnected:
+	case protocol.ClientNoticeLinkConnected:
 		return d.dismissToastWithoutRepaint(ac, domain.NoticeConnection, sess.id)
 	default:
 		return false

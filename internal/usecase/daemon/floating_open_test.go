@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type contextAwareFloatingPTY struct {
@@ -94,7 +95,7 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 			name:           "visible session",
 			desiredVisible: true,
 			teardown: func(d *Daemon, sess *session, _ *tab) {
-				require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+				require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
 			},
 		},
 	}
@@ -412,7 +413,7 @@ func TestFloatingOpenCancellationBoundsSessionTeardownAndClosesLatePTY(t *testin
 	}
 
 	killed := make(chan error, 1)
-	go func() { killed <- d.killSession(sess, ports.ReasonSessionKilled, false) }()
+	go func() { killed <- d.killSession(sess, protocol.ReasonSessionKilled, false) }()
 	select {
 	case err := <-killed:
 		require.NoError(t, err)

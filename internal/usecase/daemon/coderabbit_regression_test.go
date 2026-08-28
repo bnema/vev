@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
@@ -40,7 +41,7 @@ func TestRestoreAmbiguousBadVersionLoadFailurePreservesCheckpoint(t *testing.T) 
 	d.mu.Lock()
 	entry := d.inactive[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, ports.SessionBroken, entry.state)
+	require.Equal(t, protocol.SessionBroken, entry.state)
 	require.Equal(t, persisted, entry.record)
 }
 
@@ -62,9 +63,9 @@ func TestRestoreTransientLoadFailureBecomesDiscardable(t *testing.T) {
 	d.mu.Lock()
 	entry := d.inactive[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, ports.SessionBroken, entry.state)
+	require.Equal(t, protocol.SessionBroken, entry.state)
 	require.Equal(t, persisted, entry.record)
-	require.Equal(t, ports.SessionBroken, listSessions(t, d).Sessions[0].State)
+	require.Equal(t, protocol.SessionBroken, listSessions(t, d).Sessions[0].State)
 	select {
 	case <-entry.restoreDone:
 	default:
@@ -122,14 +123,14 @@ func TestRestoreFailureCannotOverwriteDiscardReplacement(t *testing.T) {
 	entry := d.inactive[record.Name]
 	d.mu.Unlock()
 	require.Equal(t, persisted, entry.record)
-	require.Equal(t, ports.SessionDown, entry.state)
+	require.Equal(t, protocol.SessionDown, entry.state)
 }
 
 func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 	tests := []struct {
 		name        string
 		replacement func(domain.CatalogueRecord) domain.CatalogueRecord
-		state       ports.SessionState
+		state       protocol.SessionState
 	}{
 		{
 			name: "newer checkpoint",
@@ -140,7 +141,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				record.Committed = &ref
 				return record
 			},
-			state: ports.SessionDown,
+			state: protocol.SessionDown,
 		},
 		{
 			name: "newer incarnation",
@@ -148,7 +149,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				record.IncarnationID = domain.IncarnationID{9}
 				return record
 			},
-			state: ports.SessionDown,
+			state: protocol.SessionDown,
 		},
 		{
 			name: "degraded authority",
@@ -156,7 +157,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				record.DegradedReason = "newer restore decision"
 				return record
 			},
-			state: ports.SessionBroken,
+			state: protocol.SessionBroken,
 		},
 	}
 	for _, tt := range tests {
@@ -225,7 +226,7 @@ func TestCreateSessionRechecksShutdownAfterCatalogueRead(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.catalogue = catalogue
 	d.persistEnabled = true
-	d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionDown, make(chan struct{}))
+	d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, make(chan struct{}))
 
 	result := make(chan error, 1)
 	go func() {
@@ -276,7 +277,7 @@ func TestResumeStoppedSessionRejectsReplacementDuringCatalogueRead(t *testing.T)
 	d.catalogue = catalogue
 	d.persistEnabled = true
 	d.recovery = recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil)
-	d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionDown, nil)
+	d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
 	target := picker.Target{
 		Name:              record.Name,
@@ -294,7 +295,7 @@ func TestResumeStoppedSessionRejectsReplacementDuringCatalogueRead(t *testing.T)
 	replacement.UpdatedAt = replacement.CreatedAt
 	require.NoError(t, catalogue.Replace(replacement.Name, replacement))
 	d.mu.Lock()
-	d.inactive[replacement.Name] = inactiveSessionFromRecord(replacement, ports.SessionDown, nil)
+	d.inactive[replacement.Name] = inactiveSessionFromRecord(replacement, protocol.SessionDown, nil)
 	d.mu.Unlock()
 	close(catalogue.release)
 
@@ -322,7 +323,7 @@ func TestRemoteInactiveRouteRejectsReplacementDuringCatalogueRead(t *testing.T) 
 	d.catalogue = catalogue
 	d.persistEnabled = true
 	d.recovery = recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil)
-	d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionDown, nil)
+	d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
 	target := domain.RemoteSessionTarget{
 		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: record.IncarnationID,
@@ -331,10 +332,10 @@ func TestRemoteInactiveRouteRejectsReplacementDuringCatalogueRead(t *testing.T) 
 	transport, _ := newCapturingTransport(t)
 	result := make(chan error, 1)
 	go func() {
-		_, _, err := d.routeWithContext(context.Background(), ports.Hello{
-			Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name,
+		_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name,
 			Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-			EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}, transport)
 		result <- err
 	}()
@@ -346,13 +347,13 @@ func TestRemoteInactiveRouteRejectsReplacementDuringCatalogueRead(t *testing.T) 
 	replacement.UpdatedAt = replacement.CreatedAt
 	require.NoError(t, catalogue.Replace(replacement.Name, replacement))
 	d.mu.Lock()
-	d.inactive[replacement.Name] = inactiveSessionFromRecord(replacement, ports.SessionDown, nil)
+	d.inactive[replacement.Name] = inactiveSessionFromRecord(replacement, protocol.SessionDown, nil)
 	d.mu.Unlock()
 	close(catalogue.release)
 
 	var protocolErr *protoErr
 	require.ErrorAs(t, <-result, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 	require.Empty(t, catalogue.MetadataUpdates())
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -411,7 +412,7 @@ func TestRemoteInactiveRouteRejectsTabAuthorityChangeDuringCatalogueRead(t *test
 			d.catalogue = catalogue
 			d.persistEnabled = true
 			d.recovery = recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil)
-			d.inactive[record.Name] = inactiveSessionFromRecord(record, ports.SessionDown, nil)
+			d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
 			target := test.target
 			target.Endpoint = "remote"
@@ -421,10 +422,10 @@ func TestRemoteInactiveRouteRejectsTabAuthorityChangeDuringCatalogueRead(t *test
 			transport, _ := newCapturingTransport(t)
 			result := make(chan error, 1)
 			go func() {
-				_, _, err := d.routeWithContext(context.Background(), ports.Hello{
-					Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name,
+				_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
+					Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name,
 					Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
-					EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+					EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 				}, transport)
 				result <- err
 			}()
@@ -438,14 +439,14 @@ func TestRemoteInactiveRouteRejectsTabAuthorityChangeDuringCatalogueRead(t *test
 			require.NoError(t, catalogue.Replace(replacement.Name, replacement))
 			if test.updateMap {
 				d.mu.Lock()
-				d.inactive[replacement.Name] = inactiveSessionFromRecord(replacement, ports.SessionDown, nil)
+				d.inactive[replacement.Name] = inactiveSessionFromRecord(replacement, protocol.SessionDown, nil)
 				d.mu.Unlock()
 			}
 			close(catalogue.release)
 
 			var protocolErr *protoErr
 			require.ErrorAs(t, <-result, &protocolErr)
-			require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+			require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 			require.Empty(t, catalogue.MetadataUpdates())
 			d.mu.Lock()
 			defer d.mu.Unlock()

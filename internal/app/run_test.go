@@ -437,20 +437,20 @@ func TestParseArgs(t *testing.T) {
 		wantErr      bool
 		nonUsageErr  bool
 	}{
-		{name: "no args -> ephemeral attach", args: nil, wantKind: kindAttach, wantIntent: ports.IntentEphemeral},
-		{name: "empty slice -> ephemeral attach", args: []string{}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral},
-		{name: "new named", args: []string{"new", "work"}, wantKind: kindAttach, wantIntent: ports.IntentNew, wantName: "work"},
+		{name: "no args -> ephemeral attach", args: nil, wantKind: kindAttach, wantIntent: protocol.IntentEphemeral},
+		{name: "empty slice -> ephemeral attach", args: []string{}, wantKind: kindAttach, wantIntent: protocol.IntentEphemeral},
+		{name: "new named", args: []string{"new", "work"}, wantKind: kindAttach, wantIntent: protocol.IntentNew, wantName: "work"},
 		{name: "new without name", args: []string{"new"}, wantErr: true},
 		{name: "new empty name", args: []string{"new", ""}, wantErr: true},
 		{name: "new command override unsupported", args: []string{"new", "work", "--", "sh"}, wantErr: true},
-		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
-		{name: "attach preserves legacy unsafe name", args: []string{"attach", "my work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "my work"},
-		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
-		{name: "attach remote host uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
-		{name: "attach remote host with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
-		{name: "attach remote host with session", args: []string{"attach", "user@example.com:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@example.com"},
-		{name: "attach remote ipv4 with session", args: []string{"attach", "user@192.0.2.10:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@192.0.2.10"},
-		{name: "attach remote ipv6 with session", args: []string{"attach", "user@[2001:db8::1]:work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work", wantRemote: "user@[2001:db8::1]"},
+		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: protocol.IntentAttach, wantName: "work"},
+		{name: "attach preserves legacy unsafe name", args: []string{"attach", "my work"}, wantKind: kindAttach, wantIntent: protocol.IntentAttach, wantName: "my work"},
+		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: protocol.IntentAttach, wantName: "work"},
+		{name: "attach remote host uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: protocol.IntentEphemeral, wantRemote: "user@example.com"},
+		{name: "attach remote host with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: protocol.IntentEphemeral, wantRemote: "user@example.com"},
+		{name: "attach remote host with session", args: []string{"attach", "user@example.com:work"}, wantKind: kindAttach, wantIntent: protocol.IntentAttach, wantName: "work", wantRemote: "user@example.com"},
+		{name: "attach remote ipv4 with session", args: []string{"attach", "user@192.0.2.10:work"}, wantKind: kindAttach, wantIntent: protocol.IntentAttach, wantName: "work", wantRemote: "user@192.0.2.10"},
+		{name: "attach remote ipv6 with session", args: []string{"attach", "user@[2001:db8::1]:work"}, wantKind: kindAttach, wantIntent: protocol.IntentAttach, wantName: "work", wantRemote: "user@[2001:db8::1]"},
 		{name: "attach remote invalid session", args: []string{"attach", "user@example.com:my work"}, wantErr: true, nonUsageErr: true},
 		{name: "attach extra arg", args: []string{"attach", "work", "extra"}, wantErr: true},
 		{name: "attach without name", args: []string{"attach"}, wantErr: true},
@@ -566,10 +566,10 @@ func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
 		arg  string
 		want client.AttachRequest
 	}{
-		{name: "local host", arg: "work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
-		{name: "remote host", arg: "user@example.com:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
-		{name: "remote ipv4", arg: "user@192.0.2.10:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
-		{name: "remote ipv6", arg: "user@[2001:db8::1]:work", want: client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work"}},
+		{name: "local host", arg: "work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
+		{name: "remote host", arg: "user@example.com:work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
+		{name: "remote ipv4", arg: "user@192.0.2.10:work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
+		{name: "remote ipv6", arg: "user@[2001:db8::1]:work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -587,10 +587,10 @@ func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
 
 func TestListShowsBroken(t *testing.T) {
 	var out bytes.Buffer
-	printSessions(&out, []ports.SessionInfo{
-		{Name: "fresh", State: ports.SessionDown},
-		{Name: "loading", State: ports.SessionDown},
-		{Name: "broken", State: ports.SessionBroken},
+	printSessions(&out, []protocol.SessionInfo{
+		{Name: "fresh", State: protocol.SessionDown},
+		{Name: "loading", State: protocol.SessionDown},
+		{Name: "broken", State: protocol.SessionBroken},
 	})
 	require.Contains(t, out.String(), "fresh")
 	require.Contains(t, out.String(), "down")
@@ -602,9 +602,9 @@ func TestListShowsBroken(t *testing.T) {
 
 func TestPrintSessionsShowsDownState(t *testing.T) {
 	var out bytes.Buffer
-	printSessions(&out, []ports.SessionInfo{
-		{Name: "main", State: ports.SessionUp, Tabs: 2, Attached: true},
-		{Name: "old", State: ports.SessionDown},
+	printSessions(&out, []protocol.SessionInfo{
+		{Name: "main", State: protocol.SessionUp, Tabs: 2, Attached: true},
+		{Name: "old", State: protocol.SessionDown},
 	})
 	got := out.String()
 	for _, want := range []string{"NAME", "STATE", "main", "up", "2", "yes", "old", "down", "-"} {
@@ -616,10 +616,10 @@ func TestPrintSessionsShowsDownState(t *testing.T) {
 
 func TestPrintSessionsMarksEphemeral(t *testing.T) {
 	var buf bytes.Buffer
-	printSessions(&buf, []ports.SessionInfo{
-		{Name: "0", State: ports.SessionUp, Ephemeral: true, Tabs: 1, Attached: false},
-		{Name: "work", State: ports.SessionUp, Tabs: 2, Attached: true},
-		{Name: "old", State: ports.SessionDown},
+	printSessions(&buf, []protocol.SessionInfo{
+		{Name: "0", State: protocol.SessionUp, Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", State: protocol.SessionUp, Tabs: 2, Attached: true},
+		{Name: "old", State: protocol.SessionDown},
 	})
 	out := buf.String()
 	for _, want := range []string{"0", "temporary", "work", "up", "old", "down"} {
@@ -757,7 +757,7 @@ func captureStdout(t *testing.T, fn func()) string {
 
 func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 	called := false
-	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "outer", nil, runAttachDeps{
 		createDetached: func(context.Context, string) error {
 			called = true
 			return nil
@@ -776,7 +776,7 @@ func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 
 func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
 	var gotName string
-	err := runAttachWithDeps(context.Background(), ports.IntentNew, "scratch", "", "outer", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentNew, "scratch", "", "outer", nil, runAttachDeps{
 		createDetached: func(_ context.Context, name string) error {
 			gotName = name
 			return nil
@@ -796,7 +796,7 @@ func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
 
 	hello := detachedLocalHello("scratch", "/tmp/work")
 
-	require.Equal(t, ports.IntentNew, hello.Intent)
+	require.Equal(t, protocol.IntentNew, hello.Intent)
 	require.Equal(t, "scratch", hello.Name)
 	require.Equal(t, "xterm-direct", hello.TermEnv)
 	require.Equal(t, "/tmp/work", hello.Cwd)
@@ -834,7 +834,7 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 			factory := portsmocks.NewMockRemoteDialerFactory(t)
 			factory.EXPECT().DialerForRemote("remote.example", "work", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
 
-			err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 				remoteDialerFactory:     factory,
 				selectedRemoteTransport: tt.selectedTransport,
 				clipboard:               clip,
@@ -845,11 +845,11 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 					}
 					gotDialer = nd.name
 					gotRemote = deps.Remote
-					if !request.Remote || request.EnvironmentPolicy != ports.EnvironmentPolicyClientOwned {
+					if !request.Remote || request.EnvironmentPolicy != protocol.EnvironmentPolicyClientOwned {
 						t.Fatal("direct CLI remote attach must preserve client-owned environment policy")
 					}
 					gotClipboard = deps.Clipboard
-					if request.Intent != ports.IntentAttach || request.SessionName != "work" {
+					if request.Intent != protocol.IntentAttach || request.SessionName != "work" {
 						t.Fatalf("intent/name = %d/%q, want attach/work", request.Intent, request.SessionName)
 					}
 					return nil
@@ -876,18 +876,18 @@ func TestRunAttachWithDepsDirectLegacyCallbackPreservesClientOwnership(t *testin
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
 	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
 
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			require.True(t, request.Remote)
-			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
-			nextDialer, nextRequest, err := deps.AttachHandoff(ports.AttachTarget{
-				Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach,
-				EnvironmentPolicy: ports.EnvironmentPolicyClientOwned,
+			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
+			nextDialer, nextRequest, err := deps.AttachHandoff(protocol.AttachTarget{
+				Endpoint: "selected.example", Session: "picked", Intent: protocol.IntentAttach,
+				EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
 			})
 			require.NoError(t, err)
 			require.NotNil(t, nextDialer)
-			require.Equal(t, ports.EnvironmentPolicyClientOwned, nextRequest.EnvironmentPolicy)
+			require.Equal(t, protocol.EnvironmentPolicyClientOwned, nextRequest.EnvironmentPolicy)
 			return nil
 		},
 	})
@@ -899,15 +899,15 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
 	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
 	var calls int
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			calls++
 			require.NotNil(t, deps.Dialer)
 			require.True(t, request.Remote)
-			require.Equal(t, ports.EnvironmentPolicyClientOwned, request.EnvironmentPolicy, "direct CLI remote ownership must survive a handoff")
+			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy, "direct CLI remote ownership must survive a handoff")
 			if calls == 1 {
-				return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
+				return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: protocol.IntentAttach}}
 			}
 			return nil
 		},
@@ -921,11 +921,11 @@ func TestRunAttachWithDepsAllowsRevisitingRemoteHandoff(t *testing.T) {
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote-revisit"}, nil).Once()
 
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
 		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
-			dialer, request, err := deps.AttachHandoff(ports.AttachTarget{
-				Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach,
+			dialer, request, err := deps.AttachHandoff(protocol.AttachTarget{
+				Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach,
 			})
 			require.NoError(t, err)
 			require.NotNil(t, dialer)
@@ -941,11 +941,11 @@ func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(maxAttachTargetHandoffs + 1)
 
 	calls := 0
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
 		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
 			calls++
-			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentAttach}}
+			return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach}}
 		},
 	})
 	require.ErrorContains(t, err, "attach handoff exceeded maximum")
@@ -957,18 +957,18 @@ func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T)
 	factory.EXPECT().DialerForRemote("selected.example", "picked", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	localCalls, remoteCalls := 0, 0
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "", "", nil, runAttachDeps{
 		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
 		remoteDialerFactory: factory,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			if deps.Remote {
 				remoteCalls++
-				require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "picked", Remote: true, Origin: protocol.RouteOriginDiscovery, OriginKey: "selected.example", HostLabel: "selected.example", EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, request)
+				require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "picked", Remote: true, Origin: protocol.RouteOriginDiscovery, OriginKey: "selected.example", HostLabel: "selected.example", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, request)
 				return nil
 			}
 			localCalls++
-			require.Equal(t, client.AttachRequest{Intent: ports.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local"}, request)
-			return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: ports.IntentAttach}}
+			require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local"}, request)
+			return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: protocol.IntentAttach}}
 		},
 	})
 	require.NoError(t, err)
@@ -979,20 +979,20 @@ func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T)
 func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
 	tests := []struct {
 		name   string
-		target ports.AttachTarget
+		target protocol.AttachTarget
 	}{
-		{name: "invalid host", target: ports.AttachTarget{Endpoint: "remote host", Session: "work", Intent: ports.IntentAttach}},
-		{name: "invalid session", target: ports.AttachTarget{Endpoint: "remote.example", Session: "bad name", Intent: ports.IntentAttach}},
-		{name: "tokenless resume", target: ports.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: ports.IntentResume}},
+		{name: "invalid host", target: protocol.AttachTarget{Endpoint: "remote host", Session: "work", Intent: protocol.IntentAttach}},
+		{name: "invalid session", target: protocol.AttachTarget{Endpoint: "remote.example", Session: "bad name", Intent: protocol.IntentAttach}},
+		{name: "tokenless resume", target: protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentResume}},
 		{
 			name: "tokenless resume with remote target",
-			target: ports.AttachTarget{
-				Endpoint: "remote.example", Session: "work", Intent: ports.IntentResume,
+			target: protocol.AttachTarget{
+				Endpoint: "remote.example", Session: "work", Intent: protocol.IntentResume,
 				RemoteTarget: &domain.RemoteSessionTarget{
 					Endpoint: "remote.example", DisplayOrigin: "remote.example",
 					LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work", LiveTabID: "tab-1",
 				},
-				EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			},
 		},
 	}
@@ -1001,7 +1001,7 @@ func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
 			factory := portsmocks.NewMockRemoteDialerFactory(t)
 			factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 			calls := 0
-			err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 				remoteDialerFactory: factory,
 				runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
 					calls++
@@ -1018,7 +1018,7 @@ func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	runClientCalled := false
 
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory:     factory,
 		selectedRemoteTransport: "serial",
 		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
@@ -1040,7 +1040,7 @@ func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
 	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(nil, factoryErr)
 	runClientCalled := false
 
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
 		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
 			runClientCalled = true
@@ -1060,7 +1060,7 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	gotRemote := true
 	gotClipboard := ports.ClipboardReader(&fakeClipboardReader{})
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", nil, runAttachDeps{
+	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "", nil, runAttachDeps{
 		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
 		remoteDialerFactory: factory,
 		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
@@ -1075,7 +1075,7 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 				t.Fatal("local carriage metadata must not be in the attach request")
 			}
 			gotClipboard = deps.Clipboard
-			if request.Intent != ports.IntentEphemeral || request.SessionName != "" {
+			if request.Intent != protocol.IntentEphemeral || request.SessionName != "" {
 				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", request.Intent, request.SessionName)
 			}
 			return nil

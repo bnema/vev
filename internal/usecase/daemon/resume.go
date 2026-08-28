@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 var errResumeTokenLifecycleRace = errors.New("resume token lifecycle race")
@@ -164,7 +165,7 @@ func (d *Daemon) purgeParkingForSessionLocked(sess *session) {
 // waitParkingInFlight waits for an identified same-client parking publication
 // to finish. Returns true when a matching in-flight entry was observed.
 // Unknown and mismatched credentials return false without waiting.
-func (d *Daemon) waitParkingInFlight(h ports.Hello) bool {
+func (d *Daemon) waitParkingInFlight(h protocol.Hello) bool {
 	if h.ResumeToken == 0 {
 		return false
 	}
@@ -479,11 +480,11 @@ func (d *Daemon) finishParkedAttachmentRetirements(retirements []parkedAttachmen
 // to the named session's active attachment because transport teardown has not
 // parked it yet. Only the exact live owner (same session, token, and client ID)
 // is accepted; arbitrary unknown tokens stay fail-closed.
-func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
-		return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		return nil, nil, false, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 	}
 	// Teardown may have parked the credential already.
 	if d.parked[h.ResumeToken] != nil {
@@ -521,14 +522,14 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 	}
 	if credentialMatch && h.RemoteTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.RemoteTarget) {
 		d.mu.Unlock()
-		return nil, nil, false, &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
+		return nil, nil, false, &protoErr{protocol.ErrNoSuchTarget, "remote target no longer matches resumed session"}
 	}
 	d.mu.Unlock()
 
 	if clientMismatch {
 		reason := "client id mismatch"
 		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "err", reason)
-		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		return nil, nil, false, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	if !credentialMatch {
 		// Detach may have won and not published parked yet; wait out that gap
@@ -569,9 +570,9 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 		closing := d.closing
 		d.mu.Unlock()
 		if closing {
-			return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+			return nil, nil, false, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 		}
-		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		return nil, nil, false, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	_ = ac.closeCapturedTransport(oldSnap.transport)
 	d.log.Info("live resume credential parked for reconnect", "session", sess.nameSnapshot())
@@ -582,7 +583,7 @@ func (d *Daemon) resumeLiveAttachment(h ports.Hello, tr ports.Transport, sz doma
 // registry lock, preserving the global sendMu > Daemon.mu ordering. The parked
 // entry is revalidated after both locks are held because it may expire between
 // the initial lookup and lock acquisition.
-func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+func (d *Daemon) resumeParked(h protocol.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
 	d.mu.Lock()
 	parked := d.parked[h.ResumeToken]
 	d.mu.Unlock()
@@ -599,7 +600,7 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 	if d.closing {
 		d.mu.Unlock()
 		ac.sendMu.Unlock()
-		return nil, nil, false, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		return nil, nil, false, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 	}
 	if d.parked[h.ResumeToken] != parked || parked.claimed {
 		if d.sessions[parked.sess.id] == parked.sess {
@@ -609,7 +610,7 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 		}
 		d.mu.Unlock()
 		ac.sendMu.Unlock()
-		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		return nil, nil, false, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	sess, resumed, ok, err := d.resumeParkedLocked(h, tr, sz)
 	d.mu.Unlock()
@@ -631,7 +632,7 @@ func (d *Daemon) resumeParked(h ports.Hello, tr ports.Transport, sz domain.Size)
 
 // resumeParkedLocked completes a validated resume. Caller holds both ac.sendMu
 // and d.mu in that order.
-func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
+func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.Transport, sz domain.Size) (*session, *attachedClient, bool, error) {
 	parked := d.parked[h.ResumeToken]
 	if parked == nil || h.ResumeToken == 0 {
 		return nil, nil, false, nil
@@ -641,7 +642,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	if !registered {
 		d.removeParkedLocked(h.ResumeToken, parked)
 		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "registered", false)
-		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		return nil, nil, false, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	ac := parked.ac
 	if parked.claimed {
@@ -650,10 +651,10 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	if ac.clientID != h.ClientID {
 		reason := "client id mismatch"
 		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "err", reason)
-		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
+		return nil, nil, false, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	if h.RemoteTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.RemoteTarget) {
-		return nil, nil, false, &protoErr{ports.ErrNoSuchTarget, "remote target no longer matches resumed session"}
+		return nil, nil, false, &protoErr{protocol.ErrNoSuchTarget, "remote target no longer matches resumed session"}
 	}
 	// Claim the attachment while retaining the old credential until Welcome is
 	// accepted. A failed handshake can therefore restore this exact parked
@@ -680,7 +681,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// The resumed session's snapshot is the sole source for future PTY children.
 	// Existing PTYs retain the environment they were started with.
 	sess.mu.Lock()
-	if h.EnvironmentPolicy != ports.EnvironmentPolicyDaemonOwned {
+	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 		sess.env = copyEnvironment(h.Env)
 	}
 	sess.mu.Unlock()
@@ -702,7 +703,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.sendMu.Lock()
 	d.mu.Lock()
 	if err != nil {
-		return sess, ac, false, &protoErr{ports.ErrInternal, "resume attachment transition failed"}
+		return sess, ac, false, &protoErr{protocol.ErrInternal, "resume attachment transition failed"}
 	}
 	d.deferAttachmentTransitionCleanups(transition)
 	d.touchMRU(sess)

@@ -458,7 +458,7 @@ func requireNoRemoteLockViolations(t *testing.T, catalog *channelRemoteCatalog, 
 
 func remoteCatalogForTest(sessions ...ports.RemoteCatalogSession) ports.RemoteCatalog {
 	return ports.RemoteCatalog{
-		ProtocolVersion: ports.ProtocolVersion,
+		ProtocolVersion: protocol.Version,
 		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
 		Sessions:        append([]ports.RemoteCatalogSession{}, sessions...),
 	}
@@ -648,7 +648,7 @@ func TestRemoteRefreshValidationSentinelsRemainMalformed(t *testing.T) {
 			hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
 			d, _, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(400, 0))
 			d.remoteCatalog.refresh = 1
-			catalog := ports.RemoteCatalog{ProtocolVersion: ports.ProtocolVersion, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{test.session}}
+			catalog := ports.RemoteCatalog{ProtocolVersion: protocol.Version, SchemaVersion: ports.RemoteCatalogSchemaVersion, Sessions: []ports.RemoteCatalogSession{test.session}}
 			require.False(t, d.applyRemoteRefreshResult(1, "arch", catalog, nil))
 			d.remoteCatalog.mu.Lock()
 			require.Equal(t, remoteHostMalformed, d.remoteCatalog.status["arch"])
@@ -666,7 +666,7 @@ func TestRemoteRefreshVersionMismatchPreservesStaleRows(t *testing.T) {
 	d.remoteCatalog.refresh = 3
 	d.remoteCatalog.mu.Unlock()
 
-	require.False(t, d.applyRemoteRefreshResult(3, "arch", ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{Got: 19, Want: ports.ProtocolVersion}))
+	require.False(t, d.applyRemoteRefreshResult(3, "arch", ports.RemoteCatalog{}, &ports.RemoteCatalogVersionMismatchError{Got: 19, Want: protocol.Version}))
 	d.remoteCatalog.mu.Lock()
 	require.Equal(t, old, d.remoteCatalog.cache["arch"])
 	require.Equal(t, remoteHostVersionMismatch, d.remoteCatalog.status["arch"])
@@ -699,7 +699,7 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	require.Equal(t, ports.MsgAttachTarget, frame.Type)
 	got, err := ports.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.AttachTarget{Endpoint: "arch", Session: "work", Intent: ports.IntentAttach, RemoteTarget: &remoteTarget, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}, got)
+	require.Equal(t, protocol.AttachTarget{Endpoint: "arch", Session: "work", Intent: protocol.IntentAttach, RemoteTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, got)
 	require.Nil(t, ac.currentAttachmentSession())
 	d.mu.Lock()
 	require.NotContains(t, d.sessions, key.ID(), "remote picker handoff must not create a local session shadow")
@@ -759,16 +759,16 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	remote := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	remote.mu.Lock()
 	remote.inactive["work"] = inactiveSession{
-		name: "work", cwd: "/remote/work", incarnation: lifecycle, state: ports.SessionDown,
+		name: "work", cwd: "/remote/work", incarnation: lifecycle, state: protocol.SessionDown,
 		tabNames:   []string{"alpha", "beta"},
 		tabRecords: []domain.CatalogueTabRecord{{StableID: "tab-a", Name: "alpha"}, {StableID: "tab-b", Name: "beta"}},
 	}
 	remote.mu.Unlock()
 	transport, _ := newCapturingTransport(t)
-	restored, attachment, err := remote.routeWithContext(context.Background(), ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: handoff.Session,
+	restored, attachment, err := remote.routeWithContext(context.Background(), protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: handoff.Session,
 		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: handoff.RemoteTarget,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, transport)
 	require.NoError(t, err)
 	t.Cleanup(func() { remote.clientGone(restored, attachment, transport, false) })
@@ -825,13 +825,13 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 
 	remote := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	remote.mu.Lock()
-	remote.inactive["work"] = inactiveSession{name: "work", cwd: "/remote/work", incarnation: lifecycle, state: ports.SessionDown}
+	remote.inactive["work"] = inactiveSession{name: "work", cwd: "/remote/work", incarnation: lifecycle, state: protocol.SessionDown}
 	remote.mu.Unlock()
 	transport, _ := newCapturingTransport(t)
-	restored, attachment, err := remote.routeWithContext(context.Background(), ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: handoff.Session,
+	restored, attachment, err := remote.routeWithContext(context.Background(), protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: handoff.Session,
 		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: handoff.RemoteTarget,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, transport)
 	require.NoError(t, err)
 	t.Cleanup(func() { remote.clientGone(restored, attachment, transport, false) })
@@ -962,7 +962,7 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 	d.remoteCatalog.mu.Unlock()
 
 	require.True(t, d.applyRemoteRefreshResult(4, "arch", ports.RemoteCatalog{
-		ProtocolVersion: ports.ProtocolVersion,
+		ProtocolVersion: protocol.Version,
 		SchemaVersion:   ports.RemoteCatalogSchemaVersion,
 		Sessions: []ports.RemoteCatalogSession{{
 			LifecycleID: remoteLifecycleForTest(), Name: "work", State: "up",
@@ -1117,7 +1117,7 @@ func TestParkedPickerResumePreservesGeneration(t *testing.T) {
 	d.clientGone(sess, ac, ac.transport(), false)
 	token := ac.resumeToken
 	tr := &closeTrackingTransport{}
-	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, sess.name, token), tr, domain.Size{Cols: 80, Rows: 24})
+	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, sess.name, token), tr, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Same(t, sess, resumedSess)

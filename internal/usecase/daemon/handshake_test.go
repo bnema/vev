@@ -11,6 +11,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type handshakeBlockingTransport struct {
@@ -128,7 +129,7 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 	handshakeDone := make(chan struct{})
 	go func() {
 		d.handleHelloWithContext(ctx, make(chan struct{}), func() {}, func() {}, tr,
-			mustHello(ports.IntentNew, "paint-cancel", domain.Size{Cols: 80, Rows: 24}))
+			mustHello(protocol.IntentNew, "paint-cancel", domain.Size{Cols: 80, Rows: 24}))
 		close(handshakeDone)
 	}()
 
@@ -156,7 +157,7 @@ func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
 	}()
 
 	timer := <-clock.timers
-	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "handshake receive did not stop after timeout")
 	requireClosedHandshakeTransport(t, tr)
@@ -171,7 +172,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	oldTransport := newHandshakeBlockingTransport(false)
-	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "resume-timeout", 0), oldTransport)
+	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "resume-timeout", 0), oldTransport)
 	require.NoError(t, err)
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
@@ -182,12 +183,12 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	resumeTransport := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(resumeTransport, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(helloResumeCapable(ports.IntentResume, sess.name, token))})
+		d.handleHello(resumeTransport, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(helloResumeCapable(protocol.IntentResume, sess.name, token))})
 		close(done)
 	}()
 
 	timer := <-clock.timers
-	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-resumeTransport.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "failed resume handshake did not finish")
@@ -210,12 +211,12 @@ func TestHandshakeTimeoutClosesBlockedWelcomeSend(t *testing.T) {
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(ports.IntentNew, "timeout-send", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHello(tr, mustHello(protocol.IntentNew, "timeout-send", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
 	timer := <-clock.timers
-	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-tr.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "handshake send did not stop after timeout")
@@ -246,12 +247,12 @@ func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
 	tr := newHandshakeBlockingTransport(false)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(ports.IntentAttach, "restoring", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHello(tr, mustHello(protocol.IntentAttach, "restoring", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
 	timer := <-clock.timers
-	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "route restore wait did not stop after handshake timeout")
 	requireClosedHandshakeTransport(t, tr)
@@ -266,7 +267,7 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	d.mu.Lock()
-	d.inactive["restored"] = inactiveSession{name: "restored", cwd: "/tmp", state: ports.SessionDown}
+	d.inactive["restored"] = inactiveSession{name: "restored", cwd: "/tmp", state: protocol.SessionDown}
 	d.mu.Unlock()
 
 	clock := &signalClock{timers: make(chan *signalTimer, 4)}
@@ -274,12 +275,12 @@ func TestHandshakeTimeoutRemovesRestoredEmptySession(t *testing.T) {
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(ports.IntentAttach, "restored", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHello(tr, mustHello(protocol.IntentAttach, "restored", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
 	timer := <-clock.timers
-	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-tr.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "timed-out restored attachment cleanup did not finish")
@@ -296,7 +297,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	oldTransport := &closeTrackingTransport{}
-	sess, old, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "shared", Size: domain.Size{Cols: 80, Rows: 24}}, oldTransport)
+	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "shared", Size: domain.Size{Cols: 80, Rows: 24}}, oldTransport)
 	require.NoError(t, err)
 
 	clock := &signalClock{timers: make(chan *signalTimer, 1)}
@@ -304,12 +305,12 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	tr := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHello(tr, mustHello(ports.IntentAttach, "shared", domain.Size{Cols: 80, Rows: 24}))
+		d.handleHello(tr, mustHello(protocol.IntentAttach, "shared", domain.Size{Cols: 80, Rows: 24}))
 		close(done)
 	}()
 
 	timer := <-clock.timers
-	require.Equal(t, ports.HandshakeTimeout, timer.duration)
+	require.Equal(t, protocol.HandshakeTimeout, timer.duration)
 	<-tr.welcome
 	timer.ch <- time.Time{}
 	awaitTestCompletion(t, done, "timed-out attachment cleanup did not finish")
@@ -321,7 +322,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	require.Len(t, d.sessions, 1)
 	require.Empty(t, d.parked)
 	d.mu.Unlock()
-	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
 }
 
 func TestSuccessfulRouteOutlivesStoppedHandshakeContext(t *testing.T) {
@@ -329,7 +330,7 @@ func TestSuccessfulRouteOutlivesStoppedHandshakeContext(t *testing.T) {
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	ctx, cancel := context.WithCancel(context.Background())
-	sess, ac, err := d.routeWithContext(ctx, ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, &closeTrackingTransport{})
+	sess, ac, err := d.routeWithContext(ctx, protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "lifetime", Size: domain.Size{Cols: 80, Rows: 24}}, &closeTrackingTransport{})
 	require.NoError(t, err)
 	cancel()
 	select {
@@ -338,5 +339,5 @@ func TestSuccessfulRouteOutlivesStoppedHandshakeContext(t *testing.T) {
 	default:
 	}
 	require.NotNil(t, ac)
-	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
 }

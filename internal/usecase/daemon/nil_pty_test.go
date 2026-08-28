@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -51,7 +51,7 @@ func TestKillSessionIgnoresNilPanePTYs(t *testing.T) {
 	d.sessions[sess.id] = sess
 
 	require.NotPanics(t, func() {
-		require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
+		require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
 	})
 	require.NotContains(t, d.sessions, sess.id)
 }

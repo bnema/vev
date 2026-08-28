@@ -15,6 +15,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 )
@@ -189,7 +190,7 @@ func TestRunAttachJoinsTraceCloseError(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv(envRemoteTransport, "invalid")
 
-	err := runAttach(context.Background(), ports.IntentEphemeral, "", "host")
+	err := runAttach(context.Background(), protocol.IntentEphemeral, "", "host")
 	if !strings.Contains(err.Error(), "invalid remote transport") {
 		t.Fatalf("runAttach() error = %v, want remote transport validation error", err)
 	}
@@ -246,7 +247,7 @@ func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
 	}
 	t.Cleanup(func() { runClientWithDeps = originalRunClient })
 
-	if err := runAttach(context.Background(), ports.IntentAttach, "work", "remote.example"); err != nil {
+	if err := runAttach(context.Background(), protocol.IntentAttach, "work", "remote.example"); err != nil {
 		t.Fatal(err)
 	}
 	if traceCalls != 1 || factoryCalls != 1 {

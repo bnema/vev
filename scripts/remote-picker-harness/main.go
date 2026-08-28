@@ -86,8 +86,8 @@ func runLiveStdioPhase(ctx context.Context, target string, catalog ports.RemoteC
 		return fmt.Errorf("open stdio transport: %w", err)
 	}
 	defer func() { _ = stdio.Close() }()
-	if err := attachAndCheck(ctx, stdio, ports.Hello{
-		Intent: ports.IntentNew, Name: sessionName, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+	if err := attachAndCheck(ctx, stdio, protocol.Hello{
+		Intent: protocol.IntentNew, Name: sessionName, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
 		TermEnv: "xterm-256color", TrueColor: true,
 	}); err != nil {
 		return fmt.Errorf("stdio live attach: %w", err)
@@ -177,8 +177,8 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 			err = errors.Join(err, fmt.Errorf("destroy remote picker session: %w", cleanupErr))
 		}
 	}()
-	if err := attachAndCheck(ctx, remote, ports.Hello{
-		Intent: ports.IntentNew, Name: remoteSession, Env: localEnvironment(), Cwd: "/tmp/remote-cwd",
+	if err := attachAndCheck(ctx, remote, protocol.Hello{
+		Intent: protocol.IntentNew, Name: remoteSession, Env: localEnvironment(), Cwd: "/tmp/remote-cwd",
 		TermEnv: "xterm-256color", TrueColor: true,
 	}); err != nil {
 		return fmt.Errorf("attach remote picker source: %w", err)
@@ -247,8 +247,8 @@ func runLocalPickerUnitedPhase(ctx context.Context, target string, catalog ports
 	// or MsgAttachTarget to this transport.
 	local.probe.configure("local-picker")
 	defer func() { _ = local.Close() }()
-	if err := attachAndCheck(ctx, local, ports.Hello{
-		Intent: ports.IntentNew, Name: localSession, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+	if err := attachAndCheck(ctx, local, protocol.Hello{
+		Intent: protocol.IntentNew, Name: localSession, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
 		TermEnv: "xterm-256color", TrueColor: true,
 	}); err != nil {
 		return fmt.Errorf("attach local picker session: %w", err)
@@ -351,10 +351,10 @@ func runRestartResumePhase(ctx context.Context, target string, catalog ports.Rem
 		return domain.RemoteSessionTarget{}, fmt.Errorf("open restart stdio transport: %w", err)
 	}
 	defer func() { _ = resumed.Close() }()
-	if err := attachAndCheck(ctx, resumed, ports.Hello{
-		Intent: ports.IntentResume, Name: sessionName, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+	if err := attachAndCheck(ctx, resumed, protocol.Hello{
+		Intent: protocol.IntentResume, Name: sessionName, Env: localEnvironment(), Cwd: "/tmp/local-cwd",
 		TermEnv: "xterm-256color", TrueColor: true, RemoteTarget: &resumedTarget,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}); err != nil {
 		return domain.RemoteSessionTarget{}, fmt.Errorf("exact restart resume: %w", err)
 	}
@@ -385,8 +385,8 @@ func runUDPPhase(ctx context.Context, target string) error {
 		return fmt.Errorf("open UDP transport: %w", err)
 	}
 	defer func() { _ = udp.Close() }()
-	if err := attachAndCheck(ctx, udp, ports.Hello{
-		Intent: ports.IntentNew, Name: "udp-harness", Env: localEnvironment(), Cwd: "/tmp/local-cwd",
+	if err := attachAndCheck(ctx, udp, protocol.Hello{
+		Intent: protocol.IntentNew, Name: "udp-harness", Env: localEnvironment(), Cwd: "/tmp/local-cwd",
 		TermEnv: "xterm-256color", TrueColor: true,
 	}); err != nil {
 		return fmt.Errorf("UDP attach: %w", err)
@@ -636,11 +636,11 @@ func openLocalTransport(ctx context.Context) (*harnessTransport, error) {
 	return h, nil
 }
 
-func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello) error {
-	hello.Version = ports.ProtocolVersion
+func attachAndCheck(ctx context.Context, tr *harnessTransport, hello protocol.Hello) error {
+	hello.Version = protocol.Version
 	hello.Size = domain.Size{Cols: 80, Rows: 24}
 	if hello.EnvironmentPolicy == 0 {
-		hello.EnvironmentPolicy = ports.EnvironmentPolicyClientOwned
+		hello.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 	}
 	payload := ports.MarshalHello(hello)
 	if err := tr.Send(ports.Frame{Type: ports.MsgHello, Payload: payload}); err != nil {
@@ -668,7 +668,7 @@ func attachAndCheck(ctx context.Context, tr *harnessTransport, hello ports.Hello
 }
 
 func sendRawInput(tr *harnessTransport, data string) error {
-	return tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(data)})})
+	return tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(data)})})
 }
 
 func processOutputFrame(tr *harnessTransport, frame ports.Frame) error {
@@ -679,7 +679,7 @@ func processOutputFrame(tr *harnessTransport, frame ports.Frame) error {
 	result := tr.probe.apply(output)
 	if !result.Accepted {
 		if !tr.probe.resetPending {
-			if err := tr.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(ports.OutputResetRequest{})}); err != nil {
+			if err := tr.Send(ports.Frame{Type: ports.MsgOutputResetRequest, Payload: ports.MarshalOutputResetRequest(protocol.OutputResetRequest{})}); err != nil {
 				return err
 			}
 			tr.probe.resetPending = true
@@ -768,7 +768,7 @@ func remotePreviewContains(preview protocol.RemotePreview, want string) bool {
 }
 
 func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want string) error {
-	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(command + "\n")})}); err != nil {
+	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte(command + "\n")})}); err != nil {
 		return err
 	}
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -795,8 +795,8 @@ func sendInputAndAwait(ctx context.Context, tr *harnessTransport, command, want 
 
 func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 	id := requestID.Add(1)
-	request := ports.CommandRequest{
-		Version:   ports.ProtocolVersion,
+	request := protocol.CommandRequest{
+		Version:   protocol.Version,
 		RequestID: id,
 		Attached:  true,
 		Slug:      slug,
@@ -836,7 +836,7 @@ func sendCommand(ctx context.Context, tr *harnessTransport, slug string) error {
 }
 
 func detach(ctx context.Context, tr *harnessTransport) error {
-	if err := tr.Send(ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}); err != nil {
+	if err := tr.Send(ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(protocol.Detach{})}); err != nil {
 		return err
 	}
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -859,9 +859,9 @@ func expectNoSuchTarget(ctx context.Context, tr *harnessTransport, target domain
 	if err := target.Validate(); err != nil {
 		return err
 	}
-	hello := ports.Hello{
-		Version:           ports.ProtocolVersion,
-		Intent:            ports.IntentResume,
+	hello := protocol.Hello{
+		Version:           protocol.Version,
+		Intent:            protocol.IntentResume,
 		Name:              sessionName,
 		Size:              domain.Size{Cols: 80, Rows: 24},
 		TermEnv:           "xterm-256color",
@@ -869,7 +869,7 @@ func expectNoSuchTarget(ctx context.Context, tr *harnessTransport, target domain
 		Env:               localEnvironment(),
 		Cwd:               "/tmp/local-cwd",
 		RemoteTarget:      &target,
-		EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	payload := ports.MarshalHello(hello)
 	if err := tr.Send(ports.Frame{Type: ports.MsgHello, Payload: payload}); err != nil {
@@ -886,7 +886,7 @@ func expectNoSuchTarget(ctx context.Context, tr *harnessTransport, target domain
 	if err != nil {
 		return err
 	}
-	if message.Code != ports.ErrNoSuchTarget {
+	if message.Code != protocol.ErrNoSuchTarget {
 		return fmt.Errorf("stale target returned error code %d", message.Code)
 	}
 	return nil

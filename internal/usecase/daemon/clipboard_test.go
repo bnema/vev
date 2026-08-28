@@ -176,7 +176,7 @@ func TestKillSessionRemovesClipboardTempFiles(t *testing.T) {
 	path := string(injected)
 	require.FileExists(t, path)
 
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
 	require.NoFileExists(t, path)
 }
 

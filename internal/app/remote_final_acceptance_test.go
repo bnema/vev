@@ -23,7 +23,7 @@ import (
 type acceptanceRemoteFactory struct {
 	mu      sync.Mutex
 	calls   []string
-	handoff map[string]ports.AttachTarget
+	handoff map[string]protocol.AttachTarget
 	outputs chan string
 }
 
@@ -37,7 +37,7 @@ func (f *acceptanceRemoteFactory) DialerForRemote(target string, _ string, _ por
 
 type acceptanceRemoteDialer struct {
 	target  string
-	handoff ports.AttachTarget
+	handoff protocol.AttachTarget
 	outputs chan<- string
 }
 
@@ -49,7 +49,7 @@ func (d acceptanceRemoteDialer) Dial(context.Context) (ports.Transport, error) {
 	return clientTransport, nil
 }
 
-func serveAcceptanceRemote(tr ports.Transport, target string, handoff ports.AttachTarget, outputs chan<- string) {
+func serveAcceptanceRemote(tr ports.Transport, target string, handoff protocol.AttachTarget, outputs chan<- string) {
 	defer func() { _ = tr.Close() }()
 	welcomed := false
 	for {
@@ -61,7 +61,7 @@ func serveAcceptanceRemote(tr ports.Transport, target string, handoff ports.Atta
 			if frame.Type != ports.MsgHello {
 				continue
 			}
-			if err := tr.Send(ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: target})}); err != nil {
+			if err := tr.Send(ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: target})}); err != nil {
 				return
 			}
 			welcomed = true
@@ -88,7 +88,7 @@ func serveAcceptanceRemote(tr ports.Transport, target string, handoff ports.Atta
 		if err := tr.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
 			return
 		}
-		_ = tr.Send(ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})})
+		_ = tr.Send(ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})})
 		for {
 			if _, err := tr.Recv(); err != nil {
 				return
@@ -139,7 +139,7 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 			result := client.NewRunner(deps).Run(ctx, request)
 			if request.SessionName == "work" {
 				require.NoError(t, result, "the client handoff completes before the test injects the composition-root handoff")
-				return &client.AttachTargetError{Target: ports.AttachTarget{Endpoint: "picked.example", Session: "picked", Intent: ports.IntentAttach}}
+				return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "picked.example", Session: "picked", Intent: protocol.IntentAttach}}
 			}
 			return result
 		},
@@ -147,11 +147,11 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 
 	wireTransport, err := (acceptanceRemoteDialer{
 		target:  "picker-wire.example",
-		handoff: ports.AttachTarget{Endpoint: "picked.example", Session: "picked", Intent: ports.IntentAttach},
+		handoff: protocol.AttachTarget{Endpoint: "picked.example", Session: "picked", Intent: protocol.IntentAttach},
 	}).Dial(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, wireTransport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24},
+	require.NoError(t, wireTransport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24},
 	})}))
 	welcome, err := wireTransport.Recv()
 	require.NoError(t, err)
@@ -165,8 +165,8 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 	require.Equal(t, "picked.example", target.Endpoint)
 	require.NoError(t, wireTransport.Close())
 
-	require.NoError(t, runAttachWithDeps(context.Background(), ports.IntentAttach, "direct", "direct.example", "", nil, deps))
-	require.NoError(t, runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "picker.example", "", nil, deps))
+	require.NoError(t, runAttachWithDeps(context.Background(), protocol.IntentAttach, "direct", "direct.example", "", nil, deps))
+	require.NoError(t, runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "picker.example", "", nil, deps))
 	factory.mu.Lock()
 	calls := append([]string(nil), factory.calls...)
 	factory.mu.Unlock()

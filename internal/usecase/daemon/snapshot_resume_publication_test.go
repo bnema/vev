@@ -12,6 +12,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 type snapshotLifecycleRepository struct {
@@ -159,9 +160,9 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 		d.sessWg.Wait()
 	})
 
-	_, _, err := d.route(snapshotLifecycleHello(ports.IntentEphemeral, ""), &closeTrackingTransport{})
+	_, _, err := d.route(snapshotLifecycleHello(protocol.IntentEphemeral, ""), &closeTrackingTransport{})
 	require.NoError(t, err, "keeper session setup failed")
-	sess, _, err := d.route(snapshotLifecycleHello(ports.IntentNew, "work"), &closeTrackingTransport{})
+	sess, _, err := d.route(snapshotLifecycleHello(protocol.IntentNew, "work"), &closeTrackingTransport{})
 	require.NoError(t, err)
 
 	testAttachmentTab(sess).focusedPane().screen.Write([]byte("first checkpoint"))
@@ -172,7 +173,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	require.NotNil(t, firstRecord.Committed)
 	require.Equal(t, uint64(1), firstRecord.Committed.Generation)
 
-	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
 	d.mu.Lock()
 	stopped, retained := d.inactive[sess.name]
 	d.mu.Unlock()
@@ -183,7 +184,7 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 	require.Equal(t, firstRecord.Committed.Generation+1, closedRecord.Committed.Generation,
 		"terminal checkpoint must be authoritative before same-daemon resume")
 
-	resumed, _, err := d.route(snapshotLifecycleHello(ports.IntentAttach, sess.name), &closeTrackingTransport{})
+	resumed, _, err := d.route(snapshotLifecycleHello(protocol.IntentAttach, sess.name), &closeTrackingTransport{})
 	require.NoError(t, err)
 	require.NotSame(t, sess, resumed, "stopped-session attach must create a new live runtime")
 	require.Equal(t, sess.incarnation, resumed.incarnation, "resume must retain durable incarnation authority")
@@ -211,9 +212,9 @@ func TestStoppedNamedSessionResumePublishesNextCheckpointInSameDaemon(t *testing
 		"same-daemon resume must use the committed terminal checkpoint as parent")
 }
 
-func snapshotLifecycleHello(intent uint8, name string) ports.Hello {
-	return ports.Hello{
-		Version: ports.ProtocolVersion,
+func snapshotLifecycleHello(intent uint8, name string) protocol.Hello {
+	return protocol.Hello{
+		Version: protocol.Version,
 		Intent:  intent,
 		Name:    name,
 		Cwd:     "/tmp",

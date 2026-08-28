@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestInactiveSessionPredicates(t *testing.T) {
@@ -22,12 +22,12 @@ func TestInactiveSessionPredicates(t *testing.T) {
 		canResume      bool
 		restorePending bool
 	}{
-		{name: "healthy down", entry: inactiveSession{state: ports.SessionDown}, visible: true, canResume: true},
-		{name: "restore pending remains resumable after wait", entry: inactiveSession{state: ports.SessionDown, restoreDone: pending}, visible: true, canResume: true, restorePending: true},
-		{name: "settled restore", entry: inactiveSession{state: ports.SessionDown, restoreDone: settled}, visible: true, canResume: true},
-		{name: "broken", entry: inactiveSession{state: ports.SessionBroken}, visible: true, broken: true},
-		{name: "degraded", entry: inactiveSession{state: ports.SessionDown, record: domain.CatalogueRecord{DegradedReason: "checkpoint unavailable"}}, visible: true, broken: true},
-		{name: "purging", entry: inactiveSession{state: ports.SessionDown, purging: true}},
+		{name: "healthy down", entry: inactiveSession{state: protocol.SessionDown}, visible: true, canResume: true},
+		{name: "restore pending remains resumable after wait", entry: inactiveSession{state: protocol.SessionDown, restoreDone: pending}, visible: true, canResume: true, restorePending: true},
+		{name: "settled restore", entry: inactiveSession{state: protocol.SessionDown, restoreDone: settled}, visible: true, canResume: true},
+		{name: "broken", entry: inactiveSession{state: protocol.SessionBroken}, visible: true, broken: true},
+		{name: "degraded", entry: inactiveSession{state: protocol.SessionDown, record: domain.CatalogueRecord{DegradedReason: "checkpoint unavailable"}}, visible: true, broken: true},
+		{name: "purging", entry: inactiveSession{state: protocol.SessionDown, purging: true}},
 	}
 
 	for _, test := range tests {

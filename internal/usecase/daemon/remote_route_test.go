@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func TestMixedAttachmentCapabilitiesKeepGraphicsAttachmentLocal(t *testing.T) {
@@ -16,8 +17,8 @@ func TestMixedAttachmentCapabilitiesKeepGraphicsAttachmentLocal(t *testing.T) {
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	kittyTransport, _ := newCapturingTransport(t)
-	_, kitty, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+	_, kitty, err := d.route(protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
 		ClientID: [16]byte{1}, KittyDirectGraphics: true,
 	}, kittyTransport)
 	require.NoError(t, err)
@@ -31,8 +32,8 @@ func TestMixedAttachmentCapabilitiesKeepGraphicsAttachmentLocal(t *testing.T) {
 	pane.mu.Unlock()
 
 	textTransport, _ := newCapturingTransport(t)
-	_, text, err := d.route(ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+	_, text, err := d.route(protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
 		ClientID: [16]byte{2},
 	}, textTransport)
 	require.NoError(t, err)
@@ -53,8 +54,8 @@ func TestDirectRemoteAttachSuppressesUndeclaredGraphicsBackend(t *testing.T) {
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
 	tr, _ := newCapturingTransport(t)
-	_, ac, err := d.routeWithContext(context.Background(), ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+	_, ac, err := d.routeWithContext(context.Background(), protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
 		Env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, Remote: true,
 	}, tr)
 	require.NoError(t, err)
@@ -67,8 +68,8 @@ func TestResumeRemoteRoutePreservesDeclaredGraphicsCapability(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "tab-1", "pane-1")
 	sess.ephemeral = false
-	local := ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
+	local := protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
 		ClientID: [16]byte{1, 2, 3, 4}, Env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, KittyDirectGraphics: true,
 	}
 	oldTransport, _ := newCapturingTransport(t)
@@ -78,7 +79,7 @@ func TestResumeRemoteRoutePreservesDeclaredGraphicsCapability(t *testing.T) {
 	token := ac.resumeToken
 	d.clientGone(sess, ac, oldTransport, false)
 
-	remote := helloResumeCapable(ports.IntentResume, "work", token)
+	remote := helloResumeCapable(protocol.IntentResume, "work", token)
 	remote.Remote = true
 	remote.KittyDirectGraphics = true
 	replacement, _ := newCapturingTransport(t)
@@ -98,7 +99,7 @@ func TestRouteRemoteTargetSelectsExactLiveTab(t *testing.T) {
 	sess.incarnation = remoteLifecycleForTest()
 	tr, _ := newCapturingTransport(t)
 	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: "tab-1"}
-	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}
+	hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
 	_, ac, err := d.routeWithContext(context.Background(), hello, tr)
 	require.NoError(t, err)
 	require.NotNil(t, ac)
@@ -114,9 +115,9 @@ func TestFinishRouteAttachRollsBackCreatedSession(t *testing.T) {
 	sess, err := createSessionForTest(d, "work", false, "/tmp/work", defaultSize, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	target := domain.RemoteSessionTarget{LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: "missing-tab"}
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
-		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	hello := protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
+		RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	// The caller must hold d.mu on entry; finishRouteAttach releases it on
 	// both success and error paths before returning.
@@ -124,7 +125,7 @@ func TestFinishRouteAttachRollsBackCreatedSession(t *testing.T) {
 	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, hello, true, true)
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 	d.mu.Lock()
 	_, retained := d.sessions[sess.id]
 	d.mu.Unlock()
@@ -141,14 +142,14 @@ func TestFinishRouteAttachPreservesConcurrentAttachment(t *testing.T) {
 
 	missing := domain.RemoteSessionTarget{LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: "missing-tab"}
 	d.mu.Lock()
-	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
-		RemoteTarget: &missing, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
+		RemoteTarget: &missing, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, true, true)
 
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 	require.Same(t, sess, winner().currentAttachmentSession())
 	d.mu.Lock()
 	require.Same(t, sess, d.sessions[sess.id])
@@ -164,9 +165,9 @@ func TestFailedHandshakeCleanupPreservesConcurrentAttachment(t *testing.T) {
 	require.NoError(t, err)
 	initialTransport, _ := newCapturingTransport(t)
 	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: domain.TabStableID(sess.tabs[0].stableID)}
-	_, initial, err := d.routeWithContext(context.Background(), ports.Hello{
-		Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: defaultSize,
-		RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+	_, initial, err := d.routeWithContext(context.Background(), protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
+		RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, initialTransport)
 	require.NoError(t, err)
 	initial.routeCreatedSession = true
@@ -193,9 +194,9 @@ func attachWhenRouteCleanupSnapshots(t *testing.T, d *Daemon, sess *session) (fu
 			SessionName: sess.name, LiveTabID: domain.TabStableID(sess.tabs[0].stableID),
 		}
 		var err error
-		_, winner, err = d.routeWithContext(context.Background(), ports.Hello{
-			Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: sess.name, Size: defaultSize,
-			RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned,
+		_, winner, err = d.routeWithContext(context.Background(), protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentAttach, Name: sess.name, Size: defaultSize,
+			RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}, winnerTransport)
 		require.NoError(t, err)
 	}
@@ -215,9 +216,9 @@ func TestRouteRemoteTargetRejectsSameNameReplacement(t *testing.T) {
 	var old domain.SessionLifecycleID
 	old[0] = 8
 	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: old, SessionName: "work", LiveTabID: "tab-new"}
-	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target, EnvironmentPolicy: ports.EnvironmentPolicyDaemonOwned}
+	hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
 	_, _, err := d.routeWithContext(context.Background(), hello, tr)
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
-	require.Equal(t, ports.ErrNoSuchTarget, protocolErr.code)
+	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 }

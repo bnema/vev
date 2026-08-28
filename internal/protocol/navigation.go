@@ -86,6 +86,16 @@ func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOver
 	return nil
 }
 
+func validateHelloNavigation(h Hello) error {
+	if h.Intent != IntentAttach && h.Intent != IntentResume {
+		if h.NavigationCapabilities != 0 || h.StartupOverlay != StartupOverlayNone {
+			return ErrInvalidNavigation
+		}
+		return nil
+	}
+	return ValidateNavigation(h.NavigationCapabilities, h.StartupOverlay, h.RemoteTarget != nil || h.EnvironmentPolicy == EnvironmentPolicyDaemonOwned)
+}
+
 func ValidateParkedRouteRequest(request ParkedRouteRequest) error {
 	if request.RequestID == 0 || request.LeaseID.IsZero() {
 		return ErrInvalidNavigation

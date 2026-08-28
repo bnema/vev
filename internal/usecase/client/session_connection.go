@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 var (
@@ -22,12 +23,12 @@ type SessionTarget struct {
 
 func (t SessionTarget) validate() error {
 	switch t.Intent {
-	case ports.IntentEphemeral:
+	case protocol.IntentEphemeral:
 		if t.SessionName != "" {
 			return ErrEphemeralSessionName
 		}
 		return nil
-	case ports.IntentNew, ports.IntentAttach, ports.IntentResume:
+	case protocol.IntentNew, protocol.IntentAttach, protocol.IntentResume:
 		if t.SessionName == "" {
 			return domain.ErrInvalidSessionName
 		}

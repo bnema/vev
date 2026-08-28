@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 var errHandshakeTimeout = errors.New("handshake timed out")
@@ -33,9 +34,9 @@ func newHandshakeContext(parent context.Context, clock ports.Clock) (context.Con
 	if clock == nil {
 		clock = systemClock{}
 	}
-	timer := clock.NewTimer(ports.HandshakeTimeout)
+	timer := clock.NewTimer(protocol.HandshakeTimeout)
 	if timer == nil {
-		timer = systemClock{}.NewTimer(ports.HandshakeTimeout)
+		timer = systemClock{}.NewTimer(protocol.HandshakeTimeout)
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
