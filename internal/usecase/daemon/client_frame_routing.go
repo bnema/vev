@@ -53,6 +53,13 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		if err != nil {
 			var failure *protocol.DecodeFailure
 			if errors.As(err, &failure) {
+				d.log.Warn("rejected client message",
+					"category", failure.Category,
+					"kind", failure.Kind,
+					"type", failure.Type,
+					"version", failure.Version,
+					"request", failure.RequestID,
+				)
 				continue
 			}
 			for range connectionSnapshotAttempts {

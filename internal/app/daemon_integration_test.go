@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -134,6 +135,27 @@ func killAll(dir string) error {
 		return nil
 	}
 	return err
+}
+
+func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
+	dir, _ := startDaemon(t)
+	tr, err := ipc.DialContext(context.Background(), dir)
+	require.NoError(t, err)
+	defer func() { _ = tr.Close() }()
+
+	payload := make([]byte, 10)
+	binary.BigEndian.PutUint16(payload[:2], protocol.Version+1)
+	binary.BigEndian.PutUint64(payload[2:], 42)
+	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: payload}))
+
+	frame, err := tr.Recv()
+	require.NoError(t, err)
+	require.Equal(t, wire.MsgCommandResult, frame.Type)
+	result, err := wire.UnmarshalCommandResult(frame.Payload)
+	require.NoError(t, err)
+	require.False(t, result.OK)
+	require.Equal(t, uint64(42), result.RequestID)
+	require.Equal(t, protocol.ErrVersionMismatch, result.Code)
 }
 
 // awaitText decodes MsgOutput frames into a fresh VT screen and returns once

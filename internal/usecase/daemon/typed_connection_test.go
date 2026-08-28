@@ -235,7 +235,7 @@ func testServerCapabilities(raw ports.Transport) protocol.ConnectionCapabilities
 	_, async := raw.(ports.AsyncTransport)
 	_, synchronous := raw.(ports.OwnedSynchronousTransport)
 	_, link := raw.(ports.LinkStateReporter)
-	window := uint8(8)
+	window := uint8(protocol.MaxOutputWindow)
 	if datagram {
 		window = 1
 	}
@@ -314,7 +314,7 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 func (d *Daemon) handleCommandFrame(connection ports.ServerConnection, frame wire.Frame) error {
 	request, err := wire.UnmarshalCommandRequest(frame.Payload)
 	if err != nil {
-		code := uint16(protocol.ErrInternal)
+		code := protocol.ErrInternal
 		if version, ok := wire.PeekCommandVersion(frame.Payload); ok && version != protocol.Version {
 			code = protocol.ErrVersionMismatch
 		}

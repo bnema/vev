@@ -1011,8 +1011,12 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	d := newTestDaemon(t, nil, stubClock{})
 	enteredSend := make(chan struct{})
 	releaseSend := make(chan struct{})
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Frame) error {
+	tr := portsmocks.NewMockServerConnection(t)
+	tr.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{
+		OutputDataLimit:       protocol.MaxOutputDataLen,
+		PreferredOutputWindow: protocol.MaxOutputWindow,
+	}).Maybe()
+	tr.EXPECT().SendOutput(mock.Anything).RunAndReturn(func(protocol.Output) error {
 		close(enteredSend)
 		<-releaseSend
 		return nil
@@ -1408,8 +1412,13 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})
 	d.inactive["old"] = inactiveSession{name: "old", cwd: t.TempDir(), createdAt: 1, state: protocol.SessionDown}
-	tr := newMockServerConnection(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr := portsmocks.NewMockServerConnection(t)
+	tr.EXPECT().Capabilities().Return(protocol.ConnectionCapabilities{
+		OutputDataLimit:       protocol.MaxOutputDataLen,
+		PreferredOutputWindow: protocol.MaxOutputWindow,
+	}).Maybe()
+	tr.EXPECT().SendOutput(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().SendServer(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
 	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
 	require.NoError(t, err)

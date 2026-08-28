@@ -54,7 +54,7 @@ const detachNotifyTimeout = time.Second
 // heavy output degrades to lower fps on a slow link instead of overflowing the
 // transport. It must stay well under the datagram carriage's 32-frame client
 // window so its reliable queue never fills from painting alone.
-const maxUnackedOutputStates = 8
+const maxUnackedOutputStates = protocol.MaxOutputWindow
 
 // normalizeOutputWindow bounds the untrusted Hello value. Zero deliberately
 // means the legacy/default window, so malformed or absent values remain safe.
@@ -1082,7 +1082,7 @@ func (d *Daemon) handleInitialDecodeFailure(ctx context.Context, tr ports.Server
 		}
 		send(serverError(protocol.ErrInternal, "malformed hello"))
 	case protocol.DecodeMessageCommand:
-		code, text := uint16(protocol.ErrInternal), "malformed command request"
+		code, text := protocol.ErrInternal, "malformed command request"
 		if failure.Version != 0 && failure.Version != protocol.Version {
 			code, text = protocol.ErrVersionMismatch, "protocol version mismatch"
 		}
@@ -1187,14 +1187,14 @@ func (d *Daemon) handleHello(tr ports.ServerConnection, hello protocol.Hello) {
 // handleHelloWithContext runs the attach handshake: version check, intent
 // routing, Welcome, guaranteed first paint, then the per-connection input loop.
 func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <-chan struct{}, stopHandshakeTransport, finishHandshake func(), tr ports.ServerConnection, h protocol.Hello) {
-	if err := handshakeContextError(context.Background(), timedOut, handshakeCtx.Err()); err != nil {
+	if err := handshakeContextError(d.hardCtx, timedOut, handshakeCtx.Err()); err != nil {
 		_ = tr.Close()
 		return
 	}
 	sendHandshake := func(message protocol.ServerMessage) error {
 		err := boundedHandshakeOperation(handshakeCtx, tr, func() error { return tr.SendServer(message) })
 		if err != nil {
-			return handshakeContextError(context.Background(), timedOut, err)
+			return handshakeContextError(d.hardCtx, timedOut, err)
 		}
 		return nil
 	}

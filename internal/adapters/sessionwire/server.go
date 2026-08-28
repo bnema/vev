@@ -136,7 +136,7 @@ func (c *serverConnection) Capabilities() protocol.ConnectionCapabilities {
 	_, async := c.raw.(ports.AsyncTransport)
 	_, synchronous := c.raw.(ports.OwnedSynchronousTransport)
 	_, linkState := c.raw.(ports.LinkStateReporter)
-	window := uint8(8)
+	window := uint8(protocol.MaxOutputWindow)
 	if datagram {
 		window = 1
 	}

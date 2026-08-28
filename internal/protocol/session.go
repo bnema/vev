@@ -23,6 +23,9 @@ const HandshakeTimeout = 15 * time.Second
 // output publication in protocol version 37.
 const MaxOutputDataLen = (16 << 20) - 55
 
+// MaxOutputWindow caps output states sent before client acknowledgement.
+const MaxOutputWindow = 8
+
 // ConnectionCapabilities describes transport behavior relevant to session
 // flow without naming a concrete carriage.
 type ConnectionCapabilities struct {

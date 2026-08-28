@@ -194,20 +194,6 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 	require.True(t, tr.closed, "the failed one-shot transport must still close")
 }
 
-func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
-	// The version prefix is valid and mismatched, while the remainder is not a
-	// decodable request. The daemon must still return ErrVersionMismatch.
-	frame := wire.Frame{Type: wire.MsgCommand, Payload: []byte{0, byte(protocol.Version + 1)}}
-	tr, sends, _ := newConn(t, frame)
-
-	d := newTestDaemon(t, nil, stubClock{})
-	require.NoError(t, d.handleCommandFrame(tr, frame))
-
-	result := awaitCommandResult(t, sends)
-	require.False(t, result.OK)
-	require.Equal(t, protocol.ErrVersionMismatch, result.Code)
-}
-
 func TestHandleConnRoutesCommand(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	request := protocol.CommandRequest{Version: protocol.Version, Slug: "list-sessions"}

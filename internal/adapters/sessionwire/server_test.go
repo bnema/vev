@@ -108,33 +108,65 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	exact := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}
 	lease := protocol.ParkedRouteLeaseID{1}
+	welcome := protocol.Welcome{SessionID: "session"}
+	errorMessage := protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"}
+	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}
+	detached := protocol.Detached{Reason: protocol.ReasonDetach}
+	pong := protocol.Pong{}
+	sessions := protocol.Sessions{}
+	commandResult := protocol.CommandResult{RequestID: 1, OK: true}
+	navigation := protocol.NavigationDirective{Action: protocol.NavigationOpenHomePicker, LeaseID: lease}
+	attachTarget := protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}
+	preview := protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewUnavailable}
+	identity := protocol.CommittedRouteIdentity{Target: exact}
+	routeAction := protocol.RouteNavigationAction{SnapshotGeneration: 1, Key: 1, Generation: 1}
+	routeFailure := protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}
+	routePosition := protocol.RoutePosition{Target: exact, ActiveTabID: "tab-1"}
+	switchFailure := protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchUnavailable}
+	parkedResponse := protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady}
+
+	outputPayload, err := wire.MarshalOutput(output)
+	require.NoError(t, err)
+	identityPayload, err := wire.MarshalCommittedRouteIdentity(identity)
+	require.NoError(t, err)
+	routeActionPayload, err := wire.MarshalRouteNavigationAction(routeAction)
+	require.NoError(t, err)
+	routeFailurePayload, err := wire.MarshalRouteNavigationFailure(routeFailure)
+	require.NoError(t, err)
+	routePositionPayload, err := wire.MarshalRoutePosition(routePosition)
+	require.NoError(t, err)
+	switchFailurePayload, err := wire.MarshalSamePeerSwitchFailure(switchFailure)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name    string
 		message protocol.ServerMessage
 		typeID  wire.MsgType
+		payload []byte
 	}{
-		{name: "welcome", message: protocol.Welcome{SessionID: "session"}, typeID: wire.MsgWelcome},
-		{name: "error", message: protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"}, typeID: wire.MsgError},
-		{name: "output", message: protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}, typeID: wire.MsgOutput},
-		{name: "detached", message: protocol.Detached{Reason: protocol.ReasonDetach}, typeID: wire.MsgDetached},
-		{name: "pong", message: protocol.Pong{}, typeID: wire.MsgPong},
-		{name: "sessions", message: protocol.Sessions{}, typeID: wire.MsgSessions},
-		{name: "command result", message: protocol.CommandResult{RequestID: 1, OK: true}, typeID: wire.MsgCommandResult},
-		{name: "navigation", message: protocol.NavigationDirective{Action: protocol.NavigationOpenHomePicker, LeaseID: lease}, typeID: wire.MsgNavigationAction},
-		{name: "attach target", message: protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}, typeID: wire.MsgAttachTarget},
-		{name: "preview", message: protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewUnavailable}, typeID: wire.MsgRemotePreviewResponse},
-		{name: "identity", message: protocol.CommittedRouteIdentity{Target: exact}, typeID: wire.MsgCommittedRouteIdentity},
-		{name: "route action", message: protocol.RouteNavigationAction{SnapshotGeneration: 1, Key: 1, Generation: 1}, typeID: wire.MsgNavigateRecentRoute},
-		{name: "route failure", message: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgRouteNavigationFailure},
-		{name: "route position", message: protocol.RoutePosition{Target: exact, ActiveTabID: "tab-1"}, typeID: wire.MsgRoutePosition},
-		{name: "switch failure", message: protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchUnavailable}, typeID: wire.MsgSamePeerSwitchFailure},
-		{name: "parked response", message: protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady}, typeID: wire.MsgParkedRouteResponse},
+		{name: "welcome", message: welcome, typeID: wire.MsgWelcome, payload: wire.MarshalWelcome(welcome)},
+		{name: "error", message: errorMessage, typeID: wire.MsgError, payload: wire.MarshalErrorMsg(errorMessage)},
+		{name: "output", message: output, typeID: wire.MsgOutput, payload: outputPayload},
+		{name: "detached", message: detached, typeID: wire.MsgDetached, payload: wire.MarshalDetached(detached)},
+		{name: "pong", message: pong, typeID: wire.MsgPong, payload: wire.MarshalPong(pong)},
+		{name: "sessions", message: sessions, typeID: wire.MsgSessions, payload: wire.MarshalSessions(sessions)},
+		{name: "command result", message: commandResult, typeID: wire.MsgCommandResult, payload: wire.MarshalCommandResult(commandResult)},
+		{name: "navigation", message: navigation, typeID: wire.MsgNavigationAction, payload: wire.MarshalNavigationDirective(navigation)},
+		{name: "attach target", message: attachTarget, typeID: wire.MsgAttachTarget, payload: wire.MarshalAttachTarget(attachTarget)},
+		{name: "preview", message: preview, typeID: wire.MsgRemotePreviewResponse, payload: wire.MarshalRemotePreview(preview)},
+		{name: "identity", message: identity, typeID: wire.MsgCommittedRouteIdentity, payload: identityPayload},
+		{name: "route action", message: routeAction, typeID: wire.MsgNavigateRecentRoute, payload: routeActionPayload},
+		{name: "route failure", message: routeFailure, typeID: wire.MsgRouteNavigationFailure, payload: routeFailurePayload},
+		{name: "route position", message: routePosition, typeID: wire.MsgRoutePosition, payload: routePositionPayload},
+		{name: "switch failure", message: switchFailure, typeID: wire.MsgSamePeerSwitchFailure, payload: switchFailurePayload},
+		{name: "parked response", message: parkedResponse, typeID: wire.MsgParkedRouteResponse, payload: wire.MarshalParkedRouteResponse(parkedResponse)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := &scriptedTransport{}
 			require.NoError(t, NewServerConnection(raw).SendServer(tt.message))
 			require.Equal(t, tt.typeID, raw.sent.Type)
+			require.Equal(t, tt.payload, raw.sent.Payload)
 		})
 	}
 }
@@ -218,7 +250,7 @@ func TestServerConnectionPreservesSendModesCapabilitiesAndErrors(t *testing.T) {
 	require.ErrorIs(t, plain.SendServerSynchronous(message), ErrUnsupportedSend)
 	require.ErrorIs(t, plain.SendOutputAsync(output), ErrUnsupportedSend)
 	require.ErrorIs(t, plain.SendOutputSynchronous(output), ErrUnsupportedSend)
-	require.Equal(t, uint8(8), plain.Capabilities().PreferredOutputWindow)
+	require.Equal(t, uint8(protocol.MaxOutputWindow), plain.Capabilities().PreferredOutputWindow)
 	require.Equal(t, ports.LinkStateConnected, plain.LinkState())
 	require.Nil(t, plain.LinkEvents())
 }
