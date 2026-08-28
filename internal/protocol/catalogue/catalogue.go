@@ -2,6 +2,7 @@
 package catalogue
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -211,6 +212,14 @@ func ValidateRemoteCatalog(c RemoteCatalog) error {
 		bytes += len(session.Name) + len(session.State) + len(session.Reason)
 	}
 	if bytes > RemoteCatalogMaxCatalogBytes {
+		return ErrRemoteCatalogTooLarge
+	}
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("%w: encoding catalogue: %v", ErrInvalidRemoteCatalog, err)
+	}
+	// marshalListing appends one newline after the JSON payload.
+	if len(encoded)+1 > RemoteCatalogMaxCatalogBytes {
 		return ErrRemoteCatalogTooLarge
 	}
 	return nil

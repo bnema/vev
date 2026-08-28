@@ -1,6 +1,9 @@
 package catalogue
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +70,35 @@ func TestValidateRemoteCatalogCacheEntriesRejectsTerminalUnsafeHost(t *testing.T
 		Host: "host\u202eoverride", FetchedAt: time.Unix(1, 0), Sessions: []RemoteCatalogSession{},
 	}})
 	require.ErrorIs(t, err, ErrInvalidRemoteCatalog)
+}
+
+func TestValidateRemoteCatalogRejectsOversizedEncodedJSON(t *testing.T) {
+	sessions := make([]RemoteCatalogSession, 4)
+	for sessionIndex := range sessions {
+		tabs := make([]RemoteCatalogTab, 100)
+		for tabIndex := range tabs {
+			tabs[tabIndex] = RemoteCatalogTab{
+				ID:     fmt.Sprintf("tab-%d-%d", sessionIndex, tabIndex),
+				Index:  uint16(tabIndex),
+				Detail: strings.Repeat("<", RemoteCatalogMaxDetailBytes),
+			}
+		}
+		sessions[sessionIndex] = RemoteCatalogSession{
+			LifecycleID: [16]byte{byte(sessionIndex + 1)},
+			Name:        fmt.Sprintf("work-%d", sessionIndex),
+			State:       RemoteCatalogSessionUp,
+			Tabs:        tabs,
+		}
+	}
+	catalog := RemoteCatalog{
+		ProtocolVersion: protocol.Version,
+		SchemaVersion:   RemoteCatalogSchemaVersion,
+		Sessions:        sessions,
+	}
+	encoded, err := json.Marshal(catalog)
+	require.NoError(t, err)
+	require.Greater(t, len(encoded)+1, RemoteCatalogMaxCatalogBytes)
+	require.ErrorIs(t, ValidateRemoteCatalog(catalog), ErrRemoteCatalogTooLarge)
 }
 
 func TestValidateRemoteCatalogRejectsDuplicateSessionNames(t *testing.T) {
