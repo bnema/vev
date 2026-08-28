@@ -63,7 +63,7 @@ func newHandshakeContext(parent context.Context, clock ports.Clock) (context.Con
 
 // watchHandshakeTransport closes a transport when the handshake context ends.
 // Transport.Close is required to interrupt blocked Send and Recv operations.
-func watchHandshakeTransport(ctx context.Context, transport ports.Transport) func() {
+func watchHandshakeTransport(ctx context.Context, transport ports.ClientConnection) func() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -83,11 +83,11 @@ func watchHandshakeTransport(ctx context.Context, transport ports.Transport) fun
 	}
 }
 
-func boundedHandshakeOperation(ctx context.Context, transport ports.Transport, operation func() error) error {
+func boundedHandshakeOperation(ctx context.Context, transport ports.ClientConnection, operation func() error) error {
 	return boundedHandshakeOperationWithTransition(ctx, transport, operation, nil)
 }
 
-func boundedHandshakeOperationWithTransition(ctx context.Context, transport ports.Transport, operation func() error, transition *transitionUI) error {
+func boundedHandshakeOperationWithTransition(ctx context.Context, transport ports.ClientConnection, operation func() error, transition *transitionUI) error {
 	if err := ctx.Err(); err != nil {
 		_ = transport.Close()
 		return err
@@ -116,16 +116,16 @@ func boundedHandshakeOperationWithTransition(ctx context.Context, transport port
 	}
 }
 
-func boundedDial(ctx context.Context, dialer ports.Dialer) (ports.Transport, error) {
+func boundedDial(ctx context.Context, dialer ports.ClientDialer) (ports.ClientConnection, error) {
 	return boundedDialWithTransition(ctx, dialer, nil)
 }
 
-func boundedDialWithTransition(ctx context.Context, dialer ports.Dialer, transition *transitionUI) (ports.Transport, error) {
+func boundedDialWithTransition(ctx context.Context, dialer ports.ClientDialer, transition *transitionUI) (ports.ClientConnection, error) {
 	// The dial context only bounds startup. A successful carriage outlives the
 	// handshake context; canceling that context after Welcome must not kill SSH.
 	dialCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	type dialResult struct {
-		transport ports.Transport
+		transport ports.ClientConnection
 		err       error
 	}
 	result := make(chan dialResult, 1)

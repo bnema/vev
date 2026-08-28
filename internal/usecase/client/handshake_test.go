@@ -14,7 +14,7 @@ type failedContextDialer struct {
 	ctx context.Context
 }
 
-func (d *failedContextDialer) Dial(ctx context.Context) (ports.Transport, error) {
+func (d *failedContextDialer) Dial(ctx context.Context) (ports.ClientConnection, error) {
 	d.ctx = ctx
 	return nil, errors.New("dial failed")
 }

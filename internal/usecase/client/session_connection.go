@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	errNilSessionTransport  = errors.New("client: nil session transport")
+	errNilSessionConnection = errors.New("client: nil session connection")
 	ErrEphemeralSessionName = errors.New("client: ephemeral sessions cannot have a name")
 )
 
@@ -38,31 +38,30 @@ func (t SessionTarget) validate() error {
 	return domain.ValidateSessionName(t.SessionName)
 }
 
-// SessionConnection owns one already-open transport and its daemon-facing
-// session target. Local sockets and remote carriages use this same owner.
+// SessionConnection owns one already-open typed connection and its
+// daemon-facing session target. Local and remote carriages use this owner.
 type SessionConnection struct {
-	transport ports.Transport
-	target    SessionTarget
+	connection ports.ClientConnection
+	target     SessionTarget
 }
 
-// NewSessionConnection creates a connection for an already-selected transport.
-// Target validation happens before the connection is used for a Hello.
-func NewSessionConnection(transport ports.Transport, target SessionTarget) (*SessionConnection, error) {
-	if transport == nil {
-		return nil, errNilSessionTransport
+// NewSessionConnection binds an already-selected typed connection to a target.
+func NewSessionConnection(connection ports.ClientConnection, target SessionTarget) (*SessionConnection, error) {
+	if connection == nil {
+		return nil, errNilSessionConnection
 	}
 	if err := target.validate(); err != nil {
 		return nil, fmt.Errorf("invalid session target: %w", err)
 	}
-	return &SessionConnection{transport: transport, target: target}, nil
+	return &SessionConnection{connection: connection, target: target}, nil
 }
 
-// Transport returns the owned carriage for this connection.
-func (c *SessionConnection) Transport() ports.Transport {
+// Connection returns the owned typed session connection.
+func (c *SessionConnection) Connection() ports.ClientConnection {
 	if c == nil {
 		return nil
 	}
-	return c.transport
+	return c.connection
 }
 
 // AttachRequest returns the common request shape used after transport
@@ -88,10 +87,10 @@ func cloneAttachRequest(request AttachRequest) AttachRequest {
 	return request
 }
 
-// Close releases the owned transport.
+// Close releases the owned connection.
 func (c *SessionConnection) Close() error {
-	if c == nil || c.transport == nil {
+	if c == nil || c.connection == nil {
 		return nil
 	}
-	return c.transport.Close()
+	return c.connection.Close()
 }

@@ -44,7 +44,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	gotImage = make(chan protocol.ImagePush, 1)
 	allowDetach := make(chan struct{})
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Send(isType(wire.MsgResize)).Return(nil).Maybe()
@@ -88,7 +88,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	d := portsmocks.NewMockDialer(t)
+	d := newMockClientDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
 	err := runTestClient(context.Background(), testDependencies(d, tm, realClock{}, clip, nil), client.AttachRequest{Intent: protocol.IntentEphemeral, Remote: remote})
@@ -157,8 +157,8 @@ func (*clipboardToastLifecycleTransport) Close() error                { return n
 
 type clipboardToastLifecycleDialer struct{ transport ports.Transport }
 
-func (d clipboardToastLifecycleDialer) Dial(context.Context) (ports.Transport, error) {
-	return d.transport, nil
+func (d clipboardToastLifecycleDialer) Dial(context.Context) (ports.ClientConnection, error) {
+	return &rawClientConnection{raw: d.transport}, nil
 }
 
 func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testing.T) {

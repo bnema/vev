@@ -3,7 +3,6 @@ package client_test
 import (
 	"testing"
 
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/require"
@@ -11,8 +10,8 @@ import (
 
 func TestSessionConnectionUsesOneAttachShapeForLocalAndRemoteTransports(t *testing.T) {
 	target := client.SessionTarget{Intent: protocol.IntentAttach, SessionName: "work"}
-	local := portsmocks.NewMockTransport(t)
-	remote := portsmocks.NewMockTransport(t)
+	local := newMockClientConnection(t)
+	remote := newMockClientConnection(t)
 
 	localConnection, err := client.NewSessionConnection(local, target)
 	require.NoError(t, err)
@@ -21,8 +20,8 @@ func TestSessionConnectionUsesOneAttachShapeForLocalAndRemoteTransports(t *testi
 
 	require.Equal(t, localConnection.AttachRequest(), remoteConnection.AttachRequest())
 	require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}, localConnection.AttachRequest())
-	require.Same(t, local, localConnection.Transport())
-	require.Same(t, remote, remoteConnection.Transport())
+	require.Same(t, local, localConnection.Connection())
+	require.Same(t, remote, remoteConnection.Connection())
 }
 
 func TestSessionTargetValidation(t *testing.T) {
@@ -43,7 +42,7 @@ func TestSessionTargetValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := portsmocks.NewMockTransport(t)
+			transport := newMockClientConnection(t)
 			_, err := client.NewSessionConnection(transport, tt.target)
 			if tt.wantErr {
 				require.Error(t, err)

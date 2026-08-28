@@ -132,10 +132,17 @@ func encodeOutput(output protocol.Output) (wire.Frame, error) {
 }
 
 func (c *serverConnection) Capabilities() protocol.ConnectionCapabilities {
-	_, datagram := c.raw.(ports.DatagramTransport)
-	_, async := c.raw.(ports.AsyncTransport)
-	_, synchronous := c.raw.(ports.OwnedSynchronousTransport)
-	_, linkState := c.raw.(ports.LinkStateReporter)
+	return rawCapabilities(c.raw)
+}
+
+func (c *serverConnection) LinkState() ports.LinkState         { return rawLinkState(c.raw) }
+func (c *serverConnection) LinkEvents() <-chan ports.LinkEvent { return rawLinkEvents(c.raw) }
+
+func rawCapabilities(raw ports.Transport) protocol.ConnectionCapabilities {
+	_, datagram := raw.(ports.DatagramTransport)
+	_, async := raw.(ports.AsyncTransport)
+	_, synchronous := raw.(ports.OwnedSynchronousTransport)
+	_, linkState := raw.(ports.LinkStateReporter)
 	window := uint8(protocol.MaxOutputWindow)
 	if datagram {
 		window = 1
@@ -149,15 +156,15 @@ func (c *serverConnection) Capabilities() protocol.ConnectionCapabilities {
 	}
 }
 
-func (c *serverConnection) LinkState() ports.LinkState {
-	if reporter, ok := c.raw.(ports.LinkStateReporter); ok {
+func rawLinkState(raw ports.Transport) ports.LinkState {
+	if reporter, ok := raw.(ports.LinkStateReporter); ok {
 		return reporter.LinkState()
 	}
 	return ports.LinkStateConnected
 }
 
-func (c *serverConnection) LinkEvents() <-chan ports.LinkEvent {
-	if reporter, ok := c.raw.(ports.LinkStateReporter); ok {
+func rawLinkEvents(raw ports.Transport) <-chan ports.LinkEvent {
+	if reporter, ok := raw.(ports.LinkStateReporter); ok {
 		return reporter.LinkEvents()
 	}
 	return nil

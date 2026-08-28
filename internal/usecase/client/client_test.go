@@ -130,7 +130,7 @@ func (markedDatagramTransport) DatagramTransport() {}
 // scriptRecv wires a MockTransport's Recv to yield the given items in order,
 // then block forever (simulating a live but idle connection). It returns a
 // cleanup that unblocks the parked reader.
-func scriptRecv(tr *portsmocks.MockTransport, items ...recvItem) func() {
+func scriptRecv(tr *mockClientConnection, items ...recvItem) func() {
 	ch := make(chan recvItem, len(items))
 	for _, it := range items {
 		ch <- it
@@ -242,15 +242,15 @@ func isType(typ wire.MsgType) any {
 // transportDialer adapts one already-open test transport to the Runner API.
 type transportDialer struct{ transport ports.Transport }
 
-func (d transportDialer) Dial(context.Context) (ports.Transport, error) {
-	return d.transport, nil
+func (d transportDialer) Dial(context.Context) (ports.ClientConnection, error) {
+	return &rawClientConnection{raw: d.transport}, nil
 }
 
 func runTestClient(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
 	return client.NewRunner(deps).Run(ctx, request)
 }
 
-func testDependencies(dialer ports.Dialer, terminal ports.Terminal, clock ports.Clock, clipboard ports.ClipboardReader, observer ports.SerializedRuntimeObserver) client.Dependencies {
+func testDependencies(dialer ports.ClientDialer, terminal ports.Terminal, clock ports.Clock, clipboard ports.ClipboardReader, observer ports.SerializedRuntimeObserver) client.Dependencies {
 	return client.Dependencies{
 		Dialer:                 dialer,
 		Terminal:               terminal,
@@ -286,7 +286,7 @@ func newHandshakeClock(t *testing.T, timerCount int) (*portsmocks.MockClock, <-c
 func TestRunBoundsBlockedDial(t *testing.T) {
 	clk, createdTimers := newHandshakeClock(t, 1)
 	started := make(chan struct{})
-	dialer := portsmocks.NewMockDialer(t)
+	dialer := newMockClientDialer(t)
 	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(ctx context.Context) (ports.Transport, error) {
 		close(started)
 		<-ctx.Done()
@@ -330,7 +330,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			closed := make(chan struct{})
 			var closeOnce sync.Once
 			operationExited := make(chan struct{})
-			tr := portsmocks.NewMockTransport(t)
+			tr := newMockClientConnection(t)
 			tr.EXPECT().Close().Run(func() { closeOnce.Do(func() { close(closed) }) }).Return(nil).Maybe()
 
 			block := func() error {
@@ -349,7 +349,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 					return wire.Frame{}, block()
 				}).Once()
 			}
-			dialer := portsmocks.NewMockDialer(t)
+			dialer := newMockClientDialer(t)
 			dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
 			errCh := make(chan error, 1)
@@ -401,7 +401,7 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	defer in.unblock()
 
 	gotHello := make(chan protocol.Hello, 1)
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
@@ -616,7 +616,7 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 	localDialer := &sequenceDialer{trs: []ports.Transport{local1, local2}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote}}
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
-	deps.AttachHandoff = func(protocol.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+	deps.AttachHandoff = func(protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
 		target := protocol.ExactSessionTarget{LifecycleID: remoteLifecycle, SessionName: "work"}
 		return remoteDialer, client.AttachRequest{
 			Intent: protocol.IntentAttach, SessionName: "work", Remote: true,
@@ -650,9 +650,9 @@ func hybridLocalBootstrap(lifecycle domain.SessionLifecycleID, target domain.Rem
 	}}
 }
 
-func hybridPickerDependencies(localDialer ports.Dialer, term ports.Terminal, clock ports.Clock, remoteByEndpoint map[string]ports.Dialer) client.Dependencies {
+func hybridPickerDependencies(localDialer ports.ClientDialer, term ports.Terminal, clock ports.Clock, remoteByEndpoint map[string]ports.ClientDialer) client.Dependencies {
 	deps := testDependencies(localDialer, term, clock, nil, nil)
-	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
 		if target.RemoteTarget == nil {
 			return nil, client.AttachRequest{}, errors.New("hybrid picker target is not remote")
 		}
@@ -743,7 +743,7 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 	}
 	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
-	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.Dialer{"remote": remoteDialer})
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
 
 	err := runTestClient(context.Background(), deps, client.AttachRequest{
 		Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
@@ -826,7 +826,7 @@ func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{
 		markedDatagramTransport{Transport: sourceRemote}, targetRemote,
 	}}
-	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.Dialer{"remote": remoteDialer})
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
 
 	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
 		Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
@@ -890,7 +890,7 @@ func TestHybridPickerPrepareResponseTimeoutClosesRetainedTransport(t *testing.T)
 
 	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
-	deps := hybridPickerDependencies(localDialer, term, clock, map[string]ports.Dialer{"remote": remoteDialer})
+	deps := hybridPickerDependencies(localDialer, term, clock, map[string]ports.ClientDialer{"remote": remoteDialer})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -967,7 +967,7 @@ func TestHybridPickerBackResumesRetainedRemoteTransport(t *testing.T) {
 	}}
 	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: remote}}}
-	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.Dialer{"remote": remoteDialer})
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
 
 	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
 		Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
@@ -1023,7 +1023,7 @@ func TestHybridPickerDifferentHostFallsBackToNewRemoteDial(t *testing.T) {
 	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
 	sourceDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: sourceRemote}}}
 	targetDialer := &sequenceDialer{trs: []ports.Transport{targetRemote}}
-	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.Dialer{
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{
 		sourceTarget.Endpoint: sourceDialer,
 		targetTarget.Endpoint: targetDialer,
 	})
@@ -1109,7 +1109,7 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote1, remote2, remote3}}
 
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
-	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.Dialer, client.AttachRequest, error) {
+	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
 		require.Equal(t, remoteHandoff, target)
 		return remoteDialer, client.AttachRequest{
 			Intent: protocol.IntentAttach, SessionName: target.Session, Remote: true,
@@ -1170,7 +1170,7 @@ func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.
 	defer in.unblock()
 
 	target := protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach}
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
@@ -1197,7 +1197,7 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 	defer in.unblock()
 
 	gotHello := make(chan protocol.Hello, 1)
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
@@ -1226,7 +1226,7 @@ func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
@@ -1252,7 +1252,7 @@ func TestAttachHappyPath(t *testing.T) {
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
@@ -1275,7 +1275,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	// EnterRaw must NOT be called on the error-before-welcome path.
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
 		frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
@@ -1298,7 +1298,7 @@ func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
@@ -1322,7 +1322,7 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
@@ -1356,7 +1356,7 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 
 	gotInput := make(chan []byte, 2)
 	allowDetach := make(chan struct{})
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
@@ -1418,7 +1418,7 @@ func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
 
 	gotInput := make(chan []byte, 1)
 	allowDetach := make(chan struct{})
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
@@ -1473,7 +1473,7 @@ func TestAttachForwardsResize(t *testing.T) {
 	firstRecv := make(chan struct{})
 	var firstRecvOnce sync.Once
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
@@ -1534,7 +1534,7 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
 	defer in.unblock()
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
@@ -1545,7 +1545,7 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
-	d := portsmocks.NewMockDialer(t)
+	d := newMockClientDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
 	err := runTestClient(context.Background(), testDependencies(d, tm, realClock{}, nil, nil), client.AttachRequest{Intent: protocol.IntentEphemeral, SessionName: "", Remote: false})
@@ -1558,14 +1558,14 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	tm.EXPECT().Geometry().Return(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil).Once()
 	// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
 		frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
 		nil,
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
-	d := portsmocks.NewMockDialer(t)
+	d := newMockClientDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
 	err := runTestClient(context.Background(), testDependencies(d, tm, realClock{}, nil, nil), client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: false})
@@ -1577,7 +1577,7 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 
 func TestRunPhaseASingleAttempt(t *testing.T) {
 	dialErr := errors.New("dial failed")
-	d := portsmocks.NewMockDialer(t)
+	d := newMockClientDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(nil, dialErr).Once()
 	tm := portsmocks.NewMockTerminal(t)
 
@@ -1591,7 +1591,7 @@ type sequenceDialer struct {
 	calls atomic.Int32
 }
 
-func (d *sequenceDialer) Dial(context.Context) (ports.Transport, error) {
+func (d *sequenceDialer) Dial(context.Context) (ports.ClientConnection, error) {
 	i := int(d.calls.Add(1)) - 1
 	if i < len(d.errs) && d.errs[i] != nil {
 		return nil, d.errs[i]
@@ -1599,7 +1599,7 @@ func (d *sequenceDialer) Dial(context.Context) (ports.Transport, error) {
 	if i >= len(d.trs) {
 		return nil, io.EOF
 	}
-	return d.trs[i], nil
+	return &rawClientConnection{raw: d.trs[i]}, nil
 }
 
 type recordingTransport struct {
@@ -1939,7 +1939,7 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 				return nil
 			}
 
-			tr := portsmocks.NewMockTransport(t)
+			tr := newMockClientConnection(t)
 			if !tt.preWelcomeReject {
 				tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 			}
@@ -2033,7 +2033,7 @@ func TestAttachRememberRemoteHostDoesNotBlockAfterWelcome(t *testing.T) {
 	releaseLearner := make(chan struct{})
 	learnerDone := make(chan struct{})
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
@@ -2114,7 +2114,7 @@ func TestRunRestoresTerminalBeforeWaitingForLearner(t *testing.T) {
 	releaseLearner := make(chan struct{})
 	learnerDone := make(chan struct{})
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
@@ -2211,7 +2211,7 @@ func TestRunReturnsWhenRemoteHostLearnerStalls(t *testing.T) {
 		return realClock{}.NewTimer(d)
 	}).Maybe()
 
-	tr := portsmocks.NewMockTransport(t)
+	tr := newMockClientConnection(t)
 	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
