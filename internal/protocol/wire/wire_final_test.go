@@ -158,7 +158,7 @@ func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
 		{name: "size zero", mutate: func(b []byte) { binary.BigEndian.PutUint16(b[40:42], 0) }},
 		{name: "full flag false for reset", mutate: func(b []byte) { b[44] = 0 }},
 		{name: "invalid bool", mutate: func(b []byte) { b[44] = 2 }},
-		{name: "impossible data length", mutate: func(b []byte) { binary.BigEndian.PutUint32(b[50:54], ^uint32(0)) }},
+		{name: "impossible data length", mutate: func(b []byte) { binary.BigEndian.PutUint32(b[46:50], ^uint32(0)) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bad := append([]byte(nil), payload...)

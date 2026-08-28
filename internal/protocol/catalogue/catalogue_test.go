@@ -41,6 +41,26 @@ func TestRemoteCatalogStateContract(t *testing.T) {
 	require.Equal(t, RemoteCatalogSchemaVersion, mismatch.Want)
 }
 
+func TestValidateRemoteCatalogRejectsTerminalUnsafeText(t *testing.T) {
+	for _, tt := range []struct{ name, value string }{
+		{name: "bidi override", value: "\u202eoverride"},
+		{name: "line separator", value: "\u2028line separator"},
+		{name: "paragraph separator", value: "\u2029paragraph separator"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRemoteCatalog(RemoteCatalog{
+				ProtocolVersion: protocol.Version,
+				SchemaVersion:   RemoteCatalogSchemaVersion,
+				Sessions: []RemoteCatalogSession{{
+					LifecycleID: [16]byte{1}, Name: "work", State: RemoteCatalogSessionUp,
+					Tabs: []RemoteCatalogTab{{ID: "tab-1", Detail: tt.value}},
+				}},
+			})
+			require.ErrorIs(t, err, ErrInvalidRemoteCatalog)
+		})
+	}
+}
+
 func TestValidateRemoteCatalogRejectsDuplicateSessionNames(t *testing.T) {
 	err := ValidateRemoteCatalog(RemoteCatalog{
 		ProtocolVersion: protocol.Version,
